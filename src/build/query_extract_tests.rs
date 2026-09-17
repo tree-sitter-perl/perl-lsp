@@ -5357,6 +5357,76 @@ class Svc {
     }
 }
 
+/// The event bus is a class-keyed rail: `event(new X)` / `X::dispatch()`
+/// emit, a listener's `handle(X $e)`, a `$listen` key and `Event::listen`
+/// register — references from either side list all of them; the rail is
+/// never renameable (the class rename owns `X`); a job's `handle` is the
+/// handler of `dispatch(new Job)`; an injected dependency's type is not
+/// an emission's target; and `X::dispatch( )` emits exactly as
+/// `X::dispatch()` does (the empty list is a shape, not a spelling).
+#[cfg(feature = "php")]
+#[test]
+fn php_laravel_event_bus_connects_emissions_and_handlers() {
+    let src = "\
+<?php
+namespace App;
+class Provider { protected $listen = [ Liked::class => [ LoveIt::class ] ]; }
+class LoveIt { public function handle(Liked $event): void {} }
+class SendMail { public function handle(Mailer $mailer): void {} }
+function emit($x) { event(new Liked($x)); Liked::dispatch($x); dispatch(new SendMail()); }
+function reg() { Event::listen(Liked::class, fn (Liked $e) => 1); }
+function spaced() { Liked::dispatch( ); }
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{HandlerOwner, RailNames, SymbolDetail};
+    assert!(
+        fa.pack.class_named_rails.iter().any(|r| r == "event"),
+        "the rail document declares the rail class-keyed: {:?}",
+        fa.pack.class_named_rails
+    );
+    let handlers: Vec<(String, usize)> = fa
+        .symbols()
+        .iter()
+        .filter(|s| matches!(&s.detail, SymbolDetail::Handler { owner: owner @ HandlerOwner::Rail(r), .. }
+            if r == "event" && owner.names_are(&fa.pack) == RailNames::Classes))
+        .map(|s| (s.name.clone(), s.selection_span.start.row))
+        .collect();
+    assert!(handlers.contains(&("Liked".to_string(), 2)), "$listen key: {handlers:?}");
+    assert!(handlers.contains(&("Liked".to_string(), 3)), "listener handle: {handlers:?}");
+    assert!(handlers.contains(&("Liked".to_string(), 6)), "Event::listen: {handlers:?}");
+    assert!(handlers.contains(&("SendMail".to_string(), 4)), "a job's own handle: {handlers:?}");
+    assert!(handlers.contains(&("Mailer".to_string(), 4)), "typed first param (noise, hidden): {handlers:?}");
+    assert!(
+        fa.symbols().iter().filter(|s| s.name == "Mailer").all(|s| s.hidden_in_outline()),
+        "class-rail handlers stay out of the outline"
+    );
+    let target = crate::index::resolve::TargetRef::new(
+        "Liked".to_string(),
+        crate::index::resolve::TargetKind::Handler {
+            owner: HandlerOwner::Rail("event".to_string()),
+            name: "Liked".to_string(),
+            names: RailNames::Classes,
+        },
+        &fa,
+    );
+    assert!(!target.supports_cross_file_rename(), "a class-keyed rail is never renamed");
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/app/bus.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let mut rows: Vec<usize> = locs.iter().map(|l| l.span.start.row).collect();
+    rows.sort();
+    rows.dedup();
+    // Row 7 is the argument-less form spelled with a space: the empty
+    // argument list is a fact of the TREE, never of the source text.
+    assert_eq!(rows, vec![2, 3, 5, 6, 7], "registrations + every emission: {locs:?}");
+    assert!(locs.iter().all(|l| !l.rewritable), "never rewritable: {locs:?}");
+}
+
 /// A row says what it binds through its capture suffix, and an unsuffixed
 /// capture binds a type — the default every include/`use` row without the
 /// `function` / `const` keyword means.

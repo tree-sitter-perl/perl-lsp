@@ -1924,3 +1924,56 @@ fn php_laravel_route_rail_reaches_blade_templates() {
     assert!(refs.contains("routes/web.php"), "{refs}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The event bus across files: goto-def on the emission's class token
+/// lists the class AND the listener's `handle`; `--check` hints an
+/// emission no listener answers; call hierarchy on `handle` counts the
+/// emission as an incoming call.
+#[cfg(feature = "php")]
+#[test]
+fn php_laravel_event_bus_across_files() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-lrbus-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for d in ["app/Events", "app/Listeners", "app/Services", "app/Providers"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+    }
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\"}}}");
+    w("app/Events/Liked.php", "<?php\nnamespace App\\Events;\nclass Liked\n{\n    public function __construct(public int $id) {}\n}\n");
+    w("app/Events/Lonely.php", "<?php\nnamespace App\\Events;\nclass Lonely\n{\n}\n");
+    w("app/Listeners/LoveIt.php", "<?php\nnamespace App\\Listeners;\nuse App\\Events\\Liked;\nclass LoveIt\n{\n    public function handle(Liked $event): void\n    {\n        echo $event->id;\n    }\n}\n");
+    w("app/Services/Likes.php", "<?php\nnamespace App\\Services;\nuse App\\Events\\Liked;\nuse App\\Events\\Lonely;\nclass Likes\n{\n    public function like(int $id): void\n    {\n        event(new Liked($id));\n        event(new Lonely());\n    }\n}\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+    };
+    let check = run(&["--check", dir.to_str().unwrap(), "--severity", "hint"]);
+    let dead: Vec<&str> = check.lines().filter(|l| l.contains("[undefined-event]")).collect();
+    assert_eq!(dead.len(), 1, "{check}");
+    assert!(dead[0].contains("'Lonely'") && dead[0].contains("No listener for event"), "{check}");
+    // `event(new Liked($id))` — row 8; the class token starts at col 18 and
+    // the cursor sits inside it.
+    let likes = dir.join("app/Services/Likes.php");
+    let gd = run(&["--definition", dir.to_str().unwrap(), likes.to_str().unwrap(), "8", "19"]);
+    assert!(gd.contains("Events/Liked.php"), "the class: {gd}");
+    assert!(gd.contains("Listeners/LoveIt.php"), "the listener: {gd}");
+    let listener = dir.join("app/Listeners/LoveIt.php");
+    let ch = run(&["--call-hierarchy", dir.to_str().unwrap(), listener.to_str().unwrap(), "5", "21"]);
+    // The emitting METHOD is the incoming caller — named, not "the file's
+    // name appears somewhere in the output".
+    // `run` folds stderr in after stdout, so read the first JSON value.
+    let ch: serde_json::Value = serde_json::Deserializer::from_str(&ch)
+        .into_iter::<serde_json::Value>()
+        .next()
+        .expect("a report")
+        .expect("call-hierarchy JSON");
+    assert_eq!(ch["item"]["name"].as_str(), Some("handle"), "{ch}");
+    let callers: Vec<&str> =
+        ch["incoming"].as_array().expect("incoming").iter().filter_map(|c| c["name"].as_str()).collect();
+    assert_eq!(callers, vec!["like"], "the emission is an incoming call: {ch}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
