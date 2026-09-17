@@ -139,26 +139,29 @@ fn default_sep() -> String {
     ".".to_string()
 }
 
+/// A rail declarations document (bundled per pack, or
+/// `<plugin-dir>/<name>/rails.json`). Public so `--plugin-check`'s rail arm
+/// can lint the same field list the loaders read.
 #[derive(Debug, Clone, serde::Deserialize)]
-struct RailsDoc {
-    language: String,
+pub struct RailsDoc {
+    pub language: String,
     #[serde(default)]
-    text_rails: Vec<TextRail>,
+    pub text_rails: Vec<TextRail>,
     #[serde(default)]
-    path_rails: Vec<PathRail>,
+    pub path_rails: Vec<PathRail>,
     /// rail → how the undefined-name lane phrases a miss (`"event": "No
     /// listener for event"`); default `Undefined <rail>`.
     #[serde(default)]
-    labels: std::collections::HashMap<String, String>,
+    pub labels: std::collections::HashMap<String, String>,
     /// Rails whose miss is a hint, not a warning: their definitions are
     /// partly runtime-only (framework-default middleware aliases, database
     /// permissions on the ability rail), so an unmatched name is a lead.
     #[serde(default)]
-    hints: Vec<String>,
+    pub hints: Vec<String>,
     /// rail → the separator after which a use carries PARAMETERS
     /// (`throttle:60,1` names `throttle`); the name and its span end there.
     #[serde(default)]
-    name_seps: std::collections::HashMap<String, String>,
+    pub name_seps: std::collections::HashMap<String, String>,
 }
 
 /// The lane-facing rail conventions of a language, merged over its rail
@@ -168,6 +171,21 @@ pub struct RailConventions {
     pub labels: Vec<(String, String)>,
     pub hints: Vec<String>,
     pub name_seps: Vec<(String, String)>,
+}
+
+/// One bundled rail document, or `None` when it declares another language.
+/// A document that does not PARSE is dropped with a diagnostic: every rail
+/// this loader serves — the path rails, the lane's labels and hint rails —
+/// is a feature that would otherwise go missing in silence.
+fn parse_rail_doc(src: &str, pack: &LangPack) -> Option<RailsDoc> {
+    match serde_json::from_str::<RailsDoc>(src) {
+        Ok(doc) if doc.language == pack.lang_id => Some(doc),
+        Ok(_) => None,
+        Err(e) => {
+            eprintln!("perl-lsp: rail declarations (bundled) dropped: {e}");
+            None
+        }
+    }
 }
 
 /// The path rails in force for a language, from the bundled rail documents.
@@ -183,10 +201,9 @@ pub fn path_rails_for(pack: &LangPack) -> std::sync::Arc<Vec<PathRail>> {
     }
     let mut out: Vec<PathRail> = Vec::new();
     for src in pack.bundled_rail_docs {
-        if let Ok(doc) = serde_json::from_str::<RailsDoc>(src) {
-            if doc.language == pack.lang_id {
-                out.extend(doc.path_rails);
-            }
+        match parse_rail_doc(src, pack) {
+            Some(doc) => out.extend(doc.path_rails),
+            None => continue,
         }
     }
     let arc = Arc::new(out);
@@ -208,13 +225,10 @@ pub fn rail_conventions_for(pack: &LangPack) -> std::sync::Arc<RailConventions> 
     }
     let mut out = RailConventions::default();
     for src in pack.bundled_rail_docs {
-        if let Ok(doc) = serde_json::from_str::<RailsDoc>(src) {
-            if doc.language == pack.lang_id {
-                out.labels.extend(doc.labels);
-                out.hints.extend(doc.hints);
-                out.name_seps.extend(doc.name_seps);
-            }
-        }
+        let Some(doc) = parse_rail_doc(src, pack) else { continue };
+        out.labels.extend(doc.labels);
+        out.hints.extend(doc.hints);
+        out.name_seps.extend(doc.name_seps);
     }
     out.labels.sort();
     out.hints.sort();
