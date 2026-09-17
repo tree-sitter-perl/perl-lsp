@@ -105,7 +105,13 @@ pub struct LangPack {
     /// The engine joins each comment to the def directly below it and
     /// fills ONLY where the syntax declared nothing — declared types win
     /// (docblocks drift). Empty = no doc lane.
-    pub doc_types: fn(text: &str) -> Vec<DocFact>,
+    pub doc_types: fn(text: &str, uses_method_tags: &[&str]) -> Vec<DocFact>,
+    /// Docblock tags whose argument NAMES a sibling method a framework
+    /// runner will invoke (`@dataProvider providerRows`). Data, not a
+    /// literal in the reader: the tag is one framework's word, exactly
+    /// like the attribute spellings the entry documents carry, and the
+    /// reader is the engine's. Empty = no such tag.
+    pub doc_uses_method_tags: &'static [&'static str],
     /// Module-name → workspace-relative candidate paths — the entire
     /// per-language cross-file resolution strategy ("the one executable
     /// line"). Python: `pkg.mod` → pkg/mod.py | pkg/mod/__init__.py.
@@ -494,10 +500,11 @@ pub enum DocFact {
     /// below (or, with a `$name`, of that specific local — the inline
     /// `/** @var Type[] $rows */` idiom above an assignment).
     Var { ty: String, name: Option<String> },
-    /// `@dataProvider name` — a PHPUnit docblock row naming a sibling
-    /// METHOD the runner will invoke. The join mints a real method
-    /// reference (invocant = the enclosing class) on the fact's own
-    /// line, so providers gain fan-in and rename reaches the row.
+    /// A `LangPack::doc_uses_method_tags` row naming a sibling METHOD a
+    /// framework runner will invoke (`@dataProvider providerRows`). The
+    /// join mints a real method reference (invocant = the enclosing class)
+    /// on the fact's own line, so the named method gains fan-in and rename
+    /// reaches the row.
     UsesMethod { name: String, line: usize, col: usize },
     /// `@method [static] T name(...)` on a CLASS docblock — a documented
     /// virtual method (Laravel facades, Eloquent's `__call` surface). The
@@ -577,7 +584,8 @@ pub fn perl_pack() -> LangPack {
         class_token_kinds: &[],
         function_scoped_vars: false,
         constructor_names: &[],
-        doc_types: |_| vec![],
+        doc_types: |_, _| vec![],
+        doc_uses_method_tags: &[],
         module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
         shape_ctor: |_| false,
         import_call: |_, _| None,
@@ -660,7 +668,8 @@ pub fn python_pack() -> LangPack {
         class_token_kinds: &[],
         function_scoped_vars: false,
         constructor_names: &[],
-        doc_types: |_| vec![],
+        doc_types: |_, _| vec![],
+        doc_uses_method_tags: &[],
         module_paths: |m| {
             let base = m.replace('.', "/");
             vec![format!("{base}.py"), format!("{base}/__init__.py")]
@@ -743,7 +752,8 @@ pub fn r_pack() -> LangPack {
         class_token_kinds: &[],
         function_scoped_vars: false,
         constructor_names: &[],
-        doc_types: |_| vec![],
+        doc_types: |_, _| vec![],
+        doc_uses_method_tags: &[],
         // No reliable lexical ctor convention in R (S4/R5 exist but
         // rare); class typing arrives via shapes and S3 later.
         // source("util.R") hands us the path verbatim; library(pkg)
@@ -825,7 +835,8 @@ pub fn cmake_pack() -> LangPack {
         class_token_kinds: &[],
         function_scoped_vars: false,
         constructor_names: &[],
-        doc_types: |_| vec![],
+        doc_types: |_, _| vec![],
+        doc_uses_method_tags: &[],
         // include(util.cmake) is a literal path; add_subdirectory(src)
         // means src/CMakeLists.txt. The whole resolution strategy.
         module_paths: |m| {
@@ -1124,6 +1135,7 @@ pub fn php_pack() -> LangPack {
         // phpdoc: the type vocabulary of REAL PHP — most of WordPress and
         // half of Laravel's public API type only here.
         doc_types: php_doc_types,
+        doc_uses_method_tags: &["dataProvider"],
         // PHP's own spellings for the engine's value lattice; a PHP array
         // is one type whichever rep the engine inferred.
         type_display: &[
@@ -1326,7 +1338,8 @@ pub fn cpp_pack() -> LangPack {
         class_token_kinds: &[],
         function_scoped_vars: false,
         constructor_names: &[],
-        doc_types: |_| vec![],
+        doc_types: |_, _| vec![],
+        doc_uses_method_tags: &[],
         // #include "a/b.h" / <vector>: strip the delimiters; a quoted
         // path is workspace-relative verbatim, a system header resolves
         // through include dirs (library_roots, later). Tier 1: identity.
@@ -1480,7 +1493,7 @@ pub(super) fn param_return_expr(
 /// phpdoc `@return` / `@param` / `@var` facts out of one `/** */` comment.
 /// Only doc comments participate (a `//` or plain `/* */` never carries
 /// the vocabulary); each tag line yields at most one fact.
-fn php_doc_types(text: &str) -> Vec<DocFact> {
+fn php_doc_types(text: &str, uses_method_tags: &[&str]) -> Vec<DocFact> {
     if !text.starts_with("/**") {
         return Vec::new();
     }
@@ -1604,18 +1617,20 @@ fn php_doc_types(text: &str) -> Vec<DocFact> {
                     .map(|n| n.to_string());
                 out.push(DocFact::Var { ty: t, name });
             }
-        } else if let Some(rest) = l.strip_prefix("@dataProvider ") {
+        } else if let Some((tag, rest)) = l.strip_prefix('@').and_then(|body| {
+            uses_method_tags.iter().find_map(|t| {
+                body.strip_prefix(*t).and_then(|r| r.strip_prefix(' ')).map(|r| (*t, r))
+            })
+        }) {
             if let Some(name) = rest.split_whitespace().next() {
                 if name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric()) {
-                    // Byte column of the provider NAME in the RAW line, so
+                    // Byte column of the named METHOD in the RAW line, so
                     // the ref spans the token (rename rewrites it in place;
                     // anchored past the tag so a name that happens to be a
-                    // substring of "@dataProvider" can't mis-anchor).
+                    // substring of the tag can't mis-anchor).
                     let col = line
-                        .find("@dataProvider")
-                        .and_then(|tag| {
-                            line[tag..].find(name).map(|o| tag + o)
-                        })
+                        .find(tag)
+                        .and_then(|t| line[t..].find(name).map(|o| t + o))
                         .unwrap_or(0);
                     out.push(DocFact::UsesMethod {
                         name: name.to_string(),

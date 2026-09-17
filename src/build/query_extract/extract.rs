@@ -870,7 +870,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let template_names: std::collections::HashSet<String> = events
         .iter()
         .filter(|e| e.cap == "doc.comment")
-        .flat_map(|e| (pack.doc_types)(&e.text))
+        .flat_map(|e| (pack.doc_types)(&e.text, pack.doc_uses_method_tags))
         .filter_map(|f| match f {
             super::packs::DocFact::Template { name, .. } => Some(name),
             _ => None,
@@ -3158,7 +3158,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         }
                     }
                 }
-                let facts = (pack.doc_types)(&e.text);
+                let facts = (pack.doc_types)(&e.text, pack.doc_uses_method_tags);
                 if !facts.is_empty() {
                     let entry = by_end_row
                         .entry(e.end.row)
@@ -3305,12 +3305,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             }
                         }
                         DocFact::UsesMethod { name, line, col } => {
-                            // PHPUnit `@dataProvider name`: a method REF on
-                            // the enclosing class, spanning the provider
-                            // NAME TOKEN in the docblock — providers gain
-                            // real fan-in, and rename rewrites the token in
-                            // place. Only meaningful on class members (the
-                            // invocant is the class).
+                            // A method REF on the enclosing class, spanning
+                            // the NAME TOKEN in the docblock — the named
+                            // method gains real fan-in, and rename rewrites
+                            // the token in place. Only meaningful on class
+                            // members (the invocant is the class).
                             if let (true, Some(cls)) = (
                                 matches!(sym.kind.as_str(), "sub" | "method"),
                                 sym.package.as_deref(),
