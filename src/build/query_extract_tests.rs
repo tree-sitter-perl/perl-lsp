@@ -4297,6 +4297,53 @@ do_action('shutdown');
     assert_eq!(reg_rows, rows, "either side lists the same sites");
 }
 
+/// An unsuffixed `@def.handler.named` names no rail, and a rail is the
+/// namespace one framework owns — an unnamed one would claim the whole
+/// program. The lint reports it; this pins that the extractor also mints
+/// NOTHING for it, with the rail-suffixed spelling as the control.
+#[cfg(feature = "php")]
+#[test]
+fn php_an_unsuffixed_handler_capture_mints_no_handler() {
+    const PATTERN: &str = "(function_call_expression \
+        function: (name) @_uh \
+        arguments: (arguments . (argument (string . (string_content) @CAP .))) \
+        (#eq? @_uh \"add_action\"))";
+    let src = "<?php\nadd_action('init', 'cb');\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    // The pattern rides the pack's OWN query source, not an overlay: the
+    // overlay assembly caches per (lang_id, query_source) because a
+    // bundled set is a compile-time constant of the language.
+    let handlers = |capture: &str| -> usize {
+        let base = crate::build::query_extract::php_pack();
+        let source: &'static str = Box::leak(
+            format!("{}\n{}", base.query_source, PATTERN.replace("@CAP", capture))
+                .into_boxed_str(),
+        );
+        let pack = crate::build::query_extract::LangPack {
+            query_source: source,
+            bundled_overlays: &[],
+            ..base
+        };
+        let skel = extract(&tree, src.as_bytes(), &pack).unwrap();
+        let minted = skel.symbols.iter().filter(|s| s.kind == "handler").count();
+        let fa = skel.into_file_analysis();
+        assert_eq!(
+            fa.symbols()
+                .iter()
+                .filter(|s| matches!(
+                    s.detail,
+                    crate::model::file_analysis::SymbolDetail::Handler { .. }
+                ))
+                .count(),
+            minted,
+            "every minted handler reaches the model"
+        );
+        minted
+    };
+    assert_eq!(handlers("@def.handler.named.hook"), 1, "the rail-suffixed spelling mints it");
+    assert_eq!(handlers("@def.handler.named"), 0, "an unnamed rail mints nothing");
+}
 
 #[test]
 fn php_member_rename_never_rewrites_import_leaves() {
