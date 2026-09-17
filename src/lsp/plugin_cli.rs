@@ -47,7 +47,15 @@ pub fn cli_plugin_check(args: &[String]) {
         check_pack_overlay(Path::new(path), json_mode);
         return;
     }
-    if Path::new(path).extension().and_then(|s| s.to_str()) == Some("json") {
+    // A pack ships two JSON document families and they lint differently;
+    // the bundled names carry the suffix (`wordpress.rails.json`) and a
+    // plugin dir's own documents ARE the bare names.
+    let name = Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or("");
+    if name.ends_with("rails.json") {
+        check_rail_declarations(Path::new(path), json_mode);
+        return;
+    }
+    if name.ends_with(".json") {
         check_entry_declarations(Path::new(path), json_mode);
         return;
     }
@@ -80,6 +88,122 @@ struct EntryRuleLint {
     methods: Vec<String>,
     #[serde(default)]
     when_isa: Option<String>,
+}
+
+/// The lint's STRICT view of a rail document — the same remote-derive
+/// discipline as [`EntryRuleLint`]: the field list is the loader's, checked
+/// by the compiler, and `deny_unknown_fields` names a stray key that the
+/// lenient loader would ignore.
+#[derive(serde::Deserialize)]
+#[serde(remote = "crate::build::query_extract::RailsDoc", deny_unknown_fields)]
+struct RailDocLint {
+    language: String,
+    #[serde(default)]
+    text_rails: Vec<crate::build::query_extract::TextRail>,
+    #[serde(default)]
+    path_rails: Vec<crate::build::query_extract::PathRail>,
+    #[serde(default)]
+    labels: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    hints: Vec<String>,
+    #[serde(default)]
+    name_seps: std::collections::HashMap<String, String>,
+}
+
+/// The rail-declarations arm of `--plugin-check`: validates a
+/// `rails.json` document — parse errors and stray keys (the loader drops
+/// or ignores them), a `language` no enabled pack serves, and a document
+/// that declares no rail at all. A rail NAME is an overlay's own word, so
+/// nothing here checks it against a set; what is checkable is that each
+/// declaration carries the parts its lane reads.
+fn check_rail_declarations(path: &Path, json_mode: bool) {
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cannot read {}: {e}", path.display());
+            crate::lsp::cli::exit_with(2, "exit");
+        }
+    };
+    // Two passes, as the entry arm does: the LENIENT shape decides whether
+    // the loader keeps the document at all, the strict view turns what the
+    // loader would silently ignore into a warning.
+    let doc = match serde_json::from_str::<serde_json::Value>(&source)
+        .and_then(|v| serde_json::from_value::<crate::build::query_extract::RailsDoc>(v))
+    {
+        Ok(d) => d,
+        Err(e) => {
+            if json_mode {
+                println!(
+                    "{}",
+                    json!({ "rails": path.display().to_string(), "ok": false, "error": e.to_string() })
+                );
+            } else {
+                println!("FAIL: {e} (the loader would drop this document)");
+            }
+            crate::lsp::cli::exit_with(1, "exit");
+        }
+    };
+    let mut warnings: Vec<String> = Vec::new();
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&source) {
+        if let Err(e) = RailDocLint::deserialize(&v) {
+            warnings.push(format!("{e} (ignored by the loader — usually a typo)"));
+        }
+    }
+    if doc.language.is_empty() {
+        warnings.push("no `language` field — the loader matches none".to_string());
+    } else if crate::build::language_driver::LanguageRegistry::with_enabled()
+        .for_id(&doc.language)
+        .is_none()
+    {
+        warnings.push(format!(
+            "language '{}' is not served by this build (rails load only under its cargo feature)",
+            doc.language
+        ));
+    }
+    let declared = doc.text_rails.len()
+        + doc.path_rails.len()
+        + doc.labels.len()
+        + doc.hints.len()
+        + doc.name_seps.len();
+    if declared == 0 {
+        warnings.push("the document declares no rail (no rails, labels, hints or separators)".to_string());
+    }
+    for (i, r) in doc.text_rails.iter().enumerate() {
+        if r.calls.is_empty() || r.files.is_empty() {
+            warnings.push(format!(
+                "text rail #{i} ('{}'): a scan needs both `calls` and `files` — it matches nothing",
+                r.rail
+            ));
+        }
+    }
+    for (i, r) in doc.path_rails.iter().enumerate() {
+        if r.under.is_empty() {
+            warnings.push(format!(
+                "path rail #{i} ('{}'): no `under` — it would claim every file",
+                r.rail
+            ));
+        }
+    }
+    if json_mode {
+        println!(
+            "{}",
+            json!({
+                "rails": path.display().to_string(),
+                "ok": true,
+                "language": doc.language,
+                "text_rails": doc.text_rails.len(),
+                "path_rails": doc.path_rails.len(),
+                "labels": doc.labels.len(),
+                "hints": doc.hints.len(),
+                "warnings": warnings,
+            })
+        );
+    } else {
+        println!("OK: {declared} rail declaration(s) for '{}'", doc.language);
+        for w in &warnings {
+            println!("warning: {w}");
+        }
+    }
 }
 
 /// The entry-declarations arm of `--plugin-check`: validates an

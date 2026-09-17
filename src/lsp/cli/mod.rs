@@ -167,7 +167,7 @@ pub(crate) fn print_usage() {
     eprintln!("                                                         (JSON default; --csv / --html viewer)");
     eprintln!();
     eprintln!("PLUGIN AUTHORING:");
-    eprintln!("  perl-lsp --plugin-check <file.rhai|.scm|entry.json>    Lint a plugin: Rhai script, pack query overlay, or entry rules");
+    eprintln!("  perl-lsp --plugin-check <.rhai|.scm|entry.json|rails.json>  Lint a plugin: Rhai script, pack query overlay, entry rules, or rail declarations");
     eprintln!("  perl-lsp --plugin-run <file.rhai> --on <fixture.pl>    Run plugin on one Perl file");
     eprintln!("  perl-lsp --plugin-test <plugin-dir> [--update]         Snapshot-test a plugin dir");
     eprintln!();
