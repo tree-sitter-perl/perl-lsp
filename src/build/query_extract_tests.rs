@@ -4202,6 +4202,74 @@ class Plugin {
     assert!(hook_sites.iter().all(|l| l.rewritable), "rename reaches them: {hook_sites:?}");
 }
 
+#[test]
+fn php_pack_query_overlays_load_from_plugin_dir() {
+    // Tier-1 pack plugins (docs/prompt-pack-plugins.md): overlays at
+    // `<plugin-dir>/<name>/queries/<lang>.scm` concat onto the bundled
+    // query. One test (env var is process-global) covering the three
+    // loader contracts:
+    //   1. the bundled Laravel overlay copies into a plugin dir VERBATIM
+    //      and still compiles/loads — the seam is real;
+    //   2. an overlay's patterns actually fire (a probe pattern minting a
+    //      field only this overlay knows);
+    //   3. a malformed overlay is dropped ALONE — base + survivors serve.
+    let dir = std::env::temp_dir().join(format!(
+        "perl-lsp-overlay-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+    ));
+    let laravel = dir.join("laravel-copy/queries");
+    let probe = dir.join("probe/queries");
+    let broken = dir.join("broken/queries");
+    for d in [&laravel, &probe, &broken] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(
+        laravel.join("php.scm"),
+        include_str!("../../queries/php/frameworks/laravel.scm"),
+    )
+    .unwrap();
+    std::fs::write(
+        probe.join("php.scm"),
+        "(method_declaration name: (name) @def.field.name @def.field\n  (#any-of? @def.field.name \"zz_overlay_probe\"))\n",
+    )
+    .unwrap();
+    std::fs::write(broken.join("php.scm"), "(this_kind_does_not_exist) @def.field\n").unwrap();
+
+    let saved = std::env::var("PERL_LSP_PLUGIN_DIR").ok();
+    std::env::set_var("PERL_LSP_PLUGIN_DIR", &dir);
+
+    let src = "\
+<?php
+class C {
+    public function zz_overlay_probe(): int { return 1; }
+}
+";
+    let (fa, _) = php_fa(src);
+    // (1) the copy really LOADED. A dropped overlay is dropped alone, so
+    // the probe below fires either way — only counting the Laravel header
+    // in the assembled source (bundled once, plugin-dir copy once) says
+    // the verbatim copy compiled and was concatenated.
+    let language: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP.into();
+    let assembled = effective_query_source(&language, &crate::build::query_extract::php_pack());
+    let laravel_copies = assembled.matches("; Laravel framework overlay").count();
+
+    match saved {
+        Some(v) => std::env::set_var("PERL_LSP_PLUGIN_DIR", v),
+        None => std::env::remove_var("PERL_LSP_PLUGIN_DIR"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(laravel_copies, 2, "the bundled overlay copies into a plugin dir verbatim and loads");
+    let field = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "zz_overlay_probe" && matches!(s.kind, crate::model::file_analysis::SymKind::Field));
+    assert!(field.is_some(), "the probe overlay's pattern fired (base + survivors serve despite the broken sibling)");
+}
 
 #[test]
 fn php_promoted_property_navigation_and_rename_group() {
