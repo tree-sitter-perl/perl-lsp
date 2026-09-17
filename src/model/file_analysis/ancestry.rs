@@ -767,6 +767,22 @@ impl FileAnalysis {
         true
     }
 
+    /// The MRO walk for a member whose family the ASKER names — the
+    /// kind-parameterized face of the two walks above, for a consumer
+    /// holding a `MemberKind` rather than a ref
+    /// (`docs/adr/member-kinds.md`).
+    pub fn resolve_member(
+        &self,
+        class_name: &str,
+        member_name: &str,
+        want: MemberKind,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<MethodResolution> {
+        self.resolve_member_in_ancestors(class_name, member_name, module_index, &|k| {
+            want.admits_decl(k)
+        })
+    }
+
     /// The MRO walk both member walks share; `agrees` is the kind family
     /// the asking ref admits.
     fn resolve_member_in_ancestors(
