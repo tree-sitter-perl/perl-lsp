@@ -66,6 +66,9 @@ these hold (checked most-specific first):
 | `constructor` | conventional constructor (`new`) — frameworks instantiate it |
 | `class-referenced` | a pack constructor whose CLASS is referenced somewhere (a type hint, `Foo::class`, a `use` row) while nothing `new`s it — a DI container or a factory instantiates it. The class's own `references()` projection answers, minted at its declaration like every other count here |
 | `framework-synthesized` | symbol is plugin-minted (Moo accessors, routes, DBIC rels), not user-written; the framework calls it through machinery the static graph doesn't model |
+| `entry-point` | a name the LANGUAGE declares as a runtime entry (`LanguageCaps::entrypoint_symbols` — C/C++ `main`): entered over the ABI, never from a source call site |
+| `runtime-invoked` | a METHOD name the language declares the runtime invokes structurally (`runtime_invoked_methods` — php's `__toString`, `__invoke`): zero call sites is its expected state |
+| `framework-entry` | a declared entry rule claims the symbol — an annotation name, a method name or prefix, and an optional leaf-keyed `when_isa` ancestry gate, ANDed across the rule's present conditions and ORed across the rules. The rules are DATA (`<lang>/frameworks/*.entry.json` bundled per pack, plus `<plugin-dir>/<name>/entry.json`); the evaluator compares nothing but the symbol's own attributes, name and ancestry |
 | `package-implicit-use` | packages/classes/modules — reachable via `require`, app entrypoints, dynamic class strings; too many invisible vectors to flag |
 | `dynamic-dispatch` | a **method-shaped** sub (declared in a non-`main` package) when the workspace contains **any** `$obj->$method` dispatch — see below |
 
@@ -98,6 +101,14 @@ graph cannot see:
 - **External callers** — anything outside the indexed workspace (and, without
   `--include-deps`, outside open+workspace files). Exported symbols are guarded
   for exactly this reason.
+- **Declared framework entries over-shield by name** — an entry rule's
+  `attributes` condition carries no ancestry gate, so ANY symbol bearing an
+  annotation *named* `Test` or `Route` is shielded, whichever library minted
+  that attribute; and the `when_isa` gate is keyed on the base's LEAF, so a
+  project's own `TestCase` in an unrelated namespace answers it. Both widen
+  toward reachable, which is the direction a shield must err — an entry
+  document is a claim that a runner calls these, and the cost of believing
+  it is a dead helper left in the queue's shadow, not a live method flagged.
 - **Container / factory instantiation** — a class built by a DI container, a
   service locator, or a `new $class` from configuration has no `new` site the
   graph can see. The `class-referenced` guard covers the common case (the class
