@@ -760,7 +760,7 @@ pub fn pack_symbol_diagnostics(
     idx: Option<&dyn CrossFileLookup>,
     index_settled: bool,
 ) -> Vec<Diagnostic> {
-    use crate::model::file_analysis::{MemberKind, MethodResolution, ScopeKind};
+    use crate::model::file_analysis::{HandlerOwner, MemberKind, MethodResolution, RailNames, ScopeKind};
     let mut out = Vec::new();
     let pack = &analysis.pack;
     // Every per-class fact is derived ONCE per class, never per ref: a
@@ -1241,6 +1241,65 @@ pub fn pack_symbol_diagnostics(
                     .map(|r| serde_json::json!({ "row": [r.start.row, r.end.row] })),
                 ..Default::default()
             });
+        }
+    }
+
+    // ---- undefined rail name: a use on a named rail (`route('home')`)
+    // that no definition on that rail answers, here or in the settled
+    // index. Names a framework synthesizes (`Route::resource`) have no
+    // definition token, so the lane warns rather than errors.
+    if index_settled {
+        if let Some(idx) = idx {
+            for r in analysis.refs() {
+                if !matches!(r.kind, RefKind::DispatchCall { .. }) {
+                    continue;
+                }
+                let Some(owner @ HandlerOwner::Rail(rail)) = r.handler_owner() else { continue };
+                // what this rail's names denote is the rail document's own
+                // declaration, not a second owner variant
+                let names = owner.names_are(pack);
+                let class_named = names == RailNames::Classes;
+                let name = r.target_name.as_str();
+                // Silence: a name the lane cannot answer for. A trailing
+                // separator is a PREFIX the caller concatenates onto
+                // (`view('auth.parts.login-form-' . $kind)`); a `::` names
+                // a package-namespaced rail (`errors::minimal`) whose
+                // provider file lives outside the path rails; a class-keyed
+                // emission with no dispatcher (`Theme::dispatch(X::CONST)`)
+                // is an event the overlay could not name; a `*` is a
+                // wildcard (`->can('*')`), never one name.
+                let member_qualified = analysis
+                    .names()
+                    .member_sep()
+                    .is_some_and(|sep| name.contains(sep));
+                if name.ends_with(['.', '_', '-']) || member_qualified || name.contains('*') {
+                    continue;
+                }
+                if let (true, RefKind::DispatchCall { dispatcher }) = (class_named, &r.kind) {
+                    if dispatcher.is_empty() {
+                        continue;
+                    }
+                }
+                if analysis.rail_names(rail).any(|n| n == name) {
+                    continue;
+                }
+                if !crate::index::resolve::handler_definitions(owner, names, name, idx).is_empty() {
+                    continue;
+                }
+                // a class-keyed rail's miss is a dead emission — a hint
+                let severity = if class_named || pack.rail_hints.iter().any(|h| h == rail) {
+                    DiagnosticSeverity::HINT
+                } else {
+                    DiagnosticSeverity::WARNING
+                };
+                let label = pack
+                    .rail_labels
+                    .iter()
+                    .find(|(r, _)| r == rail)
+                    .map(|(_, l)| l.clone())
+                    .unwrap_or_else(|| format!("Undefined {rail}"));
+                push(&mut out, r.span, severity, &format!("undefined-{rail}"), format!("{label} '{name}'."));
+            }
         }
     }
 
