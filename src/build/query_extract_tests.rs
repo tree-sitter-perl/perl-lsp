@@ -2804,6 +2804,70 @@ $y = $x;
 }
 
 #[test]
+fn php_parent_edges_from_extends_implements_and_trait_use() {
+    let src = "\
+<?php
+trait T {}
+interface I {}
+class B {}
+class C extends B implements I {
+    use T;
+}
+";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    for parent in ["B", "I", "T"] {
+        assert!(
+            skel.parents.contains(&("C".to_string(), parent.to_string())),
+            "expected C -> {parent}, got {:?}",
+            skel.parents,
+        );
+    }
+}
+
+#[test]
+fn php_parent_edges_resolve_aliases_and_record_namespaces() {
+    // The FQ identity lane: `use X\Y as Z` parents recorded under Z were
+    // dead edges (Laravel's `Repository as CacheContract` hid the direct
+    // implementer from implementations); unqualified parents bind to the
+    // file's own namespace; written qualifiers carry their own.
+    let src = "\
+<?php
+namespace App\\Cache;
+
+use Illuminate\\Contracts\\Cache\\Repository as CacheContract;
+use Psr\\Log\\{LoggerInterface, NullLogger as Quiet};
+
+class Repo extends \\Vendor\\Base implements CacheContract
+{
+}
+class Local extends Helper
+{
+}
+class Logging extends Quiet
+{
+}
+";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let edges: Vec<(&str, &str)> = skel.parents.iter().map(|(c, p)| (c.as_str(), p.as_str())).collect();
+    // an alias resolves to the real identity, namespace from the import;
+    // the edge carries both ends' identities
+    assert!(
+        edges.contains(&("App\\Cache\\Repo", "Illuminate\\Contracts\\Cache\\Repository")),
+        "the edge must carry the real identity, not the alias: {edges:?}"
+    );
+    // written qualifier is authoritative
+    assert!(edges.contains(&("App\\Cache\\Repo", "Vendor\\Base")), "{edges:?}");
+    // unqualified binds to the file's own namespace
+    assert!(edges.contains(&("App\\Cache\\Local", "App\\Cache\\Helper")), "{edges:?}");
+    // group-use alias resolves through the shared prefix
+    assert!(edges.contains(&("App\\Cache\\Logging", "Psr\\Log\\NullLogger")), "{edges:?}");
+}
+
+#[test]
 fn cpp_member_chain_types_through_method_hops() {
     // The identical gap on the cpp side: `auto x = w.get().spin();` — the
     // called-member pattern mints the hop witness alongside the call-blind
