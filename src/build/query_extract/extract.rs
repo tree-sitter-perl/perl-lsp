@@ -977,7 +977,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // (registered_at_depth, value) — a context set inside a scope pops
     // with it (Python class blocks); one set at file depth is sticky
     // (Perl's flat `package Foo;`).
-    let mut context_stack: Vec<(usize, String)> = Vec::new();
+    // (depth, identity, is_class): the class flag is what tells an
+    // enclosing NAMESPACE from an enclosing class body, so a bare call's
+    // callee is keyed where a free function would be declared.
+    let mut context_stack: Vec<(usize, String, bool)> = Vec::new();
     let mut def_name_spans: Vec<(usize, usize)> = Vec::new();
 
     use crate::model::file_analysis::{Scope, ScopeId, ScopeKind};
@@ -1130,12 +1133,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             && scope_stack.last().is_some_and(|&(end, _)| e.start_byte >= end)
         {
             scope_stack.pop();
-            while context_stack.last().is_some_and(|&(d, _)| d > scope_stack.len()) {
+            while context_stack.last().is_some_and(|(d, _, _)| *d > scope_stack.len()) {
                 context_stack.pop();
             }
         }
         let cur_scope = scope_stack.last().unwrap().1;
-        let package: Option<String> = context_stack.last().map(|(_, p)| p.clone());
+        let package: Option<String> = context_stack.last().map(|(_, p, _)| p.clone());
         let import_binds = binds_by_match.get(&e.match_id).copied().unwrap_or_default();
         match strip_import_binds(&e.cap) {
             // `@scope` = a plain lexical Block; `@scope.sub` = sub-body
@@ -1163,7 +1166,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // a context deferred to THIS scope (C++ namespace) →
                 // register at the body depth so it pops with the block.
                 if let Some(text) = pending_context.remove(&e.match_id) {
-                    while context_stack.last().is_some_and(|&(d, _)| d >= scope_stack.len()) {
+                    while context_stack.last().is_some_and(|(d, _, _)| *d >= scope_stack.len()) {
                         context_stack.pop();
                     }
                     // The receiver name (`$this`) IS this class inside its
@@ -1171,11 +1174,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // it (`$this->mailer->send()`) resolves through the same
                     // registry chase as any typed variable. Class bodies
                     // only: a namespace body carries a context too.
-                    if names_by_match.contains_key(&(e.match_id, "def.class".to_string())) {
+                    let is_class =
+                        names_by_match.contains_key(&(e.match_id, "def.class".to_string()));
+                    if is_class {
                         register_class_body(&mut out, pack, id, &text, e.start);
                         class_body_scopes.insert(id);
                     }
-                    context_stack.push((scope_stack.len(), text));
+                    context_stack.push((scope_stack.len(), text, is_class));
                 }
                 // a guard narrowing whose block is THIS scope → the refined type
                 // holds within `id` (invisible outside it). Two join shapes:
@@ -1288,19 +1293,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // were already popped with their scopes.
                     while context_stack
                         .last()
-                        .is_some_and(|&(d, _)| d >= scope_stack.len())
+                        .is_some_and(|(d, _, _)| *d >= scope_stack.len())
                     {
                         context_stack.pop();
                     }
                     // php puts the class scope on the whole declaration, so
                     // the body scope is ALREADY open here: it carries the
                     // class as its package and the receiver witness.
-                    if names_by_match.contains_key(&(e.match_id, "def.class".to_string())) {
+                    let is_class =
+                        names_by_match.contains_key(&(e.match_id, "def.class".to_string()));
+                    if is_class {
                         let id = scope_stack.last().unwrap().1;
                         register_class_body(&mut out, pack, id, &raw, e.start);
                         class_body_scopes.insert(id);
                     }
-                    context_stack.push((scope_stack.len(), raw));
+                    context_stack.push((scope_stack.len(), raw, is_class));
                 }
             }
             "parent" => {
@@ -1997,7 +2004,18 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                     wit::WitnessPayload::Edge(wit::WitnessAttachment::Param {
                                         package: pkg
                                             .map(str::to_string)
-                                            .or_else(|| package.clone())
+                                            // A bare call names a free function, and a
+                                            // free function belongs to the enclosing
+                                            // NAMESPACE — never to the class whose body
+                                            // the call sits in. The callee's own bag
+                                            // keys its parameters that way.
+                                            .or_else(|| {
+                                                context_stack
+                                                    .iter()
+                                                    .rev()
+                                                    .find(|(_, _, is_class)| !*is_class)
+                                                    .map(|(_, p, _)| p.clone())
+                                            })
                                             .unwrap_or_default(),
                                         name: bare.to_string(),
                                         index: *index,
