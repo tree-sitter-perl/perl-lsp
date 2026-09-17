@@ -881,6 +881,12 @@ pub trait CrossFileLookup {
         }
         out
     }
+    /// Every handler name registered on the string rail `rail`, across
+    /// every file this index holds — the cross-file half of rail-name
+    /// completion. Default empty: an index with no handler axis.
+    fn rail_names(&self, _rail: &str) -> Vec<String> {
+        Vec::new()
+    }
     fn find_exporters(&self, func_name: &str) -> Vec<String>;
     fn defining_module_cached(&self, entry: &str, name: &str) -> Option<std::sync::Arc<CachedModule>>;
     fn module_declaring_method_in_package(&self, name: &str, class: &str) -> Option<String>;

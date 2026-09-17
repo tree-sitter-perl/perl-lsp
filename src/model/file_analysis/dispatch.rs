@@ -130,6 +130,19 @@ impl HandlerOwner {
     }
 }
 
+impl FileAnalysis {
+    /// Every handler name THIS file declares on the string rail `rail` —
+    /// the rail's own declarations. The rail-name completion source and the
+    /// undefined-rail-name lane's local answer read it, so neither spells
+    /// the `Handler { owner: Rail(..) }` filter itself.
+    pub fn rail_names<'a>(&'a self, rail: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        self.symbols().iter().filter_map(move |s| {
+            matches!(&s.detail, SymbolDetail::Handler { owner: HandlerOwner::Rail(r), .. } if r == rail)
+                .then(|| s.name.as_str())
+        })
+    }
+}
+
 // ---- Plugin namespace ----
 
 /// A plugin-controlled scope: the plugin says "I own a namespace — here's
