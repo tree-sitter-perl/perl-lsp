@@ -1406,10 +1406,22 @@ pub fn pack_symbol_diagnostics(
                     if matches!(pins.pins.get(leaf), Some(None)) {
                         continue;
                     }
-                    // the identity this file's use-map gives the written
-                    // spelling, and the namespace that identity carries
-                    let identity = analysis.class_spelling_identity(written);
-                    let ns = analysis.identity_namespace(&identity).unwrap_or_else(|| own.to_string());
+                    // The namespace this file's evidence gives the leaf: its
+                    // PIN where it has one — a qualified spelling names its
+                    // namespace outright, and an absolute one (`\Throwable`)
+                    // names the global namespace, neither of which survives on
+                    // the leaf token the ref carries — and the bare use-map
+                    // resolve otherwise.
+                    let (identity, ns) = match pins.pins.get(leaf) {
+                        Some(Some(ns)) => (join_name(analysis, ns, leaf), ns.clone()),
+                        _ => {
+                            let identity = analysis.class_spelling_identity(written);
+                            let ns = analysis
+                                .identity_namespace(&identity)
+                                .unwrap_or_else(|| own.to_string());
+                            (identity, ns)
+                        }
+                    };
                     // the global namespace is the builtins we carry no stubs
                     // for — silent, unless the workspace declares the leaf
                     // under a namespace and nowhere global: then the type is
