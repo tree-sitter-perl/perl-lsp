@@ -216,6 +216,7 @@ the `use` rows.
 ## Measured (2026-09-02, corpora without vendored PHPUnit/Symfony)
 
 See `bench/RESULTS.md` for the per-corpus counts against Intelephense on
-the same files. Known residuals: `createMock()`-typed receivers
-(`$mock->expects()` — PHPUnit's mock intersection type needs a framework
-overlay), and `instanceof` narrowing.
+the same files. Known residuals: the `MockObject` half of a mock's
+intersection type (`$mock->expects()` — the doubled class resolves, the
+mock API does not; the fork is `docs/open-forks.md`, "Intersection types"),
+and `instanceof` narrowing.
