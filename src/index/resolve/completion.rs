@@ -41,6 +41,35 @@ impl<'a> CandidateSet<'a> {
         })
     }
 
+    /// The rail-name candidates for a string rail: every name declared on
+    /// it, here and across the index, narrowed by the typed prefix. A
+    /// candidate SOURCE like `complete` and `complete_modules` — the slot
+    /// detection that decides a cursor sits on a rail, and the edit that
+    /// replaces the string's content, stay in the adapter.
+    pub fn complete_rail_names(&self, rail: &str, prefix: &str) -> Vec<CompletionCandidate> {
+        let mut names: Vec<String> = self.origin.rail_names(rail).map(str::to_string).collect();
+        if let Some(idx) = self.module_index {
+            names.extend(idx.rail_names(rail));
+        }
+        names.sort();
+        names.dedup();
+        names
+            .into_iter()
+            .filter(|n| n.starts_with(prefix))
+            .map(|n| CompletionCandidate {
+                label: n,
+                kind: SymKind::Handler,
+                is_static: false,
+                detail: Some(rail.to_string()),
+                insert_text: None,
+                sort_priority: crate::model::file_analysis::PRIORITY_LOCAL,
+                additional_edits: vec![],
+                import_fact: None,
+                display_override: None,
+            })
+            .collect()
+    }
+
     /// Completion visibility: unlike the navigation projections there is no
     /// resolved target to run `references_mask_for` on (the cursor sits on a
     /// prefix, not a name), so the default is the full VISIBLE universe; the
