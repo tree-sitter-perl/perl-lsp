@@ -1116,6 +1116,7 @@ fn inject_member_blocks(
             // renderer (hover stars, inlay suppression, `*field*` labeling) can
             // tell a macro-pasted member from a directly-declared one (rule #10).
             skel.symbols.push(SkelSymbol {
+                declared_with: None,
                 declared_return: None,
                 kind: "field".to_string(),
                 name: m.name.clone(),
@@ -1565,6 +1566,8 @@ fn remap_spans(
             qualifier_owned: _,
             doc: _,
             deprecation: _,
+            // a symbol id, not a position
+            declared_with: _,
         } = s;
         *start = r(*start);
         *end = r(*end);

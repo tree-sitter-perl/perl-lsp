@@ -51,6 +51,11 @@ pub struct SkelSymbol {
     /// same `@arity.sig` list as `arity` and flowed to `SymbolDetail::Sub`.
     /// Empty for non-callables and for a signature the query didn't capture.
     pub params: Vec<crate::model::file_analysis::ParamInfo>,
+    /// The other symbol this ONE declaration token minted (php's promoted
+    /// constructor property and its parameter). Minted as a pair where the
+    /// query captures both, so no consumer re-derives the relation from
+    /// spans (`Symbol::declared_with`, rule #11).
+    pub declared_with: Option<crate::model::file_analysis::SymbolId>,
     /// The `package` came from an explicit `::` qualifier on an out-of-line def
     /// (`Ret Class::m(){}`), not from lexical/sticky context. The class the
     /// qualifier names is authoritative EVEN when its body lives in another file
@@ -839,7 +844,7 @@ impl SkeletonAnalysis {
                     a
                 },
                 flags: symbol_flags_of(&s.kind, &s.attributes),
-                declared_with: None,
+                declared_with: s.declared_with,
                 deref_stack: s.deref_stack.clone(),
                 arity: s.arity,
             })

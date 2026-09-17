@@ -901,6 +901,7 @@ fn tok(src: &str, needle: &str, occ: usize) -> Point {
 fn sksym(src: &str, kind: &str, name: &str, occ: usize, package: Option<&str>) -> super::SkelSymbol {
     let ns = tok(src, name, occ);
     super::SkelSymbol {
+        declared_with: None,
         declared_return: None,
         receiver_instance_of: None,
         kind: kind.to_string(),

@@ -116,6 +116,15 @@ pub(super) fn strip_import_binds(cap: &str) -> &str {
     }
 }
 
+/// The capture suffix by which a query DECLARES that the defs one match
+/// mints are co-declared — one token, two symbols, `Symbol::declared_with`
+/// each way (php's promoted constructor property and its ctor-body local).
+/// It is opt-in at the capture because "two defs in one match" is a
+/// property of those patterns, not of the capture vocabulary: a future
+/// bundled pattern, or a plugin overlay's query, that happens to capture
+/// two defs would otherwise mint a false pair (rule #10).
+pub(super) const CODECLARED_SUFFIX: &str = ".declared_with";
+
 pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAnalysis, String> {
     let language = tree.language();
     let query = cached_query(&language, effective_query_source(&language, pack))?;
@@ -169,6 +178,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut arg_vars_by_start: HashMap<(usize, usize), Vec<(u32, String, Point)>> = HashMap::new();
     // A callable's by-reference parameter positions with their names, keyed
     // by the parameter list's span (joined to the def symbol like the arity).
+    // The def symbols each MATCH minted, in mint order — paired where the
+    // match's captures declared it (`CODECLARED_SUFFIX`).
+    let mut defs_by_match: HashMap<usize, Vec<u32>> = HashMap::new();
+    // Matches whose `@def.*` captures declared the pair (`CODECLARED_SUFFIX`).
+    let mut codeclared_matches: std::collections::HashSet<usize> = Default::default();
     let mut by_ref_params: Vec<(crate::model::file_analysis::Span, u32, String, crate::model::file_analysis::Span)> =
         Vec::new();
     let mut cursor = QueryCursor::new();
@@ -425,6 +439,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // `@qualifier` on a templated owner (`Buf<T>::grow`): the class
             // the def joins is the BASE name — peel the `name` field where
             // the node is live (structural, never a string split on `<`).
+            // A `@def.*` capture may declare that this match's defs are
+            // co-declared; the marker is read and stripped here, so every
+            // path below sees the plain capture it already knows.
+            let cap = match cap.strip_suffix(CODECLARED_SUFFIX) {
+                Some(base) if base.starts_with("def.") => {
+                    codeclared_matches.insert(match_counter);
+                    base
+                }
+                _ => cap,
+            };
             let text = if cap == "qualifier" && pack.qualifier_peel.contains(&node.kind()) {
                 node.child_by_field_name("name")
                     .and_then(|n| n.utf8_text(source).ok())
@@ -1323,6 +1347,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     attributes.push("class_rail".to_string());
                 }
                 out.symbols.push(SkelSymbol {
+                    declared_with: None,
                     declared_return: None,
                     name,
                     kind: "handler".to_string(),
@@ -1515,7 +1540,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         });
                     }
                 }
+                defs_by_match.entry(e.match_id).or_default().push(out.symbols.len() as u32);
                 out.symbols.push(SkelSymbol {
+                    declared_with: None,
                     name: shaped,
                     kind,
                     start: e.start,
@@ -2444,6 +2471,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
     }
 
+    // A declaration token whose query DECLARED the pair and minted exactly
+    // two defs declared both: link them each way where they were minted, so
+    // goto-def, references and rename read the relation instead of
+    // reconstructing it from spans (rule #11).
+    for mid in &codeclared_matches {
+        let Some(defs) = defs_by_match.get(mid) else { continue };
+        let [a, b] = defs[..] else { continue };
+        out.symbols[a as usize].declared_with =
+            Some(crate::model::file_analysis::SymbolId(b));
+        out.symbols[b as usize].declared_with =
+            Some(crate::model::file_analysis::SymbolId(a));
+    }
+
     // ---- inline namespaces: tag the Package symbol by name span ----
     if !inline_ns_spans.is_empty() {
         let same = |a: Point, b: Point| a.row == b.row && a.column == b.column;
@@ -2542,8 +2582,24 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 }
             }
         }
+        // Renumbering invalidates symbol ids, and the co-declaration pairs
+        // minted above are the only ones held this early — remap them here
+        // (a partner that did not survive leaves no link).
+        let mut renumbered: Vec<Option<u32>> = vec![None; keep.len()];
+        let mut next = 0u32;
+        for (i, k) in keep.iter().enumerate() {
+            if *k {
+                renumbered[i] = Some(next);
+                next += 1;
+            }
+        }
         let mut it = keep.iter();
         out.symbols.retain(|_| *it.next().unwrap());
+        for sym in out.symbols.iter_mut() {
+            sym.declared_with = sym.declared_with.and_then(|id| {
+                renumbered[id.0 as usize].map(crate::model::file_analysis::SymbolId)
+            });
+        }
     }
 
     // ---- command dispatch: classify each command's effects ----
@@ -2569,6 +2625,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 CmdEffect::Def { kind, name_arg } => {
                     if let Some((name, span)) = args.get(name_arg) {
                         out.symbols.push(SkelSymbol {
+                            declared_with: None,
                             declared_return: None,
                             kind: kind.to_string(),
                             name: name.clone(),
@@ -3100,6 +3157,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             let at = Point { row: cstart + line, column: *col };
                             let at_end = Point { row: at.row, column: col + name.len() };
                             doc_methods.push(SkelSymbol {
+                                declared_with: None,
                                 declared_return: None,
                                 kind: "method".to_string(),
                                 name: name.clone(),
