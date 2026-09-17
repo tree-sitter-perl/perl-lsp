@@ -69,6 +69,31 @@ pub(crate) fn peel<'a>(
     None
 }
 
+/// A parameter's NAME token inside its declaration node: the `name` field
+/// where the grammar has one (php's `simple_parameter`), else the first
+/// simple-variable descendant — a C++ declarator nests the `identifier` under
+/// however many pointer/array/reference declarators the type wrote. `None`
+/// for an unnamed parameter (`void f(int)`, a bare `...`), which binds
+/// nothing. The by-reference lane and the parameter lane locate the same
+/// token, so they ask the same function.
+fn param_name_node<'t>(
+    ch: tree_sitter::Node<'t>,
+    simple_var_kinds: &[&str],
+) -> Option<tree_sitter::Node<'t>> {
+    ch.child_by_field_name("name").or_else(|| {
+        let mut stack = vec![ch];
+        while let Some(n) = stack.pop() {
+            if n != ch && simple_var_kinds.contains(&n.kind()) {
+                return Some(n);
+            }
+            let mut w = n.walk();
+            let kids: Vec<_> = n.named_children(&mut w).collect();
+            stack.extend(kids.into_iter().rev());
+        }
+        None
+    })
+}
+
 pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAnalysis, String> {
     let language = tree.language();
     let query = cached_query(&language, effective_query_source(&language, pack))?;
@@ -102,11 +127,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // for shapes whose list lands in another match.
     let mut arg_counts_by_match: HashMap<usize, usize> = HashMap::new();
     let mut placeholder_by_match: std::collections::HashSet<usize> = Default::default();
-    // A callable's declared parameter arity, keyed by the parameter_list span.
-    // Associated to its def symbol by span containment in `into_file_analysis`
-    // (`@arity.sig` fires a separate match from the def name).
-    let mut param_sigs: Vec<(crate::model::file_analysis::Span, crate::model::file_analysis::ParamArity)> =
-        Vec::new();
+    // A callable's declared parameter arity AND the parameters themselves,
+    // keyed by the parameter_list span. Associated to its def symbol by span
+    // containment in `into_file_analysis` (`@arity.sig` fires a separate match
+    // from the def name). The parameters ride with the counts because the walk
+    // that counts them is the one that holds their name tokens (rule #11) — a
+    // consumer that wants names must never re-scan the source for them.
+    let mut param_sigs: Vec<(
+        crate::model::file_analysis::Span,
+        crate::model::file_analysis::ParamArity,
+        Vec<crate::model::file_analysis::ParamInfo>,
+    )> = Vec::new();
     // Bare variables written as call arguments, keyed by the argument
     // list's start (the callee token's end — the same adjacency the arity
     // join uses): (position, the variable's name, its token start). The
@@ -301,18 +332,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     if !by_ref {
                         return;
                     }
-                    let name_node = ch.child_by_field_name("name").or_else(|| {
-                        let mut stack = vec![ch];
-                        while let Some(n) = stack.pop() {
-                            if n != ch && pack.simple_var_kinds.contains(&n.kind()) {
-                                return Some(n);
-                            }
-                            let mut w = n.walk();
-                            let kids: Vec<_> = n.named_children(&mut w).collect();
-                            stack.extend(kids.into_iter().rev());
-                        }
-                        None
-                    });
+                    let name_node = param_name_node(ch, pack.simple_var_kinds);
                     let Some(name_node) = name_node else { return };
                     let text = name_node.utf8_text(source).unwrap_or("");
                     by_ref_params.push((
@@ -325,21 +345,45 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         },
                     ));
                 };
+                // The parameter itself, in source order: the name token the
+                // by-ref lane already locates, plus the default as SOURCE
+                // TEXT (rule #13 — a rendering would have to be parsed back).
+                // A parameter with no name token (C's bare `...`, an unnamed
+                // `void f(int)`) binds nothing and mints nothing.
+                let mut params: Vec<crate::model::file_analysis::ParamInfo> = Vec::new();
+                let mut note_param = |ch: tree_sitter::Node, is_slurpy: bool| {
+                    let Some(name_node) = param_name_node(ch, pack.simple_var_kinds) else {
+                        return;
+                    };
+                    let text = name_node.utf8_text(source).unwrap_or("");
+                    params.push(crate::model::file_analysis::ParamInfo {
+                        name: (pack.shape_name)("def.var", text),
+                        default: ch
+                            .child_by_field_name("default_value")
+                            .and_then(|d| d.utf8_text(source).ok())
+                            .map(str::to_string),
+                        is_slurpy,
+                        is_invocant: false,
+                        binding_site: Some(name_node.start_position()),
+                    });
+                };
                 let mut c = node.walk();
                 for ch in node.children(&mut c) {
                     match ch.kind() {
-                        "parameter_declaration" => { note_by_ref(ch, total); total += 1; required += 1; }
-                        "optional_parameter_declaration" => { note_by_ref(ch, total); total += 1; }
+                        "parameter_declaration" => { note_by_ref(ch, total); note_param(ch, false); total += 1; required += 1; }
+                        "optional_parameter_declaration" => { note_by_ref(ch, total); note_param(ch, false); total += 1; }
                         // PHP: a parameter with a default is optional; a
                         // promoted ctor param still counts toward arity.
                         "simple_parameter" | "property_promotion_parameter" => {
                             note_by_ref(ch, total);
+                            note_param(ch, false);
                             total += 1;
                             if ch.child_by_field_name("default_value").is_none() {
                                 required += 1;
                             }
                         }
                         "variadic_parameter_declaration" | "variadic_parameter" | "..." => {
+                            note_param(ch, true);
                             variadic = true
                         }
                         _ => {}
@@ -348,6 +392,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 param_sigs.push((
                     sig_span,
                     crate::model::file_analysis::ParamArity { total, required, variadic },
+                    params,
                 ));
                 continue;
             }
@@ -1240,6 +1285,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     deref_stack: Vec::new(),
                     attributes,
                     arity: None,
+                    params: Vec::new(),
                     qualifier_owned: false,
                     doc: None,
                     deprecation: None,
@@ -1459,6 +1505,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // Filled by span association in `into_file_analysis` — the
                     // `@arity.sig` match fires separately from this def name.
                     arity: None,
+                    params: Vec::new(),
                     doc: None,
                     deprecation: None,
                     qualifier_owned: qualifier_by_match.contains_key(&e.match_id),
@@ -2456,6 +2503,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             deref_stack: Vec::new(),
                             attributes: Vec::new(),
                             arity: None,
+                            params: Vec::new(),
                             qualifier_owned: false,
                             doc: None,
                             deprecation: None,
@@ -2990,6 +3038,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 // documentation, not a declaration: no body, no annotation to add
                                 attributes: vec!["documented".to_string()],
                                 arity: None,
+                                params: Vec::new(),
                                 qualifier_owned: false,
                                 doc: None,
                                 deprecation: None,
@@ -3305,7 +3354,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         let mut edges: Vec<crate::model::witnesses::Witness> = Vec::new();
         // NB: the local `param_sigs` vec — it moves into `out` only at the
         // end of this fn, so `out.param_sigs` is still empty here.
-        for (sig_span, _) in &param_sigs {
+        for (sig_span, _, _) in &param_sigs {
             let Some((cls, method, _)) = method_rows
                 .iter()
                 .find(|(_, _, msp)| in_span(sig_span.start, msp))

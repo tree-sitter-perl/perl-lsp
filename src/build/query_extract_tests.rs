@@ -915,6 +915,7 @@ fn sksym(src: &str, kind: &str, name: &str, occ: usize, package: Option<&str>) -
         deref_stack: Vec::new(),
         attributes: Vec::new(),
         arity: None,
+        params: Vec::new(),
         qualifier_owned: false,
         doc: None,
         deprecation: None,

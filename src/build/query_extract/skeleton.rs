@@ -42,6 +42,10 @@ pub struct SkelSymbol {
     /// def's parameter list (`@arity.sig`). `None` for non-callables and defs
     /// whose parameter list the query didn't capture. Flows to `Symbol.arity`.
     pub arity: Option<crate::model::file_analysis::ParamArity>,
+    /// The callable's declared parameters, in source order — joined from the
+    /// same `@arity.sig` list as `arity` and flowed to `SymbolDetail::Sub`.
+    /// Empty for non-callables and for a signature the query didn't capture.
+    pub params: Vec<crate::model::file_analysis::ParamInfo>,
     /// The `package` came from an explicit `::` qualifier on an out-of-line def
     /// (`Ret Class::m(){}`), not from lexical/sticky context. The class the
     /// qualifier names is authoritative EVEN when its body lives in another file
@@ -275,9 +279,16 @@ pub struct SkeletonAnalysis {
     /// fuel) is cpp-specific and lives in `language_driver.rs`'s post-
     /// extraction pipeline (`emit_return_fuel`).
     pub return_sites: Vec<(crate::model::file_analysis::ScopeId, Span)>,
-    /// Callable parameter arities keyed by parameter_list span (`@arity.sig`).
-    /// Associated to def symbols by span containment in `into_file_analysis`.
-    pub param_sigs: Vec<(crate::model::file_analysis::Span, crate::model::file_analysis::ParamArity)>,
+    /// Callable parameter arities and the parameters themselves, keyed by
+    /// parameter_list span (`@arity.sig`). Associated to def symbols by span
+    /// containment in `into_file_analysis`, which lands the parameters on the
+    /// def's `SymbolDetail::Sub` — the same shape Perl's subs carry, so one
+    /// reader serves both (signature help, hover, inlay hints).
+    pub param_sigs: Vec<(
+        crate::model::file_analysis::Span,
+        crate::model::file_analysis::ParamArity,
+        Vec<crate::model::file_analysis::ParamInfo>,
+    )>,
 }
 
 /// What a function-like macro's return resolves to (`SkeletonAnalysis::
@@ -665,13 +676,14 @@ impl SkeletonAnalysis {
                 }
                 let sig = param_sigs
                     .iter()
-                    .filter(|(sp, _)| {
+                    .filter(|(sp, _, _)| {
                         after(sp.start, s.name_end)
                             && after(s.end, sp.end)
                             && after(sp.start, s.start)
                     })
-                    .min_by_key(|(sp, _)| (sp.start.row, sp.start.column));
-                s.arity = sig.map(|(_, ar)| *ar);
+                    .min_by_key(|(sp, _, _)| (sp.start.row, sp.start.column));
+                s.arity = sig.map(|(_, ar, _)| *ar);
+                s.params = sig.map(|(_, _, ps)| ps.clone()).unwrap_or_default();
                 // The callable's body scope — the `Sub` scope its span opens
                 // — names this symbol as its owner (`Scope::owner`), the one
                 // hop from a scope to its parameters; the by-reference
@@ -689,7 +701,7 @@ impl SkeletonAnalysis {
                 if let Some(body) = body {
                     self.scopes[body.0 as usize].owner = Some(SymbolId(i as u32));
                 }
-                let (Some((sig_span, _)), Some(body)) = (sig, body) else { continue };
+                let (Some((sig_span, _, _)), Some(body)) = (sig, body) else { continue };
                 for (_, index, pname, name_span) in
                     by_ref_params.iter().filter(|(sp, _, _, _)| sp == sig_span)
                 {
@@ -760,6 +772,21 @@ impl SkeletonAnalysis {
                         owner: rail_owner(Span { start: s.name_start, end: s.name_end }),
                         dispatchers: Vec::new(),
                         params: Vec::new(),
+                    }
+                } else if matches!(s.kind.as_str(), "sub" | "method") {
+                    // The signature the `@arity.sig` join read. Perl's subs
+                    // carry theirs the same way, so signature help, hover and
+                    // the outline's parameter suffix have ONE reader for both.
+                    // Doc text stays on `presentation` (where the pack tier
+                    // has always put it); arity stays on `Symbol.arity`, which
+                    // `param_arity()` prefers.
+                    SymbolDetail::Sub {
+                        params: s.params.clone(),
+                        is_method: s.kind == "method",
+                        doc: None,
+                        opaque_return: false,
+                        is_constant: false,
+                        lexical: false,
                     }
                 } else {
                     SymbolDetail::None
