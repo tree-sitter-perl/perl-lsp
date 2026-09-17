@@ -179,7 +179,10 @@ fn check_entry_declarations(path: &Path, json_mode: bool) {
 /// what makes the loader drop it — and lists capture names outside the
 /// bundled vocabulary. Unknown captures are inert by design (an overlay
 /// written against a newer vocabulary degrades to silence); this arm is
-/// what makes that silence diagnosable.
+/// what makes that silence diagnosable. A capture inside a KNOWN family
+/// with a wrong payload — a rail family naming no rail, an attribute
+/// spelling no flag answers to — is a finding instead, and fails the
+/// check.
 fn check_pack_overlay(path: &Path, json_mode: bool) {
     let registry = crate::build::language_driver::LanguageRegistry::with_enabled();
     // A plugin-dir overlay is named for its language (`queries/php.scm`);
@@ -229,15 +232,22 @@ fn check_pack_overlay(path: &Path, json_mode: bool) {
                 &language,
                 q.capture_names(),
             );
+            // Inside a known family a wrong payload is a FINDING, not the
+            // inert silence an unknown capture buys: nothing downstream can
+            // guess the rail an overlay left off, or the flag a misspelling
+            // meant.
+            let findings =
+                crate::build::query_extract::overlay_capture_findings(q.capture_names());
             if json_mode {
                 println!(
                     "{}",
                     json!({
                         "overlay": path.display().to_string(),
                         "language": lang_id,
-                        "ok": true,
+                        "ok": findings.is_empty(),
                         "patterns": q.pattern_count(),
                         "unknown_captures": unknown,
+                        "findings": findings,
                     })
                 );
             } else {
@@ -248,8 +258,14 @@ fn check_pack_overlay(path: &Path, json_mode: bool) {
                          (it will match but mint nothing)"
                     );
                 }
+                for f in &findings {
+                    println!("error: {f}");
+                }
             }
-            return;
+            if findings.is_empty() {
+                return;
+            }
+            crate::lsp::cli::exit_with(1, "exit");
         }
         Err(e) => e,
     };

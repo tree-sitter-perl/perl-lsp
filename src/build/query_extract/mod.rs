@@ -455,6 +455,40 @@ pub fn unserved_captures(
         .collect()
 }
 
+/// What an overlay's capture names say that the extractor cannot honour.
+///
+/// A capture outside the vocabulary is inert by design (an overlay written
+/// against a newer engine degrades to silence). These are captures INSIDE a
+/// known family whose payload is wrong — a rail family with no rail, a
+/// declared attribute spelling no flag answers to — where silence reads as
+/// a missing feature instead of a document to fix. `--plugin-check` reports
+/// them.
+pub fn overlay_capture_findings(captures: &[&str]) -> Vec<String> {
+    use crate::model::file_analysis::SymbolFlags;
+    let mut out = Vec::new();
+    for c in captures {
+        if let Some((family, _)) =
+            RAIL_CAPTURE_FAMILIES.iter().find(|(f, _)| c == f || c.strip_prefix(f) == Some("."))
+        {
+            out.push(format!(
+                "@{c} names no rail: the vocabulary is @{family}.<rail>, and a rail is the \
+                 namespace one framework owns — an unnamed one would claim the whole program, \
+                 so this capture mints nothing"
+            ));
+            continue;
+        }
+        if let Some(spelling) = c.strip_prefix("classattr.") {
+            if SymbolFlags::try_from(spelling).is_err() {
+                out.push(format!(
+                    "@{c} declares the attribute `{spelling}`, which no symbol flag answers to \
+                     (docs/adr/symbol-flags.md): it would stamp a string nothing reads"
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// The pack's effective query source: the bundled query plus every
 /// surviving discovered overlay, assembled once per distinct overlay set
 /// and leaked (`cached_query` then compiles it once by content).
@@ -498,27 +532,26 @@ fn effective_query_source(language: &Language, pack: &LangPack) -> &'static str 
     // Bundled overlays get the same isolation as plugin-dir ones: a syntax
     // slip in one framework document must not take every verb of the
     // language dark (it did — the documents used to be one `concat!`).
-    for (name, s) in pack.bundled_overlays {
-        match Query::new(language, s) {
-            Ok(_) => {
+    // A finding does NOT drop the document: the capture that carries it
+    // mints nothing while every other pattern still serves. Saying so is
+    // what keeps it a document to fix rather than a missing feature.
+    let fold = |src: &str, origin: &dyn std::fmt::Display, assembled: &mut String| {
+        match Query::new(language, src) {
+            Ok(q) => {
+                for f in overlay_capture_findings(q.capture_names()) {
+                    eprintln!("perl-lsp: overlay {origin}: {f}");
+                }
                 assembled.push('\n');
-                assembled.push_str(s);
+                assembled.push_str(src);
             }
-            Err(e) => {
-                eprintln!("perl-lsp: bundled {} overlay {name} dropped: {e}", pack.lang_id);
-            }
+            Err(e) => eprintln!("perl-lsp: overlay {origin} dropped: {e}"),
         }
+    };
+    for (name, s) in pack.bundled_overlays {
+        fold(s, &format_args!("{} (bundled {})", name, pack.lang_id), &mut assembled);
     }
     for (p, s) in &sources {
-        match Query::new(language, s) {
-            Ok(_) => {
-                assembled.push('\n');
-                assembled.push_str(s);
-            }
-            Err(e) => {
-                eprintln!("perl-lsp: pack overlay {} dropped: {e}", p.display());
-            }
-        }
+        fold(s, &p.display(), &mut assembled);
     }
     let leaked: &'static str = Box::leak(assembled.into_boxed_str());
     cache.lock().unwrap().insert(key, leaked);
