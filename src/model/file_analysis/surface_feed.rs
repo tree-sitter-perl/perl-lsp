@@ -28,7 +28,7 @@ pub struct SurfaceFeed<'a> {
     pub plugin_namespaces: &'a [PluginNamespace],
     pub app_surface_consumers: &'a [String],
     pub macro_defs: &'a [MacroDef],
-    pub include_directives: &'a [(Span, String)],
+    pub include_directives: &'a [ImportRow],
     pub dbic_source_name: &'a Option<String>,
     /// Derived-query handle — see the struct doc for its narrow license.
     pub analysis: &'a FileAnalysis,

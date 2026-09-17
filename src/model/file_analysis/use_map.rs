@@ -10,7 +10,7 @@
 //! the pack's declared one (`PackFacts::names`); a language whose
 //! spellings are already identities (C's flat linkage) never builds one.
 
-use super::Span;
+use super::ImportRow;
 
 /// One file's name-resolution context for class spellings.
 #[derive(Debug, Clone, Copy)]
@@ -18,7 +18,7 @@ pub struct UseMap<'a> {
     /// The file's `use` rows as written (`PackFacts::include_directives`):
     /// a row's last segment is the leaf it binds, the whole row the
     /// identity.
-    pub rows: &'a [(Span, String)],
+    pub rows: &'a [ImportRow],
     /// `use A\B as C` rows as (alias, namespace, real leaf)
     /// (`PackFacts::use_aliases`).
     pub aliases: &'a [(String, String, String)],
@@ -56,8 +56,8 @@ impl<'a> UseMap<'a> {
             .find(|(alias, _, _)| alias == head)
             .map(|(_, ns, leaf)| join(ns, leaf, sep))
             .or_else(|| {
-                self.rows.iter().find_map(|(_, raw)| {
-                    let t = raw.trim_start_matches(sep);
+                self.rows.iter().find_map(|row| {
+                    let t = row.raw.trim_start_matches(sep);
                     if t.rsplit(sep).next() != Some(head) {
                         return None;
                     }

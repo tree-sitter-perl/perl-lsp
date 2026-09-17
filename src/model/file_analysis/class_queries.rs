@@ -1097,7 +1097,9 @@ impl FileAnalysis {
     /// PackageRef lanes (goto-def, hover, references) share.
     pub fn spelled_identity(&self, r: &Ref) -> String {
         match (self.pack.names.use_map_sep(), self.pack.import_row_covering(&r.span)) {
-            (Some(sep), Some((_, raw))) => raw.strip_prefix(sep).unwrap_or(raw).to_string(),
+            (Some(sep), Some(row)) => {
+                row.raw.strip_prefix(sep).unwrap_or(&row.raw).to_string()
+            }
             _ => self.class_spelling_identity(&r.target_name),
         }
     }
@@ -1201,7 +1203,8 @@ impl FileAnalysis {
         // Import rows carry a namespace only for a use-map language; C's
         // `#include` paths ride the same lane and pin nothing.
         if let Some(sep) = self.pack.names.use_map_sep() {
-            for (_, raw) in &self.pack.include_directives {
+            for row in &self.pack.include_directives {
+                let raw = &row.raw;
                 let t = raw.strip_prefix(sep).unwrap_or(raw);
                 // A bare row (`use Exception;`) names the GLOBAL namespace: the
                 // empty pin keeps a same-leaf class of the file's own namespace

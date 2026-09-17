@@ -94,6 +94,28 @@ fn param_name_node<'t>(
     })
 }
 
+/// The `ImportBinds` a capture-name suffix declares, or `None` when the
+/// suffix is not one. `use function` / `use const` rows bind a callable or a
+/// constant; an unsuffixed row binds a type, so the pack spells only the two
+/// exceptions and nothing has to read the leaf's capitalization to guess.
+pub(super) fn import_binds_suffix(suffix: &str) -> Option<crate::model::file_analysis::ImportBinds> {
+    match suffix {
+        "function" => Some(crate::model::file_analysis::ImportBinds::Function),
+        "const" => Some(crate::model::file_analysis::ImportBinds::Const),
+        _ => None,
+    }
+}
+
+/// A capture name with its import-binding suffix removed, so the dispatch
+/// arms stay spelled as the bare capture (`import`, `import.name`) however
+/// the pack's query declared the binding.
+pub(super) fn strip_import_binds(cap: &str) -> &str {
+    match cap.rsplit_once('.') {
+        Some((head, sfx)) if cap.starts_with("import") && import_binds_suffix(sfx).is_some() => head,
+        _ => cap,
+    }
+}
+
 pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAnalysis, String> {
     let language = tree.language();
     let query = cached_query(&language, effective_query_source(&language, pack))?;
@@ -510,7 +532,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // covers all three php container kinds, and SUPER/reference walks
     // need to ask the value which one it is.
     let mut classattr_by_name_span: HashMap<(Point, Point), String> = HashMap::new();
+    // What an import row BINDS, per match (`@import.function` / `@import
+    // .const`, on the row capture or on its name token). Read once here so
+    // every capture in the `import` family accepts the suffix and the flat
+    // and group forms of a row answer the same way.
+    let mut binds_by_match: HashMap<usize, crate::model::file_analysis::ImportBinds> =
+        HashMap::new();
     for e in &events {
+        if let (true, Some(b)) = (
+            e.cap.starts_with("import"),
+            e.cap.rsplit_once('.').and_then(|(_, sfx)| import_binds_suffix(sfx)),
+        ) {
+            binds_by_match.insert(e.match_id, b);
+        }
         if let Some(prefix) = e.cap.strip_suffix(".name") {
             names_by_match
                 .insert((e.match_id, prefix.to_string()), (e.text.clone(), e.start, e.end));
@@ -675,7 +709,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // separator only — empty otherwise).
     let mut out_use_aliases: Vec<(String, String, String)> = Vec::new();
     let mut use_map: HashMap<String, (String, String)> = HashMap::new();
-    let mut group_import_sites: Vec<(String, Span)> = Vec::new();
+    let mut group_import_sites: Vec<(String, Span, crate::model::file_analysis::ImportBinds)> =
+        Vec::new();
     let mut parent_fq_by_match: HashMap<usize, String> = HashMap::new();
     // `@ref.qualified`: the WRITTEN qualifier of a call/ctor/type/parent
     // spelling (`Downloader\DownloadManager`, `\A\B`) — the use-map pins
@@ -738,7 +773,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // A group clause is an import row like any flat one: the same
             // `include_directives` row (spelled in full, spanning the leaf
             // token) feeds the use-map pin and the row-namespace lanes.
-            group_import_sites.push((format!("{ns}{sep}{leaf}"), *span));
+            group_import_sites.push((
+                format!("{ns}{sep}{leaf}"),
+                *span,
+                binds_by_match.get(mid).copied().unwrap_or_default(),
+            ));
             use_map.insert(key, (ns, leaf.clone()));
         }
     }
@@ -750,7 +789,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // the namespace in force at the spelling's position. A declaration
     // joins its namespace directly. Without a separator a spelling IS its
     // identity, and every resolver below is the identity function.
-    let ident_rows: Vec<(Span, String)> = use_map
+    let ident_rows: Vec<crate::model::file_analysis::ImportRow> = use_map
         .iter()
         .filter(|(key, (_, leaf))| *key == leaf)
         .map(|(_, (ns, leaf))| {
@@ -759,7 +798,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // declared separator
             let sep = pack.names.use_map_sep().unwrap_or_default();
             let row = if ns.is_empty() { leaf.clone() } else { format!("{ns}{sep}{leaf}") };
-            (Span { start: zero, end: zero }, row)
+            // A class-identity row, by construction: this is the ladder that
+            // resolves class SPELLINGS, so the function/const rows are not
+            // what it is built from — but they never key a spelling either,
+            // and the span is synthetic (nothing resolves against it).
+            crate::model::file_analysis::ImportRow {
+                span: Span { start: zero, end: zero },
+                raw: row,
+                binds: crate::model::file_analysis::ImportBinds::Type,
+            }
         })
         .collect();
     let ident_aliases = out_use_aliases.clone();
@@ -836,9 +883,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // Group rows land ahead of the flat rows the main loop pushes in
     // document order; every reader of these lanes is span- or map-keyed,
     // so the order carries no meaning — do not make a consumer assume it.
-    for (raw, span) in group_import_sites {
+    for (raw, span, binds) in group_import_sites {
         out.imports.push(raw.clone());
-        out.import_sites.push((raw, span));
+        out.import_sites
+            .push(crate::model::file_analysis::ImportRow { span, raw, binds });
     }
     out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
     out.implicit_variables = pack.implicit_variables.iter().map(|s| s.to_string()).collect();
@@ -1050,7 +1098,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         let cur_scope = scope_stack.last().unwrap().1;
         let package: Option<String> = context_stack.last().map(|(_, p)| p.clone());
-        match e.cap.as_str() {
+        let import_binds = binds_by_match.get(&e.match_id).copied().unwrap_or_default();
+        match strip_import_binds(&e.cap) {
             // `@scope` = a plain lexical Block; `@scope.sub` = sub-body
             // content (function bodies, prototype signatures, explicit
             // instantiations, requires-expressions) — the kind
@@ -1970,8 +2019,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 }
             }
             "import.name" => {
-                out.import_sites
-                    .push((e.text.clone(), Span { start: e.start, end: e.end }));
+                out.import_sites.push(crate::model::file_analysis::ImportRow {
+                    span: Span { start: e.start, end: e.end },
+                    raw: e.text.clone(),
+                    binds: import_binds,
+                });
                 out.imports.push(e.text.clone());
             }
             "preamble" => {
@@ -2945,9 +2997,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         let bound: std::collections::HashSet<String> = out
             .import_sites
             .iter()
-            .map(|(raw, _)| match pack.names.sep() {
-                Some(sep) => raw.rsplit(sep).next().unwrap_or(raw).to_string(),
-                None => raw.to_string(),
+            .map(|r| match pack.names.sep() {
+                Some(sep) => r.raw.rsplit(sep).next().unwrap_or(&r.raw).to_string(),
+                None => r.raw.clone(),
             })
             .chain(out.use_aliases.iter().map(|(alias, _, _)| alias.clone()))
             .collect();

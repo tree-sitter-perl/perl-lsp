@@ -373,7 +373,7 @@ impl Surface {
         macros.sort_by(|a, b| (&a.name, &a.guards).cmp(&(&b.name, &b.guards)));
         macros.dedup();
         let mut includes: Vec<String> =
-            feed.include_directives.iter().map(|(_, raw)| raw.clone()).collect();
+            feed.include_directives.iter().map(|r| r.raw.clone()).collect();
         includes.sort_unstable();
         includes.dedup();
         let mut export_tags: Vec<(String, Vec<String>)> = feed

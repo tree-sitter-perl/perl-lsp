@@ -2763,3 +2763,20 @@ int f(Widget w) {
         "two-hop chain must type",
     );
 }
+
+/// A row says what it binds through its capture suffix, and an unsuffixed
+/// capture binds a type — the default every include/`use` row without the
+/// `function` / `const` keyword means.
+#[test]
+fn import_capture_suffix_declares_what_the_row_binds() {
+    use crate::model::file_analysis::ImportBinds;
+    use super::extract::{import_binds_suffix, strip_import_binds};
+    assert_eq!(import_binds_suffix("function"), Some(ImportBinds::Function));
+    assert_eq!(import_binds_suffix("const"), Some(ImportBinds::Const));
+    assert_eq!(import_binds_suffix("name"), None);
+    assert_eq!(strip_import_binds("import.name.function"), "import.name");
+    assert_eq!(strip_import_binds("import.const"), "import");
+    assert_eq!(strip_import_binds("import.name"), "import.name");
+    // Only the import family; a `.const` elsewhere is somebody else's capture.
+    assert_eq!(strip_import_binds("def.const"), "def.const");
+}

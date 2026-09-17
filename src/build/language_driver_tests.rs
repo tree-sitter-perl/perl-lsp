@@ -530,9 +530,13 @@ fn cpp_splice_remaps_import_sites() {
         end: Point { row: 1, column: tcol + 4 },
     };
     let mut skel = crate::build::query_extract::SkeletonAnalysis::default();
-    skel.import_sites.push(("tail.h".to_string(), sp));
+    skel.import_sites.push(crate::model::file_analysis::ImportRow {
+        span: sp,
+        raw: "tail.h".to_string(),
+        binds: Default::default(),
+    });
     remap_spans(&mut skel, &rewritten, &src, &map);
-    let got = skel.import_sites[0].1;
+    let got = skel.import_sites[0].span;
     assert_eq!(
         ((got.start.row, got.start.column), (got.end.row, got.end.column)),
         ((1, 16), (1, 20)),
@@ -1027,4 +1031,18 @@ fn cpp_callable_carries_its_parameters_as_facts() {
     // The counts stay on `arity`, which `param_arity()` still prefers.
     let arity = sym.param_arity().expect("a callable has an arity");
     assert_eq!((arity.total, arity.required, arity.variadic), (2, 1, true));
+}
+
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_include_row_binds_a_type() {
+    use crate::model::file_analysis::ImportBinds;
+    // C has one kind of `#include`, so its rows carry the default binding —
+    // the value a consumer reads instead of guessing from the leaf's case.
+    let fa = cpp_driver().analyze("#include \"box.h\"\n#include <vector>\n");
+    let raws: Vec<&str> = fa.pack.include_directives.iter().map(|r| r.raw.as_str()).collect();
+    assert_eq!(raws, vec!["box.h", "<vector>"], "both rows: {raws:?}");
+    for r in &fa.pack.include_directives {
+        assert_eq!(r.binds, ImportBinds::Type, "unsuffixed capture binds a type");
+    }
 }
