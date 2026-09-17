@@ -747,3 +747,210 @@ fn receiver_class(analysis: &FileAnalysis, r: &crate::model::file_analysis::Ref)
         _ => None,
     }
 }
+
+
+/// The pack-language symbol lanes — the facts only packs mint (`arg_count`
+/// on calls, `ParamArity` on callables, the use-map's namespace pins,
+/// `Ref::binding` on every variable read) turned into the diagnostics an
+/// editor expects of a typed language. Precision first: every lane has a
+/// silence rule for the case it cannot see, named at the rule.
+pub fn pack_symbol_diagnostics(
+    analysis: &FileAnalysis,
+    idx: Option<&dyn CrossFileLookup>,
+    index_settled: bool,
+) -> Vec<Diagnostic> {
+    use crate::model::file_analysis::MemberKind;
+    let mut out = Vec::new();
+    let pack = &analysis.pack;
+    // Every per-class fact is derived ONCE per class, never per ref: a
+    // 10k-line class file has thousands of member calls on a handful of
+    // classes, and a symbol scan per call is quadratic.
+    let local_classes: std::collections::HashSet<&str> = analysis
+        .symbols()
+        .iter()
+        .filter(|s| matches!(s.kind, FaSymKind::Class | FaSymKind::Package))
+        .map(|s| s.name.as_str())
+        .collect();
+    let local_class = |class: &str| local_classes.contains(class);
+    // The members php declares by WRITING them, per class. A write is a ref
+    // fact, so it stays a per-file set — but resolving each write's invocant
+    // is the work the member loop already pays, so it is derived once, on
+    // the first lane that asks.
+    let mut written: Option<HashMap<String, std::collections::HashSet<String>>> = None;
+    // The class's DEFINING analysis plus the facts every lane asks of it,
+    // memoized per class. `None` = a class the lanes stay silent on.
+    struct OwnerFacts {
+        owner: Option<std::sync::Arc<FileAnalysis>>,
+        is_interface: bool,
+        is_enum: bool,
+        /// A trait's `$this` is whatever class composes it: every member
+        /// it does not declare may live there.
+        is_trait: bool,
+    }
+    // keyed by (leaf, the namespace the CALL means): a `parent::` call's
+    // parent is the parent-namespace row of the class it is written in — an
+    // aliased parent carrying the child's own leaf is not the child
+    let mut owner_memo: HashMap<(String, Option<String>), Option<OwnerFacts>> = HashMap::new();
+    let push = |out: &mut Vec<Diagnostic>, span: Span, sev: DiagnosticSeverity, code: &str, msg: String| {
+        out.push(Diagnostic {
+            range: span_to_range(span),
+            severity: Some(sev),
+            code: Some(NumberOrString::String(code.to_string())),
+            source: Some("perl-lsp".to_string()),
+            message: msg,
+            ..Default::default()
+        });
+    };
+
+    // ---- undefined member / arity, per member access ----
+    // Template method: `$this->step()` in a base whose SUBCLASS declares
+    // `step` dispatches on the runtime class, which is that subclass. One
+    // graph walk per (class, member, kind).
+    let mut below_memo: HashMap<(String, String, bool), bool> = HashMap::new();
+    for r in analysis.refs() {
+        let Some(site) = r.member_site() else { continue };
+        // a member site always states its family
+        let Some(want) = MemberKind::of_ref(&r.kind) else { continue };
+        let invocant = site.invocant;
+        // only a call can be named by a string (`[$obj, 'name']`)
+        let named_by_string = matches!(r.kind, RefKind::MethodCall { named_by_string: true, .. });
+        let name = r.unqualified_target_name(analysis.names());
+        // `$obj->$dyn()` — the member is named by a variable, and a sigil
+        // is a variable only where the language declares one.
+        if name.is_empty() || name.chars().next().is_some_and(|c| analysis.names().is_sigil(c)) {
+            continue;
+        }
+        if !pack.class_literal_member.is_empty() && name == pack.class_literal_member {
+            continue; // `Foo::class` is the class-name literal
+        }
+        // The dispatch projection every verb reads (`$this` is a typed
+        // receiver here — the extractor witnesses it at the class body).
+        let Some(class) = analysis.method_call_invocant_class(r, idx) else { continue };
+        // The receiver is an identity: its own namespace names the class's
+        // defining candidate (a pack without namespaces makes no claim).
+        let want_ns = analysis.identity_namespace(&class);
+        let facts = owner_memo.entry((class.clone(), want_ns.clone())).or_insert_with(|| {
+            // The class's DEFINING analysis: this file, or — once the
+            // workspace index is settled — the candidate its namespace
+            // names. An unsettled index would flag every cross-file member.
+            let is_local = local_class(&class)
+                && (want_ns.is_none() || analysis.declared_class_namespace(&class) == want_ns);
+            let owner_arc: Option<std::sync::Arc<FileAnalysis>> = if is_local {
+                None
+            } else if index_settled {
+                let i = idx?;
+                Some(i.defining_analysis(&class, &|a| {
+                    let declared = a.declared_class_namespace(&class);
+                    declared.is_some() && (want_ns.is_none() || declared == want_ns)
+                })?)
+            } else {
+                return None;
+            };
+            let owner: &FileAnalysis = owner_arc.as_deref().unwrap_or(analysis);
+            let owner_has_members = owner.symbols().iter().any(|s| {
+                matches!(s.kind, FaSymKind::Sub | FaSymKind::Method | FaSymKind::Field)
+                    && s.package.as_deref() == Some(class.as_str())
+            });
+            let owner_catch_all = pack.catch_all_methods.iter().any(|m| {
+                owner.resolve_member(&class, m, MemberKind::Callable, idx).is_some()
+            });
+            if !owner_has_members || owner_catch_all || !owner.ancestry_fully_visible(&class, idx) {
+                return None;
+            }
+            let class_attr = |attr: &str| {
+                owner.symbols().iter().any(|s| {
+                    matches!(s.kind, FaSymKind::Class) && s.name == class && s.attributes.iter().any(|a| a == attr)
+                })
+            };
+            Some(OwnerFacts {
+                // A receiver typed as an INTERFACE names any implementation.
+                // `instanceof` narrowing retypes a VARIABLE receiver, but a
+                // member subject (`$this->x instanceof T`), a method guard
+                // (`->isT()`) or `is_a()` leave the interface type standing
+                // — so the interface stays silent on undefined members
+                // (resolved ones still check arity).
+                is_interface: class_attr("interface"),
+                is_enum: class_attr("enum"),
+                is_trait: class_attr("trait"),
+                owner: owner_arc,
+            })
+        });
+        let Some(facts) = facts.as_ref() else { continue };
+        let owner: &FileAnalysis = facts.owner.as_deref().unwrap_or(analysis);
+        // an enum's language-given members
+        if facts.is_enum && pack.enum_members.iter().any(|m| m == name) {
+            continue;
+        }
+        match owner.resolve_member(&class, name, want, idx) {
+            None if facts.is_interface || facts.is_trait => {}
+            // a class with no declared constructor has the default one
+            None if pack.constructor_names.iter().any(|c| c == name) => {}
+            None if named_by_string => {
+                // `[$obj, 'name']` is data until dispatch proves it a
+                // callable: a claim only when it resolves
+            }
+            None => {
+                // php declares a property by writing it: a write of this
+                // member on the same class anywhere in the file is its
+                // declaration
+                if matches!(want, MemberKind::Value) {
+                    let writes = written.get_or_insert_with(|| {
+                        let mut by_class: HashMap<String, std::collections::HashSet<String>> =
+                            HashMap::new();
+                        for w in analysis.refs() {
+                            if w.member_site().is_none()
+                                || !matches!(w.access, crate::model::file_analysis::AccessKind::Write)
+                            {
+                                continue;
+                            }
+                            if let Some(c) = analysis.method_call_invocant_class(w, idx) {
+                                by_class
+                                    .entry(c)
+                                    .or_default()
+                                    .insert(w.unqualified_target_name(analysis.names()).to_string());
+                            }
+                        }
+                        by_class
+                    });
+                    if writes.get(&class).is_some_and(|m| m.contains(name)) {
+                        continue;
+                    }
+                }
+                // a read inside an existence probe (`isset($x->p)`) IS the
+                // question of whether the member exists
+                if matches!(want, MemberKind::Value)
+                    && analysis.pack.probe_regions.iter().any(|p| p.contains(&r.span))
+                {
+                    continue;
+                }
+                // the receiver is the pack's own (`$this`): the runtime class
+                // may be any descendant, and one of them declares the member
+                let own_receiver = pack.receiver_names.iter().any(|n| n == invocant.text());
+                if own_receiver {
+                    let declared_below = *below_memo
+                        .entry((class.clone(), name.to_string(), matches!(want, MemberKind::Value)))
+                        .or_insert_with(|| {
+                            owner
+                                .dispatch_participants(&class, idx)
+                                .iter()
+                                .filter(|p| **p != class)
+                                .any(|p| owner.resolve_member(p, name, want, idx).is_some())
+                        });
+                    if declared_below {
+                        continue;
+                    }
+                }
+                // a same-named member of the OTHER kind is a different
+                // finding (a method read as a property) — still undefined
+                let (code, what) = match want {
+                    MemberKind::Value => ("undefined-property", "property"),
+                    _ => ("unresolved-method", "method"),
+                };
+                push(&mut out, r.span, DiagnosticSeverity::ERROR, code, format!("Undefined {what} '{name}'."));
+            }
+            Some(_) => {}
+        }
+    }
+
+    out
+}
