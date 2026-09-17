@@ -451,12 +451,21 @@ pub fn rail_of(cap: &str) -> Option<(RailCapture, &str)> {
 }
 
 /// Capture names the extractor READS that no bundled skeleton spells.
-/// Only a framework overlay reaches for a call or member shape whose name
-/// is a STRING, so the skeleton has never needed to write one — but the
-/// extractor serves them, and a baseline that does not know them calls
-/// every one of them unserved.
-const OVERLAY_ONLY_CAPTURES: &[&str] =
-    &["ref.call.named", "ref.method.named.self", "dispatch.via"];
+/// A skeleton describes the language; these describe a FRAMEWORK's shapes
+/// — a call or member whose name is a string, the companion token that
+/// names a rail handler declared by another capture of the same match, an
+/// array key a path rail promotes to a name, and a call expression whose
+/// value the overlay declares. The extractor serves them all, so a
+/// baseline that does not know them calls every one of them unserved.
+const OVERLAY_ONLY_CAPTURES: &[&str] = &[
+    "ref.call.named",
+    "ref.method.named.self",
+    "dispatch.via",
+    "handler.name",
+    "def.handler.key",
+    "key.elem",
+    "expr.annot",
+];
 
 /// The captures in `declared` the extractor does NOT serve — `--plugin-check`'s
 /// vocabulary lint, answered here so the CLI holds no vocabulary of its own.
