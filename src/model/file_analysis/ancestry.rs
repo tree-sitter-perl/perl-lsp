@@ -705,6 +705,68 @@ impl FileAnalysis {
         })
     }
 
+    /// Is every ancestor of `class`, transitively, declared somewhere we
+    /// can read — this file, or a candidate the lookup reaches? One
+    /// unreadable parent means a member may live there, which is what the
+    /// member lanes stay silent on. Narrower than
+    /// `class_has_unresolved_ancestor`, which also counts a runtime-
+    /// generated parent edge as ancestry we do not have.
+    pub fn ancestry_fully_visible(
+        &self,
+        class: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> bool {
+        self.ancestry_visible_from(class, module_index, &mut HashSet::new(), 0)
+    }
+
+    fn ancestry_visible_from(
+        &self,
+        class: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+        seen: &mut HashSet<String>,
+        depth: usize,
+    ) -> bool {
+        // The MRO bound: a tail this deep is not walked, so it makes no
+        // claim either way — silence would be reported as a gap.
+        if depth > 20 {
+            return true;
+        }
+        for p in parents_of(class, &self.packages, module_index, &self.plugin.app_surface_consumers) {
+            // The synthetic surface edge has no declaration to find.
+            if p == APP_SURFACE_CLASS {
+                continue;
+            }
+            // The edge carries the parent's identity: a namespaced pack
+            // files its symbol under the FQN (`class Exception extends
+            // \Exception` never finds itself), a pack without namespaces
+            // under the leaf.
+            let key = if self.identity_namespace(&p).is_some() {
+                p.clone()
+            } else {
+                name_match_key(&p, self.names())
+            };
+            if self.find_type_decl(&key).is_some() {
+                if seen.insert(key.clone())
+                    && !self.ancestry_visible_from(&key, module_index, seen, depth + 1)
+                {
+                    return false;
+                }
+                continue;
+            }
+            let Some(idx) = module_index else { return false };
+            let Some(decls) = idx.defining_analysis(&key, &|a| a.find_type_decl(&key).is_some())
+            else {
+                return false;
+            };
+            if seen.insert(key.clone())
+                && !decls.ancestry_visible_from(&key, module_index, seen, depth + 1)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
     /// The MRO walk both member walks share; `agrees` is the kind family
     /// the asking ref admits.
     fn resolve_member_in_ancestors(
