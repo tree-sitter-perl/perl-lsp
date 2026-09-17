@@ -456,7 +456,7 @@ fn string_dispatch_signature_for(
                     sym: &crate::model::file_analysis::Symbol,
                     provenance: Option<&str>| {
         let SymbolDetail::Handler { owner, dispatchers, params, .. } = &sym.detail else { return };
-        // Global handlers are not class-dispatched — no receiver signature here.
+        // A rail-owned handler is not class-dispatched — no receiver signature here.
         let HandlerOwner::Class(n) = owner else { return };
         if n != class { return; }
         let dispatcher_ok = dispatchers.is_empty()

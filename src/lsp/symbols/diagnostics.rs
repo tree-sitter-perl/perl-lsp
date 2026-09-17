@@ -1293,8 +1293,8 @@ pub fn pack_symbol_diagnostics(
                     continue;
                 }
                 let Some(owner @ HandlerOwner::Rail(rail)) = r.handler_owner() else { continue };
-                // what this rail's names denote is the rail document's own
-                // declaration, not a second owner variant
+                // what this rail's names denote: the document's declaration
+                // (`docs/adr/laravel-rails.md` §Identity)
                 let names = owner.names_are(pack);
                 let class_named = names == RailNames::Classes;
                 let name = r.target_name.as_str();
