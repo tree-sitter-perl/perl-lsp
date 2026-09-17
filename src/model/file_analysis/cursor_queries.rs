@@ -998,6 +998,28 @@ impl FileAnalysis {
             .filter(|f| matches!(f.kind, SymKind::Field))
     }
 
+    /// Is class member `member` on `class` ONE declaration in two member
+    /// families? A framework overlay legitimately spells a stored member on
+    /// a callable's own name token — an Eloquent relation declares `pages()`
+    /// the method and, through `__get`, `->pages` the property — and the
+    /// extractor links the pair with `declared_with`. Both halves are the
+    /// same member, so an identity carrying one carries the other and a
+    /// rename co-edits both spellings. Asks the RELATION the producer
+    /// minted, never a span coincidence; both halves must belong to the
+    /// same class, which keeps a rail handler standing on a method's token
+    /// (no class of its own) out.
+    pub fn member_is_codeclared_pair(&self, member: &str, class: &str) -> bool {
+        self.symbols_named(member).iter().map(|&sid| self.symbol(sid)).any(|s| {
+            s.package.as_deref() == Some(class)
+                && s.declared_with.map(|id| self.symbol(id)).is_some_and(|t| {
+                    t.name == s.name
+                        && t.package == s.package
+                        && t.selection_span == s.selection_span
+                        && MemberKind::of_sym(t.kind) != MemberKind::of_sym(s.kind)
+                })
+        })
+    }
+
     /// The promoted param's (field decl span, variable USE spans) —
     /// sigil-narrowed to the bare name — `Some` only when `member` on
     /// `class` is a promoted constructor property here. The member's
