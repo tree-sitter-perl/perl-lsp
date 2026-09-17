@@ -5030,12 +5030,23 @@ fn php_bundled_documents_each_load_alone() {
     let pack = crate::build::query_extract::php_pack();
     let language: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP.into();
     tree_sitter::Query::new(&language, pack.query_source).expect("skeleton compiles");
+    let conv = crate::build::query_extract::rail_conventions_for(&pack);
+    let mut every_capture: Vec<String> = Vec::new();
     for (name, src) in pack.bundled_overlays {
         match tree_sitter::Query::new(&language, src) {
             Ok(q) => {
+                every_capture.extend(q.capture_names().iter().map(|c| c.to_string()));
                 let findings =
                     crate::build::query_extract::overlay_capture_findings(q.capture_names());
                 assert!(findings.is_empty(), "bundled php overlay {name}: {findings:?}");
+                // a class-keyed capture whose rail no document declares
+                // class-keyed mints handlers every lane then reads as
+                // strings — the two halves of one fact, pinned together
+                let undeclared = crate::build::query_extract::class_rail_capture_findings(
+                    &conv.class_named_rails,
+                    q.capture_names(),
+                );
+                assert!(undeclared.is_empty(), "bundled php overlay {name}: {undeclared:?}");
                 // and every capture it spells is one the extractor serves —
                 // a bundled document that reads as "matches but mints
                 // nothing" is either a typo or a vocabulary gap.
@@ -5075,10 +5086,13 @@ fn php_bundled_documents_each_load_alone() {
         !crate::build::query_extract::entry_markers_for(&pack).is_empty(),
         "the bundled entry rules reach the evaluator"
     );
-    assert!(
-        !crate::build::query_extract::rail_conventions_for(&pack).labels.is_empty(),
-        "the bundled rail labels reach the diagnostics lane"
-    );
+    assert!(!conv.labels.is_empty(), "the bundled rail labels reach the diagnostics lane");
+    // and the other half: every declared class rail has a capture family
+    // that mints it, answerable only over the pack's whole capture set.
+    let caps: Vec<&str> = every_capture.iter().map(|s| s.as_str()).collect();
+    let unminted =
+        crate::build::query_extract::class_rail_declaration_findings(&conv.class_named_rails, &caps);
+    assert!(unminted.is_empty(), "{unminted:?}");
 }
 
 /// The overlay lint's findings: a rail family with no rail names a
