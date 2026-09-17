@@ -1337,32 +1337,29 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     }
                 }
             }
-            // Hook-NAME identity (the Handler rail): a registration string
-            // (`add_action('init', …)` arg 1) DECLARES the hook — a Handler
-            // symbol whose name and span are the string content, stacking
-            // like every same-named Handler. A firing string
-            // (`do_action('init')`) mints the DispatchCall ref that matches
-            // it. Both are Global-owned: the program shares one flat hook
-            // namespace, no receiver.
-            c if c == "def.handler.named"
-                || c.starts_with("def.handler.named.")
-                || c.starts_with("def.handler.class.")
-                || c.starts_with("def.handler.by.") =>
-            {
+            // A registration string (`add_action('init', …)` arg 1)
+            // DECLARES a name on its rail — a Handler symbol whose name and
+            // span are the string content, stacking like every same-named
+            // Handler. A firing string (`do_action('init')`) mints the
+            // DispatchCall ref that matches it. The capture's suffix names
+            // the rail and is REQUIRED: an unnamed namespace would claim
+            // the whole program for one framework's hook space, so an
+            // unsuffixed capture mints nothing and the overlay lint says so.
+            c if super::rail_of(c).is_some_and(|(k, _)| k.is_handler()) => {
+                let Some((kind, rail)) = super::rail_of(c) else { continue };
                 let span = Span { start: e.start, end: e.end };
                 let mut attributes = Vec::new();
                 let mut name = e.text.clone();
-                if let Some(rail) = c.strip_prefix("def.handler.named.") {
-                    out.rails.push((span, rail.to_string()));
-                } else if let Some(rail) = c.strip_prefix("def.handler.class.") {
-                    out.class_rails.push((span, rail.to_string()));
-                    attributes.push("class_rail".to_string());
-                } else if let Some(rail) = c.strip_prefix("def.handler.by.") {
+                if kind == super::RailCapture::ClassHandlerNamedByMatch {
                     // named by another token of the match; no name → no handler
                     let Some(n) = handler_name_by_match.get(&e.match_id) else { continue };
                     name = n.clone();
+                }
+                if kind.is_class_named() {
                     out.class_rails.push((span, rail.to_string()));
                     attributes.push("class_rail".to_string());
+                } else {
+                    out.rails.push((span, rail.to_string()));
                 }
                 out.symbols.push(SkelSymbol {
                     declared_with: None,
@@ -1711,14 +1708,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     named_by_string: false,
                 });
             }
-            c if c == "ref.dispatch.named"
-                || c.starts_with("ref.dispatch.named.")
-                || c.starts_with("ref.dispatch.class.") =>
-            {
-                if let Some(rail) = c.strip_prefix("ref.dispatch.named.") {
-                    out.rails.push((Span { start: e.start, end: e.end }, rail.to_string()));
-                } else if let Some(rail) = c.strip_prefix("ref.dispatch.class.") {
-                    out.class_rails.push((Span { start: e.start, end: e.end }, rail.to_string()));
+            c if super::rail_of(c).is_some_and(|(k, _)| !k.is_handler()) => {
+                let Some((kind, rail)) = super::rail_of(c) else { continue };
+                let span = Span { start: e.start, end: e.end };
+                if kind.is_class_named() {
+                    out.class_rails.push((span, rail.to_string()));
+                } else {
+                    out.rails.push((span, rail.to_string()));
                 }
                 out.refs.push(SkelRef {
                     via: dispatch_via_by_match.get(&e.match_id).cloned(),

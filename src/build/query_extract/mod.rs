@@ -356,6 +356,67 @@ pub fn pack_overlay_paths(lang_id: &str) -> Vec<std::path::PathBuf> {
     out
 }
 
+/// What the extractor does with a rail-suffixed capture. The consumers ask
+/// the VALUE (is it a handler? is its rail class-named?) instead of
+/// re-testing the family spelling, so [`RAIL_CAPTURE_FAMILIES`] is the one
+/// home of the vocabulary and not a prose mirror of the match arms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RailCapture {
+    /// `@def.handler.named.<rail>` — a registration string DECLARES a name
+    /// on the rail; the captured string is the Handler symbol's name.
+    Handler,
+    /// `@def.handler.class.<rail>` — the same, on a rail a dispatcher CLASS
+    /// names, so an unmatched firing reads as a dead emission, not an
+    /// undefined name.
+    ClassHandler,
+    /// `@def.handler.by.<rail>` — a class-named handler whose name comes
+    /// from another token of the same match, not from this capture.
+    ClassHandlerNamedByMatch,
+    /// `@ref.dispatch.named.<rail>` — a firing string USES a name on the rail.
+    Dispatch,
+    /// `@ref.dispatch.class.<rail>` — a firing on a class-named rail.
+    ClassDispatch,
+}
+
+impl RailCapture {
+    /// Does this capture DECLARE a name on its rail (rather than use one)?
+    pub fn is_handler(self) -> bool {
+        matches!(self, Self::Handler | Self::ClassHandler | Self::ClassHandlerNamedByMatch)
+    }
+
+    /// Is the rail named by a dispatcher CLASS? Such a rail's misses are
+    /// dead emissions — the diagnostics lane says them as hints.
+    pub fn is_class_named(self) -> bool {
+        matches!(self, Self::ClassHandler | Self::ClassHandlerNamedByMatch | Self::ClassDispatch)
+    }
+}
+
+/// The capture families whose name ends in a rail (`<family>.<rail>`, the
+/// rail being the namespace one framework owns), each with what the
+/// extractor makes of it. Both extractor arms and the lint read this
+/// through [`rail_of`], so a family added here is served and reported by
+/// construction.
+const RAIL_CAPTURE_FAMILIES: &[(&str, RailCapture)] = &[
+    ("def.handler.named", RailCapture::Handler),
+    ("def.handler.class", RailCapture::ClassHandler),
+    ("def.handler.by", RailCapture::ClassHandlerNamedByMatch),
+    ("ref.dispatch.named", RailCapture::Dispatch),
+    ("ref.dispatch.class", RailCapture::ClassDispatch),
+];
+
+/// The rail a capture names, and what the extractor makes of it:
+/// `@def.handler.named.hook` → `(Handler, "hook")`. `None` for anything
+/// else, including a bare family spelling with no rail (which mints
+/// nothing — [`overlay_capture_findings`] says so).
+pub fn rail_of(cap: &str) -> Option<(RailCapture, &str)> {
+    RAIL_CAPTURE_FAMILIES.iter().find_map(|(f, kind)| {
+        cap.strip_prefix(f)
+            .and_then(|r| r.strip_prefix('.'))
+            .filter(|r| !r.is_empty())
+            .map(|r| (*kind, r))
+    })
+}
+
 /// The pack's effective query source: the bundled query plus every
 /// surviving discovered overlay, assembled once per distinct overlay set
 /// and leaked (`cached_query` then compiles it once by content).
