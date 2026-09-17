@@ -918,6 +918,76 @@ fn php_aliased_imports_and_qualified_spellings_pin_the_right_class() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A group-use row (`use A\{Foo, Bar as Baz};`) is an
+/// import row like the flat spelling — each clause pins its leaf (or
+/// alias) to the group's namespace, the leaf token is a reference site
+/// goto-def lands from, and references/rename on the class reach the
+/// row and the `new` sites it enables. A MIXED group binds per clause:
+/// `function b` names a callable and `const C` a constant, neither of
+/// which is a class reference.
+#[cfg(feature = "php")]
+#[test]
+fn php_group_use_rows_answer_like_flat_rows() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-r7group-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for d in ["A", "B"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+    }
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("A/Foo.php", "<?php\nnamespace A;\nclass Foo { public function go(): int { return 1; } }\n");
+    w("A/Bar.php", "<?php\nnamespace A;\nclass Bar { public function run(): int { return 2; } }\n");
+    w("B/Use.php", "<?php\nnamespace B;\nuse A\\{Foo, Bar as Baz};\nclass Use1 {\n    public function m(): int { $f = new Foo(); $b = new Baz(); return $f->go() + $b->run(); }\n}\n");
+    w("A/Lib.php", "<?php\nnamespace A;\nfunction slug(): int { return 3; }\nconst LIMIT = 4;\n");
+    w("B/Mixed.php", "<?php\nnamespace B;\nuse A\\{Foo, function slug, const LIMIT};\nfunction mixed(): int { return slug() + LIMIT + (new Foo())->go(); }\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    let sites = |out: &str| -> Vec<(String, u64)> {
+        let v: serde_json::Value = serde_json::from_str(out).expect("json");
+        let mut l: Vec<(String, u64)> = v.as_array().unwrap().iter().map(|e| {
+            let f = e["file"].as_str().unwrap();
+            (f[f.rfind('/').map(|i| i + 1).unwrap_or(0)..].to_string(), e["line"].as_u64().unwrap())
+        }).collect();
+        l.sort();
+        l
+    };
+    // the `Foo` leaf inside the group row (0-based row 2, col 7)
+    let row = run(&["--definition", root, "B/Use.php", "2", "7"]);
+    assert!(row.contains("A/Foo.php"), "group-use leaf resolves by the group's namespace: {row}");
+    let bar = run(&["--definition", root, "B/Use.php", "2", "12"]);
+    assert!(bar.contains("A/Bar.php"), "aliased group clause's real leaf: {bar}");
+    let new_site = run(&["--definition", root, "B/Use.php", "4", "40"]);
+    assert!(new_site.contains("A/Foo.php"), "`new Foo()` under a group use: {new_site}");
+    let foo = sites(&run(&["--references", root, "A/Foo.php", "2", "6"]));
+    assert_eq!(
+        foo,
+        vec![
+            ("Foo.php".into(), 2),
+            ("Mixed.php".into(), 2),
+            ("Mixed.php".into(), 3),
+            ("Use.php".into(), 2),
+            ("Use.php".into(), 4),
+        ],
+        "decl, both group rows, both `new` sites: {foo:?}"
+    );
+    let bar = sites(&run(&["--references", root, "A/Bar.php", "2", "6"]));
+    assert_eq!(bar, vec![("Bar.php".into(), 2), ("Use.php".into(), 2)], "decl and the aliased group clause: {bar:?}");
+    // a mixed group's callable and constant clauses are not class
+    // references, so no lane reads them as missing types
+    let check = run(&["--check", root]);
+    assert!(
+        !check.contains("undefined-type"),
+        "a mixed group binds per clause: {check}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// An anonymous class (`new class(...) extends Base {...}`)
 /// is its own identity — a position-keyed synthesized Class symbol its
 /// members key by — never a member of the enclosing container: an outer
