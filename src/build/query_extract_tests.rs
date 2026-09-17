@@ -4823,3 +4823,93 @@ use App\\Mixed\\{User, function slugify, const MAX_ROWS};
         "a mixed group binds per CLAUSE, like three flat rows: {rows:?}"
     );
 }
+
+/// A by-reference parameter binds the caller's variable through the bag:
+/// the aliasing edge is the callee's, and a bare argument of a callee
+/// nothing here declares is silence, never a guess. Both php spellings of
+/// `&` reach the mint — the modifier beside a plain parameter's name and
+/// the wrapper around a promoted one's.
+#[cfg(feature = "php")]
+#[test]
+fn php_by_reference_parameters_bind_their_call_arguments() {
+    use crate::model::file_analysis::InferredType;
+    let src = "\
+<?php
+namespace App;
+function fill(&$out): void {}
+function fillTyped(array &$rows): void {}
+function plain(string $x): int { return 1; }
+class Box {
+    public function __construct(private array &$bag) {}
+}
+class Runner {
+    public function run(): int {
+        fill($local);
+        fillTyped($table);
+        preg_match('/a/', 'abc', $m);
+        plain($typo);
+        new Box($boxed);
+        return 1;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    let at = |row: usize| tree_sitter::Point { row, column: 30 };
+    assert_eq!(
+        fa.inferred_type_via_bag("$local", at(10)),
+        Some(InferredType::Unknown),
+        "an untyped by-reference parameter still binds: a value flowed here, \
+         and silence would read as by-value",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$table", at(11)),
+        Some(InferredType::HashRef),
+        "and a typed one leaves its type in the caller's variable",
+    );
+    // a PROMOTED parameter spells `&` by wrapping its name, and that
+    // spelling mints the same aliasing edge
+    use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+    assert!(
+        fa.witnesses.all().iter().any(|w| matches!(
+            (&w.attachment, &w.payload),
+            (
+                WitnessAttachment::Param { package, name, index: 0 },
+                WitnessPayload::Edge(WitnessAttachment::Variable { name: bound, .. })
+            ) if package == "App\\Box" && name == "__construct" && bound == "$bag"
+        )),
+        "the promoted `&$bag` aliases its position",
+    );
+    // a construction site IS a call of the constructor, so its arguments
+    // bind through the same edge — the class is known statically there.
+    // `Unknown` is the bound-but-untyped answer the lane needs; silence
+    // would read as by-value and report `$boxed` undefined.
+    assert_eq!(
+        fa.inferred_type_via_bag("$boxed", at(15)),
+        Some(InferredType::Unknown),
+        "`new Box($boxed)` binds through the promoted `&$bag`",
+    );
+    assert!(
+        fa.witnesses.all().iter().any(|w| matches!(
+            (&w.attachment, &w.payload),
+            (
+                crate::model::witnesses::WitnessAttachment::Variable { name, .. },
+                crate::model::witnesses::WitnessPayload::Edge(
+                    crate::model::witnesses::WitnessAttachment::Param { package, name: ctor, index: 0 }
+                )
+            ) if name == "$boxed" && package == "App\\Box" && ctor == "__construct"
+        )),
+        "the argument edge names the constructor of the class the site spells",
+    );
+    // the callee decides: a by-value position leaves the argument as it was
+    assert_eq!(fa.inferred_type_via_bag("$typo", at(13)), None);
+    // and a callee with no declaration here names itself, so the lane can
+    // stay silent instead of guessing
+    let arg = |name: &str| {
+        fa.refs()
+            .iter()
+            .find(|r| r.target_name == name && matches!(r.kind, crate::model::file_analysis::RefKind::Variable))
+            .and_then(|r| fa.argument_callee(r))
+    };
+    assert_eq!(arg("$m"), Some("preg_match"));
+    assert_eq!(arg("$typo"), Some("plain"));
+}
