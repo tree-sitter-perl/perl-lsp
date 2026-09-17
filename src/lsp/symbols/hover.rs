@@ -51,7 +51,7 @@ pub fn pack_hover_markdown(
                     let sym = analysis.symbol(sym_id);
                     if matches!(sym.kind, FaSymKind::Method | FaSymKind::Sub) {
                         let mut text = render_symbol_hover(
-                            sym, source, &sym.span.start, language, analysis, sym.span.start, Some(midx),
+                            sym, source, language, analysis, sym.span.start, Some(midx),
                         );
                         if let Some(rt) = substituted(
                             analysis.find_method_return_type(&cn, field, Some(midx), None),
@@ -120,11 +120,12 @@ pub fn pack_hover_markdown(
     // symbol under the cursor directly (its own type point + scope).
     if let Some(sym) = analysis.symbol_at(point) {
         return Some(render_symbol_hover(
-            sym, source, &sym.span.start, language, analysis, point, module_index,
+            sym, source, language, analysis, point, module_index,
         ));
     }
     None
 }
+
 
 /// Render the hover projection's candidate: the symbol declared at the
 /// location — in the origin (fresh text in hand) or a cached pack module
@@ -155,7 +156,7 @@ fn render_candidate_hover(
         if let Some(i) = sym_at(analysis) {
             let sym = &analysis.symbols()[i];
             return Some(render_symbol_hover(
-                sym, source, &sym.span.start, language, analysis, cs.cursor(), module_index,
+                sym, source, language, analysis, cs.cursor(), module_index,
             ));
         }
         let line = source.lines().nth(loc.span.start.row)?.trim();
@@ -181,7 +182,7 @@ fn render_candidate_hover(
         if let Some(i) = sym_at(&whole) {
             let sym = &whole.symbols()[i];
             let mut out = render_symbol_hover(
-                sym, &text, &sym.span.start, language, &whole, sym.span.start,
+                sym, &text, language, &whole, sym.span.start,
                 module_index,
             );
             out.push_str(&format!("\n\n— `{}`", fname));
@@ -223,7 +224,6 @@ fn hover_kind_label(sym: &crate::model::file_analysis::Symbol) -> &'static str {
 fn render_symbol_hover(
     sym: &crate::model::file_analysis::Symbol,
     source: &str,
-    line_at: &Point,
     language: &str,
     analysis: &FileAnalysis,
     type_point: Point,
@@ -243,7 +243,7 @@ fn render_symbol_hover(
                         .type_name_edge_of(&sym.name, sym.scope)
                         .and_then(|sp| config_variant_leaf_display(analysis, &sp, midx))
                 })
-                .unwrap_or_else(|| sym.display_type(&ty));
+                .unwrap_or_else(|| analysis.display_type_of(sym, &ty));
             // A union member's def-site hover carries the storage overlay,
             // same as the member-access path (`FileAnalysis::member_hover`).
             let overlay = match analysis.union_overlay(sym) {
@@ -258,7 +258,23 @@ fn render_symbol_hover(
             );
         }
     }
-    let line = source.lines().nth(line_at.row).unwrap_or("").trim();
+    // The signature line is the line carrying the NAME token, not the def
+    // span's first row — an attributed def (`#[Test]` above a php method,
+    // `template<...>` above a cpp fn) starts rows earlier, and rendering
+    // that row showed the annotation as the signature.
+    // A variable hovered at a REBIND (php's function-scoped locals: one
+    // def at the first assignment, every later `$x = …` a rebind) must not
+    // show the first assignment's line as if it were this site's — that
+    // attributes another branch's code to the cursor. The site says which
+    // it is: a demoted re-assignment is a WRITE ref. Untyped there, the
+    // honest answer is the name alone.
+    let at_rebind = analysis
+        .ref_at(type_point)
+        .is_some_and(|r| matches!(r.access, crate::model::file_analysis::AccessKind::Write));
+    if matches!(sym.kind, FaSymKind::Variable) && at_rebind {
+        return format!("```{}\n{}\n```\n\n*{}*", language, sym.name, hover_kind_label(sym));
+    }
+    let line = source.lines().nth(sym.selection_span.start.row).unwrap_or("").trim();
     let sig = line.trim_end_matches([' ', '{', ';']).trim();
     let mut out = format!("```{}\n{}\n```\n\n*{}*", language, sig, hover_kind_label(sym));
     if matches!(sym.kind, FaSymKind::Class) {
