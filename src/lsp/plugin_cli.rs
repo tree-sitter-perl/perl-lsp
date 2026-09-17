@@ -43,6 +43,10 @@ pub fn cli_plugin_check(args: &[String]) {
         }
     };
     let json_mode = is_json_format(args);
+    if Path::new(path).extension().and_then(|s| s.to_str()) == Some("scm") {
+        check_pack_overlay(Path::new(path), json_mode);
+        return;
+    }
     let report = check_plugin_file(Path::new(path));
 
     if json_mode {
@@ -53,6 +57,109 @@ pub fn cli_plugin_check(args: &[String]) {
     if !report.is_ok() {
         crate::lsp::cli::exit_with(1, "exit");
     }
+}
+
+/// The pack-overlay arm of `--plugin-check` (tier 1,
+/// docs/prompt-pack-plugins.md): the file stem names the language
+/// (`queries/php.scm` → php). Compiles the overlay ALONE against the
+/// grammar — the loader's isolation gate, so a failure here is exactly
+/// what makes the loader drop it — and lists capture names outside the
+/// bundled vocabulary. Unknown captures are inert by design (an overlay
+/// written against a newer vocabulary degrades to silence); this arm is
+/// what makes that silence diagnosable.
+fn check_pack_overlay(path: &Path, json_mode: bool) {
+    let registry = crate::build::language_driver::LanguageRegistry::with_enabled();
+    // A plugin-dir overlay is named for its language (`queries/php.scm`);
+    // a bundled overlay is named for its framework under a language dir
+    // (`queries/php/frameworks/wordpress.scm`) — accept both by falling
+    // back to the first path component that names a served language.
+    let lang_id = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| registry.for_id(s).is_some())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            path.components().find_map(|c| {
+                c.as_os_str()
+                    .to_str()
+                    .filter(|s| registry.for_id(s).is_some())
+                    .map(|s| s.to_string())
+            })
+        })
+        .unwrap_or_else(|| {
+            path.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string()
+        });
+    let not_a_pack_language = || -> ! {
+        eprintln!(
+            "language '{lang_id}' is not a pack language in this build \
+             (enable its cargo feature, and name the file <lang>.scm)"
+        );
+        crate::lsp::cli::exit_with(2, "exit");
+    };
+    let Some(driver) = registry.for_id(&lang_id) else { not_a_pack_language() };
+    let Some(pack) = driver.lang_pack() else { not_a_pack_language() };
+    let parser = driver.make_parser();
+    let Some(language) = parser.language() else { not_a_pack_language() };
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cannot read {}: {e}", path.display());
+            crate::lsp::cli::exit_with(2, "exit");
+        }
+    };
+    let compile_error = match tree_sitter::Query::new(&language, &source) {
+        Ok(q) => {
+            // The bundled query's capture set IS the served vocabulary
+            // baseline; `_`-prefixed captures are query-internal anchors.
+            let known: std::collections::HashSet<String> =
+                match tree_sitter::Query::new(&language, pack.query_source) {
+                    Ok(base) => base.capture_names().iter().map(|s| s.to_string()).collect(),
+                    Err(_) => Default::default(),
+                };
+            let unknown: Vec<String> = q
+                .capture_names()
+                .iter()
+                .filter(|c| !c.starts_with('_') && !known.contains(**c))
+                .map(|s| s.to_string())
+                .collect();
+            if json_mode {
+                println!(
+                    "{}",
+                    json!({
+                        "overlay": path.display().to_string(),
+                        "language": lang_id,
+                        "ok": true,
+                        "patterns": q.pattern_count(),
+                        "unknown_captures": unknown,
+                    })
+                );
+            } else {
+                println!("OK: {} pattern(s) compile for {lang_id}", q.pattern_count());
+                for c in &unknown {
+                    println!(
+                        "warning: capture @{c} is outside the bundled {lang_id} vocabulary \
+                         (it will match but mint nothing)"
+                    );
+                }
+            }
+            return;
+        }
+        Err(e) => e,
+    };
+    if json_mode {
+        println!(
+            "{}",
+            json!({
+                "overlay": path.display().to_string(),
+                "language": lang_id,
+                "ok": false,
+                "error": compile_error.to_string(),
+            })
+        );
+    } else {
+        println!("FAIL: {compile_error} (the loader would drop this overlay)");
+    }
+    crate::lsp::cli::exit_with(1, "exit");
 }
 
 /// `--plugin-run <file.rhai> --on <fixture.pl> [--format json|human]`
