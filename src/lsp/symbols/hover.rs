@@ -139,6 +139,19 @@ pub fn pack_hover_markdown(
             }
         }
     }
+    // The current-object receiver (`$this` — the pack's declared receiver
+    // names) has no declaration to land on; its value IS the enclosing
+    // class, which is what a reader hovering it wants to know.
+    if let Some(tok) = analysis.ref_at(point).map(|r| r.target_name.as_str()) {
+        if analysis.pack.receiver_names.iter().any(|n| n == tok) {
+            if let Some(cls) = analysis
+                .scope_at(point)
+                .and_then(|sc| analysis.enclosing_class_for_scope(sc))
+            {
+                return Some(format!("```{}\n{}: {}\n```\n\n*variable*", language, tok, cls));
+            }
+        }
+    }
     // The projection's answer: present the top-ranked definition candidate —
     // what goto-def would jump to — wherever it lives (macro variants,
     // template/spec ladders, locals, cross-file functions all arrive here).
@@ -283,10 +296,15 @@ fn render_symbol_hover(
                 }
                 _ => String::new(),
             };
-            return format!(
+            let mut out = format!(
                 "```{}\n{}: {}{}\n```\n\n*{}*",
                 language, sym.name, display, overlay, hover_kind_label(sym)
             );
+            if let Some(doc) = sym.presentation.doc.as_deref() {
+                out.push_str("\n\n");
+                out.push_str(doc);
+            }
+            return out;
         }
     }
     // The signature line is the line carrying the NAME token, not the def
@@ -312,6 +330,22 @@ fn render_symbol_hover(
         for attr in &sym.attributes {
             out.push_str(&format!("\n\n*{}*", attr));
         }
+    }
+    // A callable the source leaves untyped, in a language that writes
+    // native return annotations: what the bag infers for it is the
+    // hover's business — only the TOTAL return (every arm witnessed, none
+    // null), the same value the quick-fix would write.
+    if matches!(sym.kind, FaSymKind::Sub | FaSymKind::Method)
+        && !analysis.pack.return_annotation_template.is_empty()
+        && !sym.attributes.iter().any(|a| a == "declared_return")
+    {
+        if let Some(rt) = analysis.total_inferred_return(sym.id) {
+            out.push_str(&format!("\n\n*returns: {}*", analysis.render_type(&rt)));
+        }
+    }
+    if let Some(doc) = sym.presentation.doc.as_deref() {
+        out.push_str("\n\n");
+        out.push_str(doc);
     }
     out
 }
