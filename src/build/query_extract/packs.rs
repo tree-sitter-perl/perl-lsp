@@ -90,7 +90,7 @@ pub struct LangPack {
     /// then anchor to the nearest enclosing sub scope and same-scope
     /// re-assignments demote to write references — one identity per
     /// function, so references/rename see every site instead of
-    /// per-assignment islands (round-3 R5: a rename from any island
+    /// per-assignment islands (a rename from any island
     /// rewrote a fragment and broke the code). False = block-scoped
     /// (cpp) or handled natively (Perl's `my`).
     pub function_scoped_vars: bool,
