@@ -1958,6 +1958,28 @@ impl LanguageRegistry {
             .unwrap_or(&[])
     }
 
+    /// Does `token` name a class RELATIVE to the one that writes it — the
+    /// pack's `self_class_tokens` (its own class) or its `super_receiver`
+    /// (that class's parent)? Such a spelling is resolved off the writing
+    /// scope, so it names no type a namespace has to supply. Memoized like
+    /// `builtin_types`; a language without a pack claims nothing.
+    pub fn writes_own_class_token(id: &str, token: &str) -> bool {
+        type Tokens = (&'static str, &'static [&'static str], fn(&str) -> bool);
+        static SELF: std::sync::OnceLock<Vec<Tokens>> = std::sync::OnceLock::new();
+        SELF.get_or_init(|| {
+            LanguageRegistry::with_enabled()
+                .drivers
+                .iter()
+                .filter_map(|d| {
+                    d.lang_pack().map(|p| (d.id(), p.self_class_tokens, p.super_receiver))
+                })
+                .collect()
+        })
+        .iter()
+        .find(|(l, _, _)| *l == id)
+        .is_some_and(|(_, own, is_super)| own.contains(&token) || is_super(token))
+    }
+
     pub fn pack_visibility(id: &str) -> crate::model::file_analysis::PackVisibility {
         use crate::model::file_analysis::PackVisibility;
         static LINKAGE: std::sync::OnceLock<Vec<(&'static str, bool)>> =
