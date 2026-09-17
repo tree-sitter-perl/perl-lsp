@@ -131,6 +131,19 @@ impl HandlerOwner {
 }
 
 impl FileAnalysis {
+    /// The rail Handler co-declared with `sym`, if any. A path rail whose
+    /// `methods` arm names every method of a file (a policy class: each
+    /// method IS an ability) mints the Handler ON the method's own name
+    /// token and links the two (`Symbol::declared_with`), because the
+    /// rail's dispatch sites (`->authorize('update', …)`, `@can(…)`) name
+    /// the handler and never the method. A consumer asks this relation —
+    /// never which rail, never a span coincidence.
+    pub fn rail_handler_twin(&self, sym: &Symbol) -> Option<&Symbol> {
+        sym.declared_with
+            .map(|id| self.symbol(id))
+            .filter(|t| matches!(t.detail, SymbolDetail::Handler { owner: HandlerOwner::Rail(_), .. }))
+    }
+
     /// Every handler name THIS file declares on the string rail `rail` —
     /// the rail's own declarations. The rail-name completion source and the
     /// undefined-rail-name lane's local answer read it, so neither spells

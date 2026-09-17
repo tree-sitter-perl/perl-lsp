@@ -723,16 +723,25 @@ fn adopt_path_rails(
     use tree_sitter::Point;
     let p = path.to_string_lossy().replace('\\', "/");
     let rails = crate::build::query_extract::path_rails_for(pack);
-    let mut minted: Vec<(String, String, Span)> = Vec::new(); // (rail, name, span)
+    // (rail, name, span, the declaration the handler STANDS ON)
+    let mut minted: Vec<(String, String, Span, Option<crate::model::file_analysis::SymbolId>)> =
+        Vec::new();
 
     for rail in rails.iter() {
         let Some(idx) = p.rfind(rail.under.as_str()) else { continue };
         if rail.methods {
             // the file's methods ARE the names (a policy's abilities); the
-            // Handler sits on the method's name token
+            // Handler sits on the method's name token, and that it does is
+            // a relation (rule #11) — a consumer asks `rail_handler_twin`
+            // instead of rediscovering the pair from a span
             for s in fa.symbols() {
                 if matches!(s.kind, crate::model::file_analysis::SymKind::Method) {
-                    minted.push((rail.rail.clone(), s.name.clone(), s.selection_span));
+                    minted.push((
+                        rail.rail.clone(),
+                        s.name.clone(),
+                        s.selection_span,
+                        Some(s.id),
+                    ));
                 }
             }
             continue;
@@ -752,7 +761,7 @@ fn adopt_path_rails(
         }
         if !rail.keys {
             let at = Span { start: Point { row: 0, column: 0 }, end: Point { row: 0, column: 0 } };
-            minted.push((rail.rail.clone(), name, at));
+            minted.push((rail.rail.clone(), name, at, None));
             continue;
         }
         // keys: the dotted chain of enclosing elements' keys, then this key
@@ -774,15 +783,16 @@ fn adopt_path_rails(
             }
             full.push_str(rail.sep.as_str());
             full.push_str(&k.key);
-            minted.push((rail.rail.clone(), full, k.key_span));
+            minted.push((rail.rail.clone(), full, k.key_span, None));
         }
     }
     if minted.is_empty() {
         return;
     }
+    let base = fa.symbols().len() as u32;
     let symbols: Vec<crate::model::file_analysis::Symbol> = minted
         .into_iter()
-        .map(|(rail, name, span)| crate::model::file_analysis::Symbol {
+        .map(|(rail, name, span, twin)| crate::model::file_analysis::Symbol {
             id: crate::model::file_analysis::SymbolId(0),
             name,
             kind: crate::model::file_analysis::SymKind::Handler,
@@ -791,7 +801,7 @@ fn adopt_path_rails(
             scope: crate::model::file_analysis::ScopeId(0),
             package: None,
             flags: crate::model::file_analysis::SymbolFlags::empty(),
-            declared_with: None,
+            declared_with: twin,
             detail: crate::model::file_analysis::SymbolDetail::Handler {
                 owner: HandlerOwner::Rail(rail),
                 dispatchers: Vec::new(),
@@ -804,7 +814,25 @@ fn adopt_path_rails(
             arity: None,
         })
         .collect();
+    // The other direction of the same relation, which only the adopting
+    // side can spell: the handler's id is its position after adoption.
+    let links: Vec<(crate::model::file_analysis::SymbolId, crate::model::file_analysis::SymbolId)> =
+        symbols
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                s.declared_with
+                    .map(|m| (m, crate::model::file_analysis::SymbolId(base + i as u32)))
+            })
+            .collect();
     fa.adopt_path_symbols(symbols);
+    for (member, handler) in links {
+        if let Some(s) = fa.symbols_mut().get_mut(member.0 as usize) {
+            if s.declared_with.is_none() {
+                s.declared_with = Some(handler);
+            }
+        }
+    }
 }
 
 /// `name('literal'` occurrences of a text rail's calls, as DispatchCall refs
