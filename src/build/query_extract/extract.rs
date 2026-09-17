@@ -2642,6 +2642,28 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 renumbered[id.0 as usize].map(crate::model::file_analysis::SymbolId)
             });
         }
+        // The pair the dedup just kept IS a relation, so mint it as one
+        // (rule #11): a stored member and a callable declared at ONE name
+        // token are two spellings of a single declaration (an Eloquent
+        // relation — `pages()` the method, `->pages` the accessor through
+        // `__get`), and without the fact a rename of either spelling leaves
+        // the other stale. Pairs the query already declared
+        // (`CODECLARED_SUFFIX`) keep theirs.
+        let mut by_site: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        for (i, sym) in out.symbols.iter().enumerate() {
+            by_site.entry((sym.name_start.row, sym.name_start.column)).or_default().push(i);
+        }
+        for at in by_site.values() {
+            let stored = at.iter().copied().find(|&i| out.symbols[i].kind == "field");
+            let callable =
+                at.iter().copied().find(|&i| matches!(out.symbols[i].kind.as_str(), "method" | "sub"));
+            let (Some(f), Some(c)) = (stored, callable) else { continue };
+            if out.symbols[f].declared_with.is_some() || out.symbols[c].declared_with.is_some() {
+                continue;
+            }
+            out.symbols[f].declared_with = Some(crate::model::file_analysis::SymbolId(c as u32));
+            out.symbols[c].declared_with = Some(crate::model::file_analysis::SymbolId(f as u32));
+        }
     }
 
     // ---- command dispatch: classify each command's effects ----
