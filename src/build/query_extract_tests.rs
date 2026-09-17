@@ -2297,7 +2297,7 @@ template <typename T> void Buf<T>::grow(int n) { int local_g = n; }
 }
 
 /// Out-of-line definitions whose declarator or qualifier the narrow per-shape
-/// patterns missed (hitlist H7-2): a pointer/reference return wraps the
+/// patterns missed: a pointer/reference return wraps the
 /// function_declarator in a `pointer_declarator`; a nested class owner nests the
 /// `qualified_identifier`; a constructor/destructor has no return type at all.
 /// The general `@ool.def` capture + the driver's canonical declarator unwrap +
