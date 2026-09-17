@@ -2898,6 +2898,25 @@ $cfg = ['timeout' => 30, 'retries' => 3];
 }
 
 #[test]
+fn php_enum_cases_are_enumerators_typed_by_their_enum() {
+    let src = "\
+<?php
+enum Suit {
+    case Hearts;
+    case Spades;
+}
+";
+    let (fa, _) = php_fa(src);
+    let case_sym = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "Hearts")
+        .expect("enum case symbol");
+    assert_eq!(case_sym.kind, crate::model::file_analysis::SymKind::Enumerator);
+    assert_eq!(case_sym.package.as_deref(), Some("Suit"));
+}
+
+#[test]
 fn php_static_return_substitutes_the_receiver_fluently() {
     // `: static` publishes ReturnExpr::Receiver — the member-chain arm
     // threads the real receiver, and the MCB path's default receiver
@@ -3472,6 +3491,37 @@ function get_things(): int {
 }
 
 #[test]
+fn php_enum_cases_are_not_bare_constants() {
+    // A php enum case is only ever
+    // `Level::Debug`-reachable — never a bare token — so it must not
+    // take cpp's unscoped-enum hoisting lane (bare_constant), which
+    // let ANY same-named PackageRef match: renaming a case rewrote an
+    // unrelated class's use-import leaf.
+    let src = "\
+<?php
+enum Level: int {
+    case Debug = 100;
+}
+class User {
+    const VERSION = \"1\";
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::SymKind;
+    for name in ["Debug", "VERSION"] {
+        let sym = fa
+            .symbols()
+            .iter()
+            .find(|s| matches!(s.kind, SymKind::Enumerator) && s.name == name)
+            .unwrap();
+        assert!(
+            !fa.class_content_is_bare_constant(sym),
+            "{name} must not be bare-reachable",
+        );
+    }
+}
+
+#[test]
 fn php_new_self_types_as_enclosing_class() {
     // `(new self())->forceFill(...)` — `new self()` is the ENCLOSING
     // class, not a class named "self"; the ctor witness carries it so
@@ -3587,6 +3637,45 @@ class Child extends Base {
             WitnessPayload::InferredType(InferredType::ClassName(c)) if c == "parent"
         )),
         "no fake class 'parent'",
+    );
+}
+
+#[test]
+fn php_class_constant_and_enum_case_access() {
+    // `User::VERSION` / `Level::Debug` are class-keyed member READS: the
+    // access site mints a `FieldAccess` (gd/references connect, and the
+    // value walk never reaches a method of the same name), and a TRUE enum
+    // case's value types as its enum. A class const's VALUE stays untyped
+    // (typing it as the class would be wrong — residual).
+    let src = "\
+<?php
+class User {
+    const VERSION = \"1.0\";
+}
+enum Level: int {
+    case Debug = 100;
+}
+$v = User::VERSION;
+$d = Level::Debug;
+echo $v;
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{InferredType, RefKind};
+    let version_ref = fa.refs().iter().find(|r| {
+        matches!(r.kind, RefKind::FieldAccess { .. }) && r.target_name == "VERSION"
+    });
+    assert!(version_ref.is_some(), "const access mints a value-read member ref");
+    let d = fa.inferred_type_via_bag("$d", tree_sitter::Point { row: 9, column: 0 });
+    assert_eq!(
+        d,
+        Some(InferredType::ClassName("Level".into())),
+        "enum case types as its enum: {d:?}"
+    );
+    let v = fa.inferred_type_via_bag("$v", tree_sitter::Point { row: 9, column: 0 });
+    assert_ne!(
+        v,
+        Some(InferredType::ClassName("User".into())),
+        "a const's VALUE must never type as the owning class"
     );
 }
 
