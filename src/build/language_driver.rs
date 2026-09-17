@@ -1601,8 +1601,13 @@ fn remap_spans(
         } = s;
         *start = r(*start);
         *end = r(*end);
-        *name_start = r(*name_start);
-        *name_end = r(*name_end);
+        // The NAME span is remapped as a span, not two points: a handler
+        // symbol's name span is joined to a rail span (`rail_owner`) and
+        // rails ride `rspan`, so a length-changing splice must move both
+        // through the same helper or the join silently misses.
+        let (ns, ne) = remap_span(*name_start, *name_end);
+        *name_start = ns;
+        *name_end = ne;
     }
     // Parameter-list spans feed the def-arity association (`into_file_analysis`,
     // which runs after this remap) — they must speak original coords like the
