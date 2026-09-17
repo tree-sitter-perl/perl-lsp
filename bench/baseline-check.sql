@@ -10,7 +10,11 @@
 .mode box
 
 WITH base AS (
+  -- The NEWEST baseline row per KPI is the promise; older rows are history
+  -- (a reseed appends, it never rewrites), and joining all of them would
+  -- report every metric once per generation.
   SELECT * FROM read_json_auto('bench/baselines.jsonl')
+  QUALIFY row_number() OVER (PARTITION BY corpus, phase, metric ORDER BY date DESC) = 1
 ),
 fresh AS (
   SELECT r.sha, r.ts, m.corpus, m.phase,
