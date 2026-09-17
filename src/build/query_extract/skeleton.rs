@@ -736,6 +736,25 @@ impl SkeletonAnalysis {
                 }
             }
         }
+        // A co-declared pair on ONE token is ONE entry in a listing: an
+        // Eloquent relation's property stands on its method's own name
+        // token, so the outline shows the method — the rule `CLASS_RAIL`
+        // applies to a rail handler sitting on another symbol's token. The
+        // promoted-ctor pair is not this shape (neither half is callable).
+        let twin_hidden: std::collections::HashSet<usize> = self
+            .symbols
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !matches!(s.kind.as_str(), "method" | "sub"))
+            .filter(|(_, s)| {
+                s.declared_with.is_some_and(|t| {
+                    self.symbols.get(t.0 as usize).is_some_and(|o| {
+                        matches!(o.kind.as_str(), "method" | "sub") && o.name_start == s.name_start
+                    })
+                })
+            })
+            .map(|(i, _)| i)
+            .collect();
         let mut symbols: Vec<Symbol> = self
             .symbols
             .iter()
@@ -813,8 +832,9 @@ impl SkeletonAnalysis {
                     // stamped here so warm stub rebuilds mint it identically.
                     // A class-rail handler sits on another symbol's token (a
                     // listener's `handle`); the outline shows that one.
-                    hide_in_outline: symbol_flags_of(&s.kind, &s.attributes)
-                        .intersects(SymbolFlags::INCLUDE_GUARD | SymbolFlags::CLASS_RAIL),
+                    hide_in_outline: twin_hidden.contains(&i)
+                        || symbol_flags_of(&s.kind, &s.attributes)
+                            .intersects(SymbolFlags::INCLUDE_GUARD | SymbolFlags::CLASS_RAIL),
                     doc: s.doc.clone(),
                     deprecation: s.deprecation.clone(),
                     display: None,
