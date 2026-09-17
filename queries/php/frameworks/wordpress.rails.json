@@ -1,0 +1,7 @@
+{
+  "language": "php",
+  "labels": {
+    "hook": "No handler for hook"
+  },
+  "hints": ["hook"]
+}
