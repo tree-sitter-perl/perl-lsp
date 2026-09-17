@@ -962,11 +962,11 @@ pub fn pack_symbol_diagnostics(
                     .scope_chain(r.scope)
                     .into_iter()
                     .filter_map(|sc| analysis.scope(sc).owner)
-                    .any(|sid| analysis.symbol(sid).attributes.iter().any(|a| a == "anonymous"));
+                    .any(|sid| analysis.symbol(sid).flags.contains(SymbolFlags::ANONYMOUS));
                 // a property READ that resolved only to a same-named METHOD
                 // (or the reverse) is not an access violation
                 let kind_agrees = MemberKind::of_sym(sym.kind) == want;
-                if kind_agrees && !in_closure && sym.attributes.iter().any(|a| a == "non_public") {
+                if kind_agrees && !in_closure && sym.flags.contains(SymbolFlags::NON_PUBLIC) {
                     let from = analysis.enclosing_class_for_scope(r.scope);
                     let owner = sym.package.clone().unwrap_or_default();
                     if from.as_deref() != Some(owner.as_str())
@@ -1560,12 +1560,11 @@ fn contract_declarator(
     declarator_text(&src, sym)
 }
 
-/// A deprecated declaration's notice: `Some(text)` when the `deprecated`
-/// attribute is set (the text may be absent), `None` otherwise.
+/// A deprecated declaration's notice: `Some(text)` when the declaration
+/// carries the flag (the text may be absent), `None` otherwise.
 fn deprecation_of(sym: &crate::model::file_analysis::Symbol) -> Option<Option<String>> {
-    sym.attributes
-        .iter()
-        .any(|a| a == "deprecated")
+    sym.flags
+        .contains(SymbolFlags::DEPRECATED)
         .then(|| sym.presentation.deprecation.clone())
 }
 
