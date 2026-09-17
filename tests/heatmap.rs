@@ -481,6 +481,52 @@ fn php_framework_entry_symbols_leave_the_dead_queue() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A path rail whose `methods` arm names every method of a file (Laravel
+/// policies under `app/Policies/` — each method IS an ability) mints a rail
+/// Handler on the method's own name token, so the rail's dispatch sites
+/// (`$this->authorize('update', …)`, `@can('update', …)`) name the handler
+/// and the method itself has no call site. The co-declaration relation is
+/// what shields it; a plain helper beside it still reaches the dead queue.
+#[cfg(feature = "php")]
+#[test]
+fn php_policy_method_behind_a_rail_handler_leaves_the_dead_queue() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-heatmap-rail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("app/Policies")).unwrap();
+    std::fs::create_dir_all(dir.join("app/Http")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w(
+        "app/Policies/PostPolicy.php",
+        "<?php\n\
+         namespace App\\Policies;\n\
+         class PostPolicy {\n\
+             public function update($user, $post) { return true; }\n\
+         }\n",
+    );
+    w(
+        "app/Http/PostController.php",
+        "<?php\n\
+         namespace App\\Http;\n\
+         class PostController {\n\
+             public function show($post) { $this->authorize('update', $post); }\n\
+             public function neverCalledHelper(): int { return 1; }\n\
+         }\n",
+    );
+    let report = run_heatmap(&dir);
+    let policy = report["symbols"]
+        .as_array()
+        .expect("symbols array")
+        .iter()
+        .find(|s| s["name"].as_str() == Some("update")
+            && s["package"].as_str() == Some("App\\Policies\\PostPolicy"))
+        .unwrap_or_else(|| panic!("no PostPolicy::update in {}", report["symbols"]));
+    assert_eq!(policy["reachable_guard"].as_str(), Some("rail-handler"), "{policy}");
+    assert_eq!(policy["dead_code_candidate"].as_bool(), Some(false), "{policy}");
+    let helper = sym(&report, "neverCalledHelper");
+    assert_eq!(helper["dead_code_candidate"].as_bool(), Some(true), "{helper}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The same guard on the shape real code has: the base classes live in a
 /// framework namespace reached through a `use` row, and one of them sits a
 /// project-local hop away. The entry documents spell the LEAF a human
