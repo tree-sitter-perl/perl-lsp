@@ -672,11 +672,6 @@ const DECLARED_FUTURE_PERL_KINDS: &[&str] = &[];
 /// **This list may only shrink.** Adding to it means shipping a new dead arm.
 /// Keyed by (path suffix, kind) rather than line so it survives edits.
 const KNOWN_DEAD_KIND_ARMS: &[(&str, &str)] = &[
-    // The parameter kinds the pack extractor names are the php grammar's; that
-    // grammar arrives with the php pack, whose layering probe then covers them.
-    ("query_extract/extract.rs", "property_promotion_parameter"),
-    ("query_extract/extract.rs", "simple_parameter"),
-    ("query_extract/extract.rs", "variadic_parameter"),
     // Real kind is `loopex_expression` for all three, so `last if $x;` and
     // friends are not recognized as control-flow exits and do not narrow the
     // rest of the block. The one finding here with visible behaviour behind it.
@@ -917,6 +912,7 @@ fn kind_comparisons_name_real_grammar_kinds() {
     let perl = grammar_kinds(&ts_parser_perl::LANGUAGE.into());
     let pod = grammar_kinds(&ts_parser_pod::LANGUAGE.into());
     let cpp = grammar_kinds(&tree_sitter_cpp::LANGUAGE.into());
+    let php = grammar_kinds(&tree_sitter_php::LANGUAGE_PHP.into());
     assert!(perl.len() > 100 && cpp.len() > 100, "grammars failed to enumerate");
 
     let builtin: std::collections::HashSet<&str> = TREE_SITTER_BUILTIN_KINDS.iter().copied().collect();
@@ -933,7 +929,7 @@ fn kind_comparisons_name_real_grammar_kinds() {
                 (pod.iter().map(String::as_str).collect(), "pod")
             } else if rel.contains("query_extract") {
                 // The generic extraction driver serves every pack language.
-                (perl.iter().chain(pod.iter()).chain(cpp.iter()).map(String::as_str).collect(), "any")
+                (perl.iter().chain(pod.iter()).chain(cpp.iter()).chain(php.iter()).map(String::as_str).collect(), "any")
             } else if name.starts_with("cpp_") || rel.contains("cpp_reparse") {
                 (cpp.iter().map(String::as_str).collect(), "cpp")
             } else {
