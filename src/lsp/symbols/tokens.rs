@@ -165,3 +165,63 @@ pub fn semantic_tokens(analysis: &FileAnalysis) -> Vec<SemanticToken> {
 
     result
 }
+
+/// Inlay hints for a pack document: the type hints above plus a
+/// `name:` before every positional argument of a call in `range` whose
+/// callee resolves — the pack's own call shapes find the sites, the
+/// signature-help ladder names the parameters. Positional matching stops
+/// at a named argument or a spread; a variadic parameter covers the rest;
+/// an argument that IS the same-named variable already reads as the name.
+pub fn pack_inlay_hints(
+    analysis: &FileAnalysis,
+    tree: &Tree,
+    text: &str,
+    range: Range,
+    language: &str,
+    module_index: &dyn CrossFileLookup,
+) -> Vec<InlayHint> {
+    let mut hints = inlay_hints(analysis, range);
+    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let Some(pack) = reg.for_id(language).and_then(|d| d.lang_pack()) else {
+        return hints;
+    };
+    let rows = range.start.line as usize..=range.end.line as usize;
+    for call in crate::build::cursor_sentinel::calls_in_rows(tree, &pack, text, rows) {
+        if call.args.is_empty() {
+            continue;
+        }
+        let Some((_, params, _)) = pack_callee_signature(analysis, call.callee.start, module_index)
+        else {
+            continue;
+        };
+        for (i, arg) in call.args.iter().enumerate() {
+            if arg.named || arg.spread {
+                break;
+            }
+            let Some(p) = params.get(i).or_else(|| params.last().filter(|p| p.is_slurpy)) else {
+                break;
+            };
+            let shown = arg.text.trim();
+            if shown == p.name {
+                continue;
+            }
+            // The hint names the PARAMETER: a sigil the language declares
+            // is part of the variable's spelling, not of the name a reader
+            // matches the argument against.
+            let name = p.name.strip_prefix(|c| analysis.names().is_sigil(c)).unwrap_or(&p.name);
+            hints.push(InlayHint {
+                position: point_to_position(arg.span.start),
+                label: InlayHintLabel::String(format!("{name}:")),
+                kind: Some(InlayHintKind::PARAMETER),
+                text_edits: None,
+                tooltip: None,
+                padding_left: None,
+                padding_right: Some(true),
+                data: None,
+            });
+        }
+    }
+    hints
+}
+
+
