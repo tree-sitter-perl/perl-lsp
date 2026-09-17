@@ -993,6 +993,55 @@ pub fn pack_symbol_diagnostics(
         }
     }
 
+    // ---- deprecated functions and classes, local or cross-file ----
+    for r in analysis.refs() {
+        let (leaf, want_class) = match r.kind {
+            RefKind::FunctionCall => (r.unqualified_target_name(analysis.names()), false),
+            RefKind::PackageRef => (r.unqualified_target_name(analysis.names()), true),
+            _ => continue,
+        };
+        if leaf.is_empty() || analysis.pack.import_row_covering(&r.span).is_some() {
+            continue;
+        }
+        let is_kind = |s: &crate::model::file_analysis::Symbol| {
+            if want_class { matches!(s.kind, FaSymKind::Class) } else { matches!(s.kind, FaSymKind::Sub) }
+        };
+        let local = analysis.symbols_named(leaf).iter().map(|&sid| analysis.symbol(sid)).find(|s| is_kind(s)).and_then(deprecation_of);
+        // Cross-file: only a declaration in the namespace THIS file means by
+        // the leaf (its pin, else its own namespace) — a same-leaf stranger
+        // elsewhere in the workspace is a different declaration.
+        let found = local.or_else(|| {
+            let i = idx?;
+            // A class token names an identity (the use-map's answer); a
+            // function keeps the leaf under the namespace this file means.
+            if want_class {
+                let ident = analysis.class_spelling_identity(leaf);
+                let declaring = |a: &FileAnalysis| {
+                    a.symbols()
+                        .iter()
+                        .find(|s| is_kind(s) && (s.name == ident || s.name == leaf))
+                        .map(|s| s.id)
+                };
+                return i
+                    .defining_analysis(&ident, &|a| declaring(a).is_some())
+                    .and_then(|a| declaring(&a).and_then(|id| deprecation_of(a.symbol(id))));
+            }
+            let want_ns = analysis.leaf_namespace(leaf).or_else(|| analysis.use_map_pins().own_namespace.clone());
+            let declaring = |a: &FileAnalysis| {
+                a.symbols_named(leaf)
+                    .iter()
+                    .map(|&sid| a.symbol(sid))
+                    .find(|s| is_kind(s) && (want_ns.is_none() || s.package == want_ns))
+                    .map(|s| s.id)
+            };
+            i.defining_analysis(leaf, &|a| declaring(a).is_some())
+                .and_then(|a| declaring(&a).and_then(|id| deprecation_of(a.symbol(id))))
+        });
+        if let Some(text) = found {
+            out.push(deprecated_diag(r.span, leaf, &text));
+        }
+    }
+
     out
 }
 
