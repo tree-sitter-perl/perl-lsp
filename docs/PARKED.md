@@ -27,6 +27,23 @@ marked otherwise; the drain re-derived each rationale against current code.
   declared example until ts-parser-perl 2.0.0 landed it; the list is
   empty today.
 
+- **A reference-assignment alias is a per-symbol tag, not a relation.**
+  `$h = &$opts['h']` makes `$h` reach `$opts['h']`'s storage, so a write
+  through `$h` is a use of that storage and the unused-variable lane must
+  stay silent. The extractor states that as an `alias` attribute string on
+  the variable symbol, which the lane compares back — the one declaration
+  fact in `docs/adr/symbol-flags.md`'s family that deliberately did NOT
+  become a flag, because it is a RELATION between two storages and an
+  adjective on one of them loses the other end. Target shape: the
+  aliasing edge the by-reference lane already speaks
+  (`docs/adr/by-ref-binding.md`) — a witness on the aliased variable
+  pointing at the storage the `@flow.source` capture already names — and
+  the lane asks whether the variable has an aliasing binding. What it
+  needs first: an attachment/payload that says "aliases" rather than
+  "flows from", since a plain `$h = $opts['h']` mints the same flow edge
+  and a `WitnessSource` tag read for meaning is rule #14's own
+  antipattern. [recorded 2026-09-17]
+
 - **A keyed destructuring slot's key is read from the list's text.**
   `query_extract::slot_key` / `slot_position` scan the destructuring
   list's source text for the pack's pair arrow to find the key a slot
