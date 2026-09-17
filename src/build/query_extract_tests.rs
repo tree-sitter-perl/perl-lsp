@@ -2827,6 +2827,43 @@ class C extends B implements I {
 }
 
 #[test]
+fn php_self_and_static_calls_dispatch_as_the_enclosing_class() {
+    // `self::helper()` / `static::helper()` are current-package dispatch —
+    // the receiver canonicalizes to the model's `__PACKAGE__` token, so
+    // gd/hover/refs ride the same lane as Perl's `__PACKAGE__->helper`.
+    let src = "\
+<?php
+class Util {
+    public static function helper(): string {
+        return \"h\";
+    }
+    public function run(): string {
+        return self::helper() . static::helper();
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::RefKind;
+    let self_calls: Vec<_> = fa
+        .refs()
+        .iter()
+        .filter(|r| {
+            matches!(&r.kind, RefKind::MethodCall { invocant, .. }
+                if invocant.text() == "__PACKAGE__")
+        })
+        .collect();
+    assert_eq!(self_calls.len(), 2, "both relative static calls canonicalize");
+    // and the dispatch class resolves to the enclosing class
+    for r in self_calls {
+        assert_eq!(
+            fa.method_call_invocant_class(r, None).as_deref(),
+            Some("Util"),
+            "relative static dispatch lands on the enclosing class",
+        );
+    }
+}
+
+#[test]
 fn php_parent_edges_resolve_aliases_and_record_namespaces() {
     // The FQ identity lane: `use X\Y as Z` parents recorded under Z were
     // dead edges (Laravel's `Repository as CacheContract` hid the direct
@@ -3089,6 +3126,129 @@ int f(Widget w) {
         Some(InferredType::Numeric),
         "two-hop chain must type",
     );
+}
+
+#[test]
+fn php_new_self_types_as_enclosing_class() {
+    // `(new self())->forceFill(...)` — `new self()` is the ENCLOSING
+    // class, not a class named "self"; the ctor witness carries it so
+    // the chain dispatches (BookStack's createForEntity idiom).
+    let src = "\
+<?php
+class Deletion
+{
+    public function label(): string
+    {
+        return \"d\";
+    }
+
+    public static function make(): string
+    {
+        $record = new self();
+        $x = (new self())->label();
+        return $x;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let at = tree_sitter::Point { row: 12, column: 8 };
+    assert_eq!(
+        fa.inferred_type_via_bag("$record", at),
+        Some(InferredType::ClassName("Deletion".into())),
+        "new self() types as the enclosing class",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$x", at),
+        Some(InferredType::String),
+        "and the chained call off it dispatches (the flow edge must not
+         narrow onto the ctor literal when the rhs has its own hop)",
+    );
+}
+
+
+#[test]
+fn php_parent_call_mints_super_token() {
+    // `parent::normalize()` rides the model's SUPER lane: the ref's
+    // target is the SUPER-qualified token with a current-package
+    // invocant, dispatch starts ABOVE the writing class — gd/refs missed
+    // every `parent::` site and rename corrupted code.
+    let src = "\
+<?php
+class Base {
+    public function normalize(): string { return \"b\"; }
+}
+class Child extends Base {
+    public function normalize(): string {
+        return parent::normalize() . \"c\";
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::RefKind;
+    let sup = fa
+        .refs()
+        .iter()
+        .find(|r| r.target_name == "SUPER::normalize")
+        .expect("parent:: call carries the SUPER token");
+    assert!(matches!(sup.kind, RefKind::MethodCall { .. }));
+    // the ref span is the bare name token (rename rewrites only it)
+    assert_eq!(sup.span.end.column - sup.span.start.column, "normalize".len());
+    // and no ClassName(\"parent\") ghost witness leaked from the hop lane
+    use crate::model::witnesses::WitnessPayload;
+    use crate::model::file_analysis::InferredType;
+    assert!(
+        !fa.witnesses.all().iter().any(|w| matches!(
+            &w.payload,
+            WitnessPayload::InferredType(InferredType::ClassName(c)) if c == "parent"
+        )),
+        "no fake class 'parent'",
+    );
+}
+
+#[test]
+fn php_self_const_in_property_defaults_resolves() {
+    // R11: `self::CONST` in a class-LEVEL initializer (property default)
+    // was deterministically dark while the method-body form worked — the
+    // class-body scope opens under the OUTER package context, so the
+    // invocant ladder's scope-chain walk found no enclosing class.
+    // The structural fallback (narrowest containing Class symbol) fixes it.
+    let src = "\
+<?php
+class Fmt {
+    public const FORMAT = 'Y-m-d';
+    protected string $fmt = self::FORMAT;
+    public function render(): string {
+        return self::FORMAT;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 3, column: 35 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("property-default self::FORMAT must resolve: {other:?}"),
+    };
+    assert!(
+        matches!(&target.kind, crate::index::resolve::TargetKind::Method { class } if class == "Fmt"),
+        "resolves to the class const: {target:?}"
+    );
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/r5/t.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let rows: Vec<usize> = locs.iter().map(|l| l.span.start.row).collect();
+    assert!(rows.contains(&2), "the const decl: {locs:?}");
+    assert!(rows.contains(&3), "the property-default use: {locs:?}");
+    assert!(rows.contains(&5), "the method-body use: {locs:?}");
 }
 
 /// A row says what it binds through its capture suffix, and an unsuffixed
