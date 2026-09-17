@@ -231,6 +231,13 @@ fn heatmap_symbol_row(
         // `handle`). The rules are DATA; the evaluator never compares
         // framework names itself.
         Some("framework-entry")
+    } else if analysis.rail_handler_twin(sym).is_some() {
+        // A path rail's handler stands ON this declaration (a policy method
+        // IS an ability, `docs/adr/laravel-rails.md`), and the rail's
+        // dispatch sites name the handler, never the method — so no call
+        // site is the expected state. The relation is the fact the mint
+        // recorded; nothing here asks which rail.
+        Some("rail-handler")
     } else if matches!(sym.kind, SymKind::Package | SymKind::Class | SymKind::Module) {
         Some("package-implicit-use")
     } else if has_dynamic_dispatch
