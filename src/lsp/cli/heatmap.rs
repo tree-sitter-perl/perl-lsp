@@ -165,6 +165,15 @@ fn heatmap_symbol_row(
         // state. The language declares the set — the method-shaped sibling
         // of `entrypoint_symbols`.
         Some("runtime-invoked")
+    } else if matches!(sym.kind, SymKind::Sub | SymKind::Method)
+        && framework_entry_claims(analysis, sym, routing_idx)
+    {
+        // A declared framework-entry rule (`entry.json` — bundled per pack
+        // + plugin dirs) claims the symbol: a runner invokes it (PHPUnit
+        // `#[Test]` / `test*` in a TestCase descendant, a queued job's
+        // `handle`). The rules are DATA; the evaluator never compares
+        // framework names itself.
+        Some("framework-entry")
     } else if matches!(sym.kind, SymKind::Package | SymKind::Class | SymKind::Module) {
         Some("package-implicit-use")
     } else if has_dynamic_dispatch
@@ -207,6 +216,44 @@ fn heatmap_symbol_row(
         "reachable_guard": guard,
     });
     (row, is_callable, dead, dead_export)
+}
+
+/// Does a declared framework-entry rule (`EntryMarker`) claim this symbol?
+/// A rule matches when EVERY present condition holds — annotation names
+/// against `Symbol.attributes`, method name/prefix, and the (leaf-keyed)
+/// isa gate through the ancestry walk; rules OR across the set. A rule
+/// with no positive condition matches nothing.
+pub(crate) fn framework_entry_claims(
+    analysis: &file_analysis::FileAnalysis,
+    sym: &file_analysis::Symbol,
+    idx: &dyn file_analysis::CrossFileLookup,
+) -> bool {
+    let Some(pack) = crate::build::language_driver::LanguageRegistry::with_enabled()
+        .for_id(&analysis.language)
+        .and_then(|d| d.lang_pack())
+    else {
+        return false;
+    };
+    let markers = crate::build::query_extract::entry_markers_for(&pack);
+    markers.iter().any(|m| {
+        let has_positive =
+            !m.attributes.is_empty() || m.method_prefix.is_some() || !m.methods.is_empty();
+        if !has_positive {
+            return false;
+        }
+        let attr_ok = m.attributes.is_empty()
+            || m.attributes.iter().any(|a| sym.attributes.iter().any(|sa| sa == a));
+        let name_gated = m.method_prefix.is_some() || !m.methods.is_empty();
+        let name_ok = !name_gated
+            || m.method_prefix.as_deref().is_some_and(|p| sym.name.starts_with(p))
+            || m.methods.iter().any(|n| n == &sym.name);
+        let isa_ok = m.when_isa.as_deref().is_none_or(|base| {
+            sym.package
+                .as_deref()
+                .is_some_and(|cls| cls == base || analysis.class_isa(cls, base, Some(idx)))
+        });
+        attr_ok && name_ok && isa_ok
+    })
 }
 
 /// --refs-parity <root> — the relational-ref-index migration net
