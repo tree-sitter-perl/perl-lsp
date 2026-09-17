@@ -624,7 +624,7 @@ fn completion_items_native(
         // Perl's slot detector never produces these — ArgPosition is
         // `detect_call_slot`'s question (sig-help's), TypePosition has no
         // Perl detector at all.
-        Slot::TypePosition { .. } | Slot::ArgPosition { .. } => Vec::new(),
+        Slot::TypePosition { .. } | Slot::ArgPosition { .. } | Slot::RailName { .. } => Vec::new(),
     });
 
     // Type-constrained ranking: when the cursor sits at a call arg whose
