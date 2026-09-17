@@ -3488,6 +3488,59 @@ class Logger {
 }
 
 #[test]
+fn php_new_sites_are_constructor_references_but_never_rename_targets() {
+    // A construction site is two facts on one token: the token names the
+    // CLASS, and the site calls that class's constructor. References on
+    // `__construct` therefore see every `new Client(` — without them a
+    // constructor answered 1 (itself) against 304 call sites and landed in
+    // the heatmap's dead queue — while the ctor's name is the LANGUAGE's,
+    // so no rename rewrites it.
+    let src = "\
+<?php
+class Client {
+    public function __construct(string $base) {
+    }
+}
+$a = new Client('x');
+$b = new Client('y');
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::RefKind;
+    // the class token of `new Client('x')` (row 5, col 9)
+    let at = tree_sitter::Point { row: 5, column: 9 };
+    let class_ref = fa.ref_at(at).expect("the token answers as a class");
+    assert_eq!(class_ref.target_name, "Client");
+    assert!(matches!(class_ref.kind, RefKind::PackageRef), "{:?}", class_ref.kind);
+    let call = fa.call_ref_at_start(at).expect("and as a constructor call");
+    assert_eq!(call.target_name, "__construct");
+    assert!(matches!(call.kind, RefKind::MethodCall { .. }), "{:?}", call.kind);
+    assert_eq!(call.arg_count, Some(1), "the written argument list is the ctor's");
+
+    // cursor on the __construct decl (row 2, col 21)
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 2, column: 21 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("__construct decl must mint a target: {other:?}"),
+    };
+    assert_eq!(target.ctor_of.as_deref(), Some("Client"), "ctor marker");
+    assert!(target.rename_is_language_owned(), "nothing renames `__construct`");
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/ctor/t.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let new_sites: Vec<_> = locs.iter().filter(|l| l.span.start.row >= 5).collect();
+    assert_eq!(new_sites.len(), 2, "both new-sites are references: {locs:?}");
+}
+
+#[test]
 fn php_global_docblock_types_the_binding() {
     // WordPress's typing convention: `@global wpdb $wpdb` above the
     // function + `global $wpdb;` inside. The global statement is a real
@@ -3734,6 +3787,120 @@ function f(Query $q) {
 
 
 
+
+#[test]
+fn php_promoted_property_navigation_and_rename_group() {
+    // `public readonly Level $level` in a ctor signature
+    // declares BOTH the class field and the ctor param with ONE token.
+    // The access token must navigate (the class-content gate exempts
+    // Fields from the method-scope refusal), and the identity is a GROUP:
+    // rename from any spelling rewrites the decl, the member accesses,
+    // AND the `$level` body uses — leaving any of them behind breaks code.
+    let src = "\
+<?php
+class Level {
+    public function name(): string { return 'x'; }
+}
+class Record {
+    public function __construct(public readonly Level $level) {
+        echo $level->name();
+    }
+}
+function use_it(Record $record): Level {
+    return $record->level;
+}
+";
+    let (fa, _) = php_fa(src);
+    // From the ACCESS token (`$record->level`, row 10 col 20):
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 10, column: 20 },
+        None,
+    );
+    let Some(crate::index::resolve::ResolvedTarget::Group { local_spans, decl_spans, members, .. }) =
+        resolved
+    else {
+        panic!("promoted-property access must resolve to the param group: {resolved:?}");
+    };
+    assert_eq!(members.len(), 1, "one walked member (the field target)");
+    assert_eq!(members[0].target.name, "level");
+    // The decl axis is the field token (row 5, cols 55-60 — bare name).
+    assert_eq!(decl_spans.len(), 1);
+    assert_eq!(
+        (decl_spans[0].1.start.row, decl_spans[0].1.start.column),
+        (5, 55),
+        "decl span is the bare field token: {decl_spans:?}"
+    );
+    // The ctor-body use (`$level` row 6 col 13) rides sigil-narrowed.
+    assert!(
+        local_spans
+            .iter()
+            .any(|s| s.start.row == 6 && s.start.column == 14),
+        "the param body use joins the group sigil-narrowed: {local_spans:?}"
+    );
+    // From the DECL token: the same group (the Variable wins symbol_at;
+    // the field twin re-targets it).
+    let from_decl = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 5, column: 57 },
+        None,
+    );
+    assert!(
+        matches!(from_decl, Some(crate::index::resolve::ResolvedTarget::Group { .. })),
+        "decl-side cursor resolves to the same group: {from_decl:?}"
+    );
+}
+
+
+#[test]
+fn php_member_rename_never_rewrites_import_leaves() {
+    // Renaming a class-owned member (enum case / class const) named like
+    // an UNRELATED class's import leaf must not rewrite the `use` line —
+    // a class member never appears as a php import leaf.
+    let src = "\
+<?php
+namespace App;
+use PhpConsole\\Dispatcher\\Debug as DebugTool;
+enum Level {
+    case Debug;
+}
+class Cfg {
+    public const Debug = 1;
+}
+function pick(): int {
+    $x = Level::Debug;
+    return Cfg::Debug;
+}
+";
+    let (fa, _) = php_fa(src);
+    for (row, col, what) in [(4usize, 10usize, "enum case"), (7, 18, "class const")] {
+        let resolved = crate::index::resolve::resolve_symbol(
+            &fa,
+            tree_sitter::Point { row, column: col },
+            None,
+        );
+        let target = match resolved {
+            Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+            other => panic!("{what} decl must mint a target: {other:?}"),
+        };
+        let locs = crate::index::resolve::refs_to_in_file(
+            &crate::index::file_store::FileStore::new(),
+            None,
+            &target,
+            &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/r4/t.php")),
+            &fa,
+            crate::index::resolve::RoleMask::VISIBLE,
+        );
+        assert!(
+            !locs.iter().any(|l| l.span.start.row == 2),
+            "{what}: the import line is not a reference of the member: {locs:?}"
+        );
+        assert!(
+            locs.iter().any(|l| l.span.start.row >= 9),
+            "{what}: the real access still answers: {locs:?}"
+        );
+    }
+}
 
 #[test]
 fn php_self_const_in_property_defaults_resolves() {
