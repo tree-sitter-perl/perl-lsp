@@ -214,8 +214,8 @@ laravel.scm precedent is the null hypothesis, and this arc falsified
    rewrites exactly the string contents, the `array($this, 'm')` form
    dispatches through the receiver.
 3. **Hook-name identity** — LANDED on the `Handler` rail:
-   `@def.handler.named` (registration first-arg → stacked
-   `HandlerOwner::Global` Handler) + `@ref.dispatch.named` /
+   `@def.handler.named.hook` (registration first-arg → stacked
+   `HandlerOwner::Rail("hook")` Handler) + `@ref.dispatch.named.hook` /
    `@dispatch.via` (firing sites). `'init'` connects 190 sites across
    127 WP files, references = the grep count exactly.
 4. **Tier 2** when its first real tenant lands, against the API above.
