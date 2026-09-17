@@ -2954,6 +2954,36 @@ $n = $r->count();
 }
 
 #[test]
+fn php_property_field_is_sigil_less_and_joins_its_member_access() {
+    // Declared `$name`, accessed `$this->name` — the field keys on the
+    // inner name token so the access site's target joins the symbol
+    // (sigil-ful fields never matched their own uses).
+    let src = "\
+<?php
+class User {
+    public string $name;
+    public function greet(): string {
+        return $this->name;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{RefKind, SymKind};
+    let field = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "name" && matches!(s.kind, SymKind::Field))
+        .expect("sigil-less Field symbol");
+    assert_eq!(field.package.as_deref(), Some("User"));
+    assert!(
+        fa.refs().iter().any(|r| {
+            matches!(r.kind, RefKind::FieldAccess { .. }) && r.target_name == "name"
+        }),
+        "the $this->name read mints a FieldAccess targeting the field's name",
+    );
+}
+
+#[test]
 fn php_docblock_types_fill_what_the_syntax_left_untyped() {
     // phpdoc is the type vocabulary of real PHP: `@return`/`@param`/`@var`
     // facts fill syntax-untyped slots (declared types always win), with
@@ -3840,6 +3870,50 @@ listen_on('ev', array(UserController::class, 'index'));
     let sites: Vec<_> = locs.iter().filter(|l| l.span.start.row >= 4).collect();
     assert_eq!(sites.len(), 2, "both callable-array strings are refs: {locs:?}");
     assert!(sites.iter().all(|l| l.rewritable), "rename rewrites in-quotes: {sites:?}");
+}
+
+#[test]
+fn php_visibility_gates_member_completion() {
+    // private/protected members complete only from inside their own
+    // class's body: the `@nonpublic.mark` patterns stamp the same
+    // `non_public` attribute cpp access regions stamp, and the existing
+    // requesting_class gate does the rest. Covers methods, properties,
+    // consts, and promoted ctor params.
+    let src = "\
+<?php
+class Acct {
+    private string $secret;
+    private const SALT = 'x';
+    protected function guard(): bool { return true; }
+    private function inner(): int { return 1; }
+    public function api(): int { return $this->inner(); }
+    public function __construct(private string $key) {}
+}
+";
+    let (fa, _) = php_fa(src);
+    let labels = |requesting: Option<&str>| -> Vec<String> {
+        fa.complete_members_for_class("Acct", None, requesting, crate::model::file_analysis::MemberAccess::Instance)
+            .into_iter()
+            .map(|c| c.label)
+            .collect()
+    };
+    let external = labels(None);
+    for hidden in ["secret", "SALT", "guard", "inner", "key"] {
+        assert!(
+            !external.iter().any(|n| n == hidden),
+            "{hidden} must not complete externally: {external:?}"
+        );
+    }
+    assert!(external.iter().any(|n| n == "api"), "public stays: {external:?}");
+    let internal = labels(Some("Acct"));
+    // (consts complete via the qualified `Acct::` lane, not the member
+    // gather — SALT is asserted absent above and not expected here)
+    for own in ["secret", "guard", "inner", "key", "api"] {
+        assert!(
+            internal.iter().any(|n| n == own),
+            "{own} completes from inside the class: {internal:?}"
+        );
+    }
 }
 
 #[test]
