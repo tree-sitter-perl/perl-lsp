@@ -876,16 +876,18 @@ fn render_param(p: &ParamInfo) -> String {
     out
 }
 
-/// A callable's signature, rendered from the parameter facts its own
-/// extraction minted (`SymbolDetail::Sub { params }`). The invocant a
-/// caller never writes is dropped, so the label shows what is typed.
+/// A callable's signature, rendered from the declaration facts its own
+/// extraction minted (`SymbolDetail::Sub`'s parameters and the return
+/// annotation as written). The invocant a caller never writes is dropped,
+/// so the label shows what is typed.
 fn rendered_signature(sym: &crate::model::file_analysis::Symbol) -> Option<RenderedSignature> {
-    let SymbolDetail::Sub { params, .. } = &sym.detail else { return None };
+    let SymbolDetail::Sub { params, declared_return, .. } = &sym.detail else { return None };
     let shown: Vec<ParamInfo> = params.iter().filter(|p| !p.is_invocant).cloned().collect();
     let label = format!(
-        "{}({})",
+        "{}({}){}",
         sym.name,
-        shown.iter().map(render_param).collect::<Vec<_>>().join(", ")
+        shown.iter().map(render_param).collect::<Vec<_>>().join(", "),
+        declared_return.as_deref().map(|r| format!(" {r}")).unwrap_or_default()
     );
     Some((label, shown, sym.presentation.doc.clone()))
 }
