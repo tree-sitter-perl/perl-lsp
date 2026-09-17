@@ -1112,6 +1112,13 @@ pub struct Ref {
 pub use crate::model::conventions::{name_match_key, split_qualified};
 
 impl Ref {
+    /// Is this a member site, and which member family does it name? The one
+    /// spelling of the pair — a consumer that has already asked
+    /// `member_site()` never has a second, unreachable way to fail.
+    pub fn member_kind(&self) -> Option<MemberKind> {
+        MemberKind::of_ref(&self.kind)
+    }
+
     /// The receiver view of a member access (`MethodCall` / `FieldAccess`);
     /// `None` for every other kind.
     pub fn member_site(&self) -> Option<MemberSite<'_>> {
