@@ -480,3 +480,56 @@ fn php_framework_entry_symbols_leave_the_dead_queue() {
     assert_eq!(helper["dead_code_candidate"].as_bool(), Some(true), "{helper}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The same guard on the shape real code has: the base classes live in a
+/// framework namespace reached through a `use` row, and one of them sits a
+/// project-local hop away. The entry documents spell the LEAF a human
+/// writes (`TestCase`), the extractor mints the use-map-resolved identity
+/// (`PHPUnit\Framework\TestCase`), and the gate joins the two on the
+/// relational key — every hop of the ancestry walk, not just the symbol's
+/// own class.
+#[cfg(feature = "php")]
+#[test]
+fn php_framework_entry_isa_gate_is_leaf_keyed_across_namespaces() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-heatmap-ns-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/Tests")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w(
+        "src/Tests/AbstractIntegrationTest.php",
+        "<?php\n\
+         namespace App\\Tests;\n\
+         use PHPUnit\\Framework\\TestCase;\n\
+         abstract class AbstractIntegrationTest extends TestCase {}\n",
+    );
+    w(
+        "src/Tests/UserTest.php",
+        "<?php\n\
+         namespace App\\Tests;\n\
+         class UserTest extends AbstractIntegrationTest {\n\
+             protected function setUp(): void {}\n\
+             public function testAdd(): void {}\n\
+             public function neverCalledHelper(): int { return 1; }\n\
+         }\n",
+    );
+    w(
+        "src/Console.php",
+        "<?php\n\
+         namespace App;\n\
+         use Symfony\\Component\\Console\\Application;\n\
+         class Console extends Application {\n\
+             protected function getDefaultCommands(): array { return []; }\n\
+             public function getLongVersion(): string { return 'v'; }\n\
+         }\n",
+    );
+    let report = run_heatmap(&dir);
+    for name in ["setUp", "testAdd", "getDefaultCommands", "getLongVersion"] {
+        let row = sym(&report, name);
+        assert_eq!(row["reachable_guard"].as_str(), Some("framework-entry"), "{name}: {row}");
+        assert_eq!(row["dead_code_candidate"].as_bool(), Some(false), "{name}: {row}");
+    }
+    let helper = sym(&report, "neverCalledHelper");
+    assert_eq!(helper["dead_code_candidate"].as_bool(), Some(true), "{helper}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
