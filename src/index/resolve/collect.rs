@@ -1030,8 +1030,22 @@ pub(super) fn collect_from_analysis(
     // Include declaration spans when this file defines the target. Name
     // equality is `symbol_defines_target`'s first gate, so only the
     // same-named symbols can pass (in symbol order, as the vec would).
+    // A callable target reaches a stored member only as a FALLBACK — a
+    // language whose member read IS a call declares accessors as storage
+    // (a C callback field), but where the owner declares a callable of
+    // the name, that callable IS the target and a same-named slot is a
+    // different member of the same class.
+    let callable_declared = target.member_kind == Some(MemberKind::Callable)
+        && analysis.symbols_named(&target.name).iter().any(|&sid| {
+            let sym = analysis.symbol(sid);
+            MemberKind::of_sym(sym.kind) == MemberKind::Callable
+                && symbol_defines_target(sym, target, analysis)
+        });
     for &sid in analysis.symbols_named(&target.name) {
         let sym = analysis.symbol(sid);
+        if callable_declared && MemberKind::of_sym(sym.kind) != MemberKind::Callable {
+            continue;
+        }
         if symbol_defines_target(sym, target, analysis) {
             out.push(RefLocation {
                 key: key.clone(),
