@@ -1417,10 +1417,13 @@ fn allowlist_drift(what: &str, seen: &HashMap<String, usize>, allow: &[(&str, us
 /// Rule #12: a language's spellings have ONE home — `conventions.rs` for
 /// Perl, the `LangPack` (as data on `PackFacts`) for a pack. A namespace
 /// separator, a sigil, or an attribute name as a LITERAL anywhere else in
-/// the model or index tiers is that language leaking upward.
+/// the model, index or LSP tiers is that language leaking upward. The
+/// adapter is covered because that is where the leak keeps reappearing: a
+/// verb serving every language reaches for the separator of the one its
+/// author had in mind.
 #[test]
 fn language_spellings_have_one_home() {
-    let files = layer_files(&[Layer::Model, Layer::Index]);
+    let files = layer_files(&[Layer::Model, Layer::Index, Layer::Lsp]);
     let attr = ["\"static\"", "\"interface\"", "\"abstract\"", "\"readonly\"", "\"final\""];
     let seen = count_lines(&files, &|l| {
         l.contains("'\\\\'") || l.contains("\"\\\\\"") || l.contains("'$'") || attr.iter().any(|a| l.contains(a))
@@ -1436,18 +1439,23 @@ fn language_spellings_have_one_home() {
         ("model/file_analysis/invocants.rs", 3, "Perl sigil sites (legacy)"),
         ("model/file_analysis/outline.rs", 1, "Perl sigil default (legacy)"),
         ("model/file_analysis/queries.rs", 1, "Perl sigil probe (legacy)"),
+        ("lsp/cursor_context.rs", 3, "the sanctioned Perl cursor detector (rule #6) — Perl's sigils in source text at the cursor"),
+        ("lsp/cursor_slot.rs", 1, "the same Perl detector, in the slot taxonomy's sigil arm"),
+        ("lsp/symbols/diagnostics.rs", 1, "a php class-flavor attribute read off `Symbol.attributes` — the pack's own vocabulary, with no `SymbolFlags` twin for trait/enum"),
+        ("lsp/symbols/links.rs", 1, "Perl interpolation sigils in the documentLink text scan — source text, the Perl lane"),
     ];
     let drift = allowlist_drift("rule #12 (language spellings)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
-/// Rule #13: the model never parses a string this codebase rendered. Every
-/// `split`-family call in the model is allowlisted with the reason it is
-/// SOURCE-side (a written spelling, a source-spelled name); a rendered
-/// label, a joined row, or a formatted type being split is a violation.
+/// Rule #13: the model and the adapter never parse a string this codebase
+/// rendered. Every `split`-family call in those tiers is allowlisted with
+/// the reason it is SOURCE-side (a written spelling, a source-spelled name,
+/// a CLI argument); a rendered label, a joined row, or a formatted type
+/// being split is a violation.
 #[test]
 fn rendered_strings_are_not_reparsed() {
-    let files = layer_files(&[Layer::Model]);
+    let files = layer_files(&[Layer::Model, Layer::Lsp]);
     let fns = [".split(", ".rsplit(", ".split_once(", ".rsplit_once(", ".splitn(", ".rsplitn("];
     let seen = count_lines(&files, &|l| fns.iter().any(|f| l.contains(f)));
     let allow: &[(&str, usize, &str)] = &[
@@ -1457,6 +1465,10 @@ fn rendered_strings_are_not_reparsed() {
         ("model/file_analysis/invocants.rs", 2, "Perl `::` on source-spelled class and sub names"),
         ("model/file_analysis/types.rs", 1, "canonical_template_spelling — a C++ instance as written in source"),
         ("model/file_analysis/use_map.rs", 3, "resolving WRITTEN spellings"),
+        ("lsp/cli/positions.rs", 1, "a `file:line:col` CLI argument — what the user typed, not what we rendered"),
+        ("lsp/cursor_context.rs", 1, "Perl source text at the cursor, split on Perl's own separator"),
+        ("lsp/symbols/diagnostics.rs", 1, "a written qualified spelling, split on the separator the analysis declares"),
+        ("lsp/symbols/links.rs", 2, "POD link text and a module path as the source wrote them"),
     ];
     let drift = allowlist_drift("rule #13 (rendered strings)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
