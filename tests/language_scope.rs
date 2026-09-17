@@ -1284,6 +1284,43 @@ fn php_phpunit_mocks_type_as_the_doubled_class() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+
+/// The hook rail's undefined-name lane: a fired WordPress hook nothing
+/// registers is a HINT phrased by the rail document's label, while a
+/// hook with a registration anywhere in the workspace stays silent. The
+/// rail keeps its own namespace — the name is a hook, not "a global".
+/// A firing is an extension POINT — third-party code outside the
+/// workspace registers for it — so the miss is a lead, never a warning.
+#[cfg(feature = "php")]
+#[test]
+fn php_wp_fired_hook_without_a_registration_is_a_finding() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2hook-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("plugin.php"),
+        "<?php\nfunction on_init(): void {}\nadd_action('init', 'on_init');\ndo_action('init');\ndo_action('never_registered');\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap(), "--severity", "hint"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let hooks: Vec<&str> = err.lines().filter(|l| l.contains("[undefined-hook]")).collect();
+    assert_eq!(hooks.len(), 1, "exactly the unregistered hook: {err}");
+    assert!(
+        hooks[0].contains("No handler for hook 'never_registered'"),
+        "the rail document's label: {hooks:?}"
+    );
+    assert!(
+        hooks[0].contains("hint[undefined-hook]"),
+        "the rail document declares the hook rail a hint: {hooks:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The deprecation lane: `@deprecated` (with and without text) and the
 /// `#[Deprecated]` attribute on a method, a function and a class, used from
 /// another file — each use is a deprecated-tagged hint; nothing else is.
