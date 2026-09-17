@@ -362,8 +362,18 @@ fn check_pack_overlay(path: &Path, json_mode: bool) {
             // inert silence an unknown capture buys: nothing downstream can
             // guess the rail an overlay left off, or the flag a misspelling
             // meant.
-            let findings =
+            let mut findings =
                 crate::build::query_extract::overlay_capture_findings(q.capture_names());
+            // The overlay arm holds the pack, so it can also check the
+            // half of a class-keyed rail the query cannot state: the
+            // document's `names_are` declaration. (The reverse — a declared
+            // class rail no capture mints — needs the pack's WHOLE capture
+            // set, so it is the bundled-documents tripwire's, not this
+            // one-file arm's.)
+            findings.extend(crate::build::query_extract::class_rail_capture_findings(
+                &crate::build::query_extract::rail_conventions_for(&pack).class_named_rails,
+                q.capture_names(),
+            ));
             if json_mode {
                 println!(
                     "{}",

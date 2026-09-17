@@ -531,6 +531,60 @@ pub fn overlay_capture_findings(captures: &[&str]) -> Vec<String> {
     out
 }
 
+/// Class-keyed rail CAPTURES whose rail no document declares class-keyed.
+///
+/// The capture family (`@def.handler.class.<rail>` / `.by.` /
+/// `@ref.dispatch.class.<rail>`) is the mint path for a class-named
+/// handler; `names_are` is what makes the rail's NAMES classes everywhere,
+/// including the span-free minting paths a query never reaches. A capture
+/// without the declaration mints handlers the lanes then read as strings —
+/// silence that reads as a missing feature, so it is a finding.
+pub fn class_rail_capture_findings(declared: &[String], captures: &[&str]) -> Vec<String> {
+    let mut rails: Vec<&str> = captures
+        .iter()
+        .filter_map(|c| rail_of(c))
+        .filter(|(k, _)| k.is_class_named())
+        .map(|(_, r)| r)
+        .filter(|r| !declared.iter().any(|d| d == r))
+        .collect();
+    rails.sort();
+    rails.dedup();
+    rails
+        .into_iter()
+        .map(|r| {
+            format!(
+                "@…class.{r} mints a class-named handler, but no rail document declares \
+                 `\"names_are\": {{ \"{r}\": \"{RAIL_NAMES_ARE_CLASS}\" }}` — every lane would \
+                 read the rail's names as strings"
+            )
+        })
+        .collect()
+}
+
+/// Rails a document declares class-keyed that NO capture family mints —
+/// answerable only over a pack's whole capture set (one overlay of several
+/// legitimately carries none of them), which only the bundled-documents
+/// tripwire holds; `--plugin-check` lints one document at a time.
+#[cfg(test)]
+pub fn class_rail_declaration_findings(declared: &[String], captures: &[&str]) -> Vec<String> {
+    declared
+        .iter()
+        .filter(|d| {
+            !captures
+                .iter()
+                .filter_map(|c| rail_of(c))
+                .any(|(k, r)| k.is_class_named() && r == d.as_str())
+        })
+        .map(|d| {
+            format!(
+                "the rail document declares `{d}` class-keyed, but no overlay capture \
+                 (@def.handler.class.{d} / @def.handler.by.{d} / @ref.dispatch.class.{d}) \
+                 mints one"
+            )
+        })
+        .collect()
+}
+
 /// The pack's effective query source: the bundled query plus every
 /// surviving discovered overlay, assembled once per distinct overlay set
 /// and leaked (`cached_query` then compiles it once by content).
