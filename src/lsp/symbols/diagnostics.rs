@@ -1135,7 +1135,9 @@ pub fn pack_symbol_diagnostics(
             if seen.get(&(sc.0, r.target_name.clone())).copied().unwrap_or(0) != 1 {
                 continue;
             }
-            if analysis.inferred_type_via_bag_ctx(&r.target_name, r.span.start, idx).is_some() {
+            // A binding, not a type: a usage observation (`$x + 1` says
+            // numeric) types the read without anything ever writing it.
+            if analysis.variable_is_bound_via_bag(&r.target_name, r.span.start, idx) {
                 continue;
             }
             // `isset($x)` / `empty($x)` / `unset($x)`: the read IS the

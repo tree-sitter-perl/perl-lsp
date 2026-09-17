@@ -315,6 +315,37 @@ impl FileAnalysis {
         }
     }
 
+    /// Does a VALUE flow into `var` at or before `point` — a declaration, a
+    /// write, an aliasing by-reference parameter?
+    ///
+    /// Two questions, because neither answers alone. A USAGE observation is
+    /// not a binding: `$x + 1` says the read is numeric without saying
+    /// anything ever wrote `$x`, so a type alone would call every arithmetic
+    /// operand defined. And an edge that RESOLVES to nothing is not a
+    /// binding either: a by-value argument's edge is minted at every call
+    /// site and drops out in the chase, so an edge alone would call every
+    /// argument defined (`docs/adr/by-ref-binding.md`).
+    pub fn variable_is_bound_via_bag(
+        &self,
+        var: &str,
+        point: Point,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> bool {
+        use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+        let Some(scope) = self.scope_at(point) else { return false };
+        let value_witness = self.scope_chain(scope).into_iter().any(|sc| {
+            let att = WitnessAttachment::Variable { name: var.to_string(), scope: sc };
+            self.witnesses.for_attachment(&att).iter().any(|w| {
+                w.span.start <= point
+                    && match &w.payload {
+                        WitnessPayload::Observation(_) => w.payload.binds_value(),
+                        _ => true,
+                    }
+            })
+        });
+        value_witness && self.inferred_type_via_bag_ctx(var, point, module_index).is_some()
+    }
+
     pub fn inferred_type_via_bag_ctx(
         &self,
         var_name: &str,
