@@ -155,9 +155,15 @@ pub fn field_attribute_flag(attr: &str) -> Option<crate::model::file_analysis::S
     })
 }
 
+/// `__PACKAGE__` — the compile-time token for the enclosing package. The
+/// one spelling: a producer that needs to MINT the token (a pack
+/// canonicalizing `self::` onto the model's invocant vocabulary) writes
+/// this constant, and `is_current_package_token` reads it back.
+pub const CURRENT_PACKAGE_TOKEN: &str = "__PACKAGE__";
+
 /// `__PACKAGE__` — the compile-time token for the enclosing package.
 pub fn is_current_package_token(text: &str) -> bool {
-    text == "__PACKAGE__"
+    text == CURRENT_PACKAGE_TOKEN
 }
 
 /// A name that can be written as a method / sub call — a syntactically valid
@@ -422,6 +428,20 @@ impl<'a> MethodToken<'a> {
             Self::Qualified { package, .. } => Some(package),
             Self::Main(_) => Some("main"),
             Self::Bare(_) | Self::Super(_) => None,
+        }
+    }
+
+    /// The token as a method-call site writes it — `parse`'s inverse, and
+    /// the only place the qualifier separator is spelled on the minting
+    /// side. A pack that canonicalizes its own relative-dispatch spelling
+    /// (php `parent::m`) onto this vocabulary renders through here, so the
+    /// mint and the read can never drift apart.
+    pub fn render(&self) -> String {
+        match self {
+            Self::Bare(n) => (*n).to_string(),
+            Self::Super(n) => format!("SUPER::{n}"),
+            Self::Main(n) => format!("::{n}"),
+            Self::Qualified { package, name } => format!("{package}::{name}"),
         }
     }
 }

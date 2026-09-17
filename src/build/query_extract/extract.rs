@@ -1705,7 +1705,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     scope: cur_scope,
                     invocant: Some((
                         crate::model::file_analysis::Span { start: e.start, end: e.end },
-                        "__PACKAGE__".to_string(),
+                        crate::model::conventions::CURRENT_PACKAGE_TOKEN.to_string(),
                     )),
                     member_op: None,
                     arg_count: None,
@@ -1769,7 +1769,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             start: e.start,
                             end: e.end,
                             scope: cur_scope,
-                            invocant: Some((span, "__PACKAGE__".to_string())),
+                            invocant: Some((span, crate::model::conventions::CURRENT_PACKAGE_TOKEN.to_string())),
                             member_op: None,
                             arg_count: arg_counts_by_start.get(&(e.end.row, e.end.column)).copied(),
                             value_read: false,
@@ -1883,7 +1883,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     via: None,
                         kind: e.cap.strip_prefix("ref.").unwrap().to_string(),
                         name: if super_recv {
-                            format!("SUPER::{}", (pack.shape_name)(&e.cap, &e.text))
+                            crate::model::conventions::MethodToken::Super(&(pack.shape_name)(&e.cap, &e.text))
+                                .render()
                         } else {
                             (pack.shape_name)(&e.cap, &e.text)
                         },
@@ -1893,7 +1894,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         invocant: if super_recv {
                             member_recv
                                 .get(&e.match_id)
-                                .map(|(sp, _)| (*sp, "__PACKAGE__".to_string()))
+                                .map(|(sp, _)| (*sp, crate::model::conventions::CURRENT_PACKAGE_TOKEN.to_string()))
                         } else {
                             member_recv.get(&e.match_id).cloned()
                         },
