@@ -3646,10 +3646,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     Ok(out)
 }
 
-/// The positional index of a destructuring slot: the number of TOP-LEVEL
-/// commas in the list text before the slot's byte offset (`[, $b]` → 1).
-/// `None` for a keyed list (a top-level `=>`): its positions are not
-/// positions, so the slot never binds positionally.
 /// Bind every bare variable an argument list passes to the callee's
 /// parameter slot — `Variable(arg) → Edge(Param)` for a plain callee,
 /// `Projected{receiver, ParamOf}` through a dispatch. Only a position the
@@ -3679,6 +3675,10 @@ fn bind_call_args(
     }
 }
 
+/// The positional index of a destructuring slot: the number of TOP-LEVEL
+/// commas in the list text before the slot's byte offset (`[, $b]` → 1).
+/// `None` for a keyed list (a top-level `=>`): its positions are not
+/// positions, so the slot never binds positionally.
 fn slot_position(list_text: &str, slot_offset: usize, arrow: &str) -> Option<usize> {
     let bytes = list_text.as_bytes();
     let (mut depth, mut commas) = (0i32, 0usize);
