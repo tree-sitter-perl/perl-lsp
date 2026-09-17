@@ -1419,17 +1419,17 @@ fn allowlist_drift(what: &str, seen: &HashMap<String, usize>, allow: &[(&str, us
 /// author had in mind.
 #[test]
 fn language_spellings_have_one_home() {
+    // Half one: the separator / sigil literals, in the tiers that serve
+    // every language.
     let files = layer_files(&[Layer::Model, Layer::Index, Layer::Lsp]);
-    let attr = ["\"static\"", "\"interface\"", "\"abstract\"", "\"readonly\"", "\"final\""];
     let seen = count_lines(&files, &|l| {
-        l.contains("'\\\\'") || l.contains("\"\\\\\"") || l.contains("'$'") || attr.iter().any(|a| l.contains(a))
+        l.contains("'\\\\'") || l.contains("\"\\\\\"") || l.contains("'$'")
     });
     let allow: &[(&str, usize, &str)] = &[
         ("index/module_cache/rows.rs", 2, "SQLite LIKE escaping — SQL syntax, not a language spelling"),
         ("model/conventions.rs", 8, "Perl's home: `PERL_SPELLINGS` and the sigil sites, plus the test's php-shaped fixture spellings and its use-map assertion"),
         ("model/file_analysis/class_queries.rs", 1, "Perl sigil trim on a Corinna field (legacy)"),
         ("model/file_analysis/completion.rs", 10, "Perl sigils re-derived outside conventions.rs — legacy, shrink-only"),
-        ("model/file_analysis/core_types.rs", 3, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`) — the one table every language maps its spellings onto"),
         ("model/file_analysis/cursor_queries.rs", 4, "Perl sigil sites (legacy)"),
         ("model/file_analysis/enrichment.rs", 1, "Perl sigil on a hash-key access (legacy)"),
         ("model/file_analysis/invocants.rs", 3, "Perl sigil sites (legacy)"),
@@ -1437,11 +1437,59 @@ fn language_spellings_have_one_home() {
         ("model/file_analysis/queries.rs", 1, "Perl sigil probe (legacy)"),
         ("lsp/cursor_context.rs", 3, "the sanctioned Perl cursor detector (rule #6) — Perl's sigils in source text at the cursor"),
         ("lsp/cursor_slot.rs", 1, "the same Perl detector, in the slot taxonomy's sigil arm"),
-        ("lsp/symbols/diagnostics.rs", 1, "a php class-flavor attribute read off `Symbol.attributes` — the pack's own vocabulary, with no `SymbolFlags` twin for trait/enum"),
         ("lsp/symbols/links.rs", 1, "Perl interpolation sigils in the documentLink text scan — source text, the Perl lane"),
     ];
-    let drift = allowlist_drift("rule #12 (language spellings)", &seen, allow);
+    let mut drift = allowlist_drift("rule #12 (separators and sigils)", &seen, allow);
+
+    // Half two: every attribute spelling that HAS a `SymbolFlags` twin,
+    // derived from the canonical table itself so the probe cannot lag a
+    // flag someone adds. `Build` is in scope because that is where the
+    // strings are minted — the half of the round trip the sigil probe
+    // never saw, and where the role/contract pass was comparing them back.
+    let twinned = flag_twinned_spellings();
+    let files = layer_files(&[Layer::Model, Layer::Index, Layer::Lsp, Layer::Build]);
+    let seen = count_lines(&files, &|l| twinned.iter().any(|a| l.contains(a.as_str())));
+    let allow: &[(&str, usize, &str)] = &[
+        ("build/cpp_reparse/defs.rs", 5, "the C++ keyword table — grammar vocabulary in the pack's own tier"),
+        ("build/language_driver.rs", 2, "the driver STAMPS two pack attributes (`include_guard`, `non_public`), flag included — the minting side"),
+        ("build/plugin/rhai_host.rs", 3, "a manifest signal name in an inline test fixture"),
+        ("build/query_extract/extract.rs", 16, "the generic extractor minting the canonical tokens a pack's captures declare"),
+        ("build/query_extract/packs.rs", 6, "the php pack's own receiver spellings — the `LangPack` IS their home"),
+        ("build/query_extract/skeleton.rs", 14, "skeleton→model conversion: the kind/attribute vocabulary becomes flags here"),
+        ("model/conventions.rs", 3, "Perl's own attribute spellings (`field_attribute_flag`) — Perl's home"),
+        ("model/file_analysis/core_types.rs", 22, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`) — the one table every language maps its spellings onto"),
+        ("model/file_analysis/completion.rs", 1, "a `DeclKind` rendered as completion detail text, not an attribute read"),
+        ("model/file_analysis/outline.rs", 2, "outline detail text for a union container and a param decl kind"),
+        ("model/witnesses/registry.rs", 1, "the `param` owner-keyed fallback key — a witness attachment name"),
+        ("lsp/symbols/hover.rs", 1, "the hover LABEL for a macro-shaped Sub — display text (the fact itself is read as a flag)"),
+        ("lsp/symbols/diagnostics.rs", 1, "the `deprecated` diagnostic CODE — LSP wire text, not the declaration fact"),
+    ];
+    drift.extend(allowlist_drift("rule #12 (attribute spellings)", &seen, allow));
     assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// Every attribute spelling with a `SymbolFlags` twin, read out of the
+/// canonical `TryFrom<&str>` table so the tripwire and the table are one
+/// list. A flag added there is probed from the same commit.
+fn flag_twinned_spellings() -> Vec<String> {
+    let text = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/model/file_analysis/core_types.rs"),
+    )
+    .expect("read core_types.rs");
+    let start = text.find("impl TryFrom<&str> for SymbolFlags {").expect("the flag table");
+    let body = &text[start..];
+    let end = body.find("\n}\n").expect("table end");
+    let mut out: Vec<String> = Vec::new();
+    for line in body[..end].lines().filter(|l| l.contains("=> SymbolFlags::")) {
+        for lit in line.split("=> SymbolFlags::").next().unwrap_or("").split('|') {
+            let lit = lit.trim().trim_end_matches("=>").trim();
+            if lit.starts_with('"') && lit.ends_with('"') && lit.len() > 2 {
+                out.push(lit.to_string());
+            }
+        }
+    }
+    assert!(out.len() >= 20, "the flag table parse found only {out:?}");
+    out
 }
 
 /// Rule #13: the model and the adapter never parse a string this codebase
