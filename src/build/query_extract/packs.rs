@@ -1077,7 +1077,10 @@ pub fn php_pack() -> LangPack {
             include_str!("../../../queries/php/frameworks/phpunit.entry.json"),
             include_str!("../../../queries/php/frameworks/symfony.entry.json"),
         ],
-        bundled_rail_docs: &[include_str!("../../../queries/php/frameworks/wordpress.rails.json")],
+        bundled_rail_docs: &[
+            include_str!("../../../queries/php/frameworks/wordpress.rails.json"),
+            include_str!("../../../queries/php/frameworks/laravel.rails.json"),
+        ],
         // `\\` qualifies, `$` leads every variable, and a written class
         // spelling resolves through the file's `use` rows and namespace
         // (`Collection` after `use A\\B\\Collection;`). The class-to-member

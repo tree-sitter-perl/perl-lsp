@@ -1,0 +1,6 @@
+{
+  "language": "php",
+  "text_rails": [
+    { "rail": "route", "calls": ["route", "to_route"], "files": [".blade.php"] }
+  ]
+}
