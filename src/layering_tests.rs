@@ -1453,7 +1453,7 @@ fn language_spellings_have_one_home() {
         ("build/cpp_reparse/defs.rs", 5, "the C++ keyword table — grammar vocabulary in the pack's own tier"),
         ("build/language_driver.rs", 2, "the driver STAMPS two pack attributes (`include_guard`, `non_public`), flag included — the minting side"),
         ("build/plugin/rhai_host.rs", 3, "a manifest signal name in an inline test fixture"),
-        ("build/query_extract/extract.rs", 16, "the generic extractor minting the canonical tokens a pack's captures declare"),
+        ("build/query_extract/extract.rs", 15, "the generic extractor minting the canonical tokens a pack's captures declare"),
         ("build/query_extract/packs.rs", 6, "the php pack's own receiver spellings — the `LangPack` IS their home"),
         ("build/query_extract/skeleton.rs", 14, "skeleton→model conversion: the kind/attribute vocabulary becomes flags here"),
         ("model/conventions.rs", 3, "Perl's own attribute spellings (`field_attribute_flag`) — Perl's home"),
