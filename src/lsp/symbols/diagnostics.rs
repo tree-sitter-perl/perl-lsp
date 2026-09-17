@@ -10,6 +10,10 @@ use crate::model::file_analysis::{name_match_key, SymbolFlags};
 pub mod codes {
     pub const UNRESOLVED_FUNCTION: &str = "unresolved-function";
     pub const UNRESOLVED_METHOD: &str = "unresolved-method";
+    /// A member found on a same-named class in ANOTHER namespace because
+    /// the class this file names is not indexed — the honest over-
+    /// approximation, said out loud (`docs/prompt-class-identity.md`).
+    pub const RESOLVED_BY_WIDENING: &str = "resolved-by-widening";
     pub const UNDEF_DEREF: &str = "undef-deref";
     pub const OPTIONAL_DEREF: &str = "optional-deref";
     pub const DEREF_SHAPE_MISMATCH: &str = "deref-shape-mismatch";
@@ -988,6 +992,22 @@ pub fn pack_symbol_diagnostics(
                         }
                     }
                 }
+            }
+            Some(MethodResolution::CrossFile { class: on, widened: true, .. }) => {
+                // The answer stands (goto-def, hover and completion all
+                // serve it), but it is confidently wrong whenever the code
+                // is — an import not yet written, a namespace typo — so
+                // the widening is a finding of its own.
+                push(
+                    &mut out,
+                    r.span,
+                    DiagnosticSeverity::WARNING,
+                    codes::RESOLVED_BY_WIDENING,
+                    format!(
+                        "'{name}' resolved on '{on}': the class this file names, '{class}', is not \
+                         indexed, so a same-named class in another namespace answered."
+                    ),
+                );
             }
             Some(MethodResolution::CrossFile { .. }) => {}
         }
