@@ -305,9 +305,7 @@ pub(crate) fn framework_entry_claims(
             || m.method_prefix.as_deref().is_some_and(|p| sym.name.starts_with(p))
             || m.methods.iter().any(|n| n == &sym.name);
         let isa_ok = m.when_isa.as_deref().is_none_or(|base| {
-            sym.package
-                .as_deref()
-                .is_some_and(|cls| cls == base || analysis.class_isa(cls, base, Some(idx)))
+            sym.package.as_deref().is_some_and(|cls| analysis.class_isa_leaf(cls, base, Some(idx)))
         });
         attr_ok && name_ok && isa_ok
     })
