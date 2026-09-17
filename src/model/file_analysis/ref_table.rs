@@ -288,6 +288,14 @@ impl FileAnalysis {
         self.refs.as_mut_slice()
     }
 
+    /// The call-shaped ref anchored at `start` — what the token at a call
+    /// site CALLS. A construction site mints its class token and its
+    /// constructor call on one span, so `ref_at`'s companion tiebreak
+    /// answers the class there and only this index answers the call.
+    pub fn call_ref_at_start(&self, start: Point) -> Option<&Ref> {
+        self.refs.call_at_start(&start).and_then(|i| self.refs.get(i))
+    }
+
     /// All refs that resolve to this symbol — O(1) lookup via the index.
     /// Callers typically combine this with a kind filter.
     pub fn refs_to_symbol(&self, sym_id: SymbolId) -> &[usize] {
