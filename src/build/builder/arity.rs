@@ -417,7 +417,7 @@ pub(super) fn extract_data_section_params(sub_node: Node, source: &[u8]) -> Vec<
         let Some(p) = sig.named_child(i) else { continue };
         if matches!(p.kind(), "scalar" | "array" | "hash") {
             if let Ok(text) = p.utf8_text(source) {
-                params.push(ParamInfo {
+                params.push(ParamInfo { declared_type: None,
                     name: text.to_string(),
                     default: None,
                     is_slurpy: matches!(p.kind(), "array" | "hash"),

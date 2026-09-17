@@ -1003,6 +1003,12 @@ pub struct ParamInfo {
     /// value, a plugin-declared signature) — nothing in the source binds it.
     #[serde(default, with = "point_opt_serde")]
     pub binding_site: Option<Point>,
+    /// The parameter's declared type as written (`int`, `?Foo`, `T&`), minted
+    /// from the declaration's type node; `None` for a language whose
+    /// parameters carry no type (Perl) or a parameter written without one.
+    /// Source text, never a rendering — the signature label shows it verbatim.
+    #[serde(default)]
+    pub declared_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

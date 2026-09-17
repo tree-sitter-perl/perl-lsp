@@ -387,6 +387,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         is_slurpy,
                         is_invocant: false,
                         binding_site: Some(name_node.start_position()),
+                        declared_type: ch
+                            .child_by_field_name("type")
+                            .and_then(|t| t.utf8_text(source).ok())
+                            .map(str::to_string),
                     });
                 };
                 let mut c = node.walk();

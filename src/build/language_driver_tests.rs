@@ -1015,6 +1015,8 @@ fn cpp_callable_carries_its_parameters_as_facts() {
     );
     assert_eq!(params[0].default, None);
     assert_eq!(params[1].default.as_deref(), Some("10"), "the default is source text");
+    assert_eq!(params[0].declared_type.as_deref(), Some("int"), "the declared type is source text");
+    assert_eq!(params[2].declared_type.as_deref(), Some("A"), "a pack expansion keeps its element type");
     assert!(!params[1].is_slurpy);
     assert!(params[2].is_slurpy, "a pack expansion is slurpy");
     // Each binding site is the parameter's own name token.
