@@ -1550,14 +1550,13 @@ impl SkeletonAnalysis {
         let mut contract_symbols: std::collections::HashSet<SymbolId> = Default::default();
         for (i, sym) in symbols.iter().enumerate() {
             let defers = sym
-                .attributes
-                .iter()
-                .any(|a| a == "interface" || a == "trait" || a == "abstract");
+                .flags
+                .intersects(SymbolFlags::INTERFACE | SymbolFlags::TRAIT | SymbolFlags::ABSTRACT);
             if sym.kind == SymKind::Class && defers {
                 packages.entry(sym.name.clone()).or_default().is_role = true;
             }
             if matches!(sym.kind, SymKind::Sub | SymKind::Method)
-                && sym.attributes.iter().any(|a| a == "contract")
+                && sym.flags.contains(SymbolFlags::CONTRACT)
             {
                 contract_symbols.insert(SymbolId(i as u32));
                 if let Some(pkg) = &sym.package {

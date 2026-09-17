@@ -862,11 +862,7 @@ pub fn pack_symbol_diagnostics(
             if !owner_has_members || owner_catch_all || !owner.ancestry_fully_visible(&class, idx) {
                 return None;
             }
-            let class_attr = |attr: &str| {
-                owner.symbols().iter().any(|s| {
-                    matches!(s.kind, FaSymKind::Class) && s.name == class && s.attributes.iter().any(|a| a == attr)
-                })
-            };
+            let flavors = owner.class_flags(&class);
             Some(OwnerFacts {
                 // A receiver typed as an INTERFACE names any implementation.
                 // `instanceof` narrowing retypes a VARIABLE receiver, but a
@@ -874,9 +870,9 @@ pub fn pack_symbol_diagnostics(
                 // (`->isT()`) or `is_a()` leave the interface type standing
                 // — so the interface stays silent on undefined members
                 // (resolved ones still check arity).
-                is_interface: class_attr("interface"),
-                is_enum: class_attr("enum"),
-                is_trait: class_attr("trait"),
+                is_interface: flavors.contains(SymbolFlags::INTERFACE),
+                is_enum: flavors.contains(SymbolFlags::ENUM),
+                is_trait: flavors.contains(SymbolFlags::TRAIT),
                 owner: owner_arc,
             })
         });
@@ -1505,7 +1501,11 @@ pub fn pack_symbol_diagnostics(
                 // no annotation to add: a constructor, a contract, a docblock
                 // `@method`, a closure; and none wanted for an already-declared one
                 if pack.constructor_names.iter().any(|c| c == &s.name)
-                    || s.attributes.iter().any(|a| a == "contract" || a == "documented" || a == "anonymous")
+                    || s.flags.intersects(
+                        SymbolFlags::CONTRACT
+                            | SymbolFlags::DOC_DECLARED
+                            | SymbolFlags::ANONYMOUS,
+                    )
                     || declared(s)
                 {
                     continue;

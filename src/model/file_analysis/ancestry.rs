@@ -844,15 +844,22 @@ impl FileAnalysis {
     }
 
     /// Does THIS file declare `class` as an interface? php's interfaces are
-    /// `SymKind::Class` symbols carrying the "interface" flavor attribute
-    /// (stamped from the `@classattr.interface` capture); Perl never marks
-    /// one. The one speller every interface-deferral walk asks.
+    /// `SymKind::Class` symbols carrying the INTERFACE flag (mapped from the
+    /// `@classattr.interface` capture); Perl never marks one. The one
+    /// speller every interface-deferral walk asks.
     pub fn declares_interface(&self, class: &str) -> bool {
-        self.symbols().iter().any(|s| {
-            matches!(s.kind, SymKind::Class)
-                && s.name == class
-                && s.flags.contains(SymbolFlags::INTERFACE)
-        })
+        self.class_flags(class).contains(SymbolFlags::INTERFACE)
+    }
+
+    /// The declaration facts THIS file states about `class` — the container
+    /// flavors (interface / trait / enum) a resolution lane asks before it
+    /// calls a member undefined. Empty when the file declares no such class.
+    pub fn class_flags(&self, class: &str) -> SymbolFlags {
+        self.symbols()
+            .iter()
+            .find(|s| matches!(s.kind, SymKind::Class) && s.name == class)
+            .map(|s| s.flags)
+            .unwrap_or_default()
     }
 
     /// `$self->SUPER::m` dispatch: resolve `method_name` over `enclosing`'s

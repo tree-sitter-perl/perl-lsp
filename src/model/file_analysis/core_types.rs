@@ -356,6 +356,23 @@ bitflags::bitflags! {
         /// not evidence of a typo, so the undefined-variable lane stays
         /// silent.
         const DYNAMIC_VARS = 1 << 17;
+        /// A `Class` symbol that is a trait (php) / mixin: its members are
+        /// composed into the using class, so it declares an API the model
+        /// resolves without the trait ever being an instance's class.
+        const TRAIT = 1 << 18;
+        /// A `Class` symbol that is an enumeration: its cases are its
+        /// members, and the language gives every enum the same extra ones.
+        const ENUM = 1 << 19;
+        /// A callable that DECLARES an obligation without meeting it — an
+        /// interface method, an abstract method, a Perl `requires` marker.
+        /// Not `ABSTRACT`: an interface's methods carry no `abstract`
+        /// token, and the container's own flag is a different fact.
+        const CONTRACT = 1 << 20;
+        /// The DECLARATION was synthesized from a documentation row (a php
+        /// docblock `@method`), so the source has no signature to read or
+        /// annotate. Provenance of the declaration, not of the doc text —
+        /// `Presentation::doc` answers a different question.
+        const DOC_DECLARED = 1 << 21;
     }
 }
 
@@ -409,6 +426,10 @@ impl TryFrom<&str> for SymbolFlags {
             "class_rail" => SymbolFlags::CLASS_RAIL,
             "dynamic_args" => SymbolFlags::DYNAMIC_ARGS,
             "dynamic_vars" => SymbolFlags::DYNAMIC_VARS,
+            "trait" => SymbolFlags::TRAIT,
+            "enum" => SymbolFlags::ENUM,
+            "contract" => SymbolFlags::CONTRACT,
+            "documented" => SymbolFlags::DOC_DECLARED,
             other => return Err(UnknownAttribute(other.to_string())),
         })
     }
