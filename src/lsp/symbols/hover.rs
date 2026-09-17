@@ -23,7 +23,10 @@ pub fn pack_hover_markdown(
     // symbol on another class) can't hijack it with the wrong scope.
     // A data field shows `field: type` (member_hover, keyed on the field's own
     // scope); a method shows its signature.
-    if let Some(r) = analysis.ref_at(point).filter(|r| r.member_site().is_some()) {
+    if let Some((r, want)) = analysis
+        .ref_at(point)
+        .and_then(|r| Some((r, r.member_kind()?)))
+    {
         if let Some(midx) = module_index {
             if let Some(cn) = analysis.method_call_invocant_class(r, Some(midx)) {
                 let field = r.unqualified_target_name(analysis.names());
@@ -43,7 +46,7 @@ pub fn pack_hover_markdown(
                     (raw.as_ref() != Some(&sub)).then_some(sub)
                 };
                 if let Some(crate::model::file_analysis::MethodResolution::Local { sym_id, .. }) =
-                    analysis.resolve_method_in_ancestors(&cn, field, Some(midx))
+                    analysis.resolve_member(&cn, field, want, Some(midx))
                 {
                     let sym = analysis.symbol(sym_id);
                     if matches!(sym.kind, FaSymKind::Method | FaSymKind::Sub) {
@@ -71,7 +74,7 @@ pub fn pack_hover_markdown(
                         "```{}\n{}: {}\n```\n\n*member*",
                         language,
                         field,
-                        crate::model::file_analysis::format_inferred_type(&sub)
+                        analysis.render_type(&sub)
                     ));
                 }
                 // The member's declared type may be a config-variant macro whose
