@@ -2520,7 +2520,7 @@ typedef union {
     assert_eq!(overlay.len(), 1);
     assert!(overlay[0].starts_with("op_pmtargetgv"), "{overlay:?}");
     // completion: real members offered flat on pm; the synthetic container never
-    let cands = fa.complete_members_for_class("pm", None, None);
+    let cands = fa.complete_members_for_class("pm", None, None, crate::model::file_analysis::MemberAccess::Instance);
     let labels: Vec<&str> = cands.iter().map(|c| c.label.as_str()).collect();
     for want in ["op_first", "op_pmreplroot", "op_pmtargetgv", "u2a", "named_u"] {
         assert!(labels.contains(&want), "{want} missing from {labels:?}");

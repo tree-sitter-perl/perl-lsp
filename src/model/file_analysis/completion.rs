@@ -135,6 +135,18 @@ pub struct CompletionCandidate {
     pub display_override: Option<HandlerDisplay>,
 }
 
+/// How a member access reaches its class: `Foo::` names the class itself,
+/// `$o->` an instance of it. Which members each offers, and how a
+/// candidate is spelled once offered, is a language rule — so the gather
+/// takes the access and mints the spelling, and the adapter projects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberAccess {
+    /// Through the class name (`Foo::`, `Foo.` for a static-only language).
+    Scoped,
+    /// Through a value of the class (`$o->`, `o.`).
+    Instance,
+}
+
 /// Signature info for a sub/method, resolved from the symbol table.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]

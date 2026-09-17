@@ -242,7 +242,7 @@ fn member_completion_filters_by_access_specifier() {
          private:\n  void Ref();\n  void Unref();\n  int rep_;\n\
          };\n",
     );
-    let outside_cands = fa.complete_members_for_class("Status", None, None);
+    let outside_cands = fa.complete_members_for_class("Status", None, None, crate::model::file_analysis::MemberAccess::Instance);
     let outside: Vec<&str> = outside_cands.iter().map(|c| c.label.as_str()).collect();
     assert!(outside.contains(&"ok"), "{outside:?}");
     assert!(outside.contains(&"Update"), "{outside:?}");
@@ -250,7 +250,7 @@ fn member_completion_filters_by_access_specifier() {
     assert!(!outside.contains(&"Unref"), "private method leaked: {outside:?}");
     assert!(!outside.contains(&"rep_"), "private field leaked: {outside:?}");
 
-    let inside = fa.complete_members_for_class("Status", None, Some("Status"));
+    let inside = fa.complete_members_for_class("Status", None, Some("Status"), crate::model::file_analysis::MemberAccess::Instance);
     let inside_labels: Vec<&str> = inside.iter().map(|c| c.label.as_str()).collect();
     for want in ["ok", "Update", "Ref", "Unref", "rep_"] {
         assert!(inside_labels.contains(&want), "{want} missing from self-access: {inside_labels:?}");
@@ -850,7 +850,7 @@ class Iterator {\n\
     // `requesting`: None = completing from OUTSIDE the class (public only);
     // Some("Iterator") = from a method of the SAME class (privates too).
     let has = |n: &str, requesting: Option<&str>| {
-        fa.complete_members_for_class("Iterator", None, requesting)
+        fa.complete_members_for_class("Iterator", None, requesting, crate::model::file_analysis::MemberAccess::Instance)
             .iter()
             .any(|c| c.label == n)
     };

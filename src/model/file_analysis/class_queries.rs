@@ -452,6 +452,7 @@ impl FileAnalysis {
         class_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
         requesting_class: Option<&str>,
+        access: MemberAccess,
     ) -> Vec<CompletionCandidate> {
         let mut candidates = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
@@ -479,6 +480,48 @@ impl FileAnalysis {
             }
             std::ops::ControlFlow::Continue(())
         });
+        // A constant is never reached through an instance; a static
+        // property is (php allows it) but is not what the `->` operator
+        // asks for. The scoped access offers exactly the class's own.
+        candidates.retain(|c| {
+            let constant = matches!(c.kind, SymKind::Enumerator);
+            let static_value = c.is_static && MemberKind::of_sym(c.kind) == MemberKind::Value;
+            match access {
+                MemberAccess::Scoped => constant || c.is_static,
+                MemberAccess::Instance => !constant && !static_value,
+            }
+        });
+        // A scoped static property is WRITTEN with its sigil (php
+        // `Foo::$bar`), so the candidate carries that spelling.
+        let sigil = self.pack.static_property_sigil.as_str();
+        if access == MemberAccess::Scoped && !sigil.is_empty() {
+            for c in candidates.iter_mut() {
+                if c.is_static && MemberKind::of_sym(c.kind) == MemberKind::Value {
+                    c.label = format!("{sigil}{}", c.label);
+                    c.insert_text = None;
+                }
+            }
+        }
+        // The class-name literal (`Foo::class`) is a member of every class
+        // the pack declares it for — a convention on the pack, not a symbol.
+        let literal = self.pack.class_literal_member.as_str();
+        if access == MemberAccess::Scoped
+            && !literal.is_empty()
+            && !candidates.iter().any(|c| c.label == literal)
+        {
+            let sep = self.names().member_sep().unwrap_or_default();
+            candidates.push(CompletionCandidate {
+                label: literal.to_string(),
+                kind: SymKind::Enumerator,
+                is_static: false,
+                detail: Some(format!("{class_name}{sep}{literal}")),
+                insert_text: None,
+                sort_priority: PRIORITY_LESS_RELEVANT,
+                additional_edits: vec![],
+                import_fact: None,
+                display_override: None,
+            });
+        }
         candidates
     }
 
