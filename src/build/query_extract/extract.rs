@@ -1848,6 +1848,27 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // token (the receiver is still this object); the ref
                     // span stays the bare name token, so rename rewrites
                     // only the name.
+                    // A call of a name the pack declares a dynamic-argument
+                    // or dynamic-variable marker makes its ENCLOSING callable
+                    // one. Recorded against the call's scope; the skeleton's
+                    // scope chain names the callable, so the fact lands on the
+                    // callable's own symbol instead of waiting for a consumer
+                    // to join spans (rule #14).
+                    if matches!(e.cap.as_str(), "ref.call" | "ref.qcall") {
+                        let callee = (pack.shape_name)(&e.cap, &e.text);
+                        if pack.dynamic_arg_markers.contains(&callee.as_str()) {
+                            out.dynamic_markers.push((
+                                cur_scope,
+                                crate::model::file_analysis::SymbolFlags::DYNAMIC_ARGS,
+                            ));
+                        }
+                        if pack.dynamic_var_markers.contains(&callee.as_str()) {
+                            out.dynamic_markers.push((
+                                cur_scope,
+                                crate::model::file_analysis::SymbolFlags::DYNAMIC_VARS,
+                            ));
+                        }
+                    }
                     let super_recv = e.cap == "ref.member"
                         && member_recv
                             .get(&e.match_id)

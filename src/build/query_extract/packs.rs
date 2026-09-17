@@ -307,6 +307,18 @@ pub struct LangPack {
     /// `deref_stack` resolves by name to decide the expected operator. Also the
     /// cursor-completion "is this receiver a bare variable" test.
     pub simple_var_kinds: &'static [&'static str],
+    /// Names whose CALL makes the enclosing callable read arguments it never
+    /// declared (php `func_get_args` / `func_num_args` / `func_get_arg`).
+    /// The extractor stamps `SymbolFlags::DYNAMIC_ARGS` on the callable that
+    /// contains such a call, so the arity lanes ask the callable rather than
+    /// re-scanning its body. Empty = the language has no such surface.
+    pub dynamic_arg_markers: &'static [&'static str],
+    /// Names whose CALL makes the enclosing callable materialize variables no
+    /// declaration names (php `extract` / `get_defined_vars` / `eval` /
+    /// `parse_str` / `compact`). The extractor stamps
+    /// `SymbolFlags::DYNAMIC_VARS` on the containing callable, which is what
+    /// the undefined-variable lane asks. Empty = no such surface.
+    pub dynamic_var_markers: &'static [&'static str],
     /// `@qualifier` node kinds whose `name` FIELD supplies the owner text —
     /// the structural peel for a templated qualifier (`Buf<T>::grow` files
     /// under class `Buf`, unifying the out-of-line def with the in-class
@@ -611,6 +623,8 @@ pub fn perl_pack() -> LangPack {
         recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
         op_map: &[],
         simple_var_kinds: &[],
+        dynamic_arg_markers: &[],
+        dynamic_var_markers: &[],
         qualifier_peel: &[],
         member_kinds: &[],
         skip_kinds: &[],
@@ -703,6 +717,8 @@ pub fn python_pack() -> LangPack {
         // Python has one member operator (`.`), so no op-DX (op_map empty).
         op_map: &[],
         simple_var_kinds: &["identifier"],
+        dynamic_arg_markers: &[],
+        dynamic_var_markers: &[],
         qualifier_peel: &[],
         member_kinds: &["attribute"],
         skip_kinds: &["string", "string_content", "comment", "concatenated_string"],
@@ -783,6 +799,8 @@ pub fn r_pack() -> LangPack {
         recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
         op_map: &[],
         simple_var_kinds: &[],
+        dynamic_arg_markers: &[],
+        dynamic_var_markers: &[],
         qualifier_peel: &[],
         member_kinds: &[],
         skip_kinds: &[],
@@ -877,6 +895,8 @@ pub fn cmake_pack() -> LangPack {
         recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
         op_map: &[],
         simple_var_kinds: &[],
+        dynamic_arg_markers: &[],
+        dynamic_var_markers: &[],
         qualifier_peel: &[],
         member_kinds: &[],
         skip_kinds: &[],
@@ -1041,6 +1061,8 @@ pub fn cpp_pack() -> LangPack {
             (".", crate::model::file_analysis::MemberOp::Dot),
         ],
         simple_var_kinds: &["identifier"],
+        dynamic_arg_markers: &[],
+        dynamic_var_markers: &[],
         // a templated qualifier (`Buf<T>::grow`) owns by its BASE class name
         qualifier_peel: &["template_type"],
         member_kinds: &["field_expression"],

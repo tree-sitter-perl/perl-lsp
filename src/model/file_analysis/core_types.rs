@@ -346,6 +346,16 @@ bitflags::bitflags! {
         /// / `.by.<rail>`): it sits on another symbol's token (a listener's
         /// `handle`), so listings show that symbol, not this one.
         const CLASS_RAIL = 1 << 15;
+        /// This callable reads arguments it never declared (php
+        /// `func_get_args`): its written signature does not bound what a
+        /// caller may pass, so the arity lanes must not call an extra
+        /// argument an error.
+        const DYNAMIC_ARGS = 1 << 16;
+        /// This callable materializes variables no declaration names (php
+        /// `extract`, `eval`): a read of an undeclared name inside it is
+        /// not evidence of a typo, so the undefined-variable lane stays
+        /// silent.
+        const DYNAMIC_VARS = 1 << 17;
     }
 }
 
@@ -397,6 +407,8 @@ impl TryFrom<&str> for SymbolFlags {
             "reader" => SymbolFlags::READER,
             "writer" => SymbolFlags::WRITER,
             "class_rail" => SymbolFlags::CLASS_RAIL,
+            "dynamic_args" => SymbolFlags::DYNAMIC_ARGS,
+            "dynamic_vars" => SymbolFlags::DYNAMIC_VARS,
             other => return Err(UnknownAttribute(other.to_string())),
         })
     }
