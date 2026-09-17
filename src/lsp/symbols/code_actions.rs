@@ -166,6 +166,13 @@ pub fn code_actions(
     let mut actions = Vec::new();
 
     for diag in diagnostics {
+        // A missing return type: the inferred spelling after the parameter list.
+        if matches!(&diag.code, Some(NumberOrString::String(s)) if s == "missing-return-type") {
+            if let Some(action) = make_return_type_action(analysis, uri, diag) {
+                actions.push(action);
+            }
+            continue;
+        }
         // Member-access operator swap: replace the operator token (the
         // diagnostic's range) with the correct one (`data.operator`).
         if matches!(&diag.code, Some(NumberOrString::String(s)) if s == MEMBER_OP_CODE) {
@@ -409,4 +416,55 @@ pub fn declarator_text(src: &str, sym: &crate::model::file_analysis::Symbol) -> 
         return None;
     }
     Some(t.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// "Add return type": the pack's return-annotation template with the
+/// diagnostic's spelling, inserted right after the parameter list the
+/// callable declares — the list's own span, never a re-balanced scan for
+/// its closing parenthesis.
+fn make_return_type_action(
+    analysis: &FileAnalysis,
+    uri: &Url,
+    diag: &Diagnostic,
+) -> Option<CodeActionOrCommand> {
+    let template = analysis.pack.return_annotation_template.as_str();
+    if template.is_empty() {
+        return None;
+    }
+    let spelling = diag.data.as_ref()?.get("spelling")?.as_str()?;
+    let sym = analysis.symbol_at(position_to_point(diag.range.start))?;
+    let at = point_to_position(param_list_end(analysis, sym)?);
+    let mut changes = HashMap::new();
+    changes.insert(uri.clone(), vec![TextEdit { range: Range { start: at, end: at }, new_text: template.replace("{}", spelling) }]);
+    Some(CodeActionOrCommand::CodeAction(CodeAction {
+        title: format!("Add return type `{}`", template.replace("{}", spelling).trim()),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diag.clone()]),
+        edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+        is_preferred: Some(true),
+        ..Default::default()
+    }))
+}
+
+/// Where `sym`'s parameter list ends — just past its closing parenthesis,
+/// which is where a return annotation goes. The callable names its own
+/// list: the parameter region holding its parameters' binding sites, and
+/// for one that declares none, the first region after its name token.
+fn param_list_end(
+    analysis: &FileAnalysis,
+    sym: &crate::model::file_analysis::Symbol,
+) -> Option<Point> {
+    let last_bind = match &sym.detail {
+        SymbolDetail::Sub { params, .. } => params.iter().rev().find_map(|p| p.binding_site),
+        _ => None,
+    };
+    let mine = analysis.pack.param_regions.iter().filter(|r| {
+        sym.span.contains(r)
+            && (r.start.row, r.start.column)
+                >= (sym.selection_span.end.row, sym.selection_span.end.column)
+    });
+    mine.clone()
+        .find(|r| last_bind.is_some_and(|b| r.contains(&Span { start: b, end: b })))
+        .or_else(|| mine.min_by_key(|r| (r.start.row, r.start.column)))
+        .map(|r| r.end)
 }
