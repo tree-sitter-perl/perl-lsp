@@ -1323,6 +1323,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     attributes.push("class_rail".to_string());
                 }
                 out.symbols.push(SkelSymbol {
+                    declared_return: None,
                     name,
                     kind: "handler".to_string(),
                     start: e.start,
@@ -1526,6 +1527,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     return_type: rettype_by_match
                         .get(&e.match_id)
                         .and_then(|t| annot_ident(t, e.start)),
+                    // The annotation AS WRITTEN, through the pack's own
+                    // spelling — the label a signature shows and the
+                    // "already typed" gate both read this fact rather than
+                    // re-scanning the declaration's source line.
+                    declared_return: rettype_by_match
+                        .get(&e.match_id)
+                        .filter(|_| !pack.return_annotation_template.is_empty())
+                        .map(|t| pack.return_annotation_template.replace("{}", t)),
                     receiver_instance_of: None,
                     receiver_return: rettype_by_match
                         .get(&e.match_id)
@@ -1540,12 +1549,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             && !a.iter().any(|x| x == "deprecated")
                         {
                             a.push("deprecated".to_string());
-                        }
-                        // the declaration WRITES a return annotation — a
-                        // structural fact the type witness cannot carry
-                        // (`: void` names no type)
-                        if rettype_by_match.contains_key(&e.match_id) {
-                            a.push("declared_return".to_string());
                         }
                         // a default-named symbol is structure, not an
                         // addressable name — completion skips it.
@@ -2565,6 +2568,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 CmdEffect::Def { kind, name_arg } => {
                     if let Some((name, span)) = args.get(name_arg) {
                         out.symbols.push(SkelSymbol {
+                            declared_return: None,
                             kind: kind.to_string(),
                             name: name.clone(),
                             start: cmd_span.start,
@@ -3095,6 +3099,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             let at = Point { row: cstart + line, column: *col };
                             let at_end = Point { row: at.row, column: col + name.len() };
                             doc_methods.push(SkelSymbol {
+                                declared_return: None,
                                 kind: "method".to_string(),
                                 name: name.clone(),
                                 start: at,

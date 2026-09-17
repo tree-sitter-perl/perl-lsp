@@ -863,6 +863,17 @@ impl Symbol {
         None
     }
 
+    /// The return annotation this declaration writes, as the language
+    /// spells it. A declaration that writes one is already typed, whatever
+    /// the type (`: void` names none), so the hover's inferred-return line
+    /// and the missing-return-type lane both ask this.
+    pub fn declared_return(&self) -> Option<&str> {
+        match &self.detail {
+            SymbolDetail::Sub { declared_return, .. } => declared_return.as_deref(),
+            _ => None,
+        }
+    }
+
     /// True when this symbol is a presentation duplicate that symbol-listing
     /// views should fold away — the getter/primary carries the listing; the
     /// hidden twin exists only so arity-discriminated type inference can
@@ -988,6 +999,15 @@ pub enum SymbolDetail {
         /// does not (it's not a workspace-addressable entity).
         #[serde(default)]
         lexical: bool,
+        /// The return annotation the declaration WRITES, spelled as the
+        /// language writes it (php `: string`). A structural fact a type
+        /// witness cannot carry — `: void` names no type — so the
+        /// signature label and the "this declaration is already typed"
+        /// consumers read it instead of re-scanning source or comparing
+        /// an attribute string. `None` for a declaration with no
+        /// annotation and for a language that writes none (Perl).
+        #[serde(default)]
+        declared_return: Option<String>,
     },
     Class {
         parent: Option<String>,

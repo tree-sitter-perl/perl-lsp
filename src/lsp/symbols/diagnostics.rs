@@ -1492,10 +1492,9 @@ pub fn pack_symbol_diagnostics(
     // constructors, contracts, and any return the spelling cannot name
     // (ambiguous numerics, unions, a leaf that means another class here).
     if !pack.return_annotation_template.is_empty() {
-        // `declared_return` is the structural fact (the declaration writes
-        // an annotation) — a type witness cannot carry it: `: void` names
-        // no type.
-        let declared = |s: &crate::model::file_analysis::Symbol| s.attributes.iter().any(|a| a == "declared_return");
+        // The declaration's own annotation is the structural fact — a type
+        // witness cannot carry it: `: void` names no type.
+        let declared = |s: &crate::model::file_analysis::Symbol| s.declared_return().is_some();
         let callables: Vec<&crate::model::file_analysis::Symbol> = analysis
             .symbols()
             .iter()

@@ -471,6 +471,7 @@ impl<'a> Builder<'a> {
                     opaque_return: false,
                     is_constant: false,
                     lexical: false,
+                    declared_return: None,
                 },
             );
         }
@@ -777,7 +778,7 @@ impl<'a> Builder<'a> {
             if is_method { SymKind::Method } else { SymKind::Sub },
             node_to_span(node),
             node_to_span(name_node),
-            SymbolDetail::Sub { params: params.clone(), is_method, doc, opaque_return: false, is_constant: false, lexical },
+            SymbolDetail::Sub { params: params.clone(), is_method, doc, opaque_return: false, is_constant: false, lexical, declared_return: None },
         );
 
         // Exporter::Extensible method-attribute export form: `sub foo :Export`.
@@ -913,6 +914,7 @@ impl<'a> Builder<'a> {
                 opaque_return: false,
                 is_constant: false,
                 lexical: false,
+                declared_return: None,
             },
         );
         // Not a nameable entity — resolvable, never listed.
@@ -1463,7 +1465,7 @@ impl<'a> Builder<'a> {
                         SymKind::Method,
                         node_to_span(node),
                         bare_span,
-                        SymbolDetail::Sub { params: vec![], is_method: true, doc: None, opaque_return: false, is_constant: false, lexical: false },
+                        SymbolDetail::Sub { params: vec![], is_method: true, doc: None, opaque_return: false, is_constant: false, lexical: false, declared_return: None },
                     );
                 }
                 if has_writer {
@@ -1486,6 +1488,7 @@ impl<'a> Builder<'a> {
                     opaque_return: false,
                     is_constant: false,
                     lexical: false,
+                    declared_return: None,
                         },
                     );
                 }

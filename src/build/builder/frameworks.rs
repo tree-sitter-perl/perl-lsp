@@ -31,6 +31,7 @@ impl<'a> Builder<'a> {
                     opaque_return: false,
                     is_constant: false,
                     lexical: false,
+                    declared_return: None,
                 },
             );
             self.contract_symbols.insert(sid);
@@ -361,6 +362,7 @@ impl<'a> Builder<'a> {
                     opaque_return: false,
                     is_constant: false,
                     lexical: false,
+                    declared_return: None,
                         },
                     );
                     accessor_ids.push((name.clone(), getter_id));
@@ -403,6 +405,7 @@ impl<'a> Builder<'a> {
                     opaque_return: false,
                     is_constant: false,
                     lexical: false,
+                    declared_return: None,
                             },
                         );
                         // Same name+span as the getter — hide so the outline
@@ -445,6 +448,7 @@ impl<'a> Builder<'a> {
                     opaque_return: false,
                     is_constant: false,
                     lexical: false,
+                    declared_return: None,
                             },
                         );
                         let writer_arm = return_type.clone().map(|t| {
@@ -525,6 +529,7 @@ impl<'a> Builder<'a> {
                     opaque_return: false,
                     is_constant: false,
                     lexical: false,
+                    declared_return: None,
                         },
                     );
                     accessor_ids.push((name.clone(), getter_id));
@@ -560,6 +565,7 @@ impl<'a> Builder<'a> {
                     opaque_return: false,
                     is_constant: false,
                     lexical: false,
+                    declared_return: None,
                         },
                     );
                     // Same name+span as the getter — hide so the outline

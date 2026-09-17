@@ -21,6 +21,11 @@ pub struct SkelSymbol {
     /// Declared return type (`@rettype`), for methods/functions — drives
     /// method-return resolution + chaining through PackageSymbol.
     pub return_type: Option<InferredType>,
+    /// The return annotation as the language writes it (`: string`), minted
+    /// from the same `@rettype` capture through the pack's own
+    /// `return_annotation_template`. `None` where the pack writes no return
+    /// annotations, so a prefix-typed language (C) mints nothing to append.
+    pub declared_return: Option<String>,
     /// The declared return names the RECEIVER (PHP `static`/`$this`/`self`)
     /// rather than a concrete type — the writeback publishes
     /// `ReturnExpr::Receiver` so the call site's receiver substitutes
@@ -797,6 +802,7 @@ impl SkeletonAnalysis {
                         opaque_return: false,
                         is_constant: false,
                         lexical: false,
+                        declared_return: s.declared_return.clone(),
                     }
                 } else {
                     SymbolDetail::None

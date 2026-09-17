@@ -337,7 +337,7 @@ fn render_symbol_hover(
     // null), the same value the quick-fix would write.
     if matches!(sym.kind, FaSymKind::Sub | FaSymKind::Method)
         && !analysis.pack.return_annotation_template.is_empty()
-        && !sym.attributes.iter().any(|a| a == "declared_return")
+        && sym.declared_return().is_none()
     {
         if let Some(rt) = analysis.total_inferred_return(sym.id) {
             out.push_str(&format!("\n\n*returns: {}*", analysis.render_type(&rt)));
