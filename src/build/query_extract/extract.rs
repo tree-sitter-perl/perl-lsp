@@ -80,18 +80,24 @@ fn param_name_node<'t>(
     ch: tree_sitter::Node<'t>,
     simple_var_kinds: &[&str],
 ) -> Option<tree_sitter::Node<'t>> {
-    ch.child_by_field_name("name").or_else(|| {
-        let mut stack = vec![ch];
-        while let Some(n) = stack.pop() {
-            if n != ch && simple_var_kinds.contains(&n.kind()) {
-                return Some(n);
-            }
-            let mut w = n.walk();
-            let kids: Vec<_> = n.named_children(&mut w).collect();
-            stack.extend(kids.into_iter().rev());
+    // The `name` field where the grammar names the variable directly; a
+    // by-reference spelling WRAPS it (php's `by_ref`) and a C declarator
+    // buries it under pointers and arrays, so either way the identity is
+    // the simple variable underneath.
+    let named = ch.child_by_field_name("name");
+    if named.is_some_and(|n| simple_var_kinds.contains(&n.kind())) {
+        return named;
+    }
+    let mut stack = vec![named.unwrap_or(ch)];
+    while let Some(n) = stack.pop() {
+        if n != ch && simple_var_kinds.contains(&n.kind()) {
+            return Some(n);
         }
-        None
-    })
+        let mut w = n.walk();
+        let kids: Vec<_> = n.named_children(&mut w).collect();
+        stack.extend(kids.into_iter().rev());
+    }
+    named
 }
 
 /// The `ImportBinds` a capture-name suffix declares, or `None` when the
@@ -361,10 +367,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // the parameter's variable name so the def mints the
                 // aliasing edge the call sites bind through.
                 let mut note_by_ref = |ch: tree_sitter::Node, position: usize| {
+                    // The three spellings a grammar gives `&`: a modifier
+                    // beside the name, a reference declarator around it, or a
+                    // wrapper AROUND the name (php's promoted `private int
+                    // &$n`, whose `name` field is the `by_ref` node).
                     let by_ref = ch.child_by_field_name("reference_modifier").is_some()
                         || ch
                             .child_by_field_name("declarator")
-                            .is_some_and(|d| d.kind() == "reference_declarator");
+                            .is_some_and(|d| d.kind() == "reference_declarator")
+                        || ch.child_by_field_name("name").is_some_and(|n| n.kind() == "by_ref");
                     if !by_ref {
                         return;
                     }
