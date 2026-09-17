@@ -1285,6 +1285,59 @@ fn php_phpunit_mocks_type_as_the_doubled_class() {
 }
 
 
+/// Where the mock lane STOPS. The overlay enumerates the builder chain by
+/// shape — zero, one or two modifiers, and the property form only for the
+/// `createMock` family — so a three-modifier chain and a
+/// `$this->prop = $this->getMockBuilder(...)` fall through to `getMock()`'s
+/// own declared return, `MockObject`. Navigation then reaches the mock API
+/// and not the doubled class. The ceiling is recorded on the intersection
+/// fork (`docs/open-forks.md`); this is the row that says where it is.
+#[cfg(feature = "php")]
+#[test]
+fn php_phpunit_mock_chain_ceiling_is_the_mock_api() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2mockceil-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("vendor/phpunit/PHPUnit/Framework/MockObject")).unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\", \"App\\\\Tests\\\\\": \"tests/\"}}}");
+    w("vendor/phpunit/PHPUnit/Framework/MockObject/MockObject.php", "<?php\nnamespace PHPUnit\\Framework\\MockObject;\ninterface MockObject { public function expects($m); }\n");
+    w("vendor/phpunit/PHPUnit/Framework/TestCase.php", "<?php\nnamespace PHPUnit\\Framework;\nuse PHPUnit\\Framework\\MockObject\\MockObject;\nclass TestCase\n{\n    protected function getMockBuilder(string $c): MockBuilder { return new MockBuilder(); }\n}\nclass MockBuilder { public function disableOriginalConstructor(): self { return $this; } public function onlyMethods(array $m): self { return $this; } public function setConstructorArgs(array $a): self { return $this; } public function getMock(): MockObject { return null; } }\n");
+    w("src/Foo.php", "<?php\nnamespace App;\nclass Foo\n{\n    public function bar(): int { return 1; }\n}\n");
+    let test = "<?php\nnamespace App\\Tests;\nuse App\\Foo;\nuse PHPUnit\\Framework\\TestCase;\nclass FooTest extends TestCase\n{\n    private $foo;\n    protected function setUp(): void\n    {\n        $this->foo = $this->getMockBuilder(Foo::class)->disableOriginalConstructor()->getMock();\n    }\n    public function testIt(): void\n    {\n        $c = $this->getMockBuilder(Foo::class)->disableOriginalConstructor()->setConstructorArgs([])->onlyMethods([])->getMock();\n        $c->bar();\n        $this->foo->bar();\n    }\n}\n";
+    w("tests/FooTest.php", test);
+    let lines: Vec<&str> = test.lines().collect();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    // three builder modifiers: past the enumerated shapes
+    let col = lines[14].find("$c->bar").unwrap();
+    let hov = run(&["--hover", root, "tests/FooTest.php", "14", &col.to_string()]);
+    assert!(
+        hov.contains("$c: PHPUnit\\Framework\\MockObject\\MockObject"),
+        "a three-modifier chain types as the mock API, not App\\Foo: {hov}"
+    );
+    let col = lines[14].find("bar()").unwrap();
+    let def = run(&["--definition", root, "tests/FooTest.php", "14", &col.to_string()]);
+    assert!(!def.contains("src/Foo.php"), "and so does not reach the doubled class: {def}");
+    // the getMockBuilder property form: the property lane covers createMock only
+    let col = lines[15].find("foo->bar").unwrap();
+    let hov = run(&["--hover", root, "tests/FooTest.php", "15", &col.to_string()]);
+    assert!(
+        hov.contains("foo: PHPUnit\\Framework\\MockObject\\MockObject"),
+        "the builder property form types as the mock API: {hov}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
 /// The hook rail's undefined-name lane: a fired WordPress hook nothing
 /// registers is a HINT phrased by the rail document's label, while a
 /// hook with a registration anywhere in the workspace stays silent. The

@@ -608,6 +608,20 @@ marked otherwise; the drain re-derived each rationale against current code.
   #1: scan ERROR children for `const NAME =`) is deferred until a corpus
   shows more than the two known rows.
 
+- **The mock lane enumerates builder-chain shapes** (php, branch 6). The
+  PHPUnit overlay types `getMockBuilder(X::class)->…->getMock()` with a
+  pattern per modifier count (zero, one, two) and covers the property
+  form for the `createMock` family only, so a third modifier — and
+  `$this->prop = $this->getMockBuilder(…)` in `setUp()`, the commonest
+  spelling — falls back to `getMock()`'s declared `MockObject`. Each new
+  shape is another pattern, which is rule #10 in data form. Target shape:
+  let `@type.annot` RIDE the chain hops the skeleton already mints, so the
+  annotation attaches to the receiver value and every hop count follows
+  from one pattern. Parked because that is a chain-typing change in the
+  engine, not overlay data; the ceiling is recorded on the intersection
+  fork (`docs/open-forks.md`) and pinned by
+  `php_phpunit_mock_chain_ceiling_is_the_mock_api`.
+
 ## Cross-references
 - Gap shapes behind open xfails: `gold-corpus/KNOWN-GAPS.md`
 - Open architectural forks: `docs/open-forks.md`; resolved ledger:

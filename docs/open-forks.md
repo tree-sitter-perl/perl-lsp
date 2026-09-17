@@ -456,7 +456,14 @@ Format per entry:
   doubled class alone (`createMock(Foo::class)` → `Foo`), which is what
   navigation and the lanes need; `$m->expects()` / `->method()` (the
   `MockObject` side) stay unresolved on a mock, and a docblock
-  intersection still types nothing.
+  intersection still types nothing. The overlay enumerates the builder
+  chain by SHAPE, so it has a ceiling: `getMockBuilder(X::class)` with up
+  to two chained modifiers types as `X`, a third one does not, and the
+  `$this->prop = ...` property form is covered for the `createMock` family
+  only. Past the ceiling the value falls back to `getMock()`'s own declared
+  return — `MockObject`, the mock API and not the doubled class — which is
+  the honest degrade, not silence. Pinned by
+  `php_phpunit_mock_chain_ceiling_is_the_mock_api`.
 - **Options:** A — pick one arm by a rule that needs no names: the arm
   that is not the callee's native declared return type is the refinement
   (`MockObject` is what `createMock` declares; `Foo` is what the docblock
