@@ -750,3 +750,42 @@ pub fn signature_help(
 
     None
 }
+
+
+/// `(label, parameters, doc)` — a callable's declaration as the signature
+/// lanes read it: the rendered label, the parameters themselves for a
+/// consumer that needs their names, and the declaration's doc.
+pub type RenderedSignature = (String, Vec<ParamInfo>, Option<String>);
+
+/// One parameter as a signature shows it: the name its declaration bound,
+/// and the default exactly as the source wrote it.
+fn render_param(p: &ParamInfo) -> String {
+    let mut out = String::new();
+    if let Some(t) = &p.declared_type {
+        out.push_str(t);
+        out.push(' ');
+    }
+    if p.is_slurpy {
+        out.push_str("...");
+    }
+    out.push_str(&p.name);
+    if let Some(d) = &p.default {
+        out.push_str(" = ");
+        out.push_str(d);
+    }
+    out
+}
+
+/// A callable's signature, rendered from the parameter facts its own
+/// extraction minted (`SymbolDetail::Sub { params }`). The invocant a
+/// caller never writes is dropped, so the label shows what is typed.
+fn rendered_signature(sym: &crate::model::file_analysis::Symbol) -> Option<RenderedSignature> {
+    let SymbolDetail::Sub { params, .. } = &sym.detail else { return None };
+    let shown: Vec<ParamInfo> = params.iter().filter(|p| !p.is_invocant).cloned().collect();
+    let label = format!(
+        "{}({})",
+        sym.name,
+        shown.iter().map(render_param).collect::<Vec<_>>().join(", ")
+    );
+    Some((label, shown, sym.presentation.doc.clone()))
+}
