@@ -4884,6 +4884,43 @@ fn php_instance_array_callable_is_a_method_ref() {
     assert!(names.contains(&("other", Some("$obj"))), "{names:?}");
 }
 
+/// The overlay lint's findings: a rail family with no rail names a
+/// namespace nobody declared, and a `@classattr.` spelling outside the
+/// flag table stamps a string no consumer reads. Both mint nothing, so
+/// silence would read as a missing feature; a suffixed rail, a known
+/// spelling and an unrelated capture stay quiet.
+#[test]
+fn overlay_capture_findings_name_the_unhonourable_captures() {
+    use crate::build::query_extract::overlay_capture_findings;
+    let bad = overlay_capture_findings(&[
+        "def.handler.named",
+        "ref.dispatch.named",
+        "def.handler.class.",
+        "classattr.nonsense",
+    ]);
+    assert_eq!(bad.len(), 4, "{bad:?}");
+    assert!(bad[0].contains("names no rail"), "{bad:?}");
+    assert!(bad[3].contains("nonsense"), "{bad:?}");
+    let good = overlay_capture_findings(&[
+        "def.handler.named.hook",
+        "ref.dispatch.named.hook",
+        "def.handler.by.route",
+        "classattr.interface",
+        "ref.call.named",
+        "_wphook",
+    ]);
+    assert!(good.is_empty(), "{good:?}");
+    // a named rail is served vocabulary, however new the word is, and the
+    // capture SAYS what the extractor makes of it
+    use crate::build::query_extract::{rail_of, RailCapture};
+    assert_eq!(rail_of("def.handler.named.hook"), Some((RailCapture::Handler, "hook")));
+    assert_eq!(rail_of("ref.dispatch.class.event"), Some((RailCapture::ClassDispatch, "event")));
+    assert!(rail_of("def.handler.named").is_none());
+    assert!(rail_of("ref.call.named").is_none());
+    assert!(rail_of("def.handler.class.route").is_some_and(|(k, _)| k.is_handler()
+        && k.is_class_named()));
+}
+
 /// The inputs the missing-return-type lane reads: a declared return
 /// annotation is a `cpp_method_return` witness on the symbol, and a bodied
 /// callable without one still types through its return arms.
