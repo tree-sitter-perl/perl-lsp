@@ -11,6 +11,7 @@
 //! spellings are already identities (C's flat linkage) never builds one.
 
 use super::ImportRow;
+use crate::model::conventions::join_qualified as join;
 
 /// One file's name-resolution context for class spellings.
 #[derive(Debug, Clone, Copy)]
@@ -92,12 +93,3 @@ impl<'a> UseMap<'a> {
     }
 }
 
-/// `a sep b`, without a dangling separator when `a` is the global
-/// namespace.
-fn join(a: &str, b: &str, sep: &str) -> String {
-    if a.is_empty() {
-        b.to_string()
-    } else {
-        format!("{a}{sep}{b}")
-    }
-}

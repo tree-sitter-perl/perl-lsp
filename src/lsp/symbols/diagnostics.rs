@@ -1227,7 +1227,7 @@ pub fn pack_symbol_diagnostics(
                 .use_aliases
                 .iter()
                 .find(|(_, ns, real)| {
-                    real == leaf && (join_name(analysis, ns, real) == *raw || (ns.is_empty() && real == raw))
+                    real == leaf && join_name(analysis, ns, real) == *raw
                 })
                 .map(|(alias, _, _)| alias.as_str())
                 .unwrap_or(leaf);
@@ -1411,7 +1411,6 @@ pub fn pack_symbol_diagnostics(
                     // the quick-fix can offer
                     let candidates: Vec<String> = declared
                         .iter()
-                        .filter(|d| !d.is_empty())
                         .map(|d| join_name(analysis, d, leaf))
                         .collect();
                     out.push(Diagnostic {
@@ -1605,9 +1604,14 @@ fn is_qualified(name: &str, analysis: &FileAnalysis) -> bool {
 }
 
 /// `namespace` and `leaf` joined the way this file's language spells a
-/// qualified name.
+/// qualified name — the model's own join, so the global namespace gives
+/// the bare leaf and no caller guards a dangling separator.
 fn join_name(analysis: &FileAnalysis, namespace: &str, leaf: &str) -> String {
-    format!("{namespace}{}{leaf}", analysis.names().sep().unwrap_or_default())
+    crate::model::conventions::join_qualified(
+        namespace,
+        leaf,
+        analysis.names().sep().unwrap_or_default(),
+    )
 }
 
 /// The leading segment of every namespace this file writes as a QUALIFIER
