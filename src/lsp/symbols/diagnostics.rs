@@ -760,7 +760,7 @@ pub fn pack_symbol_diagnostics(
     idx: Option<&dyn CrossFileLookup>,
     index_settled: bool,
 ) -> Vec<Diagnostic> {
-    use crate::model::file_analysis::{MemberKind, MethodResolution};
+    use crate::model::file_analysis::{MemberKind, MethodResolution, ScopeKind};
     let mut out = Vec::new();
     let pack = &analysis.pack;
     // Every per-class fact is derived ONCE per class, never per ref: a
@@ -1072,6 +1072,62 @@ pub fn pack_symbol_diagnostics(
         }
     }
 
+    // ---- undefined variable: an unbound read inside a callable ----
+    if !pack.implicit_variables.is_empty() {
+        // occurrences per (callable scope, name) — a name read MORE than
+        // once is presumed bound by a call the callee lane below cannot
+        // resolve; the single stray read is the typo this lane names.
+        let callable_of = |scope: crate::model::file_analysis::ScopeId| {
+            analysis.scope_chain(scope).into_iter().find(|&sc| {
+                matches!(analysis.scope(sc).kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. })
+            })
+        };
+        let mut seen: HashMap<(u32, String), usize> = HashMap::new();
+        for r in analysis.refs() {
+            if matches!(r.kind, RefKind::Variable) {
+                if let Some(sc) = callable_of(r.scope) {
+                    *seen.entry((sc.0, r.target_name.clone())).or_default() += 1;
+                }
+            }
+        }
+        // A bare variable written as a call argument is bound by the call
+        // when the callee declares that position by reference (`&$out`):
+        // the callee's aliasing edge IS the binding, chased from the
+        // argument's own site (`docs/adr/by-ref-binding.md`). A callee this
+        // lane cannot see leaves no edge and answers nothing; a callee that
+        // aliases but names no type answers `Unknown`, which still binds.
+        for r in analysis.refs() {
+            // a WRITE binds (php declares a variable by assigning it)
+            if !matches!(r.kind, RefKind::Variable)
+                || r.binding.is_some()
+                || matches!(r.access, crate::model::file_analysis::AccessKind::Write)
+            {
+                continue;
+            }
+            if pack.implicit_variables.contains(&r.target_name) {
+                continue;
+            }
+            let Some(sc) = callable_of(r.scope) else { continue };
+            if seen.get(&(sc.0, r.target_name.clone())).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            if analysis.inferred_type_via_bag_ctx(&r.target_name, r.span.start, idx).is_some() {
+                continue;
+            }
+            // `isset($x)` / `empty($x)` / `unset($x)`: the read IS the
+            // existence question, the member lanes' probe silence
+            if analysis.pack.probe_regions.iter().any(|p| p.contains(&r.span)) {
+                continue;
+            }
+            // a callable that materializes variables dynamically is silent
+            if dynamic_vars(analysis, sc) {
+                continue;
+            }
+            push(&mut out, r.span, DiagnosticSeverity::ERROR, "undefined-variable",
+                format!("Undefined variable '{}'.", r.target_name));
+        }
+    }
+
     out
 }
 
@@ -1098,4 +1154,15 @@ fn deprecated_diag(span: Span, name: &str, text: &Option<String>) -> Diagnostic 
         tags: Some(vec![DiagnosticTag::DEPRECATED]),
         ..Default::default()
     }
+}
+
+/// Does the callable owning `scope` materialize variables no declaration
+/// names (php `extract`, `eval`)? The extractor stamped that on the
+/// callable, so the variable lanes read the flag instead of matching call
+/// spans against the body they sit in.
+fn dynamic_vars(analysis: &FileAnalysis, scope: crate::model::file_analysis::ScopeId) -> bool {
+    analysis
+        .scope(scope)
+        .owner
+        .is_some_and(|sid| analysis.symbol(sid).flags.contains(SymbolFlags::DYNAMIC_VARS))
 }
