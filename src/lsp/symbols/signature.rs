@@ -752,6 +752,44 @@ pub fn signature_help(
 }
 
 
+/// Signature help for a pack-language document: the cursor's call site
+/// (`cursor_sentinel::call_at`), the callee resolved through the same
+/// member ladder goto-def uses, and the signature rendered from the
+/// DEFINING file's own text — the parameter list between the declaration's
+/// parentheses, the return annotation after them, the docblock summary
+/// under it. One rule for local and cross-file callees.
+pub fn pack_signature_help(
+    analysis: &FileAnalysis,
+    tree: &Tree,
+    text: &str,
+    pos: Position,
+    language: &str,
+    module_index: &dyn CrossFileLookup,
+) -> Option<SignatureHelp> {
+    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let driver = reg.for_id(language)?;
+    let pack = driver.lang_pack()?;
+    let point = position_to_point(pos);
+    let cursor = crate::build::cursor_sentinel::point_to_byte(text, point);
+    let site = crate::build::cursor_sentinel::call_at(tree, &pack, text, cursor)?;
+    let (label, params, doc) = pack_callee_signature(analysis, site.callee.start, module_index)?;
+    let parameters: Vec<ParameterInformation> = params
+        .iter()
+        .map(|p| ParameterInformation { label: ParameterLabel::Simple(render_param(p)), documentation: None })
+        .collect();
+    let active = (site.active_param as u32).min(parameters.len().saturating_sub(1) as u32);
+    Some(SignatureHelp {
+        signatures: vec![SignatureInformation {
+            label,
+            documentation: doc.map(|d| Documentation::MarkupContent(MarkupContent { kind: MarkupKind::Markdown, value: d })),
+            parameters: Some(parameters),
+            active_parameter: Some(active),
+        }],
+        active_signature: Some(0),
+        active_parameter: Some(active),
+    })
+}
+
 /// `(label, parameters, doc)` — a callable's declaration as the signature
 /// lanes read it: the rendered label, the parameters themselves for a
 /// consumer that needs their names, and the declaration's doc.
