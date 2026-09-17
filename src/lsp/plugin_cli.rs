@@ -93,14 +93,17 @@ struct EntryRuleLint {
 /// The lint's STRICT view of a rail document — the same remote-derive
 /// discipline as [`EntryRuleLint`]: the field list is the loader's, checked
 /// by the compiler, and `deny_unknown_fields` names a stray key that the
-/// lenient loader would ignore.
+/// lenient loader would ignore. The strictness reaches INSIDE each rail
+/// too: a typo'd `stip`/`skp` in a path rail is the same silent loss as a
+/// stray top-level key, and neither the loader nor a top-level-only lint
+/// would say a word about it.
 #[derive(serde::Deserialize)]
 #[serde(remote = "crate::build::query_extract::RailsDoc", deny_unknown_fields)]
 struct RailDocLint {
     language: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_text_rails")]
     text_rails: Vec<crate::build::query_extract::TextRail>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_path_rails")]
     path_rails: Vec<crate::build::query_extract::PathRail>,
     #[serde(default)]
     labels: std::collections::HashMap<String, String>,
@@ -110,6 +113,52 @@ struct RailDocLint {
     name_seps: std::collections::HashMap<String, String>,
     #[serde(default)]
     names_are: std::collections::HashMap<String, String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(remote = "crate::build::query_extract::TextRail", deny_unknown_fields)]
+struct TextRailLint {
+    rail: String,
+    calls: Vec<String>,
+    files: Vec<String>,
+    #[serde(default)]
+    requires: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(remote = "crate::build::query_extract::PathRail", deny_unknown_fields)]
+struct PathRailLint {
+    rail: String,
+    under: String,
+    #[serde(default)]
+    skip: usize,
+    #[serde(default)]
+    strip: String,
+    #[serde(default = "lint_default_sep")]
+    sep: String,
+    #[serde(default)]
+    keys: bool,
+    #[serde(default)]
+    methods: bool,
+}
+fn lint_default_sep() -> String {
+    ".".to_string()
+}
+
+fn de_text_rails<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<crate::build::query_extract::TextRail>, D::Error> {
+    #[derive(serde::Deserialize)]
+    struct W(#[serde(with = "TextRailLint")] crate::build::query_extract::TextRail);
+    Ok(<Vec<W> as serde::Deserialize>::deserialize(d)?.into_iter().map(|w| w.0).collect())
+}
+
+fn de_path_rails<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<crate::build::query_extract::PathRail>, D::Error> {
+    #[derive(serde::Deserialize)]
+    struct W(#[serde(with = "PathRailLint")] crate::build::query_extract::PathRail);
+    Ok(<Vec<W> as serde::Deserialize>::deserialize(d)?.into_iter().map(|w| w.0).collect())
 }
 
 /// The rail-declarations arm of `--plugin-check`: validates a
@@ -1350,5 +1399,28 @@ mod tests {
 
         let _ = std::fs::remove_file(&plugin);
         let _ = std::fs::remove_file(&fixture);
+    }
+
+    /// The rail lint is strict INSIDE a rail, not only at the top level:
+    /// the loader ignores a typo'd key in a path rail exactly as it ignores
+    /// a stray top-level one, and both read as a feature that quietly does
+    /// nothing.
+    #[test]
+    fn rail_lint_names_a_typo_inside_a_rail() {
+        let typo = serde_json::json!({
+            "language": "php",
+            "path_rails": [ { "rail": "view", "under": "/views/", "stip": ".blade.php" } ],
+        });
+        assert!(
+            RailDocLint::deserialize(&typo).is_err(),
+            "a stray key inside a path rail is a finding"
+        );
+        let clean = serde_json::json!({
+            "language": "php",
+            "path_rails": [ { "rail": "view", "under": "/views/", "strip": ".blade.php" } ],
+            "text_rails": [ { "rail": "view", "calls": ["view"], "files": [".blade.php"] } ],
+            "names_are": { "event": "class" },
+        });
+        assert!(RailDocLint::deserialize(&clean).is_ok(), "the loader's own field list lints clean");
     }
 }
