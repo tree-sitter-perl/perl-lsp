@@ -1042,6 +1042,36 @@ pub fn pack_symbol_diagnostics(
         }
     }
 
+    // ---- arity on plain calls (local callees only) ----
+    // A construction mints its constructor call, so `new Foo(...)` is
+    // checked by the member arity lane above — where a class declaring no
+    // constructor is silent, and the default constructor takes any
+    // argument list by not resolving.
+    for r in analysis.refs() {
+        if !matches!(r.kind, RefKind::FunctionCall) {
+            continue;
+        }
+        let Some(n) = r.arg_count else { continue };
+        let name = r.unqualified_target_name(analysis.names());
+        let callee = analysis
+            .symbols_named(name)
+            .iter()
+            .map(|&sid| analysis.symbol(sid))
+            .find(|s| matches!(s.kind, FaSymKind::Sub));
+        let Some(sym) = callee else { continue };
+        let Some(a) = sym.arity else { continue };
+        if sym.flags.contains(SymbolFlags::DYNAMIC_ARGS) {
+            continue;
+        }
+        if n < a.required {
+            push(&mut out, r.span, DiagnosticSeverity::ERROR, "arity-mismatch",
+                format!("Not enough arguments. Expected {}. Found {n}.", a.required));
+        } else if !a.variadic && n > a.total {
+            push(&mut out, r.span, DiagnosticSeverity::WARNING, "arity-mismatch",
+                format!("Too many arguments. Expected {}. Found {n}.", a.total));
+        }
+    }
+
     out
 }
 
