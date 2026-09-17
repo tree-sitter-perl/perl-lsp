@@ -757,6 +757,68 @@ pub fn signature_help(
 /// consumer that needs their names, and the declaration's doc.
 pub type RenderedSignature = (String, Vec<ParamInfo>, Option<String>);
 
+/// The callee at a pack call site — the ref at its token, resolved
+/// through the member ladder goto-def uses — rendered from the parameter
+/// facts its own extraction minted. One rule for local and cross-file
+/// callees; signature help and the parameter hints share it.
+pub fn pack_callee_signature(
+    analysis: &FileAnalysis,
+    callee: Point,
+    module_index: &dyn CrossFileLookup,
+) -> Option<RenderedSignature> {
+    // The call-shaped ref at the callee token: a construction site mints
+    // its class token and its constructor call on the same span, and only
+    // the call index answers the call there.
+    let r = analysis.call_ref_at_start(callee).or_else(|| analysis.ref_at(callee))?;
+    let name = r.unqualified_target_name(analysis.names()).to_string();
+    let mut found: Option<RenderedSignature> = None;
+    if let Some(want) = r.member_kind() {
+        let class = analysis.method_call_invocant_class(r, Some(module_index))?;
+        match analysis.resolve_member(&class, &name, want, Some(module_index))? {
+            crate::model::file_analysis::MethodResolution::Local { sym_id, .. } => {
+                found = rendered_signature(analysis.symbol(sym_id));
+            }
+            crate::model::file_analysis::MethodResolution::CrossFile { class, def_module, .. } => {
+                let module = def_module.as_deref().unwrap_or(class.as_str());
+                let cached = module_index.candidate_defining_sub_in_package(module, &class, &name)?;
+                let decls = module_index.symbols_present(&cached);
+                // The resolution named the class; a same-named callable
+                // on another one is a plausible wrong signature, so the
+                // lane answers nothing instead.
+                let sym = decls.symbols().iter().find(|s| {
+                    matches!(s.kind, FaSymKind::Method | FaSymKind::Sub)
+                        && s.name == name
+                        && s.package.as_deref() == Some(class.as_str())
+                })?;
+                found = rendered_signature(sym);
+            }
+        }
+    } else if matches!(r.kind, RefKind::FunctionCall) {
+        let local = analysis
+            .symbols_named(&name)
+            .iter()
+            .map(|&sid| analysis.symbol(sid))
+            .find(|s| matches!(s.kind, FaSymKind::Sub | FaSymKind::Method));
+        let declares = |a: &FileAnalysis| {
+            a.symbols()
+                .iter()
+                .any(|s| matches!(s.kind, FaSymKind::Sub | FaSymKind::Method) && s.name == name)
+        };
+        if let Some(sym) = local {
+            found = rendered_signature(sym);
+        } else if let Some(decls) = module_index.defining_analysis(&name, &declares) {
+            // The file that DECLARES the callee, not whichever candidate
+            // the visibility axis listed first.
+            found = decls
+                .symbols()
+                .iter()
+                .find(|s| matches!(s.kind, FaSymKind::Sub | FaSymKind::Method) && s.name == name)
+                .and_then(rendered_signature);
+        }
+    }
+    found
+}
+
 /// One parameter as a signature shows it: the name its declaration bound,
 /// and the default exactly as the source wrote it.
 fn render_param(p: &ParamInfo) -> String {
