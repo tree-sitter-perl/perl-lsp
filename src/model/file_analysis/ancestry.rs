@@ -532,14 +532,22 @@ impl FileAnalysis {
     /// symbols packaged under `cls`, (b) local plugin-namespace entities
     /// bridged to `cls`, (c) cross-file: `cls`'s own module, cross-package
     /// typeglob installs, and plugin bridges from other files.
+    /// `admitted` is the WALK's fallback slot, not this pass's: a
+    /// declaration of the family the ask NAMES beats one the family merely
+    /// admits, and the ADR's contract is that the loser is held as the
+    /// fallback THE WALK returns only when nothing else does
+    /// (`docs/adr/member-kinds.md`). Keeping it per class ended the walk on
+    /// the first class with a wrong-family hit, so a parent's genuine
+    /// same-family declaration was never reached.
     fn method_resolution_on_class(
         &self,
         cls: &str,
         method_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
-        agrees: &dyn Fn(SymKind) -> bool,
+        want: MemberKind,
+        admitted: &mut Option<MethodResolution>,
     ) -> Option<MethodResolution> {
-        self.member_resolution_on_class_pass(cls, method_name, module_index, agrees)
+        self.member_resolution_on_class_pass(cls, method_name, module_index, want, admitted)
     }
 
     fn member_resolution_on_class_pass(
@@ -547,7 +555,8 @@ impl FileAnalysis {
         cls: &str,
         method_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
-        agrees: &dyn Fn(SymKind) -> bool,
+        want: MemberKind,
+        admitted: &mut Option<MethodResolution>,
     ) -> Option<MethodResolution> {
         // (a) Local symbols in this file packaged under `cls`. Methods AND
         // data members: cpp `obj->field` mints the same `MethodCall` ref as a
@@ -567,8 +576,12 @@ impl FileAnalysis {
             };
             // A re-export (`using Base::m;`) is API surface, not a def —
             // fall through so the walk reaches the origin ancestor.
-            if member_kind && agrees(sym.kind) && !sym.is_reexport() && self.symbol_in_class(sid, cls) {
-                return Some(MethodResolution::Local { class: cls.to_string(), sym_id: sid });
+            if member_kind && want.admits_decl(sym.kind) && !sym.is_reexport() && self.symbol_in_class(sid, cls) {
+                let hit = MethodResolution::Local { class: cls.to_string(), sym_id: sid };
+                if MemberKind::of_sym(sym.kind) == want {
+                    return Some(hit);
+                }
+                admitted.get_or_insert(hit);
             }
         }
         // (b) Local plugin-namespace entities bridged to `cls`.
@@ -577,6 +590,9 @@ impl FileAnalysis {
             for sym_id in &ns.entities {
                 let Some(sym) = self.symbols.get(sym_id.0 as usize) else { continue };
                 if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
+                // A synthesized entity is a callable; a value ask must not
+                // answer with one (the same family rule as the local arm).
+                if !want.admits_decl(sym.kind) { continue; }
                 if sym.name == method_name {
                     return Some(MethodResolution::Local { class: cls.to_string(), sym_id: *sym_id });
                 }
@@ -642,11 +658,11 @@ impl FileAnalysis {
                 } else {
                     cls.to_string()
                 };
-                let has_member = whole.symbols.iter().any(|s| {
+                let hit_kind = whole.symbols.iter().find(|s| {
                     s.name == method_name
                         && s.package.as_deref() == Some(cand_cls.as_str())
                         && !s.is_reexport()
-                        && agrees(s.kind)
+                        && want.admits_decl(s.kind)
                         && (matches!(s.kind, SymKind::Sub | SymKind::Method)
                             || (matches!(
                                 s.kind,
@@ -656,7 +672,8 @@ impl FileAnalysis {
                                 // `symbols_named`, which the evicted copy
                                 // answers empty.
                             ) && whole.symbol_is_class_content(s)))
-                });
+                }).map(|s| s.kind);
+                let has_member = hit_kind.is_some();
                 crate::util::ghost_stats::count(if has_member {
                     "mroc.candidate_matched"
                 } else {
@@ -679,8 +696,12 @@ impl FileAnalysis {
                         );
                     }
                 }
-                if has_member {
-                    return Some(MethodResolution::CrossFile { class: cand_cls, def_module: None, widened });
+                if let Some(kind) = hit_kind {
+                    let hit = MethodResolution::CrossFile { class: cand_cls, def_module: None, widened };
+                    if MemberKind::of_sym(kind) == want {
+                        return Some(hit);
+                    }
+                    admitted.get_or_insert(hit);
                 }
                 // A cross-file DBIC result class's column/relationship accessors
                 // are DEFERRED plugin emissions (`gated_emissions`) that the raw
@@ -690,6 +711,11 @@ impl FileAnalysis {
                 // `has_member` check above already sees them — no per-query
                 // enrichment hop here (that nested a full enrichment per hop and
                 // overflowed the stack on deep dep graphs). See `GatedEmission`.
+            }
+            // Both remaining arms install a SUB — a typeglob assignment and
+            // a plugin bridge — so a VALUE ask never answers from either.
+            if !want.admits_decl(SymKind::Sub) {
+                return None;
             }
             // Cross-package typeglob install: the method is attributed to `cls`
             // but lives in a differently-named module file (`*{'DateTime::'.
@@ -729,7 +755,7 @@ impl FileAnalysis {
         method_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<MethodResolution> {
-        self.resolve_member_in_ancestors(class_name, method_name, module_index, &|_| true)
+        self.resolve_member_in_ancestors(class_name, method_name, module_index, MemberKind::Callable)
     }
 
     /// Walk the inheritance chain to find a VALUE member — what a
@@ -742,9 +768,7 @@ impl FileAnalysis {
         field_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<MethodResolution> {
-        self.resolve_member_in_ancestors(class_name, field_name, module_index, &|k| {
-            MemberKind::of_sym(k) == MemberKind::Value
-        })
+        self.resolve_member_in_ancestors(class_name, field_name, module_index, MemberKind::Value)
     }
 
     /// Is every ancestor of `class`, transitively, declared somewhere we
@@ -820,25 +844,27 @@ impl FileAnalysis {
         want: MemberKind,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<MethodResolution> {
-        self.resolve_member_in_ancestors(class_name, member_name, module_index, &|k| {
-            want.admits_decl(k)
-        })
+        self.resolve_member_in_ancestors(class_name, member_name, module_index, want)
     }
 
-    /// The MRO walk both member walks share; `agrees` is the kind family
-    /// the asking ref admits.
+    /// The MRO walk both member walks share; `want` is the member family
+    /// the asking ref names.
     fn resolve_member_in_ancestors(
         &self,
         class_name: &str,
         method_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
-        agrees: &dyn Fn(SymKind) -> bool,
+        want: MemberKind,
     ) -> Option<MethodResolution> {
         let _t = crate::util::ghost_stats::ScopedNs::start("mroc.total");
         let mut result: Option<MethodResolution> = None;
         let mut iface_fallback: Option<MethodResolution> = None;
+        // The wrong-family fallback is the WALK's, beside the interface one:
+        // a `public $handler` on the cursor's class must not end the walk
+        // before a parent's `function handler()` answers a call.
+        let mut admitted: Option<MethodResolution> = None;
         self.for_each_ancestor_class(class_name, module_index, |cls| {
-            match self.method_resolution_on_class(cls, method_name, module_index, agrees) {
+            match self.method_resolution_on_class(cls, method_name, module_index, want, &mut admitted) {
                 // An INTERFACE hit is held as fallback, never the answer
                 // while a concrete definer exists: php's MRO interleaves
                 // `implements` (header) ahead of `use Trait` (body), so the
@@ -856,7 +882,9 @@ impl FileAnalysis {
                 None => std::ops::ControlFlow::Continue(()),
             }
         });
-        result.or(iface_fallback)
+        // A same-family declaration on an interface still states the family
+        // the ask named; a concrete class's other-family member does not.
+        result.or(iface_fallback).or(admitted)
     }
 
     /// Is the class that answered a method resolution an INTERFACE (php:
@@ -924,6 +952,7 @@ impl FileAnalysis {
         // the method.
         let mut result: Option<MethodResolution> = None;
         let mut iface_fallback: Option<MethodResolution> = None;
+        let mut admitted: Option<MethodResolution> = None;
         let graph = crate::model::graph::GraphView::new(self, module_index);
         graph.walk(
             crate::model::graph::Node::Class(enclosing.to_string()),
@@ -933,7 +962,13 @@ impl FileAnalysis {
                 let crate::model::graph::Node::Class(cls) = n else {
                     return crate::model::graph::WalkControl::Continue;
                 };
-                match self.method_resolution_on_class(cls, method_name, module_index, &|_| true) {
+                match self.method_resolution_on_class(
+                    cls,
+                    method_name,
+                    module_index,
+                    MemberKind::Callable,
+                    &mut admitted,
+                ) {
                     Some(r) => {
                         if self.hit_class_is_interface(cls, &r, module_index) {
                             iface_fallback.get_or_insert(r);
@@ -947,7 +982,7 @@ impl FileAnalysis {
                 }
             },
         );
-        result.or(iface_fallback)
+        result.or(iface_fallback).or(admitted)
     }
 
     /// Does `class` (or any ancestor we CAN reach) name a parent that
