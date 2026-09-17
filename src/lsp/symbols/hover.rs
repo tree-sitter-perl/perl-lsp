@@ -1,6 +1,7 @@
 //! Hover rendering for Perl and pack languages.
 
 use super::*;
+use crate::model::file_analysis::MemberKind;
 
 /// Hover for pack languages: a presentation of the CandidateSet's hover
 /// projection (`docs/adr/resolution-candidate-set.md` — hover presents the
@@ -39,10 +40,15 @@ pub fn pack_hover_markdown(
                     .member_site()
                     .and_then(|m| m.invocant_span)
                     .and_then(|sp| analysis.expr_type_at_span(sp, Some(midx)));
+                // The ref's family picks the rung: a value read never
+                // answers through a method of the same name.
                 let substituted = |raw: Option<InferredType>| -> Option<InferredType> {
-                    let sub = recv_ty
-                        .as_ref()
-                        .and_then(|t| analysis.member_value_type(t, field, Some(midx), None))?;
+                    let sub = recv_ty.as_ref().and_then(|t| match want {
+                        MemberKind::Value => analysis.field_value_type(t, field, Some(midx)),
+                        MemberKind::Callable => {
+                            analysis.member_value_type(t, field, Some(midx), None)
+                        }
+                    })?;
                     (raw.as_ref() != Some(&sub)).then_some(sub)
                 };
                 use crate::model::file_analysis::MethodResolution;
