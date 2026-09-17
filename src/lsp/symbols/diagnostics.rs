@@ -819,7 +819,15 @@ pub fn pack_symbol_diagnostics(
         let invocant = site.invocant;
         // only a call can be named by a string (`[$obj, 'name']`)
         let named_by_string = matches!(r.kind, RefKind::MethodCall { named_by_string: true, .. });
-        let name = r.unqualified_target_name(analysis.names());
+        // The method TOKEN the model spells: a `parent::` call is minted on
+        // the model's SUPER lane (`SUPER::m`), whose qualifier is the
+        // model's own spelling and not the language's namespace separator,
+        // so splitting on that separator left the qualifier on the name and
+        // every `parent::` call read as undefined.
+        let name = crate::model::conventions::MethodToken::parse(
+            r.unqualified_target_name(analysis.names()),
+        )
+        .name();
         // `$obj->$dyn()` — the member is named by a variable, and a sigil
         // is a variable only where the language declares one.
         if name.is_empty() || name.chars().next().is_some_and(|c| analysis.names().is_sigil(c)) {
