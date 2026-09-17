@@ -5076,10 +5076,32 @@ fn php_bundled_documents_each_load_alone() {
             "every bundled entry rule carries a positive condition"
         );
     }
+    let path_rails = crate::build::query_extract::path_rails_for(&pack);
+    let text_rails = crate::build::query_extract::text_rails_for(&pack);
     for src in pack.bundled_rail_docs {
         let doc: serde_json::Value =
             serde_json::from_str(src).expect("a bundled rail document parses");
         assert_eq!(doc["language"], "php", "a bundled rail document declares its language");
+        // every family a document declares reaches ITS loader: a family
+        // loaded by nothing is inert with nothing saying so, which is how
+        // `path_rails` stayed bundled-only.
+        let parsed: crate::build::query_extract::RailsDoc =
+            serde_json::from_str(src).expect("the rail document shape");
+        for r in &parsed.path_rails {
+            assert!(
+                path_rails.iter().any(|p| p.rail == r.rail && p.under == r.under),
+                "path rail '{}' under '{}' reaches the driver",
+                r.rail,
+                r.under
+            );
+        }
+        for r in &parsed.text_rails {
+            assert!(
+                text_rails.iter().any(|t| t.rail == r.rail && t.calls == r.calls),
+                "text rail '{}' reaches the scanner",
+                r.rail
+            );
+        }
     }
     // and the loaders serve what the documents declare
     assert!(
