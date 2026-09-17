@@ -1117,6 +1117,50 @@ fn php_callable_variable_call_does_not_take_its_arguments_type() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An Eloquent relation is ONE member declared in two spellings on one
+/// token — `cover()` the method, `->cover` the property Eloquent's `__get`
+/// serves. The extractor mints the pair as a relation
+/// (`Symbol::declared_with`), so a rename at the declaration rewrites the
+/// calls AND the value reads, and the outline lists the member once.
+#[cfg(feature = "php")]
+#[test]
+fn php_eloquent_relation_renames_both_of_its_spellings() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-eloq-pair-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("Book.php", "<?php\nnamespace App;\nclass Book\n{\n    public function cover()\n    {\n        return $this->hasOne(Cover::class);\n    }\n}\n");
+    w("Cover.php", "<?php\nnamespace App;\nclass Cover { public function url(): string { return \"u\"; } }\n");
+    w("Shelf.php", "<?php\nnamespace App;\nclass Shelf\n{\n    public function show(Book $b): array\n    {\n        return [$b->cover(), $b->cover];\n    }\n}\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    // one declaration token, one outline entry
+    let outline: serde_json::Value =
+        serde_json::from_str(&run(&["--outline", &dir.join("Book.php").to_string_lossy()])).unwrap();
+    let covers: Vec<&str> = outline
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["name"].as_str() == Some("cover"))
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(covers, vec!["Method"], "the outline lists the relation once: {outline}");
+    // and a rename at that token reaches both spellings
+    let edits: serde_json::Value =
+        serde_json::from_str(&run(&["--rename", root, "Book.php", "4", "20", "jacket"])).unwrap();
+    let shelf = &edits[dir.join("Shelf.php").to_string_lossy().to_string()];
+    let cols: Vec<u64> =
+        shelf.as_array().unwrap().iter().map(|e| e["col"].as_u64().unwrap()).collect();
+    assert_eq!(cols, vec![20, 33], "call and value read both rewritten: {edits}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
 
 /// A `'A\\F::cb'` string callable is a Callable
 /// member reference on `F` (references from the method reach it); `new
