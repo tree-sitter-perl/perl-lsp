@@ -1140,6 +1140,18 @@ pub fn pack_symbol_diagnostics(
             if analysis.variable_is_bound_via_bag(&r.target_name, r.span.start, idx) {
                 continue;
             }
+            // A bare argument of a callee this file does not declare is
+            // silence, never a guess either way: the callee's own bag says
+            // which positions alias, and php's own functions (`preg_match`'s
+            // `$matches`) have no bag here to say it.
+            if let Some(callee) = analysis.argument_callee(r) {
+                let declared = analysis.symbols_named(callee).iter().any(|&sid| {
+                    matches!(analysis.symbol(sid).kind, FaSymKind::Sub | FaSymKind::Method)
+                });
+                if !declared {
+                    continue;
+                }
+            }
             // `isset($x)` / `empty($x)` / `unset($x)`: the read IS the
             // existence question, the member lanes' probe silence
             if analysis.pack.probe_regions.iter().any(|p| p.contains(&r.span)) {
