@@ -108,6 +108,8 @@ struct RailDocLint {
     hints: Vec<String>,
     #[serde(default)]
     name_seps: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    names_are: std::collections::HashMap<String, String>,
 }
 
 /// The rail-declarations arm of `--plugin-check`: validates a

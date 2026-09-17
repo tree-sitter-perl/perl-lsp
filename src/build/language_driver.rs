@@ -1536,6 +1536,7 @@ fn remap_spans(
         rail_labels: _,
         rail_hints: _,
         rail_name_seps: _,
+        class_named_rails: _,
         annot_expr_spans: _,
         preamble_end: _,
         imports_bind_names: _,

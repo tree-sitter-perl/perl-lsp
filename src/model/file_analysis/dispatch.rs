@@ -90,8 +90,8 @@ pub enum HandlerOwner {
 }
 
 /// What a rail's names denote — the rail document's `names_are`
-/// declaration, carried as `PackFacts::class_named_rails` and read through
-/// `HandlerOwner::names_are`.
+/// declaration (`docs/adr/laravel-rails.md` §Identity), carried as
+/// `PackFacts::class_named_rails` and read through `HandlerOwner::names_are`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RailNames {
     /// The name is a string the framework matches verbatim (a route name,

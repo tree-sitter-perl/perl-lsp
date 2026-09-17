@@ -943,6 +943,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         out.rail_labels = conv.labels.clone();
         out.rail_hints = conv.hints.clone();
         out.rail_name_seps = conv.name_seps.clone();
+        out.class_named_rails = conv.class_named_rails.clone();
     }
     out.imports_bind_names = pack.imports_bind_names;
     out.members_are_package_bound = pack.members_are_package_bound;

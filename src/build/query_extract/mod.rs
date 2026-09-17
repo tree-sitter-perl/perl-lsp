@@ -162,7 +162,17 @@ pub struct RailsDoc {
     /// (`throttle:60,1` names `throttle`); the name and its span end there.
     #[serde(default)]
     pub name_seps: std::collections::HashMap<String, String>,
+    /// rail → what its names DENOTE ([`RAIL_NAMES_ARE_CLASS`]: class
+    /// identities, Laravel's event bus; a rail absent here names strings).
+    /// A constant of the overlay, declared once, so every file of the pack
+    /// answers the same question the same way.
+    #[serde(default)]
+    pub names_are: std::collections::HashMap<String, String>,
 }
+
+/// The `names_are` value that declares a rail's names to be class
+/// identities (`RailNames::Classes`); any other value names strings.
+pub const RAIL_NAMES_ARE_CLASS: &str = "class";
 
 /// The lane-facing rail conventions of a language, merged over its rail
 /// documents.
@@ -171,6 +181,9 @@ pub struct RailConventions {
     pub labels: Vec<(String, String)>,
     pub hints: Vec<String>,
     pub name_seps: Vec<(String, String)>,
+    /// The rails the documents declare class-keyed — baked onto every file
+    /// of the pack as `PackFacts::class_named_rails`.
+    pub class_named_rails: Vec<String>,
 }
 
 /// Every `<plugin-dir>/<name>/<file_name>` under the shared plugin search
@@ -282,8 +295,8 @@ pub fn text_rails_for(pack: &LangPack) -> std::sync::Arc<Vec<TextRail>> {
     arc
 }
 
-/// The rail conventions (lane labels, hint rails, name separators) in
-/// force for a language.
+/// The rail conventions (lane labels, hint rails, name separators, the
+/// class-keyed rails) in force for a language.
 pub fn rail_conventions_for(pack: &LangPack) -> std::sync::Arc<RailConventions> {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
@@ -298,10 +311,18 @@ pub fn rail_conventions_for(pack: &LangPack) -> std::sync::Arc<RailConventions> 
         out.labels.extend(doc.labels.iter().map(|(k, v)| (k.clone(), v.clone())));
         out.hints.extend(doc.hints.iter().cloned());
         out.name_seps.extend(doc.name_seps.iter().map(|(k, v)| (k.clone(), v.clone())));
+        out.class_named_rails.extend(
+            doc.names_are
+                .iter()
+                .filter(|(_, v)| v.as_str() == RAIL_NAMES_ARE_CLASS)
+                .map(|(rail, _)| rail.clone()),
+        );
     }
     out.labels.sort();
     out.hints.sort();
     out.name_seps.sort();
+    out.class_named_rails.sort();
+    out.class_named_rails.dedup();
     let arc = Arc::new(out);
     cache.lock().unwrap().insert(key, Arc::clone(&arc));
     arc

@@ -67,10 +67,13 @@ pub struct PackFacts {
     #[serde(default)]
     pub rail_hints: Vec<String>,
     /// Rails whose names are CLASS identities (the rail document's
-    /// `names_are: class` — Laravel's event bus). Per-overlay data the
-    /// file carries, like `rail_labels`: which overlays load is a property
-    /// of the workspace, not of the language, so it is not a language
-    /// convention reached by id. Read through `HandlerOwner::names_are`.
+    /// `names_are: class` — Laravel's event bus). Per-overlay data the file
+    /// carries, like `rail_labels`: which overlays load is a property of the
+    /// workspace, not of the language, so it is not a language convention
+    /// reached by id. Baked from the DECLARATION for every file of the pack,
+    /// so the span-free minting paths (`scan_text_rails`, `adopt_path_rails`)
+    /// carry it by construction and a rail cannot answer differently in two
+    /// files. Read through `HandlerOwner::names_are`.
     #[serde(default)]
     pub class_named_rails: Vec<String>,
     /// The last row of the file preamble (open tag, `declare` rows).

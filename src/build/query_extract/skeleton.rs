@@ -190,6 +190,8 @@ pub struct SkeletonAnalysis {
     pub rail_hints: Vec<String>,
     /// rail → the parameter separator a use's name ends at (`rails.json`).
     pub rail_name_seps: Vec<(String, String)>,
+    /// The rails the pack's documents declare class-keyed (`names_are`).
+    pub class_named_rails: Vec<String>,
     /// Expression spans whose value an overlay declared (`@expr.annot`) —
     /// the callee-return edge is not minted for them.
     pub annot_expr_spans: Vec<crate::model::file_analysis::Span>,
@@ -248,9 +250,8 @@ pub struct SkeletonAnalysis {
     pub rails: Vec<(crate::model::file_analysis::Span, String)>,
     /// Class-keyed rails (`@def.handler.class.<rail>` / `.by.<rail>`,
     /// `@ref.dispatch.class.<rail>`): token span → rail name. The owner is
-    /// the same `HandlerOwner::Rail`; that the rail's names are classes is
-    /// the rail document's declaration, carried as
-    /// `PackFacts::class_named_rails` (`HandlerOwner::names_are`).
+    /// the same `HandlerOwner::Rail`; what the rail's names DENOTE is the
+    /// document's own declaration (`docs/adr/laravel-rails.md` §Identity).
     pub class_rails: Vec<(crate::model::file_analysis::Span, String)>,
     /// Array-key DEF candidates (`@def.handler.key` on a string key, its
     /// element on `@key.elem`): promoted to rail names by the driver when
@@ -537,12 +538,6 @@ impl SkeletonAnalysis {
             debug_assert!(rail.is_some(), "a handler token names its rail");
             rail.map(|(_, rail)| crate::model::file_analysis::HandlerOwner::Rail(rail.clone()))
         };
-        let mut class_named_rails: Vec<String> = Vec::new();
-        for (_, rail) in &class_rails {
-            if !class_named_rails.contains(rail) {
-                class_named_rails.push(rail.clone());
-            }
-        }
         use crate::model::file_analysis::{
             FileAnalysis, FileAnalysisParts, SymKind, Symbol, SymbolDetail, SymbolId,
         };
@@ -1649,7 +1644,7 @@ impl SkeletonAnalysis {
             control_regions: std::mem::take(&mut self.control_regions),
             param_regions: std::mem::take(&mut self.param_regions),
             probe_regions: std::mem::take(&mut self.probe_regions),
-            class_named_rails,
+            class_named_rails: std::mem::take(&mut self.class_named_rails),
             ..Default::default()
         };
         // Folding follows the scopes the skeleton minted: a class body, a
