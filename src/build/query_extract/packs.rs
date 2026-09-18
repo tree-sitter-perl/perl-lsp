@@ -92,13 +92,6 @@ pub struct LangPack {
     /// `language_driver::emit_return_fuel` — asked of the pack, never a
     /// language-name branch.
     pub implicit_this_members: bool,
-    /// Symbols the runtime enters from OUTSIDE the source graph (C/C++
-    /// `main`: reached through the ABI, never a source call site) — a
-    /// zero-fan-in callable with one of these names is alive by contract.
-    /// Empty for languages whose entry is the file itself (Perl, Python
-    /// scripts). Consumed by the heatmap's reachability guard — asked of
-    /// the pack, never a name/language branch (rule #10).
-    pub entrypoint_symbols: &'static [&'static str],
     /// Container membership (class/struct/union/namespace) is delimited by
     /// literal `{`/`}` in the source, so a member that lost its enclosing
     /// container to a tree-sitter misparse can be re-anchored by matching the

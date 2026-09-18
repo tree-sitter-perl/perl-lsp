@@ -935,7 +935,6 @@ fn driver_caps_axes_are_reviewed_exhaustively() {
             context_gather,
             pack_invalidation,
             cross_file_words,
-            entrypoint_symbols,
         } = d.caps();
         // The hub lanes (enrichment, native cursor/hover/rebuild verbs) and
         // the pack lanes (invalidator, gather, bare words) are disjoint
@@ -948,8 +947,7 @@ fn driver_caps_axes_are_reviewed_exhaustively() {
             || synchronous_rebuild;
         let pack_family = pack_invalidation
             || context_gather
-            || cross_file_words
-            || !entrypoint_symbols.is_empty();
+            || cross_file_words;
         assert!(
             !(hub_family && pack_family),
             "driver {} declares capabilities from both serving architectures",

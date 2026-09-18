@@ -65,9 +65,6 @@ pub struct DriverCaps {
     /// closure) — enables the raw-word goto-def/hover fallback lane outside
     /// the CandidateSet.
     pub cross_file_words: bool,
-    /// See `LangPack::entrypoint_symbols` — symbols the runtime enters
-    /// through the ABI, alive at zero fan-in by contract.
-    pub entrypoint_symbols: &'static [&'static str],
 }
 
 /// Everything the server needs to host one language: parse + analyze a
@@ -400,7 +397,6 @@ impl LanguageDriver for PackDriver {
             context_gather: self.gather_macros.is_some() || self.include_closure.is_some(),
             pack_invalidation: true,
             cross_file_words: true,
-            entrypoint_symbols: pack.entrypoint_symbols,
             ..Default::default()
         }
     }
