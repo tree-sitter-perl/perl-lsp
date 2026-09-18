@@ -40,7 +40,6 @@ pub fn python_pack() -> LangPack {
         bundled_builtin_types: &[],
         trigger_chars: &["."],
         receiver_names: &["self", "cls"],
-        nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
         recv_peel: PeelSpec {
             wrappers: &[("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer)],
             annot_kinds: &[],

@@ -341,6 +341,32 @@
 ; — the universal `(function_definition) @scope.sub` mints it.
 (function_definition type: (_) @rettype) @ool.def
 (function_definition !type) @ool.def
+; the declarator shapes, captured as themselves — the walks own the DEPTH
+; (unbounded: `Foo**& Class::m()`, `char* const& b`), the document owns the
+; kinds. @ool.wrap is a wrapper the out-of-line unwrap descends through to the
+; @ool.declarator it stops at, whose @ool.qualifier chain names the owner;
+; @deref.* is one level of the declarator peel, @deref.annot its cv-qualifiers,
+; and @deref.leaf.<kind> the chain's leaf — the suffix names the def the leaf
+; mints, so a member outlines as a field and a local as a local.
+(pointer_declarator) @ool.wrap @deref.pointer
+(reference_declarator) @ool.wrap @deref.ref
+(parenthesized_declarator) @ool.wrap
+(function_declarator) @ool.declarator
+(qualified_identifier) @ool.qualifier
+(pointer_declarator (type_qualifier) @deref.annot)
+(pointer_declarator (identifier) @deref.leaf.local)
+(pointer_declarator (field_identifier) @deref.leaf.field)
+(reference_declarator (identifier) @deref.leaf.local)
+(reference_declarator (field_identifier) @deref.leaf.field)
+; two more levels the peel descends: @deref.callable says the declared name
+; holds a value that is INVOKED (a function-pointer declarator), and
+; @deref.paren is the grouping level that denotes nothing of its own.
+(function_declarator) @deref.callable
+(parenthesized_declarator) @deref.paren
+; a templated owner (`Buf<T>::grow`) owns by its BASE class name: the name
+; field IS the class, so every qualifier segment peels through this capture
+; instead of a string split on `<`.
+(qualified_identifier scope: (template_type name: (_) @qualifier.name))
 (function_definition
   declarator: (pointer_declarator
     declarator: (function_declarator
@@ -612,6 +638,15 @@
 (field_declaration
   type: (_) @type.annot
   declarator: [(pointer_declarator) (reference_declarator)] @nested.target)
+; a function-POINTER data member (`int (*read)(char *);`) — a stored slot
+; whose value is called. The parenthesized declarator is what distinguishes
+; it from a method prototype (`int read();`), whose declarator names the
+; member directly; the chain's @deref.callable level is what makes
+; `ops->read(buf)` resolve to the slot.
+(field_declaration
+  type: (_) @type.annot
+  declarator: (function_declarator
+    declarator: (parenthesized_declarator)) @nested.target)
 
 ; ---- C goto labels: `done:` is a nav target, `goto done;` jumps to it.
 ; The def is an unpackaged Variable symbol (outline-hidden, like a local);
