@@ -293,6 +293,16 @@ perl-lsp --plugin-check my-helpers.rhai
 
 Add `--format json` for CI use.
 
+The same verb takes a query document (`queries/php/skeleton.scm`, a
+plugin-dir `perl.scm`): the file stem or its language directory names the
+language, and the document is compiled ALONE against that grammar — the
+loader's own isolation gate, so a failure here is exactly what makes the
+loader drop it. It also names the captures outside the language's served
+vocabulary, which mint nothing. A language whose native builder owns its
+documents (Perl) declares no pack and therefore no vocabulary to compare
+against: the compile gate and the payload findings still run, and the
+vocabulary line says it was skipped.
+
 ### `--plugin-run <file.rhai> --on <fixture.pl>`
 
 Apply your plugin (and **only** your plugin) to one Perl file, dump the
