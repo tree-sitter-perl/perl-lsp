@@ -47,7 +47,6 @@ pub fn r_pack() -> LangPack {
         },
         cmd_effects: |_| vec![],
         narrow_type: |_| None,
-        rebind_method: |_| false,
         implicit_this_members: false,
         include_path_tokens: false,
         preprocessor_macros: false,

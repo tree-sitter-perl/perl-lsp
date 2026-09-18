@@ -791,6 +791,17 @@
   left: (identifier) @flow.target
   right: (_) @flow.source) @flow.assign
 
+; `x.clear()` / `x.reset()` — a rebinding method call puts a moved-from object
+; back into a known state, so the moved-from window (and any narrowing) ends at
+; the receiver, sparing the reset's own read. Which methods rebind is the
+; pattern's own `#any-of?`; the receiver is captured as the rebind itself, so
+; the effect needs no second vocabulary.
+(call_expression
+  function: (field_expression
+    argument: (identifier) @flow.rebind
+    field: (field_identifier) @move.rebind)
+  (#any-of? @move.rebind "clear" "reset" "assign" "emplace" "swap"))
+
 ; `std::move(x)` leaves x in a moved-from (valid-but-unspecified) state: a
 ; subsequent READ of x before it is reassigned is a use-after-move bug.
 ; Capture the moved var + the whole call span; the minter checks scope/name

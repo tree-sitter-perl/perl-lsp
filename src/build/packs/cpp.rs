@@ -81,13 +81,6 @@ pub fn cpp_pack() -> LangPack {
                 _ => None,
             }
         },
-        // Rebinding methods: a moved-from object is put back into a known state
-        // by these std container/optional/smart-ptr resets, so a use after one
-        // is NOT a use-after-move. (An ordinary `x.use()` is not here, so the
-        // canonical bug still flags.)
-        rebind_method: |m| {
-            matches!(m, "clear" | "reset" | "assign" | "emplace" | "swap")
-        },
         // C/C++ methods read members with an implicit `this->`.
         implicit_this_members: true,
         include_path_tokens: true,

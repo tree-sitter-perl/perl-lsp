@@ -142,12 +142,6 @@ pub struct LangPack {
     /// structure out — which guards narrow is the document's `#eq?`.
     /// `None` = this spelling refines nothing.
     pub narrow_type: fn(type_text: &str) -> Option<InferredType>,
-    /// Does calling `method` on a variable REBIND it — putting a moved-from
-    /// object back into a known state (`clear`/`reset`/`assign`/…)? Used to end
-    /// a moved-from region (and any narrowing) at the reset call, so a use after
-    /// it is clean. Pack-owned language vocab (like `op_map`): core asks the
-    /// value, never enumerates names itself.
-    pub rebind_method: fn(method: &str) -> bool,
     /// Can a bare, receiver-less identifier resolve through an implicit
     /// `this->` — both a field read (`return inner_;` = `this->inner_`) AND a
     /// sibling method call (`foo()` = `this->foo()`)? True for C/C++ (the
@@ -361,7 +355,6 @@ impl LangPack {
             import_call: _,
             cmd_effects: _,
             narrow_type: _,
-            rebind_method: _,
             implicit_this_members: _,
             include_path_tokens: _,
             preprocessor_macros: _,

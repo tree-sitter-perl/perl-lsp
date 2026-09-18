@@ -144,7 +144,6 @@ pub fn php_pack() -> LangPack {
         narrow_type: |ty| {
             php_annot_type(ty).filter(|t| matches!(t, InferredType::ClassName(_)))
         },
-        rebind_method: |_| false,
         // `$this->` is mandatory — no receiver elision (unlike C++).
         implicit_this_members: false,
         include_path_tokens: false,

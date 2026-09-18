@@ -53,7 +53,6 @@ pub fn python_pack() -> LangPack {
         cmd_effects: |_| vec![],
         // A guard's type token is a class name verbatim (`isinstance(x, Foo)`).
         narrow_type: |ty| Some(InferredType::ClassName(ty.to_string())),
-        rebind_method: |_| false,
         implicit_this_members: false,
         include_path_tokens: false,
         preprocessor_macros: false,
