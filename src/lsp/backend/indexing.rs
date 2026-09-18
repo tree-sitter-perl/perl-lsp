@@ -489,12 +489,9 @@ impl Backend {
     /// language: everything it will ever hold is in it. Saying so is what
     /// keeps the absence-reporting lanes (undefined type, undefined rail
     /// name) answering instead of waiting forever on a pass that will never
-    /// run. The pack sub-index answers for its own language, so it is marked
-    /// alongside the hub.
+    /// run. The hub is the only store to mark: a pack sub-index is attached
+    /// by the sweep that also marks it, so on these paths there is none.
     fn settle_unindexable(module_index: &ModuleIndex, language: &str) {
-        if let Some(pack) = module_index.pack_index(language) {
-            pack.mark_language_indexed(language);
-        }
         module_index.mark_language_indexed(language);
     }
 
