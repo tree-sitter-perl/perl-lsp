@@ -51,8 +51,19 @@ impl<'a> UseMap<'a> {
             Some((h, r)) => (h, Some(r)),
             None => (written, None),
         };
-        let base = self
-            .aliases
+        let base = self.resolve_head(head);
+        match rest {
+            Some(r) => join(&base, r, sep),
+            None => base,
+        }
+    }
+
+    /// What the HEAD segment of a spelling names: an alias to what it
+    /// aliases, an imported leaf to its row, anything else into the file's
+    /// own namespace (a file with no namespace resolves it globally).
+    fn resolve_head(&self, head: &str) -> String {
+        let sep = self.sep;
+        self.aliases
             .iter()
             .find(|(alias, _, _)| alias == head)
             .map(|(_, ns, leaf)| join(ns, leaf, sep))
@@ -75,17 +86,38 @@ impl<'a> UseMap<'a> {
             .unwrap_or_else(|| match self.own_namespace {
                 Some(own) => join(own, head, sep),
                 None => head.to_string(),
-            });
-        match rest {
-            Some(r) => join(&base, r, sep),
-            None => base,
-        }
+            })
     }
 
     /// `resolve`, split into (namespace, leaf) — the shape the visibility
-    /// pins are keyed by. The global namespace is the empty string.
-    pub fn resolve_split(&self, written: &str) -> (String, String) {
-        let fqn = self.resolve(written);
+    /// pins are keyed by — for a spelling whose PARTS the producer kept
+    /// (`QualifiedSpelling`), so no consumer renders a prefix for this to
+    /// take apart again (rule #13). The global namespace is the empty
+    /// string.
+    pub fn resolve_split_parts(&self, q: &super::QualifiedSpelling) -> (String, String) {
+        // An absolute spelling is its own identity: its segments ARE the
+        // namespace, whatever this file imports.
+        if q.absolute {
+            return (q.segments.join(self.sep), q.leaf.clone());
+        }
+        // Otherwise the head segment resolves and the rest hangs off it —
+        // `resolve`'s rule, reached without a written spelling.
+        let (head, tail) = match q.segments.split_first() {
+            Some((h, t)) => (h.as_str(), t),
+            None => (q.leaf.as_str(), &[][..]),
+        };
+        let mut fqn = self.resolve_head(head);
+        for seg in tail {
+            fqn = join(&fqn, seg, self.sep);
+        }
+        if !q.segments.is_empty() {
+            fqn = join(&fqn, &q.leaf, self.sep);
+        }
+        self.split_fqn(fqn)
+    }
+
+    /// An identity as (namespace, leaf); the global namespace is empty.
+    fn split_fqn(&self, fqn: String) -> (String, String) {
         match fqn.rsplit_once(self.sep) {
             Some((ns, leaf)) => (ns.to_string(), leaf.to_string()),
             None => (String::new(), fqn),
