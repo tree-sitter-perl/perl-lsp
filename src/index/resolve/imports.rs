@@ -226,7 +226,11 @@ pub(super) fn dispatch_handler_locations(
                         access: AccessKind::Declaration,
                         // a class-keyed rail's handler token spells the
                         // class, never the rail name
-                        rewritable: names != crate::model::file_analysis::RailNames::Classes,
+                        rewritable: if names == crate::model::file_analysis::RailNames::Classes {
+                            Rewritable::No(NotRewritable::RailEmission)
+                        } else {
+                            Rewritable::Yes
+                        },
                         label: None,
                     };
                     if !locs.iter().any(|l| l.key == loc.key && l.span == loc.span) {

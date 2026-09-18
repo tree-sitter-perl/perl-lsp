@@ -309,7 +309,7 @@ pub(super) fn pack_symbol_def_location(
                 key: origin_key.clone(),
                 span: sym.selection_span,
                 access: AccessKind::Declaration,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None,
             },
         ));
@@ -335,7 +335,7 @@ pub(super) fn pack_symbol_def_location(
                     key: FileKey::Path(cached.path.clone()),
                     span: sym.selection_span,
                     access: AccessKind::Declaration,
-                    rewritable: true,
+                    rewritable: Rewritable::Yes,
                     label: None,
                 },
             ));
@@ -805,7 +805,7 @@ pub(super) fn collect_package_var(
                 key: key.clone(),
                 span: tail(sym.selection_span),
                 access: AccessKind::Declaration,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None
             });
         }
@@ -822,7 +822,7 @@ pub(super) fn collect_package_var(
                     key: key.clone(),
                     span: tail(r.span),
                     access: r.access,
-                    rewritable: true,
+                    rewritable: Rewritable::Yes,
                     label: None
                 });
             }
@@ -832,7 +832,7 @@ pub(super) fn collect_package_var(
                 key: key.clone(),
                 span: tail(r.span),
                 access: r.access,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None
             });
         }
@@ -1016,9 +1016,14 @@ pub(super) fn collect_from_analysis(
     // Whether this target's spans hold its own name at all is the target's
     // policy (`sites_are_rewritable`); the fold is per-site.
     let sites_rewritable = target.sites_are_rewritable();
-    let rewritable_at = |span: Span| {
-        sites_rewritable
-            && !(foldable && span_is_folded_name(analysis, span, folds_through_calls, &target.name))
+    let rewritable_at = |span: Span| -> Rewritable {
+        if !sites_rewritable {
+            return Rewritable::No(NotRewritable::RailEmission);
+        }
+        if foldable && span_is_folded_name(analysis, span, folds_through_calls, &target.name) {
+            return Rewritable::No(NotRewritable::ConstFolded);
+        }
+        Rewritable::Yes
     };
 
     // Include declaration spans when this file defines the target. Name
@@ -1398,7 +1403,11 @@ pub(super) fn collect_from_analysis(
                 key: key.clone(),
                 span,
                 access: r.access,
-                rewritable: !alias_matched && rewritable_at(span),
+                rewritable: if alias_matched {
+                    Rewritable::No(NotRewritable::MacroDelegated)
+                } else {
+                    rewritable_at(span)
+                },
                 label: None
             });
             // A call folded from a variable (`my $m = 'process'; $self->$m()`)

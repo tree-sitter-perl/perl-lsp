@@ -4328,7 +4328,7 @@ remove_action('init', 'wp_cron');
     let hook_sites: Vec<_> = locs.iter().filter(|l| l.span.start.row >= 2).collect();
     assert_eq!(hook_sites.len(), 3, "all three registration strings are refs: {locs:?}");
     assert!(
-        hook_sites.iter().all(|l| l.rewritable),
+        hook_sites.iter().all(|l| l.is_rewritable()),
         "rename rewrites the string content: {hook_sites:?}"
     );
     // the span is the content INSIDE the quotes: `add_action('init', 'wp_cron');`
@@ -4373,7 +4373,7 @@ class Plugin {
     let hook_sites: Vec<_> =
         locs.iter().filter(|l| l.span.start.row == 3 || l.span.start.row == 4).collect();
     assert_eq!(hook_sites.len(), 2, "both array-callback strings are refs: {locs:?}");
-    assert!(hook_sites.iter().all(|l| l.rewritable), "rename reaches them: {hook_sites:?}");
+    assert!(hook_sites.iter().all(|l| l.is_rewritable()), "rename reaches them: {hook_sites:?}");
 }
 
 #[test]
@@ -4557,7 +4557,7 @@ do_action('shutdown');
     assert!(rows.contains(&2) && rows.contains(&3), "both registrations: {locs:?}");
     assert!(rows.contains(&4), "the firing site: {locs:?}");
     assert!(!rows.contains(&5), "'shutdown' is a different hook: {locs:?}");
-    assert!(locs.iter().all(|l| l.rewritable), "rename rewrites inside quotes: {locs:?}");
+    assert!(locs.iter().all(|l| l.is_rewritable()), "rename rewrites inside quotes: {locs:?}");
     // …and the other direction: a cursor on a REGISTRATION string resolves
     // to the same target, so "from either side" is pinned, not assumed.
     let from_reg = crate::index::resolve::resolve_symbol(
@@ -4865,7 +4865,7 @@ listen_on('ev', array(UserController::class, 'index'));
     );
     let sites: Vec<_> = locs.iter().filter(|l| l.span.start.row >= 4).collect();
     assert_eq!(sites.len(), 2, "both callable-array strings are refs: {locs:?}");
-    assert!(sites.iter().all(|l| l.rewritable), "rename rewrites in-quotes: {sites:?}");
+    assert!(sites.iter().all(|l| l.is_rewritable()), "rename rewrites in-quotes: {sites:?}");
 }
 
 #[test]
@@ -5488,7 +5488,7 @@ do_action('home');
     let mut rows: Vec<usize> = locs.iter().map(|l| l.span.start.row).collect();
     rows.sort();
     assert_eq!(rows, vec![2, 4, 5], "declaration + both uses, never the hook: {locs:?}");
-    assert!(locs.iter().all(|l| l.rewritable), "rename rewrites inside quotes: {locs:?}");
+    assert!(locs.iter().all(|l| l.is_rewritable()), "rename rewrites inside quotes: {locs:?}");
 }
 
 /// Middleware aliases, abilities and container bindings are string rails:
@@ -5659,7 +5659,7 @@ function spaced() { Liked::dispatch( ); }
     // Row 7 is the argument-less form spelled with a space: the empty
     // argument list is a fact of the TREE, never of the source text.
     assert_eq!(rows, vec![2, 3, 5, 6, 7], "registrations + every emission: {locs:?}");
-    assert!(locs.iter().all(|l| !l.rewritable), "never rewritable: {locs:?}");
+    assert!(locs.iter().all(|l| !l.is_rewritable()), "never rewritable: {locs:?}");
 }
 
 /// A row says what it binds through its capture suffix, and an unsuffixed
