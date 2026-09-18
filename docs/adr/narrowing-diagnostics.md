@@ -122,8 +122,9 @@ lowers them to `InferredType::Optional`/`Undef`. The C/C++ path is
 `query_extract` (skeleton IR), which never runs `build()` and so mints
 none of the `deref_receiver_sites` / `guard_sites` / `arrow_deref_sites`
 these seams read. Cross-language narrowing *facts* do exist on the pack
-side — the `narrow_guard` pack hook already refines a receiver inside
-`if (dynamic_cast<Derived*>(b))` / `std::optional` engagement blocks
+side — the narrowing patterns and the `narrow_type` pack hook already
+refine a receiver inside `if (dynamic_cast<Derived*>(b))` /
+`std::optional` engagement blocks
 (`cpp_dynamic_cast_guard_narrows`) — but that is the hover/goto **type**
 tier. The **diagnostics** tier on top of it does not exist: nothing pairs
 a cpp deref with a proven-`nullptr` / disengaged-`optional` receiver, and

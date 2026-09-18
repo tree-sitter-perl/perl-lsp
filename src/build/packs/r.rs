@@ -1,6 +1,6 @@
 //! R's pack.
 
-use crate::build::query_extract::{LangPack, OutOfLineSpec, PeelSpec};
+use crate::build::query_extract::{LangPack, PeelSpec};
 use crate::model::file_analysis::{NameSpellings, PackSpellings};
 
 /// R writes and displays nothing of its own: the engine's type tags are
@@ -40,15 +40,10 @@ pub fn r_pack() -> LangPack {
         // resolves into the installed-library tree (a real install
         // would consult .libPaths() — not modeled here).
         module_paths: |m| vec![m.to_string()],
-        shape_ctor: |callee| matches!(callee, "list" | "data.frame" | "tibble"),
-        import_call: |callee, arg| match callee {
-            "library" | "require" | "source" => Some(arg.to_string()),
-            _ => None,
-        },
-        cmd_effects: |_| vec![],
-        narrow_guard: |_, _| None,
-        narrow_assertions: &[],
-        rebind_method: |_| false,
+        // Whichever call imports, R names the module in the ARGUMENT: a
+        // sourced path verbatim, a library name into the installed tree.
+        import_module: |_, arg| Some(arg.to_string()),
+        narrow_type: |_| None,
         implicit_this_members: false,
         include_path_tokens: false,
         preprocessor_macros: false,
@@ -70,18 +65,15 @@ pub fn r_pack() -> LangPack {
         enum_members: &[],
         trigger_chars: &["$", "@", ":"],
         receiver_names: &[],
-        nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
         recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
         op_map: &[],
         simple_var_kinds: &[],
         dynamic_arg_markers: &[],
         dynamic_var_markers: &[],
-        qualifier_peel: &[],
         member_kinds: &[],
         skip_kinds: &[],
         call_kinds: &[],
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
-        oolfn: OutOfLineSpec::OFF,
     }
 }

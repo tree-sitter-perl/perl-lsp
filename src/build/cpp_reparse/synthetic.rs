@@ -342,6 +342,15 @@ fn synth_base(
     let synth = format!("{prefix}{} }};", field_block_inner(&site.body));
     let synth_tree = parser.parse(&synth, None)?;
     let sbytes = synth.as_bytes();
+    // Pointer-ness through the SAME document the plain-field query lane reads:
+    // its `@deref` captures over this tree, peeled by the one walk. A shape the
+    // peel can't model (a function-pointer field) degrades to no stack, exactly
+    // as the query lane does — parity either way.
+    let derefs = crate::build::query_extract::DerefCaps::of_tree(
+        &synth_tree,
+        sbytes,
+        &crate::build::packs::cpp_pack(),
+    );
     let mut fields: Vec<SynMember> = Vec::new();
     for_each_field_declaration(synth_tree.root_node(), &mut |fd| {
         let Some(name_node) = declarator_field_name(fd, sbytes) else { return };
@@ -351,12 +360,9 @@ fn synth_base(
         if name.is_empty() || type_text.is_empty() {
             return;
         }
-        // Pointer-ness via the SAME peel the plain-field query lane runs; a
-        // shape peel can't model (function-pointer field) degrades to no stack,
-        // exactly as the query lane does — parity either way.
         let deref_stack = fd
             .child_by_field_name("declarator")
-            .and_then(|d| crate::build::query_extract::peel(d, &crate::build::packs::cpp::C_FIELD_DECL_PEEL, sbytes))
+            .and_then(|d| derefs.peel(d, sbytes))
             .map(|(_, stack, _)| stack)
             .unwrap_or_default();
         // synth byte → body byte (drop the prefix) → original Point.

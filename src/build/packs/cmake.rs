@@ -1,6 +1,6 @@
 //! CMake's pack — the command-dispatched language.
 
-use crate::build::query_extract::{CmdEffect, LangPack, OutOfLineSpec, PeelSpec};
+use crate::build::query_extract::{LangPack, PeelSpec};
 use crate::model::file_analysis::{NameSpellings, PackSpellings};
 
 /// CMake writes and displays nothing of its own: the engine's type tags are
@@ -12,7 +12,6 @@ const SPELLINGS: PackSpellings = PackSpellings {
 };
 
 // Live only under `feature = "cmake"` (or the pack tests); see `python_pack`.
-// Sole constructor of the `CmdEffect` variants.
 #[allow(dead_code)]
 pub fn cmake_pack() -> LangPack {
     LangPack {
@@ -44,25 +43,8 @@ pub fn cmake_pack() -> LangPack {
                 vec![format!("{m}/CMakeLists.txt"), format!("{m}.cmake")]
             }
         },
-        shape_ctor: |_| false,
-        import_call: |_, _| None,
-        cmd_effects: |cmd| match cmd.to_ascii_lowercase().as_str() {
-            "set" | "option" => vec![CmdEffect::Def { kind: "var", name_arg: 0 }],
-            "add_library" | "add_executable" | "add_custom_target" => {
-                // Targets. SymKind::Target is the real future; "sub"
-                // rides the full rename/refs machinery today.
-                vec![CmdEffect::Def { kind: "sub", name_arg: 0 }]
-            }
-            "target_link_libraries" | "target_include_directories"
-            | "target_compile_definitions" | "target_sources" => vec![
-                CmdEffect::RefArgsFrom { from: 0 },
-            ],
-            "include" | "add_subdirectory" => vec![CmdEffect::Import { arg: 0 }],
-            _ => vec![],
-        },
-        narrow_guard: |_, _| None,
-        narrow_assertions: &[],
-        rebind_method: |_| false,
+        import_module: |_, _| None,
+        narrow_type: |_| None,
         implicit_this_members: false,
         include_path_tokens: false,
         preprocessor_macros: false,
@@ -84,18 +66,15 @@ pub fn cmake_pack() -> LangPack {
         enum_members: &[],
         trigger_chars: &["{", "("],
         receiver_names: &[],
-        nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
         recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
         op_map: &[],
         simple_var_kinds: &[],
         dynamic_arg_markers: &[],
         dynamic_var_markers: &[],
-        qualifier_peel: &[],
         member_kinds: &[],
         skip_kinds: &[],
         call_kinds: &[],
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
-        oolfn: OutOfLineSpec::OFF,
     }
 }

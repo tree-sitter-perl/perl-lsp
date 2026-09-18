@@ -24,7 +24,7 @@ struct Event {
 /// (returns its def capture); an empty one accepts ANY leaf and mints nothing
 /// (the receiver peel — the leaf is an invocant). Outermost level first
 /// (left-to-right display order, `Box*&` → `[Pointer, Reference]`). Depth-
-/// capped. The ONE peel: `nested_peel` and `recv_peel` are both this.
+/// capped.
 pub(crate) fn peel<'a>(
     mut node: tree_sitter::Node<'a>,
     spec: &PeelSpec,
@@ -65,6 +65,170 @@ pub(crate) fn peel<'a>(
         } else {
             return None;
         }
+    }
+    None
+}
+
+/// What the document says about one declarator node: a level of the peel, a
+/// per-level cv-qualifier, or the chain's leaf (whose capture suffix names the
+/// def the synthetic leaf event mints — `@deref.leaf.field` → `def.field`).
+#[derive(Clone)]
+enum DerefCap {
+    Step(crate::model::file_analysis::DerefKind),
+    Annot,
+    Leaf(String),
+}
+
+/// The `@deref.*` captures of one tree, by node byte range — everything the
+/// declarator peel needs to know about a language's declarators.
+///
+/// The extraction pass fills it as it flattens matches; a consumer with a tree
+/// the extractor never saw (a reparsed macro body) fills it with
+/// [`DerefCaps::of_tree`]. Both then peel through the SAME walk, so a pointer
+/// field's `*`s are extracted once however the field was written.
+#[derive(Default)]
+pub struct DerefCaps(std::collections::HashMap<(usize, usize), DerefCap>);
+
+impl DerefCaps {
+    /// Record `node` under the capture that named it, ignoring every capture
+    /// outside the `@deref` family. Returns whether it was one.
+    fn record(&mut self, cap: &str, node: tree_sitter::Node) -> bool {
+        use crate::model::file_analysis::DerefKind;
+        let Some(rest) = cap.strip_prefix("deref.") else { return false };
+        let what = match rest {
+            "pointer" => DerefCap::Step(DerefKind::Pointer),
+            "ref" => DerefCap::Step(DerefKind::Reference),
+            "annot" => DerefCap::Annot,
+            _ => match rest.strip_prefix("leaf.") {
+                Some(kind) => DerefCap::Leaf(format!("def.{kind}")),
+                None => return false,
+            },
+        };
+        self.0.insert((node.start_byte(), node.end_byte()), what);
+        true
+    }
+
+    /// Every `@deref.*` capture in `tree`, for a caller running the pack's
+    /// query itself.
+    pub fn of_tree(tree: &Tree, src: &[u8], pack: &LangPack) -> DerefCaps {
+        let language = tree.language();
+        let mut out = DerefCaps::default();
+        let Ok(query) = cached_query(&language, effective_query_source(&language, pack)) else {
+            return out;
+        };
+        let names = query.capture_names();
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(query, tree.root_node(), src);
+        while let Some(m) = matches.next() {
+            for c in m.captures {
+                out.record(names[c.index as usize], c.node);
+            }
+        }
+        out
+    }
+
+    /// Flatten a declarator chain — the recursion tree-sitter's fixed-depth
+    /// queries cannot express — to its leaf, recording a `DerefStep` per level.
+    /// Outermost level first (left-to-right display order, `Box*&` →
+    /// `[Pointer, Reference]`); depth-capped. `None` when the chain reaches no
+    /// leaf the document named (a function-pointer declarator), which mints
+    /// nothing rather than a half-read shape.
+    pub fn peel<'a>(
+        &self,
+        mut node: tree_sitter::Node<'a>,
+        src: &[u8],
+    ) -> Option<(tree_sitter::Node<'a>, Vec<crate::model::file_analysis::DerefStep>, String)> {
+        use crate::model::file_analysis::DerefStep;
+        let at = |n: &tree_sitter::Node| self.0.get(&(n.start_byte(), n.end_byte()));
+        let mut stack = Vec::new();
+        for _ in 0..32 {
+            match at(&node) {
+                Some(DerefCap::Step(kind)) => {
+                    let mut annotations = Vec::new();
+                    let mut inner = None;
+                    let mut cur = node.walk();
+                    for ch in node.children(&mut cur) {
+                        match at(&ch) {
+                            Some(DerefCap::Annot) => {
+                                if let Ok(t) = ch.utf8_text(src) {
+                                    annotations.push(t.to_string());
+                                }
+                            }
+                            Some(_) if inner.is_none() => inner = Some(ch),
+                            _ => {}
+                        }
+                    }
+                    stack.push(DerefStep { kind: *kind, annotations });
+                    node = inner?;
+                }
+                // `identifier`→`def.local` (param/local), `field_identifier`→
+                // `def.field` (a class member), so a pointer field outlines as a
+                // member.
+                Some(DerefCap::Leaf(def_cap)) => return Some((node, stack, def_cap.clone())),
+                _ => return None,
+            }
+        }
+        None
+    }
+}
+
+/// Peel declarator wrappers (`@ool.wrap`, ANY depth) to the inner function
+/// declarator (`@ool.declarator`) — the arbitrary nesting S-queries can't
+/// express (`Foo**& Class::m()`). THE out-of-line unwrap, spelled once so no
+/// call site enumerates wrapper kinds. `None` when no function declarator is
+/// reachable (not a function-def shape).
+fn unwrap_to_function_declarator<'a>(
+    mut node: tree_sitter::Node<'a>,
+    wraps: &std::collections::HashSet<(usize, usize)>,
+    declarators: &std::collections::HashSet<(usize, usize)>,
+) -> Option<tree_sitter::Node<'a>> {
+    for _ in 0..32 {
+        let range = (node.start_byte(), node.end_byte());
+        if declarators.contains(&range) {
+            return Some(node);
+        }
+        if !wraps.contains(&range) {
+            return None;
+        }
+        // a pointer declarator carries its inner under `declarator:`; a
+        // reference/parenthesized declarator holds it as the first named child
+        // (the `&`/parens are anonymous tokens).
+        node = node.child_by_field_name("declarator").or_else(|| node.named_child(0))?;
+    }
+    None
+}
+
+/// Walk a qualified-name chain (`A::B::c`, `@ool.qualifier` at every hop) to its
+/// leaf name token, returning the full scope text (`A::B`) and the leaf. THE
+/// out-of-line owner walk: the owning class is the innermost scope —
+/// `rsplit("::")` of the returned text, as the `def.` handler already does for
+/// single-hop qualifiers — and the leaf is the member/ctor/dtor/operator name.
+/// A segment the document captured a `@qualifier.name` for (a templated owner
+/// `Buf<T>`) contributes that name. `None` when the node is not a qualified name
+/// (a free function / in-class method — its own pattern owns it).
+fn walk_qualifier_chain<'a>(
+    mut node: tree_sitter::Node<'a>,
+    qualifiers: &std::collections::HashSet<(usize, usize)>,
+    peel: &std::collections::HashMap<usize, (usize, String)>,
+    src: &[u8],
+) -> Option<(String, tree_sitter::Node<'a>)> {
+    let is_qualified =
+        |n: &tree_sitter::Node| qualifiers.contains(&(n.start_byte(), n.end_byte()));
+    if !is_qualified(&node) {
+        return None;
+    }
+    let mut scopes: Vec<String> = Vec::new();
+    for _ in 0..32 {
+        if !is_qualified(&node) {
+            return Some((scopes.join("::"), node));
+        }
+        if let Some(scope) = node.child_by_field_name("scope") {
+            scopes.push(match peel.get(&scope.start_byte()) {
+                Some((name_end, name)) if scope.end_byte() > *name_end => name.clone(),
+                _ => scope.utf8_text(src).unwrap_or("").to_string(),
+            });
+        }
+        node = node.child_by_field_name("name")?;
     }
     None
 }
@@ -194,6 +358,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut codeclared_matches: std::collections::HashSet<usize> = Default::default();
     let mut by_ref_params: Vec<(crate::model::file_analysis::Span, u32, String, crate::model::file_analysis::Span)> =
         Vec::new();
+    // The out-of-line-definition vocabulary, by byte range: the declarator
+    // wrappers, the function declarators, the qualified names, and a templated
+    // qualifier's base name keyed by the spelling's start (a `template_type`
+    // starts where its name does).
+    let mut ool_defs: Vec<(tree_sitter::Node, usize)> = Vec::new();
+    let mut ool_wraps: std::collections::HashSet<(usize, usize)> = Default::default();
+    let mut ool_declarators: std::collections::HashSet<(usize, usize)> = Default::default();
+    let mut ool_qualifiers: std::collections::HashSet<(usize, usize)> = Default::default();
+    let mut qualifier_peel: std::collections::HashMap<usize, (usize, String)> = Default::default();
+    // The declarator peel's vocabulary, and the chains waiting on it: a level is
+    // matched AFTER the chain that contains it, so the peel runs post-loop.
+    let mut deref_caps = DerefCaps::default();
+    let mut nested_targets: Vec<(tree_sitter::Node, usize)> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), source);
     let mut match_counter = 0usize;
@@ -202,80 +379,37 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         for c in m.captures {
             let node = c.node;
             let cap = cap_names[c.index as usize].as_str();
-            // `@ool.def`: an out-of-line definition (`Ret Class::method(...) {}`).
-            // The one general capture (fires for EVERY function_definition) —
-            // peel the declarator to the function declarator, walk its qualified
-            // name to the leaf + owning class, and synthesize the
-            // `def.method` / `def.method.name` / `qualifier` events downstream
-            // extraction consumes — the same vocabulary the narrow per-shape
-            // patterns emit for the shapes they own. A non-qualified declarator
-            // (free function / in-class method) yields nothing here — its own
-            // pattern owns it. Arbitrary declarator nesting + multi-level
-            // qualifiers (which fixed-depth S-queries can't express) work by
-            // construction.
-            if cap == "ool.def" {
-                if let Some((scope_text, leaf)) = node
-                    .child_by_field_name("declarator")
-                    .and_then(|d| unwrap_to_function_declarator(d, &pack.oolfn))
-                    .and_then(|fd| fd.child_by_field_name("declarator"))
-                    .and_then(|q| {
-                        walk_qualifier_chain(q, pack.oolfn.qualified_name, pack.qualifier_peel, source)
-                    })
-                {
-                    let leaf_text = leaf.utf8_text(source).unwrap_or("").to_string();
-                    // the def symbol spans the whole function_definition; name +
-                    // owner come from the qualified declarator's leaf + scope.
-                    events.push(Event {
-                        start_byte: node.start_byte(),
-                        end_byte: node.end_byte(),
-                        start: node.start_position(),
-                        end: node.end_position(),
-                        cap: "def.method".to_string(),
-                        text: leaf_text.clone(),
-                        match_id: match_counter,
-                    });
-                    events.push(Event {
-                        start_byte: leaf.start_byte(),
-                        end_byte: leaf.end_byte(),
-                        start: leaf.start_position(),
-                        end: leaf.end_position(),
-                        cap: "def.method.name".to_string(),
-                        text: leaf_text,
-                        match_id: match_counter,
-                    });
-                    events.push(Event {
-                        start_byte: node.start_byte(),
-                        end_byte: node.end_byte(),
-                        start: node.start_position(),
-                        end: node.end_position(),
-                        cap: "qualifier".to_string(),
-                        text: scope_text,
-                        match_id: match_counter,
-                    });
-                }
+            // The out-of-line vocabulary, collected here and joined once the
+            // whole tree has been matched: a wrapper the peel descends, the
+            // function declarator it stops at, the qualified name whose chain
+            // names the owner, and a templated owner's base name. A wrapper
+            // captured inside a definition is matched AFTER it, so the join
+            // cannot run here.
+            if let Some(set) = match cap {
+                "ool.wrap" => Some(&mut ool_wraps),
+                "ool.declarator" => Some(&mut ool_declarators),
+                "ool.qualifier" => Some(&mut ool_qualifiers),
+                _ => None,
+            } {
+                set.insert((node.start_byte(), node.end_byte()));
                 continue;
             }
-            // `@nested.target`: a pointer/reference declarator CHAIN of any
-            // depth. Peel it (where the node is live) to the leaf identifier
-            // + the deref stack, then emit the leaf as if the query had
-            // captured it directly — downstream join/symbol/witness paths are
-            // unchanged, and arbitrary nesting works without enumerating it.
+            if deref_caps.record(cap, node) {
+                continue;
+            }
+            if cap == "qualifier.name" {
+                qualifier_peel.insert(
+                    node.start_byte(),
+                    (node.end_byte(), node.utf8_text(source).unwrap_or("").to_string()),
+                );
+                continue;
+            }
+            if cap == "ool.def" {
+                ool_defs.push((node, match_counter));
+                continue;
+            }
             if cap == "nested.target" {
-                if let Some((leaf, stack, Some(def_cap))) = peel(node, &pack.nested_peel, source) {
-                    nested_stacks.insert(match_counter, stack);
-                    let ltext = leaf.utf8_text(source).unwrap_or("").to_string();
-                    for syn in ["flow.target", def_cap] {
-                        events.push(Event {
-                            start_byte: leaf.start_byte(),
-                            end_byte: leaf.end_byte(),
-                            start: leaf.start_position(),
-                            end: leaf.end_position(),
-                            cap: syn.to_string(),
-                            text: ltext.clone(),
-                            match_id: match_counter,
-                        });
-                    }
-                }
+                nested_targets.push((node, match_counter));
                 continue;
             }
             // `@member.recv`: a member access receiver. Peel transparent
@@ -450,9 +584,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 ));
                 continue;
             }
-            // `@qualifier` on a templated owner (`Buf<T>::grow`): the class
-            // the def joins is the BASE name — peel the `name` field where
-            // the node is live (structural, never a string split on `<`).
             // A `@def.*` capture may declare that this match's defs are
             // co-declared; the marker is read and stripped here, so every
             // path below sees the plain capture it already knows.
@@ -463,14 +594,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 }
                 _ => cap,
             };
-            let text = if cap == "qualifier" && pack.qualifier_peel.contains(&node.kind()) {
-                node.child_by_field_name("name")
-                    .and_then(|n| n.utf8_text(source).ok())
-                    .unwrap_or(node.utf8_text(source).unwrap_or(""))
-                    .to_string()
-            } else {
-                node.utf8_text(source).unwrap_or("").to_string()
-            };
+            let text = node.utf8_text(source).unwrap_or("").to_string();
             events.push(Event {
                 start_byte: node.start_byte(),
                 end_byte: node.end_byte(),
@@ -482,6 +606,73 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             });
         }
     }
+    // ---- `@nested.target`: a declarator CHAIN of any depth. Peel it to the
+    // leaf + the deref stack, then emit the leaf as if the query had captured
+    // it directly — downstream join/symbol/witness paths are unchanged, and
+    // arbitrary nesting works without enumerating it.
+    for (node, match_id) in &nested_targets {
+        let Some((leaf, stack, def_cap)) = deref_caps.peel(*node, source) else { continue };
+        nested_stacks.insert(*match_id, stack);
+        let ltext = leaf.utf8_text(source).unwrap_or("").to_string();
+        for syn in ["flow.target", &def_cap] {
+            events.push(Event {
+                start_byte: leaf.start_byte(),
+                end_byte: leaf.end_byte(),
+                start: leaf.start_position(),
+                end: leaf.end_position(),
+                cap: syn.to_string(),
+                text: ltext.clone(),
+                match_id: *match_id,
+            });
+        }
+    }
+    // ---- out-of-line definitions: peel each `@ool.def`'s declarator to its
+    // function declarator, walk the qualified name to the leaf + owning class,
+    // and synthesize the `def.method` / `def.method.name` / `qualifier` events
+    // downstream extraction consumes — the same vocabulary the narrow per-shape
+    // patterns emit for the shapes they own. A non-qualified declarator (free
+    // function / in-class method) yields nothing — its own pattern owns it.
+    // Arbitrary declarator nesting + multi-level qualifiers (which fixed-depth
+    // S-queries can't express) work by construction.
+    for (node, match_id) in &ool_defs {
+        let Some((scope_text, leaf)) = node
+            .child_by_field_name("declarator")
+            .and_then(|d| unwrap_to_function_declarator(d, &ool_wraps, &ool_declarators))
+            .and_then(|fd| fd.child_by_field_name("declarator"))
+            .and_then(|q| walk_qualifier_chain(q, &ool_qualifiers, &qualifier_peel, source))
+        else {
+            continue;
+        };
+        let leaf_text = leaf.utf8_text(source).unwrap_or("").to_string();
+        // the def symbol spans the whole function_definition; name + owner come
+        // from the qualified declarator's leaf + scope.
+        for (cap, n, text) in [
+            ("def.method", *node, leaf_text.clone()),
+            ("def.method.name", leaf, leaf_text.clone()),
+            ("qualifier", *node, scope_text),
+        ] {
+            events.push(Event {
+                start_byte: n.start_byte(),
+                end_byte: n.end_byte(),
+                start: n.start_position(),
+                end: n.end_position(),
+                cap: cap.to_string(),
+                text,
+                match_id: *match_id,
+            });
+        }
+    }
+    // A templated qualifier (`Buf<T>::grow`) joins its BASE class: peel every
+    // `@qualifier` the document captured as a template spelling, once the peel
+    // names are all in.
+    for e in events.iter_mut().filter(|e| e.cap == "qualifier") {
+        if let Some((name_end, name)) = qualifier_peel.get(&e.start_byte) {
+            if e.end_byte > *name_end {
+                e.text = name.clone();
+            }
+        }
+    }
+
     // Source order; outermost first on ties so scopes push before their
     // contents. A `@scope` on the SAME node as a `@def` (a function_definition
     // carries its own body scope) must open AFTER the def is recorded, so the
@@ -1014,15 +1205,20 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut annots: HashMap<usize, String> = HashMap::new();
     // keyed-shape collection: ctor + keys grouped per @expr.shape span
     let mut shape_spans: Vec<(usize, usize, Span)> = Vec::new();
-    let mut shape_ctors: HashMap<(usize, usize), String> = HashMap::new();
+    let mut shape_ctor_at: std::collections::HashSet<(usize, usize)> = Default::default();
     let mut shape_keys: Vec<(usize, usize, String)> = Vec::new();
     // command-dispatch collection: per match, the command identifier
     // and its ordered arguments
     let mut cmd_names: std::collections::BTreeMap<usize, (String, Span, crate::model::file_analysis::ScopeId)> =
         Default::default();
     let mut cmd_args: std::collections::BTreeMap<usize, Vec<(String, Span)>> = Default::default();
-    // import-call halves, joined per match (BTreeMap: match ids are
-    // source-ordered, so imports come out deterministic)
+    // `@cmd.def.<kind>` — the entity kind a command declares, with the
+    // command's own start (the def spans from the command to the name) and the
+    // scope it sits in, joined to this match's `@cmd.def.name`.
+    let mut cmd_defs: HashMap<usize, (String, Point, ScopeId)> = HashMap::new();
+    // import-call halves — the import KIND the capture named and the argument
+    // it carries — joined per match (BTreeMap: match ids are source-ordered, so
+    // imports come out deterministic)
     let mut import_fns: std::collections::BTreeMap<usize, String> = Default::default();
     let mut import_args: std::collections::BTreeMap<usize, String> = Default::default();
     // expr-literal spans, for narrowing an Edge target onto the actual
@@ -1036,8 +1232,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // extent). The condition's captures precede the block in source, so
     // by the time the `@scope` event fires these are populated.
     let mut narrow_var: HashMap<usize, String> = HashMap::new();
-    let mut narrow_type: HashMap<usize, String> = HashMap::new();
-    let mut narrow_guard: HashMap<usize, String> = HashMap::new();
+    let mut narrow_type_txt: HashMap<usize, String> = HashMap::new();
     // Recognized narrowings deferred to after flow-edge minting, so the region
     // cutoff can read the edges (`apply` below) — (subject, refined type, FULL
     // guarded-block region, block scope).
@@ -1052,7 +1247,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // over the node itself — each in the scope open at the node.
     let mut narrow_after: Vec<(usize, Point, ScopeId)> = Vec::new();
     let mut narrow_within: Vec<(usize, Span, ScopeId)> = Vec::new();
-    let mut narrow_assert: HashMap<usize, String> = HashMap::new();
     // `std::move(x)` halves, joined per match: the qualifier (`std`) + name
     // (`move`) verify the call IS std::move (no query predicates), the var is
     // the moved subject, the call span the region start + enclosing scope.
@@ -1191,20 +1385,28 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     let subject = (pack.shape_name)("ref.var", &var);
                     // Type text: the guard's own `@narrow.type` when it names one
                     // (`dynamic_cast<Derived*>`), else the subject's declared type
-                    // (the optional-engagement form peels `T` from it). The guard
-                    // token is absent for the bare `if (opt)` truthiness form.
-                    // Resolve the subject's declared type up the guard's scope
-                    // chain (innermost first), so a same-named var in a sibling
-                    // function never supplies the inner type — the nearest
-                    // enclosing declaration of `subject` wins.
-                    let ty = narrow_type.get(&nmid).cloned().or_else(|| {
-                        scope_stack.iter().rev().find_map(|&(_, sid)| {
+                    // (the engagement forms peel `T` from it). The declared type
+                    // resolves up the guard's scope chain (innermost first), so a
+                    // same-named var in a sibling function never supplies the
+                    // inner type — the nearest enclosing declaration wins.
+                    let captured = narrow_type_txt.get(&nmid).cloned();
+                    let declared = match captured {
+                        Some(_) => None,
+                        None => scope_stack.iter().rev().find_map(|&(_, sid)| {
                             annot_text_by_var.get(&(subject.clone(), sid)).cloned()
-                        })
-                    });
-                    let guard = narrow_guard.get(&nmid).map(String::as_str);
-                    if let Some(refined) =
-                        ty.and_then(|t| (pack.narrow_guard)(guard, &t)).map(|r| ident_type(r, e.start))
+                        }),
+                    };
+                    // A refinement that lands back on the subject's own
+                    // declaration refines nothing, and the witness would shadow
+                    // a stronger refinement already in force at that point.
+                    let refines_nothing = |r: &crate::model::file_analysis::InferredType| {
+                        declared.as_deref().and_then(pack.annot_type).as_ref() == Some(r)
+                    };
+                    if let Some(refined) = captured
+                        .or_else(|| declared.clone())
+                        .and_then(|t| (pack.narrow_type)(&t))
+                        .filter(|r| !refines_nothing(r))
+                        .map(|r| ident_type(r, e.start))
                     {
                         // Defer: the region cutoff (first rebind edge) needs the
                         // FlowEdges, minted after this loop. Carry the FULL
@@ -1223,10 +1425,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 narrow_var.insert(e.match_id, e.text.clone());
             }
             "narrow.type" => {
-                narrow_type.insert(e.match_id, e.text.clone());
-            }
-            "narrow.guard" => {
-                narrow_guard.insert(e.match_id, e.text.clone());
+                narrow_type_txt.insert(e.match_id, e.text.clone());
             }
             "narrow.after" => {
                 if let Some(&(_, sid)) = scope_stack.last() {
@@ -1237,9 +1436,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 if let Some(&(_, sid)) = scope_stack.last() {
                     narrow_within.push((e.match_id, Span { start: e.start, end: e.end }, sid));
                 }
-            }
-            "narrow.assert" => {
-                narrow_assert.insert(e.match_id, e.text.clone());
             }
             "move.scope" => {
                 move_scope_txt.insert(e.match_id, e.text.clone());
@@ -1832,25 +2028,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         .unwrap_or(false)
                         .then(|| member_op_raw.get(&e.match_id).copied())
                         .flatten();
-                    // Reset-via-method: a rebinding method call on a simple-var
-                    // receiver (`x.clear()`/`.reset()`/`.assign()`) puts a
-                    // moved-from object back into a known state — a rebind. Mint
-                    // a Rebind FlowEdge at the RECEIVER position so the moved-from
-                    // window (and the narrowing cutoff) end there, sparing the
-                    // receiver read itself. The pack owns which method names
-                    // rebind (cpp vocab, like its op_map).
-                    if e.cap == "ref.member"
-                        && (pack.rebind_method)(&e.text)
-                        && member_simple.get(&e.match_id).copied().unwrap_or(false)
-                    {
-                        if let Some((recv_span, recv_text)) = member_recv.get(&e.match_id) {
-                            flow_rebinds.push((
-                                (pack.shape_name)("def.var", recv_text),
-                                cur_scope,
-                                recv_span.start,
-                            ));
-                        }
-                    }
                     // A construction site (`new Foo(...)`) is two facts on one
                     // token: the token names the CLASS (a `PackageRef`, so the
                     // class's references and rename own it), and the site calls
@@ -2315,9 +2492,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             "shape.ctor" => {
                 // belongs to the smallest enclosing expr.shape; matches
                 // share the call node so byte keys line up
-                shape_ctors
-                    .entry(byte_range_of(&events, e.match_id, "expr.shape").unwrap_or((0, 0)))
-                    .or_insert_with(|| e.text.clone());
+                shape_ctor_at
+                    .insert(byte_range_of(&events, e.match_id, "expr.shape").unwrap_or((0, 0)));
             }
             "shape.key" => {
                 if let Some(range) = byte_range_of(&events, e.match_id, "expr.shape") {
@@ -2336,8 +2512,72 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     .or_default()
                     .push((e.text.clone(), Span { start: e.start, end: e.end }));
             }
-            "import.fn" => {
-                import_fns.insert(e.match_id, e.text.clone());
+            // The command's effect, as the document names it: a def of the
+            // capture's kind at the captured argument, a reference per captured
+            // argument, an import of the captured file.
+            cap if cap.starts_with("cmd.def.") && cap != "cmd.def.name" => {
+                cmd_defs.insert(
+                    e.match_id,
+                    (cap["cmd.def.".len()..].to_string(), e.start, cur_scope),
+                );
+            }
+            "cmd.def.name" => {
+                if let Some((kind, cmd_start, scope)) = cmd_defs.get(&e.match_id) {
+                    out.symbols.push(SkelSymbol {
+                        declared_with: None,
+                        declared_return: None,
+                        kind: kind.clone(),
+                        name: e.text.clone(),
+                        start: *cmd_start,
+                        end: e.end,
+                        name_start: e.start,
+                        name_end: e.end,
+                        package: None,
+                        scope: *scope,
+                        return_type: None,
+                        receiver_return: false,
+                        receiver_instance_of: None,
+                        deref_stack: Vec::new(),
+                        attributes: Vec::new(),
+                        arity: None,
+                        params: Vec::new(),
+                        qualifier_owned: false,
+                        doc: None,
+                        deprecation: None,
+                    });
+                }
+            }
+            "cmd.refargs" => {
+                // ALL-CAPS keyword arguments (PRIVATE/STATIC) are CMake's
+                // keyword convention, and an interpolation names no one
+                // symbol — neither is a reference.
+                let is_keyword =
+                    !e.text.is_empty() && e.text.chars().all(|c| c.is_ascii_uppercase() || c == '_');
+                if !is_keyword && !e.text.contains("${") {
+                    out.refs.push(SkelRef {
+                        via: None,
+                        kind: "call".into(),
+                        name: e.text.clone(),
+                        start: e.start,
+                        end: e.end,
+                        scope: cur_scope,
+                        invocant: None,
+                        member_op: None,
+                        arg_count: None,
+                        value_read: false,
+                        named_by_string: false,
+                    });
+                }
+            }
+            "cmd.import" => {
+                if !out.imports.contains(&e.text) {
+                    out.imports.push(e.text.clone());
+                }
+            }
+            // `@import.call.<kind>` — the document says what kind of import
+            // this call is; the pack maps its argument to a module.
+            cap if cap.starts_with("import.call.") => {
+                import_fns.insert(e.match_id, cap["import.call.".len()..].to_string());
             }
             "import.arg" => {
                 import_args.insert(e.match_id, e.text.clone());
@@ -2539,8 +2779,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             if !seen_spans.insert((sb, eb)) {
                 continue;
             }
-            let Some(ctor) = shape_ctors.get(&(sb, eb)) else { continue };
-            if !(pack.shape_ctor)(ctor) {
+            // a keyed value only where the document named the constructor
+            if !shape_ctor_at.contains(&(sb, eb)) {
                 continue;
             }
             let mut keys: Vec<(String, Option<Box<InferredType>>)> = shape_keys
@@ -2562,9 +2802,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     }
 
     // ---- import CALLS (library/source) → imports ----
-    for (mid, f) in &import_fns {
+    for (mid, kind) in &import_fns {
         if let Some(arg) = import_args.get(mid) {
-            if let Some(module) = (pack.import_call)(f, arg) {
+            if let Some(module) = (pack.import_module)(kind, arg) {
                 if !out.imports.contains(&module) {
                     out.imports.push(module);
                 }
@@ -2675,64 +2915,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             value_read: false,
             named_by_string: false,
         });
-        for effect in (pack.cmd_effects)(cmd) {
-            match effect {
-                CmdEffect::Def { kind, name_arg } => {
-                    if let Some((name, span)) = args.get(name_arg) {
-                        out.symbols.push(SkelSymbol {
-                            declared_with: None,
-                            declared_return: None,
-                            kind: kind.to_string(),
-                            name: name.clone(),
-                            start: cmd_span.start,
-                            end: span.end,
-                            name_start: span.start,
-                            name_end: span.end,
-                            package: None,
-                            scope: *scope,
-                            return_type: None,
-                            receiver_return: false,
-            receiver_instance_of: None,
-                            deref_stack: Vec::new(),
-                            attributes: Vec::new(),
-                            arity: None,
-                            params: Vec::new(),
-                            qualifier_owned: false,
-                            doc: None,
-                            deprecation: None,
-                        });
-                    }
-                }
-                CmdEffect::RefArgsFrom { from } => {
-                    for (name, span) in args.iter().skip(from) {
-                        let is_keyword =
-                            !name.is_empty() && name.chars().all(|c| c.is_ascii_uppercase() || c == '_');
-                        if !is_keyword && !name.contains("${") {
-                            out.refs.push(SkelRef {
-                    via: None,
-                                kind: "call".into(),
-                                name: name.clone(),
-                                start: span.start,
-                                end: span.end,
-                                scope: *scope,
-                                invocant: None,
-                                member_op: None,
-                                arg_count: None,
-                                value_read: false,
-                                named_by_string: false,
-                            });
-                        }
-                    }
-                }
-                CmdEffect::Import { arg } => {
-                    if let Some((name, _)) = args.get(arg) {
-                        if !out.imports.contains(name) {
-                            out.imports.push(name.clone());
-                        }
-                    }
-                }
-            }
-        }
     }
 
     // ---- typedef / using aliases → TypeName witnesses (the alias graph) ----
@@ -3099,19 +3281,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // point-containment ends the narrowing at the rebind — the soundness Perl
     // got from its cutoff, now generic. Every LangPack that narrows (python
     // isinstance, cpp dynamic_cast + optional engagement) gets it free.
-    // The region shapes join here, once every guard capture is in. An
-    // assertion form is honoured only for the pack's declared callees.
+    // The region shapes join here, once every guard capture is in.
     let regions = narrow_after
         .into_iter()
         .map(|(mid, at, sid)| (mid, Span { start: at, end: out.scopes[sid.0 as usize].span.end }, sid))
         .chain(narrow_within);
     for (mid, region, sid) in regions {
-        if narrow_assert.get(&mid).is_some_and(|c| !pack.narrow_assertions.contains(&c.as_str())) {
+        let (Some(var), Some(ty)) = (narrow_var.get(&mid), narrow_type_txt.get(&mid)) else {
             continue;
-        }
-        let (Some(var), Some(ty)) = (narrow_var.get(&mid), narrow_type.get(&mid)) else { continue };
-        let guard = narrow_guard.get(&mid).map(String::as_str);
-        if let Some(refined) = (pack.narrow_guard)(guard, ty).map(|r| ident_type(r, region.start)) {
+        };
+        if let Some(refined) = (pack.narrow_type)(ty).map(|r| ident_type(r, region.start)) {
             pending_narrow.push(((pack.shape_name)("ref.var", var), refined, region, sid));
         }
     }

@@ -125,37 +125,18 @@ pub struct LangPack {
     /// (`resolve_imports_with_pack` in query_extract_tests.rs) drive it today.
     #[allow(dead_code)]
     pub module_paths: fn(module: &str) -> Vec<String>,
-    /// Does a call to `callee` construct a KEYED value whose named
-    /// arguments are `$`-style accessible keys? (R: list / data.frame.)
-    pub shape_ctor: fn(callee: &str) -> bool,
     /// Languages where imports are CALLS, not statements (R's
-    /// library()/source()): map (callee, argument) → imported module.
-    pub import_call: fn(callee: &str, arg: &str) -> Option<String>,
-    /// Command-dispatched languages (CMake): what a command DOES with
-    /// its positional arguments. The @cmd/@cmd.arg captures deliver
-    /// (name, ordered args); this predicate classifies.
-    pub cmd_effects: fn(cmd: &str) -> Vec<CmdEffect>,
-    /// Guard narrowing: given the guard token (`@narrow.guard` — a
-    /// function/operator like `isinstance`, `has_value`; `None` for the
-    /// token-less `if (opt)` truthiness form) and the type text, the
-    /// refined type that holds inside the guarded block, or `None` if this
-    /// guard doesn't narrow. The type text is the `@narrow.type` capture
-    /// when the guard names one (`dynamic_cast<Derived*>`), else the
-    /// subject's DECLARED type (the optional-engagement form reads
-    /// `std::optional<T>` off the declaration and peels `T`). The pack owns
-    /// "which guard means which refinement" (rule #10); core just scopes
-    /// the witness to the block.
-    pub narrow_guard: fn(guard: Option<&str>, type_text: &str) -> Option<InferredType>,
-    /// Callees that ASSERT their argument (php `assert`): a guard passed to
-    /// one narrows the rest of the enclosing scope. The `@narrow.assert`
-    /// capture fires for any call around a guard; core honours only these.
-    pub narrow_assertions: &'static [&'static str],
-    /// Does calling `method` on a variable REBIND it — putting a moved-from
-    /// object back into a known state (`clear`/`reset`/`assign`/…)? Used to end
-    /// a moved-from region (and any narrowing) at the reset call, so a use after
-    /// it is clean. Pack-owned language vocab (like `op_map`): core asks the
-    /// value, never enumerates names itself.
-    pub rebind_method: fn(method: &str) -> bool,
+    /// library()/source()): the module an `@import.call.<kind>` argument
+    /// names. The KIND is the capture's suffix — which callees import is the
+    /// document's — and this maps the argument text the kind carries.
+    pub import_module: fn(kind: &str, arg: &str) -> Option<String>,
+    /// The refinement a narrowed subject's type TEXT denotes: the
+    /// `@narrow.type` capture where the guard names one
+    /// (`dynamic_cast<Derived*>`), else the subject's DECLARED type, which
+    /// an engagement guard peels (`std::optional<T>` → `T`). Text in,
+    /// structure out — which guards narrow is the document's `#eq?`.
+    /// `None` = this spelling refines nothing.
+    pub narrow_type: fn(type_text: &str) -> Option<InferredType>,
     /// Can a bare, receiver-less identifier resolve through an implicit
     /// `this->` — both a field read (`return inner_;` = `this->inner_`) AND a
     /// sibling method call (`foo()` = `this->foo()`)? True for C/C++ (the
@@ -263,11 +244,6 @@ pub struct LangPack {
     /// semantics → the pack owns it (NOT core `conventions.rs`, which is
     /// Perl's `$self`/`$class`).
     pub receiver_names: &'static [&'static str],
-    /// The pointer/reference DECLARATOR peel: a `@nested.target` chain
-    /// flattened to its leaf + per-level deref stack — `Box**`, `char****`,
-    /// `Box* const&`. THE recursion S-queries can't express (unbounded depth);
-    /// the pack declares the grammar, the generic `peel` walks it.
-    pub nested_peel: PeelSpec,
     /// The member-access RECEIVER peel: transparent expression wrappers
     /// (`(*p)`, `(&o)`, `(p)` → `p`) dropped so the invocant types via the
     /// inner. The SAME `peel`, no stack, any leaf.
@@ -298,11 +274,6 @@ pub struct LangPack {
     /// `SymbolFlags::DYNAMIC_VARS` on the containing callable, which is what
     /// the undefined-variable lane asks. Empty = no such surface.
     pub dynamic_var_markers: &'static [&'static str],
-    /// `@qualifier` node kinds whose `name` FIELD supplies the owner text —
-    /// the structural peel for a templated qualifier (`Buf<T>::grow` files
-    /// under class `Buf`, unifying the out-of-line def with the in-class
-    /// decl). Never string-splitting on `<`. Empty = qualifiers verbatim.
-    pub qualifier_peel: &'static [&'static str],
     /// Member-access node kinds (`field_expression` / `attribute`): a `recv.m`
     /// the cursor-completion path climbs to + types the receiver of. Empty =
     /// no member-access completion (Perl uses `cursor_context`).
@@ -324,10 +295,6 @@ pub struct LangPack {
     /// node a domain comparison — the pack owns which operators mean
     /// "equality against a domain value" (rule #10). Empty = feature off.
     pub domain_compare_ops: &'static [&'static str],
-    /// Out-of-line-definition extraction (`@ool.def` — a `Ret Class::method(...)`
-    /// body owned by a `::` qualifier). The grammar the canonical declarator
-    /// unwrap + qualifier walk consume; `OutOfLineSpec::OFF` = feature off.
-    pub oolfn: OutOfLineSpec,
 }
 
 impl LangPack {
@@ -365,12 +332,8 @@ impl LangPack {
             doc_types: _,
             doc_uses_method_tags,
             module_paths: _,
-            shape_ctor: _,
-            import_call: _,
-            cmd_effects: _,
-            narrow_guard: _,
-            narrow_assertions,
-            rebind_method: _,
+            import_module: _,
+            narrow_type: _,
             implicit_this_members: _,
             include_path_tokens: _,
             preprocessor_macros: _,
@@ -392,19 +355,16 @@ impl LangPack {
             arg_kind,
             trigger_chars,
             receiver_names,
-            nested_peel,
             recv_peel,
             op_map,
             simple_var_kinds,
             dynamic_arg_markers,
             dynamic_var_markers,
-            qualifier_peel,
             member_kinds,
             skip_kinds,
             call_kinds,
             domain_compare_kinds,
             domain_compare_ops,
-            oolfn,
         } = self;
         let mut out: Vec<(&'static str, &'static str)> = Vec::new();
         fn list(
@@ -418,7 +378,6 @@ impl LangPack {
         list(&mut out, "class_token_kinds", class_token_kinds);
         list(&mut out, "constructor_names", constructor_names);
         list(&mut out, "doc_uses_method_tags", doc_uses_method_tags);
-        list(&mut out, "narrow_assertions", narrow_assertions);
         list(&mut out, "entrypoint_symbols", entrypoint_symbols);
         list(&mut out, "runtime_invoked_methods", runtime_invoked_methods);
         list(&mut out, "implicit_variables", implicit_variables);
@@ -431,7 +390,6 @@ impl LangPack {
         list(&mut out, "simple_var_kinds", simple_var_kinds);
         list(&mut out, "dynamic_arg_markers", dynamic_arg_markers);
         list(&mut out, "dynamic_var_markers", dynamic_var_markers);
-        list(&mut out, "qualifier_peel", qualifier_peel);
         list(&mut out, "member_kinds", member_kinds);
         list(&mut out, "skip_kinds", skip_kinds);
         list(&mut out, "call_kinds", call_kinds);
@@ -444,8 +402,6 @@ impl LangPack {
             ("named_arg_field", *named_arg_field),
             ("deprecated_attribute", *deprecated_attribute),
             ("arg_kind", *arg_kind),
-            ("oolfn", oolfn.function_declarator),
-            ("oolfn", oolfn.qualified_name),
         ] {
             if !one.is_empty() {
                 out.push((field, one));
@@ -456,15 +412,12 @@ impl LangPack {
             out.push(("call_shapes", c.callee_field));
             out.push(("call_shapes", c.args_field));
         }
-        for (field, peel) in [("nested_peel", nested_peel), ("recv_peel", recv_peel)] {
-            out.extend(peel.wrappers.iter().map(|(k, _)| (field, *k)));
-            list(&mut out, field, peel.annot_kinds);
-            for (leaf, _) in peel.leaf_to_def {
-                out.push((field, *leaf));
-            }
+        out.extend(recv_peel.wrappers.iter().map(|(k, _)| ("recv_peel", *k)));
+        list(&mut out, "recv_peel", recv_peel.annot_kinds);
+        for (leaf, _) in recv_peel.leaf_to_def {
+            out.push(("recv_peel", *leaf));
         }
         out.extend(op_map.iter().map(|(k, _)| ("op_map", *k)));
-        list(&mut out, "oolfn", oolfn.declarator_wrappers);
         out.retain(|(_, v)| !v.is_empty());
         out
     }
@@ -472,9 +425,9 @@ impl LangPack {
 
 /// A declarative peel: descend a wrapper chain tree-sitter's fixed-depth
 /// S-expression queries cannot express, to the leaf, optionally accumulating a
-/// per-level deref stack. ONE combinator the pack parameterizes — `nested_peel`
-/// (declarators, stack, leaf→def) and `recv_peel` (expr wrappers, no stack, any
-/// leaf) are both instances of it. Empty `wrappers` = the capture is absent.
+/// per-level deref stack. The pack parameterizes it: `recv_peel` (expr
+/// wrappers, no stack, any leaf) is what it carries. Empty `wrappers` = the
+/// capture is absent.
 #[derive(Clone, Copy)]
 pub struct PeelSpec {
     /// Wrapper node kinds → the `DerefKind` each contributes (only consulted
@@ -489,91 +442,6 @@ pub struct PeelSpec {
     pub leaf_to_def: &'static [(&'static str, &'static str)],
     /// Accumulate the per-level `DerefStep` stack (pointer depth) vs descend only.
     pub record_stack: bool,
-}
-
-/// Out-of-line-definition extraction (`Ret Class::method(...) {...}` bodies —
-/// the owner is named by a `::` qualifier, not lexical nesting). Declares the
-/// three grammar shapes the driver's canonical unwrap + qualifier walk consume:
-/// the declarator WRAPPERS peeled (any depth) to reach the function declarator,
-/// the FUNCTION-DECLARATOR node whose `declarator` field carries the (possibly
-/// multi-level) qualified name, and the QUALIFIED-NAME node kind the walk
-/// descends. Empty `declarator_wrappers` = feature off (a pack that mints no
-/// `@ool.def` capture).
-#[derive(Clone, Copy)]
-pub struct OutOfLineSpec {
-    pub declarator_wrappers: &'static [&'static str],
-    pub function_declarator: &'static str,
-    pub qualified_name: &'static str,
-}
-
-impl OutOfLineSpec {
-    pub const OFF: OutOfLineSpec = OutOfLineSpec {
-        declarator_wrappers: &[],
-        function_declarator: "",
-        qualified_name: "",
-    };
-}
-
-/// Peel declarator wrappers (`pointer_declarator`/`reference_declarator`/
-/// `parenthesized_declarator`, ANY depth) to the inner function declarator —
-/// the arbitrary nesting S-queries can't express (`Foo**& Class::m()`). THE
-/// out-of-line unwrap, spelled once so no call site enumerates wrapper kinds.
-/// `None` when no function declarator is reachable (not a function-def shape).
-pub(super) fn unwrap_to_function_declarator<'a>(
-    mut node: tree_sitter::Node<'a>,
-    spec: &OutOfLineSpec,
-) -> Option<tree_sitter::Node<'a>> {
-    for _ in 0..32 {
-        if node.kind() == spec.function_declarator {
-            return Some(node);
-        }
-        if !spec.declarator_wrappers.contains(&node.kind()) {
-            return None;
-        }
-        // pointer_declarator carries its inner under `declarator:`; a
-        // reference/parenthesized declarator holds it as the first named child
-        // (the `&`/parens are anonymous tokens).
-        node = node
-            .child_by_field_name("declarator")
-            .or_else(|| node.named_child(0))?;
-    }
-    None
-}
-
-/// Walk a qualified-name chain (`A::B::c`) to its leaf name token, returning the
-/// full scope text (`A::B`) and the leaf node. THE out-of-line owner walk: the
-/// owning class is the innermost scope — `rsplit("::")` of the returned text, as
-/// the `def.` handler already does for single-hop qualifiers — and the leaf is
-/// the member/ctor/dtor/operator name. A scope segment whose kind is in
-/// `peel_kinds` (a templated owner `Buf<T>`) contributes its `name` field's text
-/// (`Buf`), the same structural peel the single-capture qualifier path applies —
-/// never a string split on `<`. `None` when the node is not a qualified name (a
-/// free function / in-class method — its own pattern owns it).
-pub(super) fn walk_qualifier_chain<'a>(
-    mut node: tree_sitter::Node<'a>,
-    qualified_kind: &str,
-    peel_kinds: &[&str],
-    src: &[u8],
-) -> Option<(String, tree_sitter::Node<'a>)> {
-    if node.kind() != qualified_kind {
-        return None;
-    }
-    let mut scopes: Vec<String> = Vec::new();
-    for _ in 0..32 {
-        if node.kind() != qualified_kind {
-            return Some((scopes.join("::"), node));
-        }
-        if let Some(scope) = node.child_by_field_name("scope") {
-            let seg = if peel_kinds.contains(&scope.kind()) {
-                scope.child_by_field_name("name").unwrap_or(scope)
-            } else {
-                scope
-            };
-            scopes.push(seg.utf8_text(src).unwrap_or("").to_string());
-        }
-        node = node.child_by_field_name("name")?;
-    }
-    None
 }
 
 /// A call-expression shape signature help climbs to from the cursor
@@ -633,24 +501,6 @@ pub enum DocFact {
     /// The comment's summary paragraph — every line before the first
     /// `@tag`, joined; the text hover shows under the signature.
     Description(String),
-}
-
-/// One effect of a command-dispatched statement.
-// Variants are constructed only by `cmake_pack` (command languages) and read by
-// the generic cmd-effect match; both absent in a build without that feature.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy)]
-pub enum CmdEffect {
-    /// Argument `name_arg` declares an entity of `kind` ("var",
-    /// "sub", ...).
-    Def { kind: &'static str, name_arg: usize },
-    /// Arguments from `from` onward are name references (all-caps
-    /// keyword arguments like PRIVATE/STATIC are skipped — CMake's
-    /// keyword convention; a finer filter is a later predicate).
-    RefArgsFrom { from: usize },
-    /// Argument `arg` names an imported module (joins import_call's
-    /// role for command languages).
-    Import { arg: usize },
 }
 
 /// Translate a member's declared return type into the deferred

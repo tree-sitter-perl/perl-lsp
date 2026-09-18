@@ -4,7 +4,7 @@ mod doc;
 
 use doc::{php_annot_type, php_doc_types, PHP_BUILTIN_TYPES};
 
-use crate::build::query_extract::{CallShape, LangPack, OutOfLineSpec, PeelSpec};
+use crate::build::query_extract::{CallShape, LangPack, PeelSpec};
 use crate::model::file_analysis::{InferredType, NameSpellings, PackSpellings};
 
 /// php's write and display spellings. `type_display` is what a human
@@ -132,23 +132,13 @@ pub fn php_pack() -> LangPack {
             let base = m.trim_start_matches('\\').replace('\\', "/");
             vec![format!("{base}.php")]
         },
-        // `['k' => v]` / `array('k', v)` construct keyed values; the
-        // shape query gates on a string-keyed element, so these tokens
-        // only ever arrive for genuinely keyed literals.
-        shape_ctor: |callee| matches!(callee, "[" | "array"),
-        import_call: |_, _| None,
-        cmd_effects: |_| vec![],
-        // `$x instanceof User` refines $x to User inside the guard.
-        narrow_guard: |guard, ty| {
-            // The class token leafs like every other class spelling
-            // (`Op\Install` → `Install`; classes are filed by leaf).
-            (guard == Some("instanceof"))
-                .then(|| php_annot_type(ty))
-                .flatten()
-                .filter(|t| matches!(t, InferredType::ClassName(_)))
+        import_module: |_, _| None,
+        // `$x instanceof User` refines $x to User: the class token leafs like
+        // every other class spelling (`Op\Install` → `Install`; classes are
+        // filed by leaf).
+        narrow_type: |ty| {
+            php_annot_type(ty).filter(|t| matches!(t, InferredType::ClassName(_)))
         },
-        narrow_assertions: &["assert"],
-        rebind_method: |_| false,
         // `$this->` is mandatory — no receiver elision (unlike C++).
         implicit_this_members: false,
         include_path_tokens: false,
@@ -195,7 +185,6 @@ pub fn php_pack() -> LangPack {
         enum_members: &["value", "name", "cases", "from", "tryFrom"],
         trigger_chars: &["$", ">", ":"],
         receiver_names: &["$this"],
-        nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
         recv_peel: PeelSpec {
             wrappers: &[("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer)],
             annot_kinds: &[],
@@ -205,7 +194,6 @@ pub fn php_pack() -> LangPack {
         // one meaningful member operator family (`->`/`?->`): no op-DX.
         op_map: &[],
         simple_var_kinds: &["variable_name"],
-        qualifier_peel: &[],
         // calls included: PHP's method call is ONE flat node (unlike cpp,
         // where the call wraps a field_expression), so mid-token member
         // completion (`->ma|p`) must climb to the call node itself.
@@ -229,7 +217,6 @@ pub fn php_pack() -> LangPack {
         ],
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
-        oolfn: OutOfLineSpec::OFF,
     }
 }
 

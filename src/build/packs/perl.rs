@@ -1,7 +1,7 @@
 //! Perl's pack — the query-engine seam for the language the native
 //! builder owns.
 
-use crate::build::query_extract::{LangPack, OutOfLineSpec, PeelSpec};
+use crate::build::query_extract::{LangPack, PeelSpec};
 use crate::model::file_analysis::PackSpellings;
 
 /// Perl writes and displays nothing of its own: the engine's type tags are
@@ -48,12 +48,8 @@ pub fn perl_pack() -> LangPack {
         doc_types: |_, _| vec![],
         doc_uses_method_tags: &[],
         module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
-        shape_ctor: |_| false,
-        import_call: |_, _| None,
-        cmd_effects: |_| vec![],
-        narrow_guard: |_, _| None,
-        narrow_assertions: &[],
-        rebind_method: |_| false,
+        import_module: |_, _| None,
+        narrow_type: |_| None,
         implicit_this_members: false,
         include_path_tokens: false,
         preprocessor_macros: false,
@@ -75,18 +71,15 @@ pub fn perl_pack() -> LangPack {
         enum_members: &[],
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
         receiver_names: &[],
-        nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
         recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
         op_map: &[],
         simple_var_kinds: &[],
         dynamic_arg_markers: &[],
         dynamic_var_markers: &[],
-        qualifier_peel: &[],
         member_kinds: &[],
         skip_kinds: &[],
         call_kinds: &[],
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
-        oolfn: OutOfLineSpec::OFF,
     }
 }

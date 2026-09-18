@@ -338,6 +338,27 @@
 ; — the universal `(function_definition) @scope.sub` mints it.
 (function_definition type: (_) @rettype) @ool.def
 (function_definition !type) @ool.def
+; the declarator shapes, captured as themselves — the walks own the DEPTH
+; (unbounded: `Foo**& Class::m()`, `char* const& b`), the document owns the
+; kinds. @ool.wrap is a wrapper the out-of-line unwrap descends through to the
+; @ool.declarator it stops at, whose @ool.qualifier chain names the owner;
+; @deref.* is one level of the declarator peel, @deref.annot its cv-qualifiers,
+; and @deref.leaf.<kind> the chain's leaf — the suffix names the def the leaf
+; mints, so a member outlines as a field and a local as a local.
+(pointer_declarator) @ool.wrap @deref.pointer
+(reference_declarator) @ool.wrap @deref.ref
+(parenthesized_declarator) @ool.wrap
+(function_declarator) @ool.declarator
+(qualified_identifier) @ool.qualifier
+(pointer_declarator (type_qualifier) @deref.annot)
+(pointer_declarator (identifier) @deref.leaf.local)
+(pointer_declarator (field_identifier) @deref.leaf.field)
+(reference_declarator (identifier) @deref.leaf.local)
+(reference_declarator (field_identifier) @deref.leaf.field)
+; a templated owner (`Buf<T>::grow`) owns by its BASE class name: the name
+; field IS the class, so every qualifier segment peels through this capture
+; instead of a string split on `<`.
+(qualified_identifier scope: (template_type name: (_) @qualifier.name))
 (function_definition
   declarator: (pointer_declarator
     declarator: (function_declarator
@@ -791,6 +812,17 @@
   left: (identifier) @flow.target
   right: (_) @flow.source) @flow.assign
 
+; `x.clear()` / `x.reset()` — a rebinding method call puts a moved-from object
+; back into a known state, so the moved-from window (and any narrowing) ends at
+; the receiver, sparing the reset's own read. Which methods rebind is the
+; pattern's own `#any-of?`; the receiver is captured as the rebind itself, so
+; the effect needs no second vocabulary.
+(call_expression
+  function: (field_expression
+    argument: (identifier) @flow.rebind
+    field: (field_identifier) @move.rebind)
+  (#any-of? @move.rebind "clear" "reset" "assign" "emplace" "swap"))
+
 ; `std::move(x)` leaves x in a moved-from (valid-but-unspecified) state: a
 ; subsequent READ of x before it is reassigned is a use-after-move bug.
 ; Capture the moved var + the whole call span; the minter checks scope/name
@@ -842,9 +874,10 @@
 (parameter_list) @param.region
 
 ; `if (dynamic_cast<Derived*>(b)) { b->... }` narrows b to Derived INSIDE the
-; block — the cpp analog of python `isinstance`. The pack's narrow_guard maps
-; `dynamic_cast` + the template type to the refinement; core scopes it to
-; @scope and the edge-driven cutoff ends it at any rebind of b.
+; block — the cpp analog of python `isinstance`. The guard name is the
+; pattern's own `#eq?`, so only a cast reaches the extractor; @narrow.type
+; names the refinement, core scopes it to @scope and the edge-driven cutoff
+; ends it at any rebind of b.
 (if_statement
   condition: (condition_clause
     value: (call_expression
@@ -853,18 +886,19 @@
         arguments: (template_argument_list
           (type_descriptor type: (type_identifier) @narrow.type)))
       arguments: (argument_list (identifier) @narrow.var)))
-  consequence: (compound_statement) @narrow.block)
+  consequence: (compound_statement) @narrow.block
+  (#eq? @narrow.guard "dynamic_cast"))
 
 ; `std::optional<T>` engaged-state narrowing. Guard-testing an optional as
 ; engaged proves it HOLDS a T inside the block, so `opt->m` / `*opt` resolve on
-; T there. No type token rides these guards (unlike dynamic_cast) — the pack's
-; narrow_guard reads the subject's DECLARED type (std::optional<T>) and peels T,
-; so the refinement keys on the type being optional, not on the guard name (a
-; bare `if (ptr)` over a non-optional declares no inner type → no narrowing).
-; Two clean engagement shapes: bare truthiness `if (opt)` (no @narrow.guard),
-; and `if (opt.has_value())` (guard token gates the method — an arbitrary
-; `opt.foo()` won't narrow). `!= std::nullopt` needs both operator + operand
-; checks the one-token hook can't express, so it's left out.
+; T there. No @narrow.type rides these shapes (unlike dynamic_cast), so the
+; subject's DECLARED type is what gets peeled — the refinement keys on the type
+; being optional, not on the guard (a bare `if (ptr)` over a non-optional
+; declares no inner type → no narrowing). Two clean engagement shapes: bare
+; truthiness `if (opt)`, and `if (opt.has_value())` whose `#eq?` gates the
+; method so an arbitrary `opt.foo()` never reaches the extractor.
+; `!= std::nullopt` needs both operator + operand checks the one-token hook
+; can't express, so it's left out.
 (if_statement
   condition: (condition_clause value: (identifier) @narrow.var)
   consequence: (compound_statement) @narrow.block)
@@ -874,7 +908,8 @@
       function: (field_expression
         argument: (identifier) @narrow.var
         field: (field_identifier) @narrow.guard)))
-  consequence: (compound_statement) @narrow.block)
+  consequence: (compound_statement) @narrow.block
+  (#eq? @narrow.guard "has_value"))
 
 ; ---- branch arms are lexical scopes (conditional-move soundness) ----
 ; if/else arm bodies each mint a @scope, so a `std::move` in one arm bounds its

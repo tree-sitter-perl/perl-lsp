@@ -754,6 +754,22 @@ fn cmake_outline_targets_vars_and_interpolated_refs() {
     assert!(!skel.refs.iter().any(|r| r.name == "PRIVATE"));
 }
 
+/// CMake is case-insensitive in its command names, so the family patterns
+/// match that way: `SET`/`Add_Library` declare exactly what their lower-case
+/// spellings do.
+#[test]
+fn cmake_command_families_match_however_the_command_is_cased() {
+    let skel = cmake_skel("SET(MY_FLAG ON)\nAdd_Library(widgets STATIC a.c)\nINCLUDE(util.cmake)\n");
+    let defs: Vec<(String, String)> = skel
+        .symbols
+        .iter()
+        .map(|s| (s.kind.clone(), s.name.clone()))
+        .collect();
+    assert!(defs.contains(&("var".into(), "MY_FLAG".into())), "{defs:?}");
+    assert!(defs.contains(&("sub".into(), "widgets".into())), "{defs:?}");
+    assert_eq!(skel.imports, vec!["util.cmake"]);
+}
+
 // ---- C++ obstacle course: measure macro-induced parse damage ----
 
 #[path = "cpp_obstacle_test_corpus.rs"]
@@ -1817,6 +1833,45 @@ void f(Widget* p, std::optional<Widget> opt) {
         Some(InferredType::ClassName("Widget".into())),
         "non-optional pointer keeps its declared pointee type; bare-if is a no-op",
     );
+}
+
+/// The declarator peel, spelling by spelling: the per-level stack a pointer /
+/// reference chain flattens to, each level carrying its own cv-qualifiers, and
+/// the same chain reading the same whether it declares a member or a local.
+#[test]
+fn cpp_declarator_peel_stacks_every_spelling() {
+    use crate::model::file_analysis::DerefKind::{Pointer, Reference};
+    let src = "\
+struct S {
+  Box** a;
+  char* const& b;
+  Box* const& c;
+  Node*** d;
+};
+void f() {
+  Box** x;
+  char* const& y = q;
+}
+";
+    let skel = cpp_skel(src);
+    let stack = |name: &str| -> Vec<(crate::model::file_analysis::DerefKind, Vec<String>)> {
+        skel.symbols
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} is extracted"))
+            .deref_stack
+            .iter()
+            .map(|st| (st.kind, st.annotations.clone()))
+            .collect()
+    };
+    let plain = |k| (k, Vec::<String>::new());
+    let cnst = |k| (k, vec!["const".to_string()]);
+    assert_eq!(stack("a"), vec![plain(Pointer), plain(Pointer)], "Box**");
+    assert_eq!(stack("b"), vec![cnst(Pointer), plain(Reference)], "char* const&");
+    assert_eq!(stack("c"), vec![cnst(Pointer), plain(Reference)], "Box* const&");
+    assert_eq!(stack("d"), vec![plain(Pointer); 3], "Node***");
+    assert_eq!(stack("x"), vec![plain(Pointer), plain(Pointer)], "a local reads the same");
+    assert_eq!(stack("y"), vec![cnst(Pointer), plain(Reference)], "an initialized local too");
 }
 
 #[test]

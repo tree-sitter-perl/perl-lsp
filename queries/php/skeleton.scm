@@ -732,8 +732,9 @@
     (break_statement)
     (expression_statement (throw_expression))
     (compound_statement [(return_statement) (continue_statement) (break_statement) (expression_statement (throw_expression))] .)]) @narrow.after
-;; `assert($x instanceof T);` — the pack's `narrow_assertions` decide
-;; which callees assert (the capture fires for any call; core gates).
+;; `assert($x instanceof T);` — an asserted guard holds for the rest of the
+;; scope. Which callees assert is the pattern's own `#eq?`, so an overlay
+;; teaches a new asserting callee by adding a pattern, not by editing Rust.
 (expression_statement
   (function_call_expression
     function: (name) @narrow.assert
@@ -742,7 +743,8 @@
         (binary_expression
           left: (variable_name) @narrow.var
           "instanceof" @narrow.guard
-          right: [(name) (qualified_name)] @narrow.type))))) @narrow.after
+          right: [(name) (qualified_name)] @narrow.type))))
+  (#eq? @narrow.assert "assert")) @narrow.after
 ;; Expression-level regions: the refinement holds WITHIN the marked node —
 ;; the right operand of `&&`, the ternary's true arm, a `match` arm's
 ;; return expression.
