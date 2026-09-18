@@ -133,7 +133,10 @@ pub(super) const CODECLARED_SUFFIX: &str = ".declared_with";
 
 pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAnalysis, String> {
     let language = tree.language();
-    let query = cached_query(&language, effective_query_source(&language, pack))?;
+    let query_source = effective_query_source(&language, pack);
+    let query = cached_query(&language, query_source)?;
+    // The cursor-time runner serves THIS object, never one of its own.
+    super::cursor_query::remember(pack.lang_id, query, query_source);
     let cap_names: Vec<String> = query
         .capture_names()
         .iter()
