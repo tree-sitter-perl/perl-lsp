@@ -305,6 +305,48 @@ impl FileAnalysis {
         found
     }
 
+    /// `child isa ancestor`, keyed on the LEAF of both names. The identity
+    /// a class carries is its FQN (`PHPUnit\Framework\TestCase`), minted
+    /// through the file's use-map; a declaration document spells the leaf
+    /// the human writes (`TestCase`), because the namespace a framework's
+    /// base lives in is the framework's business, not the rule's. The
+    /// relational key between the two is `name_match_key` on the language's
+    /// declared separator — the same key `refs_to` joins on.
+    ///
+    /// Leaf keying is a deliberate WIDENING: a project's own `TestCase` in
+    /// another namespace answers this gate. That is the direction a
+    /// declaration document wants (see `docs/adr/heatmap.md` — a shield
+    /// over-approximates toward reachable).
+    pub fn class_isa_leaf(
+        &self,
+        child: &str,
+        ancestor: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> bool {
+        let names = self.names();
+        let key = |n: &str| crate::model::conventions::name_match_key(n, names);
+        let want = key(ancestor);
+        if key(child) == want {
+            return true;
+        }
+        let graph = crate::model::graph::GraphView::new(self, module_index);
+        let mut found = false;
+        graph.walk(
+            crate::model::graph::Node::Class(child.to_string()),
+            crate::model::graph::EdgeKindMask::INHERITS
+                | crate::model::graph::EdgeKindMask::APP_SURFACE,
+            &mut |n| {
+                if matches!(n, crate::model::graph::Node::Class(c) if key(c) == want) {
+                    found = true;
+                    crate::model::graph::WalkControl::Stop
+                } else {
+                    crate::model::graph::WalkControl::Continue
+                }
+            },
+        );
+        found
+    }
+
     /// Inheritance chain for a method rename: `[class, ..., defining_class]`.
     ///
     /// Cross-class method rename has to touch two distinct things:
