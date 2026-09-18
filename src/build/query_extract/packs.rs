@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::model::file_analysis::NameSpellings;
+use crate::model::file_analysis::PackSpellings;
 
 // The per-language declarations, re-exported so `query_extract::packs` stays
 // the one path every caller spells. A build with no pack language compiled
@@ -37,6 +38,11 @@ pub struct LangPack {
     /// grammar cannot see (a Blade template's `route('x')`), scanned as
     /// text into `DispatchCall` refs on the named rail.
     pub bundled_rail_docs: &'static [&'static str],
+    /// The language's WRITE and DISPLAY spellings — what a quick-fix
+    /// inserts and what a human surface renders. Per-language constants,
+    /// so an analysis carries the pointer and every consumer reaches them
+    /// by language id (rule #14); `PackSpellings::NONE` = declares none.
+    pub spellings: &'static crate::model::file_analysis::PackSpellings,
     /// How the language spells names — its namespace separator and its
     /// variable sigils. Baked onto `PackFacts::names`; every key function
     /// reads it there.

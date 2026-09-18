@@ -1,7 +1,15 @@
 //! CMake's pack — the command-dispatched language.
 
 use crate::build::query_extract::{CmdEffect, LangPack, PeelSpec};
-use crate::model::file_analysis::NameSpellings;
+use crate::model::file_analysis::{NameSpellings, PackSpellings};
+
+/// CMake writes and displays nothing of its own: the engine's type tags are
+/// its vocabulary, and it offers no import or annotation quick-fix. Its
+/// members belong to the container that declares them.
+const SPELLINGS: PackSpellings = PackSpellings {
+    members_are_package_bound: true,
+    ..PackSpellings::NONE
+};
 
 // Live only under `feature = "cmake"` (or the pack tests); see `python_pack`.
 // Sole constructor of the `CmdEffect` variants.
@@ -10,6 +18,7 @@ pub fn cmake_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/cmake/skeleton.scm"),
         bundled_overlays: &[],
+        spellings: &SPELLINGS,
         lang_id: "cmake",
         bundled_entry_markers: &[],
         bundled_rail_docs: &[],

@@ -120,6 +120,10 @@ pub struct SkeletonAnalysis {
     /// Whole import-statement spans (`use A\B;` rows), for the insertion
     /// point of an import quick-fix.
     pub import_rows: Vec<Span>,
+    /// The language's write/display spellings (`LangPack::spellings`),
+    /// carried to `PackFacts` as a pointer — per-language constants, never
+    /// copied per file (rule #14).
+    pub spellings: Option<&'static crate::model::file_analysis::PackSpellings>,
     /// The last row of the file preamble (open tag, `declare` rows): an
     /// inserted import goes after it when no import or namespace anchors.
     pub preamble_end: Option<usize>,
@@ -1156,6 +1160,7 @@ impl SkeletonAnalysis {
             // the pack, generic logic in core).
             receiver_names: std::mem::take(&mut self.receiver_names),
             import_rows: std::mem::take(&mut self.import_rows),
+            spellings: self.spellings,
             preamble_end: self.preamble_end,
             names: std::mem::take(&mut self.names),
             // Specialization family edges (spec → primary). NOT an inheritance
