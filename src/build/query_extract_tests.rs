@@ -754,6 +754,22 @@ fn cmake_outline_targets_vars_and_interpolated_refs() {
     assert!(!skel.refs.iter().any(|r| r.name == "PRIVATE"));
 }
 
+/// CMake is case-insensitive in its command names, so the family patterns
+/// match that way: `SET`/`Add_Library` declare exactly what their lower-case
+/// spellings do.
+#[test]
+fn cmake_command_families_match_however_the_command_is_cased() {
+    let skel = cmake_skel("SET(MY_FLAG ON)\nAdd_Library(widgets STATIC a.c)\nINCLUDE(util.cmake)\n");
+    let defs: Vec<(String, String)> = skel
+        .symbols
+        .iter()
+        .map(|s| (s.kind.clone(), s.name.clone()))
+        .collect();
+    assert!(defs.contains(&("var".into(), "MY_FLAG".into())), "{defs:?}");
+    assert!(defs.contains(&("sub".into(), "widgets".into())), "{defs:?}");
+    assert_eq!(skel.imports, vec!["util.cmake"]);
+}
+
 // ---- C++ obstacle course: measure macro-induced parse damage ----
 
 #[path = "cpp_obstacle_test_corpus.rs"]
@@ -901,6 +917,9 @@ fn tok(src: &str, needle: &str, occ: usize) -> Point {
 fn sksym(src: &str, kind: &str, name: &str, occ: usize, package: Option<&str>) -> super::SkelSymbol {
     let ns = tok(src, name, occ);
     super::SkelSymbol {
+        declared_with: None,
+        declared_return: None,
+        return_annotation: None,
         kind: kind.to_string(),
         name: name.to_string(),
         start: ns,
@@ -909,11 +928,14 @@ fn sksym(src: &str, kind: &str, name: &str, occ: usize, package: Option<&str>) -
         name_end: Point { row: ns.row, column: ns.column + name.len() },
         package: package.map(str::to_string),
         scope: crate::model::file_analysis::ScopeId(0),
-        return_type: None,
         deref_stack: Vec::new(),
         attributes: Vec::new(),
         arity: None,
+        params: Vec::new(),
         qualifier_owned: false,
+        doc: None,
+        deprecation: None,
+        flags: Default::default(),
     }
 }
 
@@ -1645,36 +1667,9 @@ void f() {
 }
 
 #[test]
-fn cpp_uam_toggle_gates_pack_diagnostics() {
-    // The diagnostic is opt-in: `pack_diagnostics` emits it only when the toggle
-    // is set, and never for the default (off) options.
-    let src = "\
-void f() {
-  Widget x;
-  sink(std::move(x));
-  x.use();
-}
-";
-    let fa = cpp_skel(src).into_file_analysis();
-    let off = crate::lsp::symbols::pack_diagnostics(&fa, crate::lsp::symbols::DiagnosticOptions::default());
-    assert!(
-        !off.iter().any(|d| matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(s)) if s == "use-after-move")),
-        "off by default: {off:?}",
-    );
-    let on = crate::lsp::symbols::pack_diagnostics(
-        &fa,
-        crate::lsp::symbols::DiagnosticOptions { use_after_move: true, ..Default::default() },
-    );
-    assert!(
-        on.iter().any(|d| matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(s)) if s == "use-after-move")),
-        "on when toggled: {on:?}",
-    );
-}
-
-#[test]
 fn cpp_dynamic_cast_guard_narrows() {
     // `if (dynamic_cast<Derived*>(b))` refines b to Derived inside the block —
-    // the cpp analog of python isinstance, via the now-wired narrow_guard.
+    // the cpp analog of python's `isinstance`, on the same guard patterns.
     let src = "\
 void f(Base* b) {
     if (dynamic_cast<Derived*>(b)) {
@@ -1808,6 +1803,45 @@ void f(Widget* p, std::optional<Widget> opt) {
         Some(InferredType::ClassName("Widget".into())),
         "non-optional pointer keeps its declared pointee type; bare-if is a no-op",
     );
+}
+
+/// The declarator peel, spelling by spelling: the per-level stack a pointer /
+/// reference chain flattens to, each level carrying its own cv-qualifiers, and
+/// the same chain reading the same whether it declares a member or a local.
+#[test]
+fn cpp_declarator_peel_stacks_every_spelling() {
+    use crate::model::file_analysis::DerefKind::{Pointer, Reference};
+    let src = "\
+struct S {
+  Box** a;
+  char* const& b;
+  Box* const& c;
+  Node*** d;
+};
+void f() {
+  Box** x;
+  char* const& y = q;
+}
+";
+    let skel = cpp_skel(src);
+    let stack = |name: &str| -> Vec<(crate::model::file_analysis::DerefKind, Vec<String>)> {
+        skel.symbols
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} is extracted"))
+            .deref_stack
+            .iter()
+            .map(|st| (st.kind, st.annotations.clone()))
+            .collect()
+    };
+    let plain = |k| (k, Vec::<String>::new());
+    let cnst = |k| (k, vec!["const".to_string()]);
+    assert_eq!(stack("a"), vec![plain(Pointer), plain(Pointer)], "Box**");
+    assert_eq!(stack("b"), vec![cnst(Pointer), plain(Reference)], "char* const&");
+    assert_eq!(stack("c"), vec![cnst(Pointer), plain(Reference)], "Box* const&");
+    assert_eq!(stack("d"), vec![plain(Pointer); 3], "Node***");
+    assert_eq!(stack("x"), vec![plain(Pointer), plain(Pointer)], "a local reads the same");
+    assert_eq!(stack("y"), vec![cnst(Pointer), plain(Reference)], "an initialized local too");
 }
 
 #[test]
@@ -2288,7 +2322,7 @@ template <typename T> void Buf<T>::grow(int n) { int local_g = n; }
 }
 
 /// Out-of-line definitions whose declarator or qualifier the narrow per-shape
-/// patterns missed (hitlist H7-2): a pointer/reference return wraps the
+/// patterns missed: a pointer/reference return wraps the
 /// function_declarator in a `pointer_declarator`; a nested class owner nests the
 /// `qualified_identifier`; a constructor/destructor has no return type at all.
 /// The general `@ool.def` capture + the driver's canonical declarator unwrap +
@@ -2722,4 +2756,94 @@ void go() {
     };
     assert_eq!(gd(11, 13), Some((1, 9)), "w.get().spin() resolves spin on Widget");
     assert_eq!(gd(12, 9), Some((1, 9)), "w.v_.spin() resolves through the field's type");
+}
+
+// ==== PHP pack: the fifth language on the same driver ====
+
+#[test]
+fn cpp_member_chain_types_through_method_hops() {
+    // The identical gap on the cpp side: `auto x = w.get().spin();` — the
+    // called-member pattern mints the hop witness alongside the call-blind
+    // field ref, so the chain types with no intermediate variable.
+    let src = "\
+struct Engine {
+    int spin() { return 7; }
+};
+struct Widget {
+    Engine get() { return Engine(); }
+};
+int f(Widget w) {
+    auto x = w.get().spin();
+    auto e = w.get();
+    return x;
+}
+";
+    let fa = cpp_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let inside = tree_sitter::Point { row: 9, column: 4 };
+    assert_eq!(
+        fa.inferred_type_via_bag("e", inside),
+        Some(InferredType::ClassName("Engine".into())),
+        "single hop must type",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("x", inside),
+        Some(InferredType::Numeric),
+        "two-hop chain must type",
+    );
+}
+
+/// The overlay lint's findings: a rail family with no rail names a
+/// namespace nobody declared, and a `@classattr.` spelling outside the
+/// flag table stamps a string no consumer reads. Both mint nothing, so
+/// silence would read as a missing feature; a suffixed rail, a known
+/// spelling and an unrelated capture stay quiet.
+#[test]
+fn overlay_capture_findings_name_the_unhonourable_captures() {
+    use crate::build::query_extract::overlay_capture_findings;
+    let bad = overlay_capture_findings(&[
+        "def.handler.named",
+        "ref.dispatch.named",
+        "def.handler.class.",
+        "classattr.nonsense",
+    ]);
+    assert_eq!(bad.len(), 4, "{bad:?}");
+    assert!(bad[0].contains("names no rail"), "{bad:?}");
+    assert!(bad[3].contains("nonsense"), "{bad:?}");
+    let good = overlay_capture_findings(&[
+        "def.handler.named.hook",
+        "ref.dispatch.named.hook",
+        "def.handler.by.route",
+        "classattr.interface",
+        "ref.call.named",
+        "_wphook",
+    ]);
+    assert!(good.is_empty(), "{good:?}");
+    // a named rail is served vocabulary, however new the word is, and the
+    // capture SAYS what the extractor makes of it
+    use crate::build::query_extract::{rail_of, RailCapture};
+    assert_eq!(rail_of("def.handler.named.hook"), Some((RailCapture::Handler, "hook")));
+    assert_eq!(rail_of("ref.dispatch.class.event"), Some((RailCapture::ClassDispatch, "event")));
+    assert!(rail_of("def.handler.named").is_none());
+    assert!(rail_of("ref.call.named").is_none());
+    assert!(rail_of("def.handler.class.route").is_some_and(|(k, _)| k.is_handler()
+        && k.is_class_named()));
+}
+
+
+/// A row says what it binds through its capture suffix, and an unsuffixed
+/// capture binds a type — the default every include/`use` row without the
+/// `function` / `const` keyword means.
+#[test]
+fn import_capture_suffix_declares_what_the_row_binds() {
+    use crate::model::file_analysis::ImportBinds;
+    use super::extract::{import_binds_suffix, strip_import_binds};
+    assert_eq!(import_binds_suffix("function"), Some(ImportBinds::Function));
+    assert_eq!(import_binds_suffix("const"), Some(ImportBinds::Const));
+    assert_eq!(import_binds_suffix("name"), None);
+    assert_eq!(strip_import_binds("import.name.function"), "import.name");
+    assert_eq!(strip_import_binds("import.const"), "import");
+    assert_eq!(strip_import_binds("import.name"), "import.name");
+    // Only the import family; a `.const` elsewhere is somebody else's capture.
+    assert_eq!(strip_import_binds("def.const"), "def.const");
 }

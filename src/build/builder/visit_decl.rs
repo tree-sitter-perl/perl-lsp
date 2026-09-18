@@ -4,6 +4,10 @@
 use crate::model::file_analysis::SymbolFlags;
 use super::*;
 
+/// Perl's catch-all method name. The ONE site that spells it: the mint
+/// turns it into a fact on the package, and every lane reads the fact.
+const AUTOLOAD_SUB: &str = "AUTOLOAD";
+
 impl<'a> Builder<'a> {
     // ---- Main visitor ----
 
@@ -471,23 +475,35 @@ impl<'a> Builder<'a> {
                     opaque_return: false,
                     is_constant: false,
                     lexical: false,
+                    declared_return: None,
                 },
             );
         }
     }
 
-    /// Walk a `{ ... }` block's children, reverting package context at block
-    /// close. `package Foo;` is file-scoped in Perl, but a `{ }` block is a
-    /// hard boundary: `{ package Inner; }` must not leak Inner to the
-    /// statements that follow. Saves the walk-time package name and the open
-    /// statement-range cursor, restores both on exit, and repairs the
-    /// `package_ranges` spans so `package_at` reverts past the block too.
-    pub(super) fn walk_block_package_scoped(&mut self, node: Node<'a>) {
-        self.walk_block_package_scoped_then(node, |_| {});
+    /// Stamp `DYNAMIC_MEMBERS` on the package the walk is inside. The
+    /// package statement precedes its subs, so the symbol is already there;
+    /// a file that declares no package has no container to carry the fact.
+    fn mark_package_answers_any_member(&mut self) {
+        let Some(pkg) = self.current_package.clone() else { return };
+        if let Some(sym) = self
+            .symbols
+            .iter_mut()
+            .rev()
+            .find(|s| matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == pkg)
+        {
+            sym.flags |= crate::model::file_analysis::SymbolFlags::DYNAMIC_MEMBERS;
+        }
     }
 
-    /// `walk_block_package_scoped`, with `work` run after the package context
-    /// is restored — the block-scope arm closes its lexical scope there.
+    /// Walk a `{ ... }` block's children, reverting package context at block
+    /// close, then run `work`. `package Foo;` is file-scoped in Perl, but a
+    /// `{ }` block is a hard boundary: `{ package Inner; }` must not leak
+    /// Inner to the statements that follow. Saves the walk-time package name
+    /// and the open statement-range cursor, restores both on exit, and
+    /// repairs the `package_ranges` spans so `package_at` reverts past the
+    /// block too. `work` runs after the restore — the block-scope arm closes
+    /// its lexical scope there.
     pub(super) fn walk_block_package_scoped_then(
         &mut self,
         node: Node<'a>,
@@ -777,8 +793,16 @@ impl<'a> Builder<'a> {
             if is_method { SymKind::Method } else { SymKind::Sub },
             node_to_span(node),
             node_to_span(name_node),
-            SymbolDetail::Sub { params: params.clone(), is_method, doc, opaque_return: false, is_constant: false, lexical },
+            SymbolDetail::Sub { params: params.clone(), is_method, doc, opaque_return: false, is_constant: false, lexical, declared_return: None },
         );
+
+        // `AUTOLOAD` is Perl's catch-all: the package that declares one
+        // answers ANY method name at runtime, so its `sub` set is not its
+        // surface. The fact belongs to the PACKAGE — one flag, read through
+        // the MRO by the same model query the packs' `__call` feeds.
+        if name == AUTOLOAD_SUB {
+            self.mark_package_answers_any_member();
+        }
 
         // Exporter::Extensible method-attribute export form: `sub foo :Export`.
         // The sub's name is the export; recognizing the attribute is builder
@@ -913,6 +937,7 @@ impl<'a> Builder<'a> {
                 opaque_return: false,
                 is_constant: false,
                 lexical: false,
+                declared_return: None,
             },
         );
         // Not a nameable entity — resolvable, never listed.
@@ -976,7 +1001,7 @@ impl<'a> Builder<'a> {
                                 .into_iter()
                                 .map(|(name, span)| {
                                     let is_slurpy = name.starts_with('@') || name.starts_with('%');
-                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false, binding_site: Some(span.start) }
+                                    ParamInfo { declared_type: None, name, default: None, is_slurpy, is_invocant: false, binding_site: Some(span.start) }
                                 })
                                 .collect();
                             // Combine any preceding shift params with @_ params
@@ -1004,7 +1029,7 @@ impl<'a> Builder<'a> {
                                 .into_iter()
                                 .map(|(name, span)| {
                                     let is_slurpy = name.starts_with('@') || name.starts_with('%');
-                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false, binding_site: Some(span.start) }
+                                    ParamInfo { declared_type: None, name, default: None, is_slurpy, is_invocant: false, binding_site: Some(span.start) }
                                 })
                                 .collect();
                             if !list_params.is_empty() {
@@ -1021,7 +1046,7 @@ impl<'a> Builder<'a> {
                         .and_then(|l| self.collect_vars_from_decl(l).into_iter().next())
                         .map(|(_, span)| span.start);
                     if let Some((var_name, default)) = self.extract_shift_param(assign, right) {
-                        shift_params.push(ParamInfo {
+                        shift_params.push(ParamInfo { declared_type: None,
                             name: var_name,
                             default,
                             is_slurpy: false,
@@ -1033,7 +1058,7 @@ impl<'a> Builder<'a> {
 
                     // Pattern: my $var = $_[N];
                     if let Some(var_name) = self.extract_subscript_param(assign, right) {
-                        shift_params.push(ParamInfo {
+                        shift_params.push(ParamInfo { declared_type: None,
                             name: var_name,
                             default: None,
                             is_slurpy: false,
@@ -1128,7 +1153,7 @@ impl<'a> Builder<'a> {
                 match param.kind() {
                     "mandatory_parameter" => {
                         if let Some(var) = self.first_var_child(param) {
-                            params.push(ParamInfo { name: var, default: None, is_slurpy: false, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { declared_type: None, name: var, default: None, is_slurpy: false, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     "optional_parameter" => {
@@ -1141,18 +1166,18 @@ impl<'a> Builder<'a> {
                             .and_then(|d| d.utf8_text(self.source).ok())
                             .map(|s| s.to_string());
                         if let Some(name) = var {
-                            params.push(ParamInfo { name, default, is_slurpy: false, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { declared_type: None, name, default, is_slurpy: false, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     "slurpy_parameter" => {
                         if let Some(var) = self.first_var_child(param) {
-                            params.push(ParamInfo { name: var, default: None, is_slurpy: true, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { declared_type: None, name: var, default: None, is_slurpy: true, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     "scalar" | "array" | "hash" => {
                         if let Ok(text) = param.utf8_text(self.source) {
                             let is_slurpy = matches!(param.kind(), "array" | "hash");
-                            params.push(ParamInfo { name: text.to_string(), default: None, is_slurpy, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { declared_type: None, name: text.to_string(), default: None, is_slurpy, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     _ => {}
@@ -1463,7 +1488,7 @@ impl<'a> Builder<'a> {
                         SymKind::Method,
                         node_to_span(node),
                         bare_span,
-                        SymbolDetail::Sub { params: vec![], is_method: true, doc: None, opaque_return: false, is_constant: false, lexical: false },
+                        SymbolDetail::Sub { params: vec![], is_method: true, doc: None, opaque_return: false, is_constant: false, lexical: false, declared_return: None },
                     );
                 }
                 if has_writer {
@@ -1474,7 +1499,7 @@ impl<'a> Builder<'a> {
                         node_to_span(node),
                         bare_span,
                         SymbolDetail::Sub {
-                            params: vec![ParamInfo {
+                            params: vec![ParamInfo { declared_type: None,
                                 name: format!("${}", bare_name),
                                 default: None,
                                 is_slurpy: false,
@@ -1486,6 +1511,7 @@ impl<'a> Builder<'a> {
                     opaque_return: false,
                     is_constant: false,
                     lexical: false,
+                    declared_return: None,
                         },
                     );
                 }

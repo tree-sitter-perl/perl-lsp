@@ -116,6 +116,7 @@ impl<'a> Builder<'a> {
                     opaque_return: false,
                     is_constant: false,
                     lexical: false,
+                    declared_return: None,
                 },
             );
             self.record_framework_accessor_witness(
@@ -688,6 +689,7 @@ impl<'a> Builder<'a> {
                 opaque_return: false,
                 is_constant: true,
                 lexical: false,
+                declared_return: None,
             },
         );
     }

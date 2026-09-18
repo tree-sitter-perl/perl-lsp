@@ -44,6 +44,7 @@ pub use enrichment::{declare_enrichment_profile, enrichment_profile, EnrichmentP
 mod class_queries;
 mod cursor_queries;
 mod invocants;
+pub use invocants::substitute_class_params;
 mod hover;
 mod sym_index;
 mod completion;
@@ -493,6 +494,27 @@ impl LocalParents for HashMap<String, Vec<String>> {
 impl LocalParents for HashMap<String, PackageFacts> {
     fn declared_parents(&self, package: &str) -> &[String] {
         self.get(package).map_or(&[], |f| f.parents.as_slice())
+    }
+}
+
+/// The template-parameter twin of [`LocalParents`]: read a class's declared
+/// type parameters from either side's store.
+pub trait ClassTemplateParams {
+    fn template_params(&self, class: &str) -> &[String];
+}
+
+impl ClassTemplateParams for HashMap<String, Vec<String>> {
+    fn template_params(&self, class: &str) -> &[String] {
+        self.get(class).map_or(&[], |v| v.as_slice())
+    }
+}
+
+/// The empty store, for a language whose classes take no type parameters.
+pub struct NoClassParams;
+
+impl ClassTemplateParams for NoClassParams {
+    fn template_params(&self, _class: &str) -> &[String] {
+        &[]
     }
 }
 

@@ -54,6 +54,25 @@ A language where a method is also readable as a value (JS `obj.method`)
 publishes the callable on BOTH attachments at mint; the model never learns
 which language did that.
 
+The fallback is a fallback, not a union: a Callable target collects a
+stored member of its name only where the owner declares no callable of
+that name (`index/resolve/collect.rs`). Where it does, that callable IS
+the target and a same-named slot is a different member of the same class —
+so a php class with both `handler()` and `$handler` keeps two identities,
+and `$this->handler()`'s references never splat onto the property. The
+narrowing is owner-scoped through `symbol_defines_target`, so it asks the
+same question the collect walk already asks; Perl is unaffected by
+construction, since its class content admits only `Variable | Field |
+Enumerator` and a `has` accessor's `HashKeyDef` never reached the callable
+arm.
+
+The MRO walk narrows on the same rule: `resolve_member_in_ancestors` takes
+the family the asking ref NAMES, and per class a declaration of that family
+answers while one the family merely admits is held as the fallback the walk
+returns only when nothing else does. Without it the answer was declaration
+order — a property declared above its same-named method swallowed every
+call to it.
+
 ### Perl accesses that are semantically value reads
 
 A Perl `$o->name` with no arguments is often a value read in intent (a

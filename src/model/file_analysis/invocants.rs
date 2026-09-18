@@ -285,31 +285,6 @@ impl FileAnalysis {
         out
     }
 
-    /// The declaration-order template parameter names of `class` — local
-    /// `template_params`, else the class's own cached file. Empty for
-    /// non-template classes and full specs.
-    fn class_template_params(
-        &self,
-        class: &str,
-        module_index: Option<&dyn CrossFileLookup>,
-    ) -> Vec<String> {
-        if let Some(p) = self.pack.template_params.get(class) {
-            return p.clone();
-        }
-        if let Some(idx) = module_index {
-            // Any candidate file declaring `class` may carry its template
-            // params (pack lane — never evicted).
-            if let Some(p) = idx
-                .visible_def_candidates(class)
-                .iter()
-                .find_map(|c| c.analysis.pack.template_params.get(class).cloned())
-            {
-                return p;
-            }
-        }
-        Vec::new()
-    }
-
     /// A member's VALUE on a receiver when the asker does not know the
     /// member's kind — the sentinel's receiver typing mid-keystroke, member
     /// hover before a ref exists. Dispatch runs the specificity ladder
@@ -370,14 +345,7 @@ impl FileAnalysis {
         recv: &InferredType,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> InferredType {
-        let params = self.class_template_params(class, module_index);
-        if params.is_empty() {
-            return raw;
-        }
-        let InferredType::Parametric(ParametricType::Instance { args, .. }) = recv else {
-            return raw;
-        };
-        substitute_type_params(&raw, &params, args)
+        substitute_class_params(&raw, class, recv, &self.pack.template_params, module_index)
     }
 
     /// `dispatch_class_of`'s type-to-type twin for consumers that hand a
@@ -910,19 +878,23 @@ impl FileAnalysis {
         None
     }
 
-    /// The class of the method enclosing `point` — the implicit-`this` class
-    /// for a bare member access in a method body. Read off the innermost
-    /// containing Sub/Method SYMBOL's package (not the body scope): an
-    /// out-of-line body (`Status DBImpl::Recover(...) { ... }`) is lexically at
-    /// file scope, so its body scope carries no package, but the peeled method
-    /// symbol does — reading it off the symbol covers in-class AND out-of-line
-    /// with one rule (the same seam `emit_return_fuel`'s sibling-call pin uses).
+    /// The class a bare name at `point` reads its members from — `None`
+    /// where the language spells the receiver.
+    ///
+    /// The scope states the elision (`Scope::implicit_receiver`, from the
+    /// document's own capture) and the chain carries it, so a nested block
+    /// or lambda body answers like the method around it. The declaring
+    /// scope's `owner` is the callable it is the body of, and that symbol's
+    /// package is the class — in-class and out-of-line alike, since an
+    /// out-of-line body (`Status DBImpl::Recover(...) { ... }`) is lexically
+    /// at file scope while the peeled method symbol still carries `DBImpl`.
     pub(crate) fn implicit_receiver_class_at(&self, point: Point) -> Option<String> {
-        self.symbols
-            .iter()
-            .filter(|s| matches!(s.kind, SymKind::Method | SymKind::Sub))
-            .filter(|s| contains_point(&s.span, point))
-            .min_by_key(|s| span_size(&s.span))
+        let scope = self.scope_at(point)?;
+        self.scope_chain(scope)
+            .into_iter()
+            .find(|sid| self.scope(*sid).implicit_receiver)
+            .and_then(|sid| self.scope(sid).owner)
+            .and_then(|sym| self.symbols.get(sym.0 as usize))
             .and_then(|s| s.package.clone())
     }
 
@@ -1159,9 +1131,12 @@ impl FileAnalysis {
             if self.class_has_unresolved_ancestor(pkg, module_index) {
                 continue;
             }
-            if self
-                .resolve_method_in_ancestors(pkg, "AUTOLOAD", module_index)
-                .is_some()
+            // A catch-all silences this lane only where the language lets
+            // one satisfy an obligation: Perl's `AUTOLOAD` answers a
+            // required method at runtime, php's `__call` never satisfies an
+            // `implements` the engine checks at the declaration.
+            if self.spellings().catch_all_satisfies_contracts
+                && self.class_answers_any_member(pkg, module_index)
             {
                 continue;
             }
@@ -1208,7 +1183,7 @@ impl FileAnalysis {
                 // Perl's typeglob installs put a def ANYWHERE in the
                 // candidate file; a pack whose members are package-bound
                 // reads only the declarations attributed to the ancestor.
-                let package_bound = self.pack.members_are_package_bound;
+                let package_bound = self.spellings().members_are_package_bound;
                 self.for_each_ancestor_class(pkg, module_index, |a| {
                     let here = self.class_provides_method(a, &name)
                         || module_index.is_some_and(|idx| {
@@ -1599,4 +1574,48 @@ impl FileAnalysis {
 
 
 
+}
+
+/// The declaration-order template parameter names of `class`: the asking
+/// side's own table, else the class's own cached file (the pack lane — never
+/// evicted). One derivation, so the registry's member hop and
+/// `field_value_type` cannot disagree about what a class's parameters are.
+pub fn class_template_params_in(
+    local: &dyn super::ClassTemplateParams,
+    class: &str,
+    module_index: Option<&dyn CrossFileLookup>,
+) -> Vec<String> {
+    let own = local.template_params(class);
+    if !own.is_empty() {
+        return own.to_vec();
+    }
+    module_index
+        .and_then(|idx| {
+            idx.visible_def_candidates(class)
+                .iter()
+                .find_map(|c| c.analysis.pack.template_params.get(class).cloned())
+        })
+        .unwrap_or_default()
+}
+
+/// A member's declared type — written in the CLASS's vocabulary — read on an
+/// INSTANCE: the receiver's type arguments substitute for the class's
+/// parameters (`item_: T` on a `Box<int>` is `int`). A non-parametric class,
+/// a receiver that is not an instance, or a type mentioning no parameter all
+/// pass the raw type through.
+pub fn substitute_class_params(
+    raw: &InferredType,
+    class: &str,
+    recv: &InferredType,
+    local: &dyn super::ClassTemplateParams,
+    module_index: Option<&dyn CrossFileLookup>,
+) -> InferredType {
+    let params = class_template_params_in(local, class, module_index);
+    if params.is_empty() {
+        return raw.clone();
+    }
+    let InferredType::Parametric(ParametricType::Instance { args, .. }) = recv else {
+        return raw.clone();
+    };
+    substitute_type_params(raw, &params, args)
 }

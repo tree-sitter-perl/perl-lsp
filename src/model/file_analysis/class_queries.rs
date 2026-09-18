@@ -22,7 +22,7 @@ impl FileAnalysis {
     /// else after the package/namespace line, else after the preamble —
     /// `(insertion point, text)`. `None` when the pack has no import form.
     pub fn import_edit_for(&self, fq: &str, row: usize) -> Option<(Point, String)> {
-        let template = self.pack.import_template.as_str();
+        let template = self.spellings().import_template;
         if template.is_empty() {
             return None;
         }
@@ -337,6 +337,21 @@ impl FileAnalysis {
     /// `candidates`, deduped by `seen`. Called per-class in the ancestor
     /// walk: on `self` for local classes, on a cached module's analysis
     /// for cross-file ones.
+    /// How a member is WRITTEN wherever it is offered: php spells a static
+    /// property `Foo::$bar`, and that sigil belongs to the name its producer
+    /// mints, never to a rewrite of the label further down (rule #11). A
+    /// language that declares no sigil writes the bare name.
+    pub(crate) fn written_label(&self, sym: &Symbol) -> String {
+        let sigil = self.spellings().static_property_sigil;
+        if sigil.is_empty()
+            || !sym.flags.contains(SymbolFlags::STATIC)
+            || MemberKind::of_sym(sym.kind) != MemberKind::Value
+        {
+            return sym.name.clone();
+        }
+        format!("{sigil}{}", sym.name)
+    }
+
     fn collect_class_fields(
         &self,
         cls: &str,
@@ -386,7 +401,7 @@ impl FileAnalysis {
                             self.scope_chain(sym.scope).contains(&cb)
                                 && !self.scope_within_sub_body(sym.scope)
                         })))
-                && !self.pack.receiver_names.contains(&sym.name)
+                && !sym.flags.contains(SymbolFlags::RECEIVER)
                 // an anonymous container (`(union)`) is structure, not an
                 // addressable member
                 && !sym.flags.contains(SymbolFlags::ANONYMOUS)
@@ -398,7 +413,7 @@ impl FileAnalysis {
                 && seen.insert(sym.name.clone())
             {
                 candidates.push(CompletionCandidate {
-                    label: sym.name.clone(),
+                    label: self.written_label(sym),
                     kind: sym.kind,
                     is_static: sym.flags.contains(SymbolFlags::STATIC),
                     detail: None,
@@ -421,7 +436,7 @@ impl FileAnalysis {
                 && seen.insert(sym.name.clone())
             {
                 candidates.push(CompletionCandidate {
-                    label: sym.name.clone(),
+                    label: self.written_label(sym),
                     kind: sym.kind,
                     is_static: sym.flags.contains(SymbolFlags::STATIC),
                     detail: None,
@@ -567,13 +582,15 @@ impl FileAnalysis {
     /// same edge resolves to. `None` when the field's declared type is a
     /// primitive/committed value rather than an alias edge. Reads the field's
     /// OWNING analysis (cross-file fields resolve, like `field_type_on_class`).
+    /// A stored slot is what this asks for — the cross-file arm below already
+    /// reads one — so it is the VALUE ask, in every language.
     pub fn member_type_spelling(
         &self,
         class: &str,
         field: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<String> {
-        match self.resolve_method_in_ancestors(class, field, module_index)? {
+        match self.resolve_field_in_ancestors(class, field, module_index)? {
             MethodResolution::Local { sym_id, .. } => {
                 self.type_name_edge_of(&self.symbol(sym_id).name, self.symbol(sym_id).scope)
             }
@@ -817,7 +834,7 @@ impl FileAnalysis {
         let r = self
             .refs
             .iter()
-            .find(|r| r.span == site.slot_span && matches!(r.kind, RefKind::MethodCall { .. }))?;
+            .find(|r| r.span == site.slot_span && r.member_site().is_some())?;
         let class = self.method_call_invocant_class(r, module_index)?;
         let crate::model::witnesses::WitnessAttachment::Field { owner, .. } =
             self.field_subject(&class, &site.slot, module_index)
@@ -984,7 +1001,7 @@ impl FileAnalysis {
             let SymbolDetail::Handler { owner, dispatchers: dd, .. } = &sym.detail else {
                 return false;
             };
-            // Global handlers have no owner class — receiver-typed lookups skip them.
+            // A rail-owned handler has no owner class — receiver-typed lookups skip it.
             let HandlerOwner::Class(c) = owner else { return false };
             if c != owner_class { return false; }
             if !dispatchers.is_empty()
@@ -1097,7 +1114,9 @@ impl FileAnalysis {
     /// PackageRef lanes (goto-def, hover, references) share.
     pub fn spelled_identity(&self, r: &Ref) -> String {
         match (self.pack.names.use_map_sep(), self.pack.import_row_covering(&r.span)) {
-            (Some(sep), Some((_, raw))) => raw.strip_prefix(sep).unwrap_or(raw).to_string(),
+            (Some(sep), Some(row)) => {
+                row.raw.strip_prefix(sep).unwrap_or(&row.raw).to_string()
+            }
             _ => self.class_spelling_identity(&r.target_name),
         }
     }
@@ -1201,7 +1220,8 @@ impl FileAnalysis {
         // Import rows carry a namespace only for a use-map language; C's
         // `#include` paths ride the same lane and pin nothing.
         if let Some(sep) = self.pack.names.use_map_sep() {
-            for (_, raw) in &self.pack.include_directives {
+            for row in &self.pack.include_directives {
+                let raw = &row.raw;
                 let t = raw.strip_prefix(sep).unwrap_or(raw);
                 // A bare row (`use Exception;`) names the GLOBAL namespace: the
                 // empty pin keeps a same-leaf class of the file's own namespace
@@ -1252,9 +1272,9 @@ impl FileAnalysis {
         // resolver's answer for the whole spelling, split back to the pin's
         // (namespace, leaf) shape.
         if let Some(map) = self.use_map_with(own_ns.as_deref()) {
-            for (leaf, prefix) in &self.pack.qualified_spellings {
-                let (ns, _) = map.resolve_split(&format!("{prefix}{}{leaf}", map.sep));
-                pin(&mut pins, leaf, &ns);
+            for q in &self.pack.qualified_spellings {
+                let (ns, _) = map.resolve_split_parts(q);
+                pin(&mut pins, &q.leaf, &ns);
             }
         }
         let mut spelled: std::collections::HashSet<String> = std::collections::HashSet::new();

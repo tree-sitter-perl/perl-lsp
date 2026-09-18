@@ -1,12 +1,17 @@
 use super::use_map::UseMap;
-use super::Span;
+use super::{ImportBinds, ImportRow, Span};
 
-fn span() -> Span {
-    Span { start: tree_sitter::Point::new(0, 0), end: tree_sitter::Point::new(0, 0) }
+fn row(raw: &str) -> ImportRow {
+    ImportRow {
+        span: Span { start: tree_sitter::Point::new(0, 0), end: tree_sitter::Point::new(0, 0) },
+        raw: raw.to_string(),
+        binds: ImportBinds::Type,
+        bound: None,
+    }
 }
 
 fn map<'a>(
-    rows: &'a [(Span, String)],
+    rows: &'a [ImportRow],
     aliases: &'a [(String, String, String)],
     own: Option<&'a str>,
 ) -> UseMap<'a> {
@@ -30,7 +35,7 @@ fn bare_leaf_resolves_in_own_namespace_else_globally() {
 
 #[test]
 fn use_row_binds_its_leaf_and_carries_a_tail() {
-    let rows = vec![(span(), "GuzzleHttp\\Psr7".to_string()), (span(), "\\Exception".to_string())];
+    let rows = vec![row("GuzzleHttp\\Psr7"), row("\\Exception")];
     let m = map(&rows, &[], Some("App"));
     assert_eq!(m.resolve("Psr7"), "GuzzleHttp\\Psr7");
     assert_eq!(m.resolve("Psr7\\Utils"), "GuzzleHttp\\Psr7\\Utils");
@@ -39,7 +44,7 @@ fn use_row_binds_its_leaf_and_carries_a_tail() {
 
 #[test]
 fn alias_wins_over_row_and_own_namespace() {
-    let rows = vec![(span(), "GuzzleHttp\\Promise".to_string())];
+    let rows = vec![row("GuzzleHttp\\Promise")];
     let aliases = vec![("P".to_string(), "GuzzleHttp".to_string(), "Promise".to_string())];
     let m = map(&rows, &aliases, Some("App"));
     assert_eq!(m.resolve("P"), "GuzzleHttp\\Promise");
@@ -53,7 +58,7 @@ fn alias_wins_over_row_and_own_namespace() {
 fn an_aliased_row_binds_its_alias_never_its_leaf() {
     // the row is in `rows` too (every import row is), yet `Event`
     // means the file's own class, not the aliased import
-    let rows = vec![(span(), "B\\Event".to_string())];
+    let rows = vec![row("B\\Event")];
     let aliases = vec![("ScriptEvent".to_string(), "B".to_string(), "Event".to_string())];
     let m = map(&rows, &aliases, Some("A"));
     assert_eq!(m.resolve("ScriptEvent"), "B\\Event");
@@ -71,10 +76,31 @@ fn aliased_leaf_alone_falls_to_own_namespace() {
 
 #[test]
 fn split_keeps_the_global_namespace_empty() {
+    let bare = |leaf: &str| crate::model::file_analysis::QualifiedSpelling {
+        leaf: leaf.to_string(),
+        segments: Vec::new(),
+        absolute: false,
+    };
     let m = map(&[], &[], None);
-    assert_eq!(m.resolve_split("Exception"), ("".to_string(), "Exception".to_string()));
+    assert_eq!(m.resolve_split_parts(&bare("Exception")), ("".to_string(), "Exception".to_string()));
     let n = map(&[], &[], Some("A\\B"));
-    assert_eq!(n.resolve_split("C"), ("A\\B".to_string(), "C".to_string()));
+    assert_eq!(n.resolve_split_parts(&bare("C")), ("A\\B".to_string(), "C".to_string()));
+    // an absolute spelling is its own identity, whatever this file imports
+    let abs = crate::model::file_analysis::QualifiedSpelling {
+        leaf: "Throwable".to_string(),
+        segments: Vec::new(),
+        absolute: true,
+    };
+    assert_eq!(n.resolve_split_parts(&abs), ("".to_string(), "Throwable".to_string()));
+    let deep = crate::model::file_analysis::QualifiedSpelling {
+        leaf: "Utils".to_string(),
+        segments: vec!["GuzzleHttp".to_string(), "Psr7".to_string()],
+        absolute: true,
+    };
+    assert_eq!(
+        n.resolve_split_parts(&deep),
+        ("GuzzleHttp\\Psr7".to_string(), "Utils".to_string())
+    );
 }
 
 /// `resolve` takes a WRITTEN spelling. It is not idempotent: an identity

@@ -28,7 +28,7 @@ pub struct SurfaceFeed<'a> {
     pub plugin_namespaces: &'a [PluginNamespace],
     pub app_surface_consumers: &'a [String],
     pub macro_defs: &'a [MacroDef],
-    pub include_directives: &'a [(Span, String)],
+    pub include_directives: &'a [ImportRow],
     pub dbic_source_name: &'a Option<String>,
     /// Derived-query handle — see the struct doc for its narrow license.
     pub analysis: &'a FileAnalysis,
@@ -66,28 +66,10 @@ impl FileAnalysis {
                     include_directives,
                     // File-internal pack lanes: read LIVE from the
                     // provider's re-registered analysis per query.
-                    receiver_names: _receiver_names, // LangPack-wide convention, identical across the pack's files
-                    implicit_variables: _implicit_variables, // pack-wide convention
-                    throwaway_names: _throwaway_names,       // pack-wide convention
-                    catch_all_methods: _catch_all_methods, // pack-wide convention
-                    class_literal_member: _class_literal_member, // pack-wide convention
                     import_rows: _import_rows, // editing aid, not cross-file-visible
-                    import_template: _import_template, // pack-wide convention
-                    contract_stub: _contract_stub, // pack-wide convention
-                    return_annotation_template: _return_annotation_template, // pack-wide convention
-                    native_type_spellings: _native_type_spellings, // pack-wide convention
-                    static_property_sigil: _static_property_sigil, // pack-wide convention
-                    rail_labels: _rail_labels,       // pack-wide convention
-                    rail_hints: _rail_hints,         // pack-wide convention
                     class_named_rails: _class_named_rails, // overlay-wide convention
                     preamble_end: _preamble_end, // an editing aid
-                    imports_bind_names: _imports_bind_names, // pack-wide convention
-                    members_are_package_bound: _members_are_package_bound, // pack-wide convention
                     doc_mentions: _doc_mentions, // a file-local lint fact
-                    types_are_capitalized: _types_are_capitalized, // pack-wide convention
-                    enum_members: _enum_members, // pack-wide convention
-                    type_display: _type_display,     // LangPack-wide display vocabulary, same reasoning
-                    constructor_names: _constructor_names, // LangPack-wide convention, identical across the pack's files
                     specializes: _specializes,       // family edges; the file re-registers on its own rebuild even when Unchanged
                     use_aliases: _use_aliases,             // this file's OWN spelling table; a consumer never sees an alias
                     qualified_spellings: _qualified_spellings, // same: how THIS file spells classes
@@ -99,6 +81,8 @@ impl FileAnalysis {
                     control_regions: _control_regions, // own-file straight-line gate spans
                     param_regions: _param_regions,   // own-file parameter-region spans
                     probe_regions: _probe_regions,   // own-file existence-probe spans
+                    doc_disagreements: _doc_disagreements, // own-file hint input, two spellings at one site
+                    spellings: _spellings, // the language's own constants, attached by id
                 },
             plugin:
                 PluginFacts {
