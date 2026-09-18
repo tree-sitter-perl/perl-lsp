@@ -1208,7 +1208,7 @@ impl FileAnalysis {
                 // Perl's typeglob installs put a def ANYWHERE in the
                 // candidate file; a pack whose members are package-bound
                 // reads only the declarations attributed to the ancestor.
-                let package_bound = self.pack.members_are_package_bound;
+                let package_bound = self.spellings().members_are_package_bound;
                 self.for_each_ancestor_class(pkg, module_index, |a| {
                     let here = self.class_provides_method(a, &name)
                         || module_index.is_some_and(|idx| {

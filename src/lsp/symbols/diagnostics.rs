@@ -833,7 +833,8 @@ pub fn pack_symbol_diagnostics(
         if name.is_empty() || name.chars().next().is_some_and(|c| analysis.names().is_sigil(c)) {
             continue;
         }
-        if !pack.class_literal_member.is_empty() && name == pack.class_literal_member {
+        let class_literal = analysis.spellings().class_literal_member;
+        if !class_literal.is_empty() && name == class_literal {
             continue; // `Foo::class` is the class-name literal
         }
         // The dispatch projection every verb reads (`$this` is a typed
@@ -1520,7 +1521,7 @@ pub fn pack_symbol_diagnostics(
     // a docblock-typed codebase is not asked to change style). Skipped:
     // constructors, contracts, and any return the spelling cannot name
     // (ambiguous numerics, unions, a leaf that means another class here).
-    if !pack.return_annotation_template.is_empty() {
+    if !analysis.spellings().return_annotation_template.is_empty() {
         // The declaration's own annotation is the structural fact — a type
         // witness cannot carry it: `: void` names no type.
         let declared = |s: &crate::model::file_analysis::Symbol| s.declared_return().is_some();

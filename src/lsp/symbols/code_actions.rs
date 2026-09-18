@@ -429,7 +429,7 @@ fn make_implement_contracts_action(
     uri: &Url,
     diag: &Diagnostic,
 ) -> Option<CodeActionOrCommand> {
-    let template = analysis.pack.contract_stub.as_str();
+    let template = analysis.spellings().contract_stub;
     if template.is_empty() {
         return None;
     }
@@ -507,7 +507,7 @@ fn make_return_type_action(
     uri: &Url,
     diag: &Diagnostic,
 ) -> Option<CodeActionOrCommand> {
-    let template = analysis.pack.return_annotation_template.as_str();
+    let template = analysis.spellings().return_annotation_template;
     if template.is_empty() {
         return None;
     }

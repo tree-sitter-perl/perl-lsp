@@ -1552,15 +1552,10 @@ fn remap_spans(
         implicit_variables: _,
         throwaway_names: _,
         catch_all_methods: _,
-        class_literal_member: _,
         enum_members: _,
         member_writes,
         import_rows,
-        import_template: _,
-        contract_stub: _,
-        return_annotation_template: _,
-        native_type_spellings: _,
-        static_property_sigil: _,
+        spellings: _,
         rail_labels: _,
         rail_hints: _,
         rail_name_seps: _,
@@ -1568,12 +1563,10 @@ fn remap_spans(
         annot_expr_spans: _,
         preamble_end: _,
         imports_bind_names: _,
-        members_are_package_bound: _,
         doc_mentions: _,
         // language-wide facts, no spans to remap.
         function_scoped_vars: _,
         constructor_names: _,
-        type_display: _,
         flow_edges,
         moved_from,
         control_regions,
@@ -2027,6 +2020,29 @@ impl LanguageRegistry {
             .find(|(l, _)| *l == id)
             .map(|(_, t)| *t)
             .unwrap_or(&[])
+    }
+
+    /// The write/display spellings of `id`'s language — the pack's own
+    /// `PackSpellings`, reached by id because they are the same for every
+    /// file of the language (rule #14). THE seam a decode path re-attaches
+    /// through and an lsp-tier caller holding only an id reads; a language
+    /// without a pack answers the neutral defaults. Memoized like
+    /// `builtin_types`.
+    pub fn spellings(id: &str) -> &'static crate::model::file_analysis::PackSpellings {
+        type Row = (&'static str, &'static crate::model::file_analysis::PackSpellings);
+        static SPELLINGS: std::sync::OnceLock<Vec<Row>> = std::sync::OnceLock::new();
+        SPELLINGS
+            .get_or_init(|| {
+                LanguageRegistry::with_enabled()
+                    .drivers
+                    .iter()
+                    .filter_map(|d| d.lang_pack().map(|p| (d.id(), p.spellings)))
+                    .collect()
+            })
+            .iter()
+            .find(|(l, _)| *l == id)
+            .map(|(_, s)| *s)
+            .unwrap_or(&crate::model::file_analysis::NEUTRAL_SPELLINGS)
     }
 
     /// Does `token` name a class RELATIVE to the one that writes it — the

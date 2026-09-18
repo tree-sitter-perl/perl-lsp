@@ -169,21 +169,16 @@ pub struct SkeletonAnalysis {
     pub implicit_variables: Vec<String>,
     pub throwaway_names: Vec<String>,
     pub catch_all_methods: Vec<String>,
-    pub class_literal_member: String,
     pub enum_members: Vec<String>,
     /// Member tokens on the left of an assignment (dynamic property sites).
     pub member_writes: Vec<Span>,
     /// Whole import-statement spans (`use A\B;` rows), for the insertion
     /// point of an import quick-fix.
     pub import_rows: Vec<Span>,
-    /// The pack's import statement template (`import_template`).
-    pub import_template: String,
-    /// The pack's contract stub template (`contract_stub`).
-    pub contract_stub: String,
-    /// The pack's native return-annotation template and native type spellings.
-    pub return_annotation_template: String,
-    pub native_type_spellings: Vec<(String, String)>,
-    pub static_property_sigil: String,
+    /// The language's write/display spellings (`LangPack::spellings`),
+    /// carried to `PackFacts` as a pointer — per-language constants, never
+    /// copied per file (rule #14).
+    pub spellings: Option<&'static crate::model::file_analysis::PackSpellings>,
     /// rail → the undefined-name lane's phrasing (`rails.json` labels).
     pub rail_labels: Vec<(String, String)>,
     /// Rails whose miss is a hint (`rails.json` hints).
@@ -200,8 +195,6 @@ pub struct SkeletonAnalysis {
     pub preamble_end: Option<usize>,
     /// `imports_bind_names`, baked.
     pub imports_bind_names: bool,
-    /// `members_are_package_bound`, baked.
-    pub members_are_package_bound: bool,
     /// Imported names a doc comment mentions (`@var Foo`, `@throws Foo`,
     /// `@see Foo`): a use the tree never shows.
     pub doc_mentions: Vec<String>,
@@ -210,9 +203,6 @@ pub struct SkeletonAnalysis {
     pub function_scoped_vars: bool,
     /// The pack's constructor-method names, riding to `PackFacts`.
     pub constructor_names: Vec<String>,
-    /// The pack's display vocabulary (engine tag → language spelling),
-    /// carried onto `PackFacts.type_display`.
-    pub type_display: Vec<(String, String)>,
     /// The language's name spellings (`LangPack::names`), baked onto
     /// `PackFacts::names`.
     pub names: crate::model::file_analysis::NameSpellings,
@@ -1626,21 +1616,14 @@ impl SkeletonAnalysis {
             implicit_variables: std::mem::take(&mut self.implicit_variables),
             throwaway_names: std::mem::take(&mut self.throwaway_names),
             catch_all_methods: std::mem::take(&mut self.catch_all_methods),
-            class_literal_member: std::mem::take(&mut self.class_literal_member),
             import_rows: std::mem::take(&mut self.import_rows),
-            import_template: std::mem::take(&mut self.import_template),
-            contract_stub: std::mem::take(&mut self.contract_stub),
-            return_annotation_template: std::mem::take(&mut self.return_annotation_template),
-            native_type_spellings: std::mem::take(&mut self.native_type_spellings),
-            static_property_sigil: std::mem::take(&mut self.static_property_sigil),
+            spellings: self.spellings,
             rail_labels: std::mem::take(&mut self.rail_labels),
             rail_hints: std::mem::take(&mut self.rail_hints),
             preamble_end: self.preamble_end,
             imports_bind_names: self.imports_bind_names,
-            members_are_package_bound: self.members_are_package_bound,
             doc_mentions: std::mem::take(&mut self.doc_mentions),
             enum_members: std::mem::take(&mut self.enum_members),
-            type_display: std::mem::take(&mut self.type_display),
             constructor_names: std::mem::take(&mut self.constructor_names),
             names: std::mem::take(&mut self.names),
             // Specialization family edges (spec → primary). NOT an inheritance

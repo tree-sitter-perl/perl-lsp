@@ -22,7 +22,7 @@ impl FileAnalysis {
     /// else after the package/namespace line, else after the preamble —
     /// `(insertion point, text)`. `None` when the pack has no import form.
     pub fn import_edit_for(&self, fq: &str, row: usize) -> Option<(Point, String)> {
-        let template = self.pack.import_template.as_str();
+        let template = self.spellings().import_template;
         if template.is_empty() {
             return None;
         }
@@ -493,7 +493,7 @@ impl FileAnalysis {
         });
         // A scoped static property is WRITTEN with its sigil (php
         // `Foo::$bar`), so the candidate carries that spelling.
-        let sigil = self.pack.static_property_sigil.as_str();
+        let sigil = self.spellings().static_property_sigil;
         if access == MemberAccess::Scoped && !sigil.is_empty() {
             for c in candidates.iter_mut() {
                 if c.is_static && MemberKind::of_sym(c.kind) == MemberKind::Value {
@@ -504,7 +504,7 @@ impl FileAnalysis {
         }
         // The class-name literal (`Foo::class`) is a member of every class
         // the pack declares it for — a convention on the pack, not a symbol.
-        let literal = self.pack.class_literal_member.as_str();
+        let literal = self.spellings().class_literal_member;
         if access == MemberAccess::Scoped
             && !literal.is_empty()
             && !candidates.iter().any(|c| c.label == literal)

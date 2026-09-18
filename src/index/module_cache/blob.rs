@@ -364,12 +364,26 @@ pub fn decode_analysis(blob: &[u8]) -> Option<FileAnalysis> {
     })
     .ok()?;
     crate::util::ghost_stats::timed("decode.4_after_deser", || fa.after_deserialize());
+    attach_spellings(&mut fa);
     // The mean describes two populations: a 512 us average against ~260 ms
     // for the giant blobs the thrash chews on is a 500x spread, and a fix
     // tuned to the mean can miss the tail entirely. Bucket both axes.
     decode_bucket("decode.us", t.elapsed().as_micros() as u64);
     decode_bucket("decode.blob_kb", (blob.len() / 1024) as u64);
     Some(fa)
+}
+
+/// Re-attach the language's write/display spellings to a decoded analysis.
+///
+/// They are per-language constants reached by id, so they never ride the
+/// blob (rule #14) — which means a decoded analysis carries none until this
+/// runs, and every consumer would read the neutral defaults instead of the
+/// language's. Silent, and indistinguishable from a language that declares
+/// none: `layering_tests::decoded_pack_analyses_carry_spellings` is the
+/// tripwire. Every path that builds a `FileAnalysis` from bytes calls this.
+pub(super) fn attach_spellings(fa: &mut FileAnalysis) {
+    fa.pack.spellings =
+        Some(crate::build::language_driver::LanguageRegistry::spellings(&fa.language));
 }
 
 /// Log-ish bucket counter — the distribution behind an average, at the cost

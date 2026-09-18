@@ -5,7 +5,39 @@ mod doc;
 use doc::{php_annot_type, php_doc_types, PHP_BUILTIN_TYPES};
 
 use crate::build::query_extract::{CallShape, LangPack, OutOfLineSpec, PeelSpec};
-use crate::model::file_analysis::{InferredType, NameSpellings};
+use crate::model::file_analysis::{InferredType, NameSpellings, PackSpellings};
+
+/// php's write and display spellings. `type_display` is what a human
+/// surface renders (a php array is one type whichever rep the engine
+/// inferred); `native_type_spellings` is what a quick-fix WRITES, which is
+/// a smaller map — an engine tag with no unambiguous php spelling is absent
+/// rather than guessed.
+const SPELLINGS: PackSpellings = PackSpellings {
+    type_display: &[
+        ("String", "string"),
+        ("Numeric", "int|float"),
+        ("Bool", "bool"),
+        ("HashRef", "array"),
+        ("ArrayRef", "array"),
+        ("Undef", "null"),
+        ("CodeRef", "callable"),
+        ("Sequence", "list"),
+    ],
+    native_type_spellings: &[
+        ("String", "string"),
+        ("Bool", "bool"),
+        ("HashRef", "array"),
+        ("ArrayRef", "array"),
+        ("Sequence", "array"),
+        ("CodeRef", "callable"),
+    ],
+    class_literal_member: "class",
+    import_template: "use {};\n",
+    contract_stub: "public function {}\n{\n    // TODO: implement\n}",
+    return_annotation_template: ": {}",
+    static_property_sigil: "$",
+    members_are_package_bound: true,
+};
 
 pub fn php_pack() -> LangPack {
     LangPack {
@@ -19,6 +51,7 @@ pub fn php_pack() -> LangPack {
             ("frameworks/symfony.scm", include_str!("../../../../queries/php/frameworks/symfony.scm")),
             ("stdlib.scm", include_str!("../../../../queries/php/stdlib.scm")),
         ],
+        spellings: &SPELLINGS,
         lang_id: "php",
         bundled_entry_markers: &[
             include_str!("../../../../queries/php/frameworks/phpunit.entry.json"),
@@ -93,18 +126,6 @@ pub fn php_pack() -> LangPack {
         // half of Laravel's public API type only here.
         doc_types: php_doc_types,
         doc_uses_method_tags: &["dataProvider"],
-        // PHP's own spellings for the engine's value lattice; a PHP array
-        // is one type whichever rep the engine inferred.
-        type_display: &[
-            ("String", "string"),
-            ("Numeric", "int|float"),
-            ("Bool", "bool"),
-            ("HashRef", "array"),
-            ("ArrayRef", "array"),
-            ("Undef", "null"),
-            ("CodeRef", "callable"),
-            ("Sequence", "list"),
-        ],
         // PSR-4's real map lives in composer.json (autoload roots); the
         // one executable line is the namespace-mirrors-directories shape.
         module_paths: |m| {
@@ -164,23 +185,9 @@ pub fn php_pack() -> LangPack {
         callable_placeholder_kind: "variadic_placeholder",
         spread_arg_kind: "variadic_unpacking",
         named_arg_field: "name",
-        contract_stub: "public function {}\n{\n    // TODO: implement\n}",
-        return_annotation_template: ": {}",
-        native_type_spellings: &[
-            ("String", "string"),
-            ("Bool", "bool"),
-            ("HashRef", "array"),
-            ("ArrayRef", "array"),
-            ("Sequence", "array"),
-            ("CodeRef", "callable"),
-        ],
-        static_property_sigil: "$",
-        class_literal_member: "class",
-        import_template: "use {};\n",
         imports_bind_names: true,
         deprecated_attribute: "Deprecated",
         builtin_types: PHP_BUILTIN_TYPES,
-        members_are_package_bound: true,
         // `['k' => $v]` — the key/value arrow inside a list literal.
         pair_arrow: "=>",
         dynamic_arg_markers: &["func_get_args", "func_num_args", "func_get_arg"],

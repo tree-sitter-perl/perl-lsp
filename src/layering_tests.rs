@@ -1534,11 +1534,67 @@ fn source_tags_are_provenance_only() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// Rule #14's other half: a language's spellings are reached by ID, so
+/// they are `#[serde(skip)]` — and every path that rebuilds a
+/// `FileAnalysis` from bytes has to re-attach them. An unattached decode
+/// fails SILENTLY: the analysis answers the neutral defaults, which is
+/// indistinguishable from a language that declares none, and php starts
+/// rendering `HashRef` at every human surface. Both codecs (the blob and
+/// the warm stub), every registered pack.
+#[test]
+fn decoded_pack_analyses_carry_spellings() {
+    use crate::build::language_driver::LanguageRegistry;
+    let registry = LanguageRegistry::with_enabled();
+    let mut checked: Vec<&'static str> = Vec::new();
+    for id in registry.languages() {
+        let Some(driver) = registry.for_id(id) else { continue };
+        let Some(pack) = driver.lang_pack() else { continue };
+        let fa = driver.analyze("");
+        assert!(
+            std::ptr::eq(fa.spellings(), pack.spellings),
+            "{id}: a freshly built analysis carries its own pack's spellings"
+        );
+        let enc = crate::index::module_cache::encode_analysis(&fa).expect("encode");
+        let decoded = crate::index::module_cache::decode_analysis(&enc.analysis).expect("decode");
+        assert!(
+            std::ptr::eq(decoded.spellings(), pack.spellings),
+            "{id}: the blob decode path does not re-attach spellings"
+        );
+        let surface = crate::model::surface::Surface::project(&fa);
+        let stub = crate::index::module_cache::encode_stub(&[], &[], &[], &surface, &fa)
+            .expect("encode stub");
+        let decoded = crate::index::module_cache::decode_stub(&stub).expect("decode stub");
+        assert!(
+            std::ptr::eq(decoded.skeleton.spellings(), pack.spellings),
+            "{id}: the warm-stub decode path does not re-attach spellings"
+        );
+        checked.push(id);
+    }
+    // A pack that declares nothing would make every assertion above hold
+    // vacuously, so pin one that declares plenty.
+    #[cfg(feature = "php")]
+    {
+        assert!(checked.contains(&"php"), "php was not exercised: {checked:?}");
+        assert!(
+            !LanguageRegistry::spellings("php").import_template.is_empty(),
+            "php declares an import template — otherwise this test proves nothing"
+        );
+    }
+    #[cfg(feature = "cpp")]
+    assert!(checked.contains(&"cpp"), "cpp was not exercised: {checked:?}");
+}
+
 /// Rule #14: `PackFacts` is per-FILE facts. A per-language constant (the
 /// same value for every file of a language) does not belong on it, and a
 /// per-site fact a query joins back to a symbol is a witness or a ref
 /// binding, not a new `Vec` here. The count is a ratchet: adding a field
 /// means bumping it AND saying in the owning ADR why the fact is neither.
+///
+/// What is counted is what the BLOB carries — the rule's own words are "not
+/// serialized into every blob" — so a `#[serde(skip)]` field is exempt.
+/// There is exactly one, the `PackSpellings` pointer, and it is the shape
+/// this rule asks for: the constants live on the language, reached by id,
+/// and the analysis holds a pointer to them.
 #[test]
 fn pack_facts_fields_are_ratcheted() {
     let text = fs::read_to_string(
@@ -1548,8 +1604,19 @@ fn pack_facts_fields_are_ratcheted() {
     let start = text.find("pub struct PackFacts {").expect("PackFacts struct");
     let body = &text[start..];
     let end = body.find("\n}\n").expect("struct end");
-    let fields = body[..end].lines().filter(|l| l.starts_with("    pub ")).count();
-    const RATCHET: usize = 34;
+    let mut skipped = false;
+    let mut fields = 0usize;
+    for line in body[..end].lines() {
+        if line.trim() == "#[serde(skip)]" {
+            skipped = true;
+        } else if line.starts_with("    pub ") {
+            if !skipped {
+                fields += 1;
+            }
+            skipped = false;
+        }
+    }
+    const RATCHET: usize = 26;
     assert!(
         fields <= RATCHET,
         "PackFacts grew to {fields} fields (ratchet {RATCHET}). A per-language constant goes on \

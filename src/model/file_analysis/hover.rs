@@ -5,17 +5,17 @@
 use super::*;
 
 impl FileAnalysis {
-    /// This file's type vocabulary (`PackFacts.type_display`): a mapped
-    /// engine tag renders as the language's own spelling (php `array`, not
-    /// `HashRef`); an unmapped tag, every class name, and every Perl
-    /// analysis (empty map) pass through.
+    /// This file's type vocabulary (`PackSpellings::type_display`): a
+    /// mapped engine tag renders as the language's own spelling (php
+    /// `array`, not `HashRef`); an unmapped tag, every class name, and
+    /// every Perl analysis (empty map) pass through.
     fn type_vocab(&self) -> impl Fn(&str) -> Option<String> + '_ {
         move |tag: &str| {
-            self.pack
+            self.spellings()
                 .type_display
                 .iter()
-                .find(|(k, _)| k == tag)
-                .map(|(_, v)| v.clone())
+                .find(|(k, _)| *k == tag)
+                .map(|(_, v)| v.to_string())
         }
     }
 
@@ -46,11 +46,11 @@ impl FileAnalysis {
                 .then(|| leaf.to_string());
         }
         let root = format_type_root(ty);
-        self.pack
+        self.spellings()
             .native_type_spellings
             .iter()
             .find(|(k, _)| *k == root)
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v.to_string())
     }
 
     /// Hover info: return display text for the symbol at cursor.

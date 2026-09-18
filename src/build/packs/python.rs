@@ -1,7 +1,15 @@
 //! Python's pack.
 
 use crate::build::query_extract::{LangPack, OutOfLineSpec, PeelSpec};
-use crate::model::file_analysis::{InferredType, NameSpellings};
+use crate::model::file_analysis::{InferredType, NameSpellings, PackSpellings};
+
+/// Python writes and displays nothing of its own: the engine's type tags are
+/// its vocabulary, and it offers no import or annotation quick-fix. Its
+/// members belong to the container that declares them.
+const SPELLINGS: PackSpellings = PackSpellings {
+    members_are_package_bound: true,
+    ..PackSpellings::NONE
+};
 
 // Registered by `python_driver` only under `feature = "python"` (and driven by
 // the pack tests); dead weight in a single-language build like `cpp`-only.
@@ -10,6 +18,7 @@ pub fn python_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/python/skeleton.scm"),
         bundled_overlays: &[],
+        spellings: &SPELLINGS,
         lang_id: "python",
         bundled_entry_markers: &[],
         bundled_rail_docs: &[],
@@ -27,7 +36,6 @@ pub fn python_pack() -> LangPack {
             _ => None,
         },
         rettype_receiver: |_| false,
-        type_display: &[],
         field_registry_edges: false,
         super_receiver: |_| false,
         self_class_tokens: &[],
@@ -62,16 +70,9 @@ pub fn python_pack() -> LangPack {
         pair_arrow: "",
         spread_arg_kind: "",
         named_arg_field: "",
-        contract_stub: "",
-        return_annotation_template: "",
-        native_type_spellings: &[],
-        static_property_sigil: "",
-        class_literal_member: "",
-        import_template: "",
         imports_bind_names: false,
         deprecated_attribute: "",
         builtin_types: &[],
-        members_are_package_bound: true,
         enum_members: &[],
         trigger_chars: &["."],
         receiver_names: &["self", "cls"],

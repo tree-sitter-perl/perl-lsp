@@ -342,7 +342,7 @@ fn render_symbol_hover(
     // hover's business — only the TOTAL return (every arm witnessed, none
     // null), the same value the quick-fix would write.
     if matches!(sym.kind, FaSymKind::Sub | FaSymKind::Method)
-        && !analysis.pack.return_annotation_template.is_empty()
+        && !analysis.spellings().return_annotation_template.is_empty()
         && sym.declared_return().is_none()
     {
         if let Some(rt) = analysis.total_inferred_return(sym.id) {

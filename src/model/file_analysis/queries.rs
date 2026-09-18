@@ -9,6 +9,15 @@ impl FileAnalysis {
         &self.pack.names
     }
 
+    /// This language's write and display spellings — what a quick-fix
+    /// inserts and what a human surface renders. Attached by language id
+    /// (never serialized per file, rule #14); a language that declares
+    /// none, and an analysis nothing has attached to, answer the neutral
+    /// defaults, which is what every surface assumed before packs existed.
+    pub fn spellings(&self) -> &'static PackSpellings {
+        self.pack.spellings.unwrap_or(&NEUTRAL_SPELLINGS)
+    }
+
     /// The callee a bare variable READ is passed to, when the read is a call
     /// argument: the call site's own binding edge names it
     /// (`docs/adr/by-ref-binding.md`), so no consumer joins an argument to a

@@ -35,6 +35,11 @@ pub struct LangPack {
     /// grammar cannot see (a Blade template's `route('x')`), scanned as
     /// text into `DispatchCall` refs on the named rail.
     pub bundled_rail_docs: &'static [&'static str],
+    /// The language's WRITE and DISPLAY spellings — what a quick-fix
+    /// inserts and what a human surface renders. Per-language constants,
+    /// so an analysis carries the pointer and every consumer reaches them
+    /// by language id (rule #14); `PackSpellings::NONE` = declares none.
+    pub spellings: &'static crate::model::file_analysis::PackSpellings,
     /// How the language spells names — its namespace separator and its
     /// variable sigils. Baked onto `PackFacts::names`; every key function
     /// reads it there.
@@ -58,10 +63,6 @@ pub struct LangPack {
     /// `ReturnExpr::Receiver` so fluent builders chain — asked of the pack,
     /// never a name branch in the engine (rule #10).
     pub rettype_receiver: fn(text: &str) -> bool,
-    /// Display vocabulary: engine type tag → this language's spelling
-    /// (php `"HashRef"` → `"array"`). Rides `PackFacts.type_display`;
-    /// every human surface translates through it. Empty = engine tags.
-    pub type_display: &'static [(&'static str, &'static str)],
     /// Field types answer through the registry: each data-member decl mints
     /// `PackageSymbol{class, field} → Edge(Variable)` so a property-access
     /// hop (`$this->query->where(...)`) dispatches the field and chains.
@@ -232,29 +233,6 @@ pub struct LangPack {
     /// positional parameter hints stop at the first one. Empty = the pack
     /// has no named-argument form.
     pub named_arg_field: &'static str,
-    /// How the implement-missing-methods quick-fix spells a stub for one
-    /// contract declarator (`{}` = the declarator as written after the name,
-    /// `hi(string $n): string`). Empty = the pack offers no stub.
-    pub contract_stub: &'static str,
-    /// How a native return annotation is spelled after the parameter list
-    /// (`{}` = the type). Empty = the pack has no return annotations to add.
-    pub return_annotation_template: &'static str,
-    /// Engine type name → the pack's NATIVE spelling for a declared type
-    /// (`"HashRef"` → `"array"`); an engine type absent here has no native
-    /// spelling the pack would write (`Numeric`: `int` or `float`?). Unlike
-    /// `type_display`, this is what goes INTO the source.
-    pub native_type_spellings: &'static [(&'static str, &'static str)],
-    /// The sigil a static property is spelled with after the scope
-    /// operator (php `self::$count`), while an instance read drops it
-    /// (`$o->count`). Empty = the spelling is the bare name in both.
-    pub static_property_sigil: &'static str,
-    /// A member name that is the CLASS-NAME LITERAL, never a member
-    /// (php `Foo::class`). Empty = none.
-    pub class_literal_member: &'static str,
-    /// The import statement that brings a fully-qualified name into scope,
-    /// `{}` standing for the name (php `use {};\n`). Empty = the language
-    /// has no import quick-fix.
-    pub import_template: &'static str,
     /// An import row binds a NAME the file then spells (php `use A\B;`),
     /// as opposed to splicing text (`#include`). Only bound names can be
     /// unused.
@@ -267,11 +245,6 @@ pub struct LangPack {
     /// in the global namespace (php's core + SPL): a global reference to
     /// one is never a type missing its import.
     pub builtin_types: &'static [&'static str],
-    /// A member declaration belongs to the container that encloses it and
-    /// nothing else — no cross-package installs (Perl's typeglobs): a
-    /// contract is provided only by a declaration attributed to the
-    /// composer's own MRO, never by a sibling class in the same file.
-    pub members_are_package_bound: bool,
     /// Members every enum carries by language rule (php: `->value`,
     /// `->name`, `::cases()`, `::from()`, `::tryFrom()`).
     pub enum_members: &'static [&'static str],
