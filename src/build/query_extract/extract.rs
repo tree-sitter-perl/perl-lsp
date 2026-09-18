@@ -2275,7 +2275,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             "ref.method.named" => {
                 if let Some(inv) = member_recv.get(&e.match_id).cloned() {
                     out.refs.push(SkelRef {
-                    via: None,
+                        via: None,
                         kind: "member".to_string(),
                         name: e.text.clone(),
                         start: e.start,
@@ -2441,7 +2441,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // to join spans (rule #14).
                     let super_recv = e.cap == "ref.member" && super_recv_matches.contains(&e.match_id);
                     out.refs.push(SkelRef {
-                    via: None,
+                        via: None,
                         kind: e.cap.strip_prefix("ref.").unwrap().to_string(),
                         name: if super_recv {
                             crate::model::conventions::MethodToken::Super(&(pack.shape_name)(&e.cap, &e.text))
@@ -3232,7 +3232,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         // every invocation identifier is a call ref (user functions
         // rename through it; builtin names match no defs, harmlessly)
         out.refs.push(SkelRef {
-                    via: None,
+            via: None,
             kind: "call".into(),
             name: cmd.clone(),
             start: cmd_span.start,
