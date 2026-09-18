@@ -1464,7 +1464,6 @@ fn language_spellings_have_one_home() {
         ("model/witnesses/registry.rs", 1, "the `param` owner-keyed fallback key — a witness attachment name"),
         ("lsp/symbols/hover.rs", 1, "the hover LABEL for a macro-shaped Sub — display text (the fact itself is read as a flag)"),
         ("model/file_analysis/diagnostics.rs", 1, "the `deprecated` diagnostic CODE — client-facing wire text, not the declaration fact"),
-        ("lsp/cli/heatmap.rs", 1, "the dead-code guard's report LABEL — output text, not an attribute read (the fact itself is `Symbol::is_constructor`)"),
         ("lsp/symbols/code_actions.rs", 1, "the `receiver` KEY of a diagnostic's `data` payload — the wire contract with the quick-fix, not a declaration fact"),
         ("lsp/symbols/diagnostics.rs", 1, "the `receiver` KEY of a finding's `data` payload — the wire contract with the quick-fix, not a declaration fact"),
     ];
