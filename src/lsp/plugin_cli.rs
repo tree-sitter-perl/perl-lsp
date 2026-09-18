@@ -86,8 +86,8 @@ struct EntryRuleLint {
     method_prefix: Option<String>,
     #[serde(default)]
     methods: Vec<String>,
-    #[serde(default)]
-    when_isa: Option<String>,
+    #[serde(default, deserialize_with = "crate::build::query_extract::de_string_or_list")]
+    when_isa: Vec<String>,
 }
 
 /// The lint's STRICT view of a rail document — the same remote-derive

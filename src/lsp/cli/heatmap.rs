@@ -298,9 +298,12 @@ pub(crate) fn framework_entry_claims(
         let name_ok = !name_gated
             || m.method_prefix.as_deref().is_some_and(|p| sym.name.starts_with(p))
             || m.methods.iter().any(|n| n == &sym.name);
-        let isa_ok = m.when_isa.as_deref().is_none_or(|base| {
-            sym.package.as_deref().is_some_and(|cls| analysis.class_isa_leaf(cls, base, Some(idx)))
-        });
+        let isa_ok = m.when_isa.is_empty()
+            || m.when_isa.iter().any(|base| {
+                sym.package
+                    .as_deref()
+                    .is_some_and(|cls| analysis.class_isa_leaf(cls, base, Some(idx)))
+            });
         attr_ok && name_ok && isa_ok
     })
 }

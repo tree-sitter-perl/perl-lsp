@@ -76,7 +76,8 @@ fn cached_query(language: &Language, source: &str) -> Result<&'static Query, Str
 ///   * `attributes` — the symbol carries one of these annotation names
 ///     (php `#[Test]`, via the `@sym.attr` lane);
 ///   * `method_prefix` / `methods` — the symbol's name matches;
-///   * `when_isa` — the symbol's class isa the (leaf-keyed) class.
+///   * `when_isa` — the symbol's class isa one of the (leaf-keyed)
+///     classes, written as one name or a list of them.
 /// Rules OR across the set. The engine only EVALUATES these; every
 /// framework name lives in the data files (rule #10: the heatmap never
 /// compares names itself).
@@ -88,8 +89,29 @@ pub struct EntryMarker {
     pub method_prefix: Option<String>,
     #[serde(default)]
     pub methods: Vec<String>,
-    #[serde(default)]
-    pub when_isa: Option<String>,
+    #[serde(default, deserialize_with = "de_string_or_list")]
+    pub when_isa: Vec<String>,
+}
+
+/// A document field that holds one name or a list of them. A rule that
+/// applies to a family of bases says so once instead of being copied per
+/// base — the copy is where the seventh base gets added to one rule and
+/// not its sibling.
+pub(crate) fn de_string_or_list<'de, D>(d: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    use serde::Deserialize as _;
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+    })
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
