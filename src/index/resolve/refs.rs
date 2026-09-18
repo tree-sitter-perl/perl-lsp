@@ -625,6 +625,9 @@ fn walk_refs(
     // or not resident refs were evicted.
     if rows_active {
         if let Some(idx) = module_index {
+            // The tier is constant for the whole walk: one lock read here,
+            // then a prefix test per candidate.
+            let dep_tier = idx.dependency_tier();
             let keys = retrieval_keys(target, &aliases);
             let candidate_paths = crate::util::ghost_stats::timed("refs.retrieval.candidates", || retrieve_candidates(idx, &keys));
             crate::util::ghost_stats::count("refs.walks");
@@ -680,7 +683,7 @@ fn walk_refs(
                         ))
                     }
                     None => {
-                        let role = if idx.is_dependency_path(&path) {
+                        let role = if dep_tier.contains(path) {
                             RoleMask::DEPENDENCY
                         } else {
                             RoleMask::WORKSPACE
@@ -767,8 +770,10 @@ fn walk_refs(
     if deps_tier_wanted {
         let _t = crate::util::ghost_stats::ScopedNs::start("refs.sweep.deps");
         if let Some(idx) = module_index {
+            // Constant for the sweep — snapshot, then prefix-test per file.
+            let dep_tier = idx.dependency_tier();
             idx.for_each_cached_file(&mut |cached| {
-                let role = if idx.is_dependency_path(&cached.path) {
+                let role = if dep_tier.contains(&cached.path) {
                     RoleMask::DEPENDENCY
                 } else {
                     RoleMask::WORKSPACE

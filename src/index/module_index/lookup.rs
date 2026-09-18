@@ -697,14 +697,16 @@ impl CrossFileLookup for ModuleIndex {
             .map(|g| Arc::clone(&g))
             .unwrap_or_default()
     }
-    fn is_dependency_path(&self, path: &std::path::Path) -> bool {
+    fn dependency_tier(&self) -> crate::model::file_analysis::DependencyTier {
+        use crate::model::file_analysis::DependencyTier;
+        // Hub semantics (and a poisoned lock): everything cached here came
+        // from `@INC`.
         match self.core.dependency_roots.read() {
-            // Hub semantics: everything cached here came from `@INC`.
             Ok(g) => match g.as_ref() {
-                None => true,
-                Some(roots) => roots.iter().any(|r| path.starts_with(r)),
+                None => DependencyTier::Everything,
+                Some(roots) => DependencyTier::Roots(std::sync::Arc::clone(roots)),
             },
-            Err(_) => true,
+            Err(_) => DependencyTier::Everything,
         }
     }
 
