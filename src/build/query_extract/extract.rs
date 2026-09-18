@@ -36,15 +36,22 @@ enum DerefCap {
     Leaf(String),
 }
 
-/// The `@deref.*` captures of one tree, by node byte range — everything the
+/// The `@deref.*` captures of one tree, by node identity — everything the
 /// declarator peel needs to know about a language's declarators.
 ///
 /// The extraction pass fills it as it flattens matches; a consumer with a tree
 /// the extractor never saw (a reparsed macro body) fills it with
 /// [`DerefCaps::of_tree`]. Both then peel through the SAME walk, so a pointer
 /// field's `*`s are extracted once however the field was written.
+///
+/// Keyed by `Node::id`, not by byte range: a grammar routinely nests a node
+/// inside another of the SAME extent (a declarator whose only child spans
+/// its own bytes), and two captures on such a pair would collapse to one
+/// entry with the last write winning — the peel then reads the wrong level's
+/// verdict. Every fill and every peel runs against one tree, so the id is
+/// exact.
 #[derive(Default)]
-pub struct DerefCaps(std::collections::HashMap<(usize, usize), DerefCap>);
+pub struct DerefCaps(std::collections::HashMap<usize, DerefCap>);
 
 impl DerefCaps {
     /// Record `node` under the capture that named it, ignoring every capture
@@ -63,7 +70,7 @@ impl DerefCaps {
                 None => return false,
             },
         };
-        self.0.insert((node.start_byte(), node.end_byte()), what);
+        self.0.insert(node.id(), what);
         true
     }
 
@@ -99,7 +106,7 @@ impl DerefCaps {
         src: &[u8],
     ) -> Option<PeeledChain<'a>> {
         use crate::model::file_analysis::DerefStep;
-        let at = |n: &tree_sitter::Node| self.0.get(&(n.start_byte(), n.end_byte()));
+        let at = |n: &tree_sitter::Node| self.0.get(&n.id());
         // The one descent: the first child the document named. A level's
         // inner declarator is the only child it captures, so this needs no
         // field name and no kind list.
