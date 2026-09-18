@@ -339,6 +339,73 @@ bitflags::bitflags! {
         /// A storage slot with a generated writer (Corinna `:writer` /
         /// `:mutator` / `:accessor`, Moo `is => 'rw'`).
         const WRITER = 1 << 14;
+        /// A handler registered on a class-named rail (`@def.handler.class.<rail>`
+        /// / `.by.<rail>`): it sits on another symbol's token (a listener's
+        /// `handle`), so listings show that symbol, not this one.
+        const CLASS_RAIL = 1 << 15;
+        /// This callable reads arguments it never declared (php
+        /// `func_get_args`): its written signature does not bound what a
+        /// caller may pass, so the arity lanes must not call an extra
+        /// argument an error.
+        const DYNAMIC_ARGS = 1 << 16;
+        /// This callable materializes variables no declaration names (php
+        /// `extract`, `eval`): a read of an undeclared name inside it is
+        /// not evidence of a typo, so the undefined-variable lane stays
+        /// silent.
+        const DYNAMIC_VARS = 1 << 17;
+        /// A `Class` symbol that is a trait (php) / mixin: its members are
+        /// composed into the using class, so it declares an API the model
+        /// resolves without the trait ever being an instance's class.
+        const TRAIT = 1 << 18;
+        /// A `Class` symbol that is an enumeration: its cases are its
+        /// members, and the language gives every enum the same extra ones.
+        const ENUM = 1 << 19;
+        /// A callable that DECLARES an obligation without meeting it — an
+        /// interface method, an abstract method, a Perl `requires` marker.
+        /// Not `ABSTRACT`: an interface's methods carry no `abstract`
+        /// token, and the container's own flag is a different fact.
+        const CONTRACT = 1 << 20;
+        /// The DECLARATION was synthesized from a documentation row (a php
+        /// docblock `@method`), so the source has no signature to read or
+        /// annotate. Provenance of the declaration, not of the doc text —
+        /// `Presentation::doc` answers a different question.
+        const DOC_DECLARED = 1 << 21;
+        /// The object the enclosing method runs on (`$this`, `this`, a
+        /// python `self`/`cls` parameter): lexically inside the class body
+        /// and tagged with its package, but the instance itself and never
+        /// one of its members. Minted from the receiver capture, so no
+        /// consumer matches a receiver's spelling.
+        const RECEIVER = 1 << 22;
+        /// The constructor of the class that declares it (php
+        /// `__construct`): a `new Foo(...)` invokes it, and its name belongs
+        /// to the language, so nothing renames it. Minted from the
+        /// constructor capture; Perl's `new` is a name convention and stays
+        /// in `conventions`.
+        const CONSTRUCTOR = 1 << 23;
+        /// A binding written to be DISCARDED (php `$_` in `foreach ($a as $k
+        /// => $_)`): declared, never read on purpose, so the unused-variable
+        /// lane stays silent on it.
+        const THROWAWAY = 1 << 24;
+        /// The declaration has no token of its own — the LANGUAGE provides
+        /// the member (php's `->value` / `::cases()` on every enum), so the
+        /// extractor mints it at the container's name. Resolvable,
+        /// completable and hoverable like any member; never a dead-code
+        /// candidate, because nothing in the source could reference it into
+        /// existence.
+        const SYNTHESIZED = 1 << 25;
+        /// A binding written to REACH another slot's storage (php `$h =
+        /// &$opts['h']`): the write IS the point of it, so the liveness lanes
+        /// never ask whether anything read it.
+        const ALIAS = 1 << 26;
+        /// This class answers ANY member name at runtime — a php `__call`,
+        /// a Perl `AUTOLOAD` — so its declared member set is not its
+        /// surface. Minted on the CLASS by whoever sees the catch-all
+        /// declaration; the lanes ask `class_answers_any_member`.
+        const DYNAMIC_MEMBERS = 1 << 27;
+        /// A stored slot whose VALUE is called (a C function-pointer member,
+        /// `int (*read)(char *)`). The declarator says so, so a call landing
+        /// on the slot asks the declaration instead of a callback-name list.
+        const CALLABLE_VALUE = 1 << 28;
     }
 }
 
@@ -389,6 +456,20 @@ impl TryFrom<&str> for SymbolFlags {
             "param" => SymbolFlags::PARAM,
             "reader" => SymbolFlags::READER,
             "writer" => SymbolFlags::WRITER,
+            "class_rail" => SymbolFlags::CLASS_RAIL,
+            "dynamic_args" => SymbolFlags::DYNAMIC_ARGS,
+            "dynamic_vars" => SymbolFlags::DYNAMIC_VARS,
+            "trait" => SymbolFlags::TRAIT,
+            "enum" => SymbolFlags::ENUM,
+            "contract" => SymbolFlags::CONTRACT,
+            "documented" => SymbolFlags::DOC_DECLARED,
+            "synthesized" => SymbolFlags::SYNTHESIZED,
+            "alias" => SymbolFlags::ALIAS,
+            "dynamic_members" => SymbolFlags::DYNAMIC_MEMBERS,
+            "receiver" => SymbolFlags::RECEIVER,
+            "constructor" => SymbolFlags::CONSTRUCTOR,
+            "throwaway" => SymbolFlags::THROWAWAY,
+            "callable_value" => SymbolFlags::CALLABLE_VALUE,
             other => return Err(UnknownAttribute(other.to_string())),
         })
     }
