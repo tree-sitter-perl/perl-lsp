@@ -1688,11 +1688,13 @@ pub enum RenameKind {
     /// walks don't rename same-named subs in unrelated packages.
     Function { name: String, package: Option<String> },
     Package(String),
-    /// A method with its owning class. Cross-file walks use `class`
-    /// to avoid unioning unrelated classes that share a method name
+    /// A member with its owning class. Cross-file walks use `class`
+    /// to avoid unioning unrelated classes that share a member name
     /// (e.g. `Foo::run` vs `Bar::run`, mojo-helper leaves vs route
-    /// targets).
-    Method { name: String, class: String },
+    /// targets), and `member` is the FAMILY the cursor's own syntax
+    /// named — minted here, where the ref that states it is in hand, so
+    /// no consumer re-derives it from the cursor a second time.
+    Method { name: String, class: String, member: Option<MemberKind> },
     HashKey(String),
     /// Rename a `Handler` by (owner, name) — touches the handler symbol's
     /// name + every `DispatchCall` ref targeting it.

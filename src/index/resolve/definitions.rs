@@ -3,9 +3,71 @@
 use super::*;
 
 impl<'a> CandidateSet<'a> {
+    /// `parent::method` definition sites: the model's SUPER walk over the
+    /// enclosing class's parents (never the enclosing class itself), whose
+    /// interface deferral keeps an abstract stub as the answer only when
+    /// nothing concrete on the chain defines the method. `None` = no parent
+    /// defines it; the caller falls through to the generic lanes.
+    fn super_def_locations(
+        &self,
+        r: &crate::model::file_analysis::Ref,
+        method: &str,
+        idx: &dyn crate::model::file_analysis::CrossFileLookup,
+    ) -> Option<Vec<RefLocation>> {
+        use crate::model::file_analysis::MethodResolution;
+        let analysis = self.origin;
+        let encl = analysis.enclosing_class_for_scope(r.scope)?;
+        match analysis.resolve_super_method(&encl, method, Some(idx))? {
+            MethodResolution::Local { sym_id, .. } => analysis
+                .symbols()
+                .iter()
+                .find(|s| s.id == sym_id)
+                .map(|s| vec![self.origin_decl(s.selection_span)]),
+            MethodResolution::CrossFile { class, def_module, .. } => {
+                // Same lookup as the inherited-member lane: a real parent
+                // method lives in `class`'s own module, a bridged one in the
+                // registering file.
+                let module = def_module.as_deref().unwrap_or(class.as_str());
+                let cached = idx
+                    .candidate_defining_sub_in_package(module, &class, method)
+                    .or_else(|| idx.get_cached(module))?;
+                Url::from_file_path(&cached.path).ok()?;
+                let whole = idx.whole_present(&cached);
+                let span = whole
+                    .symbols()
+                    .iter()
+                    .find(|s| {
+                        matches!(s.kind, SymKind::Sub | SymKind::Method)
+                            && s.name == method
+                            && s.package.as_deref() == Some(class.as_str())
+                    })
+                    .map(|s| s.selection_span)?;
+                Some(vec![RefLocation {
+                    key: FileKey::Path(cached.path.clone()),
+                    span,
+                    access: AccessKind::Declaration,
+                    rewritable: Rewritable::Yes,
+                    label: None,
+                }])
+            }
+        }
+    }
+
+    /// Word-keyed fallbacks stand down inside an import row
+    /// (`PackFacts::import_row_covering`).
+    fn point_in_import_row(&self, point: tree_sitter::Point) -> bool {
+        let here = Span { start: point, end: point };
+        self.origin.pack.import_row_covering(&here).is_some()
+    }
+
     /// The def site of `member` on `class` — origin symbols first, then the
     /// class's own cached file. Serves the template-family ranked goto-def
     /// (one location per ladder class that actually defines the member).
+    /// `class` is an IDENTITY: a caller holding a written spelling (a
+    /// qualifier the cursor sits after) resolves it first, and a ladder
+    /// class is already one — resolving an identity again re-qualifies a
+    /// head that collides with an import alias (`class_spelling_identity`
+    /// is not idempotent).
     pub(super) fn member_def_location(&self, class: &str, member: &str) -> Option<RefLocation> {
         // The member's def span in `fa` under `class`'s owner set, expanded
         // through inline-namespace transparency so a symbol filed under an
@@ -13,14 +75,14 @@ impl<'a> CandidateSet<'a> {
         // parent `absl`. The set is derived once per scanned fa (the inline
         // attribution rides the file that opened the namespace, so it is
         // recomputed per file, never shared).
-        let member_span_in = |fa: &crate::model::file_analysis::FileAnalysis| -> Option<Span> {
-            let owners = pack_inline_owner_set(fa, class);
+        let member_span_in = |fa: &crate::model::file_analysis::FileAnalysis, cls: &str| -> Option<Span> {
+            let owners = pack_inline_owner_set(fa, cls);
             fa.symbols()
                 .iter()
                 .find(|s| s.name == member && pack_member_of(fa, s, &owners))
                 .map(|s| s.selection_span)
         };
-        if let Some(span) = member_span_in(self.origin) {
+        if let Some(span) = member_span_in(self.origin, class) {
             return Some(self.origin_decl(span));
         }
         let idx = self.idx()?;
@@ -30,16 +92,79 @@ impl<'a> CandidateSet<'a> {
                 key: FileKey::Path(cached.path.clone()),
                 span,
                 access: AccessKind::Declaration,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None,
             })
         };
         // Class-keyed cached module — the fast path when `class` names a
         // struct/class/enum that is itself a cache key. Every candidate
-        // file declaring the class may hold the member.
-        for cached in idx.visible_def_candidates(class) {
-            if let Some(span) = member_span_in(&idx.whole_present(&cached)) {
-                return loc_of(&cached, span);
+        // file declaring the class may hold the member — and an INHERITED
+        // member lives on an ancestor (`View::query()` finds Eloquent
+        // Model's `query`), so the lookup walks the leaf-keyed parent
+        // edges child-first (the instance-receiver path gets this from
+        // the invocant ladder's ancestor walk; a bareword-scoped call
+        // resolves here and needs its own).
+        {
+            // One lazy walk over the visibility edges — the model's, not a
+            // second one here: `GraphView` derives a class's parents from
+            // this file AND the index, so an ancestor a candidate declares
+            // is reached like any other edge, and the seen-set and bounds
+            // are the graph verbs' own.
+            let probe = crate::model::graph::GraphView::new(self.origin, Some(idx));
+            let member_of_class = |cls: &str| -> Option<RefLocation> {
+                // The origin's use-map pins the leaf to ONE namespace
+                // (`use Support\Facades\Cache;` — without this, gd on
+                // `Cache::store` landed on an unrelated same-leaf class in
+                // a never-imported namespace). A candidate declaring the
+                // class under a DIFFERENT namespace is not the class this
+                // file means; candidates with no namespace claim stay
+                // admissible. The pin table is leaf-keyed, so a qualified
+                // hop asks it by its leaf.
+                let leaf = crate::model::file_analysis::name_match_key(cls, self.origin.names());
+                let want_ns = self.origin.leaf_namespace(&leaf);
+                for cached in idx.visible_def_candidates(cls) {
+                    let a = idx.whole_present(&cached);
+                    if let (Some(want), Some(cand)) =
+                        (&want_ns, a.declared_class_namespace(&leaf))
+                    {
+                        if want != &cand {
+                            continue;
+                        }
+                    }
+                    if let Some(span) = member_span_in(&a, cls) {
+                        return loc_of(&cached, span);
+                    }
+                }
+                None
+            };
+            if let Some(loc) = member_of_class(class) {
+                return Some(loc);
+            }
+            // An INHERITED member lives on an ancestor (`View::query()`
+            // finds Eloquent Model's `query`): walk the parent edges
+            // child-first, in MRO order, and take the first class that
+            // declares it. (The instance-receiver path gets this from the
+            // invocant ladder's ancestor walk; a bareword-scoped call
+            // resolves here and needs its own.)
+            let mut found: Option<RefLocation> = None;
+            probe.walk(
+                crate::model::graph::Node::Class(class.to_string()),
+                crate::model::graph::EdgeKindMask::INHERITS,
+                &mut |n| {
+                    let crate::model::graph::Node::Class(cls) = n else {
+                        return crate::model::graph::WalkControl::Continue;
+                    };
+                    match member_of_class(cls) {
+                        Some(loc) => {
+                            found = Some(loc);
+                            crate::model::graph::WalkControl::Stop
+                        }
+                        None => crate::model::graph::WalkControl::Continue,
+                    }
+                },
+            );
+            if found.is_some() {
+                return found;
             }
         }
         let Some((self_path, visible)) = idx.visibility_scope() else {
@@ -60,7 +185,7 @@ impl<'a> CandidateSet<'a> {
                 if !connected(&cached) {
                     continue;
                 }
-                if let Some(span) = member_span_in(&idx.whole_present(&cached)) {
+                if let Some(span) = member_span_in(&idx.whole_present(&cached), class) {
                     return loc_of(&cached, span);
                 }
             }
@@ -79,7 +204,7 @@ impl<'a> CandidateSet<'a> {
             }
             // Broad scan, cold tail only (both keyed lookups missed) — the
             // rehydration LRU bounds the per-file cost for evicted copies.
-            if let Some(span) = member_span_in(&idx.whole_present(cached)) {
+            if let Some(span) = member_span_in(&idx.whole_present(cached), class) {
                 let p = cached.path.to_string_lossy().into_owned();
                 if hit.as_ref().is_none_or(|(hp, _)| p < *hp) {
                     hit = Some((p, span));
@@ -90,7 +215,7 @@ impl<'a> CandidateSet<'a> {
             key: FileKey::Path(PathBuf::from(p)),
             span,
             access: AccessKind::Declaration,
-            rewritable: true,
+            rewritable: Rewritable::Yes,
             label: None,
         })
     }
@@ -172,7 +297,7 @@ impl<'a> CandidateSet<'a> {
                 key: key.clone(),
                 span,
                 access: AccessKind::Declaration,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None,
             });
         };
@@ -247,7 +372,7 @@ impl<'a> CandidateSet<'a> {
                                     key: key.clone(),
                                     span: s.selection_span,
                                     access: AccessKind::Declaration,
-                                    rewritable: true,
+                                    rewritable: Rewritable::Yes,
                                     label: None,
                                 },
                             ));
@@ -377,7 +502,7 @@ impl<'a> CandidateSet<'a> {
                     key: key.clone(),
                     span,
                     access: AccessKind::Declaration,
-                    rewritable: true,
+                    rewritable: Rewritable::Yes,
                     label: None,
                 },
             ));
@@ -411,10 +536,17 @@ impl<'a> CandidateSet<'a> {
                 }
             }
         }
-        // Cross-file: the full def-candidates table, closure-connected to the
-        // origin (same connectivity gate as the decl→def ranking).
-        if let Some((self_path, visible)) = idx.visibility_scope() {
-            let self_str = self_path.to_string_lossy().into_owned();
+        // Cross-file: the full def-candidates table. Connectivity is
+        // closure-based under an include-path scope; a scope-less
+        // (Transparent) lookup admits every candidate — a name-keyed pack's
+        // same-named definitions are genuine siblings (WordPress's noop.php
+        // stubs vs the real implementations), and the ranked, never-pruned
+        // family is the honest answer where a single winner was confidently
+        // wrong. Arity fit then floats the real signature above a stub.
+        {
+            let scope = idx
+                .visibility_scope()
+                .map(|(p, v)| (p.to_string_lossy().into_owned(), v));
             let origin_path = key_for_sort(&self.origin_key);
             let mut cached_files = idx.def_candidates(&name);
             cached_files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -422,9 +554,14 @@ impl<'a> CandidateSet<'a> {
                 if cached.path == origin_path {
                     continue;
                 }
-                let p = cached.path.to_string_lossy().into_owned();
-                let connected = visible.contains(&p)
-                    || cached.analysis.pack.include_closure.contains(&self_str);
+                let connected = match &scope {
+                    Some((self_str, visible)) => {
+                        let p = cached.path.to_string_lossy().into_owned();
+                        visible.contains(&p)
+                            || cached.analysis.pack.include_closure.contains(self_str)
+                    }
+                    None => true,
+                };
                 if !connected {
                     continue;
                 }
@@ -460,7 +597,7 @@ impl<'a> CandidateSet<'a> {
             key: self.origin_key.clone(),
             span,
             access: AccessKind::Declaration,
-            rewritable: true,
+            rewritable: Rewritable::Yes,
             label: None
         }
     }
@@ -470,8 +607,73 @@ impl<'a> CandidateSet<'a> {
     /// the never-pruned ranked multi-def is the documented residual the
     /// spike's ranking axis fills in (see the ADR's merge plan).
     pub fn definitions(&self) -> Vec<RefLocation> {
+        let mut out = self.definitions_primary();
+        // The event bus: a class token that is ALSO an emission on a
+        // class-keyed rail (`event(new X)`) surfaces the handlers alongside
+        // the class — every relevant candidate, never a pick.
+        if self.pack {
+            for r in self.origin.refs().iter().filter(|r| {
+                matches!(r.kind, RefKind::DispatchCall { .. })
+                    && crate::model::file_analysis::contains_point(&r.span, self.point)
+            }) {
+                let Some(owner) = r.handler_owner() else { continue };
+                // One derivation for the whole arm: the gate and the
+                // location walk below both need the rail's name kind.
+                let names = owner.names_are(&self.origin.pack);
+                if names != crate::model::file_analysis::RailNames::Classes {
+                    continue;
+                }
+                let mut locs: Vec<RefLocation> = self
+                    .origin
+                    .symbols()
+                    .iter()
+                    .filter(|s| {
+                        s.name == r.target_name
+                            && matches!(&s.detail, crate::model::file_analysis::SymbolDetail::Handler { owner: o, .. } if o == owner)
+                    })
+                    .map(|s| RefLocation {
+                        key: self.origin_key.clone(),
+                        span: s.selection_span,
+                        access: AccessKind::Declaration,
+                        rewritable: Rewritable::No(NotRewritable::RailEmission),
+                        label: None,
+                    })
+                    .collect();
+                if let Some(idx) = self.idx() {
+                    locs.extend(dispatch_handler_locations(owner, names, &r.target_name, idx));
+                }
+                for l in locs {
+                    if !out.iter().any(|o| o.key == l.key && o.span == l.span) {
+                        out.push(l);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn definitions_primary(&self) -> Vec<RefLocation> {
         let analysis = self.origin;
         let point = self.point;
+
+        // `parent::` gd first (pack languages): it EXCLUDES the origin
+        // class's own override by construction — every ranked-family lane
+        // below would self-answer when the aliased parent shares the
+        // enclosing leaf (`use Support\Collection as BaseCollection;
+        // class Collection extends BaseCollection`).
+        if self.pack {
+            if let (Some(r), Some(idx)) = (analysis.ref_at(point), self.idx()) {
+                if matches!(r.kind, RefKind::MethodCall { .. }) {
+                    if let crate::model::conventions::MethodToken::Super(name) =
+                        crate::model::conventions::MethodToken::parse(&r.target_name)
+                    {
+                        if let Some(locs) = self.super_def_locations(r, name, idx) {
+                            return locs;
+                        }
+                    }
+                }
+            }
+        }
 
         // Owner-anchored forward resolution: a `::`-qualified value read
         // (`dynamic::STRING`, `absl::StatusCode::kNotFound`) names its OWNER
@@ -488,7 +690,8 @@ impl<'a> CandidateSet<'a> {
             if let Some(source) = self.source {
                 if let Some(owner) = qualifier_at_point(source, point) {
                     if let Some(name) = word_at_point(source, point) {
-                        if let Some(loc) = self.member_def_location(owner, name) {
+                        let owner = self.origin.class_spelling_identity(owner);
+                        if let Some(loc) = self.member_def_location(&owner, name) {
                             // The member lookup lands on the class DECLARATION;
                             // hop to the out-of-line body (decl→def axis).
                             return self.prefer_member_defs(loc);
@@ -524,7 +727,7 @@ impl<'a> CandidateSet<'a> {
                                 key: key.clone(),
                                 span: m.selection_span,
                                 access: AccessKind::Declaration,
-                                rewritable: true,
+                                rewritable: Rewritable::Yes,
                                 label: r.label(),
                             })
                             .collect();
@@ -562,7 +765,7 @@ impl<'a> CandidateSet<'a> {
         // plain string literal. See `docs/adr/receiver-gated-dispatch.md`.
         if let Some(idx) = self.idx() {
             if let Some(applied) = analysis.dispatch_at(point, Some(idx)) {
-                let locs = dispatch_handler_locations(&applied.owner, &applied.name, idx);
+                let locs = dispatch_handler_locations(&applied.owner, applied.owner.names_are(&self.origin.pack), &applied.name, idx);
                 if !locs.is_empty() {
                     return locs;
                 }
@@ -585,8 +788,8 @@ impl<'a> CandidateSet<'a> {
         // both offer.
         if self.pack {
             if let Some(r) = analysis.ref_at(point) {
-                if let RefKind::MethodCall { invocant_span: Some(inv), .. } = &r.kind {
-                    if let Some(recv_ty) = analysis.expr_type_at_span(*inv, self.idx()) {
+                if let Some(inv) = r.member_site().and_then(|m| m.invocant_span) {
+                    if let Some(recv_ty) = analysis.expr_type_at_span(inv, self.idx()) {
                         if recv_ty.as_parametric().is_some() {
                             let member = r.unqualified_target_name(analysis.names());
                             let mut out: Vec<RefLocation> = Vec::new();
@@ -672,7 +875,7 @@ impl<'a> CandidateSet<'a> {
                 key: FileKey::Path(path),
                 span: Span { start: p, end: p },
                 access: AccessKind::Declaration,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None
             }
         };
@@ -711,7 +914,7 @@ impl<'a> CandidateSet<'a> {
                                 key: FileKey::Path(cached.path.clone()),
                                 span: def.selection_span,
                                 access: AccessKind::Declaration,
-                                rewritable: true,
+                                rewritable: Rewritable::Yes,
                                 label: None
                             }];
                         }
@@ -848,18 +1051,38 @@ impl<'a> CandidateSet<'a> {
                 // the picker when a real type declaration exists.
                 let mut type_hits: Vec<RefLocation> = Vec::new();
                 let mut value_hits: Vec<RefLocation> = Vec::new();
-                for cached in idx.visible_def_candidates(&r.target_name) {
+                // The identity the token names — a token INSIDE an import
+                // row names its class in full (`use SimplePie\XML\Parser as
+                // DeclarationParser;` means that `Parser`, not the file's
+                // own or a stranger's), anywhere else the file's use-map
+                // answer for the spelling. Inside a row the row's namespace
+                // is the only relevant one, so a candidate must declare the
+                // leaf under it.
+                let ident = analysis.spelled_identity(r);
+                let row_ns = analysis
+                    .pack
+                    .import_row_covering(&r.span)
+                    .and_then(|_| analysis.identity_namespace(&ident));
+                let names_target = |s: &crate::model::file_analysis::Symbol| {
+                    s.name == ident || s.name == r.target_name
+                };
+                for cached in idx.visible_def_candidates(&ident) {
                     if Url::from_file_path(&cached.path).is_ok() {
                         let whole = idx.whole_present(&cached);
+                        if let Some(ns) = row_ns.as_deref() {
+                            if whole.declared_class_namespace(&r.target_name).as_deref() != Some(ns) {
+                                continue;
+                            }
+                        }
                         let loc = |span| RefLocation {
                             key: FileKey::Path(cached.path.clone()),
                             span,
                             access: AccessKind::Declaration,
-                            rewritable: true,
+                            rewritable: Rewritable::Yes,
                             label: None,
                         };
                         if let Some(s) = whole.symbols().iter().find(|s| {
-                            s.name == r.target_name
+                            names_target(s)
                                 && matches!(
                                     s.kind,
                                     SymKind::Package | SymKind::Class | SymKind::Module
@@ -873,7 +1096,7 @@ impl<'a> CandidateSet<'a> {
                         // file top. Pack-only structural gates; Perl module
                         // lookups keep the file-top fallback.
                         } else if let Some(s) = whole.symbols().iter().find(|s| {
-                            s.name == r.target_name
+                            names_target(s)
                                 && (whole.symbol_is_class_content(s)
                                     || whole.symbol_is_file_scope_value(s))
                         }) {
@@ -903,14 +1126,15 @@ impl<'a> CandidateSet<'a> {
             // one file jumps to `$producer->on('ready', sub)` in another.
             // Stacked registrations all surface (multi-location picker).
             if let (RefKind::DispatchCall { .. }, Some(owner)) = (&r.kind, r.handler_owner()) {
-                let locs = dispatch_handler_locations(owner, &r.target_name, idx);
+                let locs = dispatch_handler_locations(owner, owner.names_are(&analysis.pack), &r.target_name, idx);
                 if !locs.is_empty() {
                     return locs;
                 }
             }
 
-            // Cross-file method goto-def: inherited methods through the index.
-            if matches!(r.kind, RefKind::MethodCall { .. }) {
+            // Cross-file member goto-def: inherited methods and fields through
+            // the index.
+            if r.member_site().is_some() {
                 use crate::model::file_analysis::MethodResolution;
                 // FQ `$o->Foo::Bar::m` dispatches the bare `m` on the named class.
                 let method = r.unqualified_target_name(analysis.names());
@@ -921,15 +1145,23 @@ impl<'a> CandidateSet<'a> {
                     // freeze normally serves same-file dispatch, but a bridged
                     // invocant is never frozen (its class needs the index), so
                     // re-resolve here.
-                    if let Some(MethodResolution::Local { sym_id, .. }) =
-                        analysis.resolve_method_in_ancestors(&cn, method, Some(idx))
-                    {
+                    // A value read walks the value kinds only; a call walks
+                    // everything (`docs/adr/member-kinds.md`).
+                    let is_value_read = matches!(r.kind, RefKind::FieldAccess { .. });
+                    let walk = |class: &str| {
+                        if is_value_read {
+                            analysis.resolve_field_in_ancestors(class, method, Some(idx))
+                        } else {
+                            analysis.resolve_method_in_ancestors(class, method, Some(idx))
+                        }
+                    };
+                    if let Some(MethodResolution::Local { sym_id, .. }) = walk(&cn) {
                         if let Some(sym) = analysis.symbols().iter().find(|s| s.id == sym_id) {
                             return vec![self.origin_decl(sym.selection_span)];
                         }
                     }
                     if let Some(MethodResolution::CrossFile { ref class, ref def_module, .. }) =
-                        analysis.resolve_method_in_ancestors(&cn, method, Some(idx))
+                        walk(&cn)
                     {
                         // One path for both: a real inherited method lives in
                         // `class`'s own module; a plugin-bridged helper lives
@@ -952,6 +1184,29 @@ impl<'a> CandidateSet<'a> {
                             // completion (`materialize_gated_emissions`), so the
                             // whole view carries it — no per-query enrichment.
                             let whole = idx.whole_present(&cached);
+                            // A value read lands on the stored member first;
+                            // the callable arm below stays its fallback.
+                            let field_sym = || {
+                                whole.symbols().iter().find(|s| {
+                                    MemberKind::of_sym(s.kind) == MemberKind::Value
+                                        && s.name == method
+                                        && s.package.as_deref() == Some(class.as_str())
+                                        && whole.symbol_is_class_content(s)
+                                }).map(|s| s.selection_span)
+                            };
+                            if is_value_read {
+                                if let Some(span) = field_sym() {
+                                    if Url::from_file_path(&cached.path).is_ok() {
+                                        return vec![RefLocation {
+                                            key: FileKey::Path(cached.path.clone()),
+                                            span,
+                                            access: AccessKind::Declaration,
+                                            rewritable: Rewritable::Yes,
+                                            label: None,
+                                        }];
+                                    }
+                                }
+                            }
                             if let Some(sub_info) = whole.sub_info_view(method) {
                                 if Url::from_file_path(&cached.path).is_ok() {
                                     // A pack member call lands on the class
@@ -972,7 +1227,7 @@ impl<'a> CandidateSet<'a> {
                                                 key: FileKey::Path(cached.path.clone()),
                                                 span: sym.selection_span,
                                                 access: AccessKind::Declaration,
-                                                rewritable: true,
+                                                rewritable: Rewritable::Yes,
                                                 label: None,
                                             });
                                         }
@@ -983,13 +1238,11 @@ impl<'a> CandidateSet<'a> {
                                     )];
                                 }
                             }
-                            // cpp data field (or enum constant): a
-                            // Variable/Field/Enumerator member, not a sub.
+                            // cpp data field (or enum constant): a stored
+                            // member, not a sub.
                             if let Some(sym) = whole.symbols().iter().find(|s| {
-                                matches!(
-                                    s.kind,
-                                    SymKind::Variable | SymKind::Field | SymKind::Enumerator
-                                ) && s.name == method
+                                MemberKind::of_sym(s.kind) == MemberKind::Value
+                                    && s.name == method
                                     && s.package.as_deref() == Some(class.as_str())
                                     && whole.symbol_is_class_content(s)
                             }) {
@@ -998,7 +1251,7 @@ impl<'a> CandidateSet<'a> {
                                         key: FileKey::Path(cached.path.clone()),
                                         span: sym.selection_span,
                                         access: AccessKind::Declaration,
-                                        rewritable: true,
+                                        rewritable: Rewritable::Yes,
                                         label: None
                                     }];
                                 }
@@ -1039,7 +1292,7 @@ impl<'a> CandidateSet<'a> {
                                     key: FileKey::Path(cached.path.clone()),
                                     span: sym.selection_span,
                                     access: AccessKind::Declaration,
-                                    rewritable: true,
+                                    rewritable: Rewritable::Yes,
                                     label: None,
                                 },
                                 &whole,
@@ -1066,7 +1319,7 @@ impl<'a> CandidateSet<'a> {
                     key: path.clone().map_or_else(|| self.origin_key.clone(), FileKey::Path),
                     span: *span,
                     access: AccessKind::Declaration,
-                    rewritable: true,
+                    rewritable: Rewritable::Yes,
                     label: None,
                 })
                 .collect();
@@ -1103,8 +1356,10 @@ impl<'a> CandidateSet<'a> {
         // Last resort (pack): a token no query captures — a namespace middle
         // segment (`StatusCode` in `absl::StatusCode::kNotFound` is a
         // namespace_identifier, ref-less) — resolves by word to a named
-        // type/namespace def.
-        if self.pack {
+        // type/namespace def. Never inside an import row: `Http` in
+        // `use Illuminate\Http\Request;` names a namespace segment, and a
+        // same-named class elsewhere is not it.
+        if self.pack && !self.point_in_import_row(point) {
             if let Some(source) = self.source {
                 if let Some(word) = word_at_point(source, point) {
                     if let Some(loc) = self.type_def_location(word, idx) {

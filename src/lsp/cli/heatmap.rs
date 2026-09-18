@@ -252,7 +252,7 @@ pub(crate) fn cli_refs_parity(root: &str, sample: Option<usize>) {
                     l.span.end.row,
                     l.span.end.column,
                     l.access,
-                    l.rewritable
+                    l.is_rewritable()
                 )
             })
             .collect();

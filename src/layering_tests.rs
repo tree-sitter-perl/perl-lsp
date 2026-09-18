@@ -1775,6 +1775,58 @@ fn pack_string_tables_are_ratcheted() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// Rule #14's other half: a language's spellings are reached by ID, so
+/// they are `#[serde(skip)]` — and every path that rebuilds a
+/// `FileAnalysis` from bytes has to re-attach them. An unattached decode
+/// fails SILENTLY: the analysis answers the neutral defaults, which is
+/// indistinguishable from a language that declares none, and php starts
+/// rendering `HashRef` at every human surface. Both codecs (the blob and
+/// the warm stub), every registered pack.
+#[test]
+fn decoded_pack_analyses_carry_spellings() {
+    use crate::build::language_driver::LanguageRegistry;
+    let registry = LanguageRegistry::with_enabled();
+    let mut checked: Vec<&'static str> = Vec::new();
+    for id in registry.languages() {
+        let Some(driver) = registry.for_id(id) else { continue };
+        // Every driver answers spellings by id, pack or none — and Perl,
+        // which has no pack, is the one language whose pointer changes
+        // BEHAVIOUR (`member_reads_are_calls`), so it is the one that must
+        // not be skipped.
+        let expected = LanguageRegistry::spellings(id);
+        let fa = driver.analyze("");
+        assert!(
+            std::ptr::eq(fa.spellings(), expected),
+            "{id}: a freshly built analysis carries its own language's spellings"
+        );
+        let enc = crate::index::module_cache::encode_analysis(&fa).expect("encode");
+        let decoded = crate::index::module_cache::decode_analysis(&enc.analysis).expect("decode");
+        assert!(
+            std::ptr::eq(decoded.spellings(), expected),
+            "{id}: the blob decode path does not re-attach spellings"
+        );
+        let surface = crate::model::surface::Surface::project(&fa);
+        let stub = crate::index::module_cache::encode_stub(&[], &[], &[], &surface, &fa)
+            .expect("encode stub");
+        let decoded = crate::index::module_cache::decode_stub(&stub).expect("decode stub");
+        assert!(
+            std::ptr::eq(decoded.skeleton.spellings(), expected),
+            "{id}: the warm-stub decode path does not re-attach spellings"
+        );
+        checked.push(id);
+    }
+    // A pack that declares nothing would make every assertion above hold
+    // vacuously, so pin one that declares plenty.
+    #[cfg(feature = "cpp")]
+    assert!(checked.contains(&"cpp"), "cpp was not exercised: {checked:?}");
+    assert!(checked.contains(&"perl"), "perl was not exercised: {checked:?}");
+    assert!(
+        LanguageRegistry::spellings("perl").member_reads_are_calls,
+        "perl's pointer is the one that changes behaviour — an unattached \
+         decode flips `$obj->name()` off a Moo accessor"
+    );
+}
+
 /// Rule #14: `PackFacts` is per-FILE facts. A per-language constant (the
 /// same value for every file of a language) does not belong on it, and a
 /// per-site fact a query joins back to a symbol is a witness or a ref
