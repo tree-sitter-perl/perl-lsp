@@ -289,14 +289,20 @@ fn collect_capture_literals(
 }
 
 /// The named-node kinds a pattern's source can root at: `(kind ...)` names
-/// one, `[(a) (b)] ...` names each alternative's. Everything else — a
-/// string token, `_`, `(_)`, a grouped sibling pattern — names none.
+/// one, `[(a) (b)] ...` names each alternative's, and a group holding ONE
+/// node pattern beside its predicates — `((kind …) @c (#any-of? @c …))`,
+/// the only spelling that puts a predicate on a capture bound to an
+/// anonymous child — names that node's. Everything else — a string token,
+/// `_`, `(_)`, a group of SIBLING patterns (which matches at no single
+/// root) — names none.
 fn collect_root_kinds(pattern: &'static str, out: &mut HashSet<&'static str>) {
     let rest = skip_trivia(pattern);
     match rest.as_bytes().first() {
         Some(b'(') => {
             if let Some(kind) = leading_kind(&rest[1..]) {
                 out.insert(kind);
+            } else if let Some(inner) = sole_group_pattern(&rest[1..]) {
+                collect_root_kinds(inner, out);
             }
         }
         // An alternation at the root: each `(kind` inside it is a root.
@@ -321,6 +327,76 @@ fn collect_root_kinds(pattern: &'static str, out: &mut HashSet<&'static str>) {
         }
         _ => {}
     }
+}
+
+/// The single sub-pattern of a group, `s` being the group's interior — the
+/// shape a document writes when a predicate has to sit beside a capture the
+/// node pattern binds to an anonymous child. Predicates state nothing about
+/// what the pattern matches ON, so they are passed over; two sub-patterns
+/// mean a sibling group, which roots at no one node and names none.
+fn sole_group_pattern(s: &'static str) -> Option<&'static str> {
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    let mut found: Option<&'static str> = None;
+    while i < bytes.len() {
+        match bytes[i] {
+            // the group's own close
+            b')' => break,
+            b'"' => i = skip_string(bytes, i),
+            b';' => while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            },
+            open @ (b'(' | b'[') => {
+                let close = matching_close(bytes, i)?;
+                if !(open == b'(' && skip_trivia(&s[i + 1..]).starts_with('#'))
+                    && found.replace(&s[i..=close]).is_some()
+                {
+                    return None;
+                }
+                i = close;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    found
+}
+
+/// The index of the bracket closing the one `bytes[open]` opens, counting
+/// only its own bracket flavour and stepping over string literals and
+/// comments.
+fn matching_close(bytes: &[u8], open: usize) -> Option<usize> {
+    let (o, c) = if bytes[open] == b'(' { (b'(', b')') } else { (b'[', b']') };
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => i = skip_string(bytes, i),
+            b';' => while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            },
+            x if x == o => depth += 1,
+            x if x == c => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The index of the quote closing the string starting at `at`, or the end
+/// of the input — a quoted argument may hold a bracket of its own.
+fn skip_string(bytes: &[u8], at: usize) -> usize {
+    let mut i = at + 1;
+    while i < bytes.len() && bytes[i] != b'"' {
+        i += if bytes[i] == b'\\' { 2 } else { 1 };
+    }
+    i.min(bytes.len())
 }
 
 /// The identifier at the head of `s`, when it is one — a node kind. `_`
