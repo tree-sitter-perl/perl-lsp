@@ -1188,6 +1188,7 @@ fn dynamic_markers_land_on_the_enclosing_callable() {
 /// produce no unbound reads at all. Deleting the lane's on-switch is only
 /// safe if that holds, so it is pinned here for the packs that declare no
 /// implicit variables.
+#[cfg(any(feature = "cpp", feature = "python", feature = "r"))]
 #[test]
 fn packs_that_bind_nothing_implicitly_report_no_undefined_variables() {
     let mut checked: Vec<&str> = Vec::new();

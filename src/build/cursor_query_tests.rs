@@ -1,6 +1,9 @@
 //! The cursor-time query runner: what it reads off the document, and the
 //! cost signature the three bounds buy.
 
+// `LangPack` and the runner's seams — reached only by the per-language
+// bodies below, so a build with no pack language spells none of them.
+#[allow(unused_imports)]
 use super::*;
 
 /// Extract one small file so the language's query is compiled and

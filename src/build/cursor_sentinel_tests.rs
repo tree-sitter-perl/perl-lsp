@@ -214,6 +214,7 @@ fn no_receiver_on_plain_identifier() {
 /// failure silent in the other direction — a pattern that roots at an
 /// ANCESTOR still feeds the extractor while the cursor never reaches it —
 /// which is what this pins.
+#[cfg(any(feature = "cpp", feature = "php"))]
 #[test]
 fn every_receiver_shape_the_document_names_completes() {
     // (language, pack, source with the cursor just past the operator,

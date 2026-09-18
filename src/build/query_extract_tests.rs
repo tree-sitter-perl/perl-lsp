@@ -3785,6 +3785,7 @@ function f(): string {
     );
 }
 
+#[cfg(feature = "php")]
 #[test]
 fn php_new_sites_are_constructor_references_but_never_rename_targets() {
     // A construction site is two facts on one token: the token names the
