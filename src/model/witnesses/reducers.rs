@@ -48,6 +48,11 @@ pub struct ReducerQuery<'a> {
 /// the registry walks it for `PackageSymbol{C, m}` queries the local bag
 /// can't answer, chasing `PackageSymbol{P, m}` per parent. Both are
 /// `None`/empty for in-file callers.
+///
+/// TODO: built field-for-field at eight call sites (`builder/fold.rs`,
+/// `builder/enrichment.rs`, `witnesses/registry.rs`), so every field added
+/// to it is added eight times. Two constructors would say it once —
+/// `for_analysis(&FileAnalysis, module_index)` and `for_builder(&Builder)`.
 pub struct BagContext<'a> {
     pub scopes: &'a [Scope],
     pub package_framework: &'a dyn crate::model::file_analysis::PackageFrameworks,
@@ -58,6 +63,12 @@ pub struct BagContext<'a> {
     /// parent via `parents_of`, matching the FA-side ancestor walks.
     /// Empty for in-file callers that don't carry consumer state.
     pub app_surface_consumers: &'a [String],
+    /// Per-class template parameter names, so a field read through a
+    /// `ValueHop` substitutes them against the receiver's instance args
+    /// the way `field_value_type` does — without it the chase answers the
+    /// RAW declared type (`item_: T` instead of the substituted `int`).
+    /// Empty for callers whose language has no parametric containers.
+    pub class_params: &'a dyn crate::model::file_analysis::ClassTemplateParams,
 }
 
 /// A reducer's answer.

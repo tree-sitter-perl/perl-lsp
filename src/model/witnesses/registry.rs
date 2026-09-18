@@ -967,6 +967,7 @@ impl ReducerRegistry {
                                     module_index: Some(idx),
                                     package_parents: &full.packages,
                                     app_surface_consumers: &full.plugin.app_surface_consumers,
+                                    class_params: &full.pack.template_params,
                                 };
                                 let sub_q = ReducerQuery {
                                     attachment: q.attachment,
@@ -1127,6 +1128,7 @@ impl ReducerRegistry {
                                 module_index: Some(idx),
                                 package_parents: &full.packages,
                                 app_surface_consumers: &full.plugin.app_surface_consumers,
+                                class_params: &full.pack.template_params,
                             };
                             let sub_q = ReducerQuery {
                                 attachment: q.attachment,
@@ -1247,6 +1249,7 @@ impl ReducerRegistry {
                     module_index: Some(idx),
                     package_parents: &full.packages,
                     app_surface_consumers: &full.plugin.app_surface_consumers,
+                    class_params: &full.pack.template_params,
                 };
                 let sub_q = ReducerQuery {
                     attachment: q.attachment,
@@ -1344,6 +1347,7 @@ impl ReducerRegistry {
                         module_index: Some(idx),
                         package_parents: &full.packages,
                         app_surface_consumers: &full.plugin.app_surface_consumers,
+                        class_params: &full.pack.template_params,
                     };
                     let sub_q = ReducerQuery {
                         attachment: q.attachment,
@@ -1726,6 +1730,7 @@ impl ReducerRegistry {
                         module_index: None,
                         package_parents: &full.packages,
                         app_surface_consumers: &full.plugin.app_surface_consumers,
+                        class_params: &full.pack.template_params,
                     };
                     let sub_q = ReducerQuery {
                         attachment: q.attachment,
@@ -2274,7 +2279,7 @@ impl ReducerRegistry {
                                         ),
                                     };
                                 t.class_name().map(str::to_string).and_then(|class| {
-                                    let att = att_of(class, member.clone());
+                                    let att = att_of(class.clone(), member.clone());
                                     let sub_q = ReducerQuery {
                                         attachment: &att,
                                         point: q.point,
@@ -2284,12 +2289,34 @@ impl ReducerRegistry {
                                         args: q.args.clone(),
                                         context: q.context,
                                     };
-                                    state.in_opaque_frame(|state| {
+                                    let answer = state.in_opaque_frame(|state| {
                                         match &*self.query_rec(bag, &sub_q, state) {
                                             ReducedValue::Type(t) => Some(t.clone()),
                                             ReducedValue::FactMap(_)
                                             | ReducedValue::None => None,
                                         }
+                                    })?;
+                                    // A field's declared type is written in the
+                                    // CLASS's vocabulary (`item_: T`); the hop
+                                    // reads it on an instance, so the receiver's
+                                    // args substitute — the same step
+                                    // `field_value_type` takes before answering.
+                                    // A method return needs none: `ParamOf`
+                                    // already substituted through `q.receiver`.
+                                    Some(match step {
+                                        ProjectionStep::MethodHop { .. } => answer,
+                                        _ => match q.context {
+                                            Some(ctx) => {
+                                                crate::model::file_analysis::substitute_class_params(
+                                                    &answer,
+                                                    &class,
+                                                    &t,
+                                                    ctx.class_params,
+                                                    ctx.module_index,
+                                                )
+                                            }
+                                            None => answer,
+                                        },
                                     })
                                 })
                             }
