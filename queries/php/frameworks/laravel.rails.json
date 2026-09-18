@@ -23,6 +23,16 @@
     "ability": "Undefined ability",
     "binding": "Undefined container binding"
   },
+  "codes": {
+    "route": "undefined-route",
+    "view": "undefined-view",
+    "config": "undefined-config",
+    "lang": "undefined-lang",
+    "middleware": "undefined-middleware",
+    "ability": "undefined-ability",
+    "binding": "undefined-binding",
+    "event": "undefined-event"
+  },
   "names_are": { "event": "class" },
   "hints": ["middleware", "ability", "binding"],
   "name_seps": { "middleware": ":" }

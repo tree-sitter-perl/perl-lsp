@@ -21,6 +21,37 @@ pub mod codes {
     pub const HELPER_NOT_LOADED: &str = "helper-not-loaded";
     pub const UNRESOLVED_DISPATCH: &str = "unresolved-dispatch";
     pub const UNKNOWN_HASH_KEY: &str = "unknown-hash-key";
+    /// A member read as a property that no declaration of the receiver's
+    /// class provides.
+    pub const UNDEFINED_PROPERTY: &str = "undefined-property";
+    /// A member reached from outside the scope its access modifier allows.
+    pub const NON_PUBLIC_ACCESS: &str = "non-public-access";
+    /// A call whose written argument count the callee's declared list
+    /// cannot take.
+    pub const ARITY_MISMATCH: &str = "arity-mismatch";
+    /// A read of a name nothing in the callable binds.
+    pub const UNDEFINED_VARIABLE: &str = "undefined-variable";
+    /// A local written and never read.
+    pub const UNUSED_VARIABLE: &str = "unused-variable";
+    /// An import row binding a name the file never spells.
+    pub const UNUSED_IMPORT: &str = "unused-import";
+    /// A class name the file's namespace evidence cannot supply.
+    pub const UNDEFINED_TYPE: &str = "undefined-type";
+    /// A contract callable a concrete composer neither declares nor
+    /// inherits.
+    pub const UNIMPLEMENTED_METHOD: &str = "unimplemented-method";
+    /// A callable with an inferrable return and no native annotation, in a
+    /// file that writes them.
+    pub const MISSING_RETURN_TYPE: &str = "missing-return-type";
+    /// A use of a declaration marked deprecated.
+    pub const DEPRECATED: &str = "deprecated";
+    /// A use on a named rail that no definition on that rail answers, where
+    /// the rail's own document declares no code of its own. The rail rides
+    /// the diagnostic's `data`, so the set of codes this adapter can mint
+    /// stays closed whatever a plugin's rail document is called.
+    pub const UNDEFINED_RAIL_NAME: &str = "undefined-rail-name";
+    /// A use of a local moved from (`std::move`), opt-in.
+    pub const USE_AFTER_MOVE: &str = "use-after-move";
 }
 
 // ---- Diagnostics ----
@@ -991,8 +1022,8 @@ pub fn pack_symbol_diagnostics(
                 // a same-named member of the OTHER kind is a different
                 // finding (a method read as a property) — still undefined
                 let (code, what) = match want {
-                    MemberKind::Value => ("undefined-property", "property"),
-                    _ => ("unresolved-method", "method"),
+                    MemberKind::Value => (codes::UNDEFINED_PROPERTY, "property"),
+                    _ => (codes::UNRESOLVED_METHOD, "method"),
                 };
                 push(&mut out, r.span, DiagnosticSeverity::ERROR, code, format!("Undefined {what} '{name}'."));
             }
@@ -1019,7 +1050,7 @@ pub fn pack_symbol_diagnostics(
                     if from.as_deref() != Some(owner.as_str())
                         && !from.as_deref().is_some_and(|f| analysis.class_isa(f, &owner, idx))
                     {
-                        push(&mut out, r.span, DiagnosticSeverity::ERROR, "non-public-access",
+                        push(&mut out, r.span, DiagnosticSeverity::ERROR, codes::NON_PUBLIC_ACCESS,
                             format!("Cannot access non-public member '{name}' of {owner} from {} scope.", from.as_deref().unwrap_or("global")));
                     }
                 }
@@ -1027,10 +1058,10 @@ pub fn pack_symbol_diagnostics(
                 if let (Some(n), Some(a)) = (r.arg_count, sym.arity) {
                     if !sym.flags.contains(SymbolFlags::DYNAMIC_ARGS) {
                         if n < a.required {
-                            push(&mut out, r.span, DiagnosticSeverity::ERROR, "arity-mismatch",
+                            push(&mut out, r.span, DiagnosticSeverity::ERROR, codes::ARITY_MISMATCH,
                                 format!("Not enough arguments. Expected {}. Found {n}.", a.required));
                         } else if !a.variadic && n > a.total {
-                            push(&mut out, r.span, DiagnosticSeverity::WARNING, "arity-mismatch",
+                            push(&mut out, r.span, DiagnosticSeverity::WARNING, codes::ARITY_MISMATCH,
                                 format!("Too many arguments. Expected {}. Found {n}.", a.total));
                         }
                     }
@@ -1127,10 +1158,10 @@ pub fn pack_symbol_diagnostics(
             continue;
         }
         if n < a.required {
-            push(&mut out, r.span, DiagnosticSeverity::ERROR, "arity-mismatch",
+            push(&mut out, r.span, DiagnosticSeverity::ERROR, codes::ARITY_MISMATCH,
                 format!("Not enough arguments. Expected {}. Found {n}.", a.required));
         } else if !a.variadic && n > a.total {
-            push(&mut out, r.span, DiagnosticSeverity::WARNING, "arity-mismatch",
+            push(&mut out, r.span, DiagnosticSeverity::WARNING, codes::ARITY_MISMATCH,
                 format!("Too many arguments. Expected {}. Found {n}.", a.total));
         }
     }
@@ -1203,7 +1234,7 @@ pub fn pack_symbol_diagnostics(
             if dynamic_vars(analysis, sc) {
                 continue;
             }
-            push(&mut out, r.span, DiagnosticSeverity::ERROR, "undefined-variable",
+            push(&mut out, r.span, DiagnosticSeverity::ERROR, codes::UNDEFINED_VARIABLE,
                 format!("Undefined variable '{}'.", r.target_name));
         }
 
@@ -1264,7 +1295,7 @@ pub fn pack_symbol_diagnostics(
             out.push(Diagnostic {
                 range: span_to_range(sym.selection_span),
                 severity: Some(DiagnosticSeverity::HINT),
-                code: Some(NumberOrString::String("unused-variable".to_string())),
+                code: Some(NumberOrString::String(codes::UNUSED_VARIABLE.to_string())),
                 source: Some("perl-lsp".to_string()),
                 message: format!("'{}' is assigned but never used.", sym.name),
                 tags: Some(vec![DiagnosticTag::UNNECESSARY]),
@@ -1308,7 +1339,7 @@ pub fn pack_symbol_diagnostics(
             out.push(Diagnostic {
                 range: span_to_range(*span),
                 severity: Some(DiagnosticSeverity::HINT),
-                code: Some(NumberOrString::String("unused-import".to_string())),
+                code: Some(NumberOrString::String(codes::UNUSED_IMPORT.to_string())),
                 source: Some("perl-lsp".to_string()),
                 message: format!("'{bound}' is imported but never used."),
                 tags: Some(vec![DiagnosticTag::UNNECESSARY]),
@@ -1381,7 +1412,24 @@ pub fn pack_symbol_diagnostics(
                     .find(|(r, _)| r == rail)
                     .map(|(_, l)| l.clone())
                     .unwrap_or_else(|| format!("Undefined {rail}"));
-                push(&mut out, r.span, severity, &format!("undefined-{rail}"), format!("{label} '{name}'."));
+                // The code the rail's own document declares; a rail that
+                // declares none reports under the one generic code, so the
+                // set a client can filter on stays closed.
+                let code = rails
+                    .codes
+                    .iter()
+                    .find(|(r, _)| r == rail)
+                    .map(|(_, c)| c.as_str())
+                    .unwrap_or(codes::UNDEFINED_RAIL_NAME);
+                out.push(Diagnostic {
+                    range: span_to_range(r.span),
+                    severity: Some(severity),
+                    code: Some(NumberOrString::String(code.to_string())),
+                    source: Some("perl-lsp".to_string()),
+                    message: format!("{label} '{name}'."),
+                    data: Some(serde_json::json!({ "rail": rail })),
+                    ..Default::default()
+                });
             }
         }
     }
@@ -1498,7 +1546,7 @@ pub fn pack_symbol_diagnostics(
                     out.push(Diagnostic {
                         range: span_to_range(r.span),
                         severity: Some(DiagnosticSeverity::ERROR),
-                        code: Some(NumberOrString::String("undefined-type".to_string())),
+                        code: Some(NumberOrString::String(codes::UNDEFINED_TYPE.to_string())),
                         source: Some("perl-lsp".to_string()),
                         message: format!("Undefined type '{identity}'."),
                         data: (!candidates.is_empty()).then(|| serde_json::json!({ "candidates": candidates })),
@@ -1550,7 +1598,7 @@ pub fn pack_symbol_diagnostics(
             out.push(Diagnostic {
                 range: span_to_range(sym.selection_span),
                 severity: Some(DiagnosticSeverity::ERROR),
-                code: Some(NumberOrString::String("unimplemented-method".to_string())),
+                code: Some(NumberOrString::String(codes::UNIMPLEMENTED_METHOD.to_string())),
                 source: Some("perl-lsp".to_string()),
                 message: format!(
                     "'{class}' does not implement {list}; declare {} or make the class abstract.",
@@ -1604,7 +1652,7 @@ pub fn pack_symbol_diagnostics(
                 out.push(Diagnostic {
                     range: span_to_range(s.selection_span),
                     severity: Some(DiagnosticSeverity::HINT),
-                    code: Some(NumberOrString::String("missing-return-type".to_string())),
+                    code: Some(NumberOrString::String(codes::MISSING_RETURN_TYPE.to_string())),
                     source: Some("perl-lsp".to_string()),
                     message: format!("'{}' has no declared return type; it returns `{spelling}`.", s.name),
                     data: Some(serde_json::json!({"spelling": spelling})),
@@ -1654,7 +1702,7 @@ fn deprecated_diag(span: Span, name: &str, text: &Option<String>) -> Diagnostic 
     Diagnostic {
         range: span_to_range(span),
         severity: Some(DiagnosticSeverity::HINT),
-        code: Some(NumberOrString::String("deprecated".to_string())),
+        code: Some(NumberOrString::String(codes::DEPRECATED.to_string())),
         source: Some("perl-lsp".to_string()),
         message: match text {
             Some(t) => format!("'{name}' is deprecated: {t}"),

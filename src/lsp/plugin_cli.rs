@@ -108,6 +108,8 @@ struct RailDocLint {
     #[serde(default)]
     labels: std::collections::HashMap<String, String>,
     #[serde(default)]
+    codes: std::collections::HashMap<String, String>,
+    #[serde(default)]
     hints: Vec<String>,
     #[serde(default)]
     name_seps: std::collections::HashMap<String, String>,
@@ -215,9 +217,34 @@ fn check_rail_declarations(path: &Path, json_mode: bool) {
         + doc.path_rails.len()
         + doc.labels.len()
         + doc.hints.len()
+        + doc.codes.len()
         + doc.name_seps.len();
     if declared == 0 {
         warnings.push("the document declares no rail (no rails, labels, hints or separators)".to_string());
+    }
+    // A rail's diagnostic code is client-facing wire text: an editor filters
+    // on it and a user configures against it. A rail that declares none
+    // reports under the generic code, which is a worse answer than saying so.
+    for (rail, code) in &doc.codes {
+        if code.is_empty() || code.split_whitespace().count() != 1 {
+            warnings.push(format!(
+                "rail '{rail}': `code` is a single wire token, not '{code}'"
+            ));
+        }
+    }
+    let rail_names: std::collections::BTreeSet<&str> = doc
+        .text_rails
+        .iter()
+        .map(|r| r.rail.as_str())
+        .chain(doc.path_rails.iter().map(|r| r.rail.as_str()))
+        .chain(doc.labels.keys().map(String::as_str))
+        .collect();
+    for rail in rail_names {
+        if !doc.codes.contains_key(rail) {
+            warnings.push(format!(
+                "rail '{rail}': no `code` — its findings report under the generic                  undefined-rail-name code, with the rail in the diagnostic's data"
+            ));
+        }
     }
     for (i, r) in doc.text_rails.iter().enumerate() {
         if r.calls.is_empty() || r.files.is_empty() {

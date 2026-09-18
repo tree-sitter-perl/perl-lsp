@@ -9,10 +9,10 @@ beside the member-operator and use-after-move checks. The Perl hub's
 always-on `unresolved-function` / `unresolved-method` stay on their own
 path; the pack lanes read facts only packs mint — `Ref::arg_count`,
 `Symbol::arity`, the use-map's namespace pins, `Ref::binding` on every
-variable read — and the pack's own declarations (`receiver_names`,
-`implicit_variables`, `catch_all_methods`, `constructor_names`,
-`enum_members`, `class_literal_member`) and the flags a declaration
-carries (`SymbolFlags`).
+variable read — and the flags a declaration carries (`SymbolFlags`) — a class that
+answers any member name (php `__call`, Perl `AUTOLOAD`) says so as
+`DYNAMIC_MEMBERS`, which `class_answers_any_member` reads through the
+MRO, so no lane compares a member name against a per-language list.
 
 ## Lanes
 
@@ -24,7 +24,7 @@ carries (`SymbolFlags`).
 | `arity-mismatch` | a resolved callable's `ParamArity` rejects the written count: fewer than `required` (error) or more than `total` on a non-variadic list (warning) | error / warning |
 | `undefined-variable` | a variable read with no binding, inside a callable, read exactly once there, that the bag does not answer: a value flows in where a non-usage witness chases to something, so a by-reference parameter's aliasing edge binds its argument (`docs/adr/by-ref-binding.md`) while a usage observation (`1 + $x` says numeric) binds nothing. An argument of a callee this file does not declare (php's own functions, a `__call` class) is silence, never a guess either way — the call site's own edge names the callee. A read inside `isset` / `empty` / `unset` is the existence question (`probe_regions`) | error |
 | `undefined-event` | the same lane on a class-keyed rail (a `HandlerOwner::Rail` whose document declares `RailNames::Classes`): an emission (`event(new X)`) no handler on the event rail answers — a dead emission, phrased by the rail document's label (`No listener for event`) | hint |
-| `undefined-<rail>` | a use on a named rail (`route('home')` — a `DispatchCall` whose owner is `HandlerOwner::Rail`) that no Handler on that rail answers, here or in the settled index (`resolve::handler_definitions`, the lookup goto-def uses); names a framework synthesizes without a token (`Route::resource`) have no definition, so the lane warns rather than errors. Silent on a name ending in `.` / `_` / `-` (a prefix the caller concatenates onto), a name containing `::` (a package-namespaced view whose provider is outside the path rails), a class-keyed emission with no dispatcher (`X::dispatch(Consts::EVENT)` — the event is a value the overlay cannot name); a name containing `*` (a wildcard, never one name); path-defined rails (`view` / `config` / `lang`) phrase the miss from the rail document's label. A rail the document lists under `hints` (`middleware`, `ability`, `binding` — definitions partly runtime-only: framework defaults in an absent vendor tree, database-granted abilities) misses as a hint; a rail with a `name_seps` entry names the head before the separator (`throttle:60,1` → `throttle`), span included | warning (hint on a hint rail) |
+| the rail's declared code (`undefined-view`, …), else `undefined-rail-name` | a use on a named rail (`route('home')` — a `DispatchCall` whose owner is `HandlerOwner::Rail`) that no Handler on that rail answers, here or in the settled index (`resolve::handler_definitions`, the lookup goto-def uses); names a framework synthesizes without a token (`Route::resource`) have no definition, so the lane warns rather than errors. Silent on a name ending in `.` / `_` / `-` (a prefix the caller concatenates onto), a name containing `::` (a package-namespaced view whose provider is outside the path rails), a class-keyed emission with no dispatcher (`X::dispatch(Consts::EVENT)` — the event is a value the overlay cannot name); a name containing `*` (a wildcard, never one name); path-defined rails (`view` / `config` / `lang`) phrase the miss from the rail document's label. A rail the document lists under `hints` (`middleware`, `ability`, `binding` — definitions partly runtime-only: framework defaults in an absent vendor tree, database-granted abilities) misses as a hint; a rail with a `name_seps` entry names the head before the separator (`throttle:60,1` → `throttle`), span included | warning (hint on a hint rail) |
 | `undefined-type` | a class reference (a type hint, a `use` row, `new Foo`, a static receiver) whose namespace — pinned by the file's `use` rows, else its own — declares no such class in this file or the settled workspace index | error |
 | `doc-type-mismatch` | a docblock type and the declared type on the same slot (a return, a parameter, a property) that no value satisfies at once — `: int` + `@return string`. Docs NARROW: a doc wins a slot the declaration already admits (a bare `array` refined to `list<X>`, a subclass of the declared base, any arm of a union this lattice cannot hold) and otherwise the declaration stands. Only a PROVABLE clash reports: a class relation the extractor cannot settle (ancestry in another file) is silence, not a finding, so the lane never reports a declaration for being right. The pair is recorded at the merge that chose the declaration (`PackFacts::doc_disagreements`), so nothing re-reads a comment. On by default; `noDocTypeMismatch` / `--no-doc-type-mismatch` silences it | hint |
 
@@ -48,6 +48,46 @@ of a method-only name is an undeclared property on every verb. A callable
 target reaches a stored member only where the owner declares no callable
 of that name, which is what keeps an Eloquent `$chapter->book` pointing at
 `book()` while a class that declares both keeps them apart.
+
+## The code set
+
+Every code this adapter can mint is a `const` in
+`lsp/symbols/diagnostics.rs::codes`, spelled once. Clients filter and
+configure on these strings, and the per-file yield counters key on them,
+so a literal at a mint site is a typo away from both a code nobody can
+configure against and a silently separate metric bucket.
+
+| constant | code |
+|---|---|
+| `UNRESOLVED_FUNCTION` | `unresolved-function` |
+| `UNRESOLVED_METHOD` | `unresolved-method` |
+| `RESOLVED_BY_WIDENING` | `resolved-by-widening` |
+| `UNDEF_DEREF` | `undef-deref` |
+| `OPTIONAL_DEREF` | `optional-deref` |
+| `DEREF_SHAPE_MISMATCH` | `deref-shape-mismatch` |
+| `ROLE_REQUIRES_UNFULFILLED` | `role-requires-unfulfilled` |
+| `HELPER_NOT_LOADED` | `helper-not-loaded` |
+| `UNRESOLVED_DISPATCH` | `unresolved-dispatch` |
+| `UNKNOWN_HASH_KEY` | `unknown-hash-key` |
+| `UNDEFINED_PROPERTY` | `undefined-property` |
+| `NON_PUBLIC_ACCESS` | `non-public-access` |
+| `ARITY_MISMATCH` | `arity-mismatch` |
+| `UNDEFINED_VARIABLE` | `undefined-variable` |
+| `UNUSED_VARIABLE` | `unused-variable` |
+| `UNUSED_IMPORT` | `unused-import` |
+| `UNDEFINED_TYPE` | `undefined-type` |
+| `UNIMPLEMENTED_METHOD` | `unimplemented-method` |
+| `MISSING_RETURN_TYPE` | `missing-return-type` |
+| `DEPRECATED` | `deprecated` |
+| `USE_AFTER_MOVE` | `use-after-move` |
+| `UNDEFINED_RAIL_NAME` | `undefined-rail-name` |
+
+A rail's findings carry the code its own document declares — `"codes": {
+"view": "undefined-view" }` in `laravel.rails.json`, data beside the
+rail's label, validated by `--plugin-check`. A rail that declares none
+reports under `undefined-rail-name` with the rail in the diagnostic's
+`data`, so the set a client sees is closed either way: a declared string
+a human wrote and a linter checked, or the one generic constant.
 
 ## Silence rules (precision first)
 
