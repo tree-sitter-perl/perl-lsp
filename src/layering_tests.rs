@@ -1453,7 +1453,7 @@ fn language_spellings_have_one_home() {
         ("build/cpp_reparse/defs.rs", 5, "the C++ keyword table — grammar vocabulary in the pack's own tier"),
         ("build/language_driver.rs", 2, "the driver STAMPS two pack attributes (`include_guard`, `non_public`), flag included — the minting side"),
         ("build/packs/php/doc.rs", 2, "php's own doc-tag spellings — the pack IS their home"),
-        ("build/packs/php/mod.rs", 4, "the php pack's own receiver spellings — the `LangPack` IS their home"),
+        ("build/packs/php/mod.rs", 3, "the php pack's own receiver spellings — the `LangPack` IS their home"),
         ("build/plugin/rhai_host.rs", 3, "a manifest signal name in an inline test fixture"),
         ("build/query_extract/extract.rs", 15, "the generic extractor minting the canonical tokens a pack's captures declare"),
         ("build/query_extract/skeleton.rs", 14, "skeleton→model conversion: the kind/attribute vocabulary becomes flags here"),
@@ -1580,7 +1580,6 @@ fn pack_fields_name_no_grammar_shapes() {
         ("cpp", "oolfn", 5, "B2 — `@ool.declarator` / `@ool.qualifier` / `@ool.wrap`"),
         ("cpp", "op_map", 2, "B1 — `\"->\" @member.op.arrow`, `\".\" @member.op.dot`"),
         ("cpp", "qualifier_peel", 1, "B2 — `@qualifier.name` on `template_type`"),
-        ("cpp", "receiver_names", 1, "B1 — `@receiver.this`"),
         ("cpp", "recv_peel", 2, "B1 — `@recv.peel` / `@recv.peel.deref`"),
         ("cpp", "simple_var_kinds", 1, "B1 — `@ref.var` marks a bare variable"),
         ("cpp", "skip_kinds", 4, "B1 — `(string) @skip (comment) @skip …`"),
@@ -1591,13 +1590,11 @@ fn pack_fields_name_no_grammar_shapes() {
         ("php", "call_kinds", 5, "B1 — `@hop.call` / `@expr.call` patterns"),
         ("php", "call_shapes", 14, "B1 — the compiled query's `@arity.args` captures"),
         ("php", "callable_placeholder_kind", 1, "B1 — `@arity.placeholder`"),
-        ("php", "class_token_kinds", 2, "B1 — `@receiver.class` on the scoped-call patterns"),
         ("php", "enum_members", 2, "B3 — synthesised on every `@def.enum`"),
         ("php", "member_kinds", 6, "B1 — the `@member.recv` patterns' root kinds"),
         ("php", "named_arg_field", 1, "B1 — `@arity.arg.named`"),
         ("php", "pair_arrow", 1, "B1 — `\"=>\" @pair.arrow` on the list-literal pattern"),
         ("php", "recv_peel", 1, "B1 — `@recv.peel`"),
-        ("php", "self_class_tokens", 2, "B1 — `@receiver.self` with `#any-of?`"),
         ("php", "simple_var_kinds", 1, "B1 — `@ref.var` marks a bare variable"),
         ("php", "skip_kinds", 3, "B1 — `(string) @skip (comment) @skip …`"),
         ("php", "spread_arg_kind", 1, "B1 — `@arity.arg.spread`"),
@@ -1677,7 +1674,6 @@ fn pack_string_tables_are_ratcheted() {
         ("php", "enum_members", 3, "B3 — synthesised on every `@def.enum`, producer-only data"),
         ("php", "implicit_variables", 13, "B1 — `@ref.var.implicit` mints the binding"),
         ("php", "narrow_assertions", 1, "B2 — `(#eq? @narrow.assert \"assert\")`"),
-        ("php", "receiver_names", 1, "B1 — `@param.receiver` / `@receiver.this`"),
         ("php", "runtime_invoked_methods", 31, "B3 — an entry document (`php.entry.json`)"),
         ("php", "throwaway_names", 1, "B1 — `@def.var.throwaway` → `SymbolFlags::THROWAWAY`"),
     ];
@@ -1767,7 +1763,7 @@ fn pack_facts_fields_are_ratcheted() {
             skipped = false;
         }
     }
-    const RATCHET: usize = 26;
+    const RATCHET: usize = 25;
     assert!(
         fields <= RATCHET,
         "PackFacts grew to {fields} fields (ratchet {RATCHET}). A per-language constant goes on \

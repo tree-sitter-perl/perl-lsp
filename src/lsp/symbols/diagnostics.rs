@@ -935,7 +935,10 @@ pub fn pack_symbol_diagnostics(
                 }
                 // the receiver is the pack's own (`$this`): the runtime class
                 // may be any descendant, and one of them declares the member
-                let own_receiver = pack.receiver_names.iter().any(|n| n == invocant.text());
+                let own_receiver = crate::build::language_driver::LanguageRegistry::receiver_spellings(
+                    &analysis.language,
+                    invocant.text(),
+                );
                 if own_receiver {
                     let declared_below = *below_memo
                         .entry((class.clone(), name.to_string(), matches!(want, MemberKind::Value)))

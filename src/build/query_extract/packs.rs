@@ -72,24 +72,6 @@ pub struct LangPack {
     /// display), and a registry edge answers the RAW declared type first —
     /// `item_: T` instead of the substituted `int`.
     pub field_registry_edges: bool,
-    /// Does this receiver spelling mean "dispatch from the parent of the
-    /// writing class, skipping it" (php `parent::`)? The ref is then
-    /// minted with the model's SUPER method token (`SUPER::name`, the
-    /// Perl `$self->SUPER::m` spelling) and a current-package invocant,
-    /// so goto-def, references, and rename all ride the existing SUPER
-    /// lane (`resolve_super_method`, refs_to's SUPER arm) — asked of the
-    /// pack, never a name branch in the engine (rule #10).
-    pub super_receiver: fn(text: &str) -> bool,
-    /// Receiver tokens that name the ENCLOSING class itself for member
-    /// access (php `self::` / `static::`): no typeable value node, the class
-    /// is read off the cursor's scope chain — the `receiver_names` rule for
-    /// a scoped access. Empty = none.
-    pub self_class_tokens: &'static [&'static str],
-    /// Node kinds of a bare CLASS TOKEN in receiver position (php `Foo::m(`,
-    /// `App\Foo::CONST` — `name` / `qualified_name`): the receiver's value
-    /// is the class it spells (leaf-keyed, like every class identity).
-    /// Empty = none.
-    pub class_token_kinds: &'static [&'static str],
     /// Are local variables FUNCTION-scoped (php: an assignment inside an
     /// `if` block declares for the whole function, and re-assignment is a
     /// REBIND of the same variable, not a fresh declaration)? Var defs
@@ -256,13 +238,6 @@ pub struct LangPack {
     /// completion (and reports the char in `CompletionContext`) when one is
     /// typed. C++ `. > :` cover `.`/`->`/`::`; the member path keys off them.
     pub trigger_chars: &'static [&'static str],
-    /// The language's method-RECEIVER parameter names (Python `self`/`cls`,
-    /// C++ `this`). A receiver param is lexically inside the class body, so
-    /// the sticky class context tags it — but it is NOT a member. Extraction
-    /// clears its package so it reads as a plain local. Lang-specific
-    /// semantics → the pack owns it (NOT core `conventions.rs`, which is
-    /// Perl's `$self`/`$class`).
-    pub receiver_names: &'static [&'static str],
     /// The pointer/reference DECLARATOR peel: a `@nested.target` chain
     /// flattened to its leaf + per-level deref stack — `Box**`, `char****`,
     /// `Box* const&`. THE recursion S-queries can't express (unbounded depth);
@@ -357,9 +332,6 @@ impl LangPack {
             annot_type: _,
             rettype_receiver: _,
             field_registry_edges: _,
-            super_receiver: _,
-            self_class_tokens,
-            class_token_kinds,
             function_scoped_vars: _,
             constructor_names,
             doc_types: _,
@@ -391,7 +363,6 @@ impl LangPack {
             enum_members,
             arg_kind,
             trigger_chars,
-            receiver_names,
             nested_peel,
             recv_peel,
             op_map,
@@ -414,8 +385,6 @@ impl LangPack {
         ) {
             out.extend(values.iter().map(|v| (field, *v)));
         }
-        list(&mut out, "self_class_tokens", self_class_tokens);
-        list(&mut out, "class_token_kinds", class_token_kinds);
         list(&mut out, "constructor_names", constructor_names);
         list(&mut out, "doc_uses_method_tags", doc_uses_method_tags);
         list(&mut out, "narrow_assertions", narrow_assertions);
@@ -427,7 +396,6 @@ impl LangPack {
         list(&mut out, "builtin_types", builtin_types);
         list(&mut out, "enum_members", enum_members);
         list(&mut out, "trigger_chars", trigger_chars);
-        list(&mut out, "receiver_names", receiver_names);
         list(&mut out, "simple_var_kinds", simple_var_kinds);
         list(&mut out, "dynamic_arg_markers", dynamic_arg_markers);
         list(&mut out, "dynamic_var_markers", dynamic_var_markers);

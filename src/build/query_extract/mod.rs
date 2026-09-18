@@ -660,7 +660,7 @@ mod packs;
 mod skeleton;
 // Tested and unused until the sentinel stops consulting node-kind tables.
 #[allow(unused_imports)]
-pub(crate) use cursor_query::{captures_at, pack_query, pattern_root_kinds};
+pub(crate) use cursor_query::{capture_literals, captures_at, pack_query, pattern_root_kinds};
 pub use extract::*;
 pub use packs::*;
 pub use skeleton::*;

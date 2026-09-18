@@ -644,6 +644,11 @@
   operator: _ @member.op
   field: (field_identifier) @ref.member)
 
+; `this` is the object the enclosing method runs on — no typeable value
+; node, the class comes off the scope chain. The receiver's own capture,
+; so every consumer (member completion, the class witness) reads it here.
+((this) @receiver.this (#eq? @receiver.this "this"))
+
 ; The CALLED form additionally mints a chain-hop witness on the whole call's
 ; span (`@hop.call` + `@hop.member` — deliberately NOT `@ref.member`, the
 ; pattern above already minted the ref): `w.get().spin()` types through the

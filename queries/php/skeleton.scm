@@ -480,26 +480,37 @@
   object: (_) @member.recv
   name: (name) @ref.member) @hop.call
 (scoped_call_expression
-  scope: (name) @member.recv @ref.type
+  scope: (name) @member.recv @ref.type @receiver.class
   name: (name) @ref.member
   arguments: (arguments) @arity.args) @hop.call
 ;; `Str::$method()` — a variable method name on a class receiver: the
 ;; class is still spelled (no member to resolve).
 (scoped_call_expression
-  scope: (name) @member.recv @ref.type
+  scope: (name) @member.recv @ref.type @receiver.class
   name: (variable_name))
 ;; `Psr7\Utils::make()` — a namespace-qualified bareword receiver: the leaf
 ;; is the class, the prefix a qualified spelling (the use-map's prefix use).
 (scoped_call_expression
-  scope: (qualified_name (name) @member.recv @ref.type) @ref.qualified
+  scope: (qualified_name (name) @member.recv @ref.type) @ref.qualified @receiver.class
   name: (name) @ref.member
   arguments: (arguments) @arity.args) @hop.call
 ; `self::` / `static::` / `parent::` — the call token still gets a ref
-; (rule #7); `parent::` receiver substitution is a documented residual.
-(scoped_call_expression
-  scope: (relative_scope) @member.recv
+; (rule #7). Which relative scope was written is the receiver's own
+; capture: @receiver.self names the ENCLOSING class (no typeable value
+; node — the class comes off the cursor's scope chain), @receiver.super
+; means "dispatch above the writing class", which the mint spells as the
+; model's SUPER method token. One arm each, so the ref and its receiver
+; kind arrive in ONE match.
+((scoped_call_expression
+  scope: (relative_scope) @member.recv @receiver.self
   name: (name) @ref.member
   arguments: (arguments) @arity.args) @hop.call
+ (#any-of? @receiver.self "self" "static"))
+((scoped_call_expression
+  scope: (relative_scope) @member.recv @receiver.super
+  name: (name) @ref.member
+  arguments: (arguments) @arity.args) @hop.call
+ (#eq? @receiver.super "parent"))
 ; `$this->helper::make()` / `$cls::make()` / `static::$inst::run()` — a
 ; scoped call on an EXPRESSION receiver: the receiver types like any member
 ; access (its property type, its class-string value) and the call
@@ -528,11 +539,16 @@
 ; the receiver `(name)` can never re-match as the constant of a second
 ; combination (the use-map poison, same lesson).
 (class_constant_access_expression
-  . (name) @member.recv @ref.type
+  . (name) @member.recv @ref.type @receiver.class
   (name) @ref.member .) @hop.call
-(class_constant_access_expression
-  . (relative_scope) @member.recv
+((class_constant_access_expression
+  . (relative_scope) @member.recv @receiver.self
   (name) @ref.member .) @hop.call
+ (#any-of? @receiver.self "self" "static"))
+((class_constant_access_expression
+  . (relative_scope) @member.recv @receiver.super
+  (name) @ref.member .) @hop.call
+ (#eq? @receiver.super "parent"))
 
 ; `[UserController::class, 'index']` / `array(Listener::class, 'handle')`:
 ; php's class-array callable — the exactly-two-element pair NAMES a
@@ -574,15 +590,20 @@
 ; `$this->prop` twin always had one). The field name is the inner
 ; (name), sigil-stripped like instance access; relative scopes
 ; canonicalize via member.recv shaping.
-(scoped_property_access_expression
-  scope: (relative_scope) @member.recv
+((scoped_property_access_expression
+  scope: (relative_scope) @member.recv @receiver.self
   name: (variable_name (name) @ref.member) @var.member) @hop.call
+ (#any-of? @receiver.self "self" "static"))
+((scoped_property_access_expression
+  scope: (relative_scope) @member.recv @receiver.super
+  name: (variable_name (name) @ref.member) @var.member) @hop.call
+ (#eq? @receiver.super "parent"))
 (scoped_property_access_expression
-  scope: (name) @member.recv @ref.type
+  scope: (name) @member.recv @ref.type @receiver.class
   name: (variable_name (name) @ref.member) @var.member) @hop.call
 ;; `\Vendor\Init::$files` — the qualified spelling of the same access.
 (scoped_property_access_expression
-  scope: (qualified_name (name) @member.recv @ref.type) @ref.qualified
+  scope: (qualified_name (name) @member.recv @ref.type) @ref.qualified @receiver.class
   name: (variable_name (name) @ref.member) @var.member) @hop.call
 ; `$cls::$prop` / `$this->resource::$wrap` / `getBuilder()::$precision` — the
 ; scope is an EXPRESSION whose value is the class (a `Foo::class` string, a
@@ -606,6 +627,13 @@
 (object_creation_expression
   (qualified_name (name) @ref.call) @ref.qualified
   (arguments)? @arity.args) @expr.ctor
+
+; `$this` is the object the enclosing method runs on: it names the class
+; off the scope chain rather than out of a namespace, it is bound by the
+; runtime (never an undefined variable), and a member access through it
+; dispatches on the runtime class. One capture says all three.
+((variable_name) @receiver.this
+ (#eq? @receiver.this "$this"))
 
 (variable_name) @expr.read.var
 

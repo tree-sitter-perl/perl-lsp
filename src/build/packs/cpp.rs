@@ -91,9 +91,6 @@ pub fn cpp_pack() -> LangPack {
         },
         rettype_receiver: |_| false,
         field_registry_edges: false,
-        super_receiver: |_| false,
-        self_class_tokens: &[],
-        class_token_kinds: &[],
         function_scoped_vars: false,
         constructor_names: &[],
         doc_types: |_, _| vec![],
@@ -152,7 +149,6 @@ pub fn cpp_pack() -> LangPack {
         builtin_types: &[],
         enum_members: &[],
         trigger_chars: &[".", ">", ":"],
-        receiver_names: &["this"],
         // `field_identifier` only ever names a struct/class member (the
         // grammar's own distinction from a plain `identifier` local), so
         // "def.field" matches the plain (non-pointer) field pattern above.

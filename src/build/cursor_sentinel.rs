@@ -345,6 +345,51 @@ pub fn rail_string_ctx(
     Some(RailStringCtx { rail, prefix, content: Span { start: span.start, end: byte_to_point(src, end) } })
 }
 
+/// What the pack's own document calls the receiver at a member access.
+/// The `@receiver.*` captures ARE the classification — a spelling that
+/// names the writing class, a bare class token, or an ordinary value — so
+/// the cursor path and the extractor answer from one source.
+enum PackReceiver {
+    /// `$this` / `this` / `self::` / `static::` — the class the cursor is in.
+    OwnClass,
+    /// A bare class token (`Foo::`, `App\Foo::`): its own spelling.
+    Class(String),
+    /// A value whose type the bag answers.
+    Value,
+}
+
+fn receiver_shape(
+    cfg: &crate::build::query_extract::LangPack,
+    member: Node,
+    receiver: Node,
+    patched: &str,
+) -> PackReceiver {
+    let Some(query) = crate::build::query_extract::pack_query(cfg) else {
+        return PackReceiver::Value;
+    };
+    let src = patched.as_bytes();
+    // The receiver keyword is its OWN pattern (it is one node), so it
+    // answers rooted at the receiver; a class token rides the scoped-access
+    // pattern, which roots at the member node.
+    for (cap, node) in crate::build::query_extract::captures_at(query, receiver, src) {
+        if matches!(cap, "receiver.this" | "receiver.self") && node.id() == receiver.id() {
+            return PackReceiver::OwnClass;
+        }
+    }
+    for (cap, node) in crate::build::query_extract::captures_at(query, member, src) {
+        match cap {
+            "receiver.this" | "receiver.self" => return PackReceiver::OwnClass,
+            "receiver.class" => {
+                if let Ok(t) = node.utf8_text(src) {
+                    return PackReceiver::Class(t.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    PackReceiver::Value
+}
+
 pub fn member_completion_ctx_incremental(
     parser: &mut Parser,
     cfg: &crate::build::query_extract::LangPack,
@@ -379,12 +424,13 @@ pub fn member_completion_ctx_incremental(
     // `$this`) has no typeable value node — it IS the enclosing class,
     // read off the cursor's scope chain: self-access member completion
     // (privates included, inheritance-aware) instead of a scope dump.
+    let shape = receiver_shape(cfg, member, receiver, &patched);
     let receiver_type = resolve_node_type(receiver, cfg, &patched, analysis, module_index)
         .or_else(|| {
-            let txt = receiver.utf8_text(patched.as_bytes()).ok()?;
-            // `self::` / `static::` name the enclosing class the same way
-            // `$this->` does.
-            if !cfg.receiver_names.contains(&txt) && !cfg.self_class_tokens.contains(&txt) {
+            // `$this->` / `this->` / `self::` / `static::` name the enclosing
+            // class: no typeable value node, the class comes off the cursor's
+            // scope chain.
+            if !matches!(shape, PackReceiver::OwnClass) {
                 return None;
             }
             let sc = analysis.scope_at(byte_to_point(src, cursor))?;
@@ -395,13 +441,10 @@ pub fn member_completion_ctx_incremental(
         .or_else(|| {
             // A bare class token (`Foo::`, `App\Foo::`) IS the class it
             // spells, leaf-keyed like every class identity.
-            if !cfg.class_token_kinds.contains(&receiver.kind()) {
-                return None;
-            }
-            let txt = receiver.utf8_text(patched.as_bytes()).ok()?;
+            let PackReceiver::Class(txt) = &shape else { return None };
             let leaf = match analysis.names().sep() {
                 Some(sep) => txt.rsplit(sep).next().unwrap_or(txt),
-                None => txt,
+                None => txt.as_str(),
             };
             (!leaf.is_empty()).then(|| crate::model::file_analysis::InferredType::ClassName(leaf.to_string()))
         })

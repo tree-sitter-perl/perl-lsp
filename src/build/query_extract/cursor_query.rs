@@ -106,10 +106,44 @@ pub(crate) fn pattern_root_kinds(
     query: &'static Query,
     capture: &str,
 ) -> &'static HashSet<&'static str> {
-    static CACHE: OnceLock<Mutex<HashMap<(usize, String), &'static HashSet<&'static str>>>> =
+    cached_over_patterns(query, capture, "roots", collect_root_kinds)
+}
+
+/// The string literals a capture's own patterns require it to equal — the
+/// `#eq?` / `#any-of?` arguments written beside `@capture`.
+///
+/// A small closed keyword set (`self`/`static`, `parent`, `__construct`,
+/// the superglobals) belongs in the document, on the capture that fires on
+/// it. A consumer that needs the SET rather than one match — "does this
+/// language spell its own class `self`?" — reads it back off the compiled
+/// query here, so the `.scm` stays the one home and a plugin overlay that
+/// widens the set widens every reader with it. Empty for a capture carrying
+/// no such predicate, and for a query this process did not compile through
+/// `extract`.
+pub(crate) fn capture_literals(
+    query: &'static Query,
+    capture: &str,
+) -> &'static HashSet<&'static str> {
+    let cap = capture.to_string();
+    cached_over_patterns(query, capture, "literals", move |src, out| {
+        collect_capture_literals(src, &cap, out)
+    })
+}
+
+/// Fold `collect` over the SOURCE of every pattern carrying `capture`,
+/// memoised per (query, capture, lens). The pattern source is the only
+/// place the compiled object still spells what the document wrote, so both
+/// lenses read it the same way.
+fn cached_over_patterns(
+    query: &'static Query,
+    capture: &str,
+    lens: &str,
+    collect: impl Fn(&'static str, &mut HashSet<&'static str>),
+) -> &'static HashSet<&'static str> {
+    static CACHE: OnceLock<Mutex<HashMap<(usize, String, String), &'static HashSet<&'static str>>>> =
         OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let key = (query as *const Query as usize, capture.to_string());
+    let key = (query as *const Query as usize, capture.to_string(), lens.to_string());
     if let Some(set) = cache.lock().unwrap().get(&key) {
         return set;
     }
@@ -119,7 +153,7 @@ pub(crate) fn pattern_root_kinds(
         .values()
         .find(|(q, _)| std::ptr::eq(*q, query))
         .map(|(_, s)| *s);
-    let mut kinds: HashSet<&'static str> = HashSet::new();
+    let mut found: HashSet<&'static str> = HashSet::new();
     if let (Some(source), Some(index)) =
         (source, query.capture_names().iter().position(|n| *n == capture))
     {
@@ -136,13 +170,48 @@ pub(crate) fn pattern_root_kinds(
                 query.end_byte_for_pattern(pattern).min(source.len()),
             );
             if start < end {
-                collect_root_kinds(&source[start..end], &mut kinds);
+                collect(&source[start..end], &mut found);
             }
         }
     }
-    let leaked: &'static HashSet<&'static str> = Box::leak(Box::new(kinds));
+    let leaked: &'static HashSet<&'static str> = Box::leak(Box::new(found));
     cache.lock().unwrap().insert(key, leaked);
     leaked
+}
+
+/// The quoted arguments of every `#eq?` / `#any-of?` predicate in `pattern`
+/// whose FIRST argument is `@capture`. A predicate on another capture of
+/// the same pattern states nothing about this one, so it contributes none.
+fn collect_capture_literals(
+    pattern: &'static str,
+    capture: &str,
+    out: &mut HashSet<&'static str>,
+) {
+    let want = format!("@{capture}");
+    let mut rest = pattern;
+    while let Some(hash) = rest.find('#') {
+        rest = &rest[hash + 1..];
+        let name_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+        let predicate = &rest[..name_end];
+        rest = &rest[name_end..];
+        if !matches!(predicate, "eq?" | "any-of?") {
+            continue;
+        }
+        let Some(close) = rest.find(')') else { return };
+        let args = &rest[..close];
+        let mut tokens = args.split_whitespace();
+        if tokens.next() != Some(want.as_str()) {
+            continue;
+        }
+        // The remaining arguments are the literals, one quoted token each.
+        let mut at = 0usize;
+        while let Some(open) = args[at..].find('"') {
+            let start = at + open + 1;
+            let Some(len) = args[start..].find('"') else { break };
+            out.insert(&args[start..start + len]);
+            at = start + len + 1;
+        }
+    }
 }
 
 /// The named-node kinds a pattern's source can root at: `(kind ...)` names

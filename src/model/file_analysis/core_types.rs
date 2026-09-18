@@ -373,6 +373,12 @@ bitflags::bitflags! {
         /// annotate. Provenance of the declaration, not of the doc text —
         /// `Presentation::doc` answers a different question.
         const DOC_DECLARED = 1 << 21;
+        /// The object the enclosing method runs on (`$this`, `this`, a
+        /// python `self`/`cls` parameter): lexically inside the class body
+        /// and tagged with its package, but the instance itself and never
+        /// one of its members. Minted from the receiver capture, so no
+        /// consumer matches a receiver's spelling.
+        const RECEIVER = 1 << 22;
     }
 }
 

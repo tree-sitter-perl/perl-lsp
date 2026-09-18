@@ -569,6 +569,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut contract_name_spans: std::collections::HashSet<(Point, Point)> = std::collections::HashSet::new();
     let mut nonpublic_name_spans: std::collections::HashSet<(Point, Point)> =
         std::collections::HashSet::new();
+    // `@receiver.super` — the match whose receiver dispatches ABOVE the
+    // writing class (php `parent::`): its `@ref.member` mints on the model's
+    // SUPER lane. A per-match fact, because the ref and its receiver kind
+    // arrive in the same match by construction.
+    let mut super_recv_matches: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // `@param.receiver` — the receiver PARAMETER's name span (python
+    // `self`/`cls`): the symbol carries `RECEIVER`, and outline / member
+    // completion ask the symbol instead of matching its name.
+    let mut receiver_name_spans: std::collections::HashSet<(Point, Point)> =
+        std::collections::HashSet::new();
     // `@classattr.<flavor>` — container-def name spans stamped with a
     // flavor attribute ("interface"/"trait"): the model's SymKind::Class
     // covers all three php container kinds, and SUPER/reference walks
@@ -655,6 +665,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         if e.cap == "nonpublic.target" {
             nonpublic_name_spans.insert((e.start, e.end));
         }
+        if e.cap == "receiver.super" {
+            super_recv_matches.insert(e.match_id);
+        }
+        if e.cap == "param.receiver" {
+            receiver_name_spans.insert((e.start, e.end));
+        }
         if let Some(flavor) = e.cap.strip_prefix("classattr.") {
             classattr_by_name_span.insert((e.start, e.end), flavor.to_string());
         }
@@ -673,6 +689,20 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // pattern, a different match). Joined to the Package symbol by name span
     // in a post-pass below, tagging it "inline" so the qualified-completion
     // gather can lift its members into the enclosing namespace.
+    // The spellings this file writes for the object the enclosing method runs
+    // on (`$this`, `this`, a `self`/`cls` parameter). The class body witnesses
+    // each as an instance of its class, which is how a receiver with no
+    // declaration types.
+    let receiver_tokens: Vec<String> = {
+        let mut v: Vec<String> = events
+            .iter()
+            .filter(|e| matches!(e.cap.as_str(), "receiver.this" | "param.receiver"))
+            .map(|e| e.text.clone())
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    };
     let inline_ns_spans: Vec<(Point, Point)> = events
         .iter()
         .filter(|e| e.cap == "ns.inline")
@@ -879,10 +909,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             _ => None,
         })
         .collect();
+    // The spellings that name the WRITING class rather than a namespaced
+    // one (`self`, `static`): the document says which, on the receiver
+    // capture that fires on them, and every reader asks the document.
+    let self_class_tokens = super::cursor_query::capture_literals(query, "receiver.self");
     let ident = |written: &str, at: Point| -> String {
         // the current-class spellings name no namespace; the model
         // resolves them to the enclosing class
-        if pack.self_class_tokens.contains(&written)
+        if self_class_tokens.contains(written)
             || crate::model::conventions::is_current_package_token(written)
             || template_names.contains(written)
         {
@@ -930,7 +964,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         out.import_sites
             .push(crate::model::file_analysis::ImportRow { span, raw, binds });
     }
-    out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
     out.implicit_variables = pack.implicit_variables.iter().map(|s| s.to_string()).collect();
     out.throwaway_names = pack.throwaway_names.iter().map(|s| s.to_string()).collect();
     out.catch_all_methods = pack.catch_all_methods.iter().map(|s| s.to_string()).collect();
@@ -1169,7 +1202,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     let is_class =
                         names_by_match.contains_key(&(e.match_id, "def.class".to_string()));
                     if is_class {
-                        register_class_body(&mut out, pack, id, &text, e.start);
+                        register_class_body(&mut out, &receiver_tokens, id, &text, e.start);
                         class_body_scopes.insert(id);
                     }
                     context_stack.push((scope_stack.len(), text, is_class));
@@ -1296,7 +1329,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         names_by_match.contains_key(&(e.match_id, "def.class".to_string()));
                     if is_class {
                         let id = scope_stack.last().unwrap().1;
-                        register_class_body(&mut out, pack, id, &raw, e.start);
+                        register_class_body(&mut out, &receiver_tokens, id, &raw, e.start);
                         class_body_scopes.insert(id);
                     }
                     context_stack.push((scope_stack.len(), raw, is_class));
@@ -1374,6 +1407,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     qualifier_owned: false,
                     doc: None,
                     deprecation: None,
+                    flags: Default::default(),
                 });
             }
             "handler.name" => {}
@@ -1597,6 +1631,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     params: Vec::new(),
                     doc: None,
                     deprecation: None,
+                    flags: Default::default(),
                     qualifier_owned: qualifier_by_match.contains_key(&e.match_id),
                 });
             }
@@ -1942,10 +1977,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             ));
                         }
                     }
-                    let super_recv = e.cap == "ref.member"
-                        && member_recv
-                            .get(&e.match_id)
-                            .is_some_and(|(_, t)| (pack.super_receiver)(t));
+                    let super_recv = e.cap == "ref.member" && super_recv_matches.contains(&e.match_id);
                     out.refs.push(SkelRef {
                     via: None,
                         kind: e.cap.strip_prefix("ref.").unwrap().to_string(),
@@ -2700,6 +2732,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             qualifier_owned: false,
                             doc: None,
                             deprecation: None,
+                            flags: Default::default(),
                         });
                     }
                 }
@@ -3256,6 +3289,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 qualifier_owned: false,
                                 doc: None,
                                 deprecation: None,
+                                flags: Default::default(),
                             });
                         }
                     }
@@ -3621,8 +3655,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         || !static_name_spans.is_empty()
         || !contract_name_spans.is_empty()
         || !alias_name_ends.is_empty()
+        || !receiver_name_spans.is_empty()
     {
         for sym in &mut out.symbols {
+            if receiver_name_spans.contains(&(sym.name_start, sym.name_end)) {
+                sym.flags |= crate::model::file_analysis::SymbolFlags::RECEIVER;
+            }
             if sym.kind == "var"
                 && alias_name_ends.contains(&sym.name_end)
                 && !sym.attributes.iter().any(|a| a == "alias")
@@ -3967,7 +4005,7 @@ fn mark_deprecated(sym: &mut crate::build::query_extract::SkelSymbol, text: Opti
 
 fn register_class_body(
     out: &mut SkeletonAnalysis,
-    pack: &crate::build::query_extract::LangPack,
+    receivers: &[String],
     scope: crate::model::file_analysis::ScopeId,
     class: &str,
     at: Point,
@@ -3975,10 +4013,10 @@ fn register_class_body(
     if let Some(sc) = out.scopes.iter_mut().find(|s| s.id == scope) {
         sc.package = Some(class.to_string());
     }
-    for recv in pack.receiver_names {
+    for recv in receivers {
         out.witnesses.push(crate::model::witnesses::Witness {
             attachment: crate::model::witnesses::WitnessAttachment::Variable {
-                name: recv.to_string(),
+                name: recv.clone(),
                 scope,
             },
             source: crate::model::witnesses::WitnessSource::Builder("skeleton-receiver".into()),

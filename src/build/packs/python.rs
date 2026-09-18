@@ -37,9 +37,6 @@ pub fn python_pack() -> LangPack {
         },
         rettype_receiver: |_| false,
         field_registry_edges: false,
-        super_receiver: |_| false,
-        self_class_tokens: &[],
-        class_token_kinds: &[],
         function_scoped_vars: false,
         constructor_names: &[],
         doc_types: |_, _| vec![],
@@ -75,7 +72,6 @@ pub fn python_pack() -> LangPack {
         builtin_types: &[],
         enum_members: &[],
         trigger_chars: &["."],
-        receiver_names: &["self", "cls"],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
         recv_peel: PeelSpec {
             wrappers: &[("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer)],

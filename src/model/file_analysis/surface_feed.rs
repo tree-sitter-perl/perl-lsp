@@ -66,7 +66,6 @@ impl FileAnalysis {
                     include_directives,
                     // File-internal pack lanes: read LIVE from the
                     // provider's re-registered analysis per query.
-                    receiver_names: _receiver_names, // LangPack-wide convention, identical across the pack's files
                     implicit_variables: _implicit_variables, // pack-wide convention
                     throwaway_names: _throwaway_names,       // pack-wide convention
                     catch_all_methods: _catch_all_methods, // pack-wide convention

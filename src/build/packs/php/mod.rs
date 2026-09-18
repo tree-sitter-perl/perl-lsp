@@ -78,8 +78,8 @@ pub fn php_pack() -> LangPack {
         // the model's current-package invocant token so relative static
         // dispatch resolves like Perl's `__PACKAGE__->` (late static
         // binding over-approximates to the writing class; accepted).
-        // `parent::` is `super_receiver`'s job — it spells the model's
-        // SUPER method token, not a receiver shape.
+        // `parent::` is the skeleton's `@receiver.super` — it spells the
+        // model's SUPER method token, not a receiver shape.
         shape_name: |kind, raw| {
             if kind == "member.recv" && matches!(raw, "self" | "static") {
                 return crate::model::conventions::CURRENT_PACKAGE_TOKEN.to_string();
@@ -117,9 +117,6 @@ pub fn php_pack() -> LangPack {
             matches!(text.trim().trim_start_matches('?'), "static" | "$this" | "self")
         },
         field_registry_edges: true,
-        super_receiver: |t| t == "parent",
-        self_class_tokens: &["self", "static"],
-        class_token_kinds: &["name", "qualified_name"],
         function_scoped_vars: true,
         constructor_names: &["__construct"],
         // phpdoc: the type vocabulary of REAL PHP — most of WordPress and
@@ -194,7 +191,6 @@ pub fn php_pack() -> LangPack {
         dynamic_var_markers: &["extract", "get_defined_vars", "eval", "parse_str", "compact"],
         enum_members: &["value", "name", "cases", "from", "tryFrom"],
         trigger_chars: &["$", ">", ":"],
-        receiver_names: &["$this"],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
         recv_peel: PeelSpec {
             wrappers: &[("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer)],

@@ -13,13 +13,6 @@ use super::*;
 /// is what a Perl analysis carries.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PackFacts {
-    /// The language's method-RECEIVER param names (Python `self`/`cls`),
-    /// from the LangPack. A receiver is lexically inside the class so the
-    /// sticky context tags it, but it is NOT a member — member completion
-    /// and the outline exclude these names. Perl's receiver convention
-    /// lives in `conventions.rs`, so this stays empty there.
-    #[serde(default)]
-    pub receiver_names: Vec<String>,
     /// Variables the runtime binds without a declaration (php `$this`,
     /// superglobals) — the undefined-variable lane's silence list.
     #[serde(default)]
@@ -235,7 +228,6 @@ impl PackFacts {
 
         h.misc += map_str_vec(&self.template_params)
             + mcap(&self.specializes)
-            + vcap(&self.receiver_names)
             + vcap(&self.implicit_variables)
             + vcap(&self.throwaway_names)
             + vcap(&self.catch_all_methods)
