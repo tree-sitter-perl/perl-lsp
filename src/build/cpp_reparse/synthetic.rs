@@ -356,7 +356,7 @@ fn synth_base(
         // exactly as the query lane does — parity either way.
         let deref_stack = fd
             .child_by_field_name("declarator")
-            .and_then(|d| crate::build::query_extract::peel(d, &crate::build::query_extract::C_FIELD_DECL_PEEL, sbytes))
+            .and_then(|d| crate::build::query_extract::peel(d, &crate::build::packs::cpp::C_FIELD_DECL_PEEL, sbytes))
             .map(|(_, stack, _)| stack)
             .unwrap_or_default();
         // synth byte → body byte (drop the prefix) → original Point.

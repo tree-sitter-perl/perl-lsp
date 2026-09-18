@@ -8,12 +8,14 @@
 //! caller already spells.
 
 pub mod cmake;
+pub mod cpp;
 pub mod perl;
 pub mod php;
 pub mod python;
 pub mod r;
 
 pub use cmake::cmake_pack;
+pub use cpp::cpp_pack;
 pub use perl::perl_pack;
 pub use php::php_pack;
 pub use python::python_pack;
