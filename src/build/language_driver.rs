@@ -1686,23 +1686,32 @@ pub struct LanguageRegistry {
 }
 
 impl LanguageRegistry {
-    pub fn with_enabled() -> Self {
-        #[cfg_attr(
-            not(feature = "pack-langs"),
-            allow(unused_mut)
-        )]
-        let mut drivers: Vec<Box<dyn LanguageDriver>> = vec![Box::new(PerlDriver)];
-        #[cfg(feature = "cpp")]
-        drivers.push(Box::new(cpp_driver()));
-        #[cfg(feature = "python")]
-        drivers.push(Box::new(python_driver()));
-        #[cfg(feature = "php")]
-        drivers.push(Box::new(php_driver()));
-        #[cfg(feature = "r")]
-        drivers.push(Box::new(r_driver()));
-        #[cfg(feature = "cmake")]
-        drivers.push(Box::new(cmake_driver()));
-        LanguageRegistry { drivers }
+    /// The registry, built once per process. Which drivers this binary
+    /// serves is fixed at compile time, and the answer is reached on the
+    /// keystroke path — every capability ask (`spellings`, `builtin_types`,
+    /// `imports_bind_names`, a pack-capture literal set) starts here, and a
+    /// diagnostics publish makes several. Rebuilding it boxed six drivers
+    /// per ask for a value that cannot change.
+    pub fn with_enabled() -> &'static Self {
+        static REGISTRY: std::sync::OnceLock<LanguageRegistry> = std::sync::OnceLock::new();
+        REGISTRY.get_or_init(|| {
+            #[cfg_attr(
+                not(feature = "pack-langs"),
+                allow(unused_mut)
+            )]
+            let mut drivers: Vec<Box<dyn LanguageDriver>> = vec![Box::new(PerlDriver)];
+            #[cfg(feature = "cpp")]
+            drivers.push(Box::new(cpp_driver()));
+            #[cfg(feature = "python")]
+            drivers.push(Box::new(python_driver()));
+            #[cfg(feature = "php")]
+            drivers.push(Box::new(php_driver()));
+            #[cfg(feature = "r")]
+            drivers.push(Box::new(r_driver()));
+            #[cfg(feature = "cmake")]
+            drivers.push(Box::new(cmake_driver()));
+            LanguageRegistry { drivers }
+        })
     }
 
     /// The id of the driver that serves files no other driver claims —
