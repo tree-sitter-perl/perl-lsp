@@ -271,9 +271,20 @@ fn heatmap_symbol_row(
 
 /// Does a declared framework-entry rule (`EntryMarker`) claim this symbol?
 /// A rule matches when EVERY present condition holds — annotation names
-/// against `Symbol.attributes`, method name/prefix, and the (leaf-keyed)
-/// isa gate through the ancestry walk; rules OR across the set. A rule
-/// with no positive condition matches nothing.
+/// against `Symbol.attributes`, method name/prefix, and the isa gate
+/// through the ancestry walk; rules OR across the set. A rule with no
+/// positive condition matches nothing.
+///
+/// The isa gate is keyed on the class LEAF, not on the identity a class
+/// carries everywhere else (`App\Models\User`, docs/prompt-class-identity.md).
+/// `"when_isa": "TestCase"` therefore claims a `TestCase` in ANY namespace.
+/// The widening is deliberate here and nowhere else: this gate only decides
+/// whether a symbol is kept OFF the dead-code queue, where a false claim
+/// costs a missed candidate and a missed claim costs a wrong accusation.
+/// A document that wants the identity writes the FQN and the leaf match
+/// still holds; there is no spelling that NARROWS to one namespace, which
+/// is what a rule needing that would have to say. See
+/// `docs/adr/heatmap.md` §Identity invariant.
 pub(crate) fn framework_entry_claims(
     analysis: &file_analysis::FileAnalysis,
     sym: &file_analysis::Symbol,
