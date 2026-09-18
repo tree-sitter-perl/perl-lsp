@@ -80,12 +80,13 @@ Two properties make it cheap and exact:
   exact: tree-sitter reparses only the damaged region around the cursor,
   reusing the document tree `document.rs` already holds.
 
-Per-language config comes from `LangPack` — a single struct, not a
-branch. The member-access node kinds (`member_kinds`) and the "don't
-splice into strings/comments" set (`skip_kinds`) are the facts this seam
-reads, alongside the pack's other per-language config for the rest of
-completion. `LanguageDriver::lang_pack(language)` maps a driver id to its
-`LangPack`; `None` means the language gets in-scope completion only.
+Which nodes are a member access, and which are the tokens not to splice
+into, are the query document's own patterns — `@member.recv`'s roots and
+`@skip` — read through the bounded runner above. `LanguageDriver::
+lang_pack(language)` maps a driver id to its `LangPack`, which carries
+what is left: the language's write and display spellings, and its
+text→structure predicates. `None` means the language gets in-scope
+completion only.
 
 ### Receiver → members: tree-free, reusing the bag
 
