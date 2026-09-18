@@ -69,6 +69,67 @@ pub(crate) fn peel<'a>(
     None
 }
 
+/// Peel declarator wrappers (`@ool.wrap`, ANY depth) to the inner function
+/// declarator (`@ool.declarator`) — the arbitrary nesting S-queries can't
+/// express (`Foo**& Class::m()`). THE out-of-line unwrap, spelled once so no
+/// call site enumerates wrapper kinds. `None` when no function declarator is
+/// reachable (not a function-def shape).
+fn unwrap_to_function_declarator<'a>(
+    mut node: tree_sitter::Node<'a>,
+    wraps: &std::collections::HashSet<(usize, usize)>,
+    declarators: &std::collections::HashSet<(usize, usize)>,
+) -> Option<tree_sitter::Node<'a>> {
+    for _ in 0..32 {
+        let range = (node.start_byte(), node.end_byte());
+        if declarators.contains(&range) {
+            return Some(node);
+        }
+        if !wraps.contains(&range) {
+            return None;
+        }
+        // a pointer declarator carries its inner under `declarator:`; a
+        // reference/parenthesized declarator holds it as the first named child
+        // (the `&`/parens are anonymous tokens).
+        node = node.child_by_field_name("declarator").or_else(|| node.named_child(0))?;
+    }
+    None
+}
+
+/// Walk a qualified-name chain (`A::B::c`, `@ool.qualifier` at every hop) to its
+/// leaf name token, returning the full scope text (`A::B`) and the leaf. THE
+/// out-of-line owner walk: the owning class is the innermost scope —
+/// `rsplit("::")` of the returned text, as the `def.` handler already does for
+/// single-hop qualifiers — and the leaf is the member/ctor/dtor/operator name.
+/// A segment the document captured a `@qualifier.name` for (a templated owner
+/// `Buf<T>`) contributes that name. `None` when the node is not a qualified name
+/// (a free function / in-class method — its own pattern owns it).
+fn walk_qualifier_chain<'a>(
+    mut node: tree_sitter::Node<'a>,
+    qualifiers: &std::collections::HashSet<(usize, usize)>,
+    peel: &std::collections::HashMap<usize, (usize, String)>,
+    src: &[u8],
+) -> Option<(String, tree_sitter::Node<'a>)> {
+    let is_qualified =
+        |n: &tree_sitter::Node| qualifiers.contains(&(n.start_byte(), n.end_byte()));
+    if !is_qualified(&node) {
+        return None;
+    }
+    let mut scopes: Vec<String> = Vec::new();
+    for _ in 0..32 {
+        if !is_qualified(&node) {
+            return Some((scopes.join("::"), node));
+        }
+        if let Some(scope) = node.child_by_field_name("scope") {
+            scopes.push(match peel.get(&scope.start_byte()) {
+                Some((name_end, name)) if scope.end_byte() > *name_end => name.clone(),
+                _ => scope.utf8_text(src).unwrap_or("").to_string(),
+            });
+        }
+        node = node.child_by_field_name("name")?;
+    }
+    None
+}
+
 /// A parameter's NAME token inside its declaration node: the `name` field
 /// where the grammar has one (php's `simple_parameter`), else the first
 /// simple-variable descendant — a C++ declarator nests the `identifier` under
@@ -194,6 +255,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut codeclared_matches: std::collections::HashSet<usize> = Default::default();
     let mut by_ref_params: Vec<(crate::model::file_analysis::Span, u32, String, crate::model::file_analysis::Span)> =
         Vec::new();
+    // The out-of-line-definition vocabulary, by byte range: the declarator
+    // wrappers, the function declarators, the qualified names, and a templated
+    // qualifier's base name keyed by the spelling's start (a `template_type`
+    // starts where its name does).
+    let mut ool_defs: Vec<(tree_sitter::Node, usize)> = Vec::new();
+    let mut ool_wraps: std::collections::HashSet<(usize, usize)> = Default::default();
+    let mut ool_declarators: std::collections::HashSet<(usize, usize)> = Default::default();
+    let mut ool_qualifiers: std::collections::HashSet<(usize, usize)> = Default::default();
+    let mut qualifier_peel: std::collections::HashMap<usize, (usize, String)> = Default::default();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), source);
     let mut match_counter = 0usize;
@@ -202,57 +272,30 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         for c in m.captures {
             let node = c.node;
             let cap = cap_names[c.index as usize].as_str();
-            // `@ool.def`: an out-of-line definition (`Ret Class::method(...) {}`).
-            // The one general capture (fires for EVERY function_definition) —
-            // peel the declarator to the function declarator, walk its qualified
-            // name to the leaf + owning class, and synthesize the
-            // `def.method` / `def.method.name` / `qualifier` events downstream
-            // extraction consumes — the same vocabulary the narrow per-shape
-            // patterns emit for the shapes they own. A non-qualified declarator
-            // (free function / in-class method) yields nothing here — its own
-            // pattern owns it. Arbitrary declarator nesting + multi-level
-            // qualifiers (which fixed-depth S-queries can't express) work by
-            // construction.
+            // The out-of-line vocabulary, collected here and joined once the
+            // whole tree has been matched: a wrapper the peel descends, the
+            // function declarator it stops at, the qualified name whose chain
+            // names the owner, and a templated owner's base name. A wrapper
+            // captured inside a definition is matched AFTER it, so the join
+            // cannot run here.
+            if let Some(set) = match cap {
+                "ool.wrap" => Some(&mut ool_wraps),
+                "ool.declarator" => Some(&mut ool_declarators),
+                "ool.qualifier" => Some(&mut ool_qualifiers),
+                _ => None,
+            } {
+                set.insert((node.start_byte(), node.end_byte()));
+                continue;
+            }
+            if cap == "qualifier.name" {
+                qualifier_peel.insert(
+                    node.start_byte(),
+                    (node.end_byte(), node.utf8_text(source).unwrap_or("").to_string()),
+                );
+                continue;
+            }
             if cap == "ool.def" {
-                if let Some((scope_text, leaf)) = node
-                    .child_by_field_name("declarator")
-                    .and_then(|d| unwrap_to_function_declarator(d, &pack.oolfn))
-                    .and_then(|fd| fd.child_by_field_name("declarator"))
-                    .and_then(|q| {
-                        walk_qualifier_chain(q, pack.oolfn.qualified_name, pack.qualifier_peel, source)
-                    })
-                {
-                    let leaf_text = leaf.utf8_text(source).unwrap_or("").to_string();
-                    // the def symbol spans the whole function_definition; name +
-                    // owner come from the qualified declarator's leaf + scope.
-                    events.push(Event {
-                        start_byte: node.start_byte(),
-                        end_byte: node.end_byte(),
-                        start: node.start_position(),
-                        end: node.end_position(),
-                        cap: "def.method".to_string(),
-                        text: leaf_text.clone(),
-                        match_id: match_counter,
-                    });
-                    events.push(Event {
-                        start_byte: leaf.start_byte(),
-                        end_byte: leaf.end_byte(),
-                        start: leaf.start_position(),
-                        end: leaf.end_position(),
-                        cap: "def.method.name".to_string(),
-                        text: leaf_text,
-                        match_id: match_counter,
-                    });
-                    events.push(Event {
-                        start_byte: node.start_byte(),
-                        end_byte: node.end_byte(),
-                        start: node.start_position(),
-                        end: node.end_position(),
-                        cap: "qualifier".to_string(),
-                        text: scope_text,
-                        match_id: match_counter,
-                    });
-                }
+                ool_defs.push((node, match_counter));
                 continue;
             }
             // `@nested.target`: a pointer/reference declarator CHAIN of any
@@ -450,9 +493,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 ));
                 continue;
             }
-            // `@qualifier` on a templated owner (`Buf<T>::grow`): the class
-            // the def joins is the BASE name — peel the `name` field where
-            // the node is live (structural, never a string split on `<`).
             // A `@def.*` capture may declare that this match's defs are
             // co-declared; the marker is read and stripped here, so every
             // path below sees the plain capture it already knows.
@@ -463,14 +503,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 }
                 _ => cap,
             };
-            let text = if cap == "qualifier" && pack.qualifier_peel.contains(&node.kind()) {
-                node.child_by_field_name("name")
-                    .and_then(|n| n.utf8_text(source).ok())
-                    .unwrap_or(node.utf8_text(source).unwrap_or(""))
-                    .to_string()
-            } else {
-                node.utf8_text(source).unwrap_or("").to_string()
-            };
+            let text = node.utf8_text(source).unwrap_or("").to_string();
             events.push(Event {
                 start_byte: node.start_byte(),
                 end_byte: node.end_byte(),
@@ -482,6 +515,53 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             });
         }
     }
+    // ---- out-of-line definitions: peel each `@ool.def`'s declarator to its
+    // function declarator, walk the qualified name to the leaf + owning class,
+    // and synthesize the `def.method` / `def.method.name` / `qualifier` events
+    // downstream extraction consumes — the same vocabulary the narrow per-shape
+    // patterns emit for the shapes they own. A non-qualified declarator (free
+    // function / in-class method) yields nothing — its own pattern owns it.
+    // Arbitrary declarator nesting + multi-level qualifiers (which fixed-depth
+    // S-queries can't express) work by construction.
+    for (node, match_id) in &ool_defs {
+        let Some((scope_text, leaf)) = node
+            .child_by_field_name("declarator")
+            .and_then(|d| unwrap_to_function_declarator(d, &ool_wraps, &ool_declarators))
+            .and_then(|fd| fd.child_by_field_name("declarator"))
+            .and_then(|q| walk_qualifier_chain(q, &ool_qualifiers, &qualifier_peel, source))
+        else {
+            continue;
+        };
+        let leaf_text = leaf.utf8_text(source).unwrap_or("").to_string();
+        // the def symbol spans the whole function_definition; name + owner come
+        // from the qualified declarator's leaf + scope.
+        for (cap, n, text) in [
+            ("def.method", *node, leaf_text.clone()),
+            ("def.method.name", leaf, leaf_text.clone()),
+            ("qualifier", *node, scope_text),
+        ] {
+            events.push(Event {
+                start_byte: n.start_byte(),
+                end_byte: n.end_byte(),
+                start: n.start_position(),
+                end: n.end_position(),
+                cap: cap.to_string(),
+                text,
+                match_id: *match_id,
+            });
+        }
+    }
+    // A templated qualifier (`Buf<T>::grow`) joins its BASE class: peel every
+    // `@qualifier` the document captured as a template spelling, once the peel
+    // names are all in.
+    for e in events.iter_mut().filter(|e| e.cap == "qualifier") {
+        if let Some((name_end, name)) = qualifier_peel.get(&e.start_byte) {
+            if e.end_byte > *name_end {
+                e.text = name.clone();
+            }
+        }
+    }
+
     // Source order; outermost first on ties so scopes push before their
     // contents. A `@scope` on the SAME node as a `@def` (a function_definition
     // carries its own body scope) must open AFTER the def is recorded, so the

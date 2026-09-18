@@ -1,6 +1,6 @@
 //! Python's pack.
 
-use crate::build::query_extract::{LangPack, OutOfLineSpec, PeelSpec};
+use crate::build::query_extract::{LangPack, PeelSpec};
 use crate::model::file_analysis::{InferredType, NameSpellings, PackSpellings};
 
 /// Python writes and displays nothing of its own: the engine's type tags are
@@ -86,12 +86,10 @@ pub fn python_pack() -> LangPack {
         simple_var_kinds: &["identifier"],
         dynamic_arg_markers: &[],
         dynamic_var_markers: &[],
-        qualifier_peel: &[],
         member_kinds: &["attribute"],
         skip_kinds: &["string", "string_content", "comment", "concatenated_string"],
         call_kinds: &["call"],
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
-        oolfn: OutOfLineSpec::OFF,
     }
 }

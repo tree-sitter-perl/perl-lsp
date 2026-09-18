@@ -1,6 +1,6 @@
 //! R's pack.
 
-use crate::build::query_extract::{LangPack, OutOfLineSpec, PeelSpec};
+use crate::build::query_extract::{LangPack, PeelSpec};
 use crate::model::file_analysis::{NameSpellings, PackSpellings};
 
 /// R writes and displays nothing of its own: the engine's type tags are
@@ -74,12 +74,10 @@ pub fn r_pack() -> LangPack {
         simple_var_kinds: &[],
         dynamic_arg_markers: &[],
         dynamic_var_markers: &[],
-        qualifier_peel: &[],
         member_kinds: &[],
         skip_kinds: &[],
         call_kinds: &[],
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
-        oolfn: OutOfLineSpec::OFF,
     }
 }

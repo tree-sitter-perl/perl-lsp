@@ -338,6 +338,17 @@
 ; — the universal `(function_definition) @scope.sub` mints it.
 (function_definition type: (_) @rettype) @ool.def
 (function_definition !type) @ool.def
+; the three shapes that unwrap: a declarator WRAPPER the peel descends
+; through, the function declarator it stops at, and the qualified name whose
+; chain names the owner. Captured as themselves, so the depth is the walk's
+; business and the kinds are the document's.
+[(pointer_declarator) (reference_declarator) (parenthesized_declarator)] @ool.wrap
+(function_declarator) @ool.declarator
+(qualified_identifier) @ool.qualifier
+; a templated owner (`Buf<T>::grow`) owns by its BASE class name: the name
+; field IS the class, so every qualifier segment peels through this capture
+; instead of a string split on `<`.
+(qualified_identifier scope: (template_type name: (_) @qualifier.name))
 (function_definition
   declarator: (pointer_declarator
     declarator: (function_declarator

@@ -1,6 +1,6 @@
 //! CMake's pack — the command-dispatched language.
 
-use crate::build::query_extract::{CmdEffect, LangPack, OutOfLineSpec, PeelSpec};
+use crate::build::query_extract::{CmdEffect, LangPack, PeelSpec};
 use crate::model::file_analysis::{NameSpellings, PackSpellings};
 
 /// CMake writes and displays nothing of its own: the engine's type tags are
@@ -88,12 +88,10 @@ pub fn cmake_pack() -> LangPack {
         simple_var_kinds: &[],
         dynamic_arg_markers: &[],
         dynamic_var_markers: &[],
-        qualifier_peel: &[],
         member_kinds: &[],
         skip_kinds: &[],
         call_kinds: &[],
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
-        oolfn: OutOfLineSpec::OFF,
     }
 }

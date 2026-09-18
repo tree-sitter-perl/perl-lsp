@@ -1,6 +1,6 @@
 //! C/C++'s pack.
 
-use crate::build::query_extract::{LangPack, OutOfLineSpec, PeelSpec};
+use crate::build::query_extract::{LangPack, PeelSpec};
 use crate::model::file_analysis::{canonical_template_spelling, InferredType, NameSpellings, PackSpellings};
 
 /// The declarator peel for C/C++ struct fields and locals: pointer/reference
@@ -125,25 +125,11 @@ pub fn cpp_pack() -> LangPack {
         simple_var_kinds: &["identifier"],
         dynamic_arg_markers: &[],
         dynamic_var_markers: &[],
-        // a templated qualifier (`Buf<T>::grow`) owns by its BASE class name
-        qualifier_peel: &["template_type"],
         member_kinds: &["field_expression"],
         skip_kinds: &["string_literal", "char_literal", "raw_string_literal", "comment"],
         call_kinds: &["call_expression"],
         domain_compare_kinds: &["binary_expression"],
         domain_compare_ops: &["==", "!="],
-        // out-of-line defs (`Ret Class::m(){}`): peel pointer/reference/
-        // parenthesized returns to the function declarator, then walk the
-        // qualified name to its leaf + owning class.
-        oolfn: OutOfLineSpec {
-            declarator_wrappers: &[
-                "pointer_declarator",
-                "reference_declarator",
-                "parenthesized_declarator",
-            ],
-            function_declarator: "function_declarator",
-            qualified_name: "qualified_identifier",
-        },
     }
 }
 

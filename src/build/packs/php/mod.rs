@@ -4,7 +4,7 @@ mod doc;
 
 use doc::{php_annot_type, php_doc_types, PHP_BUILTIN_TYPES};
 
-use crate::build::query_extract::{CallShape, LangPack, OutOfLineSpec, PeelSpec};
+use crate::build::query_extract::{CallShape, LangPack, PeelSpec};
 use crate::model::file_analysis::{InferredType, NameSpellings, PackSpellings};
 
 /// php's write and display spellings. `type_display` is what a human
@@ -200,7 +200,6 @@ pub fn php_pack() -> LangPack {
         // one meaningful member operator family (`->`/`?->`): no op-DX.
         op_map: &[],
         simple_var_kinds: &["variable_name"],
-        qualifier_peel: &[],
         // calls included: PHP's method call is ONE flat node (unlike cpp,
         // where the call wraps a field_expression), so mid-token member
         // completion (`->ma|p`) must climb to the call node itself.
@@ -224,7 +223,6 @@ pub fn php_pack() -> LangPack {
         ],
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
-        oolfn: OutOfLineSpec::OFF,
     }
 }
 
