@@ -409,6 +409,43 @@ pub fn entry_markers_for(pack: &LangPack) -> std::sync::Arc<Vec<EntryMarker>> {
     arc
 }
 
+/// The builtin type names in force for a language: the pack's bundled
+/// `builtins.txt` documents plus every discovered
+/// `<plugin-dir>/<name>/builtins.txt`. Cached per (lang, plugin-path set)
+/// like the entry markers — a runtime's surface does not hot-reload within a
+/// process. One name per line; `#` starts a comment, blank lines are skipped.
+pub fn builtin_types_for(pack: &LangPack) -> std::sync::Arc<Vec<String>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<String>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let paths = plugin_documents("builtins.txt");
+    let key = document_cache_key(pack.lang_id, &paths);
+    if let Some(v) = cache.lock().unwrap().get(&key) {
+        return Arc::clone(v);
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut fold = |src: &str| {
+        for line in src.lines() {
+            let name = line.split('#').next().unwrap_or("").trim();
+            if !name.is_empty() && !out.iter().any(|n| n == name) {
+                out.push(name.to_string());
+            }
+        }
+    };
+    for src in pack.bundled_builtin_types {
+        fold(src);
+    }
+    for p in &paths {
+        if let Ok(src) = std::fs::read_to_string(p) {
+            fold(&src);
+        }
+    }
+    let arc = Arc::new(out);
+    cache.lock().unwrap().insert(key, Arc::clone(&arc));
+    arc
+}
+
 // ---- pack-plugin query overlays (tier 1, docs/prompt-pack-plugins.md) ----
 
 /// Discovered overlay files for a language: every

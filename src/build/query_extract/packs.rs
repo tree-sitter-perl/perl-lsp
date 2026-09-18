@@ -123,6 +123,13 @@ pub struct LangPack {
     /// indentation-scoped (Python) or non-nesting packs.
     /// `docs/adr/config-superposition-declarations.md`.
     pub brace_scoped_members: bool,
+    /// Bundled builtin-type documents (`builtins.txt`): the class, interface
+    /// and attribute names the language itself provides in its global
+    /// namespace, one per line. A global reference to one of these is never a
+    /// type missing its import. A runtime's surface grows and differs per
+    /// build, so it is a document a plugin dir extends, never a table
+    /// (rule #15) — read through `builtin_types_for`.
+    pub bundled_builtin_types: &'static [&'static str],
     /// Completion trigger characters for the LSP
     /// `completionProvider.triggerCharacters` slot — the client auto-fires
     /// completion (and reports the char in `CompletionContext`) when one is
