@@ -264,6 +264,13 @@ pub struct PackSpellings {
     /// The sigil a static property carries after the scope operator (php
     /// `self::$count`); empty = the bare name in both positions.
     pub static_property_sigil: &'static str,
+    /// What a signature writes before a parameter that takes the rest of the
+    /// argument list (php/C++ `...`, python `*`); empty = the language marks
+    /// one on the parameter's own name, or has none.
+    pub variadic_marker: &'static str,
+    /// What a signature writes between a parameter and its default value;
+    /// empty = the language writes no defaults.
+    pub default_sep: &'static str,
     /// A member declaration belongs to the container that encloses it and
     /// nothing else — no cross-package installs (Perl's typeglobs), so
     /// contract provision is package-attributed.
@@ -287,6 +294,8 @@ impl PackSpellings {
         contract_stub: "",
         return_annotation_template: "",
         static_property_sigil: "",
+        variadic_marker: "",
+        default_sep: "",
         members_are_package_bound: false,
         // Perl's answer: it declares no pack of its own, and its member
         // reads are accessor calls.
