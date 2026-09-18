@@ -15,7 +15,7 @@ use super::*;
 /// `invocant_class == target_class` exactly, so `$child->ping()` (where
 /// invocant class is "Child") fell out when targeting "Base::ping".
 ///
-/// `refs_to` uses `method_rename_chain(invocant_class)` which checks
+/// `refs_to` uses `member_rename_chain(invocant_class)` which checks
 /// whether the target class is anywhere on the invocant's resolution
 /// chain, so `$child->ping()` targeting Base IS matched when Child
 /// inherits Base's `ping`.

@@ -144,7 +144,7 @@ pub fn pack_hover_markdown(
                 if let Some(leaf) = storage_leaf {
                     return Some(format!("```{}\n{}: {}\n```\n\n*field*", language, field, leaf));
                 }
-                if let Some(h) = analysis.member_hover(&cn, field, Some(midx)) {
+                if let Some(h) = analysis.member_hover(&cn, field, want, Some(midx)) {
                     return Some(format!("```{}\n{}\n```\n\n*field*", language, h));
                 }
             }

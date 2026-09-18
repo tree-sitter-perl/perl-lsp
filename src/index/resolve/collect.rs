@@ -368,12 +368,16 @@ pub(super) fn method_classes_for(
     origin: &FileAnalysis,
     class: &str,
     name: &str,
+    member_kind: Option<MemberKind>,
     module_index: Option<&dyn CrossFileLookup>,
     scope: OverrideScope,
 ) -> Vec<String> {
+    // A target with no family stated is a callable ask, which is what every
+    // caller of these walks meant before the family axis existed.
+    let want = member_kind.unwrap_or(MemberKind::Callable);
     match scope {
-        OverrideScope::Hierarchy => origin.method_override_family(class, name, module_index),
-        OverrideScope::Dispatch => origin.method_rename_chain(class, name, module_index),
+        OverrideScope::Hierarchy => origin.member_override_family(class, name, want, module_index),
+        OverrideScope::Dispatch => origin.member_rename_chain(class, name, want, module_index),
     }
 }
 
@@ -495,9 +499,12 @@ pub(super) fn pack_class_def_paths(
     out
 }
 
-/// A dispatch name that is actually spelled by *another* identifier, so the
+/// The OTHER identifier a dispatch name is actually spelled by, when the
 /// token at `span` is not the literal name and rename must not rewrite it
-/// (references still resolve through the fold). A variable fold
+/// (references still resolve through the fold). The name is what tells the
+/// caller WHICH reason the site carries — a variable or constant it folded
+/// out of, or a delegating macro whose body no edit set reaches. A variable
+/// fold
 /// (`$obj->on($evt)`, `$self->$m()` — a `Variable`/`ContainerAccess` ref covers
 /// the span) always counts. A const fold (`$obj->on(EVT)` — a `FunctionCall`
 /// ref to the constant covers it) counts only when `include_calls` — for a
@@ -510,18 +517,22 @@ pub(super) fn pack_class_def_paths(
 /// the literal name — that's the collected use, not a fold, and it must stay
 /// rewritable. (Perl variable names carry their sigil, so they can never
 /// coincide with a callable name.)
-pub(super) fn span_is_folded_name(
-    analysis: &FileAnalysis,
+pub(super) fn folded_name_at<'a>(
+    analysis: &'a FileAnalysis,
     span: Span,
     include_calls: bool,
     literal_name: &str,
-) -> bool {
-    analysis.refs().iter().any(|r| {
-        (matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess)
-            || (include_calls && matches!(r.kind, RefKind::FunctionCall { .. })))
-            && r.span == span
-            && r.target_name != literal_name
-    })
+) -> Option<&'a str> {
+    analysis
+        .refs()
+        .iter()
+        .find(|r| {
+            (matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess)
+                || (include_calls && matches!(r.kind, RefKind::FunctionCall { .. })))
+                && r.span == span
+                && r.target_name != literal_name
+        })
+        .map(|r| r.target_name.as_str())
 }
 
 /// Member-family declaration match: a target with no member family admits
@@ -1024,8 +1035,20 @@ pub(super) fn collect_from_analysis(
         if !sites_rewritable {
             return Rewritable::No(NotRewritable::RailEmission);
         }
-        if foldable && span_is_folded_name(analysis, span, folds_through_calls, &target.name) {
-            return Rewritable::No(NotRewritable::ConstFolded);
+        if let Some(other) =
+            foldable.then(|| folded_name_at(analysis, span, folds_through_calls, &target.name)).flatten()
+        {
+            // A token that names a MACRO is not a fold: the expansion
+            // re-mints the use under the target's name while the source keeps
+            // the macro's, and the macro's body is not a span any edit set
+            // reaches — so the site says so, and rename refuses rather than
+            // skipping it the way it skips a fold, whose own literal is
+            // collected separately and carries the edit.
+            return Rewritable::No(if names_visible_macro(other, analysis, module_index) {
+                NotRewritable::MacroDelegated
+            } else {
+                NotRewritable::ConstFolded
+            });
         }
         Rewritable::Yes
     };
@@ -1199,7 +1222,7 @@ pub(super) fn collect_from_analysis(
                 // into a cross-file parent; enrichment re-stamps OPEN docs
                 // only) — re-resolve lazily here, where the index is in hand,
                 // rather than silently excluding the site. Either way the
-                // class then fans out over `method_rename_chain` so
+                // class then fans out over `member_rename_chain` so
                 // `$child->m` matches an ancestor-defined target while
                 // unrelated same-named methods stay out.
                 // Same derived-from-the-same-match invariant as the FunctionCall
@@ -1253,7 +1276,12 @@ pub(super) fn collect_from_analysis(
                                     || rename_chain_cache
                                         .entry(cn.clone())
                                         .or_insert_with(|| {
-                                            analysis.method_rename_chain(&cn, method, module_index)
+                                            analysis.member_rename_chain(
+                                                &cn,
+                                                method,
+                                                target.member_kind.unwrap_or(MemberKind::Callable),
+                                                module_index,
+                                            )
                                         })
                                         .iter()
                                         .any(|c| target.method_classes.iter().any(|f| f == c))
@@ -1265,7 +1293,12 @@ pub(super) fn collect_from_analysis(
                                 cn == *pkg || rename_chain_cache
                                     .entry(cn.clone())
                                     .or_insert_with(|| {
-                                        analysis.method_rename_chain(&cn, method, module_index)
+                                        analysis.member_rename_chain(
+                                                &cn,
+                                                method,
+                                                target.member_kind.unwrap_or(MemberKind::Callable),
+                                                module_index,
+                                            )
                                     })
                                     .iter()
                                     .any(|c| c == pkg)

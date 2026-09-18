@@ -3564,6 +3564,7 @@ class Repository implements ConfigContract
     let target = crate::index::resolve::TargetRef::method(
         "pull".into(),
         "Contracts\\Cache\\Repository".into(),
+        Some(crate::model::file_analysis::MemberKind::Callable),
         &fa_cc,
         Some(&idx),
         crate::index::resolve::OverrideScope::Hierarchy,

@@ -13,7 +13,7 @@ landed: `docs/adr/field-projections.md`.
 
 Inheritance override scoping (renaming `Animal::speak` surfacing
 `Dog::speak` without touching an unrelated same-named sub) is landed:
-`method_override_family` (`model/file_analysis/ancestry.rs`) is the
+`member_override_family` (`model/file_analysis/ancestry.rs`) is the
 reverse-parent walk, and `OverrideScope::Hierarchy` (the
 `rename.overrideScope` setting, `index/resolve/collect.rs`) is what
 `rename_edits()` consults — see `docs/adr/destructuring.md`'s H1 record
