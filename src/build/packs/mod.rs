@@ -7,10 +7,12 @@
 //! `*_pack()` through `query_extract::packs`, which is the path every
 //! caller already spells.
 
+pub mod cmake;
 pub mod perl;
 pub mod python;
 pub mod r;
 
+pub use cmake::cmake_pack;
 pub use perl::perl_pack;
 pub use python::python_pack;
 pub use r::r_pack;
