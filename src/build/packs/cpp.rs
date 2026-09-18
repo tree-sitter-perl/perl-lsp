@@ -8,6 +8,8 @@ use crate::model::file_analysis::{canonical_template_spelling, InferredType, Nam
 /// members belong to the container that declares them.
 const SPELLINGS: PackSpellings = PackSpellings {
     members_are_package_bound: true,
+    // a member read and a member call are different syntax here
+    member_reads_are_calls: false,
     ..PackSpellings::NONE
 };
 

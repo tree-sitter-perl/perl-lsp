@@ -300,6 +300,13 @@ pub struct PackSpellings {
     /// nothing else — no cross-package installs (Perl's typeglobs), so
     /// contract provision is package-attributed.
     pub members_are_package_bound: bool,
+    /// Reading a member IS calling it: Perl's `$o->name` invokes the
+    /// accessor, so a call may legitimately land on a stored slot and a
+    /// callable ask admits a value declaration. A language that spells the
+    /// call (`$obj->name()` vs `$obj->name`) says `false` — there the two
+    /// syntaxes name two different members, and admitting the value one is
+    /// how a missing `()` resolves to a property instead of being reported.
+    pub member_reads_are_calls: bool,
 }
 
 impl PackSpellings {
@@ -313,6 +320,9 @@ impl PackSpellings {
         return_annotation_template: "",
         static_property_sigil: "",
         members_are_package_bound: false,
+        // Perl's answer: it declares no pack of its own, and its member
+        // reads are accessor calls.
+        member_reads_are_calls: true,
     };
 }
 
