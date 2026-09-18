@@ -3136,18 +3136,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
         }
     }
-    // ---- documentation-comment types: pack vocabulary, positional join ----
-    // A doc comment documents the def that STARTS on the line directly below
-    // its last line (an attribute/modifier line between them breaks the join —
-    // accepted v1). DECLARED types always win: a doc fact fills only where
-    // the syntax carried nothing, because docblocks drift and the tree
-    // doesn't. Perl/C++ packs return no facts, so the pass is a no-op there.
+    // ---- documentation-comment types: pack vocabulary, query join ----
+    // The query pairs a doc comment with the def it documents (`@doc.comment`
+    // and `@doc.subject` in ONE match), and `@doc.subject` sits on the very
+    // node the def's own capture sits on — so the two meet at one point and
+    // nothing here measures a distance. DECLARED types always win: a doc fact
+    // fills only where the syntax carried nothing, because docblocks drift and
+    // the tree doesn't. Perl/C++ packs return no facts, so the pass is a no-op
+    // there.
     {
         use crate::build::query_extract::DocFact;
-        // Keyed by the comment's END row (the def sits on the next line);
-        // the start row rides along so a `@method` fact can span its own
-        // line inside the comment.
-        let mut by_end_row: HashMap<usize, (usize, Vec<DocFact>)> = HashMap::new();
+        // Keyed by the SUBJECT's start point; the comment's start row rides
+        // along so a `@method` fact can span its own line inside the comment.
+        let mut by_subject: HashMap<(usize, usize), (usize, Vec<DocFact>)> = HashMap::new();
         // The bound names imports bring in, for the doc-mention scan below:
         // an import used only in a docblock (`@var Foo $x`) is used.
         let bound: std::collections::HashSet<String> = out
@@ -3159,6 +3160,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             })
             .chain(out.use_aliases.iter().map(|(alias, _, _)| alias.clone()))
             .collect();
+        // The subject each match names, so the comment of that same match
+        // knows what it documents. A bare `@doc.comment` with no subject is
+        // the mention scan's input only.
+        let mut subject_by_match: HashMap<usize, Point> = HashMap::new();
+        for e in &events {
+            if e.cap == "doc.subject" {
+                subject_by_match.insert(e.match_id, e.start);
+            }
+        }
         for e in &events {
             if e.cap == "doc.comment" {
                 if !bound.is_empty() {
@@ -3168,16 +3178,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         }
                     }
                 }
+                let Some(subject) = subject_by_match.get(&e.match_id) else { continue };
                 let facts = (pack.doc_types)(&e.text, pack.doc_uses_method_tags);
                 if !facts.is_empty() {
-                    let entry = by_end_row
-                        .entry(e.end.row)
+                    let entry = by_subject
+                        .entry((subject.row, subject.column))
                         .or_insert_with(|| (e.start.row, Vec::new()));
                     entry.1.extend(facts);
                 }
             }
         }
-        if !by_end_row.is_empty() {
+        if !by_subject.is_empty() {
             let scope_spans: Vec<Span> = out.scopes.iter().map(|s| s.span).collect();
             let param_syms: Vec<(String, crate::model::file_analysis::ScopeId, Point)> =
                 out.symbols
@@ -3196,7 +3207,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // callables/fields as before.
                 if matches!(sym.kind.as_str(), "class" | "interface") {
                     let Some((cstart, facts)) =
-                        sym.start.row.checked_sub(1).and_then(|r| by_end_row.get(&r))
+                        by_subject.get(&(sym.start.row, sym.start.column))
                     else {
                         continue;
                     };
@@ -3256,8 +3267,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 if !matches!(sym.kind.as_str(), "sub" | "method" | "field" | "anon" | "var") {
                     continue;
                 }
-                let Some((cstart, facts)) =
-                    sym.start.row.checked_sub(1).and_then(|r| by_end_row.get(&r))
+                let Some((cstart, facts)) = by_subject.get(&(sym.start.row, sym.start.column))
                 else {
                     continue;
                 };
@@ -3518,23 +3528,23 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // A named `@var T $x` above a RE-assignment (php's function-
             // scoped locals: the def is the FIRST assignment, a later one is
             // a rebind FlowEdge, not a symbol) casts the variable from that
-            // row on — the `$x = Factory::make(); /** @var Concrete $x */`
-            // idiom that narrows a base-typed factory return.
-            for (end_row, (_, facts)) in &by_end_row {
+            // site on — the `$x = Factory::make(); /** @var Concrete $x */`
+            // idiom that narrows a base-typed factory return. The subject IS
+            // the assignment target, so the rebind is found at its own point.
+            for ((row, column), (_, facts)) in &by_subject {
+                let at = Point { row: *row, column: *column };
                 for f in facts {
                     let DocFact::Var { ty, name: Some(vn) } = f else { continue };
-                    let Some(t) = annot_ident(ty, Point { row: *end_row, column: 0 }) else { continue };
-                    let has_def = out
-                        .symbols
-                        .iter()
-                        .any(|s| s.kind == "var" && &s.name == vn && s.start.row == end_row + 1);
+                    let Some(t) = annot_ident(ty, at) else { continue };
+                    let has_def =
+                        out.symbols.iter().any(|s| s.kind == "var" && &s.name == vn && s.start == at);
                     if has_def {
                         continue;
                     }
                     if let Some(fe) = out
                         .flow_edges
                         .iter()
-                        .find(|fe| &fe.target_name == vn && fe.target_at.row == end_row + 1)
+                        .find(|fe| &fe.target_name == vn && fe.target_at == at)
                     {
                         out.witnesses.push(doc_cast_witness(
                             vn,

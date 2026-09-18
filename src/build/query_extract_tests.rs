@@ -3112,6 +3112,39 @@ function collect($v = null) {}
 }
 
 #[test]
+fn php_docblock_joins_its_def_across_an_attribute_line() {
+    // The doc and the def it documents are ONE query match, so anything the
+    // grammar puts between them — an attribute list, a modifier on its own
+    // line — is the query's business, not a row distance the engine measures.
+    // A property's def token is its NAME, which an attribute line pushes a
+    // row further down than the row arithmetic this join replaced could see.
+    let src = "\
+<?php
+class Repo {
+    /** @var list<User> */
+    #[SomeAttr]
+    protected array $rows = [];
+
+    /** @return Post */
+    #[Other]
+    public function latest() {}
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let in_class = tree_sitter::Point { row: 4, column: 0 };
+    assert_eq!(
+        fa.inferred_type_via_bag("rows", in_class),
+        Some(InferredType::Sequence(vec![InferredType::ClassName("User".into())])),
+        "the @var row types the property the attribute line separates it from"
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("latest", None),
+        Some(InferredType::ClassName("Post".into())),
+    );
+}
+
+#[test]
 fn php_self_and_static_calls_dispatch_as_the_enclosing_class() {
     // `self::helper()` / `static::helper()` are current-package dispatch —
     // the receiver canonicalizes to the model's `__PACKAGE__` token, so
