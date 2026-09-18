@@ -638,6 +638,53 @@ fn a_spelled_receiver_language_declares_no_implicit_scope() {
     assert_eq!(read.resolved_symbol(), None, "php: a bare name is never the property");
 }
 
+// A C callback member (`int (*read)(char *)`) is a stored slot the source
+// CALLS. The declarator says so — the peel's `@deref.callable` level mints
+// `SymbolFlags::CALLABLE_VALUE` — so `ops->read(buf)` resolves to the slot
+// while a call on a plain `int count` still resolves to nothing. The rule is
+// on the declaration, never on a list of callback names.
+#[cfg(feature = "cpp")]
+#[test]
+fn a_callback_member_answers_a_call_and_a_plain_one_does_not() {
+    use crate::model::file_analysis::{SymKind, SymbolFlags};
+    let src = "\
+struct Ops {\n\
+  int (*read)(char *buf);\n\
+  int count;\n\
+};\n\
+int a(struct Ops *o) { return o->read(\"x\"); }\n\
+int b(struct Ops *o) { return o->count(1); }\n";
+    let fa = cpp_driver().analyze(src);
+    let field = |name: &str| {
+        fa.symbols()
+            .iter()
+            .find(|s| s.name == name && s.kind == SymKind::Field)
+            .unwrap_or_else(|| panic!("{name} is a Field"))
+    };
+    assert!(
+        field("read").flags.contains(SymbolFlags::CALLABLE_VALUE),
+        "the function-pointer declarator states the slot is invoked"
+    );
+    assert!(
+        !field("count").flags.contains(SymbolFlags::CALLABLE_VALUE),
+        "a plain int member states nothing of the kind"
+    );
+    let at = |row: usize, needle: &str| {
+        let line = src.lines().nth(row).unwrap();
+        tree_sitter::Point { row, column: line.find(needle).unwrap() }
+    };
+    assert_eq!(
+        fa.find_definition(at(4, "read("), None),
+        Some(field("read").selection_span),
+        "the call lands on the callback member"
+    );
+    assert_eq!(
+        fa.find_definition(at(5, "count("), None),
+        None,
+        "a call on a non-callable slot resolves to nothing"
+    );
+}
+
 // Implicit-`this` sibling method CALLs — the call half of the same fact. A
 // bare `foo(...)` inside a body that elides the receiver pins its enclosing
 // class onto the `FunctionCall`'s `resolved_package` (in-class AND

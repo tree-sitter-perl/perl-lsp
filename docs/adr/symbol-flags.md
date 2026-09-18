@@ -24,6 +24,13 @@ handler def minted from a class-keyed rail capture (`@def.handler.class.
 <rail>`), whose token belongs to another symbol: `CLASS_RAIL` is what
 the listing verdict asks, never the attribute string.
 
+A flag can also state what a declaration's SHAPE says about its value:
+`CALLABLE_VALUE` marks a stored slot whose value is invoked (a C
+function-pointer member, `int (*read)(char *)`), minted from the
+`@deref.callable` level of the declarator peel. `MemberKind::admits_decl`
+asks it, so `ops->read(buf)` resolves to the slot in a language that
+otherwise spells its calls — without a list of callback names anywhere.
+
 A declaration the source never wrote carries `SYNTHESIZED`: the LANGUAGE
 gives every enum its `->value` and `::cases()`, and those members are
 minted at the enum's own name token, resolvable and completable like any

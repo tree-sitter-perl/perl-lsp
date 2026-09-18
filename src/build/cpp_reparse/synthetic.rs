@@ -363,7 +363,7 @@ fn synth_base(
         let deref_stack = fd
             .child_by_field_name("declarator")
             .and_then(|d| derefs.peel(d, sbytes))
-            .map(|(_, stack, _)| stack)
+            .map(|c| c.stack)
             .unwrap_or_default();
         // synth byte → body byte (drop the prefix) → original Point.
         let ns = name_node.start_byte().saturating_sub(prefix.len());

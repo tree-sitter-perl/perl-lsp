@@ -527,8 +527,12 @@ pub(super) fn span_is_folded_name(
 /// Member-family declaration match: a target with no member family admits
 /// either kind; the families' own rule (`MemberKind::admits_decl`), read
 /// under the declaring file's spellings, decides the rest.
-fn kind_admits(family: Option<MemberKind>, kind: SymKind, analysis: &FileAnalysis) -> bool {
-    family.is_none_or(|f| f.admits_decl(kind, analysis.spellings()))
+fn kind_admits(
+    family: Option<MemberKind>,
+    sym: &crate::model::file_analysis::Symbol,
+    analysis: &FileAnalysis,
+) -> bool {
+    family.is_none_or(|f| f.admits_decl(sym.kind, sym.flags, analysis.spellings()))
 }
 
 /// True when `sym` is a declaration of `target` (decl-span match).
@@ -579,7 +583,7 @@ pub(super) fn symbol_defines_target(
                         .any(|c| Some(c.as_str()) == sym_pkg));
             matches!(sym.kind, SymKind::Sub | SymKind::Method)
                 && in_scope
-                && kind_admits(target.member_kind, sym.kind, analysis)
+                && kind_admits(target.member_kind, sym, analysis)
         }
         TargetKind::Method { class } => {
             // A `sub NAME` declaration belongs to this target if it lives in
@@ -603,7 +607,7 @@ pub(super) fn symbol_defines_target(
             (matches!(sym.kind, SymKind::Sub | SymKind::Method)
                 || analysis.symbol_is_class_content(sym))
                 && on_chain
-                && kind_admits(target.member_kind, sym.kind, analysis)
+                && kind_admits(target.member_kind, sym, analysis)
         }
         TargetKind::Package => matches!(
             sym.kind,
