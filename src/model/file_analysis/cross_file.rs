@@ -619,6 +619,27 @@ pub trait CrossFileLookup {
             })
             .cloned()
     }
+    /// The first candidate for `identity` whose analysis `declares`
+    /// accepts — "the file that declares this name", asked once. Each
+    /// candidate is read on the SYMBOLS axis, because the question is
+    /// about declarations; `candidate_defining_sub_in_package` is the
+    /// sibling for a consumer that also needs the module's path.
+    ///
+    /// The first accepting candidate IS the answer: a consumer that
+    /// scanned on for a more interesting one (a deprecation, a richer
+    /// declaration) was answering from a file its own resolution never
+    /// named.
+    fn defining_analysis(
+        &self,
+        identity: &str,
+        declares: &dyn Fn(&FileAnalysis) -> bool,
+    ) -> Option<std::sync::Arc<FileAnalysis>> {
+        self.visible_def_candidates(identity)
+            .into_iter()
+            .map(|c| self.symbols_present(&c))
+            .find(|a| declares(a))
+    }
+
     /// A cached module's analysis with its witness bag GUARANTEED present.
     /// Slice 2 evicts the bag from resident pack-index copies; every TYPE
     /// query that reads a foreign file's bag (the `PackageSymbol` / `SlotType`
