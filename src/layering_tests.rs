@@ -1628,6 +1628,66 @@ fn packs_with_grammars() -> Vec<(crate::build::query_extract::LangPack, tree_sit
     out
 }
 
+/// Every bundled document says only what the engine can hear. Four ways one
+/// goes wrong with no error anywhere: it fails to COMPILE (the loader drops
+/// it and the lane it fed goes dark), it spells a capture the extractor does
+/// not serve (matches, mints nothing), it spells one INSIDE a known family
+/// whose payload the engine cannot honour, or it puts a fourth capture on
+/// one query step — tree-sitter stores three and `query_step__add_capture`
+/// no-ops past them, so the document compiles, `capture_names()` still lists
+/// the name, and the capture never fires.
+///
+/// The engine answers all four; until this test they were reachable only
+/// through `--plugin-check`, which somebody has to remember to run.
+#[test]
+fn bundled_query_documents_are_served_whole() {
+    use crate::build::query_extract::{
+        dropped_step_capture_findings, overlay_capture_findings, unserved_captures,
+    };
+    let mut problems: Vec<String> = Vec::new();
+    for (pack, language) in packs_with_grammars() {
+        let docs = std::iter::once(("skeleton", pack.query_source))
+            .chain(pack.bundled_overlays.iter().copied());
+        for (name, source) in docs {
+            let doc = format!("{}/{name}", pack.lang_id);
+            let q = match tree_sitter::Query::new(&language, source) {
+                Ok(q) => q,
+                Err(e) => {
+                    problems.push(format!("{doc}: does not compile: {e}"));
+                    continue;
+                }
+            };
+            let caps = q.capture_names();
+            problems.extend(
+                unserved_captures(&pack, &language, caps)
+                    .into_iter()
+                    .map(|c| format!("{doc}: @{c} is outside the served vocabulary")),
+            );
+            problems.extend(
+                overlay_capture_findings(caps).into_iter().map(|f| format!("{doc}: {f}")),
+            );
+            problems.extend(
+                dropped_step_capture_findings(source).into_iter().map(|f| format!("{doc}: {f}")),
+            );
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// The step-capture detector at the boundary it guards: three captures on a
+/// node are the limit and pass, a fourth is the one that vanishes.
+#[test]
+fn a_fourth_capture_on_one_step_is_reported() {
+    use crate::build::query_extract::dropped_step_capture_findings;
+    assert!(
+        dropped_step_capture_findings("(call (name) @a @b @c)").is_empty(),
+        "three captures on a node are the limit, not over it"
+    );
+    let over = dropped_step_capture_findings("(call (name) @a @b @c @d)");
+    assert_eq!(over.len(), 1, "{over:?}");
+    assert!(over[0].contains("@d"), "the finding names the capture that vanishes: {over:?}");
+}
+
 /// Rule #15: the query document owns a language's syntax. A node kind or a
 /// field name in a Rust table on the `LangPack` is the document's job done
 /// a second time, by a consumer that cannot see the capture — so it drifts
