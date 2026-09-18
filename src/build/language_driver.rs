@@ -986,7 +986,7 @@ fn php_driver() -> PackDriver {
         access_regions: None,
         // composer's vendor packages — the project gitignores them, so the
         // workspace walk can't see the dependency tier without this.
-        dependency_roots: Some(crate::build::composer::composer_dependency_roots),
+        dependency_roots: Some(crate::build::packs::php::composer::composer_dependency_roots),
     }
 }
 
