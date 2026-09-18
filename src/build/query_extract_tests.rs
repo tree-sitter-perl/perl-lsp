@@ -3145,6 +3145,58 @@ class Repo {
 }
 
 #[test]
+fn php_docs_narrow_a_declaration_and_never_contradict_it() {
+    // A docblock exists to say what the syntax could not spell, so it wins a
+    // slot only where the declaration already admits it. `: object` spells no
+    // type at all, so `@return Post` fills it; a documented subclass narrows
+    // its declared base; `: int` + `@return string` is a pair no value
+    // satisfies — the declaration stands and the mismatch is recorded.
+    let src = "\
+<?php
+class Base {}
+class Post extends Base {}
+class Repo {
+    /** @return Post */
+    public function any(): object {}
+
+    /** @return Post */
+    public function narrowed(): Base {}
+
+    /** @return string */
+    public function clash(): int {}
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    assert_eq!(
+        fa.sub_return_type_at_arity("any", None),
+        Some(InferredType::ClassName("Post".into())),
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("narrowed", None),
+        Some(InferredType::ClassName("Post".into())),
+        "a documented subclass narrows the declared base"
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("clash", None),
+        Some(InferredType::Numeric),
+        "the declaration wins a contradiction"
+    );
+    let clash: Vec<_> = fa
+        .pack
+        .doc_disagreements
+        .iter()
+        .map(|d| (d.declared.clone(), d.documented.clone()))
+        .collect();
+    assert_eq!(
+        clash,
+        vec![(InferredType::Numeric, InferredType::String)],
+        "only the contradiction is recorded: {:?}",
+        fa.pack.doc_disagreements
+    );
+}
+
+#[test]
 fn php_self_and_static_calls_dispatch_as_the_enclosing_class() {
     // `self::helper()` / `static::helper()` are current-package dispatch —
     // the receiver canonicalizes to the model's `__PACKAGE__` token, so

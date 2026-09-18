@@ -204,6 +204,9 @@ pub struct SkeletonAnalysis {
     /// extraction). Lowered to type witnesses here; carried onto the FA as the
     /// provenance tier.
     pub flow_edges: Vec<crate::model::file_analysis::FlowEdge>,
+    /// Declarations whose docblock type contradicts the declared one; the
+    /// declaration won, and the pair rides to the `doc-type-mismatch` hint.
+    pub doc_disagreements: Vec<crate::model::file_analysis::DocDisagreement>,
     /// `std::move(x)` sites: (moved var name, move-call span, enclosing scope).
     /// A read of the var after the call and before its next rebind is a
     /// use-after-move bug (`FileAnalysis::use_after_move_reads`).
@@ -1623,6 +1626,7 @@ impl SkeletonAnalysis {
             qualified_spellings: std::mem::take(&mut self.qualified_spellings),
             domain_sites: std::mem::take(&mut self.domain_sites),
             moved_from: std::mem::take(&mut self.moved_from),
+            doc_disagreements: std::mem::take(&mut self.doc_disagreements),
             control_regions: std::mem::take(&mut self.control_regions),
             param_regions: std::mem::take(&mut self.param_regions),
             probe_regions: std::mem::take(&mut self.probe_regions),

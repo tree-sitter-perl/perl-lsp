@@ -3190,13 +3190,20 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if !by_subject.is_empty() {
             let scope_spans: Vec<Span> = out.scopes.iter().map(|s| s.span).collect();
-            let param_syms: Vec<(String, crate::model::file_analysis::ScopeId, Point)> =
+            let param_syms: Vec<(String, crate::model::file_analysis::ScopeId, Point, Point)> =
                 out.symbols
                     .iter()
                     .filter(|s| s.kind == "var")
-                    .map(|s| (s.name.clone(), s.scope, s.start))
+                    .map(|s| (s.name.clone(), s.scope, s.start, s.end))
                     .collect();
             let mut doc_witnesses: Vec<crate::model::witnesses::Witness> = Vec::new();
+            let mut disagreements: Vec<crate::model::file_analysis::DocDisagreement> = Vec::new();
+            // The declared type of a slot, for the hint that reports the pair.
+            let declared_of = |slot: (&str, crate::model::file_analysis::ScopeId)| {
+                annot_text_by_var
+                    .get(&(slot.0.to_string(), slot.1))
+                    .and_then(|d| (pack.annot_type)(d))
+            };
             let mut doc_refs: Vec<SkelRef> = Vec::new();
             let mut doc_methods: Vec<SkelSymbol> = Vec::new();
             for sym in out.symbols.iter_mut() {
@@ -3299,40 +3306,38 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         }
                         DocFact::Return(t) => {
                             use crate::model::witnesses::ReturnExpr;
-                            // A doc row fills an undeclared return, and REFINES
-                            // a bare declared container (`: array` +
-                            // `@return array{Queue, Agent}`) — the same rule
-                            // `doc_admits` applies to params.
-                            let bare_container = matches!(
-                                sym.declared_return,
-                                Some(ReturnExpr::Concrete(
-                                    InferredType::HashRef | InferredType::ArrayRef
-                                ))
-                            );
-                            if sym.declared_return.is_none() || bare_container {
-                                match declared_ret(t, sym.start) {
-                                    Some(ReturnExpr::Concrete(doc)) => {
-                                        if !bare_container
-                                            || matches!(
-                                                doc,
-                                                InferredType::Sequence(_)
-                                                    | InferredType::Parametric(_)
-                                                    | InferredType::HashWithKeys { .. }
-                                            )
-                                        {
-                                            sym.declared_return =
-                                                Some(ReturnExpr::Concrete(doc));
-                                        }
+                            // A doc row fills an undeclared return and NARROWS
+                            // a declared one — the same rule `doc_admits`
+                            // applies to params and properties. It never
+                            // widens, and a contradiction leaves the
+                            // declaration standing and states itself.
+                            let Some(doc) = declared_ret(t, sym.start) else { continue };
+                            match (&sym.declared_return, &doc) {
+                                (None, _) => sym.declared_return = Some(doc),
+                                (
+                                    Some(ReturnExpr::Concrete(declared)),
+                                    ReturnExpr::Concrete(documented),
+                                ) => match doc_verdict(declared, documented, &out.parents) {
+                                    DocVerdict::Narrows => sym.declared_return = Some(doc.clone()),
+                                    DocVerdict::Contradicts => {
+                                        disagreements.push(
+                                            crate::model::file_analysis::DocDisagreement {
+                                                span: Span {
+                                                    start: sym.name_start,
+                                                    end: sym.name_end,
+                                                },
+                                                declared: declared.clone(),
+                                                documented: documented.clone(),
+                                            },
+                                        );
                                     }
-                                    // A receiver-shaped doc row only FILLS;
-                                    // it never displaces a declared container.
-                                    Some(other) => {
-                                        if !bare_container {
-                                            sym.declared_return = Some(other);
-                                        }
-                                    }
-                                    None => {}
-                                }
+                                    DocVerdict::Unknown => {}
+                                },
+                                // A receiver-shaped return on either side is a
+                                // late binding, not a value shape: neither
+                                // narrows the other, and the declaration
+                                // stands.
+                                (Some(_), _) => {}
                             }
                         }
                         DocFact::UsesMethod { name, line, col } => {
@@ -3411,12 +3416,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             // the element, the doc exists to add it.
                             if sym.kind == "field" {
                                 let Some(ty) = annot_ident(t, sym.start) else { continue };
-                                if doc_admits(
-                                    pack,
-                                    &annot_text_by_var,
-                                    (&sym.name, sym.scope),
-                                    &ty,
-                                ) {
+                                let slot = (sym.name.as_str(), sym.scope);
+                                let verdict =
+                                    doc_admits(pack, &annot_text_by_var, slot, &ty, &out.parents);
+                                if verdict == DocVerdict::Contradicts {
+                                    if let Some(declared) = declared_of(slot) {
+                                        disagreements.push(
+                                            crate::model::file_analysis::DocDisagreement {
+                                                span: Span { start: sym.start, end: sym.end },
+                                                declared,
+                                                documented: ty.clone(),
+                                            },
+                                        );
+                                    }
+                                }
+                                if verdict == DocVerdict::Narrows {
                                     let span = scope_spans
                                         .get(sym.scope.0 as usize)
                                         .copied()
@@ -3442,11 +3456,32 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 (p.row, p.column) >= (sym.start.row, sym.start.column)
                                     && (p.row, p.column) <= (sym.end.row, sym.end.column)
                             };
-                            if let Some((n, sc, at)) = param_syms.iter().find(|(n, sc, at)| {
-                                n == name
-                                    && in_def(*at)
-                                    && doc_admits(pack, &annot_text_by_var, (n, *sc), &ty)
-                            }) {
+                            let mine = param_syms
+                                .iter()
+                                .find(|(n, _, at, _)| n == name && in_def(*at));
+                            if let Some((n, sc, at, end)) = mine {
+                                match doc_admits(
+                                    pack,
+                                    &annot_text_by_var,
+                                    (n, *sc),
+                                    &ty,
+                                    &out.parents,
+                                ) {
+                                    DocVerdict::Contradicts => {
+                                        if let Some(declared) = declared_of((n, *sc)) {
+                                            disagreements.push(
+                                                crate::model::file_analysis::DocDisagreement {
+                                                    span: Span { start: *at, end: *end },
+                                                    declared,
+                                                    documented: ty.clone(),
+                                                },
+                                            );
+                                        }
+                                        continue;
+                                    }
+                                    DocVerdict::Unknown => continue,
+                                    DocVerdict::Narrows => {}
+                                }
                                 // Publish the row CLASS-KEYED too
                                 // (`method#p#$name`): an @inheritDoc override
                                 // in another file reaches it through the
@@ -3558,6 +3593,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             out.witnesses.extend(doc_witnesses);
             out.symbols.extend(doc_methods);
             out.refs.extend(doc_refs);
+            out.doc_disagreements.extend(disagreements);
         }
     }
     // @inheritDoc param inheritance every syntax-untyped,
@@ -3790,6 +3826,88 @@ fn ret_expr_ident(
     }
 }
 
+/// What a documented type says about the declared one on the same slot.
+/// A docblock exists to say what the syntax could not spell, so it may only
+/// NARROW — never widen, never contradict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DocVerdict {
+    /// The declaration already admits the documented type: the doc is the
+    /// finer statement and wins the slot.
+    Narrows,
+    /// No value satisfies both. The declaration wins (the tree does not
+    /// drift); the pair is minted so a hint can say the two disagree.
+    Contradicts,
+    /// Neither provable here — a class whose ancestry lives in another file,
+    /// a union this lattice cannot hold. The declaration wins in silence.
+    Unknown,
+}
+
+/// `doc_ty` against `declared`. Every unprovable relation is `Unknown`:
+/// calling one a contradiction would report a declaration for being right.
+pub(crate) fn doc_verdict(
+    declared: &InferredType,
+    doc_ty: &InferredType,
+    parents: &[(std::string::String, std::string::String)],
+) -> DocVerdict {
+    use InferredType::*;
+    if declared == doc_ty {
+        return DocVerdict::Narrows;
+    }
+    match (declared, doc_ty) {
+        // A union this lattice cannot hold admits each of its arms, and the
+        // doc is the only place the arms are written.
+        (Unknown, _) | (_, Unknown) => DocVerdict::Unknown,
+        // A bare container says "a container"; the doc says of what.
+        (
+            HashRef | ArrayRef,
+            Sequence(_) | Parametric(_) | HashWithKeys { .. } | HashRef | ArrayRef,
+        ) => DocVerdict::Narrows,
+        // A class admits its descendants. Local ancestry is what this side
+        // can walk; a chain that leaves the file is Unknown, not a clash.
+        (ClassName(base), ClassName(doc)) => {
+            if local_ancestors(doc, parents).iter().any(|a| a == base) {
+                DocVerdict::Narrows
+            } else {
+                DocVerdict::Unknown
+            }
+        }
+        // Definite disagreements: two settled shapes no value shares.
+        (
+            String | Numeric | Bool,
+            String | Numeric | Bool | HashRef | ArrayRef | Sequence(_) | HashWithKeys { .. }
+            | ClassName(_),
+        )
+        | (
+            HashRef | ArrayRef | Sequence(_) | HashWithKeys { .. },
+            String | Numeric | Bool | ClassName(_),
+        )
+        | (ClassName(_), String | Numeric | Bool | HashRef | ArrayRef) => DocVerdict::Contradicts,
+        // Everything else — an optional, a constraint object, a coderef, a
+        // shape one side refines structurally — is a relation this side
+        // cannot settle. Silence, and the declaration stands.
+        _ => DocVerdict::Unknown,
+    }
+}
+
+/// `class`'s ancestors along the edges THIS FILE declares, transitively.
+/// Bounded by the edge count; a cycle visits each class once.
+fn local_ancestors(
+    class: &str,
+    parents: &[(std::string::String, std::string::String)],
+) -> Vec<std::string::String> {
+    let mut seen: Vec<std::string::String> = Vec::new();
+    let mut queue = vec![class.to_string()];
+    while let Some(c) = queue.pop() {
+        for (child, parent) in parents {
+            if child == &c && !seen.iter().any(|s| s == parent) {
+                seen.push(parent.clone());
+                queue.push(parent.clone());
+            }
+        }
+    }
+    seen
+}
+
 fn doc_admits(
     pack: &LangPack,
     annot_text_by_var: &std::collections::HashMap<
@@ -3798,18 +3916,16 @@ fn doc_admits(
     >,
     slot: (&str, crate::model::file_analysis::ScopeId),
     doc_ty: &InferredType,
-) -> bool {
+    parents: &[(std::string::String, std::string::String)],
+) -> DocVerdict {
     match annot_text_by_var.get(&(slot.0.to_string(), slot.1)) {
-        None => true,
-        Some(declared) => {
-            matches!(
-                doc_ty,
-                InferredType::Sequence(_) | InferredType::Parametric(_)
-            ) && matches!(
-                (pack.annot_type)(declared),
-                Some(InferredType::HashRef | InferredType::ArrayRef)
-            )
-        }
+        None => DocVerdict::Narrows,
+        Some(declared) => match (pack.annot_type)(declared) {
+            // A spelling the pack does not read carries no claim to
+            // contradict — the slot is untyped as far as this side knows.
+            None => DocVerdict::Narrows,
+            Some(declared) => doc_verdict(&declared, doc_ty, parents),
+        },
     }
 }
 

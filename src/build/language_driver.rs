@@ -1567,6 +1567,7 @@ fn remap_spans(
         constructor_names: _,
         flow_edges,
         moved_from,
+        doc_disagreements,
         control_regions,
         param_regions,
         probe_regions,
@@ -1736,6 +1737,9 @@ fn remap_spans(
     }
     for (_, span, _) in moved_from.iter_mut() {
         *span = rspan(*span);
+    }
+    for d in doc_disagreements.iter_mut() {
+        d.span = rspan(d.span);
     }
     for span in control_regions.iter_mut() {
         *span = rspan(*span);

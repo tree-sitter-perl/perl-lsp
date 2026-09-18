@@ -285,17 +285,6 @@ impl FileAnalysis {
         out
     }
 
-    /// The declaration-order template parameter names of `class` — local
-    /// `template_params`, else the class's own cached file. Empty for
-    /// non-template classes and full specs.
-    fn class_template_params(
-        &self,
-        class: &str,
-        module_index: Option<&dyn CrossFileLookup>,
-    ) -> Vec<String> {
-        class_template_params_in(&self.pack.template_params, class, module_index)
-    }
-
     /// A member's VALUE on a receiver when the asker does not know the
     /// member's kind — the sentinel's receiver typing mid-keystroke, member
     /// hover before a ref exists. Dispatch runs the specificity ladder
