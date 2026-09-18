@@ -419,6 +419,7 @@ fn check_pack_overlay(path: &Path, json_mode: bool) {
             // class rail no capture mints — needs the pack's WHOLE capture
             // set, so it is the bundled-documents tripwire's, not this
             // one-file arm's.)
+            findings.extend(crate::build::query_extract::dropped_step_capture_findings(&source));
             findings.extend(crate::build::query_extract::class_rail_capture_findings(
                 &crate::build::query_extract::rail_conventions_for(&pack).class_named_rails,
                 q.capture_names(),
