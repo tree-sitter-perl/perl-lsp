@@ -523,7 +523,6 @@ impl Backend {
                 &ctx.module_index,
                 ctx.options,
                 OpenDocScope::PerlFamily,
-                false, // Perl family only: no pack doc derives here
             );
             if pending.is_empty() {
                 return;

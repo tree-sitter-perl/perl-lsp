@@ -790,9 +790,18 @@ fn receiver_class(analysis: &FileAnalysis, r: &crate::model::file_analysis::Ref)
 pub fn pack_symbol_diagnostics(
     analysis: &FileAnalysis,
     idx: Option<&dyn CrossFileLookup>,
-    index_settled: bool,
 ) -> Vec<Diagnostic> {
-    use crate::model::file_analysis::{HandlerOwner, MemberKind, MethodResolution, RailNames, ScopeKind};
+    use crate::model::file_analysis::{
+        HandlerOwner, IndexState, MemberKind, MethodResolution, RailNames, ScopeKind,
+    };
+    // Whether absence is meaningful is the INDEX's answer about THIS
+    // language, never a caller's claim: a store that swept nothing is
+    // warming, and the lanes that report a name missing stay silent until
+    // it says otherwise.
+    let index_settled = idx
+        .map(|i| i.index_state(&analysis.language))
+        .unwrap_or(IndexState::Warming)
+        .is_settled();
     let mut out = Vec::new();
     let pack = &analysis.pack;
     // Every per-class fact is derived ONCE per class, never per ref: a

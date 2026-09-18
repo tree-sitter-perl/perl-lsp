@@ -1678,7 +1678,7 @@ void f() {
 }
 ";
     let fa = cpp_skel(src).into_file_analysis();
-    let off = crate::lsp::symbols::pack_diagnostics(&fa, None, false, crate::lsp::symbols::DiagnosticOptions::default());
+    let off = crate::lsp::symbols::pack_diagnostics(&fa, None, crate::lsp::symbols::DiagnosticOptions::default());
     assert!(
         !off.iter().any(|d| matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(s)) if s == "use-after-move")),
         "off by default: {off:?}",
@@ -1686,7 +1686,6 @@ void f() {
     let on = crate::lsp::symbols::pack_diagnostics(
         &fa,
         None,
-        false,
         crate::lsp::symbols::DiagnosticOptions { use_after_move: true, ..Default::default() },
     );
     assert!(
@@ -3865,7 +3864,7 @@ $b = new Bare('x', 2);
         !fa.symbols().iter().any(|s| s.name == "__construct"),
         "the default constructor is declared by nothing"
     );
-    let diags = crate::lsp::symbols::pack_symbol_diagnostics(&fa, None, true);
+    let diags = crate::lsp::symbols::pack_symbol_diagnostics(&fa, None);
     assert!(
         !diags.iter().any(|d| matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(c)) if c == "arity-mismatch")),
         "the arity lane stays silent for a default constructor: {diags:?}"
