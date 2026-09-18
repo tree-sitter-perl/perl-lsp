@@ -862,16 +862,21 @@ pub trait CrossFileLookup {
     fn inc_roots(&self) -> std::sync::Arc<Vec<std::path::PathBuf>> {
         std::sync::Arc::new(Vec::new())
     }
-    /// Is `path` in this lookup's read-only DEPENDENCY tier? Tier
+    /// This lookup's read-only DEPENDENCY tier, as a SNAPSHOT. Tier
     /// attribution for the masked backward walk: a dependency site is
-    /// visible to references but never rewritten by rename. The Perl hub's
-    /// whole cache is dependency BY CONSTRUCTION (workspace Perl files live
-    /// in the FileStore, so anything here came from `@INC`) — hence the
-    /// default. A pack sub-index holds the workspace's own files too, so it
-    /// overrides with membership in its registered dependency-root set
+    /// visible to references but never rewritten by rename. The tier is
+    /// constant for the length of a walk or a sweep, so a caller takes it
+    /// ONCE at the top and asks it per path — the roots live behind a lock,
+    /// and a 30k-file sweep that re-read it per file took 30k read-locks to
+    /// answer one question.
+    ///
+    /// The Perl hub's whole cache is dependency BY CONSTRUCTION (workspace
+    /// Perl files live in the FileStore, so anything here came from `@INC`)
+    /// — hence the default. A pack sub-index holds the workspace's own
+    /// files too, so it answers with its registered dependency roots
     /// (composer's vendor packages).
-    fn is_dependency_path(&self, _path: &std::path::Path) -> bool {
-        true
+    fn dependency_tier(&self) -> DependencyTier {
+        DependencyTier::Everything
     }
     /// The workspace root, for resolving an origin's relative `use lib`
     /// entries — Perl resolves those against the process CWD, which for a
@@ -1106,6 +1111,25 @@ impl UseMapPins {
     /// A leaf the file explicitly named (a `use` row or its own class).
     fn pinned(&self, leaf: &str) -> bool {
         matches!(self.pins.get(leaf), Some(Some(_)))
+    }
+}
+
+/// Which of a lookup's files are the read-only DEPENDENCY tier, taken once
+/// and asked many times. `Everything` is the hub's construction-time
+/// semantics; `Roots` is a pack sub-index's registered dependency roots,
+/// canonical and prefix-matched.
+#[derive(Debug, Clone)]
+pub enum DependencyTier {
+    Everything,
+    Roots(std::sync::Arc<Vec<std::path::PathBuf>>),
+}
+
+impl DependencyTier {
+    pub fn contains(&self, path: &std::path::Path) -> bool {
+        match self {
+            DependencyTier::Everything => true,
+            DependencyTier::Roots(roots) => roots.iter().any(|r| path.starts_with(r)),
+        }
     }
 }
 
@@ -1345,8 +1369,8 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn resolution_epoch(&self) -> u64 {
         self.inner.resolution_epoch()
     }
-    fn is_dependency_path(&self, path: &std::path::Path) -> bool {
-        self.inner.is_dependency_path(path)
+    fn dependency_tier(&self) -> DependencyTier {
+        self.inner.dependency_tier()
     }
     fn get_cached(&self, module_name: &str) -> Option<std::sync::Arc<CachedModule>> {
         // A search-path origin's winner is PER-ASKER: the same name means
