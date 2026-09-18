@@ -25,17 +25,12 @@ pub fn python_pack() -> LangPack {
         names: NameSpellings::NONE,
         shape_name: |_, raw| raw.to_string(),
         default_name: |_, _, _| None,
-        annot_type: |text| match text.trim() {
-            "str" => Some(InferredType::String),
-            "int" | "float" => Some(InferredType::Numeric),
-            "list" => Some(InferredType::ArrayRef),
-            "dict" => Some(InferredType::HashRef),
-            t if t.chars().next().is_some_and(|c| c.is_uppercase()) => {
-                Some(InferredType::ClassName(t.to_string()))
-            }
-            _ => None,
+        annot_type: python_annot_type,
+        // Python return annotations are concrete spellings; the late-bound
+        // receiver spelling has no equivalent here.
+        declared_return: |t| {
+            python_annot_type(t).map(crate::model::witnesses::ReturnExpr::Concrete)
         },
-        rettype_receiver: |_| false,
         field_registry_edges: false,
         super_receiver: |_| false,
         self_class_tokens: &[],
@@ -95,5 +90,18 @@ pub fn python_pack() -> LangPack {
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
         oolfn: OutOfLineSpec::OFF,
+    }
+}
+
+fn python_annot_type(text: &str) -> Option<InferredType> {
+    match text.trim() {
+        "str" => Some(InferredType::String),
+        "int" | "float" => Some(InferredType::Numeric),
+        "list" => Some(InferredType::ArrayRef),
+        "dict" => Some(InferredType::HashRef),
+        t if t.chars().next().is_some_and(|c| c.is_uppercase()) => {
+            Some(InferredType::ClassName(t.to_string()))
+        }
+        _ => None,
     }
 }

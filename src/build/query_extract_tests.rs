@@ -903,7 +903,7 @@ fn sksym(src: &str, kind: &str, name: &str, occ: usize, package: Option<&str>) -
     super::SkelSymbol {
         declared_with: None,
         declared_return: None,
-        receiver_instance_of: None,
+        return_annotation: None,
         kind: kind.to_string(),
         name: name.to_string(),
         start: ns,
@@ -912,8 +912,6 @@ fn sksym(src: &str, kind: &str, name: &str, occ: usize, package: Option<&str>) -
         name_end: Point { row: ns.row, column: ns.column + name.len() },
         package: package.map(str::to_string),
         scope: crate::model::file_analysis::ScopeId(0),
-        return_type: None,
-        receiver_return: false,
         deref_stack: Vec::new(),
         attributes: Vec::new(),
         arity: None,

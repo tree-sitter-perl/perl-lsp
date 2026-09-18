@@ -106,15 +106,20 @@ pub fn php_pack() -> LangPack {
         // source — PHP's gradual typing seeds the bag, inference covers
         // the untyped legacy tier. `?T` peels to T (nullability is not a
         // navigation fact); unions/intersections defer (None → the flow
-        // edge carries); `self`/`static` receiver substitution is a
-        // documented residual (needs ReturnExpr::Receiver plumbing).
+        // edge carries). The `self`/`static` receiver spellings are a
+        // RETURN shape, answered by `declared_return`.
         annot_type: php_annot_type,
         // `: static` / `: $this` are late-bound to the call's receiver —
         // fluent builders chain through `ReturnExpr::Receiver`. `self`
         // strictly means the defining class; substituting the receiver
-        // over-approximates only for inherited methods (accepted).
-        rettype_receiver: |text| {
-            matches!(text.trim().trim_start_matches('?'), "static" | "$this" | "self")
+        // over-approximates only for inherited methods (accepted). Every
+        // other spelling is whatever the declared-type reader makes of it.
+        declared_return: |text| {
+            use crate::model::witnesses::ReturnExpr;
+            match text.trim().trim_start_matches('?') {
+                "static" | "$this" | "self" => Some(ReturnExpr::Receiver),
+                t => php_annot_type(t).map(ReturnExpr::Concrete),
+            }
         },
         field_registry_edges: true,
         super_receiver: |t| t == "parent",

@@ -58,11 +58,12 @@ pub struct LangPack {
     /// Map a `@type.annot` token's text to a type — the pack predicate
     /// for languages whose ring 3 is partly in the tree (`x: int`).
     pub annot_type: fn(text: &str) -> Option<InferredType>,
-    /// Does a `@rettype` spelling name the RECEIVER rather than a concrete
-    /// type (PHP `static`/`$this`/`self`)? The writeback then publishes
-    /// `ReturnExpr::Receiver` so fluent builders chain — asked of the pack,
-    /// never a name branch in the engine (rule #10).
-    pub rettype_receiver: fn(text: &str) -> bool,
+    /// A `@rettype` spelling as ONE deferred return shape: a concrete type,
+    /// or the RECEIVER placeholder for the late-bound spellings (php
+    /// `static`/`$this`/`self`) that make fluent builders chain. Text in,
+    /// structure out — the engine never branches on the spelling itself
+    /// (rule #10), and the writeback publishes what comes back.
+    pub declared_return: fn(text: &str) -> Option<crate::model::witnesses::ReturnExpr>,
     /// Field types answer through the registry: each data-member decl mints
     /// `PackageSymbol{class, field} → Edge(Variable)` so a property-access
     /// hop (`$this->query->where(...)`) dispatches the field and chains.
@@ -355,7 +356,7 @@ impl LangPack {
             shape_name: _,
             default_name: _,
             annot_type: _,
-            rettype_receiver: _,
+            declared_return: _,
             field_registry_edges: _,
             super_receiver: _,
             self_class_tokens,

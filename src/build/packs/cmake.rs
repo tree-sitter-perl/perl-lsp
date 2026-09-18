@@ -26,7 +26,7 @@ pub fn cmake_pack() -> LangPack {
         shape_name: |_, raw| raw.to_string(),
         default_name: |_, _, _| None,
         annot_type: |_| None,
-        rettype_receiver: |_| false,
+        declared_return: |_| None,
         field_registry_edges: false,
         super_receiver: |_| false,
         self_class_tokens: &[],

@@ -908,6 +908,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let annot_ident = |text: &str, at: Point| -> Option<InferredType> {
         (pack.annot_type)(text).map(|t| ident_type(t, at))
     };
+    // A declared return, use-map-resolved like any other written type: the
+    // pack turns the spelling into a shape, the file's imports decide what
+    // its class names mean.
+    let declared_ret = |text: &str, at: Point| -> Option<crate::model::witnesses::ReturnExpr> {
+        (pack.declared_return)(text).map(|re| ret_expr_ident(re, &|t| ident_type(t, at), &|c| ident(c, at)))
+    };
     let decl_ident = |leaf: &str, at: Point| -> String {
         match (pack.names.use_map_sep(), namespace_at(at)) {
             (Some(sep), Some(ns)) if !ns.is_empty() => format!("{ns}{sep}{leaf}"),
@@ -1355,7 +1361,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 }
                 out.symbols.push(SkelSymbol {
                     declared_with: None,
-                    declared_return: None,
+                    return_annotation: None,
                     name,
                     kind: "handler".to_string(),
                     start: e.start,
@@ -1364,9 +1370,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     name_end: e.end,
                     package: None,
                     scope: cur_scope,
-                    return_type: None,
-                    receiver_instance_of: None,
-                    receiver_return: false,
+                    declared_return: None,
                     deref_stack: Vec::new(),
                     attributes,
                     arity: None,
@@ -1558,21 +1562,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     name_end,
                     package: pkg,
                     scope: def_scope,
-                    return_type: rettype_by_match
+                    declared_return: rettype_by_match
                         .get(&e.match_id)
-                        .and_then(|t| annot_ident(t, e.start)),
+                        .and_then(|t| declared_ret(t, e.start)),
                     // The annotation AS WRITTEN, through the pack's own
                     // spelling — the label a signature shows and the
                     // "already typed" gate both read this fact rather than
                     // re-scanning the declaration's source line.
-                    declared_return: rettype_by_match
+                    return_annotation: rettype_by_match
                         .get(&e.match_id)
                         .filter(|_| !pack.spellings.return_annotation_template.is_empty())
                         .map(|t| pack.spellings.return_annotation_template.replace("{}", t)),
-                    receiver_instance_of: None,
-                    receiver_return: rettype_by_match
-                        .get(&e.match_id)
-                        .is_some_and(|t| (pack.rettype_receiver)(t)),
                     deref_stack: nested_stacks.get(&e.match_id).cloned().unwrap_or_default(),
                     attributes: {
                         let mut a =
@@ -2604,8 +2604,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     let (gen_i, gen_j) =
                         (out.symbols[i].kind == "var", out.symbols[j].kind == "var");
                     let upgrade_ret = out.symbols[i].kind == out.symbols[j].kind
-                        && out.symbols[i].return_type.is_some()
-                        && out.symbols[j].return_type.is_none();
+                        && out.symbols[i].declared_return.is_some()
+                        && out.symbols[j].declared_return.is_none();
                     if (gen_j && !gen_i) || upgrade_ret {
                         keep[j] = false;
                         best.insert(key, i);
@@ -2681,7 +2681,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     if let Some((name, span)) = args.get(name_arg) {
                         out.symbols.push(SkelSymbol {
                             declared_with: None,
-                            declared_return: None,
+                            return_annotation: None,
                             kind: kind.to_string(),
                             name: name.clone(),
                             start: cmd_span.start,
@@ -2690,9 +2690,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             name_end: span.end,
                             package: None,
                             scope: *scope,
-                            return_type: None,
-                            receiver_return: false,
-            receiver_instance_of: None,
+                            declared_return: None,
                             deref_stack: Vec::new(),
                             attributes: Vec::new(),
                             arity: None,
@@ -3232,7 +3230,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             let at_end = Point { row: at.row, column: col + name.len() };
                             doc_methods.push(SkelSymbol {
                                 declared_with: None,
-                                declared_return: None,
+                                return_annotation: None,
                                 kind: "method".to_string(),
                                 name: name.clone(),
                                 start: at,
@@ -3241,13 +3239,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 name_end: at_end,
                                 package: Some(sym.name.clone()),
                                 scope: sym.scope,
-                                return_type: ret
+                                declared_return: ret
                                     .as_deref()
-                                    .and_then(|t| annot_ident(t, at)),
-                                receiver_return: ret
-                                    .as_deref()
-                                    .is_some_and(|t| (pack.rettype_receiver)(t)),
-                                receiver_instance_of: None,
+                                    .and_then(|t| declared_ret(t, at)),
                                 deref_stack: Vec::new(),
                                 // documentation, not a declaration: no body, no annotation to add
                                 attributes: vec!["documented".to_string()],
@@ -3281,40 +3275,55 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         }
                         DocFact::Deprecated(t) => mark_deprecated(sym, t.clone()),
                         DocFact::ReturnRecvInstance { base } => {
-                            if sym.return_type.is_none()
-                                && !sym.receiver_return
-                                && sym.receiver_instance_of.is_none()
-                            {
-                                sym.receiver_instance_of = Some(ident(base, sym.start));
+                            // `@return Base<static>`: an instance of `base`
+                            // parametrized by the receiver — `Book::query()`
+                            // carries `Builder<Book>`, and a later
+                            // `@return TModel` hop projects `Book` out via
+                            // the same `ParamOf` axis cpp instantiations use.
+                            if sym.declared_return.is_none() {
+                                use crate::model::witnesses::{ParametricOp, ReturnExpr};
+                                sym.declared_return =
+                                    Some(ReturnExpr::Operator(ParametricOp::InstanceOf {
+                                        base: ident(base, sym.start),
+                                        args: vec![ReturnExpr::Receiver],
+                                    }));
                             }
                         }
                         DocFact::Return(t) => {
+                            use crate::model::witnesses::ReturnExpr;
                             // A doc row fills an undeclared return, and REFINES
                             // a bare declared container (`: array` +
                             // `@return array{Queue, Agent}`) — the same rule
                             // `doc_admits` applies to params.
                             let bare_container = matches!(
-                                sym.return_type,
-                                Some(InferredType::HashRef | InferredType::ArrayRef)
+                                sym.declared_return,
+                                Some(ReturnExpr::Concrete(
+                                    InferredType::HashRef | InferredType::ArrayRef
+                                ))
                             );
-                            if (sym.return_type.is_none() || bare_container)
-                                && !sym.receiver_return
-                            {
-                                if (pack.rettype_receiver)(t) {
-                                    if sym.return_type.is_none() {
-                                        sym.receiver_return = true;
+                            if sym.declared_return.is_none() || bare_container {
+                                match declared_ret(t, sym.start) {
+                                    Some(ReturnExpr::Concrete(doc)) => {
+                                        if !bare_container
+                                            || matches!(
+                                                doc,
+                                                InferredType::Sequence(_)
+                                                    | InferredType::Parametric(_)
+                                                    | InferredType::HashWithKeys { .. }
+                                            )
+                                        {
+                                            sym.declared_return =
+                                                Some(ReturnExpr::Concrete(doc));
+                                        }
                                     }
-                                } else if let Some(doc) = annot_ident(t, sym.start) {
-                                    if !bare_container
-                                        || matches!(
-                                            doc,
-                                            InferredType::Sequence(_)
-                                                | InferredType::Parametric(_)
-                                                | InferredType::HashWithKeys { .. }
-                                        )
-                                    {
-                                        sym.return_type = Some(doc);
+                                    // A receiver-shaped doc row only FILLS;
+                                    // it never displaces a declared container.
+                                    Some(other) => {
+                                        if !bare_container {
+                                            sym.declared_return = Some(other);
+                                        }
                                     }
+                                    None => {}
                                 }
                             }
                         }
@@ -3738,6 +3747,41 @@ fn slot_key(list_text: &str, slot_offset: usize, arrow: &str) -> Option<String> 
 /// is a `Sequence` refining a bare declared container (`array`/`iterable` —
 /// the spelling that cannot carry an element). The doc witness lands AFTER
 /// the declared one, so latest-wins reduction serves the refinement.
+/// Resolve every class name a declared return mentions through the file's
+/// use map. The shape is the pack's; what its names MEAN is the file's, and
+/// only this side knows the imports — so the walk is here, exhaustive, and
+/// no consumer re-reads the spelling.
+fn ret_expr_ident(
+    re: crate::model::witnesses::ReturnExpr,
+    ty: &dyn Fn(InferredType) -> InferredType,
+    class: &dyn Fn(&str) -> std::string::String,
+) -> crate::model::witnesses::ReturnExpr {
+    use crate::model::witnesses::{ParametricOp, ReturnExpr as RE};
+    let sub = |e: Box<RE>| Box::new(ret_expr_ident(*e, ty, class));
+    match re {
+        RE::Concrete(t) => RE::Concrete(ty(t)),
+        RE::ReceiverOr(t) => RE::ReceiverOr(ty(t)),
+        RE::Receiver => RE::Receiver,
+        RE::Arg(n) => RE::Arg(n),
+        RE::UnionOnArgs { branches } => RE::UnionOnArgs {
+            branches: branches
+                .into_iter()
+                .map(|(g, e)| (g, ret_expr_ident(e, ty, class)))
+                .collect(),
+        },
+        RE::Operator(op) => RE::Operator(match op {
+            ParametricOp::RowOf(e) => ParametricOp::RowOf(sub(e)),
+            ParametricOp::ParamOf { index, of } => {
+                ParametricOp::ParamOf { index, of: sub(of) }
+            }
+            ParametricOp::InstanceOf { base, args } => ParametricOp::InstanceOf {
+                base: class(&base),
+                args: args.into_iter().map(|e| ret_expr_ident(e, ty, class)).collect(),
+            },
+        }),
+    }
+}
+
 fn doc_admits(
     pack: &LangPack,
     annot_text_by_var: &std::collections::HashMap<
