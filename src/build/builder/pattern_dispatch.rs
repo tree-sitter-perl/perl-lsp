@@ -1076,6 +1076,7 @@ impl<'a> Builder<'a> {
                             opaque_return,
                             is_constant: false,
                             lexical: false,
+                            declared_return: None,
                         },
                         presentation: crate::model::file_analysis::Presentation {
                             hide_in_outline,
