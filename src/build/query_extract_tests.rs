@@ -1697,7 +1697,7 @@ void f() {
 #[test]
 fn cpp_dynamic_cast_guard_narrows() {
     // `if (dynamic_cast<Derived*>(b))` refines b to Derived inside the block —
-    // the cpp analog of python isinstance, via the now-wired narrow_guard.
+    // the cpp analog of python's `isinstance`, on the same guard patterns.
     let src = "\
 void f(Base* b) {
     if (dynamic_cast<Derived*>(b)) {

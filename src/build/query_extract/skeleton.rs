@@ -192,8 +192,10 @@ pub struct SkeletonAnalysis {
     /// Imported names a doc comment mentions (`@var Foo`, `@throws Foo`,
     /// `@see Foo`): a use the tree never shows.
     pub doc_mentions: Vec<String>,
-    /// The pack's `function_scoped_vars` fact (php) — drives the var
-    /// unification pass in `into_file_analysis`.
+    /// Does a bare assignment declare for the whole FUNCTION rather than
+    /// the block it sits in (php)? The document says so by capturing
+    /// `@def.var.fn`; it drives the var unification pass in
+    /// `into_file_analysis`.
     pub function_scoped_vars: bool,
     /// The pack's constructor-method names, riding to `PackFacts`.
     /// The language's name spellings (`LangPack::names`), baked onto

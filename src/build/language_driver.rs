@@ -46,8 +46,8 @@ pub struct DriverCaps {
     /// The signatureHelp verb is served (the cursor-context handler).
     pub signature_help: bool,
     /// Pack-family signature help: the call site from the document's own
-    /// tree (`cursor_sentinel::call_at` on the pack's `call_shapes`), the
-    /// signature from the defining file's text. Disjoint from the hub's
+    /// tree (`cursor_sentinel::call_at`, on the argument-list patterns the
+    /// document declares), the signature from the defining file's text. Disjoint from the hub's
     /// `signature_help` (Perl's cursor-context path).
     pub pack_signature_help: bool,
     /// The selectionRange verb is served (the tree-shape handler).
