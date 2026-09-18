@@ -227,8 +227,11 @@ pub struct LangPack {
     /// (rule #15) — read through `builtin_types_for`.
     pub bundled_builtin_types: &'static [&'static str],
     /// Members every enum carries by language rule (php: `->value`,
-    /// `->name`, `::cases()`, `::from()`, `::tryFrom()`).
-    pub enum_members: &'static [&'static str],
+    /// `->name`, `::cases()`, `::from()`, `::tryFrom()`). PRODUCER-only
+    /// data: the extractor mints each as a SYNTHESIZED member at every enum
+    /// declaration, and every consumer resolves it like any other member —
+    /// nothing downstream reads this list, so no consumer matches the names.
+    pub enum_members: &'static [EnumMember],
     /// The node kind of ONE argument inside a call's argument list (php
     /// `argument`); empty = every named child of the list is an argument.
     pub arg_kind: &'static str,
@@ -400,7 +403,7 @@ impl LangPack {
         list(&mut out, "implicit_variables", implicit_variables);
         list(&mut out, "throwaway_names", throwaway_names);
         list(&mut out, "catch_all_methods", catch_all_methods);
-        list(&mut out, "enum_members", enum_members);
+        out.extend(enum_members.iter().map(|m| ("enum_members", m.name)));
         list(&mut out, "trigger_chars", trigger_chars);
         list(&mut out, "receiver_names", receiver_names);
         list(&mut out, "simple_var_kinds", simple_var_kinds);
@@ -549,6 +552,17 @@ pub(super) fn walk_qualifier_chain<'a>(
         node = node.child_by_field_name("name")?;
     }
     None
+}
+
+/// One member the LANGUAGE gives every enum of a language. Read at
+/// extraction and nowhere else — the mint turns it into a real member.
+#[derive(Debug, Clone, Copy)]
+pub struct EnumMember {
+    pub name: &'static str,
+    /// A callable (php `::cases()`), as against a value read (`->value`).
+    /// Decides which member kind the synthesis mints, so a call and a read
+    /// of the same name can never answer for each other.
+    pub callable: bool,
 }
 
 /// A call-expression shape signature help climbs to from the cursor

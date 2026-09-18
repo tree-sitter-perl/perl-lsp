@@ -1541,7 +1541,6 @@ fn remap_spans(
         implicit_variables: _,
         throwaway_names: _,
         catch_all_methods: _,
-        enum_members: _,
         member_writes,
         import_rows,
         spellings: _,

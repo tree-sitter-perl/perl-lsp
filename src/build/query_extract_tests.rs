@@ -2976,6 +2976,42 @@ enum Suit {
 }
 
 #[test]
+fn php_enum_carries_the_members_the_language_gives_it() {
+    // `->value` / `::cases()` have no declaration token, so the extractor
+    // mints them at the enum's name as real members — SYNTHESIZED. Every
+    // consumer resolves them through the symbol table; none matches names.
+    let src = "\
+<?php
+enum Suit {
+    case Hearts;
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{MemberKind, SymbolFlags, SymKind};
+    let member = |n: &str| {
+        fa.symbols()
+            .iter()
+            .find(|s| s.name == n && s.package.as_deref() == Some("Suit"))
+            .unwrap_or_else(|| panic!("Suit::{n}: {:?}", fa.symbols().iter().map(|s| &s.name).collect::<Vec<_>>()))
+    };
+    assert_eq!(member("value").kind, SymKind::Field);
+    assert_eq!(member("cases").kind, SymKind::Method);
+    for n in ["value", "name", "cases", "from", "tryFrom"] {
+        assert!(
+            member(n).flags.contains(SymbolFlags::SYNTHESIZED),
+            "Suit::{n} is not user-written"
+        );
+        // minted at the enum's own name token — the one honest site
+        assert_eq!(member(n).span.start.row, 1, "Suit::{n}");
+    }
+    // the member lanes answer for them by KIND, so a read and a call of the
+    // same name can never stand in for each other
+    assert!(fa.resolve_member("Suit", "value", MemberKind::Value, None).is_some());
+    assert!(fa.resolve_member("Suit", "cases", MemberKind::Callable, None).is_some());
+    assert!(fa.resolve_member("Suit", "nope", MemberKind::Value, None).is_none());
+}
+
+#[test]
 fn php_static_return_substitutes_the_receiver_fluently() {
     // `: static` publishes ReturnExpr::Receiver — the member-chain arm
     // threads the real receiver, and the MCB path's default receiver

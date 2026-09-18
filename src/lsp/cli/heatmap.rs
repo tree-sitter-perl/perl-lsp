@@ -201,7 +201,11 @@ fn heatmap_symbol_row(
         // container or a factory instantiates it. Over-approximates
         // reachability on the sound side, like every guard here.
         Some("class-referenced")
-    } else if !native {
+    } else if !native || sym.flags.contains(file_analysis::SymbolFlags::SYNTHESIZED) {
+        // Not user-written: a plugin minted it (Moo accessors, routes, DBIC
+        // rels) or the LANGUAGE gives it (an enum's `->value`). Either way
+        // the caller is machinery the static graph does not model, and no
+        // source edit could reference it into existence.
         Some("framework-synthesized")
     } else if matches!(sym.kind, SymKind::Sub | SymKind::Method)
         && framework_entry_claims(analysis, sym, routing_idx)

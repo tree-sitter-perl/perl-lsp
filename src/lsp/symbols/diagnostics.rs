@@ -815,7 +815,6 @@ pub fn pack_symbol_diagnostics(
     struct OwnerFacts {
         owner: Option<std::sync::Arc<FileAnalysis>>,
         is_interface: bool,
-        is_enum: bool,
         /// A trait's `$this` is whatever class composes it: every member
         /// it does not declare may live there.
         is_trait: bool,
@@ -908,17 +907,12 @@ pub fn pack_symbol_diagnostics(
                 // — so the interface stays silent on undefined members
                 // (resolved ones still check arity).
                 is_interface: flavors.contains(SymbolFlags::INTERFACE),
-                is_enum: flavors.contains(SymbolFlags::ENUM),
                 is_trait: flavors.contains(SymbolFlags::TRAIT),
                 owner: owner_arc,
             })
         });
         let Some(facts) = facts.as_ref() else { continue };
         let owner: &FileAnalysis = facts.owner.as_deref().unwrap_or(analysis);
-        // an enum's language-given members
-        if facts.is_enum && pack.enum_members.iter().any(|m| m == name) {
-            continue;
-        }
         match owner.resolve_member(&class, name, want, idx) {
             None if facts.is_interface || facts.is_trait => {}
             // a class with no declared constructor has the default one

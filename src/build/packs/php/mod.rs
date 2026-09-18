@@ -4,7 +4,7 @@ mod doc;
 
 use doc::{php_annot_type, php_doc_types};
 
-use crate::build::query_extract::{CallShape, LangPack, OutOfLineSpec, PeelSpec};
+use crate::build::query_extract::{CallShape, EnumMember, LangPack, OutOfLineSpec, PeelSpec};
 use crate::model::file_analysis::{InferredType, NameSpellings, PackSpellings};
 
 /// php's write and display spellings. `type_display` is what a human
@@ -188,7 +188,13 @@ pub fn php_pack() -> LangPack {
         pair_arrow: "=>",
         dynamic_arg_markers: &["func_get_args", "func_num_args", "func_get_arg"],
         dynamic_var_markers: &["extract", "get_defined_vars", "eval", "parse_str", "compact"],
-        enum_members: &["value", "name", "cases", "from", "tryFrom"],
+        enum_members: &[
+            EnumMember { name: "value", callable: false },
+            EnumMember { name: "name", callable: false },
+            EnumMember { name: "cases", callable: true },
+            EnumMember { name: "from", callable: true },
+            EnumMember { name: "tryFrom", callable: true },
+        ],
         trigger_chars: &["$", ">", ":"],
         receiver_names: &["$this"],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },

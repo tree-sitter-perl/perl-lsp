@@ -1455,10 +1455,10 @@ fn language_spellings_have_one_home() {
         ("build/packs/php/doc.rs", 2, "php's own doc-tag spellings — the pack IS their home"),
         ("build/packs/php/mod.rs", 4, "the php pack's own receiver spellings — the `LangPack` IS their home"),
         ("build/plugin/rhai_host.rs", 3, "a manifest signal name in an inline test fixture"),
-        ("build/query_extract/extract.rs", 15, "the generic extractor minting the canonical tokens a pack's captures declare"),
-        ("build/query_extract/skeleton.rs", 14, "skeleton→model conversion: the kind/attribute vocabulary becomes flags here"),
+        ("build/query_extract/extract.rs", 17, "the generic extractor minting the canonical tokens a pack's captures declare"),
+        ("build/query_extract/skeleton.rs", 15, "skeleton→model conversion: the kind/attribute vocabulary becomes flags here"),
         ("model/conventions.rs", 3, "Perl's own attribute spellings (`field_attribute_flag`) — Perl's home"),
-        ("model/file_analysis/core_types.rs", 22, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`) — the one table every language maps its spellings onto"),
+        ("model/file_analysis/core_types.rs", 23, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`) — the one table every language maps its spellings onto"),
         ("model/file_analysis/completion.rs", 1, "a `DeclKind` rendered as completion detail text, not an attribute read"),
         ("model/file_analysis/outline.rs", 2, "outline detail text for a union container and a param decl kind"),
         ("model/witnesses/registry.rs", 1, "the `param` owner-keyed fallback key — a witness attachment name"),
@@ -1592,7 +1592,7 @@ fn pack_fields_name_no_grammar_shapes() {
         ("php", "call_shapes", 14, "B1 — the compiled query's `@arity.args` captures"),
         ("php", "callable_placeholder_kind", 1, "B1 — `@arity.placeholder`"),
         ("php", "class_token_kinds", 2, "B1 — `@receiver.class` on the scoped-call patterns"),
-        ("php", "enum_members", 2, "B3 — synthesised on every `@def.enum`"),
+        ("php", "enum_members", 2, "kept: producer-only — the extractor mints each as a SYNTHESIZED member at every enum, and no consumer reads the list"),
         ("php", "member_kinds", 6, "B1 — the `@member.recv` patterns' root kinds"),
         ("php", "named_arg_field", 1, "B1 — `@arity.arg.named`"),
         ("php", "pair_arrow", 1, "B1 — `\"=>\" @pair.arrow` on the list-literal pattern"),
@@ -1672,7 +1672,7 @@ fn pack_string_tables_are_ratcheted() {
         ("php", "doc_uses_method_tags", 1, "kept: one framework's docblock tag, data handed to the engine's own reader — the entry-document posture"),
         ("php", "dynamic_arg_markers", 3, "B1 — `@call.dynamic_args`"),
         ("php", "dynamic_var_markers", 5, "B1 — `@call.dynamic_vars`"),
-        ("php", "enum_members", 3, "B3 — synthesised on every `@def.enum`, producer-only data"),
+        ("php", "enum_members", 3, "kept: producer-only — the extractor mints each as a SYNTHESIZED member at every enum, and no consumer reads the list"),
         ("php", "implicit_variables", 13, "B1 — `@ref.var.implicit` mints the binding"),
         ("php", "narrow_assertions", 1, "B2 — `(#eq? @narrow.assert \"assert\")`"),
         ("php", "receiver_names", 1, "B1 — `@param.receiver` / `@receiver.this`"),
@@ -1764,7 +1764,7 @@ fn pack_facts_fields_are_ratcheted() {
             skipped = false;
         }
     }
-    const RATCHET: usize = 27;
+    const RATCHET: usize = 26;
     assert!(
         fields <= RATCHET,
         "PackFacts grew to {fields} fields (ratchet {RATCHET}). A per-language constant goes on \

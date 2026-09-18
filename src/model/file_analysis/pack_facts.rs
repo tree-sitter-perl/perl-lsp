@@ -32,9 +32,6 @@ pub struct PackFacts {
     /// `__call`/`__get`) — the undefined-member lanes stay silent on it.
     #[serde(default)]
     pub catch_all_methods: Vec<String>,
-    /// Members every enum carries by language rule.
-    #[serde(default)]
-    pub enum_members: Vec<String>,
     /// Whole import-statement spans, in file order.
     #[serde(default)]
     pub import_rows: Vec<Span>,
@@ -248,7 +245,6 @@ impl PackFacts {
             + vcap(&self.implicit_variables)
             + vcap(&self.throwaway_names)
             + vcap(&self.catch_all_methods)
-            + vcap(&self.enum_members)
             + vcap(&self.import_rows)
             + self.rail_labels.iter().map(|(a, b)| a.capacity() + b.capacity()).sum::<usize>()
             + self.rail_hints.iter().map(|a| a.capacity()).sum::<usize>()

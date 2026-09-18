@@ -949,7 +949,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         out.class_named_rails = conv.class_named_rails.clone();
     }
     out.imports_bind_names = pack.imports_bind_names;
-    out.enum_members = pack.enum_members.iter().map(|s| s.to_string()).collect();
     out.member_writes = std::mem::take(&mut member_writes);
     out.function_scoped_vars = pack.function_scoped_vars;
     out.constructor_names = pack.constructor_names.iter().map(|s| s.to_string()).collect();
@@ -3701,6 +3700,59 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 if sym.kind == "class" && !sym.attributes.iter().any(|a| a == flavor) {
                     sym.attributes.push(flavor.clone());
                 }
+            }
+        }
+    }
+
+    // Every enum carries the members the LANGUAGE gives it (php's
+    // `->value`, `::cases()`). They have no token of their own, so they are
+    // minted here, at the enum's name, as real members — SYNTHESIZED says
+    // no source could reference them into existence. A consumer resolves
+    // them through the symbol table like any other member; none matches
+    // their names.
+    if !pack.enum_members.is_empty() {
+        let enums: Vec<(std::string::String, Point, Point, crate::model::file_analysis::ScopeId)> =
+            out.symbols
+                .iter()
+                .filter(|s| s.kind == "class" && s.attributes.iter().any(|a| a == "enum"))
+                .map(|s| {
+                    // The enum's BODY scope is where its declared members
+                    // live, so the synthesized ones live there too.
+                    let body = out
+                        .scopes
+                        .iter()
+                        .find(|sc| {
+                            sc.package.as_deref() == Some(s.name.as_str())
+                                && (sc.span.start.row, sc.span.start.column)
+                                    >= (s.start.row, s.start.column)
+                        })
+                        .map(|sc| sc.id)
+                        .unwrap_or(s.scope);
+                    (s.name.clone(), s.name_start, s.name_end, body)
+                })
+                .collect();
+        for (name, name_start, name_end, scope) in enums {
+            for m in pack.enum_members {
+                out.symbols.push(SkelSymbol {
+                    declared_with: None,
+                    declared_return: None,
+                    return_annotation: None,
+                    kind: if m.callable { "method" } else { "field" }.to_string(),
+                    name: m.name.to_string(),
+                    start: name_start,
+                    end: name_end,
+                    name_start,
+                    name_end,
+                    package: Some(name.clone()),
+                    scope,
+                    deref_stack: Vec::new(),
+                    attributes: vec!["synthesized".to_string()],
+                    arity: None,
+                    params: Vec::new(),
+                    qualifier_owned: false,
+                    doc: None,
+                    deprecation: None,
+                });
             }
         }
     }
