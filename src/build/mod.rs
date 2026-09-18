@@ -19,6 +19,7 @@ pub mod cpp_toolchain;
 pub mod cursor_sentinel;
 // multi-language serving seam (LanguageDriver keystone)
 pub mod language_driver;
+pub mod packs;
 pub mod plugin;
 pub mod pod;
 pub mod query_cache;
