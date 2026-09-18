@@ -135,7 +135,8 @@ Every lane names the case it cannot see and stays silent there:
   callable) is data until dispatch proves it a callable: a reference and
   rename target when it resolves, never a finding when it does not
   (`RefKind::MethodCall::named_by_string`).
-- **A spread argument** (`f(...$args)`, the pack's `spread_arg_kind`)
+- **A spread argument** (`f(...$args)`, which the document captures as
+  `@arity.arg.spread`)
   makes the call's count unknowable; the arity lane stands down.
 - **A read inside an existence probe** (`isset($tax->helps)`,
   `empty($this->x)`) is the question of whether the member exists, not a
@@ -174,15 +175,17 @@ Every lane names the case it cannot see and stays silent there:
   the workspace index has landed and never before — an unindexed
   workspace would flag every type.
 - **An unused import** (`unused-import`, a hint tagged unnecessary) is a
-  row whose bound name — the leaf, or the alias — the file never spells
-  as a class token, a function call, a namespace prefix, or a docblock
-  word (`PackFacts::doc_mentions`, gathered at extraction). Only packs
-  whose imports bind names (`LangPack::imports_bind_names`) run it: an
-  `#include` splices text. Constant imports (no lowercase letter) are
+  row whose bound name the file never spells as a class token, a function
+  call, a namespace prefix, or a docblock word (`PackFacts::doc_mentions`,
+  gathered at extraction). The row states the name it binds — the leaf, or
+  the alias — from the document's `@import.binds` capture, so a row that
+  binds nothing (an `#include` splicing text, a `import a.b` whose binding
+  is the head package) cannot be unused and is silent. Constant imports (no lowercase letter) are
   silent — the walker records no spelling for them. The quick-fix deletes
   the row when it binds only that name.
-- **The throwaway name** (`$_` in `foreach ($a as $k => $_)`, the pack's
-  `throwaway_names`) is written to be discarded and is never unused.
+- **The throwaway name** (`$_` in `foreach ($a as $k => $_)`, which the
+  document flags `@def.var.throwaway` → `SymbolFlags::THROWAWAY`) is
+  written to be discarded and is never unused.
 - **An unused variable** (`unused-variable`, a hint tagged unnecessary)
   is a local the callable writes and never reads — a read counts for its
   callable, every enclosing one (a closure's `use ($x)` reads the outer
@@ -200,7 +203,7 @@ Every lane names the case it cannot see and stays silent there:
   provide every name through a non-contract declaration attributed to
   its own MRO (`members_are_package_bound`: a sibling class in the same
   file provides nothing — Perl's typeglob rule does not transfer). For a
-  name-keyed pack (`imports_bind_names`) the parent is the candidate
+  name-keyed pack (one whose rows bind names) the parent is the candidate
   carrying the namespace the edge wrote (else the composer's use map /
   own namespace); a same-leaf stranger is not it, and a pin nothing
   visible satisfies is silence, not a guess. Silent for an ancestor we cannot see and for a composer that
@@ -208,7 +211,7 @@ Every lane names the case it cannot see and stays silent there:
   declaration, before any call could be caught. One diagnostic per class
   carries every missing contract's declarator (`data.contracts`, read
   from the declaring file), and "Implement missing methods" inserts the
-  pack's `contract_stub` per contract before the class body's closing
+  language's `contract_stub` spelling per contract before the class body's closing
   brace, the declarator as written (types kept — a return type must stay
   covariant). Limit: a `static` contract's stub loses its `static`.
 - **A missing return type** (`missing-return-type`, a hint on the name)
@@ -228,26 +231,29 @@ Every lane names the case it cannot see and stays silent there:
   `self`; the fold cannot tell them apart). Limit: a bare `return;` or a
   fall-through past the last statement is invisible, so a body that also
   ends without a value is spelled non-nullable. The quick-fix inserts the
-  pack's `return_annotation_template` after the parameter list's closing
+  language's `return_annotation_template` spelling after the parameter list's closing
   parenthesis (quote-aware scan from the name token).
 - **A deprecated declaration** (`deprecated`, a hint tagged deprecated)
-  flags each use: the declaration's `@deprecated [text]` or the pack's
-  deprecation attribute (`LangPack::deprecated_attribute`, php
+  flags each use: the declaration's `@deprecated [text]` or the attribute
+  the document names deprecated (`@sym.attr.deprecated`, php
   `#[Deprecated]`) lands as the `deprecated` symbol attribute with the
   notice in `Presentation::deprecation`; both ride the symbols axis, so a
   dependency's declaration answers through `symbols_present`. Members
   read the resolved owner symbol; functions and classes look up the leaf
   locally, then across the visible candidates.
 - **The global namespace** (an absolute name, a namespace-less file) is
-  silent for the classes php itself provides (`LangPack::builtin_types`:
-  core, SPL, the bundled extensions — names, not stubs) and for any leaf
+  silent for the classes php itself provides (the pack's bundled
+  builtin-type documents, reached by language id through
+  `LanguageRegistry::builtin_types`: core, SPL, the bundled extensions —
+  names, not stubs) and for any leaf
   the workspace declares globally; a leaf the workspace declares only
   under a namespace is a real type missing its import, and reports with
   its candidates.
 - **An undefined type is a quick-fix**: the diagnostic carries every
   namespace that declares the leaf (`data.candidates`, the same set the
   existence test reads), and `codeAction` offers one import per
-  candidate in the pack's own statement (`LangPack::import_template`),
+  candidate in the language's own import statement (its
+  `import_template` spelling),
   inserted after the last import row above the site, else after the
   namespace declaration, else after the first line.
 

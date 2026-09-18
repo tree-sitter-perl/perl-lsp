@@ -305,7 +305,7 @@ impl<'a> CandidateSet<'a> {
     /// and the remaining edits stand.
     pub fn rename_edits(&self, new_name: &str) -> Result<Vec<(RefLocation, String)>, String> {
         // One mask for every language: the backward walk attributes a pack
-        // sub-index's files per path (`is_dependency_path`), so a pack
+        // sub-index's files per path (`dependency_tier`), so a pack
         // workspace file IS WORKSPACE-tier and a declared dependency root
         // (composer's vendor) stays read-only.
         let editable = self

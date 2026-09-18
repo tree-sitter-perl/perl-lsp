@@ -161,11 +161,12 @@ impl FileAnalysis {
         out
     }
 
-    /// An import row binding a name the file never spells. Only for a
-    /// language whose import rows bind names at all — a text-splicing
-    /// include brings in everything and binds nothing.
-    pub fn unused_import_findings(&self) -> Vec<Finding> {
-        if !self.pack.imports_bind_names {
+    /// An import row binding a name the file never spells. The row states
+    /// the name it binds (`@import.binds`); a row that binds nothing — a
+    /// text-splicing include, a `import a.b` whose binding is the head
+    /// package — cannot be unused and is silent.
+    pub fn unused_import_findings(&self, facts: &LaneFacts<'_>) -> Vec<Finding> {
+        if !facts.imports_bind_names {
             return Vec::new();
         }
         let pack = &self.pack;
@@ -173,21 +174,7 @@ impl FileAnalysis {
         let ns_heads = self.namespace_heads();
         let mut out = Vec::new();
         for row in &pack.include_directives {
-            let leaf = name_match_key(&row.raw, self.names());
-            let leaf = leaf.as_str();
-            // the alias token has a row of its own; the import's row reports
-            if split_qualified(&row.raw, self.names()).0.is_none()
-                && pack.use_aliases.iter().any(|(alias, _, _)| alias == leaf)
-            {
-                continue;
-            }
-            // the name the row binds: its alias when it has one
-            let bound = pack
-                .use_aliases
-                .iter()
-                .find(|(_, ns, real)| real == leaf && self.join_name(ns, real) == row.raw)
-                .map(|(alias, _, _)| alias.as_str())
-                .unwrap_or(leaf);
+            let Some(bound) = row.bound.as_deref() else { continue };
             // a constant import (`use const FOO`) has no spelling the walker
             // records — silent
             if bound.is_empty() || row.binds == ImportBinds::Const {
@@ -199,13 +186,21 @@ impl FileAnalysis {
             {
                 continue;
             }
-            // the whole statement's rows, when this import is the only one
-            // on it: what a remove-the-line fix needs
+            // the whole statement's BINDING rows, when this import is the
+            // only one on it: what a remove-the-line fix needs. A row that
+            // binds nothing rides the same statement (python's module row
+            // beside its name rows) and removing the line would take it too.
             let sole_row = pack
                 .import_rows
                 .iter()
                 .find(|r| r.contains(&row.span))
-                .filter(|r| pack.include_directives.iter().filter(|i| r.contains(&i.span)).count() == 1)
+                .filter(|r| {
+                    pack.include_directives
+                        .iter()
+                        .filter(|i| i.bound.is_some() && r.contains(&i.span))
+                        .count()
+                        == 1
+                })
                 .map(|r| (r.start.row, r.end.row));
             out.push(Finding::new(
                 row.span,

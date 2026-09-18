@@ -31,10 +31,6 @@ pub struct PackFacts {
     /// The last row of the file preamble (open tag, `declare` rows).
     #[serde(default)]
     pub preamble_end: Option<usize>,
-    /// Import rows bind names the file spells (php), so a row nothing
-    /// spells is unused; false for text-splicing includes.
-    #[serde(default)]
-    pub imports_bind_names: bool,
     /// Imported names a doc comment mentions.
     #[serde(default)]
     pub doc_mentions: Vec<String>,
@@ -193,7 +189,7 @@ impl PackFacts {
             + self
                 .include_directives
                 .iter()
-                .map(|r| r.raw.capacity())
+                .map(|r| r.raw.capacity() + r.bound.as_ref().map_or(0, String::capacity))
                 .sum::<usize>();
 
         h.cpp_extras += vcap(&self.macro_defs)
@@ -326,6 +322,13 @@ pub struct ImportRow {
     pub raw: String,
     #[serde(default)]
     pub binds: ImportBinds,
+    /// The NAME this row brings into the file's namespace — the alias when
+    /// the row writes one, the leaf otherwise — as the document's
+    /// `@import.binds` capture states it. `None` for a row that binds no
+    /// spellable name (a text-splicing `#include`, a `import a.b` whose
+    /// binding is the head package rather than the token).
+    #[serde(default)]
+    pub bound: Option<String>,
 }
 
 /// What an import row brings into the file's namespace. `Type` is the

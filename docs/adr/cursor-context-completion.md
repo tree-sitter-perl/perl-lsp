@@ -21,8 +21,9 @@ It is the fallback whenever the cursor is not a member access.
 
 ### The name-keyed pack's identifier universe
 
-A pack whose imports name classes rather than paths (`imports_bind_names`)
-has no include closure to gate on; its identifier universe is every class
+A pack whose imports name classes rather than paths (its document mints
+`@import.binds`, `LanguageRegistry::imports_bind_names`) has no include
+closure to gate on; its identifier universe is every class
 the index declares under the typed prefix (`defs_with_prefix`, all
 providers per leaf — each namespace declaring the leaf is a distinct
 offer). What the file can already spell decides the edit: a leaf pinned to
@@ -79,12 +80,13 @@ Two properties make it cheap and exact:
   exact: tree-sitter reparses only the damaged region around the cursor,
   reusing the document tree `document.rs` already holds.
 
-Per-language config comes from `LangPack` — a single struct, not a
-branch. The member-access node kinds (`member_kinds`) and the "don't
-splice into strings/comments" set (`skip_kinds`) are the facts this seam
-reads, alongside the pack's other per-language config for the rest of
-completion. `LanguageDriver::lang_pack(language)` maps a driver id to its
-`LangPack`; `None` means the language gets in-scope completion only.
+Which nodes are a member access, and which are the tokens not to splice
+into, are the query document's own patterns — `@member.recv`'s roots and
+`@skip` — read through the bounded runner above. `LanguageDriver::
+lang_pack(language)` maps a driver id to its `LangPack`, which carries
+what is left: the language's write and display spellings, and its
+text→structure predicates. `None` means the language gets in-scope
+completion only.
 
 ### Receiver → members: tree-free, reusing the bag
 
@@ -105,17 +107,17 @@ symbols, and no `new` is synthesized — member access lists real members.
 Members resolve to a class because the cpp pack's `@context.class` tags
 class-body symbols with the class name (`symbol_in_class` reads `package`).
 
-The operator is a filter on the candidate, not a second walk. A pack's
-`member_kinds` name every member-access form, scoped ones included
-(php's `scoped_call_expression` / `scoped_property_access_expression` /
-`class_constant_access_expression`); the receiver of a scoped access is
-a class token — the pack's `self_class_tokens` (`self` / `static`) name
-the enclosing class the way its receiver names do, a bare
-`class_token_kinds` node names the class it spells. `MemberCompletionCtx::scoped`
+The operator is a filter on the candidate, not a second walk. The
+`@member.recv` patterns name every member-access form, scoped ones
+included (php's `scoped_call_expression` /
+`scoped_property_access_expression` / `class_constant_access_expression`);
+the receiver of a scoped access is a class token — `@receiver.self`
+(`self` / `static`) names the enclosing class the way `@receiver.this`
+does, and a `@receiver.class` node names the class it spells. `MemberCompletionCtx::scoped`
 is "the operator has no instance form", and `member_completion_for_class`
 keeps constants (Enumerator symbols), members carrying the `static`
 attribute (stamped from the skeleton's `@static.target` name spans, read
-as `CompletionCandidate::is_static`) and the pack's `class_literal_member`
+as `CompletionCandidate::is_static`) and the language's `class_literal_member` spelling
 for a scoped access, and everything but the constants for an instance one.
 No consumer asks what the operator was spelled as.
 

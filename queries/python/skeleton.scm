@@ -46,6 +46,18 @@
   name: (dotted_name) @import.name) @import
 (import_from_statement
   module_name: (dotted_name) @import.name) @import
+; What each row BINDS. `import a.b` binds the head package, which no token
+; of the row spells on its own, so that row states no binding and the
+; never-spelled lane stays silent on it. The rows that DO bind a name get
+; one row apiece, spanning the bound token, so a report lands on the name
+; the file never spells rather than on the module it came from.
+(import_from_statement
+  name: (dotted_name (identifier) @import.name @import.binds)) @import
+(import_from_statement
+  name: (aliased_import alias: (identifier) @import.name @import.binds)) @import
+(import_statement
+  name: (aliased_import name: (dotted_name) @import.name
+    alias: (identifier) @import.binds)) @import
 
 ; Imported names are references to the remote def — this single
 ; pattern is what makes cross-file RENAME rewrite the import line too.
@@ -94,10 +106,10 @@
 ; token names the refinement and core scopes it to @scope.
 (if_statement
   condition: (call
-    function: (identifier) @narrow.guard
+    function: (identifier) @_narrow_guard
     arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
   consequence: (block) @scope
-  (#eq? @narrow.guard "isinstance"))
+  (#eq? @_narrow_guard "isinstance"))
 
 ; ---- cursor-time shapes ----
 ; Where a cursor may not splice: a string or a comment is not code.

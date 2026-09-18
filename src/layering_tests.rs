@@ -1804,7 +1804,7 @@ fn pack_facts_fields_are_ratcheted() {
             skipped = false;
         }
     }
-    const RATCHET: usize = 19;
+    const RATCHET: usize = 18;
     assert!(
         fields <= RATCHET,
         "PackFacts grew to {fields} fields (ratchet {RATCHET}). A per-language constant goes on \

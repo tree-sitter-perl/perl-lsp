@@ -137,21 +137,21 @@
 ; post-pass (the ns.inline precedent) so the def patterns stay
 ; modifier-blind; the vocabulary lives in the #any-of?, not in engine code.
 (method_declaration
-  (visibility_modifier) @nonpublic.mark
+  (visibility_modifier) @_nonpublic_mark
   name: (name) @nonpublic.target
-  (#any-of? @nonpublic.mark "private" "protected"))
+  (#any-of? @_nonpublic_mark "private" "protected"))
 (property_declaration
-  (visibility_modifier) @nonpublic.mark
+  (visibility_modifier) @_nonpublic_mark
   (property_element name: (variable_name (name) @nonpublic.target))
-  (#any-of? @nonpublic.mark "private" "protected"))
+  (#any-of? @_nonpublic_mark "private" "protected"))
 (const_declaration
-  (visibility_modifier) @nonpublic.mark
+  (visibility_modifier) @_nonpublic_mark
   (const_element (name) @nonpublic.target)
-  (#any-of? @nonpublic.mark "private" "protected"))
+  (#any-of? @_nonpublic_mark "private" "protected"))
 (property_promotion_parameter
-  visibility: (visibility_modifier) @nonpublic.mark
+  visibility: (visibility_modifier) @_nonpublic_mark
   name: (variable_name (name) @nonpublic.target)
-  (#any-of? @nonpublic.mark "private" "protected"))
+  (#any-of? @_nonpublic_mark "private" "protected"))
 ; `static` members: the same post-pass stamp (`static` attribute) — what a
 ; scoped access (`Foo::`) completes.
 (method_declaration
@@ -315,20 +315,32 @@
 ; What a row BINDS rides its capture suffix: `use function` binds a
 ; callable, `use const` a constant, an unsuffixed row a type. The keyword
 ; is an anonymous token, so the unsuffixed arms exclude it by the clause's
-; own text rather than letting both arms mint the same row.
+; own text rather than letting both arms mint the same row. The leading
+; anchor pins the un-fielded `(name)` to the clause's FIRST child: without
+; it the alias node matches that alternative too and `use G as H` mints a
+; second row for `H`.
+; `@import.binds` is the NAME the row brings into the file — the alias when
+; the clause writes one, the leaf otherwise. The two spellings ride one
+; capture and the later byte wins, so a reader never asks which arm fired.
 (namespace_use_declaration
-  (namespace_use_clause "function" (qualified_name) @import.name.function)) @import
+  (namespace_use_clause "function" (qualified_name (name) @import.binds) @import.name.function
+    alias: (name)? @import.binds)) @import
 (namespace_use_declaration
-  (namespace_use_clause "function" (name) @import.name.function)) @import
+  (namespace_use_clause "function" . (name) @import.name.function @import.binds
+    alias: (name)? @import.binds)) @import
 (namespace_use_declaration
-  (namespace_use_clause "const" (qualified_name) @import.name.const)) @import
+  (namespace_use_clause "const" (qualified_name (name) @import.binds) @import.name.const
+    alias: (name)? @import.binds)) @import
 (namespace_use_declaration
-  (namespace_use_clause "const" (name) @import.name.const)) @import
+  (namespace_use_clause "const" . (name) @import.name.const @import.binds
+    alias: (name)? @import.binds)) @import
 (namespace_use_declaration
-  (namespace_use_clause (qualified_name) @import.name) @_plain_row
+  (namespace_use_clause (qualified_name (name) @import.binds) @import.name
+    alias: (name)? @import.binds) @_plain_row
   (#not-match? @_plain_row "^(function|const)[ \t\r\n]")) @import
 (namespace_use_declaration
-  (namespace_use_clause (name) @import.name) @_plain_row
+  (namespace_use_clause . (name) @import.name @import.binds
+    alias: (name)? @import.binds) @_plain_row
   (#not-match? @_plain_row "^(function|const)[ \t\r\n]")) @import
 ; the imported leaf is a live class reference — cross-file rename
 ; rewrites the use line too.
@@ -381,20 +393,20 @@
   (namespace_name) @use.prefix
   body: (namespace_use_group
     (namespace_use_clause "function"
-      . (name) @use.leaf
-      alias: (name)? @use.alias))) @import.function
+      . (name) @use.leaf @import.binds
+      alias: (name)? @use.alias @import.binds))) @import.function
 (namespace_use_declaration
   (namespace_name) @use.prefix
   body: (namespace_use_group
     (namespace_use_clause "const"
-      . (name) @use.leaf
-      alias: (name)? @use.alias))) @import.const
+      . (name) @use.leaf @import.binds
+      alias: (name)? @use.alias @import.binds))) @import.const
 (namespace_use_declaration
   (namespace_name) @use.prefix
   body: (namespace_use_group
     (namespace_use_clause
-      . (name) @use.leaf
-      alias: (name)? @use.alias) @_plain_group_clause)
+      . (name) @use.leaf @import.binds
+      alias: (name)? @use.alias @import.binds) @_plain_group_clause)
   (#not-match? @_plain_group_clause "^(function|const)[ \t\r\n]")) @import
 
 ; a member on the LEFT of an assignment: php declares a property by
@@ -794,14 +806,14 @@
   condition: (parenthesized_expression
     (binary_expression
       left: (variable_name) @narrow.var
-      "instanceof" @narrow.guard
+      "instanceof" @_narrow_guard
       right: [(name) (qualified_name)] @narrow.type))
   body: (compound_statement) @scope)
 (else_if_clause
   condition: (parenthesized_expression
     (binary_expression
       left: (variable_name) @narrow.var
-      "instanceof" @narrow.guard
+      "instanceof" @_narrow_guard
       right: [(name) (qualified_name)] @narrow.type))
   body: (compound_statement) @scope)
 (if_statement
@@ -809,7 +821,7 @@
     (binary_expression
       left: (binary_expression
         left: (variable_name) @narrow.var
-        "instanceof" @narrow.guard
+        "instanceof" @_narrow_guard
         right: [(name) (qualified_name)] @narrow.type)
       "&&"))
   body: (compound_statement) @scope)
@@ -819,7 +831,7 @@
       "&&"
       right: (binary_expression
         left: (variable_name) @narrow.var
-        "instanceof" @narrow.guard
+        "instanceof" @_narrow_guard
         right: [(name) (qualified_name)] @narrow.type)))
   body: (compound_statement) @scope)
 (if_statement
@@ -828,7 +840,7 @@
       left: (binary_expression
         left: (binary_expression
           left: (variable_name) @narrow.var
-          "instanceof" @narrow.guard
+          "instanceof" @_narrow_guard
           right: [(name) (qualified_name)] @narrow.type)
         "&&")
       "&&"))
@@ -846,12 +858,12 @@
       argument: [
         (binary_expression
           left: (variable_name) @narrow.var
-          "instanceof" @narrow.guard
+          "instanceof" @_narrow_guard
           right: [(name) (qualified_name)] @narrow.type)
         (parenthesized_expression
           (binary_expression
             left: (variable_name) @narrow.var
-            "instanceof" @narrow.guard
+            "instanceof" @_narrow_guard
             right: [(name) (qualified_name)] @narrow.type))]))
   body: [
     (return_statement)
@@ -864,21 +876,21 @@
 ;; teaches a new asserting callee by adding a pattern, not by editing Rust.
 (expression_statement
   (function_call_expression
-    function: (name) @narrow.assert
+    function: (name) @_narrow_assert
     arguments: (arguments
       (argument
         (binary_expression
           left: (variable_name) @narrow.var
-          "instanceof" @narrow.guard
+          "instanceof" @_narrow_guard
           right: [(name) (qualified_name)] @narrow.type))))
-  (#eq? @narrow.assert "assert")) @narrow.after
+  (#eq? @_narrow_assert "assert")) @narrow.after
 ;; Expression-level regions: the refinement holds WITHIN the marked node —
 ;; the right operand of `&&`, the ternary's true arm, a `match` arm's
 ;; return expression.
 (binary_expression
   left: (binary_expression
     left: (variable_name) @narrow.var
-    "instanceof" @narrow.guard
+    "instanceof" @_narrow_guard
     right: [(name) (qualified_name)] @narrow.type)
   "&&"
   right: (_) @narrow.within)
@@ -889,7 +901,7 @@
   left: (binary_expression
     left: (binary_expression
       left: (variable_name) @narrow.var
-      "instanceof" @narrow.guard
+      "instanceof" @_narrow_guard
       right: [(name) (qualified_name)] @narrow.type)
     "&&")
   "&&"
@@ -899,7 +911,7 @@
     left: (binary_expression
       left: (binary_expression
         left: (variable_name) @narrow.var
-        "instanceof" @narrow.guard
+        "instanceof" @_narrow_guard
         right: [(name) (qualified_name)] @narrow.type)
       "&&")
     "&&")
@@ -909,19 +921,19 @@
   condition: [
     (binary_expression
       left: (variable_name) @narrow.var
-      "instanceof" @narrow.guard
+      "instanceof" @_narrow_guard
       right: [(name) (qualified_name)] @narrow.type)
     (parenthesized_expression
       (binary_expression
         left: (variable_name) @narrow.var
-        "instanceof" @narrow.guard
+        "instanceof" @_narrow_guard
         right: [(name) (qualified_name)] @narrow.type))]
   body: (_) @narrow.within)
 (match_conditional_expression
   conditional_expressions: (match_condition_list
     (binary_expression
       left: (variable_name) @narrow.var
-      "instanceof" @narrow.guard
+      "instanceof" @_narrow_guard
       right: [(name) (qualified_name)] @narrow.type))
   return_expression: (_) @narrow.within)
 

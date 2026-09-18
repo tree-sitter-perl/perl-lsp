@@ -65,7 +65,6 @@ pub fn cpp_pack() -> LangPack {
             }
         },
         brace_scoped_members: true,
-        imports_bind_names: false,
         bundled_builtin_types: &[],
         enum_members: &[],
         trigger_chars: &[".", ">", ":"],

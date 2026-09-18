@@ -1697,7 +1697,7 @@ void f() {
 #[test]
 fn cpp_dynamic_cast_guard_narrows() {
     // `if (dynamic_cast<Derived*>(b))` refines b to Derived inside the block —
-    // the cpp analog of python isinstance, via the now-wired narrow_guard.
+    // the cpp analog of python's `isinstance`, on the same guard patterns.
     let src = "\
 void f(Base* b) {
     if (dynamic_cast<Derived*>(b)) {
@@ -3786,6 +3786,7 @@ function f(): string {
     );
 }
 
+#[cfg(feature = "php")]
 #[test]
 fn php_new_sites_are_constructor_references_but_never_rename_targets() {
     // A construction site is two facts on one token: the token names the
@@ -4877,7 +4878,7 @@ listen_on('ev', array(UserController::class, 'index'));
 #[test]
 fn php_visibility_gates_member_completion() {
     // private/protected members complete only from inside their own
-    // class's body: the `@nonpublic.mark` patterns stamp the same
+    // class's body: the `@_nonpublic_mark` patterns stamp the same
     // `non_public` attribute cpp access regions stamp, and the existing
     // requesting_class gate does the rest. Covers methods, properties,
     // consts, and promoted ctor params.

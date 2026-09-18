@@ -488,7 +488,7 @@ Format per entry:
   `if ( is_wp_error( $term ) ) { return $term; }` and reads
   `$term->term_id` after it. `is_wp_error` carries
   `@phpstan-assert-if-true WP_Error $thing`. The narrowing tier handles
-  `instanceof` and the pack's `narrow_assertions` (`assert`), and a
+  `instanceof` and the asserting callees the document names (`assert`), and a
   negated exit for those shapes; it has no "not T" value, so a call guard
   whose assertion lives on the CALLEE's docblock (another file) narrows
   nothing. With a union now known-untypable (`InferredType::Unknown`)

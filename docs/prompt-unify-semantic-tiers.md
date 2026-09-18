@@ -16,9 +16,9 @@ share is the tier that FEEDS the engine:
 
 - **Emission**: Perl emits densely from a stateful walk
   (`builder.rs`); pack emits sparsely from skeleton extraction
-  (`query_extract.rs`) + a post-assembly fuel pass
-  (`language_driver.rs::emit_return_fuel`). Several witness shapes are
-  spelled twice.
+  (`query_extract.rs`) plus the assembly's own reading of the structural
+  return sites (`skeleton.rs::into_file_analysis`). Several witness shapes
+  are spelled twice.
 - **The fold**: `fold_to_fixed_point` (worklist to fixed point) runs for
   Perl only. Pack compensates with query-time chases.
 - **Enrichment**: import-driven cross-file propagation
@@ -80,8 +80,8 @@ strings won't.
   `Variable{name,scope}` with `Edge(TypeName(class))` payloads; typedef
   chains → `TypeName(alias) → Edge(TypeName(target))`; assorted
   `Expr(span)` witnesses.
-- `src/build/language_driver.rs::emit_return_fuel`: per return site
-  `SymbolReturnArm(sid) → Edge(Expr(ret_span))` +
+- `SkeletonAnalysis::into_file_analysis`'s return-site block: per return
+  site `SymbolReturnArm(sid) → Edge(Expr(ret_span))` +
   `Symbol(sid) → Edge(SymbolReturnArm(sid))` — the SAME shape as Perl's
   implicit-return chain, spelled independently (source tags
   `"return_arm"` / `"return_arm_chain"`).
@@ -171,7 +171,7 @@ pub fn emit_call_return_edge(bag: &mut WitnessBag, refidx: usize,
 
 **Migration (mechanical, one commit per side):**
 
-1. `emit_return_fuel`'s return-arm block → `emit_return_arm` (keep the
+1. `into_file_analysis`'s return-site block → `emit_return_arm` (keep the
    `"return_arm"` source tags — they are load-bearing for
    clear-and-emit and tests). The `for_attachment(&WA::Symbol(sid))
    .is_empty()` declared-return guard stays at the CALLER — it is pack
@@ -180,7 +180,7 @@ pub fn emit_call_return_edge(bag: &mut WitnessBag, refidx: usize,
    (Perl's own source tags preserved).
 3. `query_extract.rs`'s typed-decl / alias pushes → `emit_typed_decl` /
    `emit_alias_edge`.
-4. `emit_return_fuel`'s implicit-this field block →
+4. `into_file_analysis`'s implicit-receiver field block →
    `emit_expr_reads_variable`.
 5. `emit_method_call_return_edges`'s per-site push →
    `emit_call_return_edge` (the clear-and-emit `remove_by_source_tag`
@@ -261,7 +261,7 @@ which must still land in 1 iteration.
 
 **Step 2c — pack opts in.** Wire the driver into
 `PackDriver::analyze_with_path` as a new named phase AFTER
-`emit_return_fuel` (the doc comment on that fn enumerates phases —
+`into_file_analysis` (the doc comment on that fn enumerates phases —
 extend it). First contributors, each behind a `LangPack` capability:
 
 1. **`CallReturnEdges`** (capability: reuse the member-call semantics

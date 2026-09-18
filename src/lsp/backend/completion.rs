@@ -220,7 +220,9 @@ fn closure_symbol_completion(
     module_index: &ModuleIndex,
     items: &mut Vec<CompletionItem>,
 ) -> bool {
-    if analysis.pack.include_closure.is_empty() && !analysis.pack.imports_bind_names {
+    if analysis.pack.include_closure.is_empty()
+        && !crate::build::language_driver::LanguageRegistry::imports_bind_names(language)
+    {
         return false;
     }
     let cursor = crate::build::cursor_sentinel::point_to_byte(source, point);

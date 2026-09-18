@@ -74,8 +74,8 @@ marked otherwise; the drain re-derived each rationale against current code.
   pair node with its key child. The producer could say it directly: a
   `@destructure.key` capture on the pair's key, joined to the slot the
   way `@key.elem` joins `@def.handler.key`. Rule #11 debt, confined to
-  the extractor; the arrow is at least the pack's declaration
-  (`LangPack::pair_arrow`), not a literal. Lands with the php query,
+  the extractor; the arrow is at least the document's own capture
+  (`@pair.arrow`), not a literal. Lands with the php query,
   which is the only one that writes keyed lists. [recorded 2026-09-16]
 
 - **`PackFacts` is one lane for every pack language** (recorded
@@ -86,8 +86,8 @@ marked otherwise; the drain re-derived each rationale against current code.
   ratchet (`layering_tests::pack_facts_fields_are_ratcheted`) stops the
   lane growing, not the sharing. The shape wanted: one sub-struct per
   language family the pack declares (`CppFacts`, `PhpFacts`), each
-  default-empty, with the language-generic rows (`receiver_names`,
-  `import_rows`, `names`, the region spans) staying on
+  default-empty, with the language-generic rows (`import_rows`, `names`,
+  the region spans) staying on
   `PackFacts`; `surface_feed` destructures each exhaustively the way it
   does the lanes today. Cost: an `EXTRACT_VERSION` bump and every
   `pack.<field>` reader re-pathed; the win is that a cpp field cannot be
@@ -117,13 +117,6 @@ marked otherwise; the drain re-derived each rationale against current code.
   (spaces over comment bytes, newlines kept) so byte offsets stay in
   original coordinates for member positioning. Not a merge target.
   [re-ratified 2026-07-17]
-- **Two "enclosing class" notions in `emit_return_fuel`**: the implicit-
-  field half reads the ref's own `scope.package`; the sibling-CALL half
-  walks up to the enclosing method SYMBOL's package (so out-of-line bodies,
-  whose body scope carries no package, still resolve). Deliberately
-  different robustness; unifying is a behavior change, not a cleanup
-  (out-of-line bodies would gain implicit-field edges). [re-ratified
-  2026-07-17]
 - **Two domain/type completion rankers** (`backend::rank_domain_members`
   for pack enum members vs `symbols::rank_candidates_by_expected_type` for
   Perl scope vars): different item types (`CompletionItem` vs
@@ -269,7 +262,7 @@ marked otherwise; the drain re-derived each rationale against current code.
   `arrow_deref_sites`) are minted only by `src/builder/narrowing.rs`, a
   child of the Perl-only tree-sitter consumer. cpp goes through
   `query_extract` and never runs `build()`. The cpp hover/goto **type**
-  tier already narrows (`narrow_guard` refines inside `dynamic_cast` /
+  tier already narrows (the guard patterns refine inside `dynamic_cast` /
   `std::optional` guards — `cpp_dynamic_cast_guard_narrows`); what's missing
   is the **diagnostics** layer. Needs a cpp nullability pass that lowers
   `nullptr` comparisons + `std::optional` engagement state into the

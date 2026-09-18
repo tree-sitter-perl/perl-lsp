@@ -6,6 +6,7 @@ fn row(raw: &str) -> ImportRow {
         span: Span { start: tree_sitter::Point::new(0, 0), end: tree_sitter::Point::new(0, 0) },
         raw: raw.to_string(),
         binds: ImportBinds::Type,
+        bound: None,
     }
 }
 

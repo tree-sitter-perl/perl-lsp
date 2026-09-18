@@ -86,6 +86,56 @@ call, or a string. It reads the document instead, through three seams in
   set is what a consumer may match ON, never a claim that nothing else
   can carry the capture.
 
+### What the three bounds cost (php, measured 2026-09-17)
+
+Nine classifier modes in one binary over 25 inputs, three process runs
+each, medians, against the sentinel reparse paid in the same call.
+
+Unbounded — the whole skeleton query rooted at `tree.root_node()` with
+`set_byte_range(member)` — is a per-keystroke regression, because
+`set_byte_range` prunes DESCENT and never the walk TO the range: every
+pattern rooted at an intersecting ancestor keeps a state alive that
+forces descent through each sibling subtree before the cursor. One class
+of 5,000 methods, the same 17-byte member span, cost 68 µs with the
+cursor in the first method and 19.3 ms in the last; 100k statements
+before the cursor cost 284 ms; a minified 1 MB line, 175 ms. The bill is
+the prefix of the file.
+
+Slicing the document down to the 19 patterns carrying `@member.recv`
+escapes the prefix walk and loses elsewhere: 5.8 ms on 5,000 nested
+blocks (one match, all descent), Θ(depth²) on a member chain (55 ms at
+2,000 hops), 513 ms on a 1.29 MB receiver — plus a second `Query::new`
+(104 ms on the first completion after startup, 192–320 KB resident). It
+is not the fix.
+
+With all three bounds the full query classifies in 1.4–2.7 µs on files up
+to 6 KB, 3.6–9.5 µs on real 122–358 KB class files, and 5.9–18.4 µs on
+0.6–1.2 MB synthetic giants — 0.06–10% of the reparse beside it, with no
+second compile and no extra resident bytes. The depth cap is what carries
+the two pathological shapes: the 2,000-hop chain 55 ms → 1.7 µs, the
+1.29 MB receiver 512 ms → 126 µs. Declines (cursor at byte 0, inside a
+string or comment, no member access) cost zero in every mode, and syntax
+damage is not pathological — the enclosing node collapses and there is
+nothing to walk.
+
+Not yet measured: cpp, whose receiver patterns have a different shape.
+Forward: once the extractor mints per-call argument spans as facts, the
+inlay-hint path (`calls_in_rows`) reads them off the analysis and walks
+no tree at all — the extractor already saw every call (rule #11).
+
+### A doc-comment vocabulary is a hand parser, not a grammar
+
+php's docblock reader stays Rust (`packs/php/doc.rs`), and each frontend
+owns its own. Measured 2026-09-17 against `tree-sitter-phpdoc` v0.1.8
+over 23,051 real `/**` comments (laravel/framework, phpstan-src): 82.8% /
+70.0% parse without an ERROR node, ~92% / 84% with four small upstream
+fixes, and the residual is callable types and unions inside generics.
+Tree-sitter's recovery is not local, so on a block with an ERROR node
+whole-block parity with the hand parser is 15% and the facts that do
+emerge are wrong ones — at 21.6 µs per docblock against 1.1. A grammar in
+that shape would have to be forked to be usable, which is the opposite of
+the reason to adopt one.
+
 ## Spellings by language id
 
 A language's WRITE and DISPLAY spellings — its display vocabulary, the
@@ -108,6 +158,17 @@ indistinguishable from a language that declares none — so
 registered pack through both codecs.
 
 ## Query gotchas
+
+**An underscore capture is a predicate anchor and nothing reads it.**
+`@_plain_row`, `@_narrow_guard`, `@_cmd`: the name exists so an `#eq?` /
+`#any-of?` / `#not-match?` can be written beside it, and the fact the
+pattern states is minted by its MATCH or by a sibling capture. The
+spelling says so — a reader looking for what consumes `@_narrow_guard`
+stops at the sigil instead of grepping — and `unserved_captures` treats a
+`_` capture as served by definition. A capture the extractor or the cursor
+runner reads BY NAME (`@skip`, `@recv.peel`, `@arity.arg`, `@member.recv`,
+`@expr.read.var`, `@domain.compare.op`) carries no underscore however
+declaration-like it looks: those are read.
 
 **A query step holds at most three captures.** tree-sitter's
 `MAX_STEP_CAPTURE_COUNT` is 3 and `query_step__add_capture` no-ops past

@@ -1,6 +1,9 @@
 //! The cursor-time query runner: what it reads off the document, and the
 //! cost signature the three bounds buy.
 
+// `LangPack` and the runner's seams: every body below is per-language, so
+// a build with neither pack spells none of them — the same gate they carry.
+#[cfg(any(feature = "php", feature = "cpp"))]
 use super::*;
 
 /// Extract one small file so the language's query is compiled and

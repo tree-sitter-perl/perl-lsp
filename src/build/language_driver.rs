@@ -46,8 +46,8 @@ pub struct DriverCaps {
     /// The signatureHelp verb is served (the cursor-context handler).
     pub signature_help: bool,
     /// Pack-family signature help: the call site from the document's own
-    /// tree (`cursor_sentinel::call_at` on the pack's `call_shapes`), the
-    /// signature from the defining file's text. Disjoint from the hub's
+    /// tree (`cursor_sentinel::call_at`, on the argument-list patterns the
+    /// document declares), the signature from the defining file's text. Disjoint from the hub's
     /// `signature_help` (Perl's cursor-context path).
     pub pack_signature_help: bool,
     /// The selectionRange verb is served (the tree-shape handler).
@@ -389,15 +389,7 @@ impl LanguageDriver for PackDriver {
     ///    before (6) (`into_file_analysis` builds indices over everything).
     /// 6. `skel.into_file_analysis()` — the skeleton → FileAnalysis assembly
     ///    (unchanged; a method on `SkeletonAnalysis`, not a phase fn here).
-    /// 7. `emit_return_fuel` — post-assembly implicit-return interpretation
-    ///    over the FINAL FileAnalysis (stable SymbolIds, resolved refs): an
-    ///    `auto`-returning function with no declared type chains its Symbol
-    ///    onto its `return`-statement sites (structural-only in the skeleton
-    ///    — `SkeletonAnalysis::return_sites` — so `query_extract.rs` stays
-    ///    language-generic; the "this needs implicit-return fuel" READING of
-    ///    that data is cpp semantics, so it lives here). MUST run after (6):
-    ///    needs final SymbolIds + resolved `fa.refs`.
-    /// 8. `register_post_build` — post-assembly hooks that stamp fields only
+    /// 7. `register_post_build` — post-assembly hooks that stamp fields only
     ///    queryable once the FileAnalysis exists: macro defs, attribute-macro
     ///    signals, access-region visibility, include closure, degraded flag.
     ///
@@ -475,13 +467,8 @@ impl PackDriver {
                     skel.reanchor_truncated_containers(source);
                 }
                 let macro_defs = self.enrich_skeleton(&mut skel, &mut parser, source, &src, &map, &ctx);
-                // `return_sites` is structural skeleton output; taken before
-                // assembly consumes `skel` so phase 7 can interpret it against
-                // the FINAL FileAnalysis.
-                let return_sites = std::mem::take(&mut skel.return_sites);
                 let key_defs = std::mem::take(&mut skel.key_defs);
                 let mut fa = skel.into_file_analysis();
-                emit_return_fuel(&mut fa, &return_sites);
                 self.register_post_build(&mut fa, &mut parser, source, path, &ctx, &recovered, macro_defs, &pack);
                 if let Some(p) = path {
                     adopt_path_rails(&mut fa, p, &key_defs, &pack);
@@ -708,6 +695,7 @@ impl PackDriver {
 /// Handler on the key token). Same Handler identity as every rail, so
 /// references, rename (string rails only) and the undefined-name lane
 /// come by construction.
+#[cfg(feature = "pack-langs")]
 fn adopt_path_rails(
     fa: &mut FileAnalysis,
     path: &Path,
@@ -1277,97 +1265,6 @@ fn emit_external_type_aliases(
     }
 }
 
-/// Phase 7: the two CHAIN-FUEL gaps (`docs/PARKED.md`) — cpp's
-/// implicit-return inference and the implicit `this->field` read that
-/// feeds it. Reads the FINAL `FileAnalysis` (stable SymbolIds, resolved
-/// refs) plus `return_sites` (the skeleton's purely structural "a `return`
-/// happened here" record — `query_extract.rs` doesn't know what a return
-/// MEANS for any language; this function is the cpp-semantic reading of it).
-///
-/// An `auto`-returning function/method has no declared-return witness (the
-/// writeback inside `into_file_analysis` only fires when the syntax carries
-/// a type), so `fa.witnesses.for_attachment(Symbol(sid))` being empty IS
-/// the "undeclared" signal — reading the bag's own state rather than a
-/// private skeleton field. For each qualifying site: one
-/// `SymbolReturnArm(sid) → Edge(Expr(return_span))` witness plus one
-/// `Symbol(sid) → Edge(SymbolReturnArm(sid))` chain witness, mirroring
-/// Perl's `Builder::publish_return_arm_witnesses` — `SymbolReturnArmFold`
-/// (`witnesses.rs`) already folds multi-arm agreement generically.
-#[cfg(feature = "pack-langs")]
-fn emit_return_fuel(
-    fa: &mut FileAnalysis,
-    return_sites: &[(crate::model::file_analysis::ScopeId, crate::model::file_analysis::Span)],
-) {
-    use crate::model::file_analysis::{ScopeId, SymbolId};
-    use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
-    use std::collections::HashMap;
-
-    let scope_parent: HashMap<ScopeId, Option<ScopeId>> =
-        fa.scopes.iter().map(|s| (s.id, s.parent)).collect();
-    // The callable a scope is the body of is minted with the scope
-    // (`Scope::owner`); the chain walk finds the nearest one.
-    let scope_owner: HashMap<ScopeId, Option<SymbolId>> =
-        fa.scopes.iter().map(|s| (s.id, s.owner)).collect();
-    let mut gate: HashMap<SymbolId, Option<WitnessSource>> = HashMap::new();
-    let mut chained: std::collections::HashSet<SymbolId> = std::collections::HashSet::new();
-    for (ret_scope, ret_span) in return_sites {
-        let owner = std::iter::successors(Some(*ret_scope), |sc| {
-            scope_parent.get(sc).copied().flatten()
-        })
-        .find_map(|sc| scope_owner.get(&sc).copied().flatten());
-        let Some(sid) = owner else { continue };
-        // The per-function gate is decided ONCE, on the first return site
-        // seen for that function, from the bag as the walk left it — this
-        // loop writes the very `Symbol` witnesses the gate reads, so a live
-        // read would let the first arm block every later one (a two-return
-        // function typed by its first return only). `None` = declared,
-        // leave alone; `Some(tag)` = chain the arms under that source. A
-        // BARE declared container (`: array`) is the one declaration the
-        // returned value may refine (a tuple literal / a keyed shape): its
-        // chain rides at annot priority so the refinement beats the annot
-        // (docs/adr/destructuring.md).
-        let chain_source = gate
-            .entry(sid)
-            .or_insert_with(|| {
-                let existing = fa.witnesses.for_attachment(&WA::Symbol(sid));
-                if existing.is_empty() {
-                    Some(WitnessSource::Builder("return_arm_chain".into()))
-                } else if existing.iter().all(|w| {
-                    matches!(
-                        &w.payload,
-                        WP::InferredType(
-                            crate::model::file_analysis::InferredType::HashRef
-                                | crate::model::file_analysis::InferredType::ArrayRef
-                        )
-                    )
-                }) {
-                    Some(WitnessSource::Annotation(
-                        crate::model::witnesses::AnnotationKind::Refinement,
-                    ))
-                } else {
-                    None
-                }
-            })
-            .clone();
-        let Some(chain_source) = chain_source else { continue };
-        fa.witnesses.push(Witness {
-            attachment: WA::SymbolReturnArm(sid),
-            source: WitnessSource::Builder("return_arm".into()),
-            payload: WP::Edge(WA::Expr(*ret_span)),
-            span: *ret_span,
-        });
-        // One chain edge per function; the arms accumulate under it.
-        if chained.insert(sid) {
-            fa.witnesses.push(Witness {
-                attachment: WA::Symbol(sid),
-                source: chain_source,
-                payload: WP::Edge(WA::SymbolReturnArm(sid)),
-                span: *ret_span,
-            });
-        }
-    }
-}
-
 /// Remap extracted skeleton spans from transformed coords back to
 /// original source coords via the anchor map. A no-op for an identity
 /// map (clean/pass-through files round-trip byte→point→byte unchanged),
@@ -1431,7 +1328,6 @@ fn remap_spans(
         class_named_rails: _,
         annot_expr_spans: _,
         preamble_end: _,
-        imports_bind_names: _,
         doc_mentions: _,
         // language-wide facts, no spans to remap.
         function_scoped_vars: _,
@@ -2048,6 +1944,15 @@ impl LanguageRegistry {
     /// `has_include_tokens`.
     pub fn has_preprocessor_macros(id: &str) -> bool {
         Self::query_mints(id, "def.macro")
+    }
+
+    /// Do this language's import rows bind a NAME the file then spells
+    /// (php `use A\B;`, `from x import y`) rather than splicing text
+    /// (`#include`)? The document answers by minting `@import.binds`, so a
+    /// language cannot claim the binding without stating which token carries
+    /// it — only a bound name can go unused.
+    pub fn imports_bind_names(id: &str) -> bool {
+        Self::query_mints(id, "import.binds")
     }
 
     /// The driver that serves files no driver claims — found by asking each

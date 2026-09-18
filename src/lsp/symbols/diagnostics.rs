@@ -798,6 +798,7 @@ pub fn pack_symbol_diagnostics(
         receiver_tokens: &receivers,
         own_class_tokens: &own_class,
         builtin_types: &builtins,
+        imports_bind_names: Reg::imports_bind_names(lang),
     };
 
     let mut out: Vec<Diagnostic> = analysis
@@ -809,7 +810,7 @@ pub fn pack_symbol_diagnostics(
     let pack = &analysis.pack;
     out.extend(analysis.deprecated_use_findings(&facts).into_iter().map(render_finding));
     out.extend(analysis.liveness_findings(&facts).into_iter().map(render_finding));
-    out.extend(analysis.unused_import_findings().into_iter().map(render_finding));
+    out.extend(analysis.unused_import_findings(&facts).into_iter().map(render_finding));
 
     // ---- undefined rail name: a use on a named rail (`route('home')`)
     // that no definition on that rail answers, here or in the settled

@@ -385,6 +385,13 @@ fn check_entry_declarations(path: &Path, json_mode: bool) {
 /// with a wrong payload — a rail family naming no rail, an attribute
 /// spelling no flag answers to — is a finding instead, and fails the
 /// check.
+///
+/// A language the registry serves WITHOUT a pack (Perl, whose native
+/// builder owns its documents) is linted too: the grammar is the driver's,
+/// so the compile gate and the payload findings all hold. Only the
+/// served-vocabulary comparison needs a pack to name the vocabulary, and
+/// that one says it is skipped rather than reporting every capture as
+/// unknown.
 fn check_pack_overlay(path: &Path, json_mode: bool) {
     let registry = crate::build::language_driver::LanguageRegistry::with_enabled();
     // A plugin-dir overlay is named for its language (`queries/php.scm`);
@@ -407,17 +414,20 @@ fn check_pack_overlay(path: &Path, json_mode: bool) {
         .unwrap_or_else(|| {
             path.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string()
         });
-    let not_a_pack_language = || -> ! {
+    let not_a_served_language = || -> ! {
         eprintln!(
-            "language '{lang_id}' is not a pack language in this build \
+            "language '{lang_id}' is not served in this build \
              (enable its cargo feature, and name the file <lang>.scm)"
         );
         crate::lsp::cli::exit_with(2, "exit");
     };
-    let Some(driver) = registry.for_id(&lang_id) else { not_a_pack_language() };
-    let Some(pack) = driver.lang_pack() else { not_a_pack_language() };
+    let Some(driver) = registry.for_id(&lang_id) else { not_a_served_language() };
+    // `None` for a language whose documents the native builder owns: the
+    // grammar below is still this driver's, so everything but the
+    // served-vocabulary comparison holds.
+    let pack = driver.lang_pack();
     let parser = driver.make_parser();
-    let Some(language) = parser.language() else { not_a_pack_language() };
+    let Some(language) = parser.language() else { not_a_served_language() };
     let source = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -428,12 +438,10 @@ fn check_pack_overlay(path: &Path, json_mode: bool) {
     let compile_error = match tree_sitter::Query::new(&language, &source) {
         Ok(q) => {
             // The extractor owns its served vocabulary; this arm only
-            // reports what it answers.
-            let unknown = crate::build::query_extract::unserved_captures(
-                &pack,
-                &language,
-                q.capture_names(),
-            );
+            // reports what it answers — and only a pack names one.
+            let unknown = pack.as_ref().map(|p| {
+                crate::build::query_extract::unserved_captures(p, &language, q.capture_names())
+            });
             // Inside a known family a wrong payload is a FINDING, not the
             // inert silence an unknown capture buys: nothing downstream can
             // guess the rail an overlay left off, or the flag a misspelling
@@ -447,10 +455,12 @@ fn check_pack_overlay(path: &Path, json_mode: bool) {
             // set, so it is the bundled-documents tripwire's, not this
             // one-file arm's.)
             findings.extend(crate::build::query_extract::dropped_step_capture_findings(&source));
-            findings.extend(crate::build::query_extract::class_rail_capture_findings(
-                &crate::build::query_extract::rail_conventions_for(&pack).class_named_rails,
-                q.capture_names(),
-            ));
+            if let Some(pack) = pack.as_ref() {
+                findings.extend(crate::build::query_extract::class_rail_capture_findings(
+                    &crate::build::query_extract::rail_conventions_for(pack).class_named_rails,
+                    q.capture_names(),
+                ));
+            }
             if json_mode {
                 println!(
                     "{}",
@@ -461,15 +471,24 @@ fn check_pack_overlay(path: &Path, json_mode: bool) {
                         "patterns": q.pattern_count(),
                         "unknown_captures": unknown,
                         "findings": findings,
+                        "vocabulary_checked": unknown.is_some(),
                     })
                 );
             } else {
                 println!("OK: {} pattern(s) compile for {lang_id}", q.pattern_count());
-                for c in &unknown {
-                    println!(
-                        "warning: capture @{c} is outside the bundled {lang_id} vocabulary \
-                         (it will match but mint nothing)"
-                    );
+                match &unknown {
+                    Some(unknown) => {
+                        for c in unknown {
+                            println!(
+                                "warning: capture @{c} is outside the bundled {lang_id} \
+                                 vocabulary (it will match but mint nothing)"
+                            );
+                        }
+                    }
+                    None => println!(
+                        "note: {lang_id} declares no pack, so there is no served vocabulary \
+                         to check these captures against"
+                    ),
                 }
                 for f in &findings {
                     println!("error: {f}");

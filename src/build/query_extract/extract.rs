@@ -915,7 +915,18 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // and group forms of a row answer the same way.
     let mut binds_by_match: HashMap<usize, crate::model::file_analysis::ImportBinds> =
         HashMap::new();
+    // The NAME an import row binds (`@import.binds`), per match. A clause
+    // spells at most two candidates — its leaf and its alias — on the one
+    // capture, and the alias is always the later token, so the LATEST byte
+    // is the binding whichever arm fired.
+    let mut bound_name_by_match: HashMap<usize, (usize, String)> = HashMap::new();
     for e in &events {
+        if e.cap == "import.binds" {
+            let slot = bound_name_by_match.entry(e.match_id).or_insert((0, String::new()));
+            if e.start_byte >= slot.0 {
+                *slot = (e.start_byte, e.text.clone());
+            }
+        }
         if let (true, Some(b)) = (
             e.cap.starts_with("import"),
             e.cap.rsplit_once('.').and_then(|(_, sfx)| import_binds_suffix(sfx)),
@@ -1129,8 +1140,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // separator only — empty otherwise).
     let mut out_use_aliases: Vec<(String, String, String)> = Vec::new();
     let mut use_map: HashMap<String, (String, String)> = HashMap::new();
-    let mut group_import_sites: Vec<(String, Span, crate::model::file_analysis::ImportBinds)> =
-        Vec::new();
+    let mut group_import_sites:
+        Vec<(String, Span, crate::model::file_analysis::ImportBinds, Option<String>)> = Vec::new();
     let mut parent_fq_by_match: HashMap<usize, String> = HashMap::new();
     // `@ref.qualified`: the WRITTEN qualifier of a call/ctor/type/parent
     // spelling (`Downloader\DownloadManager`, `\A\B`) — the use-map pins
@@ -1197,6 +1208,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 format!("{ns}{sep}{leaf}"),
                 *span,
                 binds_by_match.get(mid).copied().unwrap_or_default(),
+                bound_name_by_match.get(mid).map(|(_, n)| n.clone()),
             ));
             use_map.insert(key, (ns, leaf.clone()));
         }
@@ -1226,6 +1238,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 span: Span { start: zero, end: zero },
                 raw: row,
                 binds: crate::model::file_analysis::ImportBinds::Type,
+                bound: None,
             }
         })
         .collect();
@@ -1319,10 +1332,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // Group rows land ahead of the flat rows the main loop pushes in
     // document order; every reader of these lanes is span- or map-keyed,
     // so the order carries no meaning — do not make a consumer assume it.
-    for (raw, span, binds) in group_import_sites {
+    for (raw, span, binds, bound) in group_import_sites {
         out.imports.push(raw.clone());
         out.import_sites
-            .push(crate::model::file_analysis::ImportRow { span, raw, binds });
+            .push(crate::model::file_analysis::ImportRow { span, raw, binds, bound });
     }
     out.spellings = Some(pack.spellings);
     out.lang_id = pack.lang_id;
@@ -1331,12 +1344,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         out.rail_name_seps = conv.name_seps.clone();
         out.class_named_rails = conv.class_named_rails.clone();
     }
-    out.imports_bind_names = pack.imports_bind_names;
     out.runtime_bound_reads = std::mem::take(&mut runtime_bound_reads);
     out.member_writes = std::mem::take(&mut member_writes);
-    // Assignment-declares-for-the-function is what the document SAYS on the
-    // pattern that mints such a def: a capability is what the query mints,
-    // never a pack flag beside it.
     // Assignment-declares-for-the-function is what the document SAYS on the
     // pattern that mints such a def: a capability is what the query mints,
     // never a pack flag beside it.
@@ -2510,6 +2519,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     span: Span { start: e.start, end: e.end },
                     raw: e.text.clone(),
                     binds: import_binds,
+                    bound: bound_name_by_match.get(&e.match_id).map(|(_, n)| n.clone()),
                 });
                 out.imports.push(e.text.clone());
             }
@@ -2566,9 +2576,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // The returned expression's own general-rule witness (literal
                 // / var-read / member / call — whichever matched this same
                 // node) already carries its type; this just records the site
-                // (scope + span) so `emit_return_fuel` (language_driver.rs,
-                // phase 7) can chain the enclosing function's `Symbol` onto it
-                // when undeclared.
+                // (scope + span) so assembly can chain the enclosing
+                // function's `Symbol` onto it when undeclared.
                 out.return_sites
                     .push((cur_scope, Span { start: e.start, end: e.end }));
             }

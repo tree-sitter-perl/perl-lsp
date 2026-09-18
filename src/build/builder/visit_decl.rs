@@ -497,17 +497,13 @@ impl<'a> Builder<'a> {
     }
 
     /// Walk a `{ ... }` block's children, reverting package context at block
-    /// close. `package Foo;` is file-scoped in Perl, but a `{ }` block is a
-    /// hard boundary: `{ package Inner; }` must not leak Inner to the
-    /// statements that follow. Saves the walk-time package name and the open
-    /// statement-range cursor, restores both on exit, and repairs the
-    /// `package_ranges` spans so `package_at` reverts past the block too.
-    pub(super) fn walk_block_package_scoped(&mut self, node: Node<'a>) {
-        self.walk_block_package_scoped_then(node, |_| {});
-    }
-
-    /// `walk_block_package_scoped`, with `work` run after the package context
-    /// is restored — the block-scope arm closes its lexical scope there.
+    /// close, then run `work`. `package Foo;` is file-scoped in Perl, but a
+    /// `{ }` block is a hard boundary: `{ package Inner; }` must not leak
+    /// Inner to the statements that follow. Saves the walk-time package name
+    /// and the open statement-range cursor, restores both on exit, and
+    /// repairs the `package_ranges` spans so `package_at` reverts past the
+    /// block too. `work` runs after the restore — the block-scope arm closes
+    /// its lexical scope there.
     pub(super) fn walk_block_package_scoped_then(
         &mut self,
         node: Node<'a>,

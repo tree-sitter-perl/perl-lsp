@@ -163,6 +163,7 @@ pub(super) fn php_annot_type(text: &str) -> Option<InferredType> {
 /// phpdoc `@return` / `@param` / `@var` facts out of one `/** */` comment.
 /// Only doc comments participate (a `//` or plain `/* */` never carries
 /// the vocabulary); each tag line yields at most one fact.
+#[cfg_attr(not(feature = "php"), allow(dead_code))]
 pub(super) fn php_doc_types(text: &str, uses_method_tags: &[&str]) -> Vec<DocFact> {
     if !text.starts_with("/**") {
         return Vec::new();
@@ -369,6 +370,7 @@ pub(super) fn php_doc_types(text: &str, uses_method_tags: &[&str]) -> Vec<DocFac
 /// its generic arguments (a plain whitespace split truncated it to
 /// `array<string,`). Callers slice `[..end]` for the type and
 /// `[end..]` for what follows (the `$name` of a @param).
+#[cfg_attr(not(feature = "php"), allow(dead_code))]
 fn phpdoc_type_token_end(s: &str) -> usize {
     let mut depth = 0usize;
     for (i, c) in s.char_indices() {
@@ -408,6 +410,7 @@ fn phpdoc_split_top_level(s: &str, sep: char) -> Vec<&str> {
     out
 }
 
+#[cfg_attr(not(feature = "php"), allow(dead_code))]
 fn phpdoc_type(raw: &str) -> Option<String> {
     let raw = raw.trim_start();
     let raw = raw[..phpdoc_type_token_end(raw)].trim_start_matches('?');

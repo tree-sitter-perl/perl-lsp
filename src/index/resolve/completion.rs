@@ -123,8 +123,9 @@ impl<'a> CandidateSet<'a> {
             // the prefix that this file cannot already spell bare — not its
             // own namespace's, not a pinned import — offered with the import
             // row as the edit that makes it spellable (`import_edit_for`).
-            if self.origin.pack.imports_bind_names
-                && mask.intersects(RoleMask::WORKSPACE | RoleMask::DEPENDENCY)
+            if crate::build::language_driver::LanguageRegistry::imports_bind_names(
+                &self.origin.language,
+            ) && mask.intersects(RoleMask::WORKSPACE | RoleMask::DEPENDENCY)
             {
                 if let Some(idx) = self.module_index {
                     let own = self.origin.use_map_pins().own_namespace.clone();

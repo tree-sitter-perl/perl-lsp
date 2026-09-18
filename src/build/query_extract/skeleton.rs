@@ -189,13 +189,13 @@ pub struct SkeletonAnalysis {
     /// The last row of the file preamble (open tag, `declare` rows): an
     /// inserted import goes after it when no import or namespace anchors.
     pub preamble_end: Option<usize>,
-    /// `imports_bind_names`, baked.
-    pub imports_bind_names: bool,
     /// Imported names a doc comment mentions (`@var Foo`, `@throws Foo`,
     /// `@see Foo`): a use the tree never shows.
     pub doc_mentions: Vec<String>,
-    /// The pack's `function_scoped_vars` fact (php) — drives the var
-    /// unification pass in `into_file_analysis`.
+    /// Does a bare assignment declare for the whole FUNCTION rather than
+    /// the block it sits in (php)? The document says so by capturing
+    /// `@def.var.fn`; it drives the var unification pass in
+    /// `into_file_analysis`.
     pub function_scoped_vars: bool,
     /// The pack's constructor-method names, riding to `PackFacts`.
     /// The language's name spellings (`LangPack::names`), baked onto
@@ -272,11 +272,11 @@ pub struct SkeletonAnalysis {
     /// name yields NO witness (no name-case guess — `docs/adr/macro-handling.md`).
     pub call_sites: Vec<(Span, String)>,
     /// `return EXPR;` sites (`@expr.return.value`): (enclosing scope, the
-    /// returned expression's span). Purely structural — this tier doesn't
-    /// know what a `return` MEANS for any given language; the interpretation
+    /// returned expression's span). Purely structural — the EXTRACTOR does
+    /// not know what a `return` means for any given language; the reading
     /// (join to an owning function, decide whether it needs implicit-return
-    /// fuel) is cpp-specific and lives in `language_driver.rs`'s post-
-    /// extraction pipeline (`emit_return_fuel`).
+    /// fuel) happens in `into_file_analysis`, where the symbol table and the
+    /// bag are both in hand and still ahead of the enrichment baseline.
     pub return_sites: Vec<(crate::model::file_analysis::ScopeId, Span)>,
     /// Scopes in which a call to one of the pack's dynamic-argument /
     /// dynamic-variable marker names appeared, with the flag that call
@@ -1615,6 +1615,80 @@ impl SkeletonAnalysis {
                 refs[i].bind_function_package(class);
             }
         }
+        // Implicit return: a callable whose syntax declares no return type
+        // takes its type from what it returns. `return_sites` is the
+        // structural record (an enclosing scope + the returned expression's
+        // span) that the extractor keeps language-blind; the reading — an
+        // undeclared callable chains onto its arms — is this tier's.
+        //
+        // The witnesses land BEFORE `finalize_post_walk` seals the
+        // enrichment baseline: pushed after it they sit above
+        // `base_witness_count` and the first enrichment truncates them away,
+        // so a multi-return function loses its type the moment the file is
+        // enriched.
+        {
+            use crate::model::file_analysis::InferredType;
+            use crate::model::witnesses::{
+                AnnotationKind, Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource,
+            };
+            let mut gate: std::collections::HashMap<SymbolId, Option<WitnessSource>> =
+                Default::default();
+            let mut chained: std::collections::HashSet<SymbolId> = Default::default();
+            for (ret_scope, ret_span) in &self.return_sites {
+                // The callable a scope is the body of is minted with the
+                // scope (`Scope::owner`); the chain walk finds the nearest.
+                let owner = std::iter::successors(Some(*ret_scope), |sc| {
+                    scope_parent.get(sc).copied().flatten()
+                })
+                .find_map(|sc| self.scopes.get(sc.0 as usize).and_then(|s| s.owner));
+                let Some(sid) = owner else { continue };
+                // The per-function gate is decided ONCE, on the first return
+                // site seen for that function, from the bag as extraction
+                // left it — this loop writes the very `Symbol` witnesses the
+                // gate reads, so a live read would let the first arm block
+                // every later one (a two-return function typed by its first
+                // return only). `None` = declared, leave alone; `Some(tag)` =
+                // chain the arms under that source. A BARE declared container
+                // (`: array`) is the one declaration the returned value may
+                // refine (a tuple literal / a keyed shape): its chain rides at
+                // annot priority so the refinement beats the annot
+                // (docs/adr/destructuring.md).
+                let chain_source = gate
+                    .entry(sid)
+                    .or_insert_with(|| {
+                        let existing = bag.for_attachment(&WA::Symbol(sid));
+                        if existing.is_empty() {
+                            Some(WitnessSource::Builder("return_arm_chain".into()))
+                        } else if existing.iter().all(|w| {
+                            matches!(
+                                &w.payload,
+                                WP::InferredType(InferredType::HashRef | InferredType::ArrayRef)
+                            )
+                        }) {
+                            Some(WitnessSource::Annotation(AnnotationKind::Refinement))
+                        } else {
+                            None
+                        }
+                    })
+                    .clone();
+                let Some(chain_source) = chain_source else { continue };
+                bag.push(Witness {
+                    attachment: WA::SymbolReturnArm(sid),
+                    source: WitnessSource::Builder("return_arm".into()),
+                    payload: WP::Edge(WA::Expr(*ret_span)),
+                    span: *ret_span,
+                });
+                // One chain edge per function; the arms accumulate under it.
+                if chained.insert(sid) {
+                    bag.push(Witness {
+                        attachment: WA::Symbol(sid),
+                        source: chain_source,
+                        payload: WP::Edge(WA::SymbolReturnArm(sid)),
+                        span: *ret_span,
+                    });
+                }
+            }
+        }
         let mut packages: std::collections::HashMap<
             String,
             crate::model::file_analysis::PackageFacts,
@@ -1688,7 +1762,6 @@ impl SkeletonAnalysis {
             import_rows: std::mem::take(&mut self.import_rows),
             spellings: self.spellings,
             preamble_end: self.preamble_end,
-            imports_bind_names: self.imports_bind_names,
             doc_mentions: std::mem::take(&mut self.doc_mentions),
             names: std::mem::take(&mut self.names),
             // Specialization family edges (spec → primary). NOT an inheritance
