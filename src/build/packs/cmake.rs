@@ -28,7 +28,6 @@ pub fn cmake_pack() -> LangPack {
         annot_type: |_| None,
         rettype_receiver: |_| false,
         field_registry_edges: false,
-        function_scoped_vars: false,
         doc_types: |_, _| vec![],
         doc_uses_method_tags: &[],
         // include(util.cmake) is a literal path; add_subdirectory(src)
@@ -65,7 +64,6 @@ pub fn cmake_pack() -> LangPack {
         entrypoint_symbols: &[],
         runtime_invoked_methods: &[],
         brace_scoped_members: false,
-        pair_arrow: "",
         imports_bind_names: false,
         builtin_types: &[],
         enum_members: &[],

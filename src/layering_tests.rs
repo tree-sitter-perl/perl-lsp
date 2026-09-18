@@ -1576,10 +1576,8 @@ fn pack_fields_name_no_grammar_shapes() {
         ("cpp", "oolfn", 5, "B2 — `@ool.declarator` / `@ool.qualifier` / `@ool.wrap`"),
         ("cpp", "qualifier_peel", 1, "B2 — `@qualifier.name` on `template_type`"),
         ("cpp", "trigger_chars", 3, TRIGGERS),
-        ("perl", "pair_arrow", 1, "B1 — `\"=>\" @pair.arrow` on the list-literal pattern"),
         ("perl", "trigger_chars", 6, TRIGGERS),
         ("php", "enum_members", 2, "B3 — synthesised on every `@def.enum`"),
-        ("php", "pair_arrow", 1, "B1 — `\"=>\" @pair.arrow` on the list-literal pattern"),
         ("php", "trigger_chars", 3, TRIGGERS),
     ];
     let drift = pack_allowlist_drift("rule #15 (grammar shapes on the pack)", &seen, allow);

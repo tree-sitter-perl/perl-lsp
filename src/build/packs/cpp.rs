@@ -91,7 +91,6 @@ pub fn cpp_pack() -> LangPack {
         },
         rettype_receiver: |_| false,
         field_registry_edges: false,
-        function_scoped_vars: false,
         doc_types: |_, _| vec![],
         doc_uses_method_tags: &[],
         // #include "a/b.h" / <vector>: strip the delimiters; a quoted
@@ -134,7 +133,6 @@ pub fn cpp_pack() -> LangPack {
         entrypoint_symbols: &["main"],
         runtime_invoked_methods: &[],
         brace_scoped_members: true,
-        pair_arrow: "",
         imports_bind_names: false,
         builtin_types: &[],
         enum_members: &[],

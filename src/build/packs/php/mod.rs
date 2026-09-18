@@ -117,7 +117,6 @@ pub fn php_pack() -> LangPack {
             matches!(text.trim().trim_start_matches('?'), "static" | "$this" | "self")
         },
         field_registry_edges: true,
-        function_scoped_vars: true,
         // phpdoc: the type vocabulary of REAL PHP — most of WordPress and
         // half of Laravel's public API type only here.
         doc_types: php_doc_types,
@@ -166,8 +165,6 @@ pub fn php_pack() -> LangPack {
         brace_scoped_members: true,
         imports_bind_names: true,
         builtin_types: PHP_BUILTIN_TYPES,
-        // `['k' => $v]` — the key/value arrow inside a list literal.
-        pair_arrow: "=>",
         enum_members: &["value", "name", "cases", "from", "tryFrom"],
         trigger_chars: &["$", ">", ":"],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },

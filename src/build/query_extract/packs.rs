@@ -72,16 +72,6 @@ pub struct LangPack {
     /// display), and a registry edge answers the RAW declared type first —
     /// `item_: T` instead of the substituted `int`.
     pub field_registry_edges: bool,
-    /// Are local variables FUNCTION-scoped (php: an assignment inside an
-    /// `if` block declares for the whole function, and re-assignment is a
-    /// REBIND of the same variable, not a fresh declaration)? Var defs
-    /// then anchor to the nearest enclosing sub scope and same-scope
-    /// re-assignments demote to write references — one identity per
-    /// function, so references/rename see every site instead of
-    /// per-assignment islands (a rename from any island
-    /// rewrote a fragment and broke the code). False = block-scoped
-    /// (cpp) or handled natively (Perl's `my`).
-    pub function_scoped_vars: bool,
     /// Documentation-comment type facts (phpdoc `@return`/`@param`/`@var`):
     /// the pack parses ITS OWN doc vocabulary out of a `@doc.comment`
     /// capture's text, returning type spellings `annot_type` speaks.
@@ -168,8 +158,8 @@ pub struct LangPack {
     /// `__toString`, `__invoke`, `__get`, ...): zero in-repo call sites is
     /// the EXPECTED state, so the heatmap's dead-code flagging shields
     /// them (the method-shaped sibling of `entrypoint_symbols`). The
-    /// constructor stays on its own lane (`constructor_names` — its call
-    /// sites are real `new` refs, so an unconstructed ctor honestly flags).
+    /// constructor stays on its own lane — its call sites are real `new`
+    /// refs, so an unconstructed ctor honestly flags.
     pub runtime_invoked_methods: &'static [&'static str],
     /// Container membership (class/struct/union/namespace) is delimited by
     /// literal `{`/`}` in the source, so a member that lost its enclosing
@@ -179,11 +169,6 @@ pub struct LangPack {
     /// indentation-scoped (Python) or non-nesting packs.
     /// `docs/adr/config-superposition-declarations.md`.
     pub brace_scoped_members: bool,
-    /// The key/value arrow inside a list literal (php `'k' => $v`): what a
-    /// destructuring slot's key is read before, and what makes a list keyed
-    /// rather than positional. Empty for a language whose lists carry no
-    /// written keys.
-    pub pair_arrow: &'static str,
     /// An import row binds a NAME the file then spells (php `use A\B;`),
     /// as opposed to splicing text (`#include`). Only bound names can be
     /// unused.
@@ -243,7 +228,6 @@ impl LangPack {
             annot_type: _,
             rettype_receiver: _,
             field_registry_edges: _,
-            function_scoped_vars: _,
             doc_types: _,
             doc_uses_method_tags,
             module_paths: _,
@@ -259,7 +243,6 @@ impl LangPack {
             entrypoint_symbols,
             runtime_invoked_methods,
             brace_scoped_members: _,
-            pair_arrow,
             imports_bind_names: _,
             builtin_types,
             enum_members,
@@ -285,7 +268,6 @@ impl LangPack {
         list(&mut out, "trigger_chars", trigger_chars);
         list(&mut out, "qualifier_peel", qualifier_peel);
         for (field, one) in [
-            ("pair_arrow", *pair_arrow),
             ("oolfn", oolfn.function_declarator),
             ("oolfn", oolfn.qualified_name),
         ] {
@@ -309,8 +291,8 @@ impl LangPack {
 /// A declarative peel: descend a wrapper chain tree-sitter's fixed-depth
 /// S-expression queries cannot express, to the leaf, optionally accumulating a
 /// per-level deref stack. ONE combinator the pack parameterizes — `nested_peel`
-/// (declarators, stack, leaf→def) and `recv_peel` (expr wrappers, no stack, any
-/// leaf) are both instances of it. Empty `wrappers` = the capture is absent.
+/// (declarators, stack, leaf→def) is its one instance. Empty `wrappers` =
+/// the capture is absent.
 #[derive(Clone, Copy)]
 pub struct PeelSpec {
     /// Wrapper node kinds → the `DerefKind` each contributes (only consulted

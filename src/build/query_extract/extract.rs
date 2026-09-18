@@ -346,6 +346,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     | "recv.peel.deref"
                     | "domain.compare.op"
                     | "def.method.catch_all"
+                    | "def.var.fn"
             ) {
                 continue;
             }
@@ -686,6 +687,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // per match, so the def it annotates carries the same fact the docblock
     // tag gives.
     let mut deprecated_matches: std::collections::HashSet<usize> = Default::default();
+    // `@pair.arrow` — the key/value arrow a destructuring list writes. Its
+    // TEXT is the spelling the slot walk splits on; a file with no keyed
+    // list spells none and has no keyed slot to read.
+    let pair_arrow: String = events
+        .iter()
+        .find(|e| e.cap == "pair.arrow")
+        .map(|e| e.text.clone())
+        .unwrap_or_default();
     // `@ref.var.implicit` — reads the runtime binds without a declaration.
     let mut runtime_bound_reads: Vec<Span> = Vec::new();
     // The attribute TOKENS the document names deprecated. A def's own
@@ -1118,7 +1127,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     out.runtime_bound_reads = std::mem::take(&mut runtime_bound_reads);
     out.enum_members = pack.enum_members.iter().map(|s| s.to_string()).collect();
     out.member_writes = std::mem::take(&mut member_writes);
-    out.function_scoped_vars = pack.function_scoped_vars;
+    // Assignment-declares-for-the-function is what the document SAYS on the
+    // pattern that mints such a def: a capability is what the query mints,
+    // never a pack flag beside it.
+    // Assignment-declares-for-the-function is what the document SAYS on the
+    // pattern that mints such a def: a capability is what the query mints,
+    // never a pack flag beside it.
+    out.function_scoped_vars = cap_names.iter().any(|c| c == "def.var.fn");
     out.names = pack.names.clone();
     // Template params joined to their owner class — the owner shaped like a
     // def name (a partial spec's spelling canonicalizes) so the key matches
@@ -3154,9 +3169,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         for (mid, name, scope, at, byte) in &flow_slots {
             let Some((list_span, list_byte, list_text)) = slot_lists.get(mid) else { continue };
             let offset = byte.saturating_sub(*list_byte);
-            let extraction = match slot_position(list_text, offset, pack.pair_arrow) {
+            let extraction = match slot_position(list_text, offset, &pair_arrow) {
                 Some(pos) => crate::model::file_analysis::Extraction::Positional(pos),
-                None => match slot_key(list_text, offset, pack.pair_arrow) {
+                None => match slot_key(list_text, offset, &pair_arrow) {
                     Some(k) => crate::model::file_analysis::Extraction::KeyOf(k),
                     None => continue,
                 },

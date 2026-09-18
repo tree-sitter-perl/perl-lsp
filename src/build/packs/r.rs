@@ -27,7 +27,6 @@ pub fn r_pack() -> LangPack {
         annot_type: |_| None,
         rettype_receiver: |_| false,
         field_registry_edges: false,
-        function_scoped_vars: false,
         doc_types: |_, _| vec![],
         doc_uses_method_tags: &[],
         // No reliable lexical ctor convention in R (S4/R5 exist but
@@ -51,7 +50,6 @@ pub fn r_pack() -> LangPack {
         entrypoint_symbols: &[],
         runtime_invoked_methods: &[],
         brace_scoped_members: false,
-        pair_arrow: "",
         imports_bind_names: false,
         builtin_types: &[],
         enum_members: &[],

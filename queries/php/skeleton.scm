@@ -371,9 +371,14 @@
   left: (scoped_property_access_expression name: (variable_name (name) @member.write)))
 
 ; ---- assignment IS declaration (Perl-loose, Python-identical) ----
+; `@def.var.fn`: assignment declares for the whole FUNCTION, and a second
+; assignment REBINDS the same variable rather than declaring a new one —
+; one identity per function, so references and rename see every site
+; instead of one island per assignment. It rides the pattern's ROOT: a
+; query STEP holds three captures, and the variable's are spoken for.
 (assignment_expression
   left: (variable_name) @def.var.name @def.var @flow.target
-  right: (_) @flow.source) @flow.assign
+  right: (_) @flow.source) @flow.assign @def.var.fn
 ; `$d = &$this->x` binds `$d` to the value's storage — the same
 ; declaration, typed by the same flow; `@alias.target` (on the inner
 ; name — a query step holds three captures) marks it, so a write through
@@ -457,6 +462,11 @@
     (variable_name)
     (list_literal
       (variable_name) @def.var.name @def.var @flow.slot) @flow.slot.list .))
+
+; The key/value arrow inside a destructuring list (`['k' => $v]`): what
+; makes a list KEYED rather than positional, and what a slot's key is read
+; before.
+(list_literal "=>" @pair.arrow)
 
 ; A key-less array literal is a positional TUPLE of its elements' edges
 ; (`return [$queue, $agent]`): one match per element, grouped by the
