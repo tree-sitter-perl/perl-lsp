@@ -188,10 +188,6 @@ impl FileAnalysis {
                     // finding (a method read as a property) — still undefined
                     out.push(Finding::new(
                         r.span,
-                        match want {
-                            MemberKind::Value => codes::UNDEFINED_PROPERTY,
-                            _ => codes::UNRESOLVED_METHOD,
-                        },
                         FindingData::UndefinedMember { kind: want, name: name.to_string() },
                     ));
                 }
@@ -200,7 +196,6 @@ impl FileAnalysis {
                     if let Some(note) = FileAnalysis::deprecation_of(sym) {
                         out.push(Finding::new(
                             r.span,
-                            codes::DEPRECATED,
                             FindingData::Deprecated { name: name.to_string(), note },
                         ));
                     }
@@ -224,7 +219,6 @@ impl FileAnalysis {
                         {
                             out.push(Finding::new(
                                 r.span,
-                                codes::NON_PUBLIC_ACCESS,
                                 FindingData::NonPublicAccess {
                                     name: name.to_string(),
                                     owner: owner_class,
@@ -242,7 +236,6 @@ impl FileAnalysis {
                     // so the widening is a finding of its own.
                     out.push(Finding::new(
                         r.span,
-                        codes::RESOLVED_BY_WIDENING,
                         FindingData::ResolvedByWidening {
                             name: name.to_string(),
                             on,
@@ -297,14 +290,12 @@ fn arity_findings(r: &Ref, sym: &Symbol) -> Option<Finding> {
     if n < a.required {
         return Some(Finding::new(
             r.span,
-            codes::ARITY_MISMATCH,
             FindingData::TooFewArguments { expected: a.required, found: n },
         ));
     }
     if !a.variadic && n > a.total {
         return Some(Finding::new(
             r.span,
-            codes::ARITY_MISMATCH,
             FindingData::TooManyArguments { expected: a.total, found: n },
         ));
     }

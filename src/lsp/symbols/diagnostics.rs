@@ -1046,7 +1046,7 @@ fn render_finding(f: Finding) -> Diagnostic {
     Diagnostic {
         range: span_to_range(f.span),
         severity: Some(severity),
-        code: Some(NumberOrString::String(f.code.to_string())),
+        code: Some(NumberOrString::String(f.code().to_string())),
         source: Some("perl-lsp".to_string()),
         message,
         tags,

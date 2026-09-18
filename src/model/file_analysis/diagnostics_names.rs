@@ -70,7 +70,6 @@ impl FileAnalysis {
             if let Some(note) = found {
                 out.push(Finding::new(
                     r.span,
-                    codes::DEPRECATED,
                     FindingData::Deprecated { name: leaf.to_string(), note },
                 ));
             }
@@ -175,7 +174,6 @@ impl FileAnalysis {
                 declared.iter().map(|d| self.join_name(d, leaf)).collect();
             out.push(Finding::new(
                 r.span,
-                codes::UNDEFINED_TYPE,
                 FindingData::UndefinedType { identity, candidates },
             ));
         }
@@ -222,7 +220,6 @@ impl FileAnalysis {
             };
             out.push(Finding::new(
                 sym.selection_span,
-                codes::UNIMPLEMENTED_METHOD,
                 FindingData::UnimplementedContracts { class, missing },
             ));
         }
@@ -274,7 +271,6 @@ impl FileAnalysis {
             let Some(spelling) = self.native_type_spelling(&ty) else { continue };
             out.push(Finding::new(
                 s.selection_span,
-                codes::MISSING_RETURN_TYPE,
                 FindingData::MissingReturnType { name: s.name.clone(), spelling },
             ));
         }

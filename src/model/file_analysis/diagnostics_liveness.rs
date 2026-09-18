@@ -107,7 +107,6 @@ impl FileAnalysis {
             }
             out.push(Finding::new(
                 r.span,
-                codes::UNDEFINED_VARIABLE,
                 FindingData::UndefinedVariable { name: r.target_name.clone() },
             ));
         }
@@ -154,7 +153,6 @@ impl FileAnalysis {
             }
             out.push(Finding::new(
                 sym.selection_span,
-                codes::UNUSED_VARIABLE,
                 FindingData::UnusedVariable { name: sym.name.clone() },
             ));
         }
@@ -204,7 +202,6 @@ impl FileAnalysis {
                 .map(|r| (r.start.row, r.end.row));
             out.push(Finding::new(
                 row.span,
-                codes::UNUSED_IMPORT,
                 FindingData::UnusedImport { bound: bound.to_string(), sole_row },
             ));
         }

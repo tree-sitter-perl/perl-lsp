@@ -62,19 +62,23 @@ pub mod codes {
 }
 
 
-/// One lane's answer. `code` is the wire code the finding reports under —
-/// the adapter's `codes::` constant — and `data` carries the facts its
-/// message and quick-fix payload are built from.
+/// One lane's answer: where, and the facts its message and quick-fix
+/// payload are built from. The wire code is a pure function of the data
+/// (`FindingData::code`), so a finding cannot carry one that disagrees.
 #[derive(Debug, Clone)]
 pub struct Finding {
     pub span: Span,
-    pub code: &'static str,
     pub data: FindingData,
 }
 
 impl Finding {
-    pub fn new(span: Span, code: &'static str, data: FindingData) -> Self {
-        Finding { span, code, data }
+    pub fn new(span: Span, data: FindingData) -> Self {
+        Finding { span, data }
+    }
+
+    /// The wire code this finding reports under.
+    pub fn code(&self) -> &'static str {
+        self.data.code()
     }
 }
 
@@ -115,6 +119,32 @@ pub enum FindingData {
     /// A callable with an inferrable return, no native annotation, in a file
     /// that writes them.
     MissingReturnType { name: String, spelling: String },
+}
+
+impl FindingData {
+    /// The wire code this shape reports under. Clients filter on these
+    /// strings and the per-file yield counters key on them, so the pairing
+    /// lives once, here, beside the shapes it names.
+    pub fn code(&self) -> &'static str {
+        match self {
+            FindingData::UndefinedMember { kind: MemberKind::Value, .. } => {
+                codes::UNDEFINED_PROPERTY
+            }
+            FindingData::UndefinedMember { .. } => codes::UNRESOLVED_METHOD,
+            FindingData::NonPublicAccess { .. } => codes::NON_PUBLIC_ACCESS,
+            FindingData::TooFewArguments { .. } | FindingData::TooManyArguments { .. } => {
+                codes::ARITY_MISMATCH
+            }
+            FindingData::ResolvedByWidening { .. } => codes::RESOLVED_BY_WIDENING,
+            FindingData::Deprecated { .. } => codes::DEPRECATED,
+            FindingData::UndefinedVariable { .. } => codes::UNDEFINED_VARIABLE,
+            FindingData::UnusedVariable { .. } => codes::UNUSED_VARIABLE,
+            FindingData::UnusedImport { .. } => codes::UNUSED_IMPORT,
+            FindingData::UndefinedType { .. } => codes::UNDEFINED_TYPE,
+            FindingData::UnimplementedContracts { .. } => codes::UNIMPLEMENTED_METHOD,
+            FindingData::MissingReturnType { .. } => codes::MISSING_RETURN_TYPE,
+        }
+    }
 }
 
 /// What a lane needs that the analysis cannot answer for itself.
