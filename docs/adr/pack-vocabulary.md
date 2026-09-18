@@ -56,6 +56,26 @@ any member, this call reads arguments it never declared — is a flag or a
 ref kind minted at extraction; the consumer asks the symbol. Rule #11 at
 the pack tier.
 
+The rule has a consumer half, and it reaches past the pack: a name set
+handed DOWN to a model lane so the lane can `contains` it is the same sin
+with the split replaced by a match. What a capture says about a
+DECLARATION is `SymbolFlags`; what it says about a REFERENCE SITE — the
+receiver's flavour, whether the call constructs — is `RefFlags`, minted in
+the extractor's one stamping pass and read through `Ref`'s accessors. A
+set of spellings reaches the model only when there is no per-site fact to
+mint: a runtime's builtin type names, or a capability the document states
+about the language rather than about a site.
+
+The same rule governs the engine's own walks. A parameter's shape is not a
+node kind the extractor knows — it is `@arity.param`, `@arity.param.optional`,
+`@arity.param.variadic`, `@arity.param.byref`, and the parts
+(`@arity.param.name` / `.default` / `.type`) the document anchors on the
+parameter. The engine joins a parameter to the signature it is a child of
+and a part to the parameter that encloses it, and counts; a token no
+fixed-depth pattern can reach (a C declarator's `identifier`, buried under
+however many pointer and array wrappers the type wrote) is a descent whose
+stopping kinds are the document's own read-pattern roots.
+
 ## The cursor-time seam
 
 A consumer that keeps node-kind tables is usually a cursor consumer: the
@@ -185,7 +205,16 @@ over the document SOURCE rather than the compiled query — the Rust
 `Query` API exposes patterns, capture names and quantifiers, but no
 per-step capture list, so the compiled form cannot answer which capture
 was dropped. Four or more consecutive `@name` tokens in the source is one
-node's capture list.
+node's capture list. The predicate literals behind `capture_literals` are
+scanned by hand for the same reason: `#eq?` / `#any-of?` fold into
+tree-sitter's internal text predicates and the compiled query exposes
+neither. Both scanners step over string literals, because a literal may
+contain the character that ends the form.
+
+`layering_tests::bundled_query_documents_are_served_whole` runs the three
+detectors over every registered pack's skeleton and every bundled overlay
+under `cargo test`, so none of them depends on a CLI flag being
+remembered.
 
 ## Structure
 

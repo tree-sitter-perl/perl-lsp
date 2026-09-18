@@ -48,6 +48,11 @@ pub struct ReducerQuery<'a> {
 /// the registry walks it for `PackageSymbol{C, m}` queries the local bag
 /// can't answer, chasing `PackageSymbol{P, m}` per parent. Both are
 /// `None`/empty for in-file callers.
+///
+/// TODO: built field-for-field at eight call sites (`builder/fold.rs`,
+/// `builder/enrichment.rs`, `witnesses/registry.rs`), so every field added
+/// to it is added eight times. Two constructors would say it once —
+/// `for_analysis(&FileAnalysis, module_index)` and `for_builder(&Builder)`.
 pub struct BagContext<'a> {
     pub scopes: &'a [Scope],
     pub package_framework: &'a dyn crate::model::file_analysis::PackageFrameworks,

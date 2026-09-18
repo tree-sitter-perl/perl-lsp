@@ -1707,7 +1707,6 @@ fn pack_fields_name_no_grammar_shapes() {
     let allow: &[(&str, &str, usize, &str)] = &[
         ("cmake", "trigger_chars", 2, TRIGGERS),
         ("cpp", "trigger_chars", 3, TRIGGERS),
-        ("perl", "trigger_chars", 6, TRIGGERS),
         ("php", "enum_members", 2, "kept: producer-only — the extractor mints each as a SYNTHESIZED member at every enum, and no consumer reads the list"),
         ("php", "trigger_chars", 3, TRIGGERS),
         ("python", "trigger_chars", 1, TRIGGERS),
