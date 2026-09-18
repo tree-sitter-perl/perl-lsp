@@ -28,7 +28,6 @@ pub fn r_pack() -> LangPack {
         rettype_receiver: |_| false,
         field_registry_edges: false,
         function_scoped_vars: false,
-        constructor_names: &[],
         doc_types: |_, _| vec![],
         doc_uses_method_tags: &[],
         // No reliable lexical ctor convention in R (S4/R5 exist but

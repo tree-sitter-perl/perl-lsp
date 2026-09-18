@@ -894,7 +894,11 @@ pub fn pack_symbol_diagnostics(
         match owner.resolve_member(&class, name, want, idx) {
             None if facts.is_interface || facts.is_trait => {}
             // a class with no declared constructor has the default one
-            None if pack.constructor_names.iter().any(|c| c == name) => {}
+            None if crate::build::language_driver::LanguageRegistry::pack_capture_literals(
+                &analysis.language,
+                "def.method.ctor",
+            )
+            .contains(name) => {}
             None if named_by_string => {
                 // `[$obj, 'name']` is data until dispatch proves it a
                 // callable: a claim only when it resolves
@@ -1537,7 +1541,7 @@ pub fn pack_symbol_diagnostics(
             for s in callables {
                 // no annotation to add: a constructor, a contract, a docblock
                 // `@method`, a closure; and none wanted for an already-declared one
-                if pack.constructor_names.iter().any(|c| c == &s.name)
+                if s.is_constructor()
                     || s.flags.intersects(
                         SymbolFlags::CONTRACT
                             | SymbolFlags::DOC_DECLARED

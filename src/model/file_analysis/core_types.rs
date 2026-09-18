@@ -379,6 +379,12 @@ bitflags::bitflags! {
         /// one of its members. Minted from the receiver capture, so no
         /// consumer matches a receiver's spelling.
         const RECEIVER = 1 << 22;
+        /// The constructor of the class that declares it (php
+        /// `__construct`): a `new Foo(...)` invokes it, and its name belongs
+        /// to the language, so nothing renames it. Minted from the
+        /// constructor capture; Perl's `new` is a name convention and stays
+        /// in `conventions`.
+        const CONSTRUCTOR = 1 << 23;
     }
 }
 
@@ -822,6 +828,15 @@ pub fn earliest_rebind_in(flow_edges: &[FlowEdge], var: &str, region: Span) -> O
 }
 
 impl Symbol {
+    /// Does this callable construct the class that declares it? A pack's
+    /// document names its own constructor and the flag is minted there;
+    /// Perl has no keyword for it, so its `new` convention answers here —
+    /// one method, whichever language declared the symbol.
+    pub fn is_constructor(&self) -> bool {
+        self.flags.contains(SymbolFlags::CONSTRUCTOR)
+            || crate::model::conventions::is_constructor_name(&self.name)
+    }
+
     /// A member RE-EXPORT (`using Base::insert;` in a class body): part of
     /// the class's API surface (outline/completion) but not a definition —
     /// member resolution sees through it to the origin ancestor.

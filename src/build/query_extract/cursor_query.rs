@@ -37,9 +37,23 @@ fn memo() -> &'static Mutex<HashMap<&'static str, (&'static Query, &'static str)
     MEMO.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Every compiled query's own source, keyed by the object's address.
+///
+/// Separate from `memo` on purpose: `memo` holds ONE query per language
+/// (the first wins, so a cursor keystroke never re-derives the effective
+/// source), while a process that compiles a second query for the same
+/// language — a different plugin-overlay set — still needs THAT object's
+/// patterns readable. A lens that could not find its own query's source
+/// answered EMPTY, which reads downstream as "the document says nothing".
+fn sources() -> &'static Mutex<HashMap<usize, &'static str>> {
+    static SOURCES: OnceLock<Mutex<HashMap<usize, &'static str>>> = OnceLock::new();
+    SOURCES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Record the query `extract` compiled, so a cursor-time caller gets THE
 /// object the extractor matched with rather than one of its own.
 pub(super) fn remember(lang_id: &'static str, query: &'static Query, source: &'static str) {
+    sources().lock().unwrap().insert(query as *const Query as usize, source);
     memo().lock().unwrap().entry(lang_id).or_insert((query, source));
 }
 
@@ -212,12 +226,7 @@ fn cached_over_patterns(
     if let Some(set) = cache.lock().unwrap().get(&key) {
         return set;
     }
-    let source = memo()
-        .lock()
-        .unwrap()
-        .values()
-        .find(|(q, _)| std::ptr::eq(*q, query))
-        .map(|(_, s)| *s);
+    let source = sources().lock().unwrap().get(&(query as *const Query as usize)).copied();
     let mut found: HashSet<&'static str> = HashSet::new();
     if let (Some(source), Some(index)) =
         (source, query.capture_names().iter().position(|n| *n == capture))

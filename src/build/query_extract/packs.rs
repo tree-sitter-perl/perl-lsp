@@ -82,11 +82,6 @@ pub struct LangPack {
     /// rewrote a fragment and broke the code). False = block-scoped
     /// (cpp) or handled natively (Perl's `my`).
     pub function_scoped_vars: bool,
-    /// The pack's constructor-method names (php `__construct`): a Method
-    /// target with one of these names is the class's constructor, and its
-    /// references include the class's `new Foo(...)` sites (non-rewritable
-    /// — the token spells the class). Rides `PackFacts::constructor_names`.
-    pub constructor_names: &'static [&'static str],
     /// Documentation-comment type facts (phpdoc `@return`/`@param`/`@var`):
     /// the pack parses ITS OWN doc vocabulary out of a `@doc.comment`
     /// capture's text, returning type spellings `annot_type` speaks.
@@ -275,7 +270,6 @@ impl LangPack {
             rettype_receiver: _,
             field_registry_edges: _,
             function_scoped_vars: _,
-            constructor_names,
             doc_types: _,
             doc_uses_method_tags,
             module_paths: _,
@@ -314,7 +308,6 @@ impl LangPack {
         ) {
             out.extend(values.iter().map(|v| (field, *v)));
         }
-        list(&mut out, "constructor_names", constructor_names);
         list(&mut out, "doc_uses_method_tags", doc_uses_method_tags);
         list(&mut out, "narrow_assertions", narrow_assertions);
         list(&mut out, "entrypoint_symbols", entrypoint_symbols);

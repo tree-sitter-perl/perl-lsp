@@ -118,7 +118,6 @@ pub fn php_pack() -> LangPack {
         },
         field_registry_edges: true,
         function_scoped_vars: true,
-        constructor_names: &["__construct"],
         // phpdoc: the type vocabulary of REAL PHP — most of WordPress and
         // half of Laravel's public API type only here.
         doc_types: php_doc_types,

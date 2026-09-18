@@ -666,6 +666,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // completion ask the symbol instead of matching its name.
     let mut receiver_name_spans: std::collections::HashSet<(Point, Point)> =
         std::collections::HashSet::new();
+    // `@def.method.ctor` — the constructor declaration's name span; the
+    // symbol carries `CONSTRUCTOR`, which is what rename policy, the dead-code
+    // shield and the annotation lane ask.
+    let mut ctor_name_spans: std::collections::HashSet<(Point, Point)> =
+        std::collections::HashSet::new();
     // `@classattr.<flavor>` — container-def name spans stamped with a
     // flavor attribute ("interface"/"trait"): the model's SymKind::Class
     // covers all three php container kinds, and SUPER/reference walks
@@ -762,6 +767,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "param.receiver" {
             receiver_name_spans.insert((e.start, e.end));
+        }
+        if e.cap == "def.method.ctor" {
+            ctor_name_spans.insert((e.start, e.end));
         }
         if let Some(flavor) = e.cap.strip_prefix("classattr.") {
             classattr_by_name_span.insert((e.start, e.end), flavor.to_string());
@@ -1005,6 +1013,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // one (`self`, `static`): the document says which, on the receiver
     // capture that fires on them, and every reader asks the document.
     let self_class_tokens = super::cursor_query::capture_literals(query, "receiver.self");
+    // The constructor's name — the document's own `#eq?` on the capture that
+    // flags it, so the construction sites and the declaration agree by
+    // construction. `None` for a language whose constructor is a convention
+    // rather than a spelling (Perl).
+    let ctor_name: Option<&'static str> =
+        super::cursor_query::capture_literals(query, "def.method.ctor").iter().copied().next();
     let ident = |written: &str, at: Point| -> String {
         // the current-class spellings name no namespace; the model
         // resolves them to the enclosing class
@@ -1060,6 +1074,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     out.throwaway_names = pack.throwaway_names.iter().map(|s| s.to_string()).collect();
     out.catch_all_methods = pack.catch_all_methods.iter().map(|s| s.to_string()).collect();
     out.spellings = Some(pack.spellings);
+    out.lang_id = pack.lang_id;
     {
         let conv = crate::build::query_extract::rail_conventions_for(pack);
         out.rail_labels = conv.labels.clone();
@@ -1071,7 +1086,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     out.enum_members = pack.enum_members.iter().map(|s| s.to_string()).collect();
     out.member_writes = std::mem::take(&mut member_writes);
     out.function_scoped_vars = pack.function_scoped_vars;
-    out.constructor_names = pack.constructor_names.iter().map(|s| s.to_string()).collect();
     out.names = pack.names.clone();
     // Template params joined to their owner class — the owner shaped like a
     // def name (a partial spec's spelling canonicalizes) so the key matches
@@ -1520,7 +1534,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // self()` mints — fan-in, goto-def and references on
                 // `__construct` see it like any `new Foo()`.
                 if let (Some(ctor), Some(name)) =
-                    (pack.constructor_names.first(), defaulted_matches.get(&e.match_id))
+                    (ctor_name, defaulted_matches.get(&e.match_id))
                 {
                     if anon_ctor_sites.insert((e.start_byte, e.end_byte)) {
                         let span = Span { start: e.start, end: e.end };
@@ -1921,7 +1935,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         &(pack.shape_name)("hop.recv", &e.text),
                     )
                 {
-                    if let Some(ctor) = pack.constructor_names.first() {
+                    if let Some(ctor) = ctor_name {
                         let span = Span { start: e.start, end: e.end };
                         out.refs.push(SkelRef {
                             via: None,
@@ -1987,7 +2001,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // references and goto-def see it). Neither consumer has to
                     // ask whether a call that spells a class name constructs.
                     if e.cap == "ref.call" && ctor_matches.contains(&e.match_id) {
-                        if let Some(ctor) = pack.constructor_names.first() {
+                        if let Some(ctor) = ctor_name {
                             let span = Span { start: e.start, end: e.end };
                             let class = (pack.shape_name)("ref.type", &e.text);
                             out.refs.push(SkelRef {
@@ -3749,10 +3763,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         || !contract_name_spans.is_empty()
         || !alias_name_ends.is_empty()
         || !receiver_name_spans.is_empty()
+        || !ctor_name_spans.is_empty()
     {
         for sym in &mut out.symbols {
             if receiver_name_spans.contains(&(sym.name_start, sym.name_end)) {
                 sym.flags |= crate::model::file_analysis::SymbolFlags::RECEIVER;
+            }
+            if ctor_name_spans.contains(&(sym.name_start, sym.name_end)) {
+                sym.flags |= crate::model::file_analysis::SymbolFlags::CONSTRUCTOR;
             }
             if sym.kind == "var"
                 && alias_name_ends.contains(&sym.name_end)

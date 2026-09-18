@@ -1648,7 +1648,6 @@ fn pack_string_tables_are_ratcheted() {
         ("cpp", "entrypoint_symbols", 1, "B3 — an entry document (`cpp.entry.json`)"),
         ("php", "builtin_types", 158, "B3 — a bundled stub source under the BUILTIN role"),
         ("php", "catch_all_methods", 3, "B1 — `@def.method.catch_all` → a class flag"),
-        ("php", "constructor_names", 1, "B1 — `@def.method.ctor` → `SymbolFlags::CONSTRUCTOR`"),
         ("php", "deprecated_attribute", 1, "B1 — `@sym.attr.deprecated`"),
         ("php", "doc_uses_method_tags", 1, "kept: one framework's docblock tag, data handed to the engine's own reader — the entry-document posture"),
         ("php", "dynamic_arg_markers", 3, "B1 — `@call.dynamic_args`"),
@@ -1745,7 +1744,7 @@ fn pack_facts_fields_are_ratcheted() {
             skipped = false;
         }
     }
-    const RATCHET: usize = 25;
+    const RATCHET: usize = 24;
     assert!(
         fields <= RATCHET,
         "PackFacts grew to {fields} fields (ratchet {RATCHET}). A per-language constant goes on \

@@ -92,7 +92,6 @@ pub fn cpp_pack() -> LangPack {
         rettype_receiver: |_| false,
         field_registry_edges: false,
         function_scoped_vars: false,
-        constructor_names: &[],
         doc_types: |_, _| vec![],
         doc_uses_method_tags: &[],
         // #include "a/b.h" / <vector>: strip the delimiters; a quoted

@@ -115,6 +115,12 @@
 ; interfaces and traits are SymKind::Class in the model, but SUPER
 ; resolution must prefer a concrete parent over an interface's abstract
 ; stub, and trait identity feeds the consumer-side reference walk.
+; The CONSTRUCTOR: the one method a `new Foo(...)` invokes, the one whose
+; name belongs to the language (nothing renames it). Named here, so the
+; construction sites and the rename policy read one fact.
+((method_declaration name: (name) @def.method.ctor)
+ (#eq? @def.method.ctor "__construct"))
+
 (interface_declaration name: (name) @classattr.interface)
 (trait_declaration name: (name) @classattr.trait)
 (enum_declaration name: (name) @classattr.enum)

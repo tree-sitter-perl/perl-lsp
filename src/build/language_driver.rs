@@ -1551,6 +1551,7 @@ fn remap_spans(
         qualified_spellings: _,
         var_reads,
         label_refs,
+        lang_id: _,
         implicit_variables: _,
         throwaway_names: _,
         catch_all_methods: _,
@@ -1568,7 +1569,6 @@ fn remap_spans(
         doc_mentions: _,
         // language-wide facts, no spans to remap.
         function_scoped_vars: _,
-        constructor_names: _,
         flow_edges,
         moved_from,
         control_regions,
@@ -2064,17 +2064,22 @@ impl LanguageRegistry {
         static PACKS: std::sync::OnceLock<
             Vec<(&'static str, crate::build::query_extract::LangPack)>,
         > = std::sync::OnceLock::new();
+        let registry = LanguageRegistry::with_enabled();
         PACKS
             .get_or_init(|| {
-                LanguageRegistry::with_enabled()
-                    .drivers
-                    .iter()
-                    .filter_map(|d| d.lang_pack().map(|p| (d.id(), p)))
-                    .collect()
+                registry.drivers.iter().filter_map(|d| d.lang_pack().map(|p| (d.id(), p))).collect()
             })
             .iter()
             .find(|(l, _)| *l == id)
-            .and_then(|(_, pack)| crate::build::query_extract::pack_query(pack))
+            .and_then(|(_, pack)| {
+                // The extractor's own object once this language has analysed
+                // anything; otherwise compile it here, through the same memo,
+                // so the answer never depends on what ran first.
+                crate::build::query_extract::pack_query(pack).or_else(|| {
+                    let language = registry.for_id(id)?.make_parser().language()?.clone();
+                    crate::build::query_extract::query_for(&language, pack)
+                })
+            })
             .map(|q| crate::build::query_extract::capture_literals(q, capture))
             .unwrap_or_else(|| EMPTY.get_or_init(Default::default))
     }
