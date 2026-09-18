@@ -1289,7 +1289,7 @@ impl Ref {
         match self.binding.as_ref()? {
             RefBinding::Symbol(sym) => Some(*sym),
             RefBinding::HashKey { sym, .. } | RefBinding::Handler { sym, .. } => *sym,
-            RefBinding::Function { .. } | RefBinding::Method(_) => None,
+            RefBinding::Function { .. } | RefBinding::Method(_) | RefBinding::Runtime => None,
         }
     }
 
@@ -1584,6 +1584,10 @@ pub enum RefBinding {
     /// against, plus the linked `Handler` symbol (first stacked def —
     /// `refs_to_symbol` walks all stacked defs separately).
     Handler { owner: HandlerOwner, sym: Option<SymbolId> },
+    /// Bound by the RUNTIME, with no declaration to point at (php's
+    /// `$this` and its superglobals). A read of one is resolved — nothing
+    /// to navigate to, and nothing undefined about it.
+    Runtime,
 }
 
 /// What kind of entity is being renamed — determines single-file vs cross-file scope.
