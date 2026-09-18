@@ -774,8 +774,9 @@ impl<'a> Builder<'a> {
                         ) = (&gate, &a)
                         {
                             // Receiver-gated dispatch is class-owned by
-                            // definition; a Global handler has no receiver
-                            // gate, so it takes the ungated emit path below.
+                            // definition; a rail-owned handler has no
+                            // receiver gate, so it takes the ungated emit
+                            // path below.
                             if let HandlerOwner::Class(owner_class) = owner {
                                 self.provisional_dispatches.push(ReceiverGated::new(
                                     g.target_class.clone(),
@@ -1004,7 +1005,7 @@ impl<'a> Builder<'a> {
                     },
                 ) = (&gate, &a)
                 {
-                    // Global handlers carry no receiver gate — ungated path.
+                    // A rail-owned handler carries no receiver gate — ungated path.
                     if let HandlerOwner::Class(owner_class) = owner {
                         self.provisional_dispatches.push(ReceiverGated::new(
                             g.target_class.clone(),
