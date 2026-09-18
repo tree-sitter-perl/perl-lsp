@@ -241,6 +241,7 @@ impl Backend {
         let files = Arc::clone(&self.files);
         let client = self.client.clone();
         let module_index = Arc::clone(&self.module_index);
+        let language = language.to_string();
         let root = self.module_index.workspace_root();
         // Server-initiated progress requires the client capability; a client
         // that never advertised it may also never ANSWER the create request —
@@ -276,12 +277,14 @@ impl Backend {
                 // Pack keeps its early-out shape (no heal without a root);
                 // perl must still sweep so a publish deferred against the
                 // kickoff-to-early-out window converges.
+                Self::settle_unindexable(&module_index, &language);
                 if want_perl {
                     Self::open_perl_gate_then_heal(&_done, &heal_ctx, true);
                 }
                 return;
             };
             let Some(root_path) = root_uri.strip_prefix("file://") else {
+                Self::settle_unindexable(&module_index, &language);
                 if want_perl {
                     Self::open_perl_gate_then_heal(&_done, &heal_ctx, true);
                 }
@@ -481,6 +484,20 @@ impl Backend {
     /// the raw open doc while the sweep's enrichment is still running — the
     /// same degraded window the deferral accepts). Pack keeps the guard's
     /// drop-time open: its degraded window is owned by `degraded_open`.
+    /// A session with nothing to sweep — no workspace root, or a root the
+    /// URI scheme makes unreadable — has an index that is SETTLED for the
+    /// language: everything it will ever hold is in it. Saying so is what
+    /// keeps the absence-reporting lanes (undefined type, undefined rail
+    /// name) answering instead of waiting forever on a pass that will never
+    /// run. The pack sub-index answers for its own language, so it is marked
+    /// alongside the hub.
+    fn settle_unindexable(module_index: &ModuleIndex, language: &str) {
+        if let Some(pack) = module_index.pack_index(language) {
+            pack.mark_language_indexed(language);
+        }
+        module_index.mark_language_indexed(language);
+    }
+
     fn open_perl_gate_then_heal(done: &IndexDoneGuard, ctx: &PackHealCtx, want_perl: bool) {
         if want_perl {
             done.ready.perl.open();
@@ -792,4 +809,35 @@ pub(super) async fn progress_end(client: &Client, token: NumberOrString) {
             })),
         })
         .await;
+}
+
+#[cfg(test)]
+mod rootless_index_tests {
+    use super::*;
+    use crate::model::file_analysis::{CrossFileLookup, IndexState};
+    use tower_lsp::LspService;
+
+    /// Both exits of the index kickoff that sweep nothing — no root at all,
+    /// and a root whose URI names something this server cannot read as a
+    /// path — must leave the language SETTLED. A lane that reports absence
+    /// waits for the verdict; a session that never publishes one silences
+    /// every such lane for its whole life.
+    async fn settles(root: Option<&str>) -> IndexState {
+        let (service, _socket) = LspService::new(Backend::new);
+        let backend = service.inner();
+        backend.module_index.set_workspace_root(root);
+        backend.ensure_workspace_indexed("php");
+        backend.await_index_ready("php", WaitPolicy::Complete).await;
+        backend.module_index.index_state("php")
+    }
+
+    #[tokio::test]
+    async fn no_root_settles_the_language() {
+        assert_eq!(settles(None).await, IndexState::Settled);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_root_settles_the_language() {
+        assert_eq!(settles(Some("vscode-vfs://host/project")).await, IndexState::Settled);
+    }
 }
