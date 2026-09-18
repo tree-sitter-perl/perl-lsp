@@ -8,6 +8,9 @@ pub fn cpp_pack() -> LangPack {
         query_source: include_str!("../../../queries/cpp/skeleton.scm"),
         bundled_overlays: &[],
         lang_id: "cpp",
+        // `main` is entered over the ABI, never from a source call site.
+        bundled_entry_markers: &[include_str!("../../../queries/cpp/cpp.entry.json")],
+        bundled_rail_docs: &[],
         names: NameSpellings::with_separator("::"),
         // Template spellings get ONE canonical whitespace form so a
         // specialization's identity (`formatter<int, char>`) matches

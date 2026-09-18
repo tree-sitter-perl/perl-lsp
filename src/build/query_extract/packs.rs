@@ -27,6 +27,16 @@ pub struct LangPack {
     /// query overlays (`<plugin-dir>/<name>/queries/<lang_id>.scm`,
     /// docs/prompt-pack-plugins.md) onto the language they extend.
     pub lang_id: &'static str,
+    /// Bundled framework-entry declarations (`entry.json` documents, see
+    /// `EntryMarker`): which attribute names / method conventions mean "a
+    /// runner invokes this" for the heatmap's framework-entry guard. The
+    /// framework vocabulary lives in these DATA files (like the bundled
+    /// `.scm` overlays), never in engine code; plugin dirs extend the set.
+    pub bundled_entry_markers: &'static [&'static str],
+    /// Rail documents (`rails.json`): text rails — string-named uses a
+    /// grammar cannot see (a Blade template's `route('x')`), scanned as
+    /// text into `DispatchCall` refs on the named rail.
+    pub bundled_rail_docs: &'static [&'static str],
     /// How the language spells names — its namespace separator and its
     /// variable sigils. Baked onto `PackFacts::names`; every key function
     /// reads it there.

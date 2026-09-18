@@ -11,6 +11,8 @@ pub fn cmake_pack() -> LangPack {
         query_source: include_str!("../../../queries/cmake/skeleton.scm"),
         bundled_overlays: &[],
         lang_id: "cmake",
+        bundled_entry_markers: &[],
+        bundled_rail_docs: &[],
         names: NameSpellings::NONE,
         shape_name: |_, raw| raw.to_string(),
         default_name: |_| None,
