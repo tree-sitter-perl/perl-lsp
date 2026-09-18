@@ -1,12 +1,25 @@
 //! C/C++'s pack.
 
 use crate::build::query_extract::{LangPack, PeelSpec, C_FIELD_DECL_PEEL};
-use crate::model::file_analysis::{canonical_template_spelling, InferredType, NameSpellings};
+use crate::model::file_analysis::{canonical_template_spelling, InferredType, NameSpellings, PackSpellings};
+
+/// C/C++ writes and displays nothing of its own: the engine's type tags are
+/// its vocabulary, and it offers no import or annotation quick-fix. Its
+/// members belong to the container that declares them.
+const SPELLINGS: PackSpellings = PackSpellings {
+    variadic_marker: "...",
+    default_sep: " = ",
+    members_are_package_bound: true,
+    // a member read and a member call are different syntax here
+    member_reads_are_calls: false,
+    ..PackSpellings::NONE
+};
 
 pub fn cpp_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/cpp/skeleton.scm"),
         bundled_overlays: &[],
+        spellings: &SPELLINGS,
         lang_id: "cpp",
         // `main` is entered over the ABI, never from a source call site.
         bundled_entry_markers: &[include_str!("../../../queries/cpp/cpp.entry.json")],

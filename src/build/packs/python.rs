@@ -1,7 +1,19 @@
 //! Python's pack.
 
 use crate::build::query_extract::{LangPack, PeelSpec};
-use crate::model::file_analysis::{InferredType, NameSpellings};
+use crate::model::file_analysis::{InferredType, NameSpellings, PackSpellings};
+
+/// Python writes and displays nothing of its own: the engine's type tags are
+/// its vocabulary, and it offers no import or annotation quick-fix. Its
+/// members belong to the container that declares them.
+const SPELLINGS: PackSpellings = PackSpellings {
+    variadic_marker: "*",
+    default_sep: "=",
+    members_are_package_bound: true,
+    // a member read and a member call are different syntax here
+    member_reads_are_calls: false,
+    ..PackSpellings::NONE
+};
 
 // Registered by `python_driver` only under `feature = "python"` (and driven by
 // the pack tests); dead weight in a single-language build like `cpp`-only.
@@ -10,6 +22,7 @@ pub fn python_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/python/skeleton.scm"),
         bundled_overlays: &[],
+        spellings: &SPELLINGS,
         lang_id: "python",
         bundled_entry_markers: &[],
         bundled_rail_docs: &[],
