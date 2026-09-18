@@ -878,6 +878,14 @@ pub trait CrossFileLookup {
     fn dependency_tier(&self) -> DependencyTier {
         DependencyTier::Everything
     }
+    /// This lookup's bulk-pass state for `language` — the one answer the
+    /// absence-reporting lanes read, in place of a caller-declared boolean
+    /// that cannot know what any index actually swept. Default `Warming`:
+    /// an index that does not track a bulk pass never licenses a lane to
+    /// call a name absent.
+    fn index_state(&self, _language: &str) -> IndexState {
+        IndexState::Warming
+    }
     /// The workspace root, for resolving an origin's relative `use lib`
     /// entries — Perl resolves those against the process CWD, which for a
     /// language server is the project root.
@@ -1111,6 +1119,26 @@ impl UseMapPins {
     /// A leaf the file explicitly named (a `use` row or its own class).
     fn pinned(&self, leaf: &str) -> bool {
         matches!(self.pins.get(leaf), Some(Some(_)))
+    }
+}
+
+/// Has the bulk pass that makes ABSENCE meaningful for a language finished?
+/// A lane that reports "no such class" is claiming the index would have the
+/// name if it existed; while the index is `Warming` that claim is false and
+/// the answer is indistinguishable from "not indexed yet", so the lane stays
+/// silent. Asked PER LANGUAGE — an index is settled for the files it swept,
+/// and says nothing about a language nothing has swept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexState {
+    /// The bulk pass for this language has not finished (or never ran).
+    Warming,
+    /// Everything this index will hold for the language is in it.
+    Settled,
+}
+
+impl IndexState {
+    pub fn is_settled(self) -> bool {
+        matches!(self, IndexState::Settled)
     }
 }
 
@@ -1371,6 +1399,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     }
     fn dependency_tier(&self) -> DependencyTier {
         self.inner.dependency_tier()
+    }
+    fn index_state(&self, language: &str) -> IndexState {
+        self.inner.index_state(language)
     }
     fn get_cached(&self, module_name: &str) -> Option<std::sync::Arc<CachedModule>> {
         // A search-path origin's winner is PER-ASKER: the same name means
