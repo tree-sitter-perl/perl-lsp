@@ -849,7 +849,7 @@ pub trait CrossFileLookup {
     }
     /// Does this index hold files of the WORKSPACE tier? Only a pack
     /// sub-index does: the hub's cache is `@INC` end to end
-    /// (`is_dependency_path` says so for every path). Default `false`, so a
+    /// (`dependency_tier` claims every path). Default `false`, so a
     /// walk that wants workspace files alone skips the index whole instead
     /// of sweeping every cached file to reject it.
     fn has_workspace_tier(&self) -> bool {
@@ -924,11 +924,6 @@ pub trait CrossFileLookup {
     /// call a name absent.
     fn index_state(&self, _language: &str) -> IndexState {
         IndexState::Warming
-    }
-    /// One path's tier. Convenience over `dependency_tier` for a caller
-    /// asking about a single file; anything walking a set snapshots.
-    fn is_dependency_path(&self, path: &std::path::Path) -> bool {
-        self.dependency_tier().contains(path)
     }
     /// The workspace root, for resolving an origin's relative `use lib`
     /// entries — Perl resolves those against the process CWD, which for a

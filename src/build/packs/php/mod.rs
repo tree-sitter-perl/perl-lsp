@@ -16,6 +16,7 @@ use crate::model::file_analysis::{InferredType, NameSpellings, PackSpellings};
 /// inferred); `native_type_spellings` is what a quick-fix WRITES, which is
 /// a smaller map — an engine tag with no unambiguous php spelling is absent
 /// rather than guessed.
+#[cfg_attr(not(feature = "php"), allow(dead_code))]
 const SPELLINGS: PackSpellings = PackSpellings {
     type_display: &[
         ("String", "string"),
@@ -50,6 +51,9 @@ const SPELLINGS: PackSpellings = PackSpellings {
     catch_all_satisfies_contracts: false,
 };
 
+// Registered by `php_driver` only under `feature = "php"` (and driven by the
+// pack tests); dead weight in a single-language build like `cpp`-only.
+#[cfg_attr(not(feature = "php"), allow(dead_code))]
 pub fn php_pack() -> LangPack {
     LangPack {
         // Base skeleton + the bundled framework overlays (pure query

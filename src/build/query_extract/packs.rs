@@ -6,7 +6,9 @@ use super::*;
 use crate::model::file_analysis::NameSpellings;
 
 // The per-language declarations, re-exported so `query_extract::packs` stays
-// the one path every caller spells.
+// the one path every caller spells. A build with no pack language compiled
+// spells none of them.
+#[allow(unused_imports)]
 pub use crate::build::packs::*;
 
 

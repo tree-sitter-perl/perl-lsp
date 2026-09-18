@@ -695,6 +695,7 @@ impl PackDriver {
 /// Handler on the key token). Same Handler identity as every rail, so
 /// references, rename (string rails only) and the undefined-name lane
 /// come by construction.
+#[cfg(feature = "pack-langs")]
 fn adopt_path_rails(
     fa: &mut FileAnalysis,
     path: &Path,
