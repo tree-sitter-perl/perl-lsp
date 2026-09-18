@@ -3708,7 +3708,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     }
 
     // Every enum carries the members the LANGUAGE gives it (php's
-    // `->value`, `::cases()`). They have no token of their own, so they are
+    // `->value`, `::cases()`). Which containers are enums is the query's
+    // word (`@classattr.enum`), read as the capture suffix it is.
+    //
+    // They have no token of their own, so they are
     // minted here, at the enum's name, as real members — SYNTHESIZED says
     // no source could reference them into existence. A consumer resolves
     // them through the symbol table like any other member; none matches
@@ -3717,7 +3720,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         let enums: Vec<(std::string::String, Point, Point, crate::model::file_analysis::ScopeId)> =
             out.symbols
                 .iter()
-                .filter(|s| s.kind == "class" && s.attributes.iter().any(|a| a == "enum"))
+                .filter(|s| {
+                    s.kind == "class"
+                        && classattr_by_name_span.get(&(s.name_start, s.name_end)).map(String::as_str)
+                            == Some(ENUM_CLASSATTR)
+                })
                 .map(|s| {
                     // The enum's BODY scope is where its declared members
                     // live, so the synthesized ones live there too.
@@ -3846,6 +3853,11 @@ fn slot_key(list_text: &str, slot_offset: usize, arrow: &str) -> Option<String> 
 /// is a `Sequence` refining a bare declared container (`array`/`iterable` —
 /// the spelling that cannot carry an element). The doc witness lands AFTER
 /// the declared one, so latest-wins reduction serves the refinement.
+/// The `@classattr.<flavor>` suffix a container-def carries when the query
+/// calls it an enumeration — the capture's own word, not the attribute
+/// string a consumer would otherwise compare.
+const ENUM_CLASSATTR: &str = "enum";
+
 /// Resolve every class name a declared return mentions through the file's
 /// use map. The shape is the pack's; what its names MEAN is the file's, and
 /// only this side knows the imports — so the walk is here, exhaustive, and
