@@ -140,7 +140,6 @@ pub fn php_pack() -> LangPack {
         // class/trait/interface bodies are brace-delimited, so a member
         // orphaned by a misparse can re-anchor positionally.
         brace_scoped_members: true,
-        imports_bind_names: true,
         bundled_builtin_types: &[include_str!("../../../../queries/php/builtins.txt")],
         enum_members: &[
             EnumMember { name: "value", callable: false },

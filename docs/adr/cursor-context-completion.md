@@ -21,8 +21,9 @@ It is the fallback whenever the cursor is not a member access.
 
 ### The name-keyed pack's identifier universe
 
-A pack whose imports name classes rather than paths (`imports_bind_names`)
-has no include closure to gate on; its identifier universe is every class
+A pack whose imports name classes rather than paths (its document mints
+`@import.binds`, `LanguageRegistry::imports_bind_names`) has no include
+closure to gate on; its identifier universe is every class
 the index declares under the typed prefix (`defs_with_prefix`, all
 providers per leaf — each namespace declaring the leaf is a distinct
 offer). What the file can already spell decides the edit: a leaf pinned to

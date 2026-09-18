@@ -42,7 +42,6 @@ pub fn cmake_pack() -> LangPack {
         import_module: |_, _| None,
         narrow_type: |_| None,
         brace_scoped_members: false,
-        imports_bind_names: false,
         bundled_builtin_types: &[],
         enum_members: &[],
         trigger_chars: &["{", "("],

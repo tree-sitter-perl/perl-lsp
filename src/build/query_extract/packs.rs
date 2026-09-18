@@ -104,10 +104,6 @@ pub struct LangPack {
     /// indentation-scoped (Python) or non-nesting packs.
     /// `docs/adr/config-superposition-declarations.md`.
     pub brace_scoped_members: bool,
-    /// An import row binds a NAME the file then spells (php `use A\B;`),
-    /// as opposed to splicing text (`#include`). Only bound names can be
-    /// unused.
-    pub imports_bind_names: bool,
     /// Bundled builtin-type documents (`builtins.txt`): the class, interface
     /// and attribute names the language itself provides in its global
     /// namespace, one per line. A global reference to one of these is never a
@@ -160,7 +156,6 @@ impl LangPack {
             import_module: _,
             narrow_type: _,
             brace_scoped_members: _,
-            imports_bind_names: _,
             bundled_builtin_types: _,
             enum_members,
             trigger_chars,

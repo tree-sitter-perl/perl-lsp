@@ -1431,7 +1431,6 @@ fn remap_spans(
         class_named_rails: _,
         annot_expr_spans: _,
         preamble_end: _,
-        imports_bind_names: _,
         doc_mentions: _,
         // language-wide facts, no spans to remap.
         function_scoped_vars: _,
@@ -2048,6 +2047,15 @@ impl LanguageRegistry {
     /// `has_include_tokens`.
     pub fn has_preprocessor_macros(id: &str) -> bool {
         Self::query_mints(id, "def.macro")
+    }
+
+    /// Do this language's import rows bind a NAME the file then spells
+    /// (php `use A\B;`, `from x import y`) rather than splicing text
+    /// (`#include`)? The document answers by minting `@import.binds`, so a
+    /// language cannot claim the binding without stating which token carries
+    /// it — only a bound name can go unused.
+    pub fn imports_bind_names(id: &str) -> bool {
+        Self::query_mints(id, "import.binds")
     }
 
     /// The driver that serves files no driver claims — found by asking each

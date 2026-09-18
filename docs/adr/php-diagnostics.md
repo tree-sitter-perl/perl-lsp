@@ -174,11 +174,12 @@ Every lane names the case it cannot see and stays silent there:
   the workspace index has landed and never before — an unindexed
   workspace would flag every type.
 - **An unused import** (`unused-import`, a hint tagged unnecessary) is a
-  row whose bound name — the leaf, or the alias — the file never spells
-  as a class token, a function call, a namespace prefix, or a docblock
-  word (`PackFacts::doc_mentions`, gathered at extraction). Only packs
-  whose imports bind names (`LangPack::imports_bind_names`) run it: an
-  `#include` splices text. Constant imports (no lowercase letter) are
+  row whose bound name the file never spells as a class token, a function
+  call, a namespace prefix, or a docblock word (`PackFacts::doc_mentions`,
+  gathered at extraction). The row states the name it binds — the leaf, or
+  the alias — from the document's `@import.binds` capture, so a row that
+  binds nothing (an `#include` splicing text, a `import a.b` whose binding
+  is the head package) cannot be unused and is silent. Constant imports (no lowercase letter) are
   silent — the walker records no spelling for them. The quick-fix deletes
   the row when it binds only that name.
 - **The throwaway name** (`$_` in `foreach ($a as $k => $_)`, the pack's
@@ -200,7 +201,7 @@ Every lane names the case it cannot see and stays silent there:
   provide every name through a non-contract declaration attributed to
   its own MRO (`members_are_package_bound`: a sibling class in the same
   file provides nothing — Perl's typeglob rule does not transfer). For a
-  name-keyed pack (`imports_bind_names`) the parent is the candidate
+  name-keyed pack (one whose rows bind names) the parent is the candidate
   carrying the namespace the edge wrote (else the composer's use map /
   own namespace); a same-leaf stranger is not it, and a pin nothing
   visible satisfies is silence, not a guess. Silent for an ancestor we cannot see and for a composer that

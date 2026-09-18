@@ -534,6 +534,7 @@ fn cpp_splice_remaps_import_sites() {
         span: sp,
         raw: "tail.h".to_string(),
         binds: Default::default(),
+        bound: None,
     });
     remap_spans(&mut skel, &rewritten, &src, &map);
     let got = skel.import_sites[0].span;
@@ -1228,4 +1229,64 @@ fn assert_undefined_variable_silence(
         })
         .collect();
     assert!(hits.is_empty(), "{lang} must report no undefined variables: {hits:?}");
+}
+
+/// The name an import row binds is what the DOCUMENT captured
+/// (`@import.binds`), not a leaf the lane re-derives: an alias binds the
+/// alias, a group clause binds its own leaf or alias, and every php row
+/// carries one.
+#[cfg(feature = "php")]
+#[test]
+fn php_import_rows_carry_the_name_they_bind() {
+    let fa = php_driver().analyze(
+        "<?php\nnamespace App;\nuse A\\B\\C;\nuse A\\B\\D as E;\nuse F;\nuse G as H;\nuse function A\\slug;\nuse const A\\MAX;\nuse A\\{P, Q as R};\n",
+    );
+    let mut rows: Vec<(&str, Option<&str>)> = fa
+        .pack
+        .include_directives
+        .iter()
+        .map(|r| (r.raw.as_str(), r.bound.as_deref()))
+        .collect();
+    rows.sort();
+    assert_eq!(
+        rows,
+        vec![
+            ("A\\B\\C", Some("C")),
+            ("A\\B\\D", Some("E")),
+            ("A\\MAX", Some("MAX")),
+            ("A\\P", Some("P")),
+            ("A\\Q", Some("R")),
+            ("A\\slug", Some("slug")),
+            ("F", Some("F")),
+            ("G", Some("H")),
+        ],
+        "every php row binds exactly one name, and `as` wins"
+    );
+}
+
+/// `from x import y` binds `y` — so the never-spelled lane reports `y` and
+/// never the module it came from, and stays silent once `y` is spelled.
+/// `import x` binds the head package, which no token of the row spells: the
+/// row states no binding and the lane says nothing about it.
+#[cfg(feature = "python")]
+#[test]
+fn python_from_import_binds_the_name_not_the_module() {
+    let unused = |src: &str| -> Vec<String> {
+        let fa = python_driver().analyze(src);
+        crate::lsp::symbols::pack_symbol_diagnostics(&fa, None)
+            .iter()
+            .filter(|d| {
+                matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(c)) if c == "unused-import")
+            })
+            .map(|d| d.message.clone())
+            .collect()
+    };
+    assert!(unused("from a.b import c\n\nc()\n").is_empty(), "a spelled name is used");
+    let hits = unused("import os\nfrom a.b import c\n\nprint(1)\n");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert!(hits[0].contains("'c'"), "reports the bound name: {hits:?}");
+    assert!(!hits[0].contains("a.b"), "never the module: {hits:?}");
+    let aliased = unused("import os.path as p\n\nprint(1)\n");
+    assert_eq!(aliased.len(), 1, "{aliased:?}");
+    assert!(aliased[0].contains("'p'"), "an alias binds the alias: {aliased:?}");
 }

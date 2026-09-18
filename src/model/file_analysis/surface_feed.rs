@@ -69,7 +69,6 @@ impl FileAnalysis {
                     import_rows: _import_rows, // editing aid, not cross-file-visible
                     class_named_rails: _class_named_rails, // overlay-wide convention
                     preamble_end: _preamble_end, // an editing aid
-                    imports_bind_names: _imports_bind_names, // pack-wide convention
                     doc_mentions: _doc_mentions, // a file-local lint fact
                     specializes: _specializes,       // family edges; the file re-registers on its own rebuild even when Unchanged
                     use_aliases: _use_aliases,             // this file's OWN spelling table; a consumer never sees an alias

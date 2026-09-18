@@ -45,7 +45,6 @@ pub fn python_pack() -> LangPack {
         // A guard's type token is a class name verbatim (`isinstance(x, Foo)`).
         narrow_type: |ty| Some(InferredType::ClassName(ty.to_string())),
         brace_scoped_members: false,
-        imports_bind_names: false,
         bundled_builtin_types: &[],
         enum_members: &[],
         trigger_chars: &["."],

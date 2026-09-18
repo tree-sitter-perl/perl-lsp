@@ -315,20 +315,32 @@
 ; What a row BINDS rides its capture suffix: `use function` binds a
 ; callable, `use const` a constant, an unsuffixed row a type. The keyword
 ; is an anonymous token, so the unsuffixed arms exclude it by the clause's
-; own text rather than letting both arms mint the same row.
+; own text rather than letting both arms mint the same row. The leading
+; anchor pins the un-fielded `(name)` to the clause's FIRST child: without
+; it the alias node matches that alternative too and `use G as H` mints a
+; second row for `H`.
+; `@import.binds` is the NAME the row brings into the file — the alias when
+; the clause writes one, the leaf otherwise. The two spellings ride one
+; capture and the later byte wins, so a reader never asks which arm fired.
 (namespace_use_declaration
-  (namespace_use_clause "function" (qualified_name) @import.name.function)) @import
+  (namespace_use_clause "function" (qualified_name (name) @import.binds) @import.name.function
+    alias: (name)? @import.binds)) @import
 (namespace_use_declaration
-  (namespace_use_clause "function" (name) @import.name.function)) @import
+  (namespace_use_clause "function" . (name) @import.name.function @import.binds
+    alias: (name)? @import.binds)) @import
 (namespace_use_declaration
-  (namespace_use_clause "const" (qualified_name) @import.name.const)) @import
+  (namespace_use_clause "const" (qualified_name (name) @import.binds) @import.name.const
+    alias: (name)? @import.binds)) @import
 (namespace_use_declaration
-  (namespace_use_clause "const" (name) @import.name.const)) @import
+  (namespace_use_clause "const" . (name) @import.name.const @import.binds
+    alias: (name)? @import.binds)) @import
 (namespace_use_declaration
-  (namespace_use_clause (qualified_name) @import.name) @_plain_row
+  (namespace_use_clause (qualified_name (name) @import.binds) @import.name
+    alias: (name)? @import.binds) @_plain_row
   (#not-match? @_plain_row "^(function|const)[ \t\r\n]")) @import
 (namespace_use_declaration
-  (namespace_use_clause (name) @import.name) @_plain_row
+  (namespace_use_clause . (name) @import.name @import.binds
+    alias: (name)? @import.binds) @_plain_row
   (#not-match? @_plain_row "^(function|const)[ \t\r\n]")) @import
 ; the imported leaf is a live class reference — cross-file rename
 ; rewrites the use line too.
@@ -381,20 +393,20 @@
   (namespace_name) @use.prefix
   body: (namespace_use_group
     (namespace_use_clause "function"
-      . (name) @use.leaf
-      alias: (name)? @use.alias))) @import.function
+      . (name) @use.leaf @import.binds
+      alias: (name)? @use.alias @import.binds))) @import.function
 (namespace_use_declaration
   (namespace_name) @use.prefix
   body: (namespace_use_group
     (namespace_use_clause "const"
-      . (name) @use.leaf
-      alias: (name)? @use.alias))) @import.const
+      . (name) @use.leaf @import.binds
+      alias: (name)? @use.alias @import.binds))) @import.const
 (namespace_use_declaration
   (namespace_name) @use.prefix
   body: (namespace_use_group
     (namespace_use_clause
-      . (name) @use.leaf
-      alias: (name)? @use.alias) @_plain_group_clause)
+      . (name) @use.leaf @import.binds
+      alias: (name)? @use.alias @import.binds) @_plain_group_clause)
   (#not-match? @_plain_group_clause "^(function|const)[ \t\r\n]")) @import
 
 ; a member on the LEFT of an assignment: php declares a property by

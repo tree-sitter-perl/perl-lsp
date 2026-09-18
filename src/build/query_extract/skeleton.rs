@@ -189,8 +189,6 @@ pub struct SkeletonAnalysis {
     /// The last row of the file preamble (open tag, `declare` rows): an
     /// inserted import goes after it when no import or namespace anchors.
     pub preamble_end: Option<usize>,
-    /// `imports_bind_names`, baked.
-    pub imports_bind_names: bool,
     /// Imported names a doc comment mentions (`@var Foo`, `@throws Foo`,
     /// `@see Foo`): a use the tree never shows.
     pub doc_mentions: Vec<String>,
@@ -1688,7 +1686,6 @@ impl SkeletonAnalysis {
             import_rows: std::mem::take(&mut self.import_rows),
             spellings: self.spellings,
             preamble_end: self.preamble_end,
-            imports_bind_names: self.imports_bind_names,
             doc_mentions: std::mem::take(&mut self.doc_mentions),
             names: std::mem::take(&mut self.names),
             // Specialization family edges (spec → primary). NOT an inheritance

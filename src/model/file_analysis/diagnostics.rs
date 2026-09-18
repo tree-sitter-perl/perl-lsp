@@ -143,6 +143,10 @@ pub struct LaneFacts<'a> {
     /// The type names the runtime provides, which the workspace carries no
     /// declaration for.
     pub builtin_types: &'a [String],
+    /// Do the language's import rows bind a name the file then spells? The
+    /// document says so by minting `@import.binds`; a text-splicing include
+    /// binds nothing and can never be unused.
+    pub imports_bind_names: bool,
 }
 
 impl LaneFacts<'_> {

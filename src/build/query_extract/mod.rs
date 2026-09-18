@@ -564,6 +564,7 @@ const OVERLAY_ONLY_CAPTURES: &[&str] = &[
     "key.elem",
     "expr.annot",
     "scope.sub.implicit_receiver",
+    "import.binds",
 ];
 
 /// The captures in `declared` the extractor does NOT serve — `--plugin-check`'s
