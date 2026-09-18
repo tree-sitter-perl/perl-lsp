@@ -828,6 +828,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
     // cutoff sees them, exactly like Perl's `foreach` var.
     let mut flow_rebinds: Vec<(String, ScopeId, Point)> = Vec::new();
+    // `@branch.expr` / `@branch.arm` (match / ternary) and `@subscript.*`,
+    // joined per match after the loop.
+    let mut branch_expr_by_match: HashMap<usize, Span> = HashMap::new();
+    let mut branch_arm_by_match: HashMap<usize, Span> = HashMap::new();
     let mut annots: HashMap<usize, String> = HashMap::new();
     // keyed-shape collection: ctor + keys grouped per @expr.shape span
     let mut shape_spans: Vec<(usize, usize, Span)> = Vec::new();
@@ -1267,6 +1271,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 out.return_sites
                     .push((cur_scope, Span { start: e.start, end: e.end }));
             }
+            "branch.expr" => {
+                branch_expr_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+            }
+            "branch.arm" => {
+                branch_arm_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+            }
             "flow.target" => {
                 flow_targets.insert(
                     e.match_id,
@@ -1619,6 +1629,32 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // Match-id order (deterministic) — two captures targeting the same
     // `Variable{name, scope}` slot would otherwise land witnesses in
     // HashMap-iteration order, flipping the latest-wins winner per process.
+    // Branch arms (match / ternary): the expression's value is its arms'
+    // AGREEMENT (`BranchArmFold`), never a literal found inside it.
+    {
+        let mut seen_expr: std::collections::HashSet<(Point, Point)> = Default::default();
+        for (mid, arm) in &branch_arm_by_match {
+            let Some(expr) = branch_expr_by_match.get(mid) else { continue };
+            if seen_expr.insert((expr.start, expr.end)) {
+                out.witnesses.push(crate::model::witnesses::Witness {
+                    attachment: crate::model::witnesses::WitnessAttachment::Expr(*expr),
+                    source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+                    payload: crate::model::witnesses::WitnessPayload::Edge(
+                        crate::model::witnesses::WitnessAttachment::BranchArm(*expr),
+                    ),
+                    span: *expr,
+                });
+            }
+            out.witnesses.push(crate::model::witnesses::Witness {
+                attachment: crate::model::witnesses::WitnessAttachment::BranchArm(*expr),
+                source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+                payload: crate::model::witnesses::WitnessPayload::Edge(
+                    crate::model::witnesses::WitnessAttachment::Expr(*arm),
+                ),
+                span: *arm,
+            });
+        }
+    }
     let mut flow_mids: Vec<&usize> = flow_targets.keys().collect();
     flow_mids.sort_unstable();
     // A class/struct DATA MEMBER is visible throughout its class body
