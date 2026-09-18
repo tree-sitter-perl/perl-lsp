@@ -9,6 +9,8 @@
 
 pub mod perl;
 pub mod python;
+pub mod r;
 
 pub use perl::perl_pack;
 pub use python::python_pack;
+pub use r::r_pack;
