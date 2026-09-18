@@ -1254,7 +1254,7 @@ pub fn pack_symbol_diagnostics(
             // an alias (`$h = &$opts['h']`) is written to reach its storage
             if sym.flags.contains(SymbolFlags::THROWAWAY)
                 || pack.param_regions.iter().any(|p| p.contains(&sym.span))
-                || sym.attributes.iter().any(|a| a == "alias")
+                || sym.flags.contains(SymbolFlags::ALIAS)
             {
                 continue;
             }

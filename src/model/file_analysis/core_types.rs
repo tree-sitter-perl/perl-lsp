@@ -404,6 +404,10 @@ bitflags::bitflags! {
         /// candidate, because nothing in the source could reference it into
         /// existence.
         const SYNTHESIZED = 1 << 25;
+        /// A binding written to REACH another slot's storage (php `$h =
+        /// &$opts['h']`): the write IS the point of it, so the liveness lanes
+        /// never ask whether anything read it.
+        const ALIAS = 1 << 26;
     }
 }
 
@@ -462,6 +466,7 @@ impl TryFrom<&str> for SymbolFlags {
             "contract" => SymbolFlags::CONTRACT,
             "documented" => SymbolFlags::DOC_DECLARED,
             "synthesized" => SymbolFlags::SYNTHESIZED,
+            "alias" => SymbolFlags::ALIAS,
             other => return Err(UnknownAttribute(other.to_string())),
         })
     }
