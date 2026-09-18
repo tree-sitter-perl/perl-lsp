@@ -51,9 +51,8 @@ pub fn python_pack() -> LangPack {
         shape_ctor: |_| false,
         import_call: |_, _| None,
         cmd_effects: |_| vec![],
-        // `isinstance(x, Foo)` narrows x to Foo inside the guard.
-        narrow_guard: |guard, ty| (guard == Some("isinstance")).then(|| InferredType::ClassName(ty.to_string())),
-        narrow_assertions: &[],
+        // A guard's type token is a class name verbatim (`isinstance(x, Foo)`).
+        narrow_type: |ty| Some(InferredType::ClassName(ty.to_string())),
         rebind_method: |_| false,
         implicit_this_members: false,
         include_path_tokens: false,

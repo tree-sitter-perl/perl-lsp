@@ -842,9 +842,10 @@
 (parameter_list) @param.region
 
 ; `if (dynamic_cast<Derived*>(b)) { b->... }` narrows b to Derived INSIDE the
-; block — the cpp analog of python `isinstance`. The pack's narrow_guard maps
-; `dynamic_cast` + the template type to the refinement; core scopes it to
-; @scope and the edge-driven cutoff ends it at any rebind of b.
+; block — the cpp analog of python `isinstance`. The guard name is the
+; pattern's own `#eq?`, so only a cast reaches the extractor; @narrow.type
+; names the refinement, core scopes it to @scope and the edge-driven cutoff
+; ends it at any rebind of b.
 (if_statement
   condition: (condition_clause
     value: (call_expression
@@ -853,18 +854,19 @@
         arguments: (template_argument_list
           (type_descriptor type: (type_identifier) @narrow.type)))
       arguments: (argument_list (identifier) @narrow.var)))
-  consequence: (compound_statement) @narrow.block)
+  consequence: (compound_statement) @narrow.block
+  (#eq? @narrow.guard "dynamic_cast"))
 
 ; `std::optional<T>` engaged-state narrowing. Guard-testing an optional as
 ; engaged proves it HOLDS a T inside the block, so `opt->m` / `*opt` resolve on
-; T there. No type token rides these guards (unlike dynamic_cast) — the pack's
-; narrow_guard reads the subject's DECLARED type (std::optional<T>) and peels T,
-; so the refinement keys on the type being optional, not on the guard name (a
-; bare `if (ptr)` over a non-optional declares no inner type → no narrowing).
-; Two clean engagement shapes: bare truthiness `if (opt)` (no @narrow.guard),
-; and `if (opt.has_value())` (guard token gates the method — an arbitrary
-; `opt.foo()` won't narrow). `!= std::nullopt` needs both operator + operand
-; checks the one-token hook can't express, so it's left out.
+; T there. No @narrow.type rides these shapes (unlike dynamic_cast), so the
+; subject's DECLARED type is what gets peeled — the refinement keys on the type
+; being optional, not on the guard (a bare `if (ptr)` over a non-optional
+; declares no inner type → no narrowing). Two clean engagement shapes: bare
+; truthiness `if (opt)`, and `if (opt.has_value())` whose `#eq?` gates the
+; method so an arbitrary `opt.foo()` never reaches the extractor.
+; `!= std::nullopt` needs both operator + operand checks the one-token hook
+; can't express, so it's left out.
 (if_statement
   condition: (condition_clause value: (identifier) @narrow.var)
   consequence: (compound_statement) @narrow.block)
@@ -874,7 +876,8 @@
       function: (field_expression
         argument: (identifier) @narrow.var
         field: (field_identifier) @narrow.guard)))
-  consequence: (compound_statement) @narrow.block)
+  consequence: (compound_statement) @narrow.block
+  (#eq? @narrow.guard "has_value"))
 
 ; ---- branch arms are lexical scopes (conditional-move soundness) ----
 ; if/else arm bodies each mint a @scope, so a `std::move` in one arm bounds its

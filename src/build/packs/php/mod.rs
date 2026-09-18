@@ -138,16 +138,12 @@ pub fn php_pack() -> LangPack {
         shape_ctor: |callee| matches!(callee, "[" | "array"),
         import_call: |_, _| None,
         cmd_effects: |_| vec![],
-        // `$x instanceof User` refines $x to User inside the guard.
-        narrow_guard: |guard, ty| {
-            // The class token leafs like every other class spelling
-            // (`Op\Install` → `Install`; classes are filed by leaf).
-            (guard == Some("instanceof"))
-                .then(|| php_annot_type(ty))
-                .flatten()
-                .filter(|t| matches!(t, InferredType::ClassName(_)))
+        // `$x instanceof User` refines $x to User: the class token leafs like
+        // every other class spelling (`Op\Install` → `Install`; classes are
+        // filed by leaf).
+        narrow_type: |ty| {
+            php_annot_type(ty).filter(|t| matches!(t, InferredType::ClassName(_)))
         },
-        narrow_assertions: &["assert"],
         rebind_method: |_| false,
         // `$this->` is mandatory — no receiver elision (unlike C++).
         implicit_this_members: false,

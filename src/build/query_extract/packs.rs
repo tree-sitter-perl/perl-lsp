@@ -135,21 +135,13 @@ pub struct LangPack {
     /// its positional arguments. The @cmd/@cmd.arg captures deliver
     /// (name, ordered args); this predicate classifies.
     pub cmd_effects: fn(cmd: &str) -> Vec<CmdEffect>,
-    /// Guard narrowing: given the guard token (`@narrow.guard` — a
-    /// function/operator like `isinstance`, `has_value`; `None` for the
-    /// token-less `if (opt)` truthiness form) and the type text, the
-    /// refined type that holds inside the guarded block, or `None` if this
-    /// guard doesn't narrow. The type text is the `@narrow.type` capture
-    /// when the guard names one (`dynamic_cast<Derived*>`), else the
-    /// subject's DECLARED type (the optional-engagement form reads
-    /// `std::optional<T>` off the declaration and peels `T`). The pack owns
-    /// "which guard means which refinement" (rule #10); core just scopes
-    /// the witness to the block.
-    pub narrow_guard: fn(guard: Option<&str>, type_text: &str) -> Option<InferredType>,
-    /// Callees that ASSERT their argument (php `assert`): a guard passed to
-    /// one narrows the rest of the enclosing scope. The `@narrow.assert`
-    /// capture fires for any call around a guard; core honours only these.
-    pub narrow_assertions: &'static [&'static str],
+    /// The refinement a narrowed subject's type TEXT denotes: the
+    /// `@narrow.type` capture where the guard names one
+    /// (`dynamic_cast<Derived*>`), else the subject's DECLARED type, which
+    /// an engagement guard peels (`std::optional<T>` → `T`). Text in,
+    /// structure out — which guards narrow is the document's `#eq?`.
+    /// `None` = this spelling refines nothing.
+    pub narrow_type: fn(type_text: &str) -> Option<InferredType>,
     /// Does calling `method` on a variable REBIND it — putting a moved-from
     /// object back into a known state (`clear`/`reset`/`assign`/…)? Used to end
     /// a moved-from region (and any narrowing) at the reset call, so a use after
@@ -368,8 +360,7 @@ impl LangPack {
             shape_ctor: _,
             import_call: _,
             cmd_effects: _,
-            narrow_guard: _,
-            narrow_assertions,
+            narrow_type: _,
             rebind_method: _,
             implicit_this_members: _,
             include_path_tokens: _,
@@ -418,7 +409,6 @@ impl LangPack {
         list(&mut out, "class_token_kinds", class_token_kinds);
         list(&mut out, "constructor_names", constructor_names);
         list(&mut out, "doc_uses_method_tags", doc_uses_method_tags);
-        list(&mut out, "narrow_assertions", narrow_assertions);
         list(&mut out, "entrypoint_symbols", entrypoint_symbols);
         list(&mut out, "runtime_invoked_methods", runtime_invoked_methods);
         list(&mut out, "implicit_variables", implicit_variables);

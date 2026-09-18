@@ -1676,7 +1676,6 @@ fn pack_string_tables_are_ratcheted() {
         ("php", "dynamic_var_markers", 5, "B1 — `@call.dynamic_vars`"),
         ("php", "enum_members", 3, "B3 — synthesised on every `@def.enum`, producer-only data"),
         ("php", "implicit_variables", 13, "B1 — `@ref.var.implicit` mints the binding"),
-        ("php", "narrow_assertions", 1, "B2 — `(#eq? @narrow.assert \"assert\")`"),
         ("php", "receiver_names", 1, "B1 — `@param.receiver` / `@receiver.this`"),
         ("php", "runtime_invoked_methods", 31, "B3 — an entry document (`php.entry.json`)"),
         ("php", "throwaway_names", 1, "B1 — `@def.var.throwaway` → `SymbolFlags::THROWAWAY`"),

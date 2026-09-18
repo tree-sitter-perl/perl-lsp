@@ -48,47 +48,7 @@ pub fn cpp_pack() -> LangPack {
             "unionfield" => Some("(union)".to_string()),
             _ => None,
         },
-        // C++ declared types ARE the witness source. Primitives → the
-        // value lattice; `auto`/`void` defer (None → edge carries);
-        // anything else identifier-shaped is a class instance.
-        annot_type: |text| {
-            use InferredType::*;
-            match text.trim() {
-                "int" | "long" | "short" | "unsigned" | "size_t" | "int32_t" | "int64_t"
-                | "uint32_t" | "uint64_t" | "double" | "float" | "char" => Some(Numeric),
-                "bool" => Some(Bool),
-                "std::string" | "string" | "std::string_view" => Some(String),
-                "auto" | "void" => None,
-                t => {
-                    // Elaborated type specifier `struct op` / `union u` /
-                    // `enum e` — the dominant C spelling (`struct op* o`).
-                    // The tag names the type; strip the keyword so it resolves
-                    // the same as the bare/typedef'd name.
-                    let tag = t
-                        .strip_prefix("struct ")
-                        .or_else(|| t.strip_prefix("union "))
-                        .or_else(|| t.strip_prefix("enum "))
-                        .unwrap_or(t)
-                        .trim();
-                    // A template spelling (`Box<Widget>`, `vector<int>`)
-                    // peels into the Instance flavor: dispatch keys the
-                    // BASE so members resolve through the plain-class
-                    // machinery; the args ride along for substitution.
-                    if let Some(p) =
-                        crate::model::file_analysis::ParametricType::instance_from_spelling(tag)
-                    {
-                        return Some(Parametric(p));
-                    }
-                    let typeish = !tag.is_empty()
-                        && !tag.contains(' ')
-                        && tag.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_');
-                    // Strip the namespace qualifier — classes/members are
-                    // keyed by the unqualified name (@context.class), so
-                    // `geo::Circle` must type as `Circle` to resolve.
-                    typeish.then(|| ClassName(tag.rsplit("::").next().unwrap_or(tag).to_string()))
-                }
-            }
-        },
+        annot_type,
         rettype_receiver: |_| false,
         field_registry_edges: false,
         super_receiver: |_| false,
@@ -108,22 +68,19 @@ pub fn cpp_pack() -> LangPack {
         shape_ctor: |_| false,
         import_call: |_, _| None,
         cmd_effects: |_| vec![],
-        // Two narrowings, both keyed on what the value IS, not a name allowlist:
-        //   `if (dynamic_cast<Derived*>(b))` — b is a Derived inside (ty is the
-        //     template arg; pointer-ness dropped for navigation, like locals).
-        //   `if (opt)` / `if (opt.has_value())` — an engaged std::optional<T>
-        //     holds a T inside (ty is opt's DECLARED type; peel the inner T).
-        //     The bare form carries no guard token; `.has_value()` gates the
-        //     method so `opt.value_or(x)` (not an engagement test) won't narrow.
-        narrow_guard: |guard, ty| {
-            let class = match guard {
-                Some("dynamic_cast") => ty.to_string(),
-                None | Some("has_value") => optional_inner(ty)?,
-                _ => return None,
-            };
-            Some(InferredType::ClassName(class))
+        // An engaged `std::optional<T>` holds a T, so an optional spelling
+        // refines to its inner class; anything else denotes the class it
+        // spells (`dynamic_cast<Derived*>` → Derived), which is `annot_type`'s
+        // job — a primitive or template spelling refines nothing.
+        narrow_type: |ty| {
+            if let Some(inner) = optional_inner(ty) {
+                return Some(InferredType::ClassName(inner));
+            }
+            match annot_type(ty) {
+                Some(InferredType::ClassName(c)) => Some(InferredType::ClassName(c)),
+                _ => None,
+            }
         },
-        narrow_assertions: &[],
         // Rebinding methods: a moved-from object is put back into a known state
         // by these std container/optional/smart-ptr resets, so a use after one
         // is NOT a use-after-move. (An ordinary `x.use()` is not here, so the
@@ -197,6 +154,47 @@ pub fn cpp_pack() -> LangPack {
     }
 }
 
+
+/// C++ declared types ARE the witness source. Primitives → the value lattice;
+/// `auto`/`void` defer (None → the edge carries); anything else
+/// identifier-shaped is a class instance. The narrowing tier reads it too: a
+/// guard's type text denotes whatever this says it denotes.
+fn annot_type(text: &str) -> Option<InferredType> {
+    use InferredType::*;
+    match text.trim() {
+        "int" | "long" | "short" | "unsigned" | "size_t" | "int32_t" | "int64_t"
+        | "uint32_t" | "uint64_t" | "double" | "float" | "char" => Some(Numeric),
+        "bool" => Some(Bool),
+        "std::string" | "string" | "std::string_view" => Some(String),
+        "auto" | "void" => None,
+        t => {
+            // Elaborated type specifier `struct op` / `union u` / `enum e` —
+            // the dominant C spelling (`struct op* o`). The tag names the type;
+            // strip the keyword so it resolves the same as the bare/typedef'd
+            // name.
+            let tag = t
+                .strip_prefix("struct ")
+                .or_else(|| t.strip_prefix("union "))
+                .or_else(|| t.strip_prefix("enum "))
+                .unwrap_or(t)
+                .trim();
+            // A template spelling (`Box<Widget>`, `vector<int>`) peels into the
+            // Instance flavor: dispatch keys the BASE so members resolve through
+            // the plain-class machinery; the args ride along for substitution.
+            if let Some(p) = crate::model::file_analysis::ParametricType::instance_from_spelling(tag)
+            {
+                return Some(Parametric(p));
+            }
+            let typeish = !tag.is_empty()
+                && !tag.contains(' ')
+                && tag.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_');
+            // Strip the namespace qualifier — classes/members are keyed by the
+            // unqualified name (@context.class), so `geo::Circle` must type as
+            // `Circle` to resolve.
+            typeish.then(|| ClassName(tag.rsplit("::").next().unwrap_or(tag).to_string()))
+        }
+    }
+}
 
 /// Peel `T` out of a `std::optional<T>` declared-type text, unqualified
 /// (matching how `annot_type` keys classes by their last `::` segment). `None`
