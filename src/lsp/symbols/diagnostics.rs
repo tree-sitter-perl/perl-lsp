@@ -1171,22 +1171,11 @@ pub fn pack_symbol_diagnostics(
     // (`@ref.var.implicit`), and a pack whose document binds nothing
     // produces no unbound reads to report.
     {
-        // occurrences per (callable scope, name) — a name read MORE than
-        // once is presumed bound by a call the callee lane below cannot
-        // resolve; the single stray read is the typo this lane names.
         let callable_of = |scope: crate::model::file_analysis::ScopeId| {
             analysis.scope_chain(scope).into_iter().find(|&sc| {
                 matches!(analysis.scope(sc).kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. })
             })
         };
-        let mut seen: HashMap<(u32, String), usize> = HashMap::new();
-        for r in analysis.refs() {
-            if matches!(r.kind, RefKind::Variable) {
-                if let Some(sc) = callable_of(r.scope) {
-                    *seen.entry((sc.0, r.target_name.clone())).or_default() += 1;
-                }
-            }
-        }
         // A bare variable written as a call argument is bound by the call
         // when the callee declares that position by reference (`&$out`):
         // the callee's aliasing edge IS the binding, chased from the
@@ -1205,9 +1194,6 @@ pub fn pack_symbol_diagnostics(
                 continue;
             }
             let Some(sc) = callable_of(r.scope) else { continue };
-            if seen.get(&(sc.0, r.target_name.clone())).copied().unwrap_or(0) != 1 {
-                continue;
-            }
             // A binding, not a type: a usage observation (`$x + 1` says
             // numeric) types the read without anything ever writing it.
             if analysis.variable_is_bound_via_bag(&r.target_name, r.span.start, idx) {

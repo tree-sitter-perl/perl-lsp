@@ -5886,3 +5886,29 @@ class Base {
         "without the catch-all the member is undefined: {loud:?}"
     );
 }
+
+#[test]
+fn php_a_typo_read_twice_is_still_undefined() {
+    // The lane's silence rule is the callee edge, not a repetition count: a
+    // name nothing binds is a typo however many times it is written, and
+    // counting occurrences masked exactly the case the lane exists for.
+    let src = "\
+<?php
+function f(): int {
+    $result = 1;
+    return $reuslt + $reuslt;
+}
+";
+    let (fa, _) = php_fa(src);
+    let diags = crate::lsp::symbols::pack_symbol_diagnostics(&fa, None);
+    let undefined: Vec<_> = diags
+        .iter()
+        .filter(|d| matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(c))
+            if c == "undefined-variable"))
+        .collect();
+    assert_eq!(undefined.len(), 2, "both reads of the typo report: {diags:?}");
+    assert!(
+        undefined.iter().all(|d| d.message.contains("$reuslt")),
+        "and name the typo, not the binding: {undefined:?}"
+    );
+}
