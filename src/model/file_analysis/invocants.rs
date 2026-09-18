@@ -1127,10 +1127,7 @@ impl FileAnalysis {
             if self.class_has_unresolved_ancestor(pkg, module_index) {
                 continue;
             }
-            if self
-                .resolve_method_in_ancestors(pkg, "AUTOLOAD", module_index)
-                .is_some()
-            {
+            if self.class_answers_any_member(pkg, module_index) {
                 continue;
             }
 

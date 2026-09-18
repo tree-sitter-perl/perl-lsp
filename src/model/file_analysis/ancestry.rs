@@ -926,13 +926,56 @@ impl FileAnalysis {
 
     /// The declaration facts THIS file states about `class` — the container
     /// flavors (interface / trait / enum) a resolution lane asks before it
-    /// calls a member undefined. Empty when the file declares no such class.
+    /// calls a member undefined, and whether the class answers any member at
+    /// all. A Perl package is the same container under another kind, so both
+    /// answer. Empty when the file declares no such container.
     pub fn class_flags(&self, class: &str) -> SymbolFlags {
         self.symbols()
             .iter()
-            .find(|s| matches!(s.kind, SymKind::Class) && s.name == class)
+            .find(|s| matches!(s.kind, SymKind::Class | SymKind::Package) && s.name == class)
             .map(|s| s.flags)
             .unwrap_or_default()
+    }
+
+    /// Does anything in `class`'s MRO answer ANY member name at runtime — a
+    /// php `__call`, a Perl `AUTOLOAD`? The declaration carries
+    /// `DYNAMIC_MEMBERS`, so the walk asks each container on the chain for
+    /// the fact rather than resolving a per-language name off a list. Every
+    /// lane that would report a member undefined is silent when this holds:
+    /// the static member set is not the class's surface.
+    pub fn class_answers_any_member(
+        &self,
+        class: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> bool {
+        use crate::model::graph::{EdgeKindMask, GraphView, Node, WalkControl};
+        let answers = |c: &str| {
+            if self.class_flags(c).contains(SymbolFlags::DYNAMIC_MEMBERS) {
+                return true;
+            }
+            let Some(idx) = module_index else { return false };
+            idx.visible_def_candidates(c).iter().any(|cached| {
+                idx.symbols_present(cached)
+                    .class_flags(c)
+                    .contains(SymbolFlags::DYNAMIC_MEMBERS)
+            })
+        };
+        // `walk` never visits the origin, so the class itself is asked here.
+        if answers(class) {
+            return true;
+        }
+        let graph = GraphView::new(self, module_index);
+        let mut hit = false;
+        graph.walk(Node::Class(class.to_string()), EdgeKindMask::INHERITS, &mut |n| {
+            match n {
+                Node::Class(c) if answers(c) => {
+                    hit = true;
+                    WalkControl::Stop
+                }
+                _ => WalkControl::Continue,
+            }
+        });
+        hit
     }
 
     /// `$self->SUPER::m` dispatch: resolve `method_name` over `enclosing`'s

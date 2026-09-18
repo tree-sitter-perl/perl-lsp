@@ -1458,7 +1458,7 @@ fn language_spellings_have_one_home() {
         ("build/query_extract/extract.rs", 19, "the generic extractor minting the canonical tokens a pack's captures declare"),
         ("build/query_extract/skeleton.rs", 15, "skeleton→model conversion: the kind/attribute vocabulary becomes flags here"),
         ("model/conventions.rs", 3, "Perl's own attribute spellings (`field_attribute_flag`) — Perl's home"),
-        ("model/file_analysis/core_types.rs", 24, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`) — the one table every language maps its spellings onto"),
+        ("model/file_analysis/core_types.rs", 25, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`) — the one table every language maps its spellings onto"),
         ("model/file_analysis/completion.rs", 1, "a `DeclKind` rendered as completion detail text, not an attribute read"),
         ("model/file_analysis/outline.rs", 2, "outline detail text for a union container and a param decl kind"),
         ("model/witnesses/registry.rs", 1, "the `param` owner-keyed fallback key — a witness attachment name"),

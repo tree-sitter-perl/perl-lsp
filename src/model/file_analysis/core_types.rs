@@ -408,6 +408,11 @@ bitflags::bitflags! {
         /// &$opts['h']`): the write IS the point of it, so the liveness lanes
         /// never ask whether anything read it.
         const ALIAS = 1 << 26;
+        /// This class answers ANY member name at runtime — a php `__call`,
+        /// a Perl `AUTOLOAD` — so its declared member set is not its
+        /// surface. Minted on the CLASS by whoever sees the catch-all
+        /// declaration; the lanes ask `class_answers_any_member`.
+        const DYNAMIC_MEMBERS = 1 << 27;
     }
 }
 
@@ -467,6 +472,7 @@ impl TryFrom<&str> for SymbolFlags {
             "documented" => SymbolFlags::DOC_DECLARED,
             "synthesized" => SymbolFlags::SYNTHESIZED,
             "alias" => SymbolFlags::ALIAS,
+            "dynamic_members" => SymbolFlags::DYNAMIC_MEMBERS,
             other => return Err(UnknownAttribute(other.to_string())),
         })
     }

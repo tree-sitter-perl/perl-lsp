@@ -4,6 +4,10 @@
 use crate::model::file_analysis::SymbolFlags;
 use super::*;
 
+/// Perl's catch-all method name. The ONE site that spells it: the mint
+/// turns it into a fact on the package, and every lane reads the fact.
+const AUTOLOAD_SUB: &str = "AUTOLOAD";
+
 impl<'a> Builder<'a> {
     // ---- Main visitor ----
 
@@ -477,6 +481,21 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Stamp `DYNAMIC_MEMBERS` on the package the walk is inside. The
+    /// package statement precedes its subs, so the symbol is already there;
+    /// a file that declares no package has no container to carry the fact.
+    fn mark_package_answers_any_member(&mut self) {
+        let Some(pkg) = self.current_package.clone() else { return };
+        if let Some(sym) = self
+            .symbols
+            .iter_mut()
+            .rev()
+            .find(|s| matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == pkg)
+        {
+            sym.flags |= crate::model::file_analysis::SymbolFlags::DYNAMIC_MEMBERS;
+        }
+    }
+
     /// Walk a `{ ... }` block's children, reverting package context at block
     /// close. `package Foo;` is file-scoped in Perl, but a `{ }` block is a
     /// hard boundary: `{ package Inner; }` must not leak Inner to the
@@ -780,6 +799,14 @@ impl<'a> Builder<'a> {
             node_to_span(name_node),
             SymbolDetail::Sub { params: params.clone(), is_method, doc, opaque_return: false, is_constant: false, lexical, declared_return: None },
         );
+
+        // `AUTOLOAD` is Perl's catch-all: the package that declares one
+        // answers ANY method name at runtime, so its `sub` set is not its
+        // surface. The fact belongs to the PACKAGE — one flag, read through
+        // the MRO by the same model query the packs' `__call` feeds.
+        if name == AUTOLOAD_SUB {
+            self.mark_package_answers_any_member();
+        }
 
         // Exporter::Extensible method-attribute export form: `sub foo :Export`.
         // The sub's name is the export; recognizing the attribute is builder

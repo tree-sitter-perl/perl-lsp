@@ -5814,3 +5814,75 @@ class Runner {
     assert_eq!(arg("$m"), Some("preg_match"));
     assert_eq!(arg("$typo"), Some("plain"));
 }
+
+#[test]
+fn php_a_catch_all_in_another_file_silences_the_member_lane() {
+    // The catch-all is a fact about the CLASS that declares it, and it
+    // reaches a child through the MRO like any other inherited fact — so an
+    // ancestor in a file this one only inherits from is enough to keep the
+    // undefined-member lane quiet.
+    let base = "\
+<?php
+namespace App;
+class Base {
+    public function __call($name, $args) { return null; }
+}
+";
+    let (base_fa, _) = php_fa(base);
+    assert!(
+        base_fa
+            .class_flags("App\\Base")
+            .contains(crate::model::file_analysis::SymbolFlags::DYNAMIC_MEMBERS),
+        "the declaring class carries the fact: {:?}",
+        base_fa.symbols().iter().map(|s| (&s.name, s.flags)).collect::<Vec<_>>()
+    );
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.register_symbols(
+        std::path::PathBuf::from("/fake/php/Base.php"),
+        std::sync::Arc::new(base_fa),
+    );
+    idx.mark_language_indexed("php");
+
+    let child = "\
+<?php
+namespace App;
+class Child extends Base {
+    public function run() { return $this->whatever(); }
+}
+";
+    let (child_fa, _) = php_fa(child);
+    assert!(
+        child_fa.class_answers_any_member("App\\Child", Some(&idx)),
+        "the MRO walk finds the ancestor's catch-all"
+    );
+    let diags = crate::lsp::symbols::pack_symbol_diagnostics(&child_fa, Some(&idx));
+    assert!(
+        !diags.iter().any(|d| matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(c))
+            if c == "unresolved-method" || c == "undefined-property")),
+        "a catch-all ancestor silences the member lane: {diags:?}"
+    );
+
+    // The control: the same ancestor without the catch-all, so the lane is
+    // loud and the silence above is the fact's doing, not an unresolved MRO.
+    let plain = "\
+<?php
+namespace App;
+class Base {
+    public function known() { return 1; }
+}
+";
+    let (plain_fa, _) = php_fa(plain);
+    let plain_idx = crate::index::module_index::ModuleIndex::new_for_test();
+    plain_idx.register_symbols(
+        std::path::PathBuf::from("/fake/php/Base.php"),
+        std::sync::Arc::new(plain_fa),
+    );
+    plain_idx.mark_language_indexed("php");
+    let loud = crate::lsp::symbols::pack_symbol_diagnostics(&child_fa, Some(&plain_idx));
+    assert!(
+        loud.iter().any(|d| matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(c))
+            if c == "unresolved-method")),
+        "without the catch-all the member is undefined: {loud:?}"
+    );
+}

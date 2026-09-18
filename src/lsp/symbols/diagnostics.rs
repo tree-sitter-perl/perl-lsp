@@ -435,10 +435,10 @@ pub fn collect_diagnostics(
             continue;
         }
 
-        // A class with `AUTOLOAD` anywhere in its MRO answers ANY method name at
-        // runtime, so the static `sub` set isn't its real surface — stay silent
-        // (the role-contracts diagnostic uses the same skip, file_analysis.rs).
-        if analysis.resolve_method_in_ancestors(&class_name, "AUTOLOAD", Some(module_index)).is_some() {
+        // A class that answers any member name at runtime (Perl's
+        // `AUTOLOAD`) has a `sub` set that is not its real surface — stay
+        // silent, exactly as the contract lane does.
+        if analysis.class_answers_any_member(&class_name, Some(module_index)) {
             continue;
         }
 
@@ -901,18 +901,10 @@ pub fn pack_symbol_diagnostics(
                 matches!(s.kind, FaSymKind::Sub | FaSymKind::Method | FaSymKind::Field)
                     && s.package.as_deref() == Some(class.as_str())
             });
-            // A class with one of these anywhere in its MRO answers ANY
-            // member name at runtime. The document names them on the
-            // capture that fires on their declarations, so the set has one
-            // home and an overlay can widen it.
-            let owner_catch_all =
-                crate::build::language_driver::LanguageRegistry::pack_capture_literals(
-                    &analysis.language,
-                    "def.method.catch_all",
-                )
-                .iter()
-                .any(|m| owner.resolve_member(&class, m, MemberKind::Callable, idx).is_some());
-            if !owner_has_members || owner_catch_all || !owner.ancestry_fully_visible(&class, idx) {
+            if !owner_has_members
+                || owner.class_answers_any_member(&class, idx)
+                || !owner.ancestry_fully_visible(&class, idx)
+            {
                 return None;
             }
             let flavors = owner.class_flags(&class);
