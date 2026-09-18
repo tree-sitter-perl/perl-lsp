@@ -914,6 +914,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         .filter(|e| e.cap == "param.region")
         .map(|e| Span { start: e.start, end: e.end })
         .collect();
+    // Existence probes (`@probe.region`: the argument list of `isset` /
+    // `empty`): a member read inside one asks whether the member exists.
+    out.probe_regions = events
+        .iter()
+        .filter(|e| e.cap == "probe.region")
+        .map(|e| Span { start: e.start, end: e.end })
+        .collect();
 
     for e in &events {
         while scope_stack.len() > 1
@@ -1223,6 +1230,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     bound: bound_name_by_match.get(&e.match_id).map(|(_, n)| n.clone()),
                 });
                 out.imports.push(e.text.clone());
+            }
+            "preamble" => {
+                out.preamble_end = Some(out.preamble_end.map_or(e.end.row, |r| r.max(e.end.row)));
+            }
+            "import" => {
+                let row = Span { start: e.start, end: e.end };
+                if out.import_rows.last() != Some(&row) {
+                    out.import_rows.push(row);
+                }
             }
             cap if cap.starts_with("expr.lit.") => {
                 let suffix = cap.strip_prefix("expr.lit.").unwrap();
