@@ -14,9 +14,17 @@ pub mod php;
 pub mod python;
 pub mod r;
 
+// A pack whose language feature is off has no caller outside the pack
+// tests, which drive every language's pack whatever is compiled in.
+#[allow(unused_imports)]
 pub use cmake::cmake_pack;
+#[allow(unused_imports)]
 pub use cpp::cpp_pack;
+#[allow(unused_imports)]
 pub use perl::perl_pack;
+#[allow(unused_imports)]
 pub use php::php_pack;
+#[allow(unused_imports)]
 pub use python::python_pack;
+#[allow(unused_imports)]
 pub use r::r_pack;

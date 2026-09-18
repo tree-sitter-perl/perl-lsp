@@ -342,6 +342,7 @@ impl LangPack {
     /// documents themselves, `names` is the language's own spelling seam,
     /// and `lang_id` is a registration — none is a vocabulary this rule
     /// governs, so none is yielded.
+    #[allow(dead_code)] // the rule #15 tripwires are its only caller
     pub(crate) fn declared_strings(&self) -> Vec<(&'static str, &'static str)> {
         let LangPack {
             query_source: _,

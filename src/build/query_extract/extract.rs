@@ -3820,6 +3820,9 @@ pub(crate) fn type_alias_payload(
 // The canonical template-spelling rule lives in the Model layer
 // (`file_analysis.rs`) so the `ParametricType::Instance` peel shares it;
 // re-exported here because the pack `shape_name`s are its Build-side home.
+// Re-exported for the pack tests, which reach the model's vocabulary
+// through `query_extract`; the cpp pack imports it from the model.
+#[allow(unused_imports)]
 pub use crate::model::file_analysis::canonical_template_spelling;
 
 /// Is `body` a bare TYPE spelling (a macro that aliases a type), rather than a
