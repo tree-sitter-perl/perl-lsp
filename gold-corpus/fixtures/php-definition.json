@@ -181,6 +181,170 @@
         "none": []
       },
       "status": "gold"
+    },
+    {
+      "id": "php-lar-def-route-name",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`redirect()->route('posts.show')` lands on the `->name('posts.show')` string in routes/web.php.",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 23,
+      "col": 34,
+      "expect": {
+        "all": [
+          "web.php:7:69"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-lar-def-view-file",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`view('posts.index')` lands on the template file (the view rail is path-defined).",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 16,
+      "col": 21,
+      "expect": {
+        "all": [
+          "index.blade.php:1:1"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-lar-def-config-key",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`config('app.name')` lands on the `'name'` key row of config/app.php.",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 16,
+      "col": 55,
+      "expect": {
+        "all": [
+          "app.php:4:6"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-lar-def-lang-key",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`__('auth.failed')` lands on the `'failed'` key row of lang/en/auth.php.",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 30,
+      "col": 38,
+      "expect": {
+        "all": [
+          "auth.php:4:6"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-lar-def-event-emission",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`event(new PostPublished(...))`: the class, the listener's `handle(PostPublished $e)` and the `$listen` row — every candidate, never a pick.",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 22,
+      "col": 18,
+      "expect": {
+        "all": [
+          "PostPublished.php:5:7",
+          "NotifyFollowers.php:9:21",
+          "EventServiceProvider.php:11:9"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-lar-def-ability-policy",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`$this->authorize('update', $post)` lands on `PostPolicy::update` (every policy method is an ability through the `app/Policies/` path rail).",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 21,
+      "col": 26,
+      "expect": {
+        "all": [
+          "PostPolicy.php:7:21"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-lar-def-middleware-alias",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`->middleware('auth:web')` names `auth` (the head before the parameter separator) and lands on the kernel's alias row.",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 11,
+      "col": 27,
+      "expect": {
+        "all": [
+          "Kernel.php:8:10"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-lar-def-container-binding",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`app('users.default')` lands on the provider's `singleton('users.default', ...)`.",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 29,
+      "col": 24,
+      "expect": {
+        "all": [
+          "AppServiceProvider.php:9:32"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-lar-def-container-resolution-typed",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`app(PostRepo::class)->find(...)`: the container resolves what the argument spells, so the chain dispatches on PostRepo.",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 28,
+      "col": 38,
+      "expect": {
+        "all": [
+          "PostRepo.php:7:21"
+        ],
+        "none": []
+      },
+      "status": "gold"
     }
   ]
 }
