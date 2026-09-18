@@ -90,14 +90,10 @@ impl<'a> UseMap<'a> {
     }
 
     /// `resolve`, split into (namespace, leaf) — the shape the visibility
-    /// pins are keyed by. The global namespace is the empty string.
-    pub fn resolve_split(&self, written: &str) -> (String, String) {
-        self.split_fqn(self.resolve(written))
-    }
-
-    /// `resolve_split` for a spelling whose PARTS the producer kept
-    /// (`QualifiedSpelling`): no consumer renders a prefix for this to take
-    /// apart again (rule #13).
+    /// pins are keyed by — for a spelling whose PARTS the producer kept
+    /// (`QualifiedSpelling`), so no consumer renders a prefix for this to
+    /// take apart again (rule #13). The global namespace is the empty
+    /// string.
     pub fn resolve_split_parts(&self, q: &super::QualifiedSpelling) -> (String, String) {
         // An absolute spelling is its own identity: its segments ARE the
         // namespace, whatever this file imports.
