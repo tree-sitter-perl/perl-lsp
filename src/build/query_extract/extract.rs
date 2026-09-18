@@ -18,6 +18,148 @@ struct Event {
     match_id: usize,
 }
 
+
+/// What the document says about one declarator node: a level of the peel, a
+/// per-level cv-qualifier, a level that says the declared name holds a value
+/// that is CALLED, a level that only groups, or the chain's leaf (whose
+/// capture suffix names the def the synthetic leaf event mints —
+/// `@deref.leaf.field` → `def.field`).
+#[derive(Clone)]
+enum DerefCap {
+    Step(crate::model::file_analysis::DerefKind),
+    Annot,
+    /// `@deref.callable` — the declared name is invoked (a function-pointer
+    /// declarator). Adds no level to the stack; the leaf carries the fact.
+    Callable,
+    /// `@deref.paren` — a grouping level that denotes nothing of its own.
+    Transparent,
+    Leaf(String),
+}
+
+/// The `@deref.*` captures of one tree, by node identity — everything the
+/// declarator peel needs to know about a language's declarators.
+///
+/// The extraction pass fills it as it flattens matches; a consumer with a tree
+/// the extractor never saw (a reparsed macro body) fills it with
+/// [`DerefCaps::of_tree`]. Both then peel through the SAME walk, so a pointer
+/// field's `*`s are extracted once however the field was written.
+///
+/// Keyed by `Node::id`, not by byte range: a grammar routinely nests a node
+/// inside another of the SAME extent (a declarator whose only child spans
+/// its own bytes), and two captures on such a pair would collapse to one
+/// entry with the last write winning — the peel then reads the wrong level's
+/// verdict. Every fill and every peel runs against one tree, so the id is
+/// exact.
+#[derive(Default)]
+pub struct DerefCaps(std::collections::HashMap<usize, DerefCap>);
+
+impl DerefCaps {
+    /// Record `node` under the capture that named it, ignoring every capture
+    /// outside the `@deref` family. Returns whether it was one.
+    fn record(&mut self, cap: &str, node: tree_sitter::Node) -> bool {
+        use crate::model::file_analysis::DerefKind;
+        let Some(rest) = cap.strip_prefix("deref.") else { return false };
+        let what = match rest {
+            "pointer" => DerefCap::Step(DerefKind::Pointer),
+            "ref" => DerefCap::Step(DerefKind::Reference),
+            "annot" => DerefCap::Annot,
+            "callable" => DerefCap::Callable,
+            "paren" => DerefCap::Transparent,
+            _ => match rest.strip_prefix("leaf.") {
+                Some(kind) => DerefCap::Leaf(format!("def.{kind}")),
+                None => return false,
+            },
+        };
+        self.0.insert(node.id(), what);
+        true
+    }
+
+    /// Every `@deref.*` capture in `tree`, for a caller running the pack's
+    /// query itself.
+    pub fn of_tree(tree: &Tree, src: &[u8], pack: &LangPack) -> DerefCaps {
+        let language = tree.language();
+        let mut out = DerefCaps::default();
+        let Ok(query) = cached_query(&language, effective_query_source(&language, pack)) else {
+            return out;
+        };
+        let names = query.capture_names();
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(query, tree.root_node(), src);
+        while let Some(m) = matches.next() {
+            for c in m.captures {
+                out.record(names[c.index as usize], c.node);
+            }
+        }
+        out
+    }
+
+    /// Flatten a declarator chain — the recursion tree-sitter's fixed-depth
+    /// queries cannot express — to its leaf, recording a `DerefStep` per level.
+    /// Outermost level first (left-to-right display order, `Box*&` →
+    /// `[Pointer, Reference]`); depth-capped. The `callable` verdict is true
+    /// when some level said the declared value is invoked. `None` when the
+    /// chain reaches no leaf the document named, which mints nothing rather
+    /// than a half-read shape.
+    pub fn peel<'a>(
+        &self,
+        mut node: tree_sitter::Node<'a>,
+        src: &[u8],
+    ) -> Option<PeeledChain<'a>> {
+        use crate::model::file_analysis::DerefStep;
+        let at = |n: &tree_sitter::Node| self.0.get(&n.id());
+        // The one descent: the first child the document named. A level's
+        // inner declarator is the only child it captures, so this needs no
+        // field name and no kind list.
+        let inner_of = |n: tree_sitter::Node<'a>| -> Option<tree_sitter::Node<'a>> {
+            let mut cur = n.walk();
+            let found =
+                n.children(&mut cur).find(|ch| !matches!(at(ch), None | Some(DerefCap::Annot)));
+            found
+        };
+        let mut stack = Vec::new();
+        let mut callable = false;
+        for _ in 0..32 {
+            match at(&node) {
+                Some(DerefCap::Step(kind)) => {
+                    let mut annotations = Vec::new();
+                    let mut cur = node.walk();
+                    for ch in node.children(&mut cur) {
+                        if let Some(DerefCap::Annot) = at(&ch) {
+                            if let Ok(t) = ch.utf8_text(src) {
+                                annotations.push(t.to_string());
+                            }
+                        }
+                    }
+                    stack.push(DerefStep { kind: *kind, annotations });
+                    node = inner_of(node)?;
+                }
+                Some(DerefCap::Callable) => {
+                    callable = true;
+                    node = inner_of(node)?;
+                }
+                Some(DerefCap::Transparent) => node = inner_of(node)?,
+                // `identifier`→`def.local` (param/local), `field_identifier`→
+                // `def.field` (a class member), so a pointer field outlines as a
+                // member.
+                Some(DerefCap::Leaf(def_cap)) => {
+                    return Some(PeeledChain { leaf: node, stack, def_cap: def_cap.clone(), callable })
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+}
+
+/// A declarator chain read to its end: the name token, the levels above it,
+/// the def capture its suffix names, and whether the value is invoked.
+pub struct PeeledChain<'a> {
+    pub leaf: tree_sitter::Node<'a>,
+    pub stack: Vec<crate::model::file_analysis::DerefStep>,
+    pub def_cap: String,
+    pub callable: bool,
+}
+
 /// Flatten a wrapper chain — the recursion tree-sitter's fixed-depth queries
 /// cannot express — to its leaf, recording a `DerefStep` per level when
 /// `spec.record_stack`. A non-empty `leaf_to_def` REQUIRES the leaf to match
@@ -122,6 +264,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // (`@arity.sig` fires a separate match from the def name).
     let mut param_sigs: Vec<(crate::model::file_analysis::Span, crate::model::file_analysis::ParamArity)> =
         Vec::new();
+    // The declarator peel's vocabulary, and the chains waiting on it: a level is
+    // matched AFTER the chain that contains it, so the peel runs post-loop.
+    let mut deref_caps = DerefCaps::default();
+    let mut nested_targets: Vec<(tree_sitter::Node, usize)> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), source);
     let mut match_counter = 0usize;
@@ -183,27 +329,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 }
                 continue;
             }
-            // `@nested.target`: a pointer/reference declarator CHAIN of any
-            // depth. Peel it (where the node is live) to the leaf identifier
-            // + the deref stack, then emit the leaf as if the query had
-            // captured it directly — downstream join/symbol/witness paths are
-            // unchanged, and arbitrary nesting works without enumerating it.
+            if deref_caps.record(cap, node) {
+                continue;
+            }
             if cap == "nested.target" {
-                if let Some((leaf, stack, Some(def_cap))) = peel(node, &pack.nested_peel, source) {
-                    nested_stacks.insert(match_counter, stack);
-                    let ltext = leaf.utf8_text(source).unwrap_or("").to_string();
-                    for syn in ["flow.target", def_cap] {
-                        events.push(Event {
-                            start_byte: leaf.start_byte(),
-                            end_byte: leaf.end_byte(),
-                            start: leaf.start_position(),
-                            end: leaf.end_position(),
-                            cap: syn.to_string(),
-                            text: ltext.clone(),
-                            match_id: match_counter,
-                        });
-                    }
-                }
+                nested_targets.push((node, match_counter));
                 continue;
             }
             // `@member.recv`: a member access receiver. Peel transparent
@@ -283,6 +413,27 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 cap: cap.to_string(),
                 text,
                 match_id: match_counter,
+            });
+        }
+    }
+    // ---- `@nested.target`: a declarator CHAIN of any depth. Peel it to the
+    // leaf + the deref stack, then emit the leaf as if the query had captured
+    // it directly — downstream join/symbol/witness paths are unchanged, and
+    // arbitrary nesting works without enumerating it.
+    for (node, match_id) in &nested_targets {
+        let Some(chain) = deref_caps.peel(*node, source) else { continue };
+        nested_stacks.insert(*match_id, chain.stack);
+        let leaf = chain.leaf;
+        let ltext = leaf.utf8_text(source).unwrap_or("").to_string();
+        for syn in ["flow.target", &chain.def_cap] {
+            events.push(Event {
+                start_byte: leaf.start_byte(),
+                end_byte: leaf.end_byte(),
+                start: leaf.start_position(),
+                end: leaf.end_position(),
+                cap: syn.to_string(),
+                text: ltext.clone(),
+                match_id: *match_id,
             });
         }
     }

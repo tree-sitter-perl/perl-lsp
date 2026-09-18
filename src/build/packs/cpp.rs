@@ -106,7 +106,6 @@ pub fn cpp_pack() -> LangPack {
         // grammar's own distinction from a plain `identifier` local), so
         // "def.field" matches the plain (non-pointer) field pattern above.
         // Shared with the member-block synth lane (rule #10).
-        nested_peel: C_FIELD_DECL_PEEL,
         // DerefKind placeholder — record_stack false, so it's never read.
         recv_peel: PeelSpec {
             wrappers: &[

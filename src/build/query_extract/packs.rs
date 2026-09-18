@@ -123,7 +123,6 @@ pub struct LangPack {
     /// flattened to its leaf + per-level deref stack — `Box**`, `char****`,
     /// `Box* const&`. THE recursion S-queries can't express (unbounded depth);
     /// the pack declares the grammar, the generic `peel` walks it.
-    pub nested_peel: PeelSpec,
     /// The member-access RECEIVER peel: transparent expression wrappers
     /// (`(*p)`, `(&o)`, `(p)` → `p`) dropped so the invocant types via the
     /// inner. The SAME `peel`, no stack, any leaf.
