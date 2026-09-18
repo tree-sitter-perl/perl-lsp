@@ -551,6 +551,9 @@ pub fn index_pack_languages(
                 expected_whole.load(Ordering::Relaxed),
             );
         }
+        // The sweep is over: this store now holds everything it will hold
+        // for the language, so absence in it is meaningful.
+        pack_index.mark_language_indexed(lang);
         hub.attach_pack_index(lang, pack_index);
     }
     if std::env::var_os("PERL_LSP_MEM_REPORT").is_some() {

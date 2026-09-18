@@ -76,6 +76,10 @@ pub(crate) struct IndexCore {
     /// root prefixes it. Set once by the bulk indexer; canonical, like
     /// `inc_roots`.
     pub(crate) dependency_roots: std::sync::RwLock<Option<Arc<Vec<std::path::PathBuf>>>>,
+    /// Languages whose bulk index has finished on THIS store. Marked by the
+    /// indexer that swept them, read by `index_state` — so "settled" is a
+    /// fact the sweep published, never a claim a caller made on its behalf.
+    pub(crate) indexed_languages: DashMap<String, ()>,
     pub(crate) queue: ResolveQueue,
     pub(crate) resolved: ResolveNotify,
     pub(crate) workspace_root: WorkspaceRootChannel,
@@ -155,6 +159,7 @@ impl IndexCore {
             all_defs: DashMap::new(),
             inc_roots: std::sync::RwLock::new(Arc::new(Vec::new())),
             dependency_roots: std::sync::RwLock::new(None),
+            indexed_languages: DashMap::new(),
             queue: ResolveQueue {
                 priority: Mutex::new(Vec::new()),
                 pending: Mutex::new(Vec::new()),

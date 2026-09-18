@@ -1240,6 +1240,34 @@ impl ModuleIndex {
         self.core.set_dependency_roots(roots);
     }
 
+    /// Publish that this store's bulk pass over `language` has finished —
+    /// everything it will hold for that language is in it. Called by the
+    /// indexer that swept it, once, at the end of the sweep; the
+    /// absence-reporting lanes read the verdict back through
+    /// `CrossFileLookup::index_state`.
+    pub fn mark_language_indexed(&self, language: &str) {
+        self.core.indexed_languages.insert(language.to_string(), ());
+    }
+
+    /// This store's bulk-pass state for `language`. A hub routes the
+    /// question to the sub-index serving that language, exactly as
+    /// `lookup_for` routes the queries, so an asker holding either one gets
+    /// the same answer.
+    pub fn language_index_state(
+        &self,
+        language: &str,
+    ) -> crate::model::file_analysis::IndexState {
+        use crate::model::file_analysis::IndexState;
+        if let Some(p) = self.pack_index(language) {
+            return p.language_index_state(language);
+        }
+        if self.core.indexed_languages.contains_key(language) {
+            IndexState::Settled
+        } else {
+            IndexState::Warming
+        }
+    }
+
     /// Post-`Arc` variant for the hub, set alongside the workspace root.
     /// LAST root wins — a re-rooted session must not keep rehydrating from
     /// the first root's DB while the writers moved to the new one.
