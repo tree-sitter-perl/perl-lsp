@@ -153,9 +153,6 @@ pub fn php_pack() -> LangPack {
             EnumMember { name: "tryFrom", callable: true },
         ],
         trigger_chars: &["$", ">", ":"],
-        // calls included: PHP's method call is ONE flat node (unlike cpp,
-        // where the call wraps a field_expression), so mid-token member
-        // completion (`->ma|p`) must climb to the call node itself.
     }
 }
 

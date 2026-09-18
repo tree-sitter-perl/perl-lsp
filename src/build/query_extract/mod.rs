@@ -563,8 +563,13 @@ const OVERLAY_ONLY_CAPTURES: &[&str] = &[
     "def.handler.key",
     "key.elem",
     "expr.annot",
+    // spelled by cpp's skeleton, which is why it is here rather than
+    // absent: the extractor's arm is language-generic, so a php or python
+    // overlay may say the same about a body its own skeleton left plain
     "scope.sub.implicit_receiver",
     "import.binds",
+    "arity.param.name",
+    "ref.method.ctor",
 ];
 
 /// The captures in `declared` the extractor does NOT serve — `--plugin-check`'s

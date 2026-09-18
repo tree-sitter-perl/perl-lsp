@@ -178,6 +178,15 @@ impl<'a> Builder<'a> {
     ) -> SymbolId {
         let id = SymbolId(self.next_symbol_id);
         self.next_symbol_id += 1;
+        // Perl spells "this constructs" with a name and nothing else, so the
+        // convention is consulted HERE, at the mint, and nowhere past it:
+        // every consumer asks `Symbol::is_constructor()` (rule #11).
+        let mut flags = crate::model::file_analysis::SymbolFlags::empty();
+        if matches!(kind, SymKind::Sub | SymKind::Method)
+            && crate::model::conventions::is_constructor_name(&name)
+        {
+            flags |= crate::model::file_analysis::SymbolFlags::CONSTRUCTOR;
+        }
         // Every symbol attaches to the current lexical scope. Package
         // context lives separately in `package_ranges`; the variable
         // resolver gates `our` decls by package match at lookup time
@@ -195,7 +204,7 @@ impl<'a> Builder<'a> {
             namespace,
             presentation: Default::default(),
             attributes: Vec::new(),
-            flags: Default::default(),
+            flags,
             declared_with: None,
             deref_stack: Vec::new(),
             // Perl carries params in `SymbolDetail::Sub`; `param_arity()`
@@ -310,6 +319,7 @@ impl<'a> Builder<'a> {
             binding,
             folded_from: None,
             arg_count: None,
+            flags: Default::default(),
         });
     }
 

@@ -65,7 +65,15 @@ marked otherwise; the drain re-derived each rationale against current code.
   `symbols()` per publish — and a publish runs on didChange. The
   adversarial shape to measure: the largest file in the Laravel corpus,
   didChange every 40 ms, with the per-lane phases attributed. Nothing
-  suggests a problem; nothing has looked. [recorded 2026-09-18]
+  suggests a problem; nothing has looked.
+
+  The same measurement owes a second number: the publish PREAMBLE, the
+  per-language constants a publish gathers before any lane runs. The
+  registry is a process-wide `OnceLock` and the builtin-type list is
+  Arc-cached, so what is left is `is_builtin_type`'s linear scan of ~164
+  `String`s per unresolved global-namespace type reference. Attribute it
+  separately from the lanes with `PERL_LSP_PHASE_TIMING`. [recorded
+  2026-09-18]
 
 - **A keyed destructuring slot's key is read from the list's text.**
   `query_extract::slot_key` / `slot_position` scan the destructuring

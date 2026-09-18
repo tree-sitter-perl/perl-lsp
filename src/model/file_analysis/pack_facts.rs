@@ -8,6 +8,18 @@
 
 use super::*;
 
+/// A class spelling written with a qualifier, in the parts the producer
+/// had: the leaf, the namespace segments ahead of it, and whether the
+/// spelling reached the global namespace outright (php's leading `\`). The
+/// producer never joins them into a prefix, so no consumer takes one apart
+/// (rule #13) — `UseMap::resolve_split_parts` reads them as they are.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QualifiedSpelling {
+    pub leaf: String,
+    pub segments: Vec<String>,
+    pub absolute: bool,
+}
+
 /// Everything a pack driver records that Perl has no analog for. Stamped
 /// by the pack driver's extract/skeleton pipeline; `Default` (all empty)
 /// is what a Perl analysis carries.
@@ -73,12 +85,10 @@ pub struct PackFacts {
     #[serde(default)]
     pub use_aliases: Vec<(String, String, String)>,
 
-    /// Class spellings written with a qualifier: (leaf, written prefix —
-    /// absolute when it starts with `\`, else relative to the file's
-    /// namespace). A qualified spelling pins the leaf to that namespace
-    /// rather than counting as a bare spelling.
+    /// Class spellings written with a qualifier. A qualified spelling pins
+    /// the leaf to that namespace rather than counting as a bare spelling.
     #[serde(default)]
-    pub qualified_spellings: Vec<(String, String)>,
+    pub qualified_spellings: Vec<QualifiedSpelling>,
 
     /// How this analysis's language spells names — its separator and its
     /// sigils — the data every key function reads (rule #12). Perl's
@@ -220,14 +230,26 @@ pub struct DocDisagreement {
     pub documented: InferredType,
 }
 
-/// A language's WRITE and DISPLAY spellings — what a quick-fix inserts and
-/// what a human surface renders. Every field is the same for every file of
-/// the language, so these are reached by language id
-/// (`LanguageRegistry::spellings`) and attached to an analysis as a
-/// pointer; serializing them would put one language's constants in every
-/// blob (rule #14). A pack declares one `const`; `NONE` is what a language
-/// without a pack answers, and it is what the engine assumed before any
-/// pack declared spellings.
+/// What is true of a language for EVERY file of it: its write and display
+/// spellings — what a quick-fix inserts and what a human surface renders —
+/// and the handful of semantics a name or a syntax cannot state.
+///
+/// The spellings are the first nine fields: the type vocabularies, the
+/// class-name literal, the import / contract-stub / return-annotation
+/// templates, the static-property sigil and the two signature separators.
+/// The last three are per-language SEMANTICS the engine's rules gate on:
+/// whether a member belongs to its enclosing container and nothing else
+/// (`members_are_package_bound`), whether reading a member is calling it
+/// (`member_reads_are_calls`), and whether a runtime catch-all discharges a
+/// compile-time obligation (`catch_all_satisfies_contracts`). Each says so
+/// on its own doc.
+///
+/// Every field is the same for every file of the language, so these are
+/// reached by language id (`LanguageRegistry::spellings`) and attached to
+/// an analysis as a pointer; serializing them would put one language's
+/// constants in every blob (rule #14). A pack declares one `const`; `NONE`
+/// is what a language without a pack answers, and it is what the engine
+/// assumed before any pack declared spellings.
 #[derive(Debug, Clone, Copy)]
 pub struct PackSpellings {
     /// Engine type tag → this language's spelling (php `"HashRef"` →

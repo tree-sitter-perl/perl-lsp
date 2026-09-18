@@ -5435,7 +5435,9 @@ $m = [Sql\\ColumnController::class => 1];
 ";
     let (fa, _) = php_fa(src);
     assert!(
-        fa.pack.qualified_spellings.iter().any(|(leaf, prefix)| leaf == "ColumnController" && prefix == "Sql"),
+        fa.pack.qualified_spellings.iter().any(|q| {
+            q.leaf == "ColumnController" && q.segments == ["Sql"] && !q.absolute
+        }),
         "{:?}",
         fa.pack.qualified_spellings
     );

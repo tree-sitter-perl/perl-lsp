@@ -126,6 +126,13 @@
 ; construction sites and the rename policy read one fact.
 ((method_declaration name: (name) @def.method.ctor)
  (#eq? @def.method.ctor "__construct"))
+; the constructor NAMED at a call site (`parent::__construct(...)`): a class
+; that declares none still has the default one, so the reference carries the
+; fact and no lane compares the spelling back.
+((scoped_call_expression name: (name) @ref.method.ctor)
+ (#eq? @ref.method.ctor "__construct"))
+((member_call_expression name: (name) @ref.method.ctor)
+ (#eq? @ref.method.ctor "__construct"))
 
 (interface_declaration name: (name) @classattr.interface)
 (trait_declaration name: (name) @classattr.trait)
@@ -190,8 +197,26 @@
 (arrow_function) @def.anon @scope.sub
 
 ; declared-parameter arity: overload-family ranking fuel (a call's written
-; arg count floats the fitting signature above a same-named stub).
+; arg count floats the fitting signature above a same-named stub). WHICH
+; children are parameters, and what each does to the count, the document
+; states: @arity.param must be written, @arity.param.optional carries a
+; default, @arity.param.variadic absorbs the rest and makes the signature
+; variadic. The parts a parameter carries ride their own captures —
+; @arity.param.name is the token a by-reference argument binds through,
+; @arity.param.byref marks the parameter that aliases its caller's variable,
+; @arity.param.default and @arity.param.type travel as source text.
 (formal_parameters) @arity.sig
+(formal_parameters (simple_parameter !default_value) @arity.param)
+(formal_parameters (simple_parameter default_value: (_)) @arity.param.optional)
+(formal_parameters (property_promotion_parameter !default_value) @arity.param)
+(formal_parameters (property_promotion_parameter default_value: (_)) @arity.param.optional)
+(formal_parameters (variadic_parameter) @arity.param.variadic)
+(formal_parameters (simple_parameter reference_modifier: (_)) @arity.param.byref)
+(formal_parameters (property_promotion_parameter name: (by_ref)) @arity.param.byref)
+(formal_parameters (_ name: (variable_name) @arity.param.name))
+(formal_parameters (_ name: (by_ref (variable_name) @arity.param.name)))
+(formal_parameters (_ default_value: (_) @arity.param.default))
+(formal_parameters (_ type: (_) @arity.param.type))
 
 ; docblocks: the pack's `doc_types` parses `@return`/`@param`/`@var` out of
 ; the comment. The bare capture feeds the mention scan (a name spelled only
@@ -355,6 +380,18 @@
 ; hints, and the file's use-map counts the leaf as spelled here.
 ; Primitives (`int`, `array`) are `primitive_type`, never matched.
 (named_type (name) @ref.type)
+; `self` / `static` / `parent` written where a class NAME goes: they name the
+; class this code is written in, or its parent, and resolve off the enclosing
+; scope rather than out of a namespace. The reference says so, so the lane
+; that reports a name its namespace cannot supply never matches the spelling.
+((named_type (name) @receiver.self) (#any-of? @receiver.self "self" "static"))
+((named_type (name) @receiver.super) (#eq? @receiver.super "parent"))
+((binary_expression "instanceof" right: (name) @receiver.self)
+ (#any-of? @receiver.self "self" "static"))
+((binary_expression "instanceof" right: (name) @receiver.super)
+ (#eq? @receiver.super "parent"))
+((object_creation_expression (name) @receiver.super)
+ (#eq? @receiver.super "parent"))
 (named_type (qualified_name (name) @ref.type) @ref.qualified)
 ;; `$x instanceof Foo` names the class; `#[Foo]` / `#[Ns\Foo(...)]` names an
 ;; attribute class — both are class references (goto-def, rename, the

@@ -1455,15 +1455,17 @@ fn language_spellings_have_one_home() {
         ("build/packs/php/doc.rs", 2, "php's own doc-tag spellings — the pack IS their home"),
         ("build/packs/php/mod.rs", 1, "php's late-bound RETURN spellings (`static`/`self`/`$this` in `declared_return`) — the `LangPack` IS their home"),
         ("build/plugin/rhai_host.rs", 3, "a manifest signal name in an inline test fixture"),
-        ("build/query_extract/extract.rs", 19, "the generic extractor minting the canonical tokens a pack's captures declare"),
+        ("build/query_extract/extract.rs", 11, "the generic extractor minting the canonical tokens a pack's captures declare"),
         ("build/query_extract/skeleton.rs", 15, "skeleton→model conversion: the kind/attribute vocabulary becomes flags here"),
         ("model/conventions.rs", 3, "Perl's own attribute spellings (`field_attribute_flag`) — Perl's home"),
-        ("model/file_analysis/core_types.rs", 25, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`) — the one table every language maps its spellings onto"),
+        ("model/file_analysis/core_types.rs", 29, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`) — the one table every language maps its spellings onto"),
         ("model/file_analysis/completion.rs", 1, "a `DeclKind` rendered as completion detail text, not an attribute read"),
         ("model/file_analysis/outline.rs", 2, "outline detail text for a union container and a param decl kind"),
         ("model/witnesses/registry.rs", 1, "the `param` owner-keyed fallback key — a witness attachment name"),
         ("lsp/symbols/hover.rs", 1, "the hover LABEL for a macro-shaped Sub — display text (the fact itself is read as a flag)"),
         ("model/file_analysis/diagnostics.rs", 1, "the `deprecated` diagnostic CODE — client-facing wire text, not the declaration fact"),
+        ("lsp/symbols/code_actions.rs", 1, "the `receiver` KEY of a diagnostic's `data` payload — the wire contract with the quick-fix, not a declaration fact"),
+        ("lsp/symbols/diagnostics.rs", 1, "the `receiver` KEY of a finding's `data` payload — the wire contract with the quick-fix, not a declaration fact"),
     ];
     drift.extend(allowlist_drift("rule #12 (attribute spellings)", &seen, allow));
 
@@ -1584,7 +1586,6 @@ fn rendered_strings_are_not_reparsed() {
         ("model/file_analysis/use_map.rs", 3, "resolving WRITTEN spellings"),
         ("lsp/cli/positions.rs", 1, "a `file:line:col` CLI argument — what the user typed, not what we rendered"),
         ("lsp/cursor_context.rs", 1, "Perl source text at the cursor, split on Perl's own separator"),
-        ("model/file_analysis/diagnostics_liveness.rs", 1, "a written qualified spelling, split on the separator the analysis declares"),
         ("lsp/symbols/links.rs", 2, "POD link text and a module path as the source wrote them"),
     ];
     let drift = allowlist_drift("rule #13 (rendered strings)", &seen, allow);
@@ -1627,6 +1628,66 @@ fn packs_with_grammars() -> Vec<(crate::build::query_extract::LangPack, tree_sit
     out
 }
 
+/// Every bundled document says only what the engine can hear. Four ways one
+/// goes wrong with no error anywhere: it fails to COMPILE (the loader drops
+/// it and the lane it fed goes dark), it spells a capture the extractor does
+/// not serve (matches, mints nothing), it spells one INSIDE a known family
+/// whose payload the engine cannot honour, or it puts a fourth capture on
+/// one query step — tree-sitter stores three and `query_step__add_capture`
+/// no-ops past them, so the document compiles, `capture_names()` still lists
+/// the name, and the capture never fires.
+///
+/// The engine answers all four; until this test they were reachable only
+/// through `--plugin-check`, which somebody has to remember to run.
+#[test]
+fn bundled_query_documents_are_served_whole() {
+    use crate::build::query_extract::{
+        dropped_step_capture_findings, overlay_capture_findings, unserved_captures,
+    };
+    let mut problems: Vec<String> = Vec::new();
+    for (pack, language) in packs_with_grammars() {
+        let docs = std::iter::once(("skeleton", pack.query_source))
+            .chain(pack.bundled_overlays.iter().copied());
+        for (name, source) in docs {
+            let doc = format!("{}/{name}", pack.lang_id);
+            let q = match tree_sitter::Query::new(&language, source) {
+                Ok(q) => q,
+                Err(e) => {
+                    problems.push(format!("{doc}: does not compile: {e}"));
+                    continue;
+                }
+            };
+            let caps = q.capture_names();
+            problems.extend(
+                unserved_captures(&pack, &language, caps)
+                    .into_iter()
+                    .map(|c| format!("{doc}: @{c} is outside the served vocabulary")),
+            );
+            problems.extend(
+                overlay_capture_findings(caps).into_iter().map(|f| format!("{doc}: {f}")),
+            );
+            problems.extend(
+                dropped_step_capture_findings(source).into_iter().map(|f| format!("{doc}: {f}")),
+            );
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// The step-capture detector at the boundary it guards: three captures on a
+/// node are the limit and pass, a fourth is the one that vanishes.
+#[test]
+fn a_fourth_capture_on_one_step_is_reported() {
+    use crate::build::query_extract::dropped_step_capture_findings;
+    assert!(
+        dropped_step_capture_findings("(call (name) @a @b @c)").is_empty(),
+        "three captures on a node are the limit, not over it"
+    );
+    let over = dropped_step_capture_findings("(call (name) @a @b @c @d)");
+    assert_eq!(over.len(), 1, "{over:?}");
+    assert!(over[0].contains("@d"), "the finding names the capture that vanishes: {over:?}");
+}
+
 /// Rule #15: the query document owns a language's syntax. A node kind or a
 /// field name in a Rust table on the `LangPack` is the document's job done
 /// a second time, by a consumer that cannot see the capture — so it drifts
@@ -1646,7 +1707,6 @@ fn pack_fields_name_no_grammar_shapes() {
     let allow: &[(&str, &str, usize, &str)] = &[
         ("cmake", "trigger_chars", 2, TRIGGERS),
         ("cpp", "trigger_chars", 3, TRIGGERS),
-        ("perl", "trigger_chars", 6, TRIGGERS),
         ("php", "enum_members", 2, "kept: producer-only — the extractor mints each as a SYNTHESIZED member at every enum, and no consumer reads the list"),
         ("php", "trigger_chars", 3, TRIGGERS),
         ("python", "trigger_chars", 1, TRIGGERS),
@@ -1736,16 +1796,20 @@ fn decoded_pack_analyses_carry_spellings() {
     let mut checked: Vec<&'static str> = Vec::new();
     for id in registry.languages() {
         let Some(driver) = registry.for_id(id) else { continue };
-        let Some(pack) = driver.lang_pack() else { continue };
+        // Every driver answers spellings by id, pack or none — and Perl,
+        // which has no pack, is the one language whose pointer changes
+        // BEHAVIOUR (`member_reads_are_calls`), so it is the one that must
+        // not be skipped.
+        let expected = LanguageRegistry::spellings(id);
         let fa = driver.analyze("");
         assert!(
-            std::ptr::eq(fa.spellings(), pack.spellings),
-            "{id}: a freshly built analysis carries its own pack's spellings"
+            std::ptr::eq(fa.spellings(), expected),
+            "{id}: a freshly built analysis carries its own language's spellings"
         );
         let enc = crate::index::module_cache::encode_analysis(&fa).expect("encode");
         let decoded = crate::index::module_cache::decode_analysis(&enc.analysis).expect("decode");
         assert!(
-            std::ptr::eq(decoded.spellings(), pack.spellings),
+            std::ptr::eq(decoded.spellings(), expected),
             "{id}: the blob decode path does not re-attach spellings"
         );
         let surface = crate::model::surface::Surface::project(&fa);
@@ -1753,7 +1817,7 @@ fn decoded_pack_analyses_carry_spellings() {
             .expect("encode stub");
         let decoded = crate::index::module_cache::decode_stub(&stub).expect("decode stub");
         assert!(
-            std::ptr::eq(decoded.skeleton.spellings(), pack.spellings),
+            std::ptr::eq(decoded.skeleton.spellings(), expected),
             "{id}: the warm-stub decode path does not re-attach spellings"
         );
         checked.push(id);
@@ -1770,6 +1834,12 @@ fn decoded_pack_analyses_carry_spellings() {
     }
     #[cfg(feature = "cpp")]
     assert!(checked.contains(&"cpp"), "cpp was not exercised: {checked:?}");
+    assert!(checked.contains(&"perl"), "perl was not exercised: {checked:?}");
+    assert!(
+        LanguageRegistry::spellings("perl").member_reads_are_calls,
+        "perl's pointer is the one that changes behaviour — an unattached \
+         decode flips `$obj->name()` off a Moo accessor"
+    );
 }
 
 /// Rule #14: `PackFacts` is per-FILE facts. A per-language constant (the

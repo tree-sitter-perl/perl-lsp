@@ -193,13 +193,13 @@ fn heatmap_symbol_row(
         None
     } else if exported {
         Some("exported")
-    } else if conventions::is_constructor_name(&sym.name) {
-        Some("constructor")
     } else if class_is_referenced(ws, routing_idx, path, analysis, sym, visibility, scope) {
-        // A pack constructor whose CLASS is named somewhere (a type hint,
-        // `Foo::class`, a `use` row) with no `new` site of its own: a
+        // A constructor whose CLASS is named somewhere (a type hint,
+        // `Foo::class`, a `use` row) with no construction site of its own: a
         // container or a factory instantiates it. Over-approximates
-        // reachability on the sound side, like every guard here.
+        // reachability on the sound side, like every guard here. One rule
+        // for every language — a constructor whose class nothing names is a
+        // candidate whatever spells it.
         Some("class-referenced")
     } else if !native || sym.flags.contains(file_analysis::SymbolFlags::SYNTHESIZED) {
         // Not user-written: a plugin minted it (Moo accessors, routes, DBIC

@@ -13,10 +13,6 @@
 //! keystroke on a large file (a full-tree traversal of a 600-pattern
 //! query); with them it is ~2 µs, because the cursor visits one node.
 
-// The sentinel's node-kind tables are what these replace; until that
-// switch lands they ship tested and unused.
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
@@ -256,6 +252,30 @@ fn cached_over_patterns(
 /// The quoted arguments of every `#eq?` / `#any-of?` predicate in `pattern`
 /// whose FIRST argument is `@capture`. A predicate on another capture of
 /// the same pattern states nothing about this one, so it contributes none.
+/// The `)` that closes a predicate's argument list, skipping over string
+/// literals: a literal may itself contain a `)` (`(#any-of? @x "a)b" "c")`),
+/// and stopping at the first one drops every argument after it — and, worse,
+/// abandons the rest of the pattern. Every other scanner in this file steps
+/// over strings the same way.
+fn predicate_close(rest: &str) -> Option<usize> {
+    let b = rest.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() {
+        match b[i] {
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            b')' => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 fn collect_capture_literals(
     pattern: &'static str,
     capture: &str,
@@ -271,7 +291,7 @@ fn collect_capture_literals(
         if !matches!(predicate, "eq?" | "any-of?") {
             continue;
         }
-        let Some(close) = rest.find(')') else { return };
+        let Some(close) = predicate_close(rest) else { return };
         let args = &rest[..close];
         let mut tokens = args.split_whitespace();
         if tokens.next() != Some(want.as_str()) {

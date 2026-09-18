@@ -107,7 +107,6 @@ impl FileAnalysis {
             }
             out.push(Finding::new(
                 r.span,
-                codes::UNDEFINED_VARIABLE,
                 FindingData::UndefinedVariable { name: r.target_name.clone() },
             ));
         }
@@ -154,7 +153,6 @@ impl FileAnalysis {
             }
             out.push(Finding::new(
                 sym.selection_span,
-                codes::UNUSED_VARIABLE,
                 FindingData::UnusedVariable { name: sym.name.clone() },
             ));
         }
@@ -204,7 +202,6 @@ impl FileAnalysis {
                 .map(|r| (r.start.row, r.end.row));
             out.push(Finding::new(
                 row.span,
-                codes::UNUSED_IMPORT,
                 FindingData::UnusedImport { bound: bound.to_string(), sole_row },
             ));
         }
@@ -226,13 +223,15 @@ impl FileAnalysis {
     /// QUALIFIER (`Psr7\Utils` → `Psr7`): such a segment names a namespace,
     /// not a type and not an unused import.
     pub(crate) fn namespace_heads(&self) -> std::collections::HashSet<String> {
-        let Some(sep) = self.names().sep() else { return Default::default() };
+        if self.names().sep().is_none() {
+            return Default::default();
+        }
         self.pack
             .qualified_spellings
             .iter()
-            .filter_map(|(_, prefix)| prefix.trim_start_matches(sep).split(sep).next())
+            .filter_map(|q| q.segments.first())
             .filter(|h| !h.is_empty())
-            .map(str::to_string)
+            .map(String::to_string)
             .collect()
     }
 }

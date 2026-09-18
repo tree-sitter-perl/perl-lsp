@@ -78,6 +78,12 @@ pub struct LangPack {
     /// literal in the reader: the tag is one framework's word, exactly
     /// like the attribute spellings the entry documents carry, and the
     /// reader is the engine's. Empty = no such tag.
+    ///
+    /// TODO: one framework's vocabulary, and that framework already has a
+    /// bundled entry document (`queries/php/frameworks/phpunit.entry.json`)
+    /// which is where framework vocabulary lives. The tag belongs in it, as
+    /// a field the entry loader hands to `doc_types` — then a plugin dir can
+    /// teach the doc lane a runner tag without a recompile.
     pub doc_uses_method_tags: &'static [&'static str],
     /// Module-name → workspace-relative candidate paths — the entire
     /// per-language cross-file resolution strategy ("the one executable
@@ -118,6 +124,12 @@ pub struct LangPack {
     /// data: the extractor mints each as a SYNTHESIZED member at every enum
     /// declaration, and every consumer resolves it like any other member —
     /// nothing downstream reads this list, so no consumer matches the names.
+    ///
+    /// TODO: still five token texts a plugin dir cannot extend, two fields
+    /// below the builtin-class list that IS a document. The replacement is
+    /// the same shape — `queries/<lang>/enum-members.txt`, one name per
+    /// line with its callable-ness, read through the `builtins.txt` reader
+    /// — and it retires this field's rule #15 allowlist entry with it.
     pub enum_members: &'static [EnumMember],
     /// Completion trigger characters for the LSP
     /// `completionProvider.triggerCharacters` slot — the client auto-fires

@@ -331,6 +331,7 @@ impl<'a> Builder<'a> {
                     }),
                     folded_from: None,
                     arg_count: None,
+                    flags: Default::default(),
                 });
             }
             plugin::EmitAction::Handler {
@@ -422,6 +423,7 @@ impl<'a> Builder<'a> {
                     binding: None,
                     folded_from: None,
                     arg_count: None,
+                    flags: Default::default(),
                 });
                 if let Some(c) = invocant_class {
                     self.method_call_invocant.insert(ref_idx, c);
@@ -452,6 +454,7 @@ impl<'a> Builder<'a> {
                         }),
                         folded_from: None,
                         arg_count: None,
+                        flags: Default::default(),
                     });
                 }
             }

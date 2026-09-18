@@ -70,7 +70,6 @@ impl FileAnalysis {
             if let Some(note) = found {
                 out.push(Finding::new(
                     r.span,
-                    codes::DEPRECATED,
                     FindingData::Deprecated { name: leaf.to_string(), note },
                 ));
             }
@@ -111,10 +110,9 @@ impl FileAnalysis {
             }
             let leaf = name_match_key(written, self.names());
             let leaf = leaf.as_str();
-            // a receiver token naming the writing class or its parent
-            // (`self::`, `static::`, `parent::`) resolves off the enclosing
-            // scope, not out of a namespace
-            if leaf.is_empty() || facts.writes_own_class(leaf) {
+            // a name that resolves off the enclosing class rather than out of
+            // a namespace (`self`, `static`, `parent`) — the document said so
+            if leaf.is_empty() || r.names_relative_scope() {
                 continue;
             }
             // a segment used as a NAMESPACE prefix in this file (`Psr7\Utils`)
@@ -176,7 +174,6 @@ impl FileAnalysis {
                 declared.iter().map(|d| self.join_name(d, leaf)).collect();
             out.push(Finding::new(
                 r.span,
-                codes::UNDEFINED_TYPE,
                 FindingData::UndefinedType { identity, candidates },
             ));
         }
@@ -223,7 +220,6 @@ impl FileAnalysis {
             };
             out.push(Finding::new(
                 sym.selection_span,
-                codes::UNIMPLEMENTED_METHOD,
                 FindingData::UnimplementedContracts { class, missing },
             ));
         }
@@ -275,7 +271,6 @@ impl FileAnalysis {
             let Some(spelling) = self.native_type_spelling(&ty) else { continue };
             out.push(Finding::new(
                 s.selection_span,
-                codes::MISSING_RETURN_TYPE,
                 FindingData::MissingReturnType { name: s.name.clone(), spelling },
             ));
         }

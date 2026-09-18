@@ -43,7 +43,6 @@ pub struct RenameOptions {
     pub override_scope: OverrideScope,
 }
 
-/// Identifies what we're collecting references to.
 /// Is `name` the constructor SPELLING of `origin`'s language? The document
 /// says so on its own constructor capture; a language whose constructor is
 /// a name convention rather than a spelling (Perl's `new`) declares none,
@@ -56,6 +55,7 @@ fn is_ctor_name(origin: &FileAnalysis, name: &str) -> bool {
     .contains(name)
 }
 
+/// Identifies what we're collecting references to.
 #[derive(Debug, Clone)]
 pub struct TargetRef {
     pub name: String,
@@ -524,9 +524,17 @@ pub enum NotRewritable {
 
 impl NotRewritable {
     /// Would leaving this site unedited silently break the code? Then rename
-    /// refuses the whole set rather than emitting a partial edit.
+    /// refuses the whole set rather than emitting a partial edit. Exhaustive
+    /// on purpose: a reason added without an answer would default to "skip",
+    /// which is the verdict that emits the partial edit.
     pub fn refuses_rename(self) -> bool {
-        matches!(self, NotRewritable::MacroDelegated)
+        match self {
+            NotRewritable::MacroDelegated => true,
+            NotRewritable::ConstFolded
+            | NotRewritable::RailEmission
+            | NotRewritable::OtherNameToken
+            | NotRewritable::NoNameToken => false,
+        }
     }
 
     /// What a refusal tells the user — the real reason, never a stand-in for

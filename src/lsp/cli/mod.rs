@@ -4,7 +4,7 @@
 use crate::build::{language_driver, plugin};
 use crate::index::{document, file_store, module_cache, module_index, module_resolver, resolve};
 use crate::lsp::{backend, symbols};
-use crate::model::{conventions, file_analysis, witnesses};
+use crate::model::{file_analysis, witnesses};
 use crate::util::timings;
 
 /// Time one CLI query step — `tphase!("completion_items", expr)` prints a
