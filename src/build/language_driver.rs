@@ -377,18 +377,14 @@ impl LanguageDriver for PackDriver {
     ///    before (6) (`into_file_analysis` builds indices over everything).
     /// 6. `skel.into_file_analysis()` — the skeleton → FileAnalysis assembly
     ///    (unchanged; a method on `SkeletonAnalysis`, not a phase fn here).
-    /// 7. `emit_return_fuel` — post-assembly implicit-return / implicit-
-    ///    `this` interpretation over the FINAL FileAnalysis (stable
-    ///    SymbolIds, resolved refs): an `auto`-returning function with no
-    ///    declared type chains its Symbol onto its `return`-statement sites
-    ///    (structural-only in the skeleton — `SkeletonAnalysis::return_sites`
-    ///    — so `query_extract.rs` stays language-generic; the "this needs
-    ///    implicit-return fuel" READING of that data is cpp semantics, so it
-    ///    lives here). The `implicit_this_members`-gated half also mints
-    ///    implicit-`this` FIELD-read edges AND pins bare sibling method
-    ///    CALLs to the enclosing class (`resolved_package`), so both halves
-    ///    of C++'s receiver elision resolve. MUST run after (6): needs final
-    ///    SymbolIds + resolved `fa.refs`.
+    /// 7. `emit_return_fuel` — post-assembly implicit-return interpretation
+    ///    over the FINAL FileAnalysis (stable SymbolIds, resolved refs): an
+    ///    `auto`-returning function with no declared type chains its Symbol
+    ///    onto its `return`-statement sites (structural-only in the skeleton
+    ///    — `SkeletonAnalysis::return_sites` — so `query_extract.rs` stays
+    ///    language-generic; the "this needs implicit-return fuel" READING of
+    ///    that data is cpp semantics, so it lives here). MUST run after (6):
+    ///    needs final SymbolIds + resolved `fa.refs`.
     /// 8. `register_post_build` — post-assembly hooks that stamp fields only
     ///    queryable once the FileAnalysis exists: macro defs, attribute-macro
     ///    signals, access-region visibility, include closure, degraded flag.
@@ -473,7 +469,7 @@ impl PackDriver {
                 let return_sites = std::mem::take(&mut skel.return_sites);
                 let key_defs = std::mem::take(&mut skel.key_defs);
                 let mut fa = skel.into_file_analysis();
-                emit_return_fuel(&mut fa, &return_sites, pack.implicit_this_members);
+                emit_return_fuel(&mut fa, &return_sites);
                 self.register_post_build(&mut fa, &mut parser, source, path, &ctx, &recovered, macro_defs, &pack);
                 if let Some(p) = path {
                     adopt_path_rails(&mut fa, p, &key_defs, &pack);
@@ -1285,52 +1281,28 @@ fn emit_external_type_aliases(
 /// `Symbol(sid) → Edge(SymbolReturnArm(sid))` chain witness, mirroring
 /// Perl's `Builder::publish_return_arm_witnesses` — `SymbolReturnArmFold`
 /// (`witnesses.rs`) already folds multi-arm agreement generically.
-///
-/// A bare identifier that resolves to no local var (an unresolved
-/// `RefKind::Variable`) but names a field of its enclosing class
-/// (`Scope::package`) is an implicit `this->field` read (`return inner_;`
-/// with no explicit receiver) — mints the same `Expr(span) →
-/// Edge(Variable{field, field's own scope})` edge the field's own
-/// declared-type witness already resolves through, so the read chases the
-/// general Variable path instead of dead-ending. General-purpose (any bare
-/// field read, not gated on return position — rule #10). The same gate also
-/// pins a bare sibling-method CALL (`foo()` = `this->foo()`) to the enclosing
-/// class. Whether a bare name CAN elide `this->` — for members OR methods — is
-/// a language fact the pack declares (`implicit_this_members`): true for C/C++,
-/// false for Python/R where the receiver is mandatory.
 #[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake", feature = "php"))]
 fn emit_return_fuel(
     fa: &mut FileAnalysis,
     return_sites: &[(crate::model::file_analysis::ScopeId, crate::model::file_analysis::Span)],
-    implicit_this_members: bool,
 ) {
-    use crate::model::file_analysis::{RefKind, ScopeId, ScopeKind, SymKind, SymbolId};
+    use crate::model::file_analysis::{ScopeId, SymbolId};
     use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
     use std::collections::HashMap;
 
     let scope_parent: HashMap<ScopeId, Option<ScopeId>> =
         fa.scopes.iter().map(|s| (s.id, s.parent)).collect();
-    // A Sub/Method's body scope (`@scope.sub`) is minted on the SAME
-    // `function_definition` node as its `@def.sub`/`@def.method` — same
-    // span, different query pattern — so span equality joins scope → Symbol.
-    let scope_to_symbol: HashMap<ScopeId, SymbolId> = fa
-        .scopes
-        .iter()
-        .filter(|s| matches!(s.kind, ScopeKind::Sub { .. }))
-        .filter_map(|s| {
-            fa.symbols()
-                .iter()
-                .find(|sym| matches!(sym.kind, SymKind::Sub | SymKind::Method) && sym.span == s.span)
-                .map(|sym| (s.id, sym.id))
-        })
-        .collect();
+    // The callable a scope is the body of is minted with the scope
+    // (`Scope::owner`); the chain walk finds the nearest one.
+    let scope_owner: HashMap<ScopeId, Option<SymbolId>> =
+        fa.scopes.iter().map(|s| (s.id, s.owner)).collect();
     let mut gate: HashMap<SymbolId, Option<WitnessSource>> = HashMap::new();
     let mut chained: std::collections::HashSet<SymbolId> = std::collections::HashSet::new();
     for (ret_scope, ret_span) in return_sites {
         let owner = std::iter::successors(Some(*ret_scope), |sc| {
             scope_parent.get(sc).copied().flatten()
         })
-        .find_map(|sc| scope_to_symbol.get(&sc).copied());
+        .find_map(|sc| scope_owner.get(&sc).copied().flatten());
         let Some(sid) = owner else { continue };
         // The per-function gate is decided ONCE, on the first return site
         // seen for that function, from the bag as the walk left it — this
@@ -1347,7 +1319,7 @@ fn emit_return_fuel(
             .or_insert_with(|| {
                 let existing = fa.witnesses.for_attachment(&WA::Symbol(sid));
                 if existing.is_empty() {
-                    Some(WitnessSource::Builder("cpp_return_arm_chain".into()))
+                    Some(WitnessSource::Builder("return_arm_chain".into()))
                 } else if existing.iter().all(|w| {
                     matches!(
                         &w.payload,
@@ -1368,7 +1340,7 @@ fn emit_return_fuel(
         let Some(chain_source) = chain_source else { continue };
         fa.witnesses.push(Witness {
             attachment: WA::SymbolReturnArm(sid),
-            source: WitnessSource::Builder("cpp_return_arm".into()),
+            source: WitnessSource::Builder("return_arm".into()),
             payload: WP::Edge(WA::Expr(*ret_span)),
             span: *ret_span,
         });
@@ -1381,102 +1353,6 @@ fn emit_return_fuel(
                 span: *ret_span,
             });
         }
-    }
-
-    if !implicit_this_members {
-        return;
-    }
-    let scope_package: HashMap<ScopeId, Option<String>> =
-        fa.scopes.iter().map(|s| (s.id, s.package.clone())).collect();
-    let field_scope: HashMap<(String, String), (ScopeId, SymbolId)> = fa
-        .symbols()
-        .iter()
-        .filter(|s| matches!(s.kind, SymKind::Field))
-        .filter_map(|s| s.package.clone().map(|p| ((p, s.name.clone()), (s.scope, s.id))))
-        .collect();
-    let implicit_field_edges: Vec<(usize, crate::model::file_analysis::Span, String, ScopeId, SymbolId)> = fa
-        .refs()
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| matches!(r.kind, RefKind::Variable) && r.resolved_symbol().is_none())
-        .filter_map(|(i, r)| {
-            let class = scope_package.get(&r.scope)?.as_ref()?;
-            let (fscope, fsym) = *field_scope.get(&(class.clone(), r.target_name.clone()))?;
-            Some((i, r.span, r.target_name.clone(), fscope, fsym))
-        })
-        .collect();
-    for (i, span, name, fscope, fsym) in implicit_field_edges {
-        // Bind the ref to the field it reads — the call half below pins its
-        // sibling calls for exactly this reason ("goto-def / references /
-        // rename all land on the sibling"); a field read left unbound feeds
-        // the TYPE system through the witness edge yet answers goto-def
-        // empty, while references still names the declaration through the
-        // symbols lane — the projection disagreement the consistency net
-        // flags as I4.
-        fa.refs_mut()[i].bind_symbol(fsym);
-        fa.witnesses.push(Witness {
-            attachment: WA::Expr(span),
-            source: WitnessSource::Builder("cpp_implicit_field_read".into()),
-            payload: WP::Edge(WA::Variable { name, scope: fscope }),
-            span,
-        });
-    }
-
-    // Sibling method CALLs — the call half of the same implicit-`this`
-    // fact the field pass covers. A bare `foo(...)` inside a method body is
-    // `this->foo(...)` when the enclosing class declares a `foo` method; C++
-    // name lookup finds the member before any free function of that name.
-    // Pinning the call's `Function` binding to the enclosing class routes it
-    // through the SAME package-scoped callable resolution a qualified
-    // `Class::foo()` uses (`package_scoped_callable`), so goto-def /
-    // references / rename all land on the sibling. A name with no matching
-    // member is left untouched — a free-function-only call still resolves
-    // free.
-    //
-    // The enclosing class is the enclosing method SYMBOL's `package`, NOT the
-    // ref's scope package: an out-of-line body (`void Buf<T>::reserve(…)`) is
-    // lexically at file scope, so its body scope carries no package, but the
-    // peeled method symbol does (`Buf`). Reading it off the symbol covers
-    // in-class AND out-of-line, template or not, with one rule.
-    let class_methods: std::collections::HashSet<(String, String)> = fa
-        .symbols()
-        .iter()
-        .filter(|s| matches!(s.kind, SymKind::Method))
-        .filter_map(|s| s.package.clone().map(|p| (p, s.name.clone())))
-        .collect();
-    // Each Sub/Method body scope → its owning class (the peeled symbol
-    // package). Precomputed so the enclosing-class walk reads no `fa` borrow,
-    // leaving the ref table free to mutate below.
-    let scope_class: HashMap<ScopeId, String> = scope_to_symbol
-        .iter()
-        .filter_map(|(&sc, &sid)| {
-            fa.symbols()
-                .iter()
-                .find(|s| s.id == sid)
-                .and_then(|s| s.package.clone())
-                .map(|p| (sc, p))
-        })
-        .collect();
-    let class_of = |sc: ScopeId| -> Option<String> {
-        std::iter::successors(Some(sc), |s| scope_parent.get(s).copied().flatten())
-            .find_map(|s| scope_class.get(&s).cloned())
-    };
-    let sibling_pins: Vec<(usize, String)> = fa
-        .refs()
-        .iter()
-        .enumerate()
-        .filter_map(|(i, r)| {
-            if !matches!(r.kind, RefKind::FunctionCall) || r.binding.is_some() {
-                return None;
-            }
-            let class = class_of(r.scope)?;
-            class_methods
-                .contains(&(class.clone(), r.target_name.clone()))
-                .then_some((i, class))
-        })
-        .collect();
-    for (i, class) in sibling_pins {
-        fa.refs_mut()[i].bind_function_package(class);
     }
 }
 
