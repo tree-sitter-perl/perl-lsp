@@ -223,6 +223,192 @@ pub struct RailConventions {
     pub class_named_rails: Vec<String>,
 }
 
+/// Every `<plugin-dir>/<name>/<file_name>` under the shared plugin search
+/// path, sorted so the discovered set is a deterministic cache key. The ONE
+/// discovery helper for the plugin-loadable declaration documents
+/// (`rails.json`, `entry.json`): a second copy of this walk is how a
+/// document family ends up bundled-only without anything saying so.
+fn plugin_documents(file_name: &str) -> Vec<std::path::PathBuf> {
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    for dir in crate::build::plugin::rhai_host::plugin_search_dirs() {
+        if let Ok(read) = std::fs::read_dir(&dir) {
+            for entry in read.flatten() {
+                let candidate = entry.path().join(file_name);
+                if candidate.is_file() {
+                    paths.push(candidate);
+                }
+            }
+        }
+    }
+    paths.sort();
+    paths
+}
+
+/// The cache key for a (language, discovered document set) pair. The key IS
+/// the path set, never its size: two plugin dirs of equal size would
+/// otherwise serve each other's documents.
+fn document_cache_key(lang_id: &str, paths: &[std::path::PathBuf]) -> String {
+    paths.iter().fold(lang_id.to_string(), |mut k, p| {
+        k.push('|');
+        k.push_str(&p.to_string_lossy());
+        k
+    })
+}
+
+/// One rail document, or `None` when it declares another language. A
+/// document that does not PARSE is dropped with a diagnostic naming its
+/// origin: every family it carries — path rails, text rails, the lane's
+/// labels and hint rails — is a feature that would otherwise go missing in
+/// silence.
+fn parse_rail_doc(src: &str, pack: &LangPack, origin: &dyn std::fmt::Display) -> Option<RailsDoc> {
+    match serde_json::from_str::<RailsDoc>(src) {
+        Ok(doc) if doc.language == pack.lang_id => Some(doc),
+        Ok(_) => None,
+        Err(e) => {
+            eprintln!("perl-lsp: rail declarations {origin} dropped: {e}");
+            None
+        }
+    }
+}
+
+/// Every rail document in force for a language: the pack's bundled ones
+/// plus every discovered `<plugin-dir>/<name>/rails.json` declaring it —
+/// the `entry.json` posture (cached per (lang, document set); documents
+/// never hot-reload within a process). The three projections below read
+/// THIS one loader, so a document's path rails, text rails and conventions
+/// load together or not at all. Returns the cache key alongside, so a
+/// projection reuses this call's discovery instead of walking again.
+fn rail_docs_for(pack: &LangPack) -> (String, std::sync::Arc<Vec<RailsDoc>>) {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<RailsDoc>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let paths = plugin_documents("rails.json");
+    let key = document_cache_key(pack.lang_id, &paths);
+    if let Some(v) = cache.lock().unwrap().get(&key) {
+        return (key, Arc::clone(v));
+    }
+    let mut out: Vec<RailsDoc> = Vec::new();
+    for src in pack.bundled_rail_docs {
+        out.extend(parse_rail_doc(src, pack, &"(bundled)"));
+    }
+    for p in &paths {
+        if let Ok(src) = std::fs::read_to_string(p) {
+            out.extend(parse_rail_doc(&src, pack, &p.display()));
+        }
+    }
+    let arc = Arc::new(out);
+    cache.lock().unwrap().insert(key.clone(), Arc::clone(&arc));
+    (key, arc)
+}
+
+/// The path rails in force for a language.
+pub fn path_rails_for(pack: &LangPack) -> std::sync::Arc<Vec<PathRail>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<PathRail>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let (key, docs) = rail_docs_for(pack);
+    if let Some(v) = cache.lock().unwrap().get(&key) {
+        return Arc::clone(v);
+    }
+    let arc = Arc::new(docs.iter().flat_map(|d| d.path_rails.iter().cloned()).collect());
+    cache.lock().unwrap().insert(key, Arc::clone(&arc));
+    arc
+}
+
+/// The text rails in force for a language.
+pub fn text_rails_for(pack: &LangPack) -> std::sync::Arc<Vec<TextRail>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<TextRail>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let (key, docs) = rail_docs_for(pack);
+    if let Some(v) = cache.lock().unwrap().get(&key) {
+        return Arc::clone(v);
+    }
+    let arc = Arc::new(docs.iter().flat_map(|d| d.text_rails.iter().cloned()).collect());
+    cache.lock().unwrap().insert(key, Arc::clone(&arc));
+    arc
+}
+
+/// The rail conventions (lane labels, hint rails, name separators, the
+/// class-keyed rails) in force for a language.
+pub fn rail_conventions_for(pack: &LangPack) -> std::sync::Arc<RailConventions> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<RailConventions>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let (key, docs) = rail_docs_for(pack);
+    if let Some(v) = cache.lock().unwrap().get(&key) {
+        return Arc::clone(v);
+    }
+    let mut out = RailConventions::default();
+    for doc in docs.iter() {
+        out.labels.extend(doc.labels.iter().map(|(k, v)| (k.clone(), v.clone())));
+        out.codes.extend(doc.codes.iter().map(|(k, v)| (k.clone(), v.clone())));
+        out.hints.extend(doc.hints.iter().cloned());
+        out.name_seps.extend(doc.name_seps.iter().map(|(k, v)| (k.clone(), v.clone())));
+        out.seps.extend(doc.name_seps.iter().map(|(k, v)| (k.clone(), v.clone())));
+        out.seps
+            .extend(doc.path_rails.iter().map(|r| (r.rail.clone(), r.sep.clone())));
+        out.class_named_rails.extend(
+            doc.names_are
+                .iter()
+                .filter(|(_, v)| v.as_str() == RAIL_NAMES_ARE_CLASS)
+                .map(|(rail, _)| rail.clone()),
+        );
+    }
+    out.labels.sort();
+    out.codes.sort();
+    out.hints.sort();
+    out.name_seps.sort();
+    out.seps.sort();
+    out.seps.dedup();
+    out.class_named_rails.sort();
+    out.class_named_rails.dedup();
+    let arc = Arc::new(out);
+    cache.lock().unwrap().insert(key, Arc::clone(&arc));
+    arc
+}
+
+/// The framework-entry rules in force for a language: the pack's bundled
+/// documents plus every discovered `<plugin-dir>/<name>/entry.json`
+/// declaring this language. Cached per (lang, plugin-path set) like the
+/// overlay assembly — entry data never hot-reloads within a process. A
+/// malformed document is dropped with a stderr diagnostic (the bundled
+/// rules and surviving documents still serve — the overlay posture).
+pub fn entry_markers_for(pack: &LangPack) -> std::sync::Arc<Vec<EntryMarker>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<Vec<EntryMarker>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let paths = plugin_documents("entry.json");
+    let key = document_cache_key(pack.lang_id, &paths);
+    if let Some(v) = cache.lock().unwrap().get(&key) {
+        return Arc::clone(v);
+    }
+    let mut out: Vec<EntryMarker> = Vec::new();
+    let mut fold = |src: &str, origin: &dyn std::fmt::Display| {
+        match serde_json::from_str::<EntryDoc>(src) {
+            Ok(doc) if doc.language == pack.lang_id => out.extend(doc.entries),
+            Ok(_) => {}
+            Err(e) => eprintln!("perl-lsp: entry declarations {origin} dropped: {e}"),
+        }
+    };
+    for src in pack.bundled_entry_markers {
+        fold(src, &"(bundled)");
+    }
+    for p in &paths {
+        if let Ok(src) = std::fs::read_to_string(p) {
+            fold(&src, &p.display());
+        }
+    }
+    let arc = Arc::new(out);
+    cache.lock().unwrap().insert(key, Arc::clone(&arc));
+    arc
+}
+
 // ---- pack-plugin query overlays (tier 1, docs/prompt-pack-plugins.md) ----
 
 /// Discovered overlay files for a language: every
