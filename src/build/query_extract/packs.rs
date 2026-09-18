@@ -330,6 +330,145 @@ pub struct LangPack {
     pub oolfn: OutOfLineSpec,
 }
 
+impl LangPack {
+    /// Every `&'static str` this pack DECLARES, tagged with the field it
+    /// came from — the reflection the rule #15 tripwires walk.
+    ///
+    /// Hand-written and exhaustive on purpose: the destructure below makes
+    /// a new `LangPack` field a compile error here until its strings are
+    /// declared, which is what stops a fresh table of node kinds from
+    /// arriving unwatched. The four DOCUMENT fields (`query_source`, the
+    /// bundled overlays, the entry markers, the rail docs) are the
+    /// documents themselves, `names` is the language's own spelling seam,
+    /// and `lang_id` is a registration — none is a vocabulary this rule
+    /// governs, so none is yielded.
+    pub(crate) fn declared_strings(&self) -> Vec<(&'static str, &'static str)> {
+        let LangPack {
+            query_source: _,
+            bundled_overlays: _,
+            lang_id: _,
+            bundled_entry_markers: _,
+            bundled_rail_docs: _,
+            spellings: _,
+            names: _,
+            shape_name: _,
+            default_name: _,
+            annot_type: _,
+            rettype_receiver: _,
+            field_registry_edges: _,
+            super_receiver: _,
+            self_class_tokens,
+            class_token_kinds,
+            function_scoped_vars: _,
+            constructor_names,
+            doc_types: _,
+            doc_uses_method_tags,
+            module_paths: _,
+            shape_ctor: _,
+            import_call: _,
+            cmd_effects: _,
+            narrow_guard: _,
+            narrow_assertions,
+            rebind_method: _,
+            implicit_this_members: _,
+            include_path_tokens: _,
+            preprocessor_macros: _,
+            entrypoint_symbols,
+            runtime_invoked_methods,
+            brace_scoped_members: _,
+            call_shapes,
+            implicit_variables,
+            throwaway_names,
+            catch_all_methods,
+            callable_placeholder_kind,
+            pair_arrow,
+            spread_arg_kind,
+            named_arg_field,
+            imports_bind_names: _,
+            deprecated_attribute,
+            builtin_types,
+            enum_members,
+            arg_kind,
+            trigger_chars,
+            receiver_names,
+            nested_peel,
+            recv_peel,
+            op_map,
+            simple_var_kinds,
+            dynamic_arg_markers,
+            dynamic_var_markers,
+            qualifier_peel,
+            member_kinds,
+            skip_kinds,
+            call_kinds,
+            domain_compare_kinds,
+            domain_compare_ops,
+            oolfn,
+        } = self;
+        let mut out: Vec<(&'static str, &'static str)> = Vec::new();
+        fn list(
+            out: &mut Vec<(&'static str, &'static str)>,
+            field: &'static str,
+            values: &'static [&'static str],
+        ) {
+            out.extend(values.iter().map(|v| (field, *v)));
+        }
+        list(&mut out, "self_class_tokens", self_class_tokens);
+        list(&mut out, "class_token_kinds", class_token_kinds);
+        list(&mut out, "constructor_names", constructor_names);
+        list(&mut out, "doc_uses_method_tags", doc_uses_method_tags);
+        list(&mut out, "narrow_assertions", narrow_assertions);
+        list(&mut out, "entrypoint_symbols", entrypoint_symbols);
+        list(&mut out, "runtime_invoked_methods", runtime_invoked_methods);
+        list(&mut out, "implicit_variables", implicit_variables);
+        list(&mut out, "throwaway_names", throwaway_names);
+        list(&mut out, "catch_all_methods", catch_all_methods);
+        list(&mut out, "builtin_types", builtin_types);
+        list(&mut out, "enum_members", enum_members);
+        list(&mut out, "trigger_chars", trigger_chars);
+        list(&mut out, "receiver_names", receiver_names);
+        list(&mut out, "simple_var_kinds", simple_var_kinds);
+        list(&mut out, "dynamic_arg_markers", dynamic_arg_markers);
+        list(&mut out, "dynamic_var_markers", dynamic_var_markers);
+        list(&mut out, "qualifier_peel", qualifier_peel);
+        list(&mut out, "member_kinds", member_kinds);
+        list(&mut out, "skip_kinds", skip_kinds);
+        list(&mut out, "call_kinds", call_kinds);
+        list(&mut out, "domain_compare_kinds", domain_compare_kinds);
+        list(&mut out, "domain_compare_ops", domain_compare_ops);
+        for (field, one) in [
+            ("callable_placeholder_kind", *callable_placeholder_kind),
+            ("pair_arrow", *pair_arrow),
+            ("spread_arg_kind", *spread_arg_kind),
+            ("named_arg_field", *named_arg_field),
+            ("deprecated_attribute", *deprecated_attribute),
+            ("arg_kind", *arg_kind),
+            ("oolfn", oolfn.function_declarator),
+            ("oolfn", oolfn.qualified_name),
+        ] {
+            if !one.is_empty() {
+                out.push((field, one));
+            }
+        }
+        for c in *call_shapes {
+            out.push(("call_shapes", c.kind));
+            out.push(("call_shapes", c.callee_field));
+            out.push(("call_shapes", c.args_field));
+        }
+        for (field, peel) in [("nested_peel", nested_peel), ("recv_peel", recv_peel)] {
+            out.extend(peel.wrappers.iter().map(|(k, _)| (field, *k)));
+            list(&mut out, field, peel.annot_kinds);
+            for (leaf, _) in peel.leaf_to_def {
+                out.push((field, *leaf));
+            }
+        }
+        out.extend(op_map.iter().map(|(k, _)| ("op_map", *k)));
+        list(&mut out, "oolfn", oolfn.declarator_wrappers);
+        out.retain(|(_, v)| !v.is_empty());
+        out
+    }
+}
+
 /// A declarative peel: descend a wrapper chain tree-sitter's fixed-depth
 /// S-expression queries cannot express, to the leaf, optionally accumulating a
 /// per-level deref stack. ONE combinator the pack parameterizes — `nested_peel`

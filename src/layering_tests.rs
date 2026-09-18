@@ -1534,6 +1534,157 @@ fn source_tags_are_provenance_only() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// Every registered pack with the grammar it serves — `perl_pack()`
+/// included, which no driver carries (the native builder owns Perl, the
+/// pack is the measured migration path).
+fn packs_with_grammars() -> Vec<(crate::build::query_extract::LangPack, tree_sitter::Language)> {
+    use crate::build::language_driver::LanguageRegistry;
+    let perl_parser = crate::build::builder::create_parser();
+    let mut out = vec![(
+        crate::build::query_extract::perl_pack(),
+        (*perl_parser.language().expect("the perl grammar")).clone(),
+    )];
+    let registry = LanguageRegistry::with_enabled();
+    for id in registry.languages() {
+        let Some(driver) = registry.for_id(id) else { continue };
+        let Some(pack) = driver.lang_pack() else { continue };
+        let parser = driver.make_parser();
+        let language = (*parser.language().expect("the pack's grammar")).clone();
+        out.push((pack, language));
+    }
+    out
+}
+
+/// Rule #15: the query document owns a language's syntax. A node kind or a
+/// field name in a Rust table on the `LangPack` is the document's job done
+/// a second time, by a consumer that cannot see the capture — so it drifts
+/// from the patterns the extractor actually matched, silently.
+///
+/// Checked against the grammar itself, so the test cannot lag a rename:
+/// every string a pack declares is compared to that language's node kinds
+/// and field names. The allowlist is what is still to move; each entry
+/// names the slice that moves it, and it only shrinks.
+#[test]
+fn pack_fields_name_no_grammar_shapes() {
+    let seen =
+        pack_string_sites(&|value, kinds, fields| kinds.contains(value) || fields.contains(value));
+    const TRIGGERS: &str =
+        "kept: the LSP client's trigger characters, which collide with the grammar's anonymous \
+         tokens by coincidence — a protocol vocabulary, not the language's syntax";
+    let allow: &[(&str, &str, usize, &str)] = &[
+        ("cpp", "call_kinds", 1, "B1 — `@hop.call` / `@expr.call` patterns"),
+        ("cpp", "domain_compare_kinds", 1, "B1 — the existing `@domain.slot` patterns"),
+        ("cpp", "domain_compare_ops", 2, "B1 — the pattern's own `#any-of?`"),
+        ("cpp", "member_kinds", 1, "B1 — the `@member.recv` patterns' root kinds"),
+        ("cpp", "nested_peel", 5, "B2 — per-level `@deref.*` captures"),
+        ("cpp", "oolfn", 5, "B2 — `@ool.declarator` / `@ool.qualifier` / `@ool.wrap`"),
+        ("cpp", "op_map", 2, "B1 — `\"->\" @member.op.arrow`, `\".\" @member.op.dot`"),
+        ("cpp", "qualifier_peel", 1, "B2 — `@qualifier.name` on `template_type`"),
+        ("cpp", "receiver_names", 1, "B1 — `@receiver.this`"),
+        ("cpp", "recv_peel", 2, "B1 — `@recv.peel` / `@recv.peel.deref`"),
+        ("cpp", "simple_var_kinds", 1, "B1 — `@ref.var` marks a bare variable"),
+        ("cpp", "skip_kinds", 4, "B1 — `(string) @skip (comment) @skip …`"),
+        ("cpp", "trigger_chars", 3, TRIGGERS),
+        ("perl", "pair_arrow", 1, "B1 — `\"=>\" @pair.arrow` on the list-literal pattern"),
+        ("perl", "trigger_chars", 6, TRIGGERS),
+        ("php", "arg_kind", 1, "B1 — `@arity.arg`"),
+        ("php", "call_kinds", 5, "B1 — `@hop.call` / `@expr.call` patterns"),
+        ("php", "call_shapes", 14, "B1 — the compiled query's `@arity.args` captures"),
+        ("php", "callable_placeholder_kind", 1, "B1 — `@arity.placeholder`"),
+        ("php", "class_token_kinds", 2, "B1 — `@receiver.class` on the scoped-call patterns"),
+        ("php", "enum_members", 2, "B3 — synthesised on every `@def.enum`"),
+        ("php", "member_kinds", 6, "B1 — the `@member.recv` patterns' root kinds"),
+        ("php", "named_arg_field", 1, "B1 — `@arity.arg.named`"),
+        ("php", "pair_arrow", 1, "B1 — `\"=>\" @pair.arrow` on the list-literal pattern"),
+        ("php", "recv_peel", 1, "B1 — `@recv.peel`"),
+        ("php", "self_class_tokens", 2, "B1 — `@receiver.self` with `#any-of?`"),
+        ("php", "simple_var_kinds", 1, "B1 — `@ref.var` marks a bare variable"),
+        ("php", "skip_kinds", 3, "B1 — `(string) @skip (comment) @skip …`"),
+        ("php", "spread_arg_kind", 1, "B1 — `@arity.arg.spread`"),
+        ("php", "trigger_chars", 3, TRIGGERS),
+    ];
+    let drift = pack_allowlist_drift("rule #15 (grammar shapes on the pack)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// One pack's declared strings, keyed `<lang>:<field>`, counting only the
+/// values `keep` admits.
+fn pack_string_sites(
+    keep: &dyn Fn(&str, &std::collections::HashSet<String>, &std::collections::HashSet<&str>) -> bool,
+) -> HashMap<String, usize> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for (pack, language) in packs_with_grammars() {
+        let kinds = grammar_kinds(&language);
+        let fields: std::collections::HashSet<&str> = (1..=language.field_count() as u16)
+            .filter_map(|id| language.field_name_for_id(id))
+            .collect();
+        for (field, value) in pack.declared_strings() {
+            if keep(value, &kinds, &fields) {
+                *seen.entry(format!("{}:{}", pack.lang_id, field)).or_default() += 1;
+            }
+        }
+    }
+    seen
+}
+
+/// `allowlist_drift` over a per-(language, field) allowlist, restricted to
+/// the languages this build serves. A pack behind a feature flag is absent
+/// rather than a missing entry, so one allowlist reads correctly whichever
+/// languages are compiled in — and stays count-exact for the ones that are.
+fn pack_allowlist_drift(
+    what: &str,
+    seen: &HashMap<String, usize>,
+    allow: &[(&'static str, &'static str, usize, &'static str)],
+) -> Vec<String> {
+    let present: std::collections::HashSet<&str> =
+        packs_with_grammars().iter().map(|(p, _)| p.lang_id).collect();
+    let rows: Vec<(String, usize, &'static str)> = allow
+        .iter()
+        .filter(|(lang, ..)| present.contains(lang))
+        .map(|(lang, field, n, why)| (format!("{lang}:{field}"), *n, *why))
+        .collect();
+    let borrowed: Vec<(&str, usize, &str)> =
+        rows.iter().map(|(k, n, why)| (k.as_str(), *n, *why)).collect();
+    allowlist_drift(what, seen, &borrowed)
+}
+
+/// Rule #15's other half: a language's VOCABULARY — the token texts,
+/// callee names and runtime-provided names a pattern must fire on — belongs
+/// in the query document as an `#eq?` / `#any-of?` predicate, or in a data
+/// document a plugin dir extends. A Rust table of them is an enumeration a
+/// consumer maintains and a document cannot extend.
+///
+/// The grammar cannot check these (`"__construct"` names no node kind), so
+/// they are ratcheted by count instead, each entry naming the slice that
+/// moves it. `trigger_chars` is not here: the LSP protocol's trigger
+/// characters are the client's vocabulary, not the language's.
+#[test]
+fn pack_string_tables_are_ratcheted() {
+    let seen = pack_string_sites(&|value, kinds, fields| {
+        !kinds.contains(value) && !fields.contains(value)
+    });
+    let seen: HashMap<String, usize> =
+        seen.into_iter().filter(|(k, _)| !k.ends_with(":trigger_chars")).collect();
+    let allow: &[(&str, &str, usize, &str)] = &[
+        ("cpp", "entrypoint_symbols", 1, "B3 — an entry document (`cpp.entry.json`)"),
+        ("php", "builtin_types", 158, "B3 — a bundled stub source under the BUILTIN role"),
+        ("php", "catch_all_methods", 3, "B1 — `@def.method.catch_all` → a class flag"),
+        ("php", "constructor_names", 1, "B1 — `@def.method.ctor` → `SymbolFlags::CONSTRUCTOR`"),
+        ("php", "deprecated_attribute", 1, "B1 — `@sym.attr.deprecated`"),
+        ("php", "doc_uses_method_tags", 1, "kept: one framework's docblock tag, data handed to the engine's own reader — the entry-document posture"),
+        ("php", "dynamic_arg_markers", 3, "B1 — `@call.dynamic_args`"),
+        ("php", "dynamic_var_markers", 5, "B1 — `@call.dynamic_vars`"),
+        ("php", "enum_members", 3, "B3 — synthesised on every `@def.enum`, producer-only data"),
+        ("php", "implicit_variables", 13, "B1 — `@ref.var.implicit` mints the binding"),
+        ("php", "narrow_assertions", 1, "B2 — `(#eq? @narrow.assert \"assert\")`"),
+        ("php", "receiver_names", 1, "B1 — `@param.receiver` / `@receiver.this`"),
+        ("php", "runtime_invoked_methods", 31, "B3 — an entry document (`php.entry.json`)"),
+        ("php", "throwaway_names", 1, "B1 — `@def.var.throwaway` → `SymbolFlags::THROWAWAY`"),
+    ];
+    let drift = pack_allowlist_drift("rule #15 (vocabulary tables on the pack)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// Rule #14's other half: a language's spellings are reached by ID, so
 /// they are `#[serde(skip)]` — and every path that rebuilds a
 /// `FileAnalysis` from bytes has to re-attach them. An unattached decode

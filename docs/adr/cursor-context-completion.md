@@ -47,6 +47,12 @@ recovery parser) — none read the broken tree.
 
 ### The seam: sentinel reparse (`cursor_sentinel.rs`)
 
+Which nodes ARE a member access, a call, or a token to skip is the query
+document's answer, read through the bounded cursor-time runner
+(`pack_query` / `captures_at` / `pattern_root_kinds`,
+`docs/adr/pack-vocabulary.md`) — never a node-kind table beside the
+document.
+
 A member of the reparse family (`cpp_reparse.rs`, `reparse.rs`): a source
 edit + reparse + span remap. The others fix a parse corrupted by a
 *declaration* (a macro, a prototype); this one fixes a parse corrupted by
