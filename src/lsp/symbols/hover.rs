@@ -88,8 +88,13 @@ pub fn pack_hover_markdown(
                                     && s.name == field
                                     && s.package.as_deref() == Some(class.as_str())
                             });
-                            if let (Some(sym), Ok(text)) =
-                                (sym, std::fs::read_to_string(&cached.path))
+                            // A disk read on the hover path, attributed:
+                            // the declaring file is closed, and its text is
+                            // what the signature is rendered from.
+                            let text = crate::util::timings::phase("lsp::hover_member_read", || {
+                                std::fs::read_to_string(&cached.path)
+                            });
+                            if let (Some(sym), Ok(text)) = (sym, text)
                             {
                                 let mut out = render_symbol_hover(
                                     sym, &text, language, &whole, sym.span.start, Some(midx),
@@ -216,7 +221,10 @@ fn render_candidate_hover(
         return (!line.is_empty()).then(|| format!("```{}\n{}\n```", language, line));
     }
     let path = crate::index::resolve::key_for_sort(&loc.key);
-    let text = std::fs::read_to_string(&path).ok()?;
+    let text = crate::util::timings::phase("lsp::hover_candidate_read", || {
+        std::fs::read_to_string(&path)
+    })
+    .ok()?;
     let fname = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
     // The candidate's own analysis: the scoped index caches every pack file
     // a projection can answer from.

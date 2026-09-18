@@ -949,7 +949,12 @@ fn contract_declarator(
             && s.name == name
             && s.package.as_deref() == Some(role)
     })?;
-    let src = std::fs::read_to_string(&cached.path).ok()?;
+    // One read per missing contract per publish, attributed: this runs on
+    // didChange, so its cost is the lane's cost.
+    let src = crate::util::timings::phase("lsp::contract_declarator_read", || {
+        std::fs::read_to_string(&cached.path)
+    })
+    .ok()?;
     declarator_text(&src, sym)
 }
 

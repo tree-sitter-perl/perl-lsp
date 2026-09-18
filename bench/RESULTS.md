@@ -1226,3 +1226,26 @@ tier never fed the reverse index for classless files (WordPress hook
 navigation across files was broken the same way), and a pack sub-index's
 lazily-woken resolver rebuilt the reverse index under the diagnostics
 sweep (nondeterministic cross-file misses on every one-shot CLI run).
+
+## Request-path disk reads (2026-09-18) — debug build, 4 cores / 15 GB
+
+Two places read a file from disk while answering a request: the contract
+quick-fix's declarator text (once per missing contract, inside a diagnostics
+publish, which runs on didChange) and cross-file member hover (once per
+hover). Both are now attributed — `PERL_LSP_PHASE_TIMING=1` prints
+`lsp::contract_declarator_read` and `lsp::hover_member_read`.
+
+| site | shape measured | per read | per request |
+|---|---|---|---|
+| `lsp::contract_declarator_read` | a class implementing 6 single-method interfaces, each in its own closed file; one `--check` publish | 0.01–0.02 ms | 6 reads, ~0.07 ms |
+| `lsp::hover_member_read` | one cross-file member hover onto a closed declaring file | 0.02 ms | 1 read, 0.02 ms |
+
+Two orders of magnitude under the 5 ms bar this was measured against, on a
+DEBUG binary and with the files in page cache — a release build and a cold
+cache move it, but not by the 250x that would matter. The design question
+(the declarator on the symbol's presentation, so hover and the quick-fix
+share a producer instead of each re-reading) stays open as debt in
+`docs/PARKED.md`; it is not a latency fix.
+
+Both numbers are from a synthetic fixture, not a corpus: a real app's
+declaring files are larger, so re-measure before citing this against one.
