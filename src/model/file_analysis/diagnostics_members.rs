@@ -53,10 +53,12 @@ impl FileAnalysis {
         let mut below_memo: HashMap<(String, String, bool), bool> = HashMap::new();
 
         for r in self.refs() {
-            let Some(site) = r.member_site() else { continue };
+            // a member site, whatever the family
+            if r.member_site().is_none() {
+                continue;
+            }
             // a member site always states its family
             let Some(want) = MemberKind::of_ref(&r.kind) else { continue };
-            let invocant = site.invocant;
             // only a call can be named by a string (`[$obj, 'name']`)
             let named_by_string = matches!(r.kind, RefKind::MethodCall { named_by_string: true, .. });
             // The method TOKEN the model spells: a `parent::` call is minted
@@ -127,7 +129,7 @@ impl FileAnalysis {
             match owner.resolve_member(&class, name, want, idx) {
                 None if class_facts.is_interface || class_facts.is_trait => {}
                 // a class with no declared constructor has the default one
-                None if facts.is_constructor_name(name) => {}
+                None if r.constructs() => {}
                 None if named_by_string => {
                     // `[$obj, 'name']` is data until dispatch proves it a
                     // callable: a claim only when it resolves
@@ -168,7 +170,7 @@ impl FileAnalysis {
                     }
                     // the receiver is the language's own: the runtime class
                     // may be any descendant, and one of them declares it
-                    if facts.is_receiver_token(invocant.text()) {
+                    if r.receiver_is_own_object() {
                         let declared_below = *below_memo
                             .entry((class.clone(), name.to_string(), matches!(want, MemberKind::Value)))
                             .or_insert_with(|| {

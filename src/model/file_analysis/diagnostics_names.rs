@@ -111,10 +111,9 @@ impl FileAnalysis {
             }
             let leaf = name_match_key(written, self.names());
             let leaf = leaf.as_str();
-            // a receiver token naming the writing class or its parent
-            // (`self::`, `static::`, `parent::`) resolves off the enclosing
-            // scope, not out of a namespace
-            if leaf.is_empty() || facts.writes_own_class(leaf) {
+            // a name that resolves off the enclosing class rather than out of
+            // a namespace (`self`, `static`, `parent`) — the document said so
+            if leaf.is_empty() || r.names_relative_scope() {
                 continue;
             }
             // a segment used as a NAMESPACE prefix in this file (`Psr7\Utils`)

@@ -908,6 +908,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // `@def.method.ctor` — the constructor declaration's name span; the
     // symbol carries `CONSTRUCTOR`, which is what rename policy, the dead-code
     // shield and the annotation lane ask.
+    // What the document said AT a reference site, by the token's span: the
+    // language's own object token, a name that resolves off the enclosing
+    // class rather than a namespace, and a call that names the constructor.
+    // Stamped onto the refs once, below, so no lane re-matches a spelling.
+    let mut this_receiver_spans: std::collections::HashSet<(Point, Point)> = Default::default();
+    let mut relative_scope_spans: std::collections::HashSet<(Point, Point)> = Default::default();
+    let mut ctor_call_spans: std::collections::HashSet<(Point, Point)> = Default::default();
     let mut ctor_name_spans: std::collections::HashSet<(Point, Point)> =
         std::collections::HashSet::new();
     // `@def.var.throwaway` — a binding written to be discarded; the symbol
@@ -1046,9 +1053,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "receiver.super" {
             super_recv_matches.insert(e.match_id);
+            relative_scope_spans.insert((e.start, e.end));
         }
         if e.cap == "receiver.self" {
             self_recv_matches.insert(e.match_id);
+            relative_scope_spans.insert((e.start, e.end));
+        }
+        if e.cap == "receiver.this" {
+            this_receiver_spans.insert((e.start, e.end));
+        }
+        if e.cap == "ref.method.ctor" {
+            ctor_call_spans.insert((e.start, e.end));
         }
         if e.cap == "param.receiver" {
             receiver_name_spans.insert((e.start, e.end));
@@ -1874,6 +1889,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             arg_count: None,
                             value_read: false,
                             named_by_string: false,
+                            flags: crate::model::file_analysis::RefFlags::CONSTRUCTS,
                         });
                     }
                 }
@@ -2165,6 +2181,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         arg_count: None,
                         value_read: false,
                         named_by_string: false,
+                        flags: Default::default(),
                     });
                     continue;
                 }
@@ -2180,6 +2197,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     arg_count: None,
                     value_read: false,
                     named_by_string: false,
+                    flags: Default::default(),
                 });
             }
             c if super::rail_of(c).is_some_and(|(k, _)| !k.is_handler()) => {
@@ -2202,6 +2220,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     arg_count: None,
                     value_read: false,
                     named_by_string: false,
+                    flags: Default::default(),
                 });
             }
             // consumed by the prepass join above; nothing to mint here
@@ -2225,6 +2244,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     arg_count: None,
                     value_read: false,
                     named_by_string: true,
+                    flags: Default::default(),
                 });
             }
             "ref.method.named" => {
@@ -2241,9 +2261,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         arg_count: None,
                         value_read: false,
                         named_by_string: true,
+                        flags: Default::default(),
                     });
                 }
             }
+            // `@ref.method.ctor`: the constructor NAMED at a call site. Read
+            // in the pre-pass as a span and stamped onto the reference the
+            // member pattern already minted — it declares nothing of its own.
+            "ref.method.ctor" => {}
             cap if cap.starts_with("ref.") => {
                 // Generic suppression: a "reference" inside a def's own
                 // header is the declaration, not a use. `ref.type` is exempt:
@@ -2285,6 +2310,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             arg_count: arg_counts_by_start.get(&(e.end.row, e.end.column)).copied(),
                             value_read: false,
                             named_by_string: false,
+                            flags: crate::model::file_analysis::RefFlags::CONSTRUCTS,
                         });
                         if let (Some(vars), Some(cls)) = (
                             arg_vars_by_start.get(&(e.end.row, e.end.column)),
@@ -2333,6 +2359,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 arg_count: None,
                                 value_read: false,
                                 named_by_string: false,
+                                flags: Default::default(),
                             });
                             out.refs.push(SkelRef {
                                 via: None,
@@ -2349,6 +2376,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                     .copied(),
                                 value_read: false,
                                 named_by_string: false,
+                                flags: crate::model::file_analysis::RefFlags::CONSTRUCTS,
                             });
                             // The construction site calls the constructor, so
                             // its arguments bind exactly as any other call's
@@ -2429,6 +2457,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 || arg_counts_by_start.contains_key(&(e.end.row, e.end.column))
                                 || placeholder_call_at.contains(&(e.end.row, e.end.column))),
                         named_by_string: false,
+                        flags: Default::default(),
                     });
                     if matches!(e.cap.as_str(), "ref.call" | "ref.qcall" | "ref.member") {
                         if let Some(vars) = arg_vars_by_start.get(&(e.end.row, e.end.column)) {
@@ -2834,6 +2863,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         arg_count: None,
                         value_read: false,
                         named_by_string: false,
+                        flags: Default::default(),
                     });
                 }
             }
@@ -3180,6 +3210,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             arg_count: Some(args.len()),
             value_read: false,
             named_by_string: false,
+            flags: Default::default(),
         });
     }
 
@@ -3826,6 +3857,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                     arg_count: None,
                                     value_read: false,
                                     named_by_string: false,
+                                    flags: Default::default(),
                                 });
                             }
                         }
@@ -4242,6 +4274,29 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     doc: None,
                     deprecation: None,
                 });
+            }
+        }
+    }
+    // What the document said AT each reference site, stamped once. A
+    // receiver's flavour and a constructor call are facts a capture stated;
+    // a consumer that matched the token text back against a set of spellings
+    // was asking a question already answered (rule #11).
+    if !this_receiver_spans.is_empty()
+        || !relative_scope_spans.is_empty()
+        || !ctor_call_spans.is_empty()
+    {
+        use crate::model::file_analysis::RefFlags;
+        for r in &mut out.refs {
+            if let Some((inv, _)) = &r.invocant {
+                if this_receiver_spans.contains(&(inv.start, inv.end)) {
+                    r.flags |= RefFlags::RECEIVER_THIS;
+                }
+            }
+            if relative_scope_spans.contains(&(r.start, r.end)) {
+                r.flags |= RefFlags::RELATIVE_SCOPE;
+            }
+            if ctor_call_spans.contains(&(r.start, r.end)) {
+                r.flags |= RefFlags::CONSTRUCTS;
             }
         }
     }

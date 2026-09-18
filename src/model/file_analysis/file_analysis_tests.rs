@@ -2539,6 +2539,7 @@ fn binding_owner_restamp_drops_stale_symbol_link() {
         binding: None,
         folded_from: None,
         arg_count: None,
+        flags: Default::default(),
     };
     // Linking without a resolved owner is a no-op — nothing to attach to.
     r.link_owned_symbol(SymbolId(7));

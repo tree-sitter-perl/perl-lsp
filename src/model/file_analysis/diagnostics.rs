@@ -120,26 +120,18 @@ pub enum FindingData {
 /// What a lane needs that the analysis cannot answer for itself.
 ///
 /// The cross-file lookup and its verdict about its own bulk pass, plus the
-/// small closed name sets a language's QUERY DOCUMENT declares (rule #12:
-/// the document is their one home). Those documents live above this layer,
-/// so the tier that can read them hands them down here rather than a lane
-/// reaching up for them.
+/// two document-declared sets with no per-site fact to mint: a runtime's
+/// type names, and whether the language's import rows bind a name at all.
+/// Those documents live above this layer, so the tier that can read them
+/// hands them down here rather than a lane reaching up for them. Anything a
+/// capture states AT a site is on the ref or the symbol instead (rule #11) —
+/// it never arrives here as a set of spellings to match back.
 pub struct LaneFacts<'a> {
     pub idx: Option<&'a dyn CrossFileLookup>,
     /// Is absence meaningful yet? A lane that reports "no such name" claims
     /// the index would have it if it existed; while the index is warming
     /// that claim is false (`IndexState`).
     pub index_settled: bool,
-    /// The names that construct (`__construct`): a class declaring none
-    /// still has the default constructor.
-    pub constructor_names: &'a [&'a str],
-    /// How the language spells the object the enclosing method runs on
-    /// (`$this`): its runtime class may be any descendant.
-    pub receiver_tokens: &'a [&'a str],
-    /// The receiver tokens that name the writing class or its parent
-    /// (`self::`, `static::`, `parent::`): they resolve off the enclosing
-    /// scope, never out of a namespace.
-    pub own_class_tokens: &'a [&'a str],
     /// The type names the runtime provides, which the workspace carries no
     /// declaration for.
     pub builtin_types: &'a [String],
@@ -153,15 +145,6 @@ impl LaneFacts<'_> {
     /// The lanes that report absence answer only against a settled index.
     pub fn settled_lookup(&self) -> Option<&dyn CrossFileLookup> {
         self.index_settled.then_some(self.idx).flatten()
-    }
-    pub fn is_constructor_name(&self, name: &str) -> bool {
-        self.constructor_names.contains(&name)
-    }
-    pub fn is_receiver_token(&self, text: &str) -> bool {
-        self.receiver_tokens.contains(&text)
-    }
-    pub fn writes_own_class(&self, token: &str) -> bool {
-        self.own_class_tokens.contains(&token)
     }
     pub fn is_builtin_type(&self, leaf: &str) -> bool {
         self.builtin_types.iter().any(|b| b == leaf)

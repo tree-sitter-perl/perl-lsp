@@ -565,6 +565,8 @@ const OVERLAY_ONLY_CAPTURES: &[&str] = &[
     "expr.annot",
     "scope.sub.implicit_receiver",
     "import.binds",
+    "arity.param.name",
+    "ref.method.ctor",
 ];
 
 /// The captures in `declared` the extractor does NOT serve — `--plugin-check`'s

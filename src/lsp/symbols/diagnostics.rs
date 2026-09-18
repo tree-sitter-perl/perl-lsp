@@ -782,21 +782,15 @@ pub fn pack_symbol_diagnostics(
         .map(|i| i.index_state(&analysis.language))
         .unwrap_or(IndexState::Warming)
         .is_settled();
-    // The small closed name sets the language's query DOCUMENT declares,
-    // read once here — the tier that can see the documents, handing them to
-    // the lanes that reason on them.
+    // The document-declared sets with no per-site fact to mint, read once
+    // here — the tier that can see the documents, handing them to the lanes
+    // that reason on them.
     use crate::build::language_driver::LanguageRegistry as Reg;
     let lang = analysis.language.as_str();
-    let ctor: Vec<&str> = Reg::pack_capture_literals(lang, "def.method.ctor").iter().copied().collect();
-    let receivers = Reg::receiver_tokens(lang);
-    let own_class = Reg::own_class_tokens(lang);
     let builtins = Reg::builtin_types(lang);
     let facts = LaneFacts {
         idx,
         index_settled,
-        constructor_names: &ctor,
-        receiver_tokens: &receivers,
-        own_class_tokens: &own_class,
         builtin_types: &builtins,
         imports_bind_names: Reg::imports_bind_names(lang),
     };

@@ -894,6 +894,7 @@ pub(crate) fn scan_text_rails(
                     binding: Some(RefBinding::Handler { owner: HandlerOwner::Rail(rail.rail.clone()), sym: None }),
                     folded_from: None,
                     arg_count: None,
+                    flags: Default::default(),
                 });
             }
         }
@@ -1423,6 +1424,7 @@ fn remap_spans(
             arg_count: _,
             value_read: _,
             named_by_string: _,
+            flags: _,
         } = rf;
         (*start, *end) = remap_span(*start, *end);
         // The invocant span is consumed via `expr_type_at_span` (member
@@ -1854,19 +1856,6 @@ impl LanguageRegistry {
             })
             .map(|q| crate::build::query_extract::capture_literals(q, capture))
             .unwrap_or_else(|| EMPTY.get_or_init(Default::default))
-    }
-
-    /// Does `token` name a class RELATIVE to the one that writes it — the
-    /// writing class itself (`self` / `static`) or its parent (`parent`)?
-    /// Such a spelling resolves off the writing scope, so it names no type a
-    /// namespace has to supply. The receiver captures say which spellings
-    /// those are; a language without a pack claims nothing.
-    pub fn own_class_tokens(id: &str) -> Vec<&'static str> {
-        Self::pack_capture_literals(id, "receiver.self")
-            .iter()
-            .chain(Self::pack_capture_literals(id, "receiver.super").iter())
-            .copied()
-            .collect()
     }
 
     /// How `id` spells the object the enclosing method runs on (`$this`,

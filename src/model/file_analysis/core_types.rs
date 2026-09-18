@@ -1188,6 +1188,43 @@ pub struct FieldDetail {
 
 // ---- Ref ----
 
+bitflags::bitflags! {
+    /// What the DOCUMENT said at a reference site, as a closed flag set.
+    /// A receiver's flavour and a construction are facts the grammar states
+    /// outright; the extractor mints them from the capture that said so, and
+    /// a consumer asks the reference instead of matching its token text back
+    /// against a set of spellings (rule #11).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct RefFlags: u8 {
+        /// The receiver is the language's own object token (`$this`, `this`):
+        /// its runtime class may be any DESCENDANT of the written one, so a
+        /// member absent from that class is not yet a missing member.
+        const RECEIVER_THIS = 1 << 0;
+        /// The written name is the enclosing class or its parent (`self::`,
+        /// `static::`, `parent::`, `new self()`, `: static`): it resolves off
+        /// the enclosing scope, never out of a namespace.
+        const RELATIVE_SCOPE = 1 << 1;
+        /// The site calls the receiver's CONSTRUCTOR — a class that declares
+        /// none still has the default one.
+        const CONSTRUCTS = 1 << 2;
+    }
+}
+
+/// The wire form is the bare bit set, like `SymbolFlags`: a flag added at
+/// the tail reads old blobs unchanged.
+impl Serialize for RefFlags {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.bits().serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for RefFlags {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        u8::deserialize(d).map(RefFlags::from_bits_retain)
+    }
+}
+
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ref {
     pub kind: RefKind,
@@ -1223,6 +1260,10 @@ pub struct Ref {
     /// kinds).
     #[serde(default)]
     pub arg_count: Option<usize>,
+    /// The facts the document stated at this site (rule #11): which flavour
+    /// of receiver was written, and whether the call constructs.
+    #[serde(default)]
+    pub flags: RefFlags,
 }
 
 pub use crate::model::conventions::{name_match_key, split_qualified};
@@ -1233,6 +1274,24 @@ impl Ref {
     /// `member_site()` never has a second, unreachable way to fail.
     pub fn member_kind(&self) -> Option<MemberKind> {
         MemberKind::of_ref(&self.kind)
+    }
+
+    /// The receiver is the language's own object token (`$this`, `this`) —
+    /// so its runtime class may be any descendant of the written one.
+    pub fn receiver_is_own_object(&self) -> bool {
+        self.flags.contains(RefFlags::RECEIVER_THIS)
+    }
+
+    /// The written name is the enclosing class or its parent, which resolves
+    /// off the enclosing scope rather than out of a namespace.
+    pub fn names_relative_scope(&self) -> bool {
+        self.flags.contains(RefFlags::RELATIVE_SCOPE)
+    }
+
+    /// This site calls the receiver's constructor. A class declaring none
+    /// still has the default one, so an unresolved member here is no finding.
+    pub fn constructs(&self) -> bool {
+        self.flags.contains(RefFlags::CONSTRUCTS)
     }
 
     /// The receiver view of a member access (`MethodCall` / `FieldAccess`);

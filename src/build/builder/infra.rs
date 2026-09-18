@@ -310,6 +310,7 @@ impl<'a> Builder<'a> {
             binding,
             folded_from: None,
             arg_count: None,
+            flags: Default::default(),
         });
     }
 

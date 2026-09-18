@@ -126,6 +126,13 @@
 ; construction sites and the rename policy read one fact.
 ((method_declaration name: (name) @def.method.ctor)
  (#eq? @def.method.ctor "__construct"))
+; the constructor NAMED at a call site (`parent::__construct(...)`): a class
+; that declares none still has the default one, so the reference carries the
+; fact and no lane compares the spelling back.
+((scoped_call_expression name: (name) @ref.method.ctor)
+ (#eq? @ref.method.ctor "__construct"))
+((member_call_expression name: (name) @ref.method.ctor)
+ (#eq? @ref.method.ctor "__construct"))
 
 (interface_declaration name: (name) @classattr.interface)
 (trait_declaration name: (name) @classattr.trait)
@@ -373,6 +380,18 @@
 ; hints, and the file's use-map counts the leaf as spelled here.
 ; Primitives (`int`, `array`) are `primitive_type`, never matched.
 (named_type (name) @ref.type)
+; `self` / `static` / `parent` written where a class NAME goes: they name the
+; class this code is written in, or its parent, and resolve off the enclosing
+; scope rather than out of a namespace. The reference says so, so the lane
+; that reports a name its namespace cannot supply never matches the spelling.
+((named_type (name) @receiver.self) (#any-of? @receiver.self "self" "static"))
+((named_type (name) @receiver.super) (#eq? @receiver.super "parent"))
+((binary_expression "instanceof" right: (name) @receiver.self)
+ (#any-of? @receiver.self "self" "static"))
+((binary_expression "instanceof" right: (name) @receiver.super)
+ (#eq? @receiver.super "parent"))
+((object_creation_expression (name) @receiver.super)
+ (#eq? @receiver.super "parent"))
 (named_type (qualified_name (name) @ref.type) @ref.qualified)
 ;; `$x instanceof Foo` names the class; `#[Foo]` / `#[Ns\Foo(...)]` names an
 ;; attribute class — both are class references (goto-def, rename, the

@@ -101,6 +101,9 @@ pub struct SkelRef {
     /// Named by a string literal (`[$obj, 'method']`) — see
     /// `RefKind::MethodCall::named_by_string`.
     pub named_by_string: bool,
+    /// What the document said at this site — the receiver's flavour, whether
+    /// the call constructs. Rides onto `Ref::flags` unchanged.
+    pub flags: crate::model::file_analysis::RefFlags,
 }
 
 /// A string array key and the element it heads — nesting is span
@@ -1232,6 +1235,7 @@ impl SkeletonAnalysis {
                     binding: Some(crate::model::file_analysis::RefBinding::Symbol(did)),
                     folded_from: None,
                     arg_count: None,
+                    flags: Default::default(),
                 }),
                 None => unresolved_reads.push((name.clone(), *read_scope, *read_span)),
             }
@@ -1260,6 +1264,7 @@ impl SkeletonAnalysis {
                     binding: Some(crate::model::file_analysis::RefBinding::Symbol(did)),
                     folded_from: None,
                     arg_count: None,
+                    flags: Default::default(),
                 });
             }
         }
@@ -1393,6 +1398,7 @@ impl SkeletonAnalysis {
                     binding,
                     folded_from: None,
                     arg_count: r.arg_count,
+                    flags: r.flags,
                 })
             })
             .collect();
@@ -1444,6 +1450,7 @@ impl SkeletonAnalysis {
                 binding: runtime.then_some(crate::model::file_analysis::RefBinding::Runtime),
                 folded_from: None,
                 arg_count: None,
+                flags: Default::default(),
             });
         }
         refs.extend(local_refs);
@@ -1460,6 +1467,7 @@ impl SkeletonAnalysis {
                 binding: None,
                 folded_from: None,
                 arg_count: None,
+                flags: Default::default(),
             });
         }
         // Field/member uses recovered from `#define` bodies (`->op_next`): the
@@ -1531,6 +1539,7 @@ impl SkeletonAnalysis {
                         )),
                         folded_from: None,
                         arg_count: None,
+                        flags: Default::default(),
                     });
                 }
             }
