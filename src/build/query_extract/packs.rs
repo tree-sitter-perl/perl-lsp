@@ -57,12 +57,11 @@ pub struct LangPack {
     /// (`resolve_imports_with_pack` in query_extract_tests.rs) drive it today.
     #[allow(dead_code)]
     pub module_paths: fn(module: &str) -> Vec<String>,
-    /// Does a call to `callee` construct a KEYED value whose named
-    /// arguments are `$`-style accessible keys? (R: list / data.frame.)
-    pub shape_ctor: fn(callee: &str) -> bool,
     /// Languages where imports are CALLS, not statements (R's
-    /// library()/source()): map (callee, argument) → imported module.
-    pub import_call: fn(callee: &str, arg: &str) -> Option<String>,
+    /// library()/source()): the module an `@import.call.<kind>` argument
+    /// names. The KIND is the capture's suffix — which callees import is the
+    /// document's — and this maps the argument text the kind carries.
+    pub import_module: fn(kind: &str, arg: &str) -> Option<String>,
     /// Command-dispatched languages (CMake): what a command DOES with
     /// its positional arguments. The @cmd/@cmd.arg captures deliver
     /// (name, ordered args); this predicate classifies.
