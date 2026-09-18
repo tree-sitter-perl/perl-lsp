@@ -217,8 +217,16 @@ impl TargetRef {
     /// `rename_edits` and for the prepareRename gate alike: an offer the
     /// rename would refuse is worse than no offer.
     pub fn rename_is_language_owned(&self) -> bool {
-        self.ctor_of.is_some()
-            || matches!(&self.kind, TargetKind::Handler { names: RailNames::Classes, .. })
+        self.ctor_of.is_some() || !self.sites_are_rewritable()
+    }
+
+    /// Do this target's reference spans hold tokens of its OWN name? A
+    /// class-keyed rail's sites spell the CLASS the rail is keyed on, so an
+    /// edit writing the target's new name over them corrupts a class
+    /// reference. The collector marks the sites it emits with this and the
+    /// rename policy above composes it — one answer, both readers.
+    pub fn sites_are_rewritable(&self) -> bool {
+        !matches!(&self.kind, TargetKind::Handler { names: RailNames::Classes, .. })
     }
 
     /// Whether this target renames cross-file through `refs_to` (matched by

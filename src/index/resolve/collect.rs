@@ -1013,13 +1013,12 @@ pub(super) fn collect_from_analysis(
         TargetKind::Sub { .. } | TargetKind::Method { .. } => (true, false),
         _ => (false, false),
     };
-    // a class-keyed rail's sites are tokens of other names — never rewritten
-    let class_rail = matches!(
-        &target.kind,
-        TargetKind::Handler { names: crate::model::file_analysis::RailNames::Classes, .. }
-    );
+    // Whether this target's spans hold its own name at all is the target's
+    // policy (`sites_are_rewritable`); the fold is per-site.
+    let sites_rewritable = target.sites_are_rewritable();
     let rewritable_at = |span: Span| {
-        !class_rail && !(foldable && span_is_folded_name(analysis, span, folds_through_calls, &target.name))
+        sites_rewritable
+            && !(foldable && span_is_folded_name(analysis, span, folds_through_calls, &target.name))
     };
 
     // Include declaration spans when this file defines the target. Name
