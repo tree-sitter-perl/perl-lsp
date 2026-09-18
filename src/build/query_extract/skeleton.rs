@@ -179,10 +179,6 @@ pub struct SkeletonAnalysis {
     /// carried to `PackFacts` as a pointer — per-language constants, never
     /// copied per file (rule #14).
     pub spellings: Option<&'static crate::model::file_analysis::PackSpellings>,
-    /// rail → the undefined-name lane's phrasing (`rails.json` labels).
-    pub rail_labels: Vec<(String, String)>,
-    /// Rails whose miss is a hint (`rails.json` hints).
-    pub rail_hints: Vec<String>,
     /// rail → the parameter separator a use's name ends at (`rails.json`).
     pub rail_name_seps: Vec<(String, String)>,
     /// The rails the pack's documents declare class-keyed (`names_are`).
@@ -1611,8 +1607,6 @@ impl SkeletonAnalysis {
             // the pack, generic logic in core).
             import_rows: std::mem::take(&mut self.import_rows),
             spellings: self.spellings,
-            rail_labels: std::mem::take(&mut self.rail_labels),
-            rail_hints: std::mem::take(&mut self.rail_hints),
             preamble_end: self.preamble_end,
             imports_bind_names: self.imports_bind_names,
             doc_mentions: std::mem::take(&mut self.doc_mentions),

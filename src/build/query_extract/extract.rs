@@ -1283,8 +1283,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     out.lang_id = pack.lang_id;
     {
         let conv = crate::build::query_extract::rail_conventions_for(pack);
-        out.rail_labels = conv.labels.clone();
-        out.rail_hints = conv.hints.clone();
         out.rail_name_seps = conv.name_seps.clone();
         out.class_named_rails = conv.class_named_rails.clone();
     }

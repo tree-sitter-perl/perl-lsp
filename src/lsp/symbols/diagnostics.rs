@@ -1329,6 +1329,10 @@ pub fn pack_symbol_diagnostics(
     // definition token, so the lane warns rather than errors.
     if index_settled {
         if let Some(idx) = idx {
+            // How the lane phrases a miss, and which rails answer with a
+            // hint: the rail documents' own declarations, reached by
+            // language id because they are the same for every file of it.
+            let rails = crate::build::language_driver::LanguageRegistry::rails(&analysis.language);
             for r in analysis.refs() {
                 if !matches!(r.kind, RefKind::DispatchCall { .. }) {
                     continue;
@@ -1366,13 +1370,13 @@ pub fn pack_symbol_diagnostics(
                     continue;
                 }
                 // a class-keyed rail's miss is a dead emission — a hint
-                let severity = if class_named || pack.rail_hints.iter().any(|h| h == rail) {
+                let severity = if class_named || rails.hints.iter().any(|h| h == rail) {
                     DiagnosticSeverity::HINT
                 } else {
                     DiagnosticSeverity::WARNING
                 };
-                let label = pack
-                    .rail_labels
+                let label = rails
+                    .labels
                     .iter()
                     .find(|(r, _)| r == rail)
                     .map(|(_, l)| l.clone())

@@ -16,19 +16,13 @@ pub struct PackFacts {
     /// Whole import-statement spans, in file order.
     #[serde(default)]
     pub import_rows: Vec<Span>,
-    /// rail → how the undefined-name lane phrases a miss on it (`"event"`
-    /// → `No listener for event`); default `Undefined <rail>`.
-    #[serde(default)]
-    pub rail_labels: Vec<(String, String)>,
-    /// Rails whose miss is a hint: their definitions are partly
-    /// runtime-only, so an unmatched name is a lead, not an error.
-    #[serde(default)]
-    pub rail_hints: Vec<String>,
     /// Rails whose names are CLASS identities (the rail document's
     /// `names_are: class` — Laravel's event bus). Per-overlay data the file
-    /// carries, like `rail_labels`: which overlays load is a property of the
-    /// workspace, not of the language, so it is not a language convention
-    /// reached by id. Baked from the DECLARATION for every file of the pack,
+    /// carries: which overlays load is a property of the workspace, not of
+    /// the language, so it is not a language convention reached by id. Unlike
+    /// the lane's labels and hint rails it changes what a MINT means, so
+    /// every span-free minting path has to agree with it. Baked from the
+    /// DECLARATION for every file of the pack,
     /// so the span-free minting paths (`scan_text_rails`, `adopt_path_rails`)
     /// carry it by construction and a rail cannot answer differently in two
     /// files. Read through `HandlerOwner::names_are`.
@@ -215,8 +209,6 @@ impl PackFacts {
         h.misc += map_str_vec(&self.template_params)
             + mcap(&self.specializes)
             + vcap(&self.import_rows)
-            + self.rail_labels.iter().map(|(a, b)| a.capacity() + b.capacity()).sum::<usize>()
-            + self.rail_hints.iter().map(|a| a.capacity()).sum::<usize>()
             + self.class_named_rails.iter().map(|a| a.capacity()).sum::<usize>()
             + vcap(&self.doc_mentions);
     }
