@@ -193,7 +193,7 @@ fn heatmap_symbol_row(
         None
     } else if exported {
         Some("exported")
-    } else if conventions::is_constructor_name(&sym.name) {
+    } else if sym.is_constructor() {
         Some("constructor")
     } else if class_is_referenced(ws, routing_idx, path, analysis, sym, visibility, scope) {
         // A pack constructor whose CLASS is named somewhere (a type hint,

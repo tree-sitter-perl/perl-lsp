@@ -877,13 +877,12 @@ pub fn earliest_rebind_in(flow_edges: &[FlowEdge], var: &str, region: Span) -> O
 }
 
 impl Symbol {
-    /// Does this callable construct the class that declares it? A pack's
-    /// document names its own constructor and the flag is minted there;
-    /// Perl has no keyword for it, so its `new` convention answers here —
-    /// one method, whichever language declared the symbol.
+    /// Does this callable construct the class that declares it? Every
+    /// language mints the flag where it knows — a pack's document names its
+    /// own constructor, Perl's builder reads its `new` convention at the
+    /// symbol's mint — so this asks the flag and never a name.
     pub fn is_constructor(&self) -> bool {
         self.flags.contains(SymbolFlags::CONSTRUCTOR)
-            || crate::model::conventions::is_constructor_name(&self.name)
     }
 
     /// A member RE-EXPORT (`using Base::insert;` in a class body): part of
