@@ -111,7 +111,15 @@ Every lane names the case it cannot see and stays silent there:
   resolves the member. A foreign receiver (`$ftp->_exec()`) still reports —
   its declared type is the contract.
 - **A catch-all class** (php `__call`/`__callStatic`/`__get` anywhere in
-  the ancestry) answers any member name — Perl's `AUTOLOAD` rule.
+  the ancestry, Perl's `AUTOLOAD`) answers any member name. The class
+  carries `SymbolFlags::DYNAMIC_MEMBERS` and the lanes ask
+  `class_answers_any_member`, one `INHERITS` walk — never a member name
+  compared against a per-language list. It does NOT silence the contract
+  lane here: php checks `implements` where the class is declared, so
+  `__call` catches calls a compile error would never let happen. Whether a
+  catch-all can satisfy an obligation at all is the language's word
+  (`PackSpellings::catch_all_satisfies_contracts`); Perl's `AUTOLOAD`
+  can, so a Perl class carrying one is silent on unfulfilled requires.
 - **An interface-typed receiver** names any implementation; php code
   narrows with `instanceof` before calling what the interface lacks.
   Narrowing retypes a VARIABLE receiver (the `if` block, a negated

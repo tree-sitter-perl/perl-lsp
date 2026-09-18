@@ -274,6 +274,13 @@ pub struct PackSpellings {
     /// syntaxes name two different members, and admitting the value one is
     /// how a missing `()` resolves to a property instead of being reported.
     pub member_reads_are_calls: bool,
+    /// Does a catch-all member SATISFY a declared obligation? Perl's
+    /// `AUTOLOAD` answers a required method at runtime and role composition
+    /// cannot see past it, so a class carrying one is silent on unfulfilled
+    /// requires. A language that checks its contracts where the class is
+    /// DECLARED (php's `implements`) says `false`: `__call` catches calls
+    /// that a compile error would never let happen.
+    pub catch_all_satisfies_contracts: bool,
 }
 
 impl PackSpellings {
@@ -289,9 +296,10 @@ impl PackSpellings {
         variadic_marker: "",
         default_sep: "",
         members_are_package_bound: false,
-        // Perl's answer: it declares no pack of its own, and its member
-        // reads are accessor calls.
+        // Perl's answer: it declares no pack of its own, its member reads
+        // are accessor calls, and an `AUTOLOAD` answers a required method.
         member_reads_are_calls: true,
+        catch_all_satisfies_contracts: true,
     };
 }
 

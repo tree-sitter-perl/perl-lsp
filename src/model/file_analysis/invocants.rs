@@ -1127,7 +1127,13 @@ impl FileAnalysis {
             if self.class_has_unresolved_ancestor(pkg, module_index) {
                 continue;
             }
-            if self.class_answers_any_member(pkg, module_index) {
+            // A catch-all silences this lane only where the language lets
+            // one satisfy an obligation: Perl's `AUTOLOAD` answers a
+            // required method at runtime, php's `__call` never satisfies an
+            // `implements` the engine checks at the declaration.
+            if self.spellings().catch_all_satisfies_contracts
+                && self.class_answers_any_member(pkg, module_index)
+            {
                 continue;
             }
 
