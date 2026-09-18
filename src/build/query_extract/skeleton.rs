@@ -110,6 +110,12 @@ pub struct SkeletonAnalysis {
     /// is a macro parameter with no type, hence the class is frozen from the
     /// field decl rather than inferred from the (untypeable) invocant.
     pub macro_body_member_reads: Vec<(String, crate::model::file_analysis::Span)>,
+    /// Whole import-statement spans (`use A\B;` rows), for the insertion
+    /// point of an import quick-fix.
+    pub import_rows: Vec<Span>,
+    /// The last row of the file preamble (open tag, `declare` rows): an
+    /// inserted import goes after it when no import or namespace anchors.
+    pub preamble_end: Option<usize>,
     /// The pack's receiver param names (Python `self`/`cls`). A Variable so
     /// named is the method receiver, not a class member — its (wrongly
     /// sticky-tagged) class package is cleared in `into_file_analysis`.
@@ -132,6 +138,9 @@ pub struct SkeletonAnalysis {
     /// Parameter-list spans (`@param.region`). The use-after-move check reads
     /// these to tell a moved parameter from a moved local (`use_after_move_reads`).
     pub param_regions: Vec<crate::model::file_analysis::Span>,
+    /// Existence-probe argument spans (`@probe.region`); the member lanes
+    /// stay silent inside them.
+    pub probe_regions: Vec<crate::model::file_analysis::Span>,
     /// Domain-typing sites: a `@domain.slot` field access compared/assigned
     /// against a `@domain.value` token. Raw (value's enum resolves cross-file
     /// at query time); folds onto `Field{owner, name}` for the int-used-as-enum
@@ -1121,6 +1130,8 @@ impl SkeletonAnalysis {
             // outline filters can exclude them generically (lang semantics in
             // the pack, generic logic in core).
             receiver_names: std::mem::take(&mut self.receiver_names),
+            import_rows: std::mem::take(&mut self.import_rows),
+            preamble_end: self.preamble_end,
             names: std::mem::take(&mut self.names),
             // Specialization family edges (spec → primary). NOT an inheritance
             // edge: a spec inherits nothing from its primary (it replaces
@@ -1140,6 +1151,7 @@ impl SkeletonAnalysis {
             moved_from: std::mem::take(&mut self.moved_from),
             control_regions: std::mem::take(&mut self.control_regions),
             param_regions: std::mem::take(&mut self.param_regions),
+            probe_regions: std::mem::take(&mut self.probe_regions),
             ..Default::default()
         };
         let mut fa = FileAnalysis::new(FileAnalysisParts {
