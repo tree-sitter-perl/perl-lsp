@@ -878,19 +878,23 @@ impl FileAnalysis {
         None
     }
 
-    /// The class of the method enclosing `point` — the implicit-`this` class
-    /// for a bare member access in a method body. Read off the innermost
-    /// containing Sub/Method SYMBOL's package (not the body scope): an
-    /// out-of-line body (`Status DBImpl::Recover(...) { ... }`) is lexically at
-    /// file scope, so its body scope carries no package, but the peeled method
-    /// symbol does — reading it off the symbol covers in-class AND out-of-line
-    /// with one rule (the same seam `emit_return_fuel`'s sibling-call pin uses).
+    /// The class a bare name at `point` reads its members from — `None`
+    /// where the language spells the receiver.
+    ///
+    /// The scope states the elision (`Scope::implicit_receiver`, from the
+    /// document's own capture) and the chain carries it, so a nested block
+    /// or lambda body answers like the method around it. The declaring
+    /// scope's `owner` is the callable it is the body of, and that symbol's
+    /// package is the class — in-class and out-of-line alike, since an
+    /// out-of-line body (`Status DBImpl::Recover(...) { ... }`) is lexically
+    /// at file scope while the peeled method symbol still carries `DBImpl`.
     pub(crate) fn implicit_receiver_class_at(&self, point: Point) -> Option<String> {
-        self.symbols
-            .iter()
-            .filter(|s| matches!(s.kind, SymKind::Method | SymKind::Sub))
-            .filter(|s| contains_point(&s.span, point))
-            .min_by_key(|s| span_size(&s.span))
+        let scope = self.scope_at(point)?;
+        self.scope_chain(scope)
+            .into_iter()
+            .find(|sid| self.scope(*sid).implicit_receiver)
+            .and_then(|sid| self.scope(sid).owner)
+            .and_then(|sym| self.symbols.get(sym.0 as usize))
             .and_then(|s| s.package.clone())
     }
 
