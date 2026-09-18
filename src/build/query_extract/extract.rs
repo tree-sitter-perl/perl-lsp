@@ -349,6 +349,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // `@arity.args`.
     let mut arg_counts_by_start: std::collections::HashMap<(usize, usize), usize> =
         std::collections::HashMap::new();
+    // `f(...)` sites: a call with no countable arguments — still a call.
+    let mut placeholder_call_at: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    // The same facts keyed by the MATCH that captured the callee alongside
+    // its list: the call pattern joins the two, so `$this->m (1)` — a space
+    // before the parentheses — is still a call. Adjacency stays the fallback
+    // for shapes whose list lands in another match.
+    let mut arg_counts_by_match: HashMap<usize, usize> = HashMap::new();
+    let mut placeholder_by_match: std::collections::HashSet<usize> = Default::default();
+    // The `@arity.args` lists, with the match that captured each, and every
+    // `@arity.arg*` capture in the file. Joined below: a capture belongs to
+    // the nearest enclosing list, which is what nests `f(g($x))` correctly.
+    let mut arity_lists: Vec<(usize, tree_sitter::Node)> = Vec::new();
+    let mut arg_caps: Vec<(&str, tree_sitter::Node)> = Vec::new();
     // A callable's declared parameter arity, keyed by the parameter_list span.
     // Associated to its def symbol by span containment in `into_file_analysis`
     // (`@arity.sig` fires a separate match from the def name).
@@ -443,13 +456,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             ) {
                 continue;
             }
-            // `@arity.args`: a call's argument_list — count its arguments (the
-            // named children; the C `...` at a CALL site never appears here).
-            // Keyed by the list's start so the callee ref finds it by adjacency.
+            // `@arity.args`: a call's argument list. What is IN it the
+            // document says argument by argument (`@arity.arg` and its
+            // marks), so the count and the by-reference sites are joined
+            // after the walk — a list's captures and its call's can sit in
+            // different matches.
             if cap == "arity.args" {
-                arg_counts_by_start
-                    .insert((node.start_position().row, node.start_position().column),
-                            node.named_child_count());
+                arity_lists.push((match_counter, node));
+                continue;
+            }
+            if cap == "arity.arg" || cap.starts_with("arity.arg.") || cap == "arity.placeholder" {
+                arg_caps.push((cap, node));
                 continue;
             }
             // `@arity.sig`: a callable's parameter_list — count declared params
@@ -558,6 +575,63 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
         }
     }
+    // ---- join each argument capture to its list, then each list to its call ----
+    // The node kinds an argument list IS come from the patterns that capture
+    // an argument, so a document that teaches the language a new call shape
+    // teaches the arity lane with it.
+    {
+        let arg_list_kinds = super::cursor_query::pattern_root_kinds(query, "arity.arg");
+        #[derive(Default)]
+        struct ListArgs<'t> {
+            args: Vec<tree_sitter::Node<'t>>,
+            named: std::collections::HashSet<usize>,
+            spread: bool,
+            placeholder: bool,
+        }
+        let mut by_list: HashMap<usize, ListArgs> = HashMap::new();
+        for (cap, node) in arg_caps {
+            // the nearest enclosing list — `f(g($x))` gives `$x` to g's
+            let mut owner = node.parent();
+            for _ in 0..8 {
+                match owner {
+                    Some(n) if arg_list_kinds.contains(n.kind()) => break,
+                    Some(n) => owner = n.parent(),
+                    None => break,
+                }
+            }
+            let Some(owner) = owner.filter(|n| arg_list_kinds.contains(n.kind())) else { continue };
+            let slot = by_list.entry(owner.id()).or_default();
+            match cap {
+                "arity.arg" => slot.args.push(node),
+                "arity.arg.named" => {
+                    slot.named.insert(node.id());
+                }
+                "arity.arg.spread" => slot.spread = true,
+                "arity.placeholder" => slot.placeholder = true,
+                _ => {}
+            }
+        }
+        for slot in by_list.values_mut() {
+            slot.args.sort_by_key(|n| n.start_byte());
+        }
+        let empty = ListArgs::default();
+        for (match_id, list) in arity_lists {
+            let at = (list.start_position().row, list.start_position().column);
+            let slot = by_list.get(&list.id()).unwrap_or(&empty);
+            // `f(...)` passes nothing — a first-class callable, not a call;
+            // `f(...$args)` passes an unknowable number. Neither mints a
+            // count: the callee still reads as callable, the arity lane
+            // stands down.
+            if slot.placeholder || slot.spread {
+                placeholder_call_at.insert(at);
+                placeholder_by_match.insert(match_id);
+                continue;
+            }
+            arg_counts_by_start.insert(at, slot.args.len());
+            arg_counts_by_match.insert(match_id, slot.args.len());
+        }
+    }
+
     // Source order; outermost first on ties so scopes push before their
     // contents. A `@scope` on the SAME node as a `@def` (a function_definition
     // carries its own body scope) must open AFTER the def is recorded, so the
@@ -1120,7 +1194,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         // method token ends; plain (uncalled) member/type refs
                         // have no adjacent arg list and stay `None`.
                         arg_count: matches!(e.cap.as_str(), "ref.call" | "ref.qcall" | "ref.member")
-                            .then(|| arg_counts_by_start.get(&(e.end.row, e.end.column)).copied())
+                            .then(|| {
+                                arg_counts_by_match
+                                    .get(&e.match_id)
+                                    .or_else(|| arg_counts_by_start.get(&(e.end.row, e.end.column)))
+                                    .copied()
+                            })
                             .flatten(),
                         flags: Default::default(),
                     });
