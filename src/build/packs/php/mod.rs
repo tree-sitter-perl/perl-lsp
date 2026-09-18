@@ -164,19 +164,10 @@ pub fn php_pack() -> LangPack {
         // class/trait/interface bodies are brace-delimited, so a member
         // orphaned by a misparse can re-anchor positionally.
         brace_scoped_members: true,
-        throwaway_names: &["$_"],
-        implicit_variables: &[
-            "$this", "$GLOBALS", "$_SERVER", "$_GET", "$_POST", "$_FILES", "$_COOKIE",
-            "$_SESSION", "$_REQUEST", "$_ENV", "$argv", "$argc", "$http_response_header",
-        ],
-        catch_all_methods: &["__call", "__callStatic", "__get"],
         imports_bind_names: true,
-        deprecated_attribute: "Deprecated",
         builtin_types: PHP_BUILTIN_TYPES,
         // `['k' => $v]` — the key/value arrow inside a list literal.
         pair_arrow: "=>",
-        dynamic_arg_markers: &["func_get_args", "func_num_args", "func_get_arg"],
-        dynamic_var_markers: &["extract", "get_defined_vars", "eval", "parse_str", "compact"],
         enum_members: &["value", "name", "cases", "from", "tryFrom"],
         trigger_chars: &["$", ">", ":"],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },

@@ -865,9 +865,17 @@ pub fn pack_symbol_diagnostics(
                 matches!(s.kind, FaSymKind::Sub | FaSymKind::Method | FaSymKind::Field)
                     && s.package.as_deref() == Some(class.as_str())
             });
-            let owner_catch_all = pack.catch_all_methods.iter().any(|m| {
-                owner.resolve_member(&class, m, MemberKind::Callable, idx).is_some()
-            });
+            // A class with one of these anywhere in its MRO answers ANY
+            // member name at runtime. The document names them on the
+            // capture that fires on their declarations, so the set has one
+            // home and an overlay can widen it.
+            let owner_catch_all =
+                crate::build::language_driver::LanguageRegistry::pack_capture_literals(
+                    &analysis.language,
+                    "def.method.catch_all",
+                )
+                .iter()
+                .any(|m| owner.resolve_member(&class, m, MemberKind::Callable, idx).is_some());
             if !owner_has_members || owner_catch_all || !owner.ancestry_fully_visible(&class, idx) {
                 return None;
             }
@@ -1105,7 +1113,10 @@ pub fn pack_symbol_diagnostics(
     }
 
     // ---- undefined variable: an unbound read inside a callable ----
-    if !pack.implicit_variables.is_empty() {
+    // The lane runs on facts: a read the runtime binds carries a binding
+    // (`@ref.var.implicit`), and a pack whose document binds nothing
+    // produces no unbound reads to report.
+    {
         // occurrences per (callable scope, name) — a name read MORE than
         // once is presumed bound by a call the callee lane below cannot
         // resolve; the single stray read is the typo this lane names.
@@ -1136,7 +1147,7 @@ pub fn pack_symbol_diagnostics(
             {
                 continue;
             }
-            if pack.implicit_variables.contains(&r.target_name) {
+            if matches!(r.binding, Some(crate::model::file_analysis::RefBinding::Runtime)) {
                 continue;
             }
             let Some(sc) = callable_of(r.scope) else { continue };
@@ -1210,8 +1221,7 @@ pub fn pack_symbol_diagnostics(
             }
             let Some(sc) = callable_of(sym.scope) else { continue };
             // an alias (`$h = &$opts['h']`) is written to reach its storage
-            if pack.implicit_variables.contains(&sym.name)
-                || pack.throwaway_names.contains(&sym.name)
+            if sym.flags.contains(SymbolFlags::THROWAWAY)
                 || pack.param_regions.iter().any(|p| p.contains(&sym.span))
                 || sym.attributes.iter().any(|a| a == "alias")
             {

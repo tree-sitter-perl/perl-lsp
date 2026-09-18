@@ -134,12 +134,8 @@ pub fn cpp_pack() -> LangPack {
         entrypoint_symbols: &["main"],
         runtime_invoked_methods: &[],
         brace_scoped_members: true,
-        implicit_variables: &[],
-        throwaway_names: &[],
-        catch_all_methods: &[],
         pair_arrow: "",
         imports_bind_names: false,
-        deprecated_attribute: "",
         builtin_types: &[],
         enum_members: &[],
         trigger_chars: &[".", ">", ":"],
@@ -149,8 +145,6 @@ pub fn cpp_pack() -> LangPack {
         // Shared with the member-block synth lane (rule #10).
         nested_peel: C_FIELD_DECL_PEEL,
         // DerefKind placeholder — record_stack false, so it's never read.
-        dynamic_arg_markers: &[],
-        dynamic_var_markers: &[],
         // a templated qualifier (`Buf<T>::grow`) owns by its BASE class name
         qualifier_peel: &["template_type"],
         // out-of-line defs (`Ret Class::m(){}`): peel pointer/reference/

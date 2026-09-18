@@ -339,7 +339,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // Declaration-only captures: they state a language fact the
             // cursor paths read off the compiled query, and mint nothing
             // here. Dropped before they become events.
-            if matches!(cap, "skip" | "recv.peel" | "recv.peel.deref" | "domain.compare.op") {
+            if matches!(
+                cap,
+                "skip"
+                    | "recv.peel"
+                    | "recv.peel.deref"
+                    | "domain.compare.op"
+                    | "def.method.catch_all"
+            ) {
                 continue;
             }
             // `@arity.args`: a call's argument list. What is IN it the
@@ -671,6 +678,25 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // shield and the annotation lane ask.
     let mut ctor_name_spans: std::collections::HashSet<(Point, Point)> =
         std::collections::HashSet::new();
+    // `@def.var.throwaway` — a binding written to be discarded; the symbol
+    // carries `THROWAWAY`, which is what the unused-variable lane asks.
+    let mut throwaway_name_spans: std::collections::HashSet<(Point, Point)> =
+        std::collections::HashSet::new();
+    // `@sym.attr.deprecated` — the ATTRIBUTE spelling of `@deprecated`,
+    // per match, so the def it annotates carries the same fact the docblock
+    // tag gives.
+    let mut deprecated_matches: std::collections::HashSet<usize> = Default::default();
+    // `@ref.var.implicit` — reads the runtime binds without a declaration.
+    let mut runtime_bound_reads: Vec<Span> = Vec::new();
+    // The attribute TOKENS the document names deprecated. A def's own
+    // pattern captures its attributes as `@sym.attr` and must stay
+    // predicate-free (a `#eq?` there would gate the whole def), so the
+    // marking pattern is separate and the two meet at the token's span.
+    let deprecated_attr_spans: std::collections::HashSet<(Point, Point)> = events
+        .iter()
+        .filter(|e| e.cap == "sym.attr.deprecated")
+        .map(|e| (e.start, e.end))
+        .collect();
     // `@classattr.<flavor>` — container-def name spans stamped with a
     // flavor attribute ("interface"/"trait"): the model's SymKind::Class
     // covers all three php container kinds, and SUPER/reference walks
@@ -770,6 +796,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "def.method.ctor" {
             ctor_name_spans.insert((e.start, e.end));
+        }
+        if e.cap == "def.var.throwaway" {
+            throwaway_name_spans.insert((e.start, e.end));
+        }
+        if e.cap == "sym.attr" && deprecated_attr_spans.contains(&(e.start, e.end)) {
+            deprecated_matches.insert(e.match_id);
+        }
+        if e.cap == "ref.var.implicit" {
+            runtime_bound_reads.push(Span { start: e.start, end: e.end });
         }
         if let Some(flavor) = e.cap.strip_prefix("classattr.") {
             classattr_by_name_span.insert((e.start, e.end), flavor.to_string());
@@ -1070,9 +1105,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         out.import_sites
             .push(crate::model::file_analysis::ImportRow { span, raw, binds });
     }
-    out.implicit_variables = pack.implicit_variables.iter().map(|s| s.to_string()).collect();
-    out.throwaway_names = pack.throwaway_names.iter().map(|s| s.to_string()).collect();
-    out.catch_all_methods = pack.catch_all_methods.iter().map(|s| s.to_string()).collect();
     out.spellings = Some(pack.spellings);
     out.lang_id = pack.lang_id;
     {
@@ -1083,6 +1115,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         out.class_named_rails = conv.class_named_rails.clone();
     }
     out.imports_bind_names = pack.imports_bind_names;
+    out.runtime_bound_reads = std::mem::take(&mut runtime_bound_reads);
     out.enum_members = pack.enum_members.iter().map(|s| s.to_string()).collect();
     out.member_writes = std::mem::take(&mut member_writes);
     out.function_scoped_vars = pack.function_scoped_vars;
@@ -1718,8 +1751,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         let mut a =
                             attrs_by_match.get(&e.match_id).cloned().unwrap_or_default();
                         // `#[Deprecated]` is the attribute spelling of `@deprecated`
-                        if !pack.deprecated_attribute.is_empty()
-                            && a.iter().any(|x| x == pack.deprecated_attribute)
+                        if deprecated_matches.contains(&e.match_id)
                             && !a.iter().any(|x| x == "deprecated")
                         {
                             a.push("deprecated".to_string());
@@ -1761,6 +1793,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     ),
                 );
             }
+            // A call whose callee makes its ENCLOSING callable read
+            // arguments it never declared, or materialize variables no
+            // declaration names. Recorded against the call's scope; the
+            // scope chain names the callable, so the fact lands on the
+            // callable's own symbol (rule #14).
+            "call.dynamic_args" => out.dynamic_markers.push((
+                cur_scope,
+                crate::model::file_analysis::SymbolFlags::DYNAMIC_ARGS,
+            )),
+            "call.dynamic_vars" => out.dynamic_markers.push((
+                cur_scope,
+                crate::model::file_analysis::SymbolFlags::DYNAMIC_VARS,
+            )),
             "member.op" => {
                 // The operator the document NAMED at this span
                 // (`@member.op.arrow` / `.dot`). An operator the document
@@ -2069,21 +2114,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // scope chain names the callable, so the fact lands on the
                     // callable's own symbol instead of waiting for a consumer
                     // to join spans (rule #14).
-                    if matches!(e.cap.as_str(), "ref.call" | "ref.qcall") {
-                        let callee = (pack.shape_name)(&e.cap, &e.text);
-                        if pack.dynamic_arg_markers.contains(&callee.as_str()) {
-                            out.dynamic_markers.push((
-                                cur_scope,
-                                crate::model::file_analysis::SymbolFlags::DYNAMIC_ARGS,
-                            ));
-                        }
-                        if pack.dynamic_var_markers.contains(&callee.as_str()) {
-                            out.dynamic_markers.push((
-                                cur_scope,
-                                crate::model::file_analysis::SymbolFlags::DYNAMIC_VARS,
-                            ));
-                        }
-                    }
                     let super_recv = e.cap == "ref.member" && super_recv_matches.contains(&e.match_id);
                     out.refs.push(SkelRef {
                     via: None,
@@ -3764,6 +3794,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         || !alias_name_ends.is_empty()
         || !receiver_name_spans.is_empty()
         || !ctor_name_spans.is_empty()
+        || !throwaway_name_spans.is_empty()
     {
         for sym in &mut out.symbols {
             if receiver_name_spans.contains(&(sym.name_start, sym.name_end)) {
@@ -3771,6 +3802,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
             if ctor_name_spans.contains(&(sym.name_start, sym.name_end)) {
                 sym.flags |= crate::model::file_analysis::SymbolFlags::CONSTRUCTOR;
+            }
+            if throwaway_name_spans.contains(&(sym.name_start, sym.name_end)) {
+                sym.flags |= crate::model::file_analysis::SymbolFlags::THROWAWAY;
             }
             if sym.kind == "var"
                 && alias_name_ends.contains(&sym.name_end)

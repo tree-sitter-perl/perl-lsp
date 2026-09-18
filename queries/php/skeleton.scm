@@ -115,6 +115,12 @@
 ; interfaces and traits are SymKind::Class in the model, but SUPER
 ; resolution must prefer a concrete parent over an interface's abstract
 ; stub, and trait identity feeds the consumer-side reference walk.
+; The methods whose presence makes a class answer ANY member name: a class
+; declaring one has no static member surface to check against, so the
+; undefined-member lanes stay silent on it (as they do on Perl's AUTOLOAD).
+((method_declaration name: (name) @def.method.catch_all)
+ (#any-of? @def.method.catch_all "__call" "__callStatic" "__get"))
+
 ; The CONSTRUCTOR: the one method a `new Foo(...)` invokes, the one whose
 ; name belongs to the language (nothing renames it). Named here, so the
 ; construction sites and the rename policy read one fact.
@@ -310,6 +316,10 @@
 (binary_expression "instanceof" right: (qualified_name (name) @ref.type) @ref.qualified)
 (attribute (name) @ref.type)
 (attribute (qualified_name (name) @ref.type) @ref.qualified)
+;; `#[Deprecated]` is the attribute spelling of the `@deprecated` docblock
+;; tag — the declaration below it carries the `deprecated` attribute.
+((attribute (name) @sym.attr.deprecated)
+ (#eq? @sym.attr.deprecated "Deprecated"))
 
 ; ---- the file's use-map (alias- and group-aware) ----
 ; What each imported leaf/alias MEANS — parents resolve through it
@@ -471,6 +481,14 @@
 ; (docs/adr/by-ref-binding.md). Anchored both ends, so `f(name: $x)` — a
 ; named argument that also holds one — is not one.
 (arguments (argument . (variable_name) @arity.arg.var .))
+
+; Calls that make the ENCLOSING callable read arguments it never declared,
+; or materialize variables no declaration names: the arity and
+; undefined-variable lanes ask the callable, which carries the fact.
+((function_call_expression function: (name) @call.dynamic_args)
+ (#any-of? @call.dynamic_args "func_get_args" "func_num_args" "func_get_arg"))
+((function_call_expression function: (name) @call.dynamic_vars)
+ (#any-of? @call.dynamic_vars "extract" "get_defined_vars" "eval" "parse_str" "compact"))
 
 ; ---- references ----
 (function_call_expression
@@ -658,6 +676,18 @@
 ; dispatches on the runtime class. One capture says all three.
 ((variable_name) @receiver.this
  (#eq? @receiver.this "$this"))
+
+; Variables the RUNTIME binds, with no declaration anywhere in the file:
+; a read of one is bound, never undefined.
+((variable_name) @ref.var.implicit
+ (#any-of? @ref.var.implicit
+   "$this" "$GLOBALS" "$_SERVER" "$_GET" "$_POST" "$_FILES" "$_COOKIE"
+   "$_SESSION" "$_REQUEST" "$_ENV" "$argv" "$argc" "$http_response_header"))
+
+; The THROWAWAY binding: `foreach ($a as $k => $_)` writes it to discard
+; it, so it is never unused.
+((variable_name) @def.var.throwaway
+ (#eq? @def.var.throwaway "$_"))
 
 (variable_name) @expr.read.var
 

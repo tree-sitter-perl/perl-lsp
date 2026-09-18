@@ -171,9 +171,11 @@ pub struct SkeletonAnalysis {
     /// consumer reaching a language's spellings by id (rule #14) finds them
     /// on an analysis the driver has not stamped yet.
     pub lang_id: &'static str,
-    pub implicit_variables: Vec<String>,
-    pub throwaway_names: Vec<String>,
-    pub catch_all_methods: Vec<String>,
+    /// `@ref.var.implicit` — spans whose variable read the RUNTIME binds
+    /// (php `$this`, the superglobals). The minted ref carries
+    /// `RefBinding::Runtime`, so the undefined-variable lane never sees an
+    /// unbound read instead of consulting a name list.
+    pub runtime_bound_reads: Vec<Span>,
     pub enum_members: Vec<String>,
     /// Member tokens on the left of an assignment (dynamic property sites).
     pub member_writes: Vec<Span>,
@@ -1442,17 +1444,23 @@ impl SkeletonAnalysis {
                 )
             }))
             .collect();
+        let runtime_bound: std::collections::HashSet<(usize, usize)> = self
+            .runtime_bound_reads
+            .iter()
+            .map(|s| (s.start.row, s.start.column))
+            .collect();
         for (name, scope, span) in unresolved_reads {
             if claimed.contains(&(span.start.row, span.start.column, name.clone())) {
                 continue;
             }
+            let runtime = runtime_bound.contains(&(span.start.row, span.start.column));
             local_refs.push(crate::model::file_analysis::Ref {
                 kind: crate::model::file_analysis::RefKind::Variable,
                 span,
                 scope,
                 target_name: name,
                 access: crate::model::file_analysis::AccessKind::Read,
-                binding: None,
+                binding: runtime.then_some(crate::model::file_analysis::RefBinding::Runtime),
                 folded_from: None,
                 arg_count: None,
             });
@@ -1616,9 +1624,6 @@ impl SkeletonAnalysis {
             // Pack-declared receiver names ride the FA so core's member /
             // outline filters can exclude them generically (lang semantics in
             // the pack, generic logic in core).
-            implicit_variables: std::mem::take(&mut self.implicit_variables),
-            throwaway_names: std::mem::take(&mut self.throwaway_names),
-            catch_all_methods: std::mem::take(&mut self.catch_all_methods),
             import_rows: std::mem::take(&mut self.import_rows),
             spellings: self.spellings,
             rail_labels: std::mem::take(&mut self.rail_labels),

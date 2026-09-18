@@ -13,18 +13,6 @@ use super::*;
 /// is what a Perl analysis carries.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PackFacts {
-    /// Variables the runtime binds without a declaration (php `$this`,
-    /// superglobals) — the undefined-variable lane's silence list.
-    #[serde(default)]
-    pub implicit_variables: Vec<String>,
-    /// The language's throwaway binding names (php `$_`) — written to be
-    /// discarded, so the unused-variable lane never reports them.
-    #[serde(default)]
-    pub throwaway_names: Vec<String>,
-    /// Methods whose presence makes a class answer any member name (php
-    /// `__call`/`__get`) — the undefined-member lanes stay silent on it.
-    #[serde(default)]
-    pub catch_all_methods: Vec<String>,
     /// Members every enum carries by language rule.
     #[serde(default)]
     pub enum_members: Vec<String>,
@@ -220,9 +208,6 @@ impl PackFacts {
 
         h.misc += map_str_vec(&self.template_params)
             + mcap(&self.specializes)
-            + vcap(&self.implicit_variables)
-            + vcap(&self.throwaway_names)
-            + vcap(&self.catch_all_methods)
             + vcap(&self.enum_members)
             + vcap(&self.import_rows)
             + self.rail_labels.iter().map(|(a, b)| a.capacity() + b.capacity()).sum::<usize>()

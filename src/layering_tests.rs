@@ -1647,16 +1647,10 @@ fn pack_string_tables_are_ratcheted() {
     let allow: &[(&str, &str, usize, &str)] = &[
         ("cpp", "entrypoint_symbols", 1, "B3 — an entry document (`cpp.entry.json`)"),
         ("php", "builtin_types", 158, "B3 — a bundled stub source under the BUILTIN role"),
-        ("php", "catch_all_methods", 3, "B1 — `@def.method.catch_all` → a class flag"),
-        ("php", "deprecated_attribute", 1, "B1 — `@sym.attr.deprecated`"),
         ("php", "doc_uses_method_tags", 1, "kept: one framework's docblock tag, data handed to the engine's own reader — the entry-document posture"),
-        ("php", "dynamic_arg_markers", 3, "B1 — `@call.dynamic_args`"),
-        ("php", "dynamic_var_markers", 5, "B1 — `@call.dynamic_vars`"),
         ("php", "enum_members", 3, "B3 — synthesised on every `@def.enum`, producer-only data"),
-        ("php", "implicit_variables", 13, "B1 — `@ref.var.implicit` mints the binding"),
         ("php", "narrow_assertions", 1, "B2 — `(#eq? @narrow.assert \"assert\")`"),
         ("php", "runtime_invoked_methods", 31, "B3 — an entry document (`php.entry.json`)"),
-        ("php", "throwaway_names", 1, "B1 — `@def.var.throwaway` → `SymbolFlags::THROWAWAY`"),
     ];
     let drift = pack_allowlist_drift("rule #15 (vocabulary tables on the pack)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
@@ -1744,7 +1738,7 @@ fn pack_facts_fields_are_ratcheted() {
             skipped = false;
         }
     }
-    const RATCHET: usize = 24;
+    const RATCHET: usize = 21;
     assert!(
         fields <= RATCHET,
         "PackFacts grew to {fields} fields (ratchet {RATCHET}). A per-language constant goes on \

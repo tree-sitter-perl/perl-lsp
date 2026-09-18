@@ -179,16 +179,6 @@ pub struct LangPack {
     /// indentation-scoped (Python) or non-nesting packs.
     /// `docs/adr/config-superposition-declarations.md`.
     pub brace_scoped_members: bool,
-    /// Variables the runtime binds without a declaration (php's `$this`
-    /// and superglobals): never "undefined".
-    pub implicit_variables: &'static [&'static str],
-    /// The language's THROWAWAY binding names (php `$_` in `foreach ($a
-    /// as $k => $_)`): written to be discarded, so never "unused".
-    pub throwaway_names: &'static [&'static str],
-    /// Methods whose presence makes a class answer ANY member name
-    /// (php `__call`/`__callStatic`, `__get`) — the undefined-member lanes
-    /// stay silent on such a class, as Perl's do on `AUTOLOAD`.
-    pub catch_all_methods: &'static [&'static str],
     /// The key/value arrow inside a list literal (php `'k' => $v`): what a
     /// destructuring slot's key is read before, and what makes a list keyed
     /// rather than positional. Empty for a language whose lists carry no
@@ -198,10 +188,6 @@ pub struct LangPack {
     /// as opposed to splicing text (`#include`). Only bound names can be
     /// unused.
     pub imports_bind_names: bool,
-    /// The attribute that marks a declaration deprecated (php
-    /// `#[Deprecated]`); empty = none. Lands as the `deprecated` symbol
-    /// attribute exactly like the docblock tag.
-    pub deprecated_attribute: &'static str,
     /// Class, interface and attribute names the language itself provides
     /// in the global namespace (php's core + SPL): a global reference to
     /// one is never a type missing its import.
@@ -219,18 +205,6 @@ pub struct LangPack {
     /// `Box* const&`. THE recursion S-queries can't express (unbounded depth);
     /// the pack declares the grammar, the generic `peel` walks it.
     pub nested_peel: PeelSpec,
-    /// Names whose CALL makes the enclosing callable read arguments it never
-    /// declared (php `func_get_args` / `func_num_args` / `func_get_arg`).
-    /// The extractor stamps `SymbolFlags::DYNAMIC_ARGS` on the callable that
-    /// contains such a call, so the arity lanes ask the callable rather than
-    /// re-scanning its body. Empty = the language has no such surface.
-    pub dynamic_arg_markers: &'static [&'static str],
-    /// Names whose CALL makes the enclosing callable materialize variables no
-    /// declaration names (php `extract` / `get_defined_vars` / `eval` /
-    /// `parse_str` / `compact`). The extractor stamps
-    /// `SymbolFlags::DYNAMIC_VARS` on the containing callable, which is what
-    /// the undefined-variable lane asks. Empty = no such surface.
-    pub dynamic_var_markers: &'static [&'static str],
     /// `@qualifier` node kinds whose `name` FIELD supplies the owner text —
     /// the structural peel for a templated qualifier (`Buf<T>::grow` files
     /// under class `Buf`, unifying the out-of-line def with the in-class
@@ -285,18 +259,12 @@ impl LangPack {
             entrypoint_symbols,
             runtime_invoked_methods,
             brace_scoped_members: _,
-            implicit_variables,
-            throwaway_names,
-            catch_all_methods,
             pair_arrow,
             imports_bind_names: _,
-            deprecated_attribute,
             builtin_types,
             enum_members,
             trigger_chars,
             nested_peel,
-            dynamic_arg_markers,
-            dynamic_var_markers,
             qualifier_peel,
             oolfn,
         } = self;
@@ -312,18 +280,12 @@ impl LangPack {
         list(&mut out, "narrow_assertions", narrow_assertions);
         list(&mut out, "entrypoint_symbols", entrypoint_symbols);
         list(&mut out, "runtime_invoked_methods", runtime_invoked_methods);
-        list(&mut out, "implicit_variables", implicit_variables);
-        list(&mut out, "throwaway_names", throwaway_names);
-        list(&mut out, "catch_all_methods", catch_all_methods);
         list(&mut out, "builtin_types", builtin_types);
         list(&mut out, "enum_members", enum_members);
         list(&mut out, "trigger_chars", trigger_chars);
-        list(&mut out, "dynamic_arg_markers", dynamic_arg_markers);
-        list(&mut out, "dynamic_var_markers", dynamic_var_markers);
         list(&mut out, "qualifier_peel", qualifier_peel);
         for (field, one) in [
             ("pair_arrow", *pair_arrow),
-            ("deprecated_attribute", *deprecated_attribute),
             ("oolfn", oolfn.function_declarator),
             ("oolfn", oolfn.qualified_name),
         ] {

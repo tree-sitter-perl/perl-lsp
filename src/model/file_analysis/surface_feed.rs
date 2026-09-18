@@ -66,9 +66,6 @@ impl FileAnalysis {
                     include_directives,
                     // File-internal pack lanes: read LIVE from the
                     // provider's re-registered analysis per query.
-                    implicit_variables: _implicit_variables, // pack-wide convention
-                    throwaway_names: _throwaway_names,       // pack-wide convention
-                    catch_all_methods: _catch_all_methods, // pack-wide convention
                     import_rows: _import_rows, // editing aid, not cross-file-visible
                     rail_labels: _rail_labels,       // pack-wide convention
                     rail_hints: _rail_hints,         // pack-wide convention

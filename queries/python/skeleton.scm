@@ -69,6 +69,10 @@
 ; `recv.attr` is python's member access; its `object:` is the receiver the
 ; cursor's member completion types.
 (attribute object: (_) @member.recv)
+; the attribute TOKEN names a member, not a local — without this the
+; identifier read pattern below claims it and `self.x` reads as a variable
+; `x` nothing declares.
+(attribute attribute: (identifier) @var.member)
 (identifier) @expr.read.var
 
 (string) @expr.lit.string

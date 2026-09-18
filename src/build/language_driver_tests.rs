@@ -1118,14 +1118,21 @@ fn cpp_include_row_binds_a_type() {
     }
 }
 
-/// The cpp pack with two ordinary function names declared as dynamic-surface
+/// An OVERLAY declaring two ordinary function names as dynamic-surface
 /// markers. No bundled pack declares any (cpp has no such surface), so the
-/// marker → flag path needs a declarer to have a subject at all.
+/// marker → flag path needs a declarer to have a subject at all — and a
+/// document is how a third party declares one.
+#[cfg(feature = "cpp")]
+const MARKER_OVERLAY: &str = "((call_expression function: (identifier) @call.dynamic_args)
+ (#eq? @call.dynamic_args \"read_args\"))
+((call_expression function: (identifier) @call.dynamic_vars)
+ (#eq? @call.dynamic_vars \"make_vars\"))
+";
+
 #[cfg(feature = "cpp")]
 fn marker_pack() -> crate::build::query_extract::LangPack {
     crate::build::query_extract::LangPack {
-        dynamic_arg_markers: &["read_args"],
-        dynamic_var_markers: &["make_vars"],
+        bundled_overlays: &[("dynamic-markers.scm", MARKER_OVERLAY)],
         ..crate::build::query_extract::cpp_pack()
     }
 }
@@ -1160,4 +1167,53 @@ fn dynamic_markers_land_on_the_enclosing_callable() {
         .map(|s| s.name.as_str())
         .collect();
     assert_eq!(stamped, vec!["wide", "narrow"], "only the two containing callables");
+}
+
+/// The undefined-variable lane runs on FACTS, not on a per-language switch:
+/// a read the runtime binds carries `RefBinding::Runtime` (php's
+/// `@ref.var.implicit`), and a pack whose document binds nothing must
+/// produce no unbound reads at all. Deleting the lane's on-switch is only
+/// safe if that holds, so it is pinned here for the packs that declare no
+/// implicit variables.
+#[test]
+fn packs_that_bind_nothing_implicitly_report_no_undefined_variables() {
+    let mut checked: Vec<&str> = Vec::new();
+    #[cfg(feature = "cpp")]
+    {
+        let fa = cpp_driver().analyze(
+            "int g = 1;\nint f(int a) { int b = a + g; for (int i = 0; i < b; i++) { b += i; } return b; }\n",
+        );
+        assert_undefined_variable_silence(&fa, "cpp");
+        checked.push("cpp");
+    }
+    #[cfg(feature = "python")]
+    {
+        let fa = python_driver().analyze(
+            "g = 1\nclass C:\n    def m(self, a):\n        b = a + g\n        return b + self.x\n",
+        );
+        assert_undefined_variable_silence(&fa, "python");
+        checked.push("python");
+    }
+    #[cfg(feature = "r")]
+    {
+        let fa = r_driver().analyze("g <- 1\nf <- function(a) {\n  b <- a + g\n  b\n}\n");
+        assert_undefined_variable_silence(&fa, "r");
+        checked.push("r");
+    }
+    assert!(!checked.is_empty(), "no pack language in this build");
+}
+
+#[cfg(any(feature = "cpp", feature = "python", feature = "r"))]
+fn assert_undefined_variable_silence(
+    fa: &crate::model::file_analysis::FileAnalysis,
+    lang: &str,
+) {
+    let diags = crate::lsp::symbols::pack_symbol_diagnostics(fa, None, true);
+    let hits: Vec<&tower_lsp::lsp_types::Diagnostic> = diags
+        .iter()
+        .filter(|d| {
+            matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(c)) if c == "undefined-variable")
+        })
+        .collect();
+    assert!(hits.is_empty(), "{lang} must report no undefined variables: {hits:?}");
 }

@@ -1552,9 +1552,6 @@ fn remap_spans(
         var_reads,
         label_refs,
         lang_id: _,
-        implicit_variables: _,
-        throwaway_names: _,
-        catch_all_methods: _,
         enum_members: _,
         member_writes,
         import_rows,
@@ -1590,6 +1587,7 @@ fn remap_spans(
         return_sites,
         // Scope-keyed, no spans to remap.
         dynamic_markers: _,
+        runtime_bound_reads,
         param_sigs,
         // Populated later (enrich_skeleton) already in original coords — no remap.
         macro_body_member_reads: _,
@@ -1751,6 +1749,9 @@ fn remap_spans(
         *span = rspan(*span);
     }
     for span in probe_regions.iter_mut() {
+        *span = rspan(*span);
+    }
+    for span in runtime_bound_reads.iter_mut() {
         *span = rspan(*span);
     }
     for (sig, _, _, name_span) in by_ref_params.iter_mut() {
