@@ -110,6 +110,13 @@ pub struct SkeletonAnalysis {
     /// is a macro parameter with no type, hence the class is frozen from the
     /// field decl rather than inferred from the (untypeable) invocant.
     pub macro_body_member_reads: Vec<(String, crate::model::file_analysis::Span)>,
+    /// `@ref.var.implicit` — spans whose variable read the RUNTIME binds
+    /// (php `$this`, the superglobals). The minted ref carries
+    /// `RefBinding::Runtime`, so the undefined-variable lane never sees an
+    /// unbound read instead of consulting a name list.
+    pub runtime_bound_reads: Vec<Span>,
+    /// Member tokens on the left of an assignment (dynamic property sites).
+    pub member_writes: Vec<Span>,
     /// Whole import-statement spans (`use A\B;` rows), for the insertion
     /// point of an import quick-fix.
     pub import_rows: Vec<Span>,
@@ -923,6 +930,11 @@ impl SkeletonAnalysis {
         // A `@ref.type` on a def's OWN name token (class/enum/typedef
         // declaring itself) is the declaration, not a use — suppress by
         // exact selection-span match so the Symbol stays the only claimant.
+        let member_write_spans: std::collections::HashSet<(usize, usize, usize, usize)> = self
+            .member_writes
+            .iter()
+            .map(|sp| (sp.start.row, sp.start.column, sp.end.row, sp.end.column))
+            .collect();
         let decl_name_spans: std::collections::HashSet<(usize, usize, usize, usize)> = symbols
             .iter()
             .map(|s| {
@@ -995,7 +1007,11 @@ impl SkeletonAnalysis {
                     span,
                     scope: r.scope,
                     target_name: r.name.clone(),
-                    access: crate::model::file_analysis::AccessKind::Read,
+                    access: if member_write_spans.contains(&(span.start.row, span.start.column, span.end.row, span.end.column)) {
+                        crate::model::file_analysis::AccessKind::Write
+                    } else {
+                        crate::model::file_analysis::AccessKind::Read
+                    },
                     binding,
                     folded_from: None,
                     arg_count: r.arg_count,
@@ -1032,17 +1048,23 @@ impl SkeletonAnalysis {
                 )
             }))
             .collect();
+        let runtime_bound: std::collections::HashSet<(usize, usize)> = self
+            .runtime_bound_reads
+            .iter()
+            .map(|s| (s.start.row, s.start.column))
+            .collect();
         for (name, scope, span) in unresolved_reads {
             if claimed.contains(&(span.start.row, span.start.column, name.clone())) {
                 continue;
             }
+            let runtime = runtime_bound.contains(&(span.start.row, span.start.column));
             local_refs.push(crate::model::file_analysis::Ref {
                 kind: crate::model::file_analysis::RefKind::Variable,
                 span,
                 scope,
                 target_name: name,
                 access: crate::model::file_analysis::AccessKind::Read,
-                binding: None,
+                binding: runtime.then_some(crate::model::file_analysis::RefBinding::Runtime),
                 folded_from: None,
                 arg_count: None,
                 flags: Default::default(),

@@ -647,6 +647,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // ---- join def name-captures to their def event ----
     use std::collections::HashMap;
     let mut names_by_match: HashMap<(usize, String), (String, Point, Point)> = HashMap::new();
+    // `@member.write` — a member on the LEFT of an assignment (php's
+    // dynamic property declaration site).
+    let mut member_writes: Vec<Span> = Vec::new();
     // `@qualifier` (a `Class::` on an out-of-line def) and `@rettype` (a
     // method's declared return type) — pre-collected like names because the
     // `@def` event fires before these inner captures.
@@ -663,6 +666,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // span; joined to `@ref.member` so op-DX rides the minted ref.
     let mut member_op_raw: HashMap<usize, (crate::model::file_analysis::MemberOp, crate::model::file_analysis::Span)> =
         HashMap::new();
+    // `@ref.var.implicit` — reads the runtime binds without a declaration.
+    let mut runtime_bound_reads: Vec<Span> = Vec::new();
     // What an import row BINDS, per match (`@import.function` / `@import
     // .const`, on the row capture or on its name token). Read once here so
     // every capture in the `import` family accepts the suffix and the flat
@@ -691,6 +696,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             names_by_match
                 .insert((e.match_id, prefix.to_string()), (e.text.clone(), e.start, e.end));
         }
+        if e.cap == "member.write" {
+            member_writes.push(Span { start: e.start, end: e.end });
+        }
         if e.cap == "qualifier" {
             qualifier_by_match.insert(e.match_id, e.text.clone());
         }
@@ -699,6 +707,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "sym.attr" {
             attrs_by_match.entry(e.match_id).or_default().push(e.text.clone());
+        }
+        if e.cap == "ref.var.implicit" {
+            runtime_bound_reads.push(Span { start: e.start, end: e.end });
         }
     }
     // `@ns.inline` — an inline namespace's NAME token, fired by a name-only
@@ -781,6 +792,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // ---- the state machine: scope stack + sticky contexts ----
     let mut out = SkeletonAnalysis::default();
     out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
+    out.runtime_bound_reads = std::mem::take(&mut runtime_bound_reads);
+    out.member_writes = std::mem::take(&mut member_writes);
     out.names = pack.names.clone();
     // Template params joined to their owner class — the owner shaped like a
     // def name (a partial spec's spelling canonicalizes) so the key matches
