@@ -72,10 +72,11 @@ pub struct SkeletonAnalysis {
     pub symbols: Vec<SkelSymbol>,
     pub refs: Vec<SkelRef>,
     pub imports: Vec<String>,
-    /// `#include`/`import` path tokens with spans: (raw path text, path-token
-    /// span). Goto-def on the token resolves the header; the span is what the
-    /// bare `imports` list drops. Carried onto `FileAnalysis.pack.include_directives`.
-    pub import_sites: Vec<(String, crate::model::file_analysis::Span)>,
+    /// `#include`/`import` rows: the path-token span, the raw text, and what
+    /// the row binds. Goto-def on the token resolves the header; the span and
+    /// the binding are what the bare `imports` list drops. Carried onto
+    /// `FileAnalysis.pack.include_directives` unchanged.
+    pub import_sites: Vec<crate::model::file_analysis::ImportRow>,
     pub scope_count: usize,
     pub scopes: Vec<crate::model::file_analysis::Scope>,
     pub witnesses: Vec<crate::model::witnesses::Witness>,
@@ -1134,11 +1135,7 @@ impl SkeletonAnalysis {
             // the header (the bare `imports` list is span-less). Resolution to
             // an absolute path happens where the file path is in hand (the
             // driver), which also fills `macro_defs` / `include_closure`.
-            include_directives: self
-                .import_sites
-                .drain(..)
-                .map(|(raw, span)| (span, raw))
-                .collect(),
+            include_directives: self.import_sites.drain(..).collect(),
             domain_sites: std::mem::take(&mut self.domain_sites),
             moved_from: std::mem::take(&mut self.moved_from),
             control_regions: std::mem::take(&mut self.control_regions),

@@ -32,10 +32,6 @@ pub struct PackFacts {
     /// `__call`/`__get`) — the undefined-member lanes stay silent on it.
     #[serde(default)]
     pub catch_all_methods: Vec<String>,
-    /// Type names are capitalized by convention (an import row with a
-    /// lowercase leaf names a function or constant).
-    #[serde(default)]
-    pub types_are_capitalized: bool,
     /// Members every enum carries by language rule.
     #[serde(default)]
     pub enum_members: Vec<String>,
@@ -102,11 +98,11 @@ pub struct PackFacts {
     #[serde(default)]
     pub macro_defs: Vec<MacroDef>,
 
-    /// `#include "x.h"` / `<x.h>` directives: (path-token span, raw path text).
-    /// Goto-def on the path token resolves the header like `use` resolves a
-    /// module.
+    /// `#include "x.h"` / `<x.h>` / `use A\B` rows. Goto-def on the path
+    /// token resolves the header like `use` resolves a module; the use-map
+    /// resolves class spellings through the same rows.
     #[serde(default)]
-    pub include_directives: Vec<(Span, String)>,
+    pub include_directives: Vec<ImportRow>,
 
     /// `use A\B as C` rows: (alias, namespace, real leaf). The use-map
     /// pins the ALIAS spelling to the namespace and leaves the real leaf
@@ -194,10 +190,10 @@ impl PackFacts {
     /// `span`, if any. The one speller for "is this token inside an import
     /// row": the row's leaf carries its own ref; every other segment is a
     /// namespace no by-name lookup should answer for.
-    pub fn import_row_covering(&self, span: &Span) -> Option<&(Span, String)> {
-        self.include_directives.iter().find(|(row, _)| {
-            (row.start.row, row.start.column) <= (span.start.row, span.start.column)
-                && (span.end.row, span.end.column) <= (row.end.row, row.end.column)
+    pub fn import_row_covering(&self, span: &Span) -> Option<&ImportRow> {
+        self.include_directives.iter().find(|r| {
+            (r.span.start.row, r.span.start.column) <= (span.start.row, span.start.column)
+                && (span.end.row, span.end.column) <= (r.span.end.row, r.span.end.column)
         })
     }
 
@@ -222,7 +218,7 @@ impl PackFacts {
             + self
                 .include_directives
                 .iter()
-                .map(|(_, s)| s.capacity())
+                .map(|r| r.raw.capacity() + r.bound.as_ref().map_or(0, String::capacity))
                 .sum::<usize>();
 
         h.cpp_extras += vcap(&self.macro_defs)
@@ -335,3 +331,35 @@ impl PackSpellings {
 /// `PackSpellings::NONE` with a `'static` address, so `spellings()` can
 /// hand out a reference without the caller owning one.
 pub static NEUTRAL_SPELLINGS: PackSpellings = PackSpellings::NONE;
+
+/// One import row as the file wrote it: the path/name token's span, the raw
+/// text, and what the row BINDS. A use-map language spells the binding out
+/// (php `use function`, `use const`), so the producer states it rather than
+/// leaving a consumer to guess from the leaf's capitalization — a guess that
+/// is wrong for every lower-case class and every upper-case constant
+/// (rule #11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportRow {
+    pub span: Span,
+    pub raw: String,
+    #[serde(default)]
+    pub binds: ImportBinds,
+    /// The NAME this row brings into the file's namespace — the alias when
+    /// the row writes one, the leaf otherwise — as the document's
+    /// `@import.binds` capture states it. `None` for a row that binds no
+    /// spellable name (a text-splicing `#include`, a `import a.b` whose
+    /// binding is the head package rather than the token).
+    #[serde(default)]
+    pub bound: Option<String>,
+}
+
+/// What an import row brings into the file's namespace. `Type` is the
+/// default because it is what an unqualified row means in every language
+/// that has one — a bare `use A\B`, a C `#include`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ImportBinds {
+    #[default]
+    Type,
+    Function,
+    Const,
+}
