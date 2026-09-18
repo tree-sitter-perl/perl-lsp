@@ -275,6 +275,14 @@ impl NameSpellings {
         self.namespace_sep.as_deref()
     }
 
+    /// The bare identity token an edit writes, from a name as a human typed
+    /// it: this language's variable sigils are spelling, not identity
+    /// (`$total` is the variable `total` at every collected span). A
+    /// language declaring no sigils passes its names through.
+    pub fn bare_name<'n>(&self, typed: &'n str) -> &'n str {
+        typed.trim_start_matches(&*self.sigils)
+    }
+
     /// The separator a use-map resolves with — `None` for a language whose
     /// class spellings are identities as written, whether or not it
     /// qualifies names. The one gate the use-map questions read.
@@ -972,13 +980,18 @@ impl MemberKind {
     }
 
     /// May a declaration of `kind` define a target of this family? The value
-    /// side is strict; a callable keeps the call walk's value-kind fallback
-    /// (a language whose member read IS a call reaches stored members through
-    /// it).
-    pub fn admits_decl(self, kind: SymKind) -> bool {
+    /// side is strict. The callable side asks the LANGUAGE
+    /// (`PackSpellings::member_reads_are_calls`): where a member read is an
+    /// accessor call, a call legitimately lands on a stored slot; where the
+    /// call is spelled, `$obj->name()` and the property `name` are two
+    /// members and admitting the property is how a missing `()` resolves to
+    /// the wrong one.
+    pub fn admits_decl(self, kind: SymKind, spellings: &PackSpellings) -> bool {
         match self {
             MemberKind::Value => MemberKind::of_sym(kind) == MemberKind::Value,
-            MemberKind::Callable => true,
+            MemberKind::Callable => {
+                spellings.member_reads_are_calls || MemberKind::of_sym(kind) == MemberKind::Callable
+            }
         }
     }
 

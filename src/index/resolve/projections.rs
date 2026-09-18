@@ -22,19 +22,13 @@ impl<'a> CandidateSet<'a> {
         self
     }
 
-    /// Per-language name semantics on the set's identity keying: normalize
-    /// a typed NEW NAME to the bare identity token edits write. Perl names
-    /// carry sigils (`conventions.rs` owns the rule); pack languages
-    /// canonicalize spellings at extraction (the LangPack `shape_name`
-    /// hook — cpp's `canonical_template_spelling` is that seam's cpp
-    /// instance), so their typed names pass through bare. New per-language
-    /// spelling rules plug in HERE, never inline in a projection.
+    /// Normalize a typed NEW NAME to the bare identity token edits write.
+    /// The origin's own spellings own the rule — a language's variable
+    /// sigils are spelling, not identity (`$total` renames `total` at every
+    /// collected span), and a language that declares none passes its names
+    /// through.
     pub(super) fn bare_new_name<'n>(&self, typed: &'n str) -> &'n str {
-        if self.pack {
-            typed
-        } else {
-            crate::model::conventions::strip_variable_sigils(typed)
-        }
+        self.origin.names().bare_name(typed)
     }
 
     /// The origin-scoped index — every forward resolution (identity,
@@ -124,7 +118,7 @@ impl<'a> CandidateSet<'a> {
                     key: self.origin_key.clone(),
                     span,
                     access,
-                    rewritable: true,
+                    rewritable: Rewritable::Yes,
                     label: None
                 })
                 .collect(),
@@ -153,7 +147,7 @@ impl<'a> CandidateSet<'a> {
     pub fn linked_editing_spans(&self) -> Vec<Span> {
         self.origin_occurrences()
             .into_iter()
-            .filter(|(loc, bare)| *bare && loc.rewritable)
+            .filter(|(loc, bare)| *bare && loc.is_rewritable())
             .map(|(loc, _)| loc.span)
             .collect()
     }
@@ -216,7 +210,7 @@ impl<'a> CandidateSet<'a> {
                                 key: self.origin_key.clone(),
                                 span: *span,
                                 access: AccessKind::Read,
-                                rewritable: true,
+                                rewritable: Rewritable::Yes,
                                 label: None,
                             },
                             true,
@@ -265,7 +259,7 @@ impl<'a> CandidateSet<'a> {
                             key: self.origin_key.clone(),
                             span,
                             access,
-                            rewritable: true,
+                            rewritable: Rewritable::Yes,
                             label: None,
                         },
                         true,
@@ -277,17 +271,16 @@ impl<'a> CandidateSet<'a> {
 
     /// Whether rename at this cursor would produce edits — the prepareRename
     /// gate. Mirrors `rename_edits`' arms so the box is offered exactly where
-    /// edits exist. Pack targets probe the real edit set: a set rename would
-    /// refuse (alias-spelled sites) or no-op on must not offer a box.
+    /// edits exist. A cross-file target probes the real edit set: a set whose
+    /// sites carry a refusing reason, or that is empty in editable space,
+    /// must not offer a box — an offer the rename would then refuse is worse
+    /// than no offer. The probe costs the walk the rename that follows the
+    /// gesture pays anyway.
     pub fn renameable(&self) -> bool {
         match self.resolution() {
             Some(ResolvedTarget::Target(t)) if t.rename_is_language_owned() => false,
             Some(ResolvedTarget::Target(t)) if t.supports_cross_file_rename() => {
-                if self.pack {
-                    self.rename_edits("x").is_ok_and(|e| !e.is_empty())
-                } else {
-                    true
-                }
+                self.rename_edits("x").is_ok_and(|e| !e.is_empty())
             }
             Some(ResolvedTarget::Group { .. }) => true,
             Some(_) => self
@@ -305,12 +298,11 @@ impl<'a> CandidateSet<'a> {
     /// edits, and the walk stops at editable space (for pack routing,
     /// "editable" includes the per-language cache).
     /// `Ok(empty)` = nothing renameable here; `Err` = a rename that would
-    /// SILENTLY BREAK code — a pack set containing an alias-spelled site (a
-    /// use through a delegating `#define`, `rewritable: false`) refuses: the
-    /// macro's body isn't a collected span, so renaming the target would
-    /// leave the delegation chain pointing at the old name. Perl's
-    /// non-rewritable sites (variable-folded dispatch) keep their
-    /// long-standing skip.
+    /// SILENTLY BREAK code. Which is which is the SITE's reason, not the
+    /// language's: a site whose `Rewritable::No(..)` reason refuses
+    /// (`NotRewritable::refuses_rename`) aborts the whole edit set and the
+    /// message names that reason, every other non-rewritable site drops out
+    /// and the remaining edits stand.
     pub fn rename_edits(&self, new_name: &str) -> Result<Vec<(RefLocation, String)>, String> {
         // One mask for every language: the backward walk attributes a pack
         // sub-index's files per path (`is_dependency_path`), so a pack
@@ -324,17 +316,21 @@ impl<'a> CandidateSet<'a> {
             Some(ResolvedTarget::Target(t)) if t.rename_is_language_owned() => Vec::new(),
             Some(ResolvedTarget::Target(t)) if t.supports_cross_file_rename() => {
                 let locations = refs_to(self.files, self.module_index, t, editable);
-                if self.pack && locations.iter().any(|l| !l.rewritable) {
+                if let Some(why) = locations
+                    .iter()
+                    .filter_map(|l| l.rewritable.reason())
+                    .find(|r| r.refuses_rename())
+                {
                     return Err(format!(
-                        "rename of `{}` would leave sites spelled through a delegating macro \
-                         unchanged (the macro body is not rewritten) — refusing rather than \
+                        "rename of `{}` would leave {} unchanged — refusing rather than \
                          emitting a partial edit",
-                        t.name
+                        t.name,
+                        why.describe()
                     ));
                 }
                 locations
                     .into_iter()
-                    .filter(|loc| loc.rewritable)
+                    .filter(|loc| loc.is_rewritable())
                     .map(|loc| (loc, new_name.to_string()))
                     .collect()
             }
@@ -366,7 +362,7 @@ impl<'a> CandidateSet<'a> {
                             key: self.origin_key.clone(),
                             span,
                             access: AccessKind::Read,
-                            rewritable: true,
+                            rewritable: Rewritable::Yes,
                             label: None
                         },
                         text,
@@ -415,7 +411,7 @@ impl<'a> CandidateSet<'a> {
                                 key: FileKey::Path(cached.path.clone()),
                                 span,
                                 access: AccessKind::Read,
-                                rewritable: false,
+                                rewritable: Rewritable::No(NotRewritable::OtherNameToken),
                                 label: None
                             });
                         }

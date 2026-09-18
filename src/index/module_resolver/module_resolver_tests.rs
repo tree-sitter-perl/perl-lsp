@@ -711,12 +711,9 @@ fn flat_axis_is_scopeless_by_rule_transparent_is_not() {
         own_namespace: Some("App".to_string()),
         spelled: ["Request".to_string()].into_iter().collect(),
         visible: Default::default(),
-        names: crate::model::file_analysis::NameSpellings {
-            namespace_sep: Some(std::borrow::Cow::Borrowed("\\")),
-            sigils: std::borrow::Cow::Borrowed(&['$']),
-            class_spelling: crate::model::file_analysis::ClassSpelling::UseMap,
-            member_sep: Some(std::borrow::Cow::Borrowed("::")),
-        },
+        // the real php spellings, so the fixture cannot drift from the
+        // language it stands for
+        names: crate::build::packs::php_pack().names,
     };
     let usemap = ScopedLookup::new(
         &idx,

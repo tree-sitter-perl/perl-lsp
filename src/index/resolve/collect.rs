@@ -309,7 +309,7 @@ pub(super) fn pack_symbol_def_location(
                 key: origin_key.clone(),
                 span: sym.selection_span,
                 access: AccessKind::Declaration,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None,
             },
         ));
@@ -335,7 +335,7 @@ pub(super) fn pack_symbol_def_location(
                     key: FileKey::Path(cached.path.clone()),
                     span: sym.selection_span,
                     access: AccessKind::Declaration,
-                    rewritable: true,
+                    rewritable: Rewritable::Yes,
                     label: None,
                 },
             ));
@@ -525,10 +525,10 @@ pub(super) fn span_is_folded_name(
 }
 
 /// Member-family declaration match: a target with no member family admits
-/// either kind; the families' own rule (`MemberKind::admits_decl`) decides
-/// the rest.
-fn kind_admits(family: Option<MemberKind>, kind: SymKind) -> bool {
-    family.is_none_or(|f| f.admits_decl(kind))
+/// either kind; the families' own rule (`MemberKind::admits_decl`), read
+/// under the declaring file's spellings, decides the rest.
+fn kind_admits(family: Option<MemberKind>, kind: SymKind, analysis: &FileAnalysis) -> bool {
+    family.is_none_or(|f| f.admits_decl(kind, analysis.spellings()))
 }
 
 /// True when `sym` is a declaration of `target` (decl-span match).
@@ -579,7 +579,7 @@ pub(super) fn symbol_defines_target(
                         .any(|c| Some(c.as_str()) == sym_pkg));
             matches!(sym.kind, SymKind::Sub | SymKind::Method)
                 && in_scope
-                && kind_admits(target.member_kind, sym.kind)
+                && kind_admits(target.member_kind, sym.kind, analysis)
         }
         TargetKind::Method { class } => {
             // A `sub NAME` declaration belongs to this target if it lives in
@@ -603,7 +603,7 @@ pub(super) fn symbol_defines_target(
             (matches!(sym.kind, SymKind::Sub | SymKind::Method)
                 || analysis.symbol_is_class_content(sym))
                 && on_chain
-                && kind_admits(target.member_kind, sym.kind)
+                && kind_admits(target.member_kind, sym.kind, analysis)
         }
         TargetKind::Package => matches!(
             sym.kind,
@@ -805,7 +805,7 @@ pub(super) fn collect_package_var(
                 key: key.clone(),
                 span: tail(sym.selection_span),
                 access: AccessKind::Declaration,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None
             });
         }
@@ -822,7 +822,7 @@ pub(super) fn collect_package_var(
                     key: key.clone(),
                     span: tail(r.span),
                     access: r.access,
-                    rewritable: true,
+                    rewritable: Rewritable::Yes,
                     label: None
                 });
             }
@@ -832,7 +832,7 @@ pub(super) fn collect_package_var(
                 key: key.clone(),
                 span: tail(r.span),
                 access: r.access,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None
             });
         }
@@ -925,23 +925,18 @@ pub(super) fn collect_from_analysis(
         })
         .collect();
 
-    // Pack languages: name lookups during matching (invocant typing, the
-    // typedef chase) must resolve against THIS file's include closure — the
-    // same visibility goto-def uses at this file's cursors — or a scanned
-    // file's `o->op_type` types against a globally-arbitrary same-named
-    // candidate and the site silently drops out. Transparent for Perl
-    // (empty closure = the plain index).
-    // A name-keyed pack file (php) is scoped the same way, by its OWN
-    // use-map: `$c->pick()` in a file that `use`s `B\Collection` types
-    // against B's class, never the same-leaf stranger the plain index would
-    // hand back first. `for_origin` owns the derivation for both shapes.
+    // Name lookups during matching (invocant typing, the typedef chase)
+    // resolve against THIS file's own visibility — the same rule goto-def
+    // uses at this file's cursors — or a scanned file's `o->op_type` types
+    // against a globally-arbitrary same-named candidate and the site
+    // silently drops out. `for_origin` owns the derivation for every
+    // language: an include-closure pack scopes by its closure, a name-keyed
+    // pack (php) by its OWN use-map (`$c->pick()` in a file that `use`s
+    // `B\Collection` types against B's class, never the same-leaf stranger
+    // the plain index would hand back first), Perl by its search path.
     let scoped_storage: Option<crate::model::file_analysis::ScopedLookup>;
     let module_index: Option<&dyn CrossFileLookup> = match module_index {
-        Some(idx)
-            if crate::build::language_driver::LanguageRegistry::is_pack_language(
-                &analysis.language,
-            ) =>
-        {
+        Some(idx) => {
             let path = key_for_sort(key);
             let axis = crate::util::ghost_stats::timed("refs.visibility_axis", || {
                 crate::model::file_analysis::VisibilityAxis::for_origin(
@@ -963,7 +958,7 @@ pub(super) fn collect_from_analysis(
             // in this same match arm — a lifetime-extension idiom, not a fallible read.
             Some(scoped_storage.as_ref().unwrap() as &dyn CrossFileLookup)
         }
-        other => other,
+        None => None,
     };
 
     // Package globals match by package + (qualified) name, not the callable
@@ -1018,13 +1013,17 @@ pub(super) fn collect_from_analysis(
         TargetKind::Sub { .. } | TargetKind::Method { .. } => (true, false),
         _ => (false, false),
     };
-    // a class-keyed rail's sites are tokens of other names — never rewritten
-    let class_rail = matches!(
-        &target.kind,
-        TargetKind::Handler { names: crate::model::file_analysis::RailNames::Classes, .. }
-    );
-    let rewritable_at = |span: Span| {
-        !class_rail && !(foldable && span_is_folded_name(analysis, span, folds_through_calls, &target.name))
+    // Whether this target's spans hold its own name at all is the target's
+    // policy (`sites_are_rewritable`); the fold is per-site.
+    let sites_rewritable = target.sites_are_rewritable();
+    let rewritable_at = |span: Span| -> Rewritable {
+        if !sites_rewritable {
+            return Rewritable::No(NotRewritable::RailEmission);
+        }
+        if foldable && span_is_folded_name(analysis, span, folds_through_calls, &target.name) {
+            return Rewritable::No(NotRewritable::ConstFolded);
+        }
+        Rewritable::Yes
     };
 
     // Include declaration spans when this file defines the target. Name
@@ -1404,7 +1403,11 @@ pub(super) fn collect_from_analysis(
                 key: key.clone(),
                 span,
                 access: r.access,
-                rewritable: !alias_matched && rewritable_at(span),
+                rewritable: if alias_matched {
+                    Rewritable::No(NotRewritable::MacroDelegated)
+                } else {
+                    rewritable_at(span)
+                },
                 label: None
             });
             // A call folded from a variable (`my $m = 'process'; $self->$m()`)

@@ -224,8 +224,16 @@ impl TargetRef {
     /// `rename_edits` and for the prepareRename gate alike: an offer the
     /// rename would refuse is worse than no offer.
     pub fn rename_is_language_owned(&self) -> bool {
-        self.ctor_of.is_some()
-            || matches!(&self.kind, TargetKind::Handler { names: RailNames::Classes, .. })
+        self.ctor_of.is_some() || !self.sites_are_rewritable()
+    }
+
+    /// Do this target's reference spans hold tokens of its OWN name? A
+    /// class-keyed rail's sites spell the CLASS the rail is keyed on, so an
+    /// edit writing the target's new name over them corrupts a class
+    /// reference. The collector marks the sites it emits with this and the
+    /// rename policy above composes it — one answer, both readers.
+    pub fn sites_are_rewritable(&self) -> bool {
+        !matches!(&self.kind, TargetKind::Handler { names: RailNames::Classes, .. })
     }
 
     /// Whether this target renames cross-file through `refs_to` (matched by
@@ -450,12 +458,11 @@ pub struct RefLocation {
     /// at the site. `highlights()` renders it as the LSP highlight kind;
     /// other projections carry it for symmetry (a reference IS its access).
     pub access: AccessKind,
-    /// Whether rename may rewrite this span. `false` for a site whose name has
-    /// no literal token to replace — a const-folded event name
-    /// (`my $e = 'ready'; $obj->on($e)`) whose dispatch span IS the variable.
-    /// References lists it (it's a real use); rename skips it (rewriting the
-    /// variable would corrupt it). True for every literal occurrence.
-    pub rewritable: bool,
+    /// Whether rename may rewrite this span, and — when it may not — WHY.
+    /// The producer that saw the site knows the reason (it saw the macro,
+    /// the fold, the rail emission), so no consumer re-derives it from the
+    /// span, and rename's policy reads the reason rather than the language.
+    pub rewritable: Rewritable,
     /// A per-candidate fact worth surfacing beside the location — a macro
     /// variant's reachability verdict, a delegation see-through note. LSP
     /// `Location` has no label slot so the editor adapter drops it (ordering
@@ -463,7 +470,91 @@ pub struct RefLocation {
     pub label: Option<String>,
 }
 
+/// May rename rewrite a located reference's span?
+///
+/// A site that is not rewritable is still a reference — references lists it —
+/// and the reason decides what rename does with it: most reasons SKIP (the
+/// token that does spell the target is collected elsewhere, so the remaining
+/// edits are complete on their own), while a reason whose site would be left
+/// silently wrong REFUSES the whole edit set. `NotRewritable::refuses_rename`
+/// is that split, stated once for every language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rewritable {
+    /// The span holds the target's own name token.
+    Yes,
+    No(NotRewritable),
+}
+
+/// Why a span may not be rewritten. Closed: a producer that cannot name its
+/// reason is emitting a site it has not understood.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotRewritable {
+    /// The name reached this site FOLDED out of a variable or constant
+    /// (`my $e = 'ready'; $obj->on($e)`) — the span is the variable.
+    /// Skipped: the literal the fold came from is collected on its own and
+    /// carries the edit.
+    ConstFolded,
+    /// The token spells a delegating macro (`#define IncRef(sv)
+    /// Perl_Inc(sv)`), not the target. REFUSES: the macro body is not a
+    /// collected span, so an edit set that merely skipped this site would
+    /// leave the delegation chain pointing at the old name — code that still
+    /// compiles and does the wrong thing.
+    MacroDelegated,
+    /// A class-keyed rail's emission site: the token spells the CLASS the
+    /// rail is keyed on. Skipped — that token renames with the class.
+    RailEmission,
+    /// The span declares or spells a DIFFERENT name: a template
+    /// specialization's whole `X<args>` spelling, a descendant class's own
+    /// declaration, a call-hierarchy item's anchor on its caller. Skipped;
+    /// the target's own token is collected separately.
+    OtherNameToken,
+    /// No name token at all — the file-top anchor a module resolves to when
+    /// its package symbol was never scanned. Skipped.
+    NoNameToken,
+}
+
+impl NotRewritable {
+    /// Would leaving this site unedited silently break the code? Then rename
+    /// refuses the whole set rather than emitting a partial edit.
+    pub fn refuses_rename(self) -> bool {
+        matches!(self, NotRewritable::MacroDelegated)
+    }
+
+    /// What a refusal tells the user — the real reason, never a stand-in for
+    /// another language's.
+    pub fn describe(self) -> &'static str {
+        match self {
+            NotRewritable::ConstFolded => "sites reached through a folded name",
+            NotRewritable::MacroDelegated => {
+                "sites spelled through a delegating macro (the macro body is not rewritten)"
+            }
+            NotRewritable::RailEmission => "sites emitted on a class-keyed rail",
+            NotRewritable::OtherNameToken => "sites whose token spells another name",
+            NotRewritable::NoNameToken => "sites that carry no name token",
+        }
+    }
+}
+
+impl Rewritable {
+    pub fn is_yes(self) -> bool {
+        matches!(self, Rewritable::Yes)
+    }
+
+    /// The reason, when there is one.
+    pub fn reason(self) -> Option<NotRewritable> {
+        match self {
+            Rewritable::Yes => None,
+            Rewritable::No(r) => Some(r),
+        }
+    }
+}
+
 impl RefLocation {
+    /// May rename write over this span?
+    pub fn is_rewritable(&self) -> bool {
+        self.rewritable.is_yes()
+    }
+
     pub fn to_url(&self) -> Option<Url> {
         match &self.key {
             FileKey::Url(u) => Some(u.clone()),
