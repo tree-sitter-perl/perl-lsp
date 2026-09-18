@@ -90,8 +90,8 @@ pub enum HandlerOwner {
 }
 
 /// What a rail's names denote — the rail document's `names_are`
-/// declaration, carried as `PackFacts::class_named_rails` and read through
-/// `HandlerOwner::names_are`.
+/// declaration (`docs/adr/laravel-rails.md` §Identity), carried as
+/// `PackFacts::class_named_rails` and read through `HandlerOwner::names_are`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RailNames {
     /// The name is a string the framework matches verbatim (a route name,
@@ -127,6 +127,32 @@ impl HandlerOwner {
     /// The rail's names are class identities — see `RailNames::Classes`.
     pub fn names_are_classes(&self, pack: &PackFacts) -> bool {
         self.names_are(pack) == RailNames::Classes
+    }
+}
+
+impl FileAnalysis {
+    /// The rail Handler co-declared with `sym`, if any. A path rail whose
+    /// `methods` arm names every method of a file (a policy class: each
+    /// method IS an ability) mints the Handler ON the method's own name
+    /// token and links the two (`Symbol::declared_with`), because the
+    /// rail's dispatch sites (`->authorize('update', …)`, `@can(…)`) name
+    /// the handler and never the method. A consumer asks this relation —
+    /// never which rail, never a span coincidence.
+    pub fn rail_handler_twin(&self, sym: &Symbol) -> Option<&Symbol> {
+        sym.declared_with
+            .map(|id| self.symbol(id))
+            .filter(|t| matches!(t.detail, SymbolDetail::Handler { owner: HandlerOwner::Rail(_), .. }))
+    }
+
+    /// Every handler name THIS file declares on the string rail `rail` —
+    /// the rail's own declarations. The rail-name completion source and the
+    /// undefined-rail-name lane's local answer read it, so neither spells
+    /// the `Handler { owner: Rail(..) }` filter itself.
+    pub fn rail_names<'a>(&'a self, rail: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        self.symbols().iter().filter_map(move |s| {
+            matches!(&s.detail, SymbolDetail::Handler { owner: HandlerOwner::Rail(r), .. } if r == rail)
+                .then(|| s.name.as_str())
+        })
     }
 }
 
