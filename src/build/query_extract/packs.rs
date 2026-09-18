@@ -130,10 +130,6 @@ pub struct LangPack {
     /// names. The KIND is the capture's suffix — which callees import is the
     /// document's — and this maps the argument text the kind carries.
     pub import_module: fn(kind: &str, arg: &str) -> Option<String>,
-    /// Command-dispatched languages (CMake): what a command DOES with
-    /// its positional arguments. The @cmd/@cmd.arg captures deliver
-    /// (name, ordered args); this predicate classifies.
-    pub cmd_effects: fn(cmd: &str) -> Vec<CmdEffect>,
     /// The refinement a narrowed subject's type TEXT denotes: the
     /// `@narrow.type` capture where the guard names one
     /// (`dynamic_cast<Derived*>`), else the subject's DECLARED type, which
@@ -337,7 +333,6 @@ impl LangPack {
             doc_uses_method_tags,
             module_paths: _,
             import_module: _,
-            cmd_effects: _,
             narrow_type: _,
             implicit_this_members: _,
             include_path_tokens: _,
@@ -506,24 +501,6 @@ pub enum DocFact {
     /// The comment's summary paragraph — every line before the first
     /// `@tag`, joined; the text hover shows under the signature.
     Description(String),
-}
-
-/// One effect of a command-dispatched statement.
-// Variants are constructed only by `cmake_pack` (command languages) and read by
-// the generic cmd-effect match; both absent in a build without that feature.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy)]
-pub enum CmdEffect {
-    /// Argument `name_arg` declares an entity of `kind` ("var",
-    /// "sub", ...).
-    Def { kind: &'static str, name_arg: usize },
-    /// Arguments from `from` onward are name references (all-caps
-    /// keyword arguments like PRIVATE/STATIC are skipped — CMake's
-    /// keyword convention; a finer filter is a later predicate).
-    RefArgsFrom { from: usize },
-    /// Argument `arg` names an imported module (joins import_call's
-    /// role for command languages).
-    Import { arg: usize },
 }
 
 /// Translate a member's declared return type into the deferred

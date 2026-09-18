@@ -43,7 +43,6 @@ pub fn r_pack() -> LangPack {
         // Whichever call imports, R names the module in the ARGUMENT: a
         // sourced path verbatim, a library name into the installed tree.
         import_module: |_, arg| Some(arg.to_string()),
-        cmd_effects: |_| vec![],
         narrow_type: |_| None,
         implicit_this_members: false,
         include_path_tokens: false,

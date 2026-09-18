@@ -50,7 +50,6 @@ pub fn cpp_pack() -> LangPack {
             vec![p.to_string()]
         },
         import_module: |_, _| None,
-        cmd_effects: |_| vec![],
         // An engaged `std::optional<T>` holds a T, so an optional spelling
         // refines to its inner class; anything else denotes the class it
         // spells (`dynamic_cast<Derived*>` → Derived), which is `annot_type`'s

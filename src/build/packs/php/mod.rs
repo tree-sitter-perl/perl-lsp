@@ -133,7 +133,6 @@ pub fn php_pack() -> LangPack {
             vec![format!("{base}.php")]
         },
         import_module: |_, _| None,
-        cmd_effects: |_| vec![],
         // `$x instanceof User` refines $x to User: the class token leafs like
         // every other class spelling (`Op\Install` → `Install`; classes are
         // filed by leaf).

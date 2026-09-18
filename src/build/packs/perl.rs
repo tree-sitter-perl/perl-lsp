@@ -49,7 +49,6 @@ pub fn perl_pack() -> LangPack {
         doc_uses_method_tags: &[],
         module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
         import_module: |_, _| None,
-        cmd_effects: |_| vec![],
         narrow_type: |_| None,
         implicit_this_members: false,
         include_path_tokens: false,

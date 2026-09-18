@@ -1,6 +1,6 @@
 //! CMake's pack — the command-dispatched language.
 
-use crate::build::query_extract::{CmdEffect, LangPack, PeelSpec};
+use crate::build::query_extract::{LangPack, PeelSpec};
 use crate::model::file_analysis::{NameSpellings, PackSpellings};
 
 /// CMake writes and displays nothing of its own: the engine's type tags are
@@ -12,7 +12,6 @@ const SPELLINGS: PackSpellings = PackSpellings {
 };
 
 // Live only under `feature = "cmake"` (or the pack tests); see `python_pack`.
-// Sole constructor of the `CmdEffect` variants.
 #[allow(dead_code)]
 pub fn cmake_pack() -> LangPack {
     LangPack {
@@ -45,20 +44,6 @@ pub fn cmake_pack() -> LangPack {
             }
         },
         import_module: |_, _| None,
-        cmd_effects: |cmd| match cmd.to_ascii_lowercase().as_str() {
-            "set" | "option" => vec![CmdEffect::Def { kind: "var", name_arg: 0 }],
-            "add_library" | "add_executable" | "add_custom_target" => {
-                // Targets. SymKind::Target is the real future; "sub"
-                // rides the full rename/refs machinery today.
-                vec![CmdEffect::Def { kind: "sub", name_arg: 0 }]
-            }
-            "target_link_libraries" | "target_include_directories"
-            | "target_compile_definitions" | "target_sources" => vec![
-                CmdEffect::RefArgsFrom { from: 0 },
-            ],
-            "include" | "add_subdirectory" => vec![CmdEffect::Import { arg: 0 }],
-            _ => vec![],
-        },
         narrow_type: |_| None,
         implicit_this_members: false,
         include_path_tokens: false,
