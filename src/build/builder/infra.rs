@@ -23,6 +23,7 @@ impl<'a> Builder<'a> {
             span,
             owner: None,
             package: pkg,
+            implicit_receiver: false,
         });
         self.scope_stack.push(id);
         id
