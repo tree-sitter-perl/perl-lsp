@@ -132,11 +132,7 @@ pub fn php_pack() -> LangPack {
             let base = m.trim_start_matches('\\').replace('\\', "/");
             vec![format!("{base}.php")]
         },
-        // `['k' => v]` / `array('k', v)` construct keyed values; the
-        // shape query gates on a string-keyed element, so these tokens
-        // only ever arrive for genuinely keyed literals.
-        shape_ctor: |callee| matches!(callee, "[" | "array"),
-        import_call: |_, _| None,
+        import_module: |_, _| None,
         cmd_effects: |_| vec![],
         // `$x instanceof User` refines $x to User: the class token leafs like
         // every other class spelling (`Op\Install` → `Install`; classes are

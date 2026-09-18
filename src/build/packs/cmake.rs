@@ -44,8 +44,7 @@ pub fn cmake_pack() -> LangPack {
                 vec![format!("{m}/CMakeLists.txt"), format!("{m}.cmake")]
             }
         },
-        shape_ctor: |_| false,
-        import_call: |_, _| None,
+        import_module: |_, _| None,
         cmd_effects: |cmd| match cmd.to_ascii_lowercase().as_str() {
             "set" | "option" => vec![CmdEffect::Def { kind: "var", name_arg: 0 }],
             "add_library" | "add_executable" | "add_custom_target" => {

@@ -1205,15 +1205,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut annots: HashMap<usize, String> = HashMap::new();
     // keyed-shape collection: ctor + keys grouped per @expr.shape span
     let mut shape_spans: Vec<(usize, usize, Span)> = Vec::new();
-    let mut shape_ctors: HashMap<(usize, usize), String> = HashMap::new();
+    let mut shape_ctor_at: std::collections::HashSet<(usize, usize)> = Default::default();
     let mut shape_keys: Vec<(usize, usize, String)> = Vec::new();
     // command-dispatch collection: per match, the command identifier
     // and its ordered arguments
     let mut cmd_names: std::collections::BTreeMap<usize, (String, Span, crate::model::file_analysis::ScopeId)> =
         Default::default();
     let mut cmd_args: std::collections::BTreeMap<usize, Vec<(String, Span)>> = Default::default();
-    // import-call halves, joined per match (BTreeMap: match ids are
-    // source-ordered, so imports come out deterministic)
+    // import-call halves — the import KIND the capture named and the argument
+    // it carries — joined per match (BTreeMap: match ids are source-ordered, so
+    // imports come out deterministic)
     let mut import_fns: std::collections::BTreeMap<usize, String> = Default::default();
     let mut import_args: std::collections::BTreeMap<usize, String> = Default::default();
     // expr-literal spans, for narrowing an Edge target onto the actual
@@ -2487,9 +2488,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             "shape.ctor" => {
                 // belongs to the smallest enclosing expr.shape; matches
                 // share the call node so byte keys line up
-                shape_ctors
-                    .entry(byte_range_of(&events, e.match_id, "expr.shape").unwrap_or((0, 0)))
-                    .or_insert_with(|| e.text.clone());
+                shape_ctor_at
+                    .insert(byte_range_of(&events, e.match_id, "expr.shape").unwrap_or((0, 0)));
             }
             "shape.key" => {
                 if let Some(range) = byte_range_of(&events, e.match_id, "expr.shape") {
@@ -2508,8 +2508,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     .or_default()
                     .push((e.text.clone(), Span { start: e.start, end: e.end }));
             }
-            "import.fn" => {
-                import_fns.insert(e.match_id, e.text.clone());
+            // `@import.call.<kind>` — the document says what kind of import
+            // this call is; the pack maps its argument to a module.
+            cap if cap.starts_with("import.call.") => {
+                import_fns.insert(e.match_id, cap["import.call.".len()..].to_string());
             }
             "import.arg" => {
                 import_args.insert(e.match_id, e.text.clone());
@@ -2711,8 +2713,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             if !seen_spans.insert((sb, eb)) {
                 continue;
             }
-            let Some(ctor) = shape_ctors.get(&(sb, eb)) else { continue };
-            if !(pack.shape_ctor)(ctor) {
+            // a keyed value only where the document named the constructor
+            if !shape_ctor_at.contains(&(sb, eb)) {
                 continue;
             }
             let mut keys: Vec<(String, Option<Box<InferredType>>)> = shape_keys
@@ -2734,9 +2736,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     }
 
     // ---- import CALLS (library/source) → imports ----
-    for (mid, f) in &import_fns {
+    for (mid, kind) in &import_fns {
         if let Some(arg) = import_args.get(mid) {
-            if let Some(module) = (pack.import_call)(f, arg) {
+            if let Some(module) = (pack.import_module)(kind, arg) {
                 if !out.imports.contains(&module) {
                     out.imports.push(module);
                 }

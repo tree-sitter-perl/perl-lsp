@@ -49,8 +49,7 @@ pub fn cpp_pack() -> LangPack {
             let p = m.trim_matches(|c: char| c == '"' || c == '<' || c == '>');
             vec![p.to_string()]
         },
-        shape_ctor: |_| false,
-        import_call: |_, _| None,
+        import_module: |_, _| None,
         cmd_effects: |_| vec![],
         // An engaged `std::optional<T>` holds a T, so an optional spelling
         // refines to its inner class; anything else denotes the class it

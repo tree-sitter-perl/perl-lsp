@@ -40,11 +40,9 @@ pub fn r_pack() -> LangPack {
         // resolves into the installed-library tree (a real install
         // would consult .libPaths() — not modeled here).
         module_paths: |m| vec![m.to_string()],
-        shape_ctor: |callee| matches!(callee, "list" | "data.frame" | "tibble"),
-        import_call: |callee, arg| match callee {
-            "library" | "require" | "source" => Some(arg.to_string()),
-            _ => None,
-        },
+        // Whichever call imports, R names the module in the ARGUMENT: a
+        // sourced path verbatim, a library name into the installed tree.
+        import_module: |_, arg| Some(arg.to_string()),
         cmd_effects: |_| vec![],
         narrow_type: |_| None,
         implicit_this_members: false,

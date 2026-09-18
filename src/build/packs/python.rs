@@ -48,8 +48,7 @@ pub fn python_pack() -> LangPack {
             let base = m.replace('.', "/");
             vec![format!("{base}.py"), format!("{base}/__init__.py")]
         },
-        shape_ctor: |_| false,
-        import_call: |_, _| None,
+        import_module: |_, _| None,
         cmd_effects: |_| vec![],
         // A guard's type token is a class name verbatim (`isinstance(x, Foo)`).
         narrow_type: |ty| Some(InferredType::ClassName(ty.to_string())),
