@@ -755,9 +755,9 @@ pub fn signature_help(
 /// Signature help for a pack-language document: the cursor's call site
 /// (`cursor_sentinel::call_at`), the callee resolved through the same
 /// member ladder goto-def uses, and the signature rendered from the
-/// DEFINING file's own text — the parameter list between the declaration's
-/// parentheses, the return annotation after them, the docblock summary
-/// under it. One rule for local and cross-file callees.
+/// declaration facts the callee's own extraction minted — its `ParamInfo`
+/// list, its declared return, its docblock summary. One rule for local and
+/// cross-file callees.
 pub fn pack_signature_help(
     analysis: &FileAnalysis,
     tree: &Tree,
