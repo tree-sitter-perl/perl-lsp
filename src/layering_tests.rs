@@ -1797,16 +1797,20 @@ fn decoded_pack_analyses_carry_spellings() {
     let mut checked: Vec<&'static str> = Vec::new();
     for id in registry.languages() {
         let Some(driver) = registry.for_id(id) else { continue };
-        let Some(pack) = driver.lang_pack() else { continue };
+        // Every driver answers spellings by id, pack or none — and Perl,
+        // which has no pack, is the one language whose pointer changes
+        // BEHAVIOUR (`member_reads_are_calls`), so it is the one that must
+        // not be skipped.
+        let expected = LanguageRegistry::spellings(id);
         let fa = driver.analyze("");
         assert!(
-            std::ptr::eq(fa.spellings(), pack.spellings),
-            "{id}: a freshly built analysis carries its own pack's spellings"
+            std::ptr::eq(fa.spellings(), expected),
+            "{id}: a freshly built analysis carries its own language's spellings"
         );
         let enc = crate::index::module_cache::encode_analysis(&fa).expect("encode");
         let decoded = crate::index::module_cache::decode_analysis(&enc.analysis).expect("decode");
         assert!(
-            std::ptr::eq(decoded.spellings(), pack.spellings),
+            std::ptr::eq(decoded.spellings(), expected),
             "{id}: the blob decode path does not re-attach spellings"
         );
         let surface = crate::model::surface::Surface::project(&fa);
@@ -1814,7 +1818,7 @@ fn decoded_pack_analyses_carry_spellings() {
             .expect("encode stub");
         let decoded = crate::index::module_cache::decode_stub(&stub).expect("decode stub");
         assert!(
-            std::ptr::eq(decoded.skeleton.spellings(), pack.spellings),
+            std::ptr::eq(decoded.skeleton.spellings(), expected),
             "{id}: the warm-stub decode path does not re-attach spellings"
         );
         checked.push(id);
@@ -1831,6 +1835,12 @@ fn decoded_pack_analyses_carry_spellings() {
     }
     #[cfg(feature = "cpp")]
     assert!(checked.contains(&"cpp"), "cpp was not exercised: {checked:?}");
+    assert!(checked.contains(&"perl"), "perl was not exercised: {checked:?}");
+    assert!(
+        LanguageRegistry::spellings("perl").member_reads_are_calls,
+        "perl's pointer is the one that changes behaviour — an unattached \
+         decode flips `$obj->name()` off a Moo accessor"
+    );
 }
 
 /// Rule #14: `PackFacts` is per-FILE facts. A per-language constant (the
