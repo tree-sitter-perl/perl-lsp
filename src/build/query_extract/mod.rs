@@ -68,6 +68,161 @@ fn cached_query(language: &Language, source: &str) -> Result<&'static Query, Str
     .clone()
 }
 
+// ---- framework-entry declarations (the heatmap's "runner-invoked" data) ----
+
+/// One declared "a runner invokes this" rule, from an `entry.json`
+/// document (bundled per pack, or `<plugin-dir>/<name>/entry.json`).
+/// A rule matches a symbol when EVERY present condition holds:
+///   * `attributes` — the symbol carries one of these annotation names
+///     (php `#[Test]`, via the `@sym.attr` lane);
+///   * `method_prefix` / `methods` — the symbol's name matches;
+///   * `when_isa` — the symbol's class isa one of the (leaf-keyed)
+///     classes, written as one name or a list of them.
+/// Rules OR across the set. The engine only EVALUATES these; every
+/// framework name lives in the data files (rule #10: the heatmap never
+/// compares names itself).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct EntryMarker {
+    #[serde(default)]
+    pub attributes: Vec<String>,
+    #[serde(default)]
+    pub method_prefix: Option<String>,
+    #[serde(default)]
+    pub methods: Vec<String>,
+    #[serde(default, deserialize_with = "de_string_or_list")]
+    pub when_isa: Vec<String>,
+}
+
+/// A document field that holds one name or a list of them. A rule that
+/// applies to a family of bases says so once instead of being copied per
+/// base — the copy is where the seventh base gets added to one rule and
+/// not its sibling.
+pub(crate) fn de_string_or_list<'de, D>(d: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    use serde::Deserialize as _;
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+    })
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct EntryDoc {
+    language: String,
+    entries: Vec<EntryMarker>,
+}
+
+/// One text rail: `calls` are the function names whose first single-quoted
+/// argument names an entity on `rail`, scanned as TEXT in files whose path
+/// ends with one of `files` (a Blade template is text to the grammar).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct TextRail {
+    pub rail: String,
+    pub calls: Vec<String>,
+    pub files: Vec<String>,
+    /// A substring every name must contain (`"."` for translation keys —
+    /// a bare word is a JSON translation STRING, not a key path).
+    #[serde(default)]
+    pub requires: Option<String>,
+}
+
+/// One path rail: a file whose path contains `under` DEFINES a name on
+/// `rail` — the rest of the path, `skip` leading segments dropped (a
+/// locale), `strip` removed from the end, separators joined by `sep`
+/// (`resources/views/a/b.blade.php` → `a.b`). With `keys`, the file's
+/// returned-array string keys extend that name (`config/app.php` →
+/// `app.name`, nested keys dotted) instead of the file naming itself.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PathRail {
+    pub rail: String,
+    pub under: String,
+    #[serde(default)]
+    pub skip: usize,
+    #[serde(default)]
+    pub strip: String,
+    #[serde(default = "default_sep")]
+    pub sep: String,
+    #[serde(default)]
+    pub keys: bool,
+    /// The file's METHODS define names on the rail (a policy class: every
+    /// method is an ability); the path only selects the file.
+    #[serde(default)]
+    pub methods: bool,
+}
+fn default_sep() -> String {
+    ".".to_string()
+}
+
+/// A rail declarations document (bundled per pack, or
+/// `<plugin-dir>/<name>/rails.json`). Public so `--plugin-check`'s rail arm
+/// can lint the same field list the loaders read.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct RailsDoc {
+    pub language: String,
+    #[serde(default)]
+    pub text_rails: Vec<TextRail>,
+    #[serde(default)]
+    pub path_rails: Vec<PathRail>,
+    /// rail → how the undefined-name lane phrases a miss (`"event": "No
+    /// listener for event"`); default `Undefined <rail>`.
+    #[serde(default)]
+    pub labels: std::collections::HashMap<String, String>,
+    /// Rails whose miss is a hint, not a warning: their definitions are
+    /// partly runtime-only (framework-default middleware aliases, database
+    /// permissions on the ability rail), so an unmatched name is a lead.
+    #[serde(default)]
+    pub hints: Vec<String>,
+    /// rail → the separator after which a use carries PARAMETERS
+    /// (`throttle:60,1` names `throttle`); the name and its span end there.
+    #[serde(default)]
+    pub name_seps: std::collections::HashMap<String, String>,
+    /// rail → the diagnostic CODE its undefined-name findings carry
+    /// (`"view": "undefined-view"`). Client-facing wire text, so it is the
+    /// document's word, not a string the lane builds out of the rail name;
+    /// a rail that declares none reports under one generic code with the
+    /// rail in the diagnostic's `data`.
+    #[serde(default)]
+    pub codes: std::collections::HashMap<String, String>,
+    /// rail → what its names DENOTE ([`RAIL_NAMES_ARE_CLASS`]: class
+    /// identities, Laravel's event bus; a rail absent here names strings).
+    /// A constant of the overlay, declared once, so every file of the pack
+    /// answers the same question the same way.
+    #[serde(default)]
+    pub names_are: std::collections::HashMap<String, String>,
+}
+
+/// The `names_are` value that declares a rail's names to be class
+/// identities (`RailNames::Classes`); any other value names strings.
+pub const RAIL_NAMES_ARE_CLASS: &str = "class";
+
+/// The lane-facing rail conventions of a language, merged over its rail
+/// documents.
+#[derive(Debug, Default, Clone)]
+pub struct RailConventions {
+    pub labels: Vec<(String, String)>,
+    /// rail → the diagnostic code its findings carry.
+    pub codes: Vec<(String, String)>,
+    /// rail → every separator its names are written with: a path rail's
+    /// hierarchy `sep`, and the parameter separator `name_seps` gives it. A
+    /// name that ENDS with one is a prefix the caller concatenates onto
+    /// (`view('parts.' . $kind)`), which the undefined-name lane cannot
+    /// answer for.
+    pub seps: Vec<(String, String)>,
+    pub hints: Vec<String>,
+    pub name_seps: Vec<(String, String)>,
+    /// The rails the documents declare class-keyed — baked onto every file
+    /// of the pack as `PackFacts::class_named_rails`.
+    pub class_named_rails: Vec<String>,
+}
+
 // ---- pack-plugin query overlays (tier 1, docs/prompt-pack-plugins.md) ----
 
 /// Discovered overlay files for a language: every
