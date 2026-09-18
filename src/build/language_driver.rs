@@ -1281,7 +1281,7 @@ fn remap_spans(
         sc.span.end = r(sc.span.end);
     }
     // `#include` path tokens — goto-def on the token is span-keyed.
-    for (_, span) in import_sites.iter_mut() {
+    for crate::model::file_analysis::ImportRow { span, .. } in import_sites.iter_mut() {
         *span = rspan(*span);
     }
     // Witness spans (the type tier). A length-changing splice (`PBF op_type` →

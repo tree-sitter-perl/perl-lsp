@@ -69,6 +69,28 @@ pub(crate) fn peel<'a>(
     None
 }
 
+/// The `ImportBinds` a capture-name suffix declares, or `None` when the
+/// suffix is not one. `use function` / `use const` rows bind a callable or a
+/// constant; an unsuffixed row binds a type, so the pack spells only the two
+/// exceptions and nothing has to read the leaf's capitalization to guess.
+pub(super) fn import_binds_suffix(suffix: &str) -> Option<crate::model::file_analysis::ImportBinds> {
+    match suffix {
+        "function" => Some(crate::model::file_analysis::ImportBinds::Function),
+        "const" => Some(crate::model::file_analysis::ImportBinds::Const),
+        _ => None,
+    }
+}
+
+/// A capture name with its import-binding suffix removed, so the dispatch
+/// arms stay spelled as the bare capture (`import`, `import.name`) however
+/// the pack's query declared the binding.
+pub(super) fn strip_import_binds(cap: &str) -> &str {
+    match cap.rsplit_once('.') {
+        Some((head, sfx)) if cap.starts_with("import") && import_binds_suffix(sfx).is_some() => head,
+        _ => cap,
+    }
+}
+
 pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAnalysis, String> {
     let language = tree.language();
     let query_source = effective_query_source(&language, pack);
@@ -295,7 +317,30 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // span; joined to `@ref.member` so op-DX rides the minted ref.
     let mut member_op_raw: HashMap<usize, (crate::model::file_analysis::MemberOp, crate::model::file_analysis::Span)> =
         HashMap::new();
+    // What an import row BINDS, per match (`@import.function` / `@import
+    // .const`, on the row capture or on its name token). Read once here so
+    // every capture in the `import` family accepts the suffix and the flat
+    // and group forms of a row answer the same way.
+    let mut binds_by_match: HashMap<usize, crate::model::file_analysis::ImportBinds> =
+        HashMap::new();
+    // The NAME an import row binds (`@import.binds`), per match. A clause
+    // spells at most two candidates — its leaf and its alias — on the one
+    // capture, and the alias is always the later token, so the LATEST byte
+    // is the binding whichever arm fired.
+    let mut bound_name_by_match: HashMap<usize, (usize, String)> = HashMap::new();
     for e in &events {
+        if e.cap == "import.binds" {
+            let slot = bound_name_by_match.entry(e.match_id).or_insert((0, String::new()));
+            if e.start_byte >= slot.0 {
+                *slot = (e.start_byte, e.text.clone());
+            }
+        }
+        if let (true, Some(b)) = (
+            e.cap.starts_with("import"),
+            e.cap.rsplit_once('.').and_then(|(_, sfx)| import_binds_suffix(sfx)),
+        ) {
+            binds_by_match.insert(e.match_id, b);
+        }
         if let Some(prefix) = e.cap.strip_suffix(".name") {
             names_by_match
                 .insert((e.match_id, prefix.to_string()), (e.text.clone(), e.start, e.end));
@@ -528,7 +573,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         let cur_scope = scope_stack.last().unwrap().1;
         let package: Option<String> = context_stack.last().map(|(_, p)| p.clone());
-        match e.cap.as_str() {
+        let import_binds = binds_by_match.get(&e.match_id).copied().unwrap_or_default();
+        match strip_import_binds(&e.cap) {
             // `@scope` = a plain lexical Block; `@scope.sub` = sub-body
             // content (function bodies, prototype signatures, explicit
             // instantiations, requires-expressions) — the kind
@@ -812,8 +858,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // DOCUMENT claims about the token — `include.path` is a path the
             // preprocessor splices, `import.name` a name the file then spells.
             "import.name" | "include.path" => {
-                out.import_sites
-                    .push((e.text.clone(), Span { start: e.start, end: e.end }));
+                out.import_sites.push(crate::model::file_analysis::ImportRow {
+                    span: Span { start: e.start, end: e.end },
+                    raw: e.text.clone(),
+                    binds: import_binds,
+                    bound: bound_name_by_match.get(&e.match_id).map(|(_, n)| n.clone()),
+                });
                 out.imports.push(e.text.clone());
             }
             cap if cap.starts_with("expr.lit.") => {

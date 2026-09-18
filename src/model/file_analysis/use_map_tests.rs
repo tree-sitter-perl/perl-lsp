@@ -1,12 +1,17 @@
 use super::use_map::UseMap;
-use super::Span;
+use super::{ImportBinds, ImportRow, Span};
 
-fn span() -> Span {
-    Span { start: tree_sitter::Point::new(0, 0), end: tree_sitter::Point::new(0, 0) }
+fn row(raw: &str) -> ImportRow {
+    ImportRow {
+        span: Span { start: tree_sitter::Point::new(0, 0), end: tree_sitter::Point::new(0, 0) },
+        raw: raw.to_string(),
+        binds: ImportBinds::Type,
+        bound: None,
+    }
 }
 
 fn map<'a>(
-    rows: &'a [(Span, String)],
+    rows: &'a [ImportRow],
     aliases: &'a [(String, String, String)],
     own: Option<&'a str>,
 ) -> UseMap<'a> {
@@ -30,7 +35,7 @@ fn bare_leaf_resolves_in_own_namespace_else_globally() {
 
 #[test]
 fn use_row_binds_its_leaf_and_carries_a_tail() {
-    let rows = vec![(span(), "GuzzleHttp\\Psr7".to_string()), (span(), "\\Exception".to_string())];
+    let rows = vec![row("GuzzleHttp\\Psr7"), row("\\Exception")];
     let m = map(&rows, &[], Some("App"));
     assert_eq!(m.resolve("Psr7"), "GuzzleHttp\\Psr7");
     assert_eq!(m.resolve("Psr7\\Utils"), "GuzzleHttp\\Psr7\\Utils");
@@ -39,7 +44,7 @@ fn use_row_binds_its_leaf_and_carries_a_tail() {
 
 #[test]
 fn alias_wins_over_row_and_own_namespace() {
-    let rows = vec![(span(), "GuzzleHttp\\Promise".to_string())];
+    let rows = vec![row("GuzzleHttp\\Promise")];
     let aliases = vec![("P".to_string(), "GuzzleHttp".to_string(), "Promise".to_string())];
     let m = map(&rows, &aliases, Some("App"));
     assert_eq!(m.resolve("P"), "GuzzleHttp\\Promise");
@@ -53,7 +58,7 @@ fn alias_wins_over_row_and_own_namespace() {
 fn an_aliased_row_binds_its_alias_never_its_leaf() {
     // the row is in `rows` too (every import row is), yet `Event`
     // means the file's own class, not the aliased import
-    let rows = vec![(span(), "B\\Event".to_string())];
+    let rows = vec![row("B\\Event")];
     let aliases = vec![("ScriptEvent".to_string(), "B".to_string(), "Event".to_string())];
     let m = map(&rows, &aliases, Some("A"));
     assert_eq!(m.resolve("ScriptEvent"), "B\\Event");
