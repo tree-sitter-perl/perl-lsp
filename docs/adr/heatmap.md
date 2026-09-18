@@ -66,9 +66,7 @@ these hold (checked most-specific first):
 | `constructor` | conventional constructor (`new`) — frameworks instantiate it |
 | `class-referenced` | a pack constructor whose CLASS is referenced somewhere (a type hint, `Foo::class`, a `use` row) while nothing `new`s it — a DI container or a factory instantiates it. The class's own `references()` projection answers, minted at its declaration like every other count here |
 | `framework-synthesized` | symbol is plugin-minted (Moo accessors, routes, DBIC rels), not user-written; the framework calls it through machinery the static graph doesn't model |
-| `entry-point` | a name the LANGUAGE declares as a runtime entry (`LanguageCaps::entrypoint_symbols` — C/C++ `main`): entered over the ABI, never from a source call site |
-| `runtime-invoked` | a METHOD name the language declares the runtime invokes structurally (`runtime_invoked_methods` — php's `__toString`, `__invoke`): zero call sites is its expected state |
-| `framework-entry` | a declared entry rule claims the symbol — an annotation name, a method name or prefix, and an optional leaf-keyed `when_isa` ancestry gate, ANDed across the rule's present conditions and ORed across the rules. The rules are DATA (`<lang>/frameworks/*.entry.json` bundled per pack, plus `<plugin-dir>/<name>/entry.json`); the evaluator compares nothing but the symbol's own attributes, name and ancestry |
+| `framework-entry` | a declared entry rule claims the symbol — an annotation name, a method name or prefix, and an optional leaf-keyed `when_isa` ancestry gate, ANDed across the rule's present conditions and ORed across the rules. ONE lane for every flavour of "something outside the source graph invokes this": the C ABI entering `main` (`cpp/cpp.entry.json`), the php engine calling `__toString` or an SPL contract method (`php/php.entry.json`), a runner calling `test*` in a TestCase descendant, a queued job's `handle`. The rules are DATA (`<lang>/*.entry.json` and `<lang>/frameworks/*.entry.json` bundled per pack, plus `<plugin-dir>/<name>/entry.json`); the evaluator compares nothing but the symbol's own attributes, name and ancestry |
 | `rail-handler` | a rail Handler is co-declared ON this declaration's own token (`FileAnalysis::rail_handler_twin` — a path rail's `methods` arm: every method of a policy class IS an ability, `docs/adr/laravel-rails.md`). The rail's dispatch sites (`->authorize('update', …)`, `@can('update', …)`) name the HANDLER, so the method itself has no call site by construction; the guard asks the minted relation, never the rail's name |
 | `package-implicit-use` | packages/classes/modules — reachable via `require`, app entrypoints, dynamic class strings; too many invisible vectors to flag |
 | `dynamic-dispatch` | a **method-shaped** sub (declared in a non-`main` package) when the workspace contains **any** `$obj->$method` dispatch — see below |
@@ -145,7 +143,7 @@ C/C++ dead-code is more over-approximate than Perl's — a zero-fan-in symbol ha
 more invisible reachability vectors. Two are cheaply shielded:
 
 - **`main`** — the runtime enters through it over the ABI, never a source call
-  site (guard `entry-point`).
+  site (guard `framework-entry`, from `cpp/cpp.entry.json`).
 - **Address-taken / used-as-value functions** — `&fn` or a bare function-pointer
   decay is a *reference* (not a call), so it lands in `fan_in` and the symbol is
   never a candidate. No special guard: the reference graph already carries it.

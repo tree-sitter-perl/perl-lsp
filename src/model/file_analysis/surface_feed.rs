@@ -77,7 +77,6 @@ impl FileAnalysis {
                     preamble_end: _preamble_end, // an editing aid
                     imports_bind_names: _imports_bind_names, // pack-wide convention
                     doc_mentions: _doc_mentions, // a file-local lint fact
-                    enum_members: _enum_members, // pack-wide convention
                     constructor_names: _constructor_names, // LangPack-wide convention, identical across the pack's files
                     specializes: _specializes,       // family edges; the file re-registers on its own rebuild even when Unchanged
                     use_aliases: _use_aliases,             // this file's OWN spelling table; a consumer never sees an alias
@@ -90,6 +89,7 @@ impl FileAnalysis {
                     control_regions: _control_regions, // own-file straight-line gate spans
                     param_regions: _param_regions,   // own-file parameter-region spans
                     probe_regions: _probe_regions,   // own-file existence-probe spans
+                    doc_disagreements: _doc_disagreements, // own-file hint input, two spellings at one site
                     spellings: _spellings, // the language's own constants, attached by id
                 },
             plugin:

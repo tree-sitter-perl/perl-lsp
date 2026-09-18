@@ -919,7 +919,7 @@ fn sksym(src: &str, kind: &str, name: &str, occ: usize, package: Option<&str>) -
     super::SkelSymbol {
         declared_with: None,
         declared_return: None,
-        receiver_instance_of: None,
+        return_annotation: None,
         kind: kind.to_string(),
         name: name.to_string(),
         start: ns,
@@ -928,8 +928,6 @@ fn sksym(src: &str, kind: &str, name: &str, occ: usize, package: Option<&str>) -
         name_end: Point { row: ns.row, column: ns.column + name.len() },
         package: package.map(str::to_string),
         scope: crate::model::file_analysis::ScopeId(0),
-        return_type: None,
-        receiver_return: false,
         deref_stack: Vec::new(),
         attributes: Vec::new(),
         arity: None,
@@ -3033,6 +3031,42 @@ enum Suit {
 }
 
 #[test]
+fn php_enum_carries_the_members_the_language_gives_it() {
+    // `->value` / `::cases()` have no declaration token, so the extractor
+    // mints them at the enum's name as real members — SYNTHESIZED. Every
+    // consumer resolves them through the symbol table; none matches names.
+    let src = "\
+<?php
+enum Suit {
+    case Hearts;
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{MemberKind, SymbolFlags, SymKind};
+    let member = |n: &str| {
+        fa.symbols()
+            .iter()
+            .find(|s| s.name == n && s.package.as_deref() == Some("Suit"))
+            .unwrap_or_else(|| panic!("Suit::{n}: {:?}", fa.symbols().iter().map(|s| &s.name).collect::<Vec<_>>()))
+    };
+    assert_eq!(member("value").kind, SymKind::Field);
+    assert_eq!(member("cases").kind, SymKind::Method);
+    for n in ["value", "name", "cases", "from", "tryFrom"] {
+        assert!(
+            member(n).flags.contains(SymbolFlags::SYNTHESIZED),
+            "Suit::{n} is not user-written"
+        );
+        // minted at the enum's own name token — the one honest site
+        assert_eq!(member(n).span.start.row, 1, "Suit::{n}");
+    }
+    // the member lanes answer for them by KIND, so a read and a call of the
+    // same name can never stand in for each other
+    assert!(fa.resolve_member("Suit", "value", MemberKind::Value, None).is_some());
+    assert!(fa.resolve_member("Suit", "cases", MemberKind::Callable, None).is_some());
+    assert!(fa.resolve_member("Suit", "nope", MemberKind::Value, None).is_none());
+}
+
+#[test]
 fn php_static_return_substitutes_the_receiver_fluently() {
     // `: static` publishes ReturnExpr::Receiver — the member-chain arm
     // threads the real receiver, and the MCB path's default receiver
@@ -3165,6 +3199,91 @@ function collect($v = null) {}
                 args: vec![InferredType::String, InferredType::Numeric],
             }
         ))
+    );
+}
+
+#[test]
+fn php_docblock_joins_its_def_across_an_attribute_line() {
+    // The doc and the def it documents are ONE query match, so anything the
+    // grammar puts between them — an attribute list, a modifier on its own
+    // line — is the query's business, not a row distance the engine measures.
+    // A property's def token is its NAME, which an attribute line pushes a
+    // row further down than the row arithmetic this join replaced could see.
+    let src = "\
+<?php
+class Repo {
+    /** @var list<User> */
+    #[SomeAttr]
+    protected array $rows = [];
+
+    /** @return Post */
+    #[Other]
+    public function latest() {}
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let in_class = tree_sitter::Point { row: 4, column: 0 };
+    assert_eq!(
+        fa.inferred_type_via_bag("rows", in_class),
+        Some(InferredType::Sequence(vec![InferredType::ClassName("User".into())])),
+        "the @var row types the property the attribute line separates it from"
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("latest", None),
+        Some(InferredType::ClassName("Post".into())),
+    );
+}
+
+#[test]
+fn php_docs_narrow_a_declaration_and_never_contradict_it() {
+    // A docblock exists to say what the syntax could not spell, so it wins a
+    // slot only where the declaration already admits it. `: object` spells no
+    // type at all, so `@return Post` fills it; a documented subclass narrows
+    // its declared base; `: int` + `@return string` is a pair no value
+    // satisfies — the declaration stands and the mismatch is recorded.
+    let src = "\
+<?php
+class Base {}
+class Post extends Base {}
+class Repo {
+    /** @return Post */
+    public function any(): object {}
+
+    /** @return Post */
+    public function narrowed(): Base {}
+
+    /** @return string */
+    public function clash(): int {}
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    assert_eq!(
+        fa.sub_return_type_at_arity("any", None),
+        Some(InferredType::ClassName("Post".into())),
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("narrowed", None),
+        Some(InferredType::ClassName("Post".into())),
+        "a documented subclass narrows the declared base"
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("clash", None),
+        Some(InferredType::Numeric),
+        "the declaration wins a contradiction"
+    );
+    let clash: Vec<_> = fa
+        .pack
+        .doc_disagreements
+        .iter()
+        .map(|d| (d.declared.clone(), d.documented.clone()))
+        .collect();
+    assert_eq!(
+        clash,
+        vec![(InferredType::Numeric, InferredType::String)],
+        "only the contradiction is recorded: {:?}",
+        fa.pack.doc_disagreements
     );
 }
 

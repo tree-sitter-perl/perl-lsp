@@ -610,27 +610,14 @@ fn implicit_field_read_pass_gated_by_pack_capability() {
     assert!(crate::build::query_extract::cpp_pack().implicit_this_members,
         "cpp: methods read members with implicit this->");
 
-    // Include-token capability: only C/C++ has `#include`-style path tokens;
-    // name-keyed-import languages answer false, so goto-def / references gate
-    // on the pack, never a language name.
-    assert!(crate::build::query_extract::cpp_pack().include_path_tokens,
-        "cpp: #include path tokens resolve to headers");
-    assert!(!crate::build::query_extract::python_pack().include_path_tokens,
-        "python: imports are name-keyed, no path tokens");
-
-    // Preprocessor capability: only C/C++ has `#define` macros; other packs
-    // answer false, so macro completion gates on the pack, never a language
-    // name.
-    assert!(crate::build::query_extract::cpp_pack().preprocessor_macros,
-        "cpp: #define macros are a completion surface");
-    assert!(!crate::build::query_extract::python_pack().preprocessor_macros,
-        "python: no C preprocessor");
 }
 
 // The by-id capability askers on the registry are THE include-token /
 // preprocessor gates for both serving surfaces (LSP handlers and their
 // CLI/--batch mirrors) — pin their answers so the shared gate can't
-// silently regress to a language-name probe on either side.
+// silently regress to a language-name probe on either side. Each answer is
+// the compiled query's own (`@include.path`, `@def.macro`), so a pack whose
+// document stops minting one stops claiming it.
 #[cfg(feature = "cpp")]
 #[test]
 fn capability_askers_answer_by_language_id() {
@@ -943,10 +930,6 @@ fn driver_caps_axes_are_reviewed_exhaustively() {
             context_gather,
             pack_invalidation,
             cross_file_words,
-            entrypoint_symbols,
-            runtime_invoked_methods,
-            include_path_tokens,
-            preprocessor_macros,
         } = d.caps();
         // The hub lanes (enrichment, native cursor/hover/rebuild verbs) and
         // the pack lanes (invalidator, gather, bare words) are disjoint
@@ -962,11 +945,7 @@ fn driver_caps_axes_are_reviewed_exhaustively() {
         let pack_family = pack_invalidation
             || pack_signature_help
             || context_gather
-            || cross_file_words
-            || include_path_tokens
-            || preprocessor_macros
-            || !entrypoint_symbols.is_empty()
-            || !runtime_invoked_methods.is_empty();
+            || cross_file_words;
         assert!(
             !(hub_family && pack_family),
             "driver {} declares capabilities from both serving architectures",

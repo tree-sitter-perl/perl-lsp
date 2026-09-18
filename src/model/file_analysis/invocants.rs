@@ -285,31 +285,6 @@ impl FileAnalysis {
         out
     }
 
-    /// The declaration-order template parameter names of `class` — local
-    /// `template_params`, else the class's own cached file. Empty for
-    /// non-template classes and full specs.
-    fn class_template_params(
-        &self,
-        class: &str,
-        module_index: Option<&dyn CrossFileLookup>,
-    ) -> Vec<String> {
-        if let Some(p) = self.pack.template_params.get(class) {
-            return p.clone();
-        }
-        if let Some(idx) = module_index {
-            // Any candidate file declaring `class` may carry its template
-            // params (pack lane — never evicted).
-            if let Some(p) = idx
-                .visible_def_candidates(class)
-                .iter()
-                .find_map(|c| c.analysis.pack.template_params.get(class).cloned())
-            {
-                return p;
-            }
-        }
-        Vec::new()
-    }
-
     /// A member's VALUE on a receiver when the asker does not know the
     /// member's kind — the sentinel's receiver typing mid-keystroke, member
     /// hover before a ref exists. Dispatch runs the specificity ladder
@@ -370,14 +345,7 @@ impl FileAnalysis {
         recv: &InferredType,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> InferredType {
-        let params = self.class_template_params(class, module_index);
-        if params.is_empty() {
-            return raw;
-        }
-        let InferredType::Parametric(ParametricType::Instance { args, .. }) = recv else {
-            return raw;
-        };
-        substitute_type_params(&raw, &params, args)
+        substitute_class_params(&raw, class, recv, &self.pack.template_params, module_index)
     }
 
     /// `dispatch_class_of`'s type-to-type twin for consumers that hand a
@@ -1599,4 +1567,48 @@ impl FileAnalysis {
 
 
 
+}
+
+/// The declaration-order template parameter names of `class`: the asking
+/// side's own table, else the class's own cached file (the pack lane — never
+/// evicted). One derivation, so the registry's member hop and
+/// `field_value_type` cannot disagree about what a class's parameters are.
+pub fn class_template_params_in(
+    local: &dyn super::ClassTemplateParams,
+    class: &str,
+    module_index: Option<&dyn CrossFileLookup>,
+) -> Vec<String> {
+    let own = local.template_params(class);
+    if !own.is_empty() {
+        return own.to_vec();
+    }
+    module_index
+        .and_then(|idx| {
+            idx.visible_def_candidates(class)
+                .iter()
+                .find_map(|c| c.analysis.pack.template_params.get(class).cloned())
+        })
+        .unwrap_or_default()
+}
+
+/// A member's declared type — written in the CLASS's vocabulary — read on an
+/// INSTANCE: the receiver's type arguments substitute for the class's
+/// parameters (`item_: T` on a `Box<int>` is `int`). A non-parametric class,
+/// a receiver that is not an instance, or a type mentioning no parameter all
+/// pass the raw type through.
+pub fn substitute_class_params(
+    raw: &InferredType,
+    class: &str,
+    recv: &InferredType,
+    local: &dyn super::ClassTemplateParams,
+    module_index: Option<&dyn CrossFileLookup>,
+) -> InferredType {
+    let params = class_template_params_in(local, class, module_index);
+    if params.is_empty() {
+        return raw.clone();
+    }
+    let InferredType::Parametric(ParametricType::Instance { args, .. }) = recv else {
+        return raw.clone();
+    };
+    substitute_type_params(raw, &params, args)
 }

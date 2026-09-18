@@ -373,6 +373,13 @@ bitflags::bitflags! {
         /// annotate. Provenance of the declaration, not of the doc text —
         /// `Presentation::doc` answers a different question.
         const DOC_DECLARED = 1 << 21;
+        /// The declaration has no token of its own — the LANGUAGE provides
+        /// the member (php's `->value` / `::cases()` on every enum), so the
+        /// extractor mints it at the container's name. Resolvable,
+        /// completable and hoverable like any member; never a dead-code
+        /// candidate, because nothing in the source could reference it into
+        /// existence.
+        const SYNTHESIZED = 1 << 22;
     }
 }
 
@@ -430,6 +437,7 @@ impl TryFrom<&str> for SymbolFlags {
             "enum" => SymbolFlags::ENUM,
             "contract" => SymbolFlags::CONTRACT,
             "documented" => SymbolFlags::DOC_DECLARED,
+            "synthesized" => SymbolFlags::SYNTHESIZED,
             other => return Err(UnknownAttribute(other.to_string())),
         })
     }

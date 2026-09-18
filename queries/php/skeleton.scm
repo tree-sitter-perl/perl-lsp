@@ -182,9 +182,44 @@
 (formal_parameters) @arity.sig
 
 ; docblocks: the pack's `doc_types` parses `@return`/`@param`/`@var` out of
-; the comment; the engine joins each to the def directly below. Declared
-; types win — the doc lane fills only what the syntax left untyped.
+; the comment. The bare capture feeds the mention scan (a name spelled only
+; in a docblock is a used import); the JOIN is the anchored patterns below.
+; Declared types win — the doc lane fills only what the syntax left untyped.
 (comment) @doc.comment
+
+; the def a docblock documents is its NEXT SIBLING, stated as one match so
+; the pair meets in the query instead of by row arithmetic — an attribute
+; line between the two (`/** */ #[Attr] protected array $x;`) joins like any
+; other. @doc.subject lands on exactly the node its `@def.*` twin does, so
+; the two meet at one point and nothing downstream measures a distance.
+((comment) @doc.comment . (function_definition) @doc.subject
+  (#match? @doc.comment "^/\\*\\*"))
+((comment) @doc.comment . (method_declaration) @doc.subject
+  (#match? @doc.comment "^/\\*\\*"))
+((comment) @doc.comment . (class_declaration) @doc.subject
+  (#match? @doc.comment "^/\\*\\*"))
+((comment) @doc.comment . (interface_declaration) @doc.subject
+  (#match? @doc.comment "^/\\*\\*"))
+((comment) @doc.comment . (trait_declaration) @doc.subject
+  (#match? @doc.comment "^/\\*\\*"))
+((comment) @doc.comment . (enum_declaration) @doc.subject
+  (#match? @doc.comment "^/\\*\\*"))
+((comment) @doc.comment
+  . (property_declaration
+      (property_element name: (variable_name (name) @doc.subject)))
+  (#match? @doc.comment "^/\\*\\*"))
+((comment) @doc.comment
+  . (const_declaration (const_element) @doc.subject)
+  (#match? @doc.comment "^/\\*\\*"))
+; `/** @var Concrete $x */ $x = Factory::make();` — the subject is the
+; assignment's target, whether it declares the variable or rebinds it.
+((comment) @doc.comment
+  . (expression_statement
+      (assignment_expression left: (variable_name) @doc.subject))
+  (#match? @doc.comment "^/\\*\\*"))
+((comment) @doc.comment
+  . (global_declaration (variable_name) @doc.subject)
+  (#match? @doc.comment "^/\\*\\*"))
 
 ; ---- properties: class data members, typed ----
 ; The field keys SIGIL-LESS (the inner name token): declared `$name`,

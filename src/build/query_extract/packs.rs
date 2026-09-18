@@ -58,20 +58,12 @@ pub struct LangPack {
     /// Map a `@type.annot` token's text to a type — the pack predicate
     /// for languages whose ring 3 is partly in the tree (`x: int`).
     pub annot_type: fn(text: &str) -> Option<InferredType>,
-    /// Does a `@rettype` spelling name the RECEIVER rather than a concrete
-    /// type (PHP `static`/`$this`/`self`)? The writeback then publishes
-    /// `ReturnExpr::Receiver` so fluent builders chain — asked of the pack,
-    /// never a name branch in the engine (rule #10).
-    pub rettype_receiver: fn(text: &str) -> bool,
-    /// Field types answer through the registry: each data-member decl mints
-    /// `PackageSymbol{class, field} → Edge(Variable)` so a property-access
-    /// hop (`$this->query->where(...)`) dispatches the field and chains.
-    /// True only where the registry IS the field-type authority (php).
-    /// False for cpp: its field answers go through the instantiation-aware
-    /// `member_value_type` lane (template-param substitution, typedef
-    /// display), and a registry edge answers the RAW declared type first —
-    /// `item_: T` instead of the substituted `int`.
-    pub field_registry_edges: bool,
+    /// A `@rettype` spelling as ONE deferred return shape: a concrete type,
+    /// or the RECEIVER placeholder for the late-bound spellings (php
+    /// `static`/`$this`/`self`) that make fluent builders chain. Text in,
+    /// structure out — the engine never branches on the spelling itself
+    /// (rule #10), and the writeback publishes what comes back.
+    pub declared_return: fn(text: &str) -> Option<crate::model::witnesses::ReturnExpr>,
     /// Does this receiver spelling mean "dispatch from the parent of the
     /// writing class, skipping it" (php `parent::`)? The ref is then
     /// minted with the model's SUPER method token (`SUPER::name`, the
@@ -146,35 +138,6 @@ pub struct LangPack {
     /// `language_driver::emit_return_fuel` — asked of the pack, never a
     /// language-name branch.
     pub implicit_this_members: bool,
-    /// Does this language have `#include`-style path tokens — a source-path
-    /// reference (the header IS the module, `#include` = `use`) that goto-def
-    /// resolves to a file and references reverses ("who includes this
-    /// header")? True for C/C++; false for languages whose imports are
-    /// name-keyed (Perl `use`, Python `import`). Gates the include-token lanes
-    /// in goto-def / references — asked of the pack, never a language-name
-    /// branch (the token is path-shaped, not name-shaped, so it stays ahead of
-    /// the name-keyed CandidateSet).
-    pub include_path_tokens: bool,
-    /// Does this language have a C-style preprocessor — `#define` macros
-    /// reachable through `#include`s that identifier-context completion offers
-    /// as an API surface? True for C/C++; false for languages with no
-    /// preprocessor (Perl, Python, R, CMake). Gates `macro_completion` — asked
-    /// of the pack, never a language-name branch (rule #10).
-    pub preprocessor_macros: bool,
-    /// Symbols the runtime enters from OUTSIDE the source graph (C/C++
-    /// `main`: reached through the ABI, never a source call site) — a
-    /// zero-fan-in callable with one of these names is alive by contract.
-    /// Empty for languages whose entry is the file itself (Perl, Python
-    /// scripts). Consumed by the heatmap's reachability guard — asked of
-    /// the pack, never a name/language branch (rule #10).
-    pub entrypoint_symbols: &'static [&'static str],
-    /// Method names the RUNTIME invokes structurally (php magic methods —
-    /// `__toString`, `__invoke`, `__get`, ...): zero in-repo call sites is
-    /// the EXPECTED state, so the heatmap's dead-code flagging shields
-    /// them (the method-shaped sibling of `entrypoint_symbols`). The
-    /// constructor stays on its own lane (`constructor_names` — its call
-    /// sites are real `new` refs, so an unconstructed ctor honestly flags).
-    pub runtime_invoked_methods: &'static [&'static str],
     /// Container membership (class/struct/union/namespace) is delimited by
     /// literal `{`/`}` in the source, so a member that lost its enclosing
     /// container to a tree-sitter misparse can be re-anchored by matching the
@@ -222,13 +185,19 @@ pub struct LangPack {
     /// `#[Deprecated]`); empty = none. Lands as the `deprecated` symbol
     /// attribute exactly like the docblock tag.
     pub deprecated_attribute: &'static str,
-    /// Class, interface and attribute names the language itself provides
-    /// in the global namespace (php's core + SPL): a global reference to
-    /// one is never a type missing its import.
-    pub builtin_types: &'static [&'static str],
+    /// Bundled builtin-type documents (`builtins.txt`): the class, interface
+    /// and attribute names the language itself provides in its global
+    /// namespace, one per line. A global reference to one of these is never a
+    /// type missing its import. A runtime's surface grows and differs per
+    /// build, so it is a document a plugin dir extends, never a table
+    /// (rule #15) — read through `builtin_types_for`.
+    pub bundled_builtin_types: &'static [&'static str],
     /// Members every enum carries by language rule (php: `->value`,
-    /// `->name`, `::cases()`, `::from()`, `::tryFrom()`).
-    pub enum_members: &'static [&'static str],
+    /// `->name`, `::cases()`, `::from()`, `::tryFrom()`). PRODUCER-only
+    /// data: the extractor mints each as a SYNTHESIZED member at every enum
+    /// declaration, and every consumer resolves it like any other member —
+    /// nothing downstream reads this list, so no consumer matches the names.
+    pub enum_members: &'static [EnumMember],
     /// The node kind of ONE argument inside a call's argument list (php
     /// `argument`); empty = every named child of the list is an argument.
     pub arg_kind: &'static str,
@@ -304,9 +273,9 @@ impl LangPack {
     /// Hand-written and exhaustive on purpose: the destructure below makes
     /// a new `LangPack` field a compile error here until its strings are
     /// declared, which is what stops a fresh table of node kinds from
-    /// arriving unwatched. The four DOCUMENT fields (`query_source`, the
-    /// bundled overlays, the entry markers, the rail docs) are the
-    /// documents themselves, `names` is the language's own spelling seam,
+    /// arriving unwatched. The DOCUMENT fields (`query_source`, the bundled
+    /// overlays, the entry markers, the rail docs, the builtin-type lists)
+    /// are the documents themselves, `names` is the language's own spelling seam,
     /// and `lang_id` is a registration — none is a vocabulary this rule
     /// governs, so none is yielded.
     #[allow(dead_code)] // the rule #15 tripwires are its only caller
@@ -322,8 +291,7 @@ impl LangPack {
             shape_name: _,
             default_name: _,
             annot_type: _,
-            rettype_receiver: _,
-            field_registry_edges: _,
+            declared_return: _,
             super_receiver: _,
             self_class_tokens,
             class_token_kinds,
@@ -335,10 +303,6 @@ impl LangPack {
             import_module: _,
             narrow_type: _,
             implicit_this_members: _,
-            include_path_tokens: _,
-            preprocessor_macros: _,
-            entrypoint_symbols,
-            runtime_invoked_methods,
             brace_scoped_members: _,
             call_shapes,
             implicit_variables,
@@ -350,7 +314,7 @@ impl LangPack {
             named_arg_field,
             imports_bind_names: _,
             deprecated_attribute,
-            builtin_types,
+            bundled_builtin_types: _,
             enum_members,
             arg_kind,
             trigger_chars,
@@ -378,13 +342,10 @@ impl LangPack {
         list(&mut out, "class_token_kinds", class_token_kinds);
         list(&mut out, "constructor_names", constructor_names);
         list(&mut out, "doc_uses_method_tags", doc_uses_method_tags);
-        list(&mut out, "entrypoint_symbols", entrypoint_symbols);
-        list(&mut out, "runtime_invoked_methods", runtime_invoked_methods);
         list(&mut out, "implicit_variables", implicit_variables);
         list(&mut out, "throwaway_names", throwaway_names);
         list(&mut out, "catch_all_methods", catch_all_methods);
-        list(&mut out, "builtin_types", builtin_types);
-        list(&mut out, "enum_members", enum_members);
+        out.extend(enum_members.iter().map(|m| ("enum_members", m.name)));
         list(&mut out, "trigger_chars", trigger_chars);
         list(&mut out, "receiver_names", receiver_names);
         list(&mut out, "simple_var_kinds", simple_var_kinds);
@@ -442,6 +403,17 @@ pub struct PeelSpec {
     pub leaf_to_def: &'static [(&'static str, &'static str)],
     /// Accumulate the per-level `DerefStep` stack (pointer depth) vs descend only.
     pub record_stack: bool,
+}
+
+/// One member the LANGUAGE gives every enum of a language. Read at
+/// extraction and nowhere else — the mint turns it into a real member.
+#[derive(Debug, Clone, Copy)]
+pub struct EnumMember {
+    pub name: &'static str,
+    /// A callable (php `::cases()`), as against a value read (`->value`).
+    /// Decides which member kind the synthesis mints, so a call and a read
+    /// of the same name can never answer for each other.
+    pub callable: bool,
 }
 
 /// A call-expression shape signature help climbs to from the cursor

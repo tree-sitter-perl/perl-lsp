@@ -25,18 +25,12 @@ pub fn python_pack() -> LangPack {
         names: NameSpellings::NONE,
         shape_name: |_, raw| raw.to_string(),
         default_name: |_, _, _| None,
-        annot_type: |text| match text.trim() {
-            "str" => Some(InferredType::String),
-            "int" | "float" => Some(InferredType::Numeric),
-            "list" => Some(InferredType::ArrayRef),
-            "dict" => Some(InferredType::HashRef),
-            t if t.chars().next().is_some_and(|c| c.is_uppercase()) => {
-                Some(InferredType::ClassName(t.to_string()))
-            }
-            _ => None,
+        annot_type: python_annot_type,
+        // Python return annotations are concrete spellings; the late-bound
+        // receiver spelling has no equivalent here.
+        declared_return: |t| {
+            python_annot_type(t).map(crate::model::witnesses::ReturnExpr::Concrete)
         },
-        rettype_receiver: |_| false,
-        field_registry_edges: false,
         super_receiver: |_| false,
         self_class_tokens: &[],
         class_token_kinds: &[],
@@ -52,10 +46,6 @@ pub fn python_pack() -> LangPack {
         // A guard's type token is a class name verbatim (`isinstance(x, Foo)`).
         narrow_type: |ty| Some(InferredType::ClassName(ty.to_string())),
         implicit_this_members: false,
-        include_path_tokens: false,
-        preprocessor_macros: false,
-        entrypoint_symbols: &[],
-        runtime_invoked_methods: &[],
         brace_scoped_members: false,
         call_shapes: &[],
         arg_kind: "",
@@ -68,7 +58,7 @@ pub fn python_pack() -> LangPack {
         named_arg_field: "",
         imports_bind_names: false,
         deprecated_attribute: "",
-        builtin_types: &[],
+        bundled_builtin_types: &[],
         enum_members: &[],
         trigger_chars: &["."],
         receiver_names: &["self", "cls"],
@@ -88,5 +78,18 @@ pub fn python_pack() -> LangPack {
         call_kinds: &["call"],
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
+    }
+}
+
+fn python_annot_type(text: &str) -> Option<InferredType> {
+    match text.trim() {
+        "str" => Some(InferredType::String),
+        "int" | "float" => Some(InferredType::Numeric),
+        "list" => Some(InferredType::ArrayRef),
+        "dict" => Some(InferredType::HashRef),
+        t if t.chars().next().is_some_and(|c| c.is_uppercase()) => {
+            Some(InferredType::ClassName(t.to_string()))
+        }
+        _ => None,
     }
 }

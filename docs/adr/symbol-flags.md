@@ -24,6 +24,13 @@ handler def minted from a class-keyed rail capture (`@def.handler.class.
 <rail>`), whose token belongs to another symbol: `CLASS_RAIL` is what
 the listing verdict asks, never the attribute string.
 
+A declaration the source never wrote carries `SYNTHESIZED`: the LANGUAGE
+gives every enum its `->value` and `::cases()`, and those members are
+minted at the enum's own name token, resolvable and completable like any
+other. The flag is what the dead-code guard asks — nothing in the source
+could reference such a member into existence — so no consumer has to know
+which names a runtime provides.
+
 ## Why closed
 
 Every flag added so far has turned out to have a language-generic

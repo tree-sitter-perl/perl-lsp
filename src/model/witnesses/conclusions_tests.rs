@@ -400,6 +400,7 @@ fn residuals_for(fa: &FileAnalysis, class: &str, name: &str) -> Option<Vec<Concl
         module_index: None,
         package_parents: &fa.packages,
         app_surface_consumers: &fa.plugin.app_surface_consumers,
+        class_params: &fa.pack.template_params,
     };
     let att = WitnessAttachment::PackageSymbol {
         package: class.to_string(),

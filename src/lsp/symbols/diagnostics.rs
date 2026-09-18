@@ -78,6 +78,13 @@ pub struct DiagnosticOptions {
     /// guaranteed runtime die. Guard-narrowed reps only; objects are never a
     /// mismatch. Off by default.
     pub deref_shape: bool,
+    /// Silence `doc-type-mismatch` (HINT): a docblock whose type no value can
+    /// share with the declared one on the same slot. On by default — the pair
+    /// is minted at the merge that already chose the declaration, so the lane
+    /// costs a list walk and reports only what the extractor could prove. The
+    /// inverse polarity of the other keys because a hint that needs opting in
+    /// is a hint nobody reads.
+    pub no_doc_type_mismatch: bool,
 }
 
 impl DiagnosticOptions {
@@ -94,6 +101,7 @@ impl DiagnosticOptions {
             optional_deref: has("--optional-deref"),
             redundant_guard: has("--redundant-guard"),
             deref_shape: has("--deref-shape"),
+            no_doc_type_mismatch: has("--no-doc-type-mismatch"),
         }
     }
 }
@@ -123,6 +131,26 @@ pub fn collect_diagnostics(
             message: pd.message.clone(),
             ..Default::default()
         });
+    }
+
+    // A docblock that contradicts the declaration it sits on: the merge kept
+    // the declaration and recorded the pair, so this renders two spellings it
+    // does not have to go looking for.
+    if !options.no_doc_type_mismatch {
+        for d in &analysis.pack.doc_disagreements {
+            diagnostics.push(Diagnostic {
+                range: span_to_range(d.span),
+                severity: Some(DiagnosticSeverity::HINT),
+                code: Some(NumberOrString::String("doc-type-mismatch".to_string())),
+                source: Some("perl-lsp".to_string()),
+                message: format!(
+                    "The docblock says '{}' where the declaration says '{}'; the declaration wins.",
+                    analysis.render_type(&d.documented),
+                    analysis.render_type(&d.declared),
+                ),
+                ..Default::default()
+            });
+        }
     }
 
     // Snapshot each `use` once: its bound set (local→remote) and, when the
@@ -787,7 +815,6 @@ pub fn pack_symbol_diagnostics(
     struct OwnerFacts {
         owner: Option<std::sync::Arc<FileAnalysis>>,
         is_interface: bool,
-        is_enum: bool,
         /// A trait's `$this` is whatever class composes it: every member
         /// it does not declare may live there.
         is_trait: bool,
@@ -880,17 +907,12 @@ pub fn pack_symbol_diagnostics(
                 // — so the interface stays silent on undefined members
                 // (resolved ones still check arity).
                 is_interface: flavors.contains(SymbolFlags::INTERFACE),
-                is_enum: flavors.contains(SymbolFlags::ENUM),
                 is_trait: flavors.contains(SymbolFlags::TRAIT),
                 owner: owner_arc,
             })
         });
         let Some(facts) = facts.as_ref() else { continue };
         let owner: &FileAnalysis = facts.owner.as_deref().unwrap_or(analysis);
-        // an enum's language-given members
-        if facts.is_enum && pack.enum_members.iter().any(|m| m == name) {
-            continue;
-        }
         match owner.resolve_member(&class, name, want, idx) {
             None if facts.is_interface || facts.is_trait => {}
             // a class with no declared constructor has the default one
@@ -1431,8 +1453,11 @@ pub fn pack_symbol_diagnostics(
                     if ns.is_empty() {
                         if declared.is_empty()
                             || declared.iter().any(|d| d.is_empty())
-                            || crate::build::language_driver::LanguageRegistry::builtin_types(&analysis.language)
-                                .contains(&leaf)
+                            || crate::build::language_driver::LanguageRegistry::builtin_types(
+                                &analysis.language,
+                            )
+                            .iter()
+                            .any(|b| b == leaf)
                         {
                             continue;
                         }

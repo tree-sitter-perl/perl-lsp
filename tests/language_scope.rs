@@ -819,10 +819,11 @@ fn php_heatmap_pre_prune_preserves_every_fan_in() {
         assert_eq!(consumer["dead_code_candidate"], true, "rows={rows}: {consumer}");
     }
     let full = run_full("1");
-    // An SPL contract method (`Countable::count`) is runtime-invoked, never dead.
+    // An SPL contract method (`Countable::count`) is invoked by the engine,
+    // never dead — php's own entry document declares it.
     let count = full["symbols"].as_array().unwrap().iter()
         .find(|s| s["name"] == "count" && s["package"] == "App\\Bag").cloned().expect("Bag::count");
-    assert_eq!(count["reachable_guard"].as_str(), Some("runtime-invoked"), "{count}");
+    assert_eq!(count["reachable_guard"].as_str(), Some("framework-entry"), "{count}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -1099,6 +1099,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let annot_ident = |text: &str, at: Point| -> Option<InferredType> {
         (pack.annot_type)(text).map(|t| ident_type(t, at))
     };
+    // A declared return, use-map-resolved like any other written type: the
+    // pack turns the spelling into a shape, the file's imports decide what
+    // its class names mean.
+    let declared_ret = |text: &str, at: Point| -> Option<crate::model::witnesses::ReturnExpr> {
+        (pack.declared_return)(text).map(|re| ret_expr_ident(re, &|t| ident_type(t, at), &|c| ident(c, at)))
+    };
     let decl_ident = |leaf: &str, at: Point| -> String {
         match (pack.names.use_map_sep(), namespace_at(at)) {
             (Some(sep), Some(ns)) if !ns.is_empty() => format!("{ns}{sep}{leaf}"),
@@ -1134,7 +1140,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         out.class_named_rails = conv.class_named_rails.clone();
     }
     out.imports_bind_names = pack.imports_bind_names;
-    out.enum_members = pack.enum_members.iter().map(|s| s.to_string()).collect();
     out.member_writes = std::mem::take(&mut member_writes);
     out.function_scoped_vars = pack.function_scoped_vars;
     out.constructor_names = pack.constructor_names.iter().map(|s| s.to_string()).collect();
@@ -1551,7 +1556,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 }
                 out.symbols.push(SkelSymbol {
                     declared_with: None,
-                    declared_return: None,
+                    return_annotation: None,
                     name,
                     kind: "handler".to_string(),
                     start: e.start,
@@ -1560,9 +1565,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     name_end: e.end,
                     package: None,
                     scope: cur_scope,
-                    return_type: None,
-                    receiver_instance_of: None,
-                    receiver_return: false,
+                    declared_return: None,
                     deref_stack: Vec::new(),
                     attributes,
                     arity: None,
@@ -1670,11 +1673,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     out.specializations
                         .push((shaped.clone(), (pack.shape_name)("spec.primary", primary)));
                 }
-                // Registry field edge (pack-gated — see `field_registry_edges`
-                // on `LangPack`): a data member's type lives as a Variable
-                // witness in its declaring scope, and this edge lets a
-                // property-access hop dispatch the field through the same
-                // class-keyed chase methods use.
                 // Foreach element peel: the loop var's value IS the
                 // collection's uniform element, deferred to query time via
                 // `Projected{base, Element}`. A simple-variable collection
@@ -1722,13 +1720,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         });
                     }
                 }
-                if kind == "field" && pack.field_registry_edges {
+                if kind == "field" {
                     if let Some(cls) = &pkg {
                         use crate::model::witnesses as wit;
                         // The field's VALUE edge on its own attachment
                         // (`docs/adr/member-kinds.md`): a `ValueHop` chases
                         // `Field`, a `MethodHop` chases `PackageSymbol`, so
-                        // no tag partitions one attachment by kind.
+                        // no tag partitions one attachment by kind. Minted for
+                        // every language — the hop substitutes the class's
+                        // template params against the receiver, so a
+                        // parametric field answers `int`, not `T`.
                         out.witnesses.push(wit::Witness {
                             attachment: wit::WitnessAttachment::Field {
                                 owner: cls.clone(),
@@ -1754,21 +1755,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     name_end,
                     package: pkg,
                     scope: def_scope,
-                    return_type: rettype_by_match
+                    declared_return: rettype_by_match
                         .get(&e.match_id)
-                        .and_then(|t| annot_ident(t, e.start)),
+                        .and_then(|t| declared_ret(t, e.start)),
                     // The annotation AS WRITTEN, through the pack's own
                     // spelling — the label a signature shows and the
                     // "already typed" gate both read this fact rather than
                     // re-scanning the declaration's source line.
-                    declared_return: rettype_by_match
+                    return_annotation: rettype_by_match
                         .get(&e.match_id)
                         .filter(|_| !pack.spellings.return_annotation_template.is_empty())
                         .map(|t| pack.spellings.return_annotation_template.replace("{}", t)),
-                    receiver_instance_of: None,
-                    receiver_return: rettype_by_match
-                        .get(&e.match_id)
-                        .is_some_and(|t| (pack.rettype_receiver)(t)),
                     deref_stack: nested_stacks.get(&e.match_id).cloned().unwrap_or_default(),
                     attributes: {
                         let mut a =
@@ -2283,7 +2280,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     );
                 }
             }
-            "import.name" => {
+            // One import row either way; the two spellings differ in what the
+            // DOCUMENT claims about the token — `include.path` is a path the
+            // preprocessor splices, `import.name` a name the file then spells.
+            "import.name" | "include.path" => {
                 out.import_sites.push(crate::model::file_analysis::ImportRow {
                     span: Span { start: e.start, end: e.end },
                     raw: e.text.clone(),
@@ -2525,7 +2525,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 if let Some((kind, cmd_start, scope)) = cmd_defs.get(&e.match_id) {
                     out.symbols.push(SkelSymbol {
                         declared_with: None,
-                        declared_return: None,
+                        return_annotation: None,
                         kind: kind.clone(),
                         name: e.text.clone(),
                         start: *cmd_start,
@@ -2534,9 +2534,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         name_end: e.end,
                         package: None,
                         scope: *scope,
-                        return_type: None,
-                        receiver_return: false,
-                        receiver_instance_of: None,
+                        declared_return: None,
                         deref_stack: Vec::new(),
                         attributes: Vec::new(),
                         arity: None,
@@ -2844,8 +2842,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     let (gen_i, gen_j) =
                         (out.symbols[i].kind == "var", out.symbols[j].kind == "var");
                     let upgrade_ret = out.symbols[i].kind == out.symbols[j].kind
-                        && out.symbols[i].return_type.is_some()
-                        && out.symbols[j].return_type.is_none();
+                        && out.symbols[i].declared_return.is_some()
+                        && out.symbols[j].declared_return.is_none();
                     if (gen_j && !gen_i) || upgrade_ret {
                         keep[j] = false;
                         best.insert(key, i);
@@ -3319,18 +3317,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
         }
     }
-    // ---- documentation-comment types: pack vocabulary, positional join ----
-    // A doc comment documents the def that STARTS on the line directly below
-    // its last line (an attribute/modifier line between them breaks the join —
-    // accepted v1). DECLARED types always win: a doc fact fills only where
-    // the syntax carried nothing, because docblocks drift and the tree
-    // doesn't. Perl/C++ packs return no facts, so the pass is a no-op there.
+    // ---- documentation-comment types: pack vocabulary, query join ----
+    // The query pairs a doc comment with the def it documents (`@doc.comment`
+    // and `@doc.subject` in ONE match), and `@doc.subject` sits on the very
+    // node the def's own capture sits on — so the two meet at one point and
+    // nothing here measures a distance. DECLARED types always win: a doc fact
+    // fills only where the syntax carried nothing, because docblocks drift and
+    // the tree doesn't. Perl/C++ packs return no facts, so the pass is a no-op
+    // there.
     {
         use crate::build::query_extract::DocFact;
-        // Keyed by the comment's END row (the def sits on the next line);
-        // the start row rides along so a `@method` fact can span its own
-        // line inside the comment.
-        let mut by_end_row: HashMap<usize, (usize, Vec<DocFact>)> = HashMap::new();
+        // Keyed by the SUBJECT's start point; the comment's start row rides
+        // along so a `@method` fact can span its own line inside the comment.
+        let mut by_subject: HashMap<(usize, usize), (usize, Vec<DocFact>)> = HashMap::new();
         // The bound names imports bring in, for the doc-mention scan below:
         // an import used only in a docblock (`@var Foo $x`) is used.
         let bound: std::collections::HashSet<String> = out
@@ -3342,6 +3341,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             })
             .chain(out.use_aliases.iter().map(|(alias, _, _)| alias.clone()))
             .collect();
+        // The subject each match names, so the comment of that same match
+        // knows what it documents. A bare `@doc.comment` with no subject is
+        // the mention scan's input only.
+        let mut subject_by_match: HashMap<usize, Point> = HashMap::new();
+        for e in &events {
+            if e.cap == "doc.subject" {
+                subject_by_match.insert(e.match_id, e.start);
+            }
+        }
         for e in &events {
             if e.cap == "doc.comment" {
                 if !bound.is_empty() {
@@ -3351,24 +3359,32 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         }
                     }
                 }
+                let Some(subject) = subject_by_match.get(&e.match_id) else { continue };
                 let facts = (pack.doc_types)(&e.text, pack.doc_uses_method_tags);
                 if !facts.is_empty() {
-                    let entry = by_end_row
-                        .entry(e.end.row)
+                    let entry = by_subject
+                        .entry((subject.row, subject.column))
                         .or_insert_with(|| (e.start.row, Vec::new()));
                     entry.1.extend(facts);
                 }
             }
         }
-        if !by_end_row.is_empty() {
+        if !by_subject.is_empty() {
             let scope_spans: Vec<Span> = out.scopes.iter().map(|s| s.span).collect();
-            let param_syms: Vec<(String, crate::model::file_analysis::ScopeId, Point)> =
+            let param_syms: Vec<(String, crate::model::file_analysis::ScopeId, Point, Point)> =
                 out.symbols
                     .iter()
                     .filter(|s| s.kind == "var")
-                    .map(|s| (s.name.clone(), s.scope, s.start))
+                    .map(|s| (s.name.clone(), s.scope, s.start, s.end))
                     .collect();
             let mut doc_witnesses: Vec<crate::model::witnesses::Witness> = Vec::new();
+            let mut disagreements: Vec<crate::model::file_analysis::DocDisagreement> = Vec::new();
+            // The declared type of a slot, for the hint that reports the pair.
+            let declared_of = |slot: (&str, crate::model::file_analysis::ScopeId)| {
+                annot_text_by_var
+                    .get(&(slot.0.to_string(), slot.1))
+                    .and_then(|d| (pack.annot_type)(d))
+            };
             let mut doc_refs: Vec<SkelRef> = Vec::new();
             let mut doc_methods: Vec<SkelSymbol> = Vec::new();
             for sym in out.symbols.iter_mut() {
@@ -3379,7 +3395,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // callables/fields as before.
                 if matches!(sym.kind.as_str(), "class" | "interface") {
                     let Some((cstart, facts)) =
-                        sym.start.row.checked_sub(1).and_then(|r| by_end_row.get(&r))
+                        by_subject.get(&(sym.start.row, sym.start.column))
                     else {
                         continue;
                     };
@@ -3411,7 +3427,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             let at_end = Point { row: at.row, column: col + name.len() };
                             doc_methods.push(SkelSymbol {
                                 declared_with: None,
-                                declared_return: None,
+                                return_annotation: None,
                                 kind: "method".to_string(),
                                 name: name.clone(),
                                 start: at,
@@ -3420,13 +3436,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 name_end: at_end,
                                 package: Some(sym.name.clone()),
                                 scope: sym.scope,
-                                return_type: ret
+                                declared_return: ret
                                     .as_deref()
-                                    .and_then(|t| annot_ident(t, at)),
-                                receiver_return: ret
-                                    .as_deref()
-                                    .is_some_and(|t| (pack.rettype_receiver)(t)),
-                                receiver_instance_of: None,
+                                    .and_then(|t| declared_ret(t, at)),
                                 deref_stack: Vec::new(),
                                 // documentation, not a declaration: no body, no annotation to add
                                 attributes: vec!["documented".to_string()],
@@ -3443,8 +3455,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 if !matches!(sym.kind.as_str(), "sub" | "method" | "field" | "anon" | "var") {
                     continue;
                 }
-                let Some((cstart, facts)) =
-                    sym.start.row.checked_sub(1).and_then(|r| by_end_row.get(&r))
+                let Some((cstart, facts)) = by_subject.get(&(sym.start.row, sym.start.column))
                 else {
                     continue;
                 };
@@ -3460,41 +3471,54 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         }
                         DocFact::Deprecated(t) => mark_deprecated(sym, t.clone()),
                         DocFact::ReturnRecvInstance { base } => {
-                            if sym.return_type.is_none()
-                                && !sym.receiver_return
-                                && sym.receiver_instance_of.is_none()
-                            {
-                                sym.receiver_instance_of = Some(ident(base, sym.start));
+                            // `@return Base<static>`: an instance of `base`
+                            // parametrized by the receiver — `Book::query()`
+                            // carries `Builder<Book>`, and a later
+                            // `@return TModel` hop projects `Book` out via
+                            // the same `ParamOf` axis cpp instantiations use.
+                            if sym.declared_return.is_none() {
+                                use crate::model::witnesses::{ParametricOp, ReturnExpr};
+                                sym.declared_return =
+                                    Some(ReturnExpr::Operator(ParametricOp::InstanceOf {
+                                        base: ident(base, sym.start),
+                                        args: vec![ReturnExpr::Receiver],
+                                    }));
                             }
                         }
                         DocFact::Return(t) => {
-                            // A doc row fills an undeclared return, and REFINES
-                            // a bare declared container (`: array` +
-                            // `@return array{Queue, Agent}`) — the same rule
-                            // `doc_admits` applies to params.
-                            let bare_container = matches!(
-                                sym.return_type,
-                                Some(InferredType::HashRef | InferredType::ArrayRef)
-                            );
-                            if (sym.return_type.is_none() || bare_container)
-                                && !sym.receiver_return
-                            {
-                                if (pack.rettype_receiver)(t) {
-                                    if sym.return_type.is_none() {
-                                        sym.receiver_return = true;
+                            use crate::model::witnesses::ReturnExpr;
+                            // A doc row fills an undeclared return and NARROWS
+                            // a declared one — the same rule `doc_admits`
+                            // applies to params and properties. It never
+                            // widens, and a contradiction leaves the
+                            // declaration standing and states itself.
+                            let Some(doc) = declared_ret(t, sym.start) else { continue };
+                            match (&sym.declared_return, &doc) {
+                                (None, _) => sym.declared_return = Some(doc),
+                                (
+                                    Some(ReturnExpr::Concrete(declared)),
+                                    ReturnExpr::Concrete(documented),
+                                ) => match doc_verdict(declared, documented, &out.parents) {
+                                    DocVerdict::Narrows => sym.declared_return = Some(doc.clone()),
+                                    DocVerdict::Contradicts => {
+                                        disagreements.push(
+                                            crate::model::file_analysis::DocDisagreement {
+                                                span: Span {
+                                                    start: sym.name_start,
+                                                    end: sym.name_end,
+                                                },
+                                                declared: declared.clone(),
+                                                documented: documented.clone(),
+                                            },
+                                        );
                                     }
-                                } else if let Some(doc) = annot_ident(t, sym.start) {
-                                    if !bare_container
-                                        || matches!(
-                                            doc,
-                                            InferredType::Sequence(_)
-                                                | InferredType::Parametric(_)
-                                                | InferredType::HashWithKeys { .. }
-                                        )
-                                    {
-                                        sym.return_type = Some(doc);
-                                    }
-                                }
+                                    DocVerdict::Unknown => {}
+                                },
+                                // A receiver-shaped return on either side is a
+                                // late binding, not a value shape: neither
+                                // narrows the other, and the declaration
+                                // stands.
+                                (Some(_), _) => {}
                             }
                         }
                         DocFact::UsesMethod { name, line, col } => {
@@ -3573,12 +3597,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             // the element, the doc exists to add it.
                             if sym.kind == "field" {
                                 let Some(ty) = annot_ident(t, sym.start) else { continue };
-                                if doc_admits(
-                                    pack,
-                                    &annot_text_by_var,
-                                    (&sym.name, sym.scope),
-                                    &ty,
-                                ) {
+                                let slot = (sym.name.as_str(), sym.scope);
+                                let verdict =
+                                    doc_admits(pack, &annot_text_by_var, slot, &ty, &out.parents);
+                                if verdict == DocVerdict::Contradicts {
+                                    if let Some(declared) = declared_of(slot) {
+                                        disagreements.push(
+                                            crate::model::file_analysis::DocDisagreement {
+                                                span: Span { start: sym.start, end: sym.end },
+                                                declared,
+                                                documented: ty.clone(),
+                                            },
+                                        );
+                                    }
+                                }
+                                if verdict == DocVerdict::Narrows {
                                     let span = scope_spans
                                         .get(sym.scope.0 as usize)
                                         .copied()
@@ -3604,11 +3637,32 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 (p.row, p.column) >= (sym.start.row, sym.start.column)
                                     && (p.row, p.column) <= (sym.end.row, sym.end.column)
                             };
-                            if let Some((n, sc, at)) = param_syms.iter().find(|(n, sc, at)| {
-                                n == name
-                                    && in_def(*at)
-                                    && doc_admits(pack, &annot_text_by_var, (n, *sc), &ty)
-                            }) {
+                            let mine = param_syms
+                                .iter()
+                                .find(|(n, _, at, _)| n == name && in_def(*at));
+                            if let Some((n, sc, at, end)) = mine {
+                                match doc_admits(
+                                    pack,
+                                    &annot_text_by_var,
+                                    (n, *sc),
+                                    &ty,
+                                    &out.parents,
+                                ) {
+                                    DocVerdict::Contradicts => {
+                                        if let Some(declared) = declared_of((n, *sc)) {
+                                            disagreements.push(
+                                                crate::model::file_analysis::DocDisagreement {
+                                                    span: Span { start: *at, end: *end },
+                                                    declared,
+                                                    documented: ty.clone(),
+                                                },
+                                            );
+                                        }
+                                        continue;
+                                    }
+                                    DocVerdict::Unknown => continue,
+                                    DocVerdict::Narrows => {}
+                                }
                                 // Publish the row CLASS-KEYED too
                                 // (`method#p#$name`): an @inheritDoc override
                                 // in another file reaches it through the
@@ -3690,23 +3744,23 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // A named `@var T $x` above a RE-assignment (php's function-
             // scoped locals: the def is the FIRST assignment, a later one is
             // a rebind FlowEdge, not a symbol) casts the variable from that
-            // row on — the `$x = Factory::make(); /** @var Concrete $x */`
-            // idiom that narrows a base-typed factory return.
-            for (end_row, (_, facts)) in &by_end_row {
+            // site on — the `$x = Factory::make(); /** @var Concrete $x */`
+            // idiom that narrows a base-typed factory return. The subject IS
+            // the assignment target, so the rebind is found at its own point.
+            for ((row, column), (_, facts)) in &by_subject {
+                let at = Point { row: *row, column: *column };
                 for f in facts {
                     let DocFact::Var { ty, name: Some(vn) } = f else { continue };
-                    let Some(t) = annot_ident(ty, Point { row: *end_row, column: 0 }) else { continue };
-                    let has_def = out
-                        .symbols
-                        .iter()
-                        .any(|s| s.kind == "var" && &s.name == vn && s.start.row == end_row + 1);
+                    let Some(t) = annot_ident(ty, at) else { continue };
+                    let has_def =
+                        out.symbols.iter().any(|s| s.kind == "var" && &s.name == vn && s.start == at);
                     if has_def {
                         continue;
                     }
                     if let Some(fe) = out
                         .flow_edges
                         .iter()
-                        .find(|fe| &fe.target_name == vn && fe.target_at.row == end_row + 1)
+                        .find(|fe| &fe.target_name == vn && fe.target_at == at)
                     {
                         out.witnesses.push(doc_cast_witness(
                             vn,
@@ -3720,6 +3774,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             out.witnesses.extend(doc_witnesses);
             out.symbols.extend(doc_methods);
             out.refs.extend(doc_refs);
+            out.doc_disagreements.extend(disagreements);
         }
     }
     // @inheritDoc param inheritance every syntax-untyped,
@@ -3830,6 +3885,66 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
         }
     }
+
+    // Every enum carries the members the LANGUAGE gives it (php's
+    // `->value`, `::cases()`). Which containers are enums is the query's
+    // word (`@classattr.enum`), read as the capture suffix it is.
+    //
+    // They have no token of their own, so they are
+    // minted here, at the enum's name, as real members — SYNTHESIZED says
+    // no source could reference them into existence. A consumer resolves
+    // them through the symbol table like any other member; none matches
+    // their names.
+    if !pack.enum_members.is_empty() {
+        let enums: Vec<(std::string::String, Point, Point, crate::model::file_analysis::ScopeId)> =
+            out.symbols
+                .iter()
+                .filter(|s| {
+                    s.kind == "class"
+                        && classattr_by_name_span.get(&(s.name_start, s.name_end)).map(String::as_str)
+                            == Some(ENUM_CLASSATTR)
+                })
+                .map(|s| {
+                    // The enum's BODY scope is where its declared members
+                    // live, so the synthesized ones live there too.
+                    let body = out
+                        .scopes
+                        .iter()
+                        .find(|sc| {
+                            sc.package.as_deref() == Some(s.name.as_str())
+                                && (sc.span.start.row, sc.span.start.column)
+                                    >= (s.start.row, s.start.column)
+                        })
+                        .map(|sc| sc.id)
+                        .unwrap_or(s.scope);
+                    (s.name.clone(), s.name_start, s.name_end, body)
+                })
+                .collect();
+        for (name, name_start, name_end, scope) in enums {
+            for m in pack.enum_members {
+                out.symbols.push(SkelSymbol {
+                    declared_with: None,
+                    declared_return: None,
+                    return_annotation: None,
+                    kind: if m.callable { "method" } else { "field" }.to_string(),
+                    name: m.name.to_string(),
+                    start: name_start,
+                    end: name_end,
+                    name_start,
+                    name_end,
+                    package: Some(name.clone()),
+                    scope,
+                    deref_stack: Vec::new(),
+                    attributes: vec!["synthesized".to_string()],
+                    arity: None,
+                    params: Vec::new(),
+                    qualifier_owned: false,
+                    doc: None,
+                    deprecation: None,
+                });
+            }
+        }
+    }
     out.param_sigs = param_sigs;
     Ok(out)
 }
@@ -3917,6 +4032,128 @@ fn slot_key(list_text: &str, slot_offset: usize, arrow: &str) -> Option<String> 
 /// is a `Sequence` refining a bare declared container (`array`/`iterable` —
 /// the spelling that cannot carry an element). The doc witness lands AFTER
 /// the declared one, so latest-wins reduction serves the refinement.
+/// The `@classattr.<flavor>` suffix a container-def carries when the query
+/// calls it an enumeration — the capture's own word, not the attribute
+/// string a consumer would otherwise compare.
+const ENUM_CLASSATTR: &str = "enum";
+
+/// Resolve every class name a declared return mentions through the file's
+/// use map. The shape is the pack's; what its names MEAN is the file's, and
+/// only this side knows the imports — so the walk is here, exhaustive, and
+/// no consumer re-reads the spelling.
+fn ret_expr_ident(
+    re: crate::model::witnesses::ReturnExpr,
+    ty: &dyn Fn(InferredType) -> InferredType,
+    class: &dyn Fn(&str) -> std::string::String,
+) -> crate::model::witnesses::ReturnExpr {
+    use crate::model::witnesses::{ParametricOp, ReturnExpr as RE};
+    let sub = |e: Box<RE>| Box::new(ret_expr_ident(*e, ty, class));
+    match re {
+        RE::Concrete(t) => RE::Concrete(ty(t)),
+        RE::ReceiverOr(t) => RE::ReceiverOr(ty(t)),
+        RE::Receiver => RE::Receiver,
+        RE::Arg(n) => RE::Arg(n),
+        RE::UnionOnArgs { branches } => RE::UnionOnArgs {
+            branches: branches
+                .into_iter()
+                .map(|(g, e)| (g, ret_expr_ident(e, ty, class)))
+                .collect(),
+        },
+        RE::Operator(op) => RE::Operator(match op {
+            ParametricOp::RowOf(e) => ParametricOp::RowOf(sub(e)),
+            ParametricOp::ParamOf { index, of } => {
+                ParametricOp::ParamOf { index, of: sub(of) }
+            }
+            ParametricOp::InstanceOf { base, args } => ParametricOp::InstanceOf {
+                base: class(&base),
+                args: args.into_iter().map(|e| ret_expr_ident(e, ty, class)).collect(),
+            },
+        }),
+    }
+}
+
+/// What a documented type says about the declared one on the same slot.
+/// A docblock exists to say what the syntax could not spell, so it may only
+/// NARROW — never widen, never contradict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DocVerdict {
+    /// The declaration already admits the documented type: the doc is the
+    /// finer statement and wins the slot.
+    Narrows,
+    /// No value satisfies both. The declaration wins (the tree does not
+    /// drift); the pair is minted so a hint can say the two disagree.
+    Contradicts,
+    /// Neither provable here — a class whose ancestry lives in another file,
+    /// a union this lattice cannot hold. The declaration wins in silence.
+    Unknown,
+}
+
+/// `doc_ty` against `declared`. Every unprovable relation is `Unknown`:
+/// calling one a contradiction would report a declaration for being right.
+pub(crate) fn doc_verdict(
+    declared: &InferredType,
+    doc_ty: &InferredType,
+    parents: &[(std::string::String, std::string::String)],
+) -> DocVerdict {
+    use InferredType::*;
+    if declared == doc_ty {
+        return DocVerdict::Narrows;
+    }
+    match (declared, doc_ty) {
+        // A union this lattice cannot hold admits each of its arms, and the
+        // doc is the only place the arms are written.
+        (Unknown, _) | (_, Unknown) => DocVerdict::Unknown,
+        // A bare container says "a container"; the doc says of what.
+        (
+            HashRef | ArrayRef,
+            Sequence(_) | Parametric(_) | HashWithKeys { .. } | HashRef | ArrayRef,
+        ) => DocVerdict::Narrows,
+        // A class admits its descendants. Local ancestry is what this side
+        // can walk; a chain that leaves the file is Unknown, not a clash.
+        (ClassName(base), ClassName(doc)) => {
+            if local_ancestors(doc, parents).iter().any(|a| a == base) {
+                DocVerdict::Narrows
+            } else {
+                DocVerdict::Unknown
+            }
+        }
+        // Definite disagreements: two settled shapes no value shares.
+        (
+            String | Numeric | Bool,
+            String | Numeric | Bool | HashRef | ArrayRef | Sequence(_) | HashWithKeys { .. }
+            | ClassName(_),
+        )
+        | (
+            HashRef | ArrayRef | Sequence(_) | HashWithKeys { .. },
+            String | Numeric | Bool | ClassName(_),
+        )
+        | (ClassName(_), String | Numeric | Bool | HashRef | ArrayRef) => DocVerdict::Contradicts,
+        // Everything else — an optional, a constraint object, a coderef, a
+        // shape one side refines structurally — is a relation this side
+        // cannot settle. Silence, and the declaration stands.
+        _ => DocVerdict::Unknown,
+    }
+}
+
+/// `class`'s ancestors along the edges THIS FILE declares, transitively.
+/// Bounded by the edge count; a cycle visits each class once.
+fn local_ancestors(
+    class: &str,
+    parents: &[(std::string::String, std::string::String)],
+) -> Vec<std::string::String> {
+    let mut seen: Vec<std::string::String> = Vec::new();
+    let mut queue = vec![class.to_string()];
+    while let Some(c) = queue.pop() {
+        for (child, parent) in parents {
+            if child == &c && !seen.iter().any(|s| s == parent) {
+                seen.push(parent.clone());
+                queue.push(parent.clone());
+            }
+        }
+    }
+    seen
+}
+
 fn doc_admits(
     pack: &LangPack,
     annot_text_by_var: &std::collections::HashMap<
@@ -3925,18 +4162,16 @@ fn doc_admits(
     >,
     slot: (&str, crate::model::file_analysis::ScopeId),
     doc_ty: &InferredType,
-) -> bool {
+    parents: &[(std::string::String, std::string::String)],
+) -> DocVerdict {
     match annot_text_by_var.get(&(slot.0.to_string(), slot.1)) {
-        None => true,
-        Some(declared) => {
-            matches!(
-                doc_ty,
-                InferredType::Sequence(_) | InferredType::Parametric(_)
-            ) && matches!(
-                (pack.annot_type)(declared),
-                Some(InferredType::HashRef | InferredType::ArrayRef)
-            )
-        }
+        None => DocVerdict::Narrows,
+        Some(declared) => match (pack.annot_type)(declared) {
+            // A spelling the pack does not read carries no claim to
+            // contradict — the slot is untyped as far as this side knows.
+            None => DocVerdict::Narrows,
+            Some(declared) => doc_verdict(&declared, doc_ty, parents),
+        },
     }
 }
 

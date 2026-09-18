@@ -58,6 +58,12 @@ pub struct BagContext<'a> {
     /// parent via `parents_of`, matching the FA-side ancestor walks.
     /// Empty for in-file callers that don't carry consumer state.
     pub app_surface_consumers: &'a [String],
+    /// Per-class template parameter names, so a field read through a
+    /// `ValueHop` substitutes them against the receiver's instance args
+    /// the way `field_value_type` does — without it the chase answers the
+    /// RAW declared type (`item_: T` instead of the substituted `int`).
+    /// Empty for callers whose language has no parametric containers.
+    pub class_params: &'a dyn crate::model::file_analysis::ClassTemplateParams,
 }
 
 /// A reducer's answer.
