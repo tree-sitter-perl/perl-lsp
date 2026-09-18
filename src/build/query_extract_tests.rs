@@ -4607,6 +4607,31 @@ class Stack {
 }
 
 #[test]
+fn php_var_row_description_starts_after_the_type_token() {
+    let doc_types = crate::build::query_extract::php_pack().doc_types;
+    // A generic's inner whitespace belongs to the type token, so a
+    // `@var`-only docblock describes nothing.
+    let facts = doc_types("/** @var array<int, string> */", &[]);
+    assert!(
+        !facts.iter().any(|f| matches!(f, DocFact::Description(_))),
+        "a bare @var row has no trailer to describe with: {facts:?}"
+    );
+    // The real trailer still describes — with and without a `$name`.
+    for row in [
+        "/** @var array Default request options */",
+        "/** @var array<string, string> $opts Default request options */",
+    ] {
+        let facts = doc_types(row, &[]);
+        assert!(
+            facts.iter().any(
+                |f| matches!(f, DocFact::Description(d) if d == "Default request options")
+            ),
+            "{row}: {facts:?}"
+        );
+    }
+}
+
+#[test]
 fn php_attributes_land_on_symbols() {
     // `#[Attr]` annotations ride the @sym.attr lane onto Symbol.attributes
     // — the substrate the framework-entry machinery and hover read.

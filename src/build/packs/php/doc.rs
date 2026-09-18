@@ -191,14 +191,18 @@ pub(super) fn php_doc_types(text: &str, uses_method_tags: &[&str]) -> Vec<DocFac
         for line in text.lines() {
             let l = line.trim().trim_start_matches('/').trim_start_matches('*').trim_end_matches('/').trim_end_matches('*').trim();
             if let Some(rest) = l.strip_prefix("@var ") {
-                let mut words = rest.split_whitespace();
-                let _ty = words.next();
-                let mut rest: Vec<&str> = words.collect();
-                if rest.first().is_some_and(|w| w.starts_with('$')) {
-                    rest.remove(0);
+                // The trailer starts where the TYPE token ends, which a
+                // whitespace split gets wrong: `array<int, string>` has a
+                // space inside its brackets, so the split published
+                // `string>` as the property's hover text.
+                let rest = rest.trim_start();
+                let mut words: Vec<&str> =
+                    rest[phpdoc_type_token_end(rest)..].split_whitespace().collect();
+                if words.first().is_some_and(|w| w.starts_with('$')) {
+                    words.remove(0);
                 }
-                if !rest.is_empty() {
-                    desc.push(rest.join(" "));
+                if !words.is_empty() {
+                    desc.push(words.join(" "));
                 }
                 break;
             }
