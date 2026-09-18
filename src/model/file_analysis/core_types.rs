@@ -487,6 +487,10 @@ impl TryFrom<&str> for SymbolFlags {
             "synthesized" => SymbolFlags::SYNTHESIZED,
             "alias" => SymbolFlags::ALIAS,
             "dynamic_members" => SymbolFlags::DYNAMIC_MEMBERS,
+            "receiver" => SymbolFlags::RECEIVER,
+            "constructor" => SymbolFlags::CONSTRUCTOR,
+            "throwaway" => SymbolFlags::THROWAWAY,
+            "callable_value" => SymbolFlags::CALLABLE_VALUE,
             other => return Err(UnknownAttribute(other.to_string())),
         })
     }

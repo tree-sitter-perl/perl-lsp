@@ -4148,9 +4148,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         out.witnesses.extend(edges);
     }
 
-    // Access-modifier stamp: the `@nonpublic.target` name spans mark
-    // members whose modifier means non-public — the same `non_public`
-    // attribute cpp access regions stamp, read by the completion gates.
+    // What a `@<fact>.target` capture said about a DECLARATION, stamped as
+    // flags — one carriage for the whole family, so a fact minted here and
+    // the same fact written as an attribute token arrive as the same bit.
+    // (`sym.attributes` stays what a human reads, never what the model asks.)
     if !nonpublic_name_spans.is_empty()
         || !classattr_by_name_span.is_empty()
         || !static_name_spans.is_empty()
@@ -4170,26 +4171,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             if throwaway_name_spans.contains(&(sym.name_start, sym.name_end)) {
                 sym.flags |= crate::model::file_analysis::SymbolFlags::THROWAWAY;
             }
-            if sym.kind == "var"
-                && alias_name_ends.contains(&sym.name_end)
-                && !sym.attributes.iter().any(|a| a == "alias")
-            {
-                sym.attributes.push("alias".to_string());
+            if sym.kind == "var" && alias_name_ends.contains(&sym.name_end) {
+                sym.flags |= crate::model::file_analysis::SymbolFlags::ALIAS;
             }
-            if contract_name_spans.contains(&(sym.name_start, sym.name_end))
-                && !sym.attributes.iter().any(|a| a == "contract")
-            {
-                sym.attributes.push("contract".to_string());
+            if contract_name_spans.contains(&(sym.name_start, sym.name_end)) {
+                sym.flags |= crate::model::file_analysis::SymbolFlags::CONTRACT;
             }
-            if nonpublic_name_spans.contains(&(sym.name_start, sym.name_end))
-                && !sym.attributes.iter().any(|a| a == "non_public")
-            {
-                sym.attributes.push("non_public".to_string());
+            if nonpublic_name_spans.contains(&(sym.name_start, sym.name_end)) {
+                sym.flags |= crate::model::file_analysis::SymbolFlags::NON_PUBLIC;
             }
-            if static_name_spans.contains(&(sym.name_start, sym.name_end))
-                && !sym.attributes.iter().any(|a| a == "static")
-            {
-                sym.attributes.push("static".to_string());
+            if static_name_spans.contains(&(sym.name_start, sym.name_end)) {
+                sym.flags |= crate::model::file_analysis::SymbolFlags::STATIC;
             }
             if let Some(flavor) = classattr_by_name_span.get(&(sym.name_start, sym.name_end)) {
                 if sym.kind == "class" && !sym.attributes.iter().any(|a| a == flavor) {
