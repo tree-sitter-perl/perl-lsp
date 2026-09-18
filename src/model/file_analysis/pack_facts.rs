@@ -230,14 +230,26 @@ pub struct DocDisagreement {
     pub documented: InferredType,
 }
 
-/// A language's WRITE and DISPLAY spellings — what a quick-fix inserts and
-/// what a human surface renders. Every field is the same for every file of
-/// the language, so these are reached by language id
-/// (`LanguageRegistry::spellings`) and attached to an analysis as a
-/// pointer; serializing them would put one language's constants in every
-/// blob (rule #14). A pack declares one `const`; `NONE` is what a language
-/// without a pack answers, and it is what the engine assumed before any
-/// pack declared spellings.
+/// What is true of a language for EVERY file of it: its write and display
+/// spellings — what a quick-fix inserts and what a human surface renders —
+/// and the handful of semantics a name or a syntax cannot state.
+///
+/// The spellings are the first nine fields: the type vocabularies, the
+/// class-name literal, the import / contract-stub / return-annotation
+/// templates, the static-property sigil and the two signature separators.
+/// The last three are per-language SEMANTICS the engine's rules gate on:
+/// whether a member belongs to its enclosing container and nothing else
+/// (`members_are_package_bound`), whether reading a member is calling it
+/// (`member_reads_are_calls`), and whether a runtime catch-all discharges a
+/// compile-time obligation (`catch_all_satisfies_contracts`). Each says so
+/// on its own doc.
+///
+/// Every field is the same for every file of the language, so these are
+/// reached by language id (`LanguageRegistry::spellings`) and attached to
+/// an analysis as a pointer; serializing them would put one language's
+/// constants in every blob (rule #14). A pack declares one `const`; `NONE`
+/// is what a language without a pack answers, and it is what the engine
+/// assumed before any pack declared spellings.
 #[derive(Debug, Clone, Copy)]
 pub struct PackSpellings {
     /// Engine type tag → this language's spelling (php `"HashRef"` →
