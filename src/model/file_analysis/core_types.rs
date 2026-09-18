@@ -954,6 +954,66 @@ impl Symbol {
     }
 }
 
+/// Which member family a name belongs to — the axis that keeps a value read
+/// and a call from answering each other (`docs/adr/member-kinds.md`). Minted
+/// from the fact that produced a name: the ref kind at a use, the symbol
+/// kind at a declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberKind {
+    /// A stored value: a field, class-content variable or enumerator.
+    Value,
+    /// A sub or method.
+    Callable,
+}
+
+impl MemberKind {
+    /// The family a ref's own kind states: a value read is `Value`, a call
+    /// `Callable`, anything else no member at all.
+    pub fn of_ref(kind: &RefKind) -> Option<Self> {
+        match kind {
+            RefKind::FieldAccess { .. } => Some(MemberKind::Value),
+            RefKind::MethodCall { .. } => Some(MemberKind::Callable),
+            _ => None,
+        }
+    }
+
+    /// The family a declaration's symbol kind states.
+    pub fn of_sym(kind: SymKind) -> Self {
+        if matches!(kind, SymKind::Sub | SymKind::Method) {
+            MemberKind::Callable
+        } else {
+            MemberKind::Value
+        }
+    }
+
+    /// May a declaration of `kind` carrying `flags` define a target of this
+    /// family? The value side is strict. The callable side asks the LANGUAGE
+    /// (`PackSpellings::member_reads_are_calls`): where a member read is an
+    /// accessor call, a call legitimately lands on a stored slot; where the
+    /// call is spelled, `$obj->name()` and the property `name` are two
+    /// members and admitting the property is how a missing `()` resolves to
+    /// the wrong one. A slot the declaration marks `CALLABLE_VALUE` is the
+    /// exception the declaration itself states: `ops->read(buf)` on a
+    /// function-pointer member IS a call on that member.
+    pub fn admits_decl(self, kind: SymKind, flags: SymbolFlags, spellings: &PackSpellings) -> bool {
+        match self {
+            MemberKind::Value => MemberKind::of_sym(kind) == MemberKind::Value,
+            MemberKind::Callable => {
+                spellings.member_reads_are_calls
+                    || flags.contains(SymbolFlags::CALLABLE_VALUE)
+                    || MemberKind::of_sym(kind) == MemberKind::Callable
+            }
+        }
+    }
+
+    /// May a ref of family `other` reference a target of this family? A
+    /// value read never reaches a callable and a call never reaches a value
+    /// target: each side's syntax already said which it wanted.
+    pub fn admits_ref(self, other: Option<MemberKind>) -> bool {
+        other.is_none_or(|o| o == self)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SymKind {
     Variable,
@@ -1191,6 +1251,13 @@ pub struct Ref {
 pub use crate::model::conventions::{name_match_key, split_qualified};
 
 impl Ref {
+    /// Is this a member site, and which member family does it name? The one
+    /// spelling of the pair — a consumer that has already asked
+    /// `member_site()` never has a second, unreachable way to fail.
+    pub fn member_kind(&self) -> Option<MemberKind> {
+        MemberKind::of_ref(&self.kind)
+    }
+
     /// The receiver is the language's own object token (`$this`, `this`) —
     /// so its runtime class may be any descendant of the written one.
     pub fn receiver_is_own_object(&self) -> bool {
