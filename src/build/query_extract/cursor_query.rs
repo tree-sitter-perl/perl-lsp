@@ -52,6 +52,27 @@ pub(crate) fn pack_query(pack: &LangPack) -> Option<&'static Query> {
     memo().lock().unwrap().get(pack.lang_id).map(|(q, _)| *q)
 }
 
+/// The pack's compiled query, compiling it here if this process has not
+/// extracted the language yet.
+///
+/// `pack_query` answers only once the extractor has run, which is the
+/// normal case for a cursor verb but not a guarantee for every entry
+/// point. `cached_query` memoises by source, so the object minted here is
+/// the SAME one the next `extract` gets — the cursor path and the
+/// extractor never match with two different queries.
+pub(crate) fn query_for(
+    language: &tree_sitter::Language,
+    pack: &LangPack,
+) -> Option<&'static Query> {
+    if let Some(q) = pack_query(pack) {
+        return Some(q);
+    }
+    let source = super::effective_query_source(language, pack);
+    let query = super::cached_query(language, source).ok()?;
+    remember(pack.lang_id, query, source);
+    Some(query)
+}
+
 /// Does this pack's document DECLARE `capture` at all? A capability is
 /// "what the query mints", never a Rust list's emptiness (rule #15): a
 /// pack that spells `@arity.args` has a call shape and therefore a
@@ -152,6 +173,26 @@ pub(crate) fn capture_literals(
     cached_over_patterns(query, capture, "literals", move |src, out| {
         collect_capture_literals(src, &cap, out)
     })
+}
+
+/// The node kinds a receiver peels THROUGH — a transparent wrapper the
+/// document names (`@recv.peel`, `@recv.peel.deref` where the wrapper also
+/// dereferences). One set: the peel drops them all, and the distinction is
+/// there for a consumer that reports what it dropped.
+pub(crate) fn recv_peel_kinds(query: &'static Query) -> &'static HashSet<&'static str> {
+    static CACHE: OnceLock<Mutex<HashMap<usize, &'static HashSet<&'static str>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = query as *const Query as usize;
+    if let Some(set) = cache.lock().unwrap().get(&key) {
+        return set;
+    }
+    let mut all: HashSet<&'static str> = HashSet::new();
+    for cap in ["recv.peel", "recv.peel.deref"] {
+        all.extend(pattern_root_kinds(query, cap).iter().copied());
+    }
+    let leaked: &'static HashSet<&'static str> = Box::leak(Box::new(all));
+    cache.lock().unwrap().insert(key, leaked);
+    leaked
 }
 
 /// Fold `collect` over the SOURCE of every pattern carrying `capture`,

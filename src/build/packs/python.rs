@@ -68,20 +68,9 @@ pub fn python_pack() -> LangPack {
         enum_members: &[],
         trigger_chars: &["."],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
-        recv_peel: PeelSpec {
-            wrappers: &[("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer)],
-            annot_kinds: &[],
-            leaf_to_def: &[],
-            record_stack: false,
-        },
         dynamic_arg_markers: &[],
         dynamic_var_markers: &[],
         qualifier_peel: &[],
-        member_kinds: &["attribute"],
-        skip_kinds: &["string", "string_content", "comment", "concatenated_string"],
-        call_kinds: &["call"],
-        domain_compare_kinds: &[],
-        domain_compare_ops: &[],
         oolfn: OutOfLineSpec::OFF,
     }
 }

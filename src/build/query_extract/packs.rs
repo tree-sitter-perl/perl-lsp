@@ -224,10 +224,6 @@ pub struct LangPack {
     /// `Box* const&`. THE recursion S-queries can't express (unbounded depth);
     /// the pack declares the grammar, the generic `peel` walks it.
     pub nested_peel: PeelSpec,
-    /// The member-access RECEIVER peel: transparent expression wrappers
-    /// (`(*p)`, `(&o)`, `(p)` → `p`) dropped so the invocant types via the
-    /// inner. The SAME `peel`, no stack, any leaf.
-    pub recv_peel: PeelSpec,
     /// Names whose CALL makes the enclosing callable read arguments it never
     /// declared (php `func_get_args` / `func_num_args` / `func_get_arg`).
     /// The extractor stamps `SymbolFlags::DYNAMIC_ARGS` on the callable that
@@ -245,27 +241,6 @@ pub struct LangPack {
     /// under class `Buf`, unifying the out-of-line def with the in-class
     /// decl). Never string-splitting on `<`. Empty = qualifiers verbatim.
     pub qualifier_peel: &'static [&'static str],
-    /// Member-access node kinds (`field_expression` / `attribute`): a `recv.m`
-    /// the cursor-completion path climbs to + types the receiver of. Empty =
-    /// no member-access completion (Perl uses `cursor_context`).
-    pub member_kinds: &'static [&'static str],
-    /// Node kinds the sentinel must NOT splice into (string/char/comment).
-    pub skip_kinds: &'static [&'static str],
-    /// Call-expression node kinds (`call_expression`/`call`) — a chained
-    /// receiver `f().attr` types through the call's inner member.
-    pub call_kinds: &'static [&'static str],
-    /// Equality-comparison node kinds (`binary_expression`) whose operand
-    /// may be a domain-typed field — the type-constrained-completion slot
-    /// (`o->op_type == |` ranks the field's DOMAIN members first,
-    /// `docs/adr/cursor-slots.md`). The operand order is either side; the
-    /// slot is the member-access operand, the value the other. Paired with
-    /// `domain_compare_ops` so a `<`/`+` binary never opens the slot. Empty
-    /// = no domain-comparison completion.
-    pub domain_compare_kinds: &'static [&'static str],
-    /// The operator tokens (`==`, `!=`) that make a `domain_compare_kinds`
-    /// node a domain comparison — the pack owns which operators mean
-    /// "equality against a domain value" (rule #10). Empty = feature off.
-    pub domain_compare_ops: &'static [&'static str],
     /// Out-of-line-definition extraction (`@ool.def` — a `Ret Class::method(...)`
     /// body owned by a `::` qualifier). The grammar the canonical declarator
     /// unwrap + qualifier walk consume; `OutOfLineSpec::OFF` = feature off.
@@ -326,15 +301,9 @@ impl LangPack {
             enum_members,
             trigger_chars,
             nested_peel,
-            recv_peel,
             dynamic_arg_markers,
             dynamic_var_markers,
             qualifier_peel,
-            member_kinds,
-            skip_kinds,
-            call_kinds,
-            domain_compare_kinds,
-            domain_compare_ops,
             oolfn,
         } = self;
         let mut out: Vec<(&'static str, &'static str)> = Vec::new();
@@ -359,11 +328,6 @@ impl LangPack {
         list(&mut out, "dynamic_arg_markers", dynamic_arg_markers);
         list(&mut out, "dynamic_var_markers", dynamic_var_markers);
         list(&mut out, "qualifier_peel", qualifier_peel);
-        list(&mut out, "member_kinds", member_kinds);
-        list(&mut out, "skip_kinds", skip_kinds);
-        list(&mut out, "call_kinds", call_kinds);
-        list(&mut out, "domain_compare_kinds", domain_compare_kinds);
-        list(&mut out, "domain_compare_ops", domain_compare_ops);
         for (field, one) in [
             ("pair_arrow", *pair_arrow),
             ("deprecated_attribute", *deprecated_attribute),
@@ -374,7 +338,7 @@ impl LangPack {
                 out.push((field, one));
             }
         }
-        for (field, peel) in [("nested_peel", nested_peel), ("recv_peel", recv_peel)] {
+        for (field, peel) in [("nested_peel", nested_peel)] {
             out.extend(peel.wrappers.iter().map(|(k, _)| (field, *k)));
             list(&mut out, field, peel.annot_kinds);
             for (leaf, _) in peel.leaf_to_def {

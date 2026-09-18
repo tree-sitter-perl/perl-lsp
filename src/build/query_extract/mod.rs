@@ -662,6 +662,7 @@ mod skeleton;
 #[allow(unused_imports)]
 pub(crate) use cursor_query::{
     capture_literals, captures_at, pack_declares_capture, pack_query, pattern_root_kinds,
+    query_for, recv_peel_kinds,
 };
 pub use extract::*;
 pub use packs::*;

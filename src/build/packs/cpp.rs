@@ -150,24 +150,10 @@ pub fn cpp_pack() -> LangPack {
         // Shared with the member-block synth lane (rule #10).
         nested_peel: C_FIELD_DECL_PEEL,
         // DerefKind placeholder — record_stack false, so it's never read.
-        recv_peel: PeelSpec {
-            wrappers: &[
-                ("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer),
-                ("pointer_expression", crate::model::file_analysis::DerefKind::Pointer),
-            ],
-            annot_kinds: &[],
-            leaf_to_def: &[],
-            record_stack: false,
-        },
         dynamic_arg_markers: &[],
         dynamic_var_markers: &[],
         // a templated qualifier (`Buf<T>::grow`) owns by its BASE class name
         qualifier_peel: &["template_type"],
-        member_kinds: &["field_expression"],
-        skip_kinds: &["string_literal", "char_literal", "raw_string_literal", "comment"],
-        call_kinds: &["call_expression"],
-        domain_compare_kinds: &["binary_expression"],
-        domain_compare_ops: &["==", "!="],
         // out-of-line defs (`Ret Class::m(){}`): peel pointer/reference/
         // parenthesized returns to the function declarator, then walk the
         // qualified name to its leaf + owning class.

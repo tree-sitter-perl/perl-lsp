@@ -76,15 +76,9 @@ pub fn cmake_pack() -> LangPack {
         enum_members: &[],
         trigger_chars: &["{", "("],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
-        recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
         dynamic_arg_markers: &[],
         dynamic_var_markers: &[],
         qualifier_peel: &[],
-        member_kinds: &[],
-        skip_kinds: &[],
-        call_kinds: &[],
-        domain_compare_kinds: &[],
-        domain_compare_ops: &[],
         oolfn: OutOfLineSpec::OFF,
     }
 }

@@ -66,6 +66,9 @@
   function: (identifier) @ref.call) @expr.call
 (call
   function: (attribute attribute: (identifier) @ref.method))
+; `recv.attr` is python's member access; its `object:` is the receiver the
+; cursor's member completion types.
+(attribute object: (_) @member.recv)
 (identifier) @expr.read.var
 
 (string) @expr.lit.string
@@ -82,3 +85,12 @@
     function: (identifier) @narrow.guard
     arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
   consequence: (block) @scope)
+
+; ---- cursor-time shapes ----
+; Where a cursor may not splice: a string or a comment is not code.
+(string) @skip
+(string_content) @skip
+(concatenated_string) @skip
+(comment) @skip
+; A transparent receiver wrapper denotes the same value as its operand.
+(parenthesized_expression) @recv.peel

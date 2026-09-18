@@ -1572,24 +1572,14 @@ fn pack_fields_name_no_grammar_shapes() {
         "kept: the LSP client's trigger characters, which collide with the grammar's anonymous \
          tokens by coincidence — a protocol vocabulary, not the language's syntax";
     let allow: &[(&str, &str, usize, &str)] = &[
-        ("cpp", "call_kinds", 1, "B1 — `@hop.call` / `@expr.call` patterns"),
-        ("cpp", "domain_compare_kinds", 1, "B1 — the existing `@domain.slot` patterns"),
-        ("cpp", "domain_compare_ops", 2, "B1 — the pattern's own `#any-of?`"),
-        ("cpp", "member_kinds", 1, "B1 — the `@member.recv` patterns' root kinds"),
         ("cpp", "nested_peel", 5, "B2 — per-level `@deref.*` captures"),
         ("cpp", "oolfn", 5, "B2 — `@ool.declarator` / `@ool.qualifier` / `@ool.wrap`"),
         ("cpp", "qualifier_peel", 1, "B2 — `@qualifier.name` on `template_type`"),
-        ("cpp", "recv_peel", 2, "B1 — `@recv.peel` / `@recv.peel.deref`"),
-        ("cpp", "skip_kinds", 4, "B1 — `(string) @skip (comment) @skip …`"),
         ("cpp", "trigger_chars", 3, TRIGGERS),
         ("perl", "pair_arrow", 1, "B1 — `\"=>\" @pair.arrow` on the list-literal pattern"),
         ("perl", "trigger_chars", 6, TRIGGERS),
-        ("php", "call_kinds", 5, "B1 — `@hop.call` / `@expr.call` patterns"),
         ("php", "enum_members", 2, "B3 — synthesised on every `@def.enum`"),
-        ("php", "member_kinds", 6, "B1 — the `@member.recv` patterns' root kinds"),
         ("php", "pair_arrow", 1, "B1 — `\"=>\" @pair.arrow` on the list-literal pattern"),
-        ("php", "recv_peel", 1, "B1 — `@recv.peel`"),
-        ("php", "skip_kinds", 3, "B1 — `(string) @skip (comment) @skip …`"),
         ("php", "trigger_chars", 3, TRIGGERS),
     ];
     let drift = pack_allowlist_drift("rule #15 (grammar shapes on the pack)", &seen, allow);

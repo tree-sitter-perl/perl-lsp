@@ -565,6 +565,9 @@
   (name) @ref.member .) @hop.call
  (#eq? @receiver.super "parent"))
 
+; A receiver whose member is named by a STRING, not by a member access:
+; `@member.recv.named` so the member-access node kinds stay exactly the
+; shapes the cursor climbs to (an array literal is not one).
 ; `[UserController::class, 'index']` / `array(Listener::class, 'handle')`:
 ; php's class-array callable — the exactly-two-element pair NAMES a
 ; dispatchable method (Laravel routes, event maps, callable args). The
@@ -579,14 +582,14 @@
 (array_creation_expression
   . (array_element_initializer
       . (class_constant_access_expression
-        . (name) @member.recv
+        . (name) @member.recv.named
         (name) @_ccls .) .)
   . (array_element_initializer . (string (string_content) @ref.method.named) .) .
   (#eq? @_ccls "class"))
 (array_creation_expression
   . (array_element_initializer
       . (class_constant_access_expression
-        . (qualified_name (name) @member.recv)
+        . (qualified_name (name) @member.recv.named)
         (name) @_cclsq .) .)
   . (array_element_initializer . (string (string_content) @ref.method.named) .) .
   (#eq? @_cclsq "class"))
@@ -596,7 +599,7 @@
 ; the string names the method. Event listeners and PHPUnit callbacks live
 ; here; a rename that misses them breaks the dispatch at runtime.
 (array_creation_expression
-  . (array_element_initializer . (variable_name) @member.recv .)
+  . (array_element_initializer . (variable_name) @member.recv.named .)
   . (array_element_initializer . (string (string_content) @ref.method.named) .) .)
 
 ; `static::$records` / `self::$records` / `Foo::$prop` — scoped STATIC
@@ -857,6 +860,17 @@
 (binary_expression
   ["+" "-" "*" "/" "%" "**" "<=>"]
   right: (variable_name) @obs.numeric)
+
+; ---- cursor-time shapes ----
+; Where a cursor may not splice: a string or a comment is not code, so the
+; member and call probes decline inside one (and the rail-string probe
+; requires one).
+(string) @skip
+(string_content) @skip
+(comment) @skip
+; Transparent receiver wrappers — `(expr)` denotes the same value as its
+; operand, so a member access through one types through the inner.
+(parenthesized_expression) @recv.peel
 
 ; ---- folding ----
 ; Blocks fold whether or not they are scopes (php has no block scoping, so

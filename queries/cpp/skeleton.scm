@@ -663,11 +663,32 @@
 ; span (`@hop.call` + `@hop.member` — deliberately NOT `@ref.member`, the
 ; pattern above already minted the ref): `w.get().spin()` types through the
 ; receiver span's own hop with no intermediate variable.
+; The receiver rides `@hop.recv` here, not `@member.recv`: this pattern
+; roots at the CALL, and the member-access kinds the cursor climbs to are
+; exactly what `@member.recv`'s patterns root at.
 (call_expression
   function: (field_expression
-    argument: (_) @member.recv
+    argument: (_) @hop.recv
     field: (field_identifier) @hop.member)
   arguments: (argument_list) @arity.args) @hop.call
+
+; ---- cursor-time shapes ----
+; Where a cursor may not splice: a literal or a comment is not code.
+(string_literal) @skip
+(char_literal) @skip
+(raw_string_literal) @skip
+(comment) @skip
+; Transparent receiver wrappers: `(p)` and `*p` / `&o` denote the same
+; class as their operand, so `(*p).m` reaches the members `p->m` does.
+(parenthesized_expression) @recv.peel
+(pointer_expression) @recv.peel.deref
+; The operators that make a comparison a DOMAIN question — what the
+; type-constrained completion slot opens on (`o->op_type == |` ranks the
+; field's domain first). A declaration only: the coherence vote's own
+; patterns below are deliberately operator-blind, because a site that is
+; NOT an equality is still counter-evidence.
+((binary_expression operator: _ @domain.compare.op)
+ (#any-of? @domain.compare.op "==" "!="))
 
 ; ---- domain typing (int-used-as-enum): a struct-field SLOT compared or
 ; assigned against ANY value. `o->op_type == OP_CONST` / `o->op_type =

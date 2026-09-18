@@ -181,36 +181,10 @@ pub fn php_pack() -> LangPack {
         enum_members: &["value", "name", "cases", "from", "tryFrom"],
         trigger_chars: &["$", ">", ":"],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
-        recv_peel: PeelSpec {
-            wrappers: &[("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer)],
-            annot_kinds: &[],
-            leaf_to_def: &[],
-            record_stack: false,
-        },
         qualifier_peel: &[],
         // calls included: PHP's method call is ONE flat node (unlike cpp,
         // where the call wraps a field_expression), so mid-token member
         // completion (`->ma|p`) must climb to the call node itself.
-        member_kinds: &[
-            "member_access_expression",
-            "member_call_expression",
-            "nullsafe_member_call_expression",
-            // `Foo::m(`, `self::CONST`, `static::$prop`: a scoped access is
-            // a member access whose receiver is the class token.
-            "scoped_call_expression",
-            "scoped_property_access_expression",
-            "class_constant_access_expression",
-        ],
-        skip_kinds: &["string", "string_content", "comment"],
-        call_kinds: &[
-            "function_call_expression",
-            "member_call_expression",
-            "scoped_call_expression",
-            "nullsafe_member_call_expression",
-            "object_creation_expression",
-        ],
-        domain_compare_kinds: &[],
-        domain_compare_ops: &[],
         oolfn: OutOfLineSpec::OFF,
     }
 }
