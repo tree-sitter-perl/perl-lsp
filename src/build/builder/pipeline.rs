@@ -160,6 +160,7 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
         },
         pack: crate::model::file_analysis::PackFacts {
             names: crate::model::conventions::PERL_SPELLINGS,
+            spellings: Some(&crate::model::conventions::PERL_SPELLINGS_PACK),
             ..Default::default()
         },
         ..Default::default()
@@ -671,6 +672,7 @@ fn build_once(
         // no template params, no `std::move`.
         pack: crate::model::file_analysis::PackFacts {
             names: crate::model::conventions::PERL_SPELLINGS,
+            spellings: Some(&crate::model::conventions::PERL_SPELLINGS_PACK),
             ..Default::default()
         },
         type_provenance: b.type_provenance,

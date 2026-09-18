@@ -22,7 +22,7 @@ impl FileAnalysis {
     /// else after the package/namespace line, else after the preamble —
     /// `(insertion point, text)`. `None` when the pack has no import form.
     pub fn import_edit_for(&self, fq: &str, row: usize) -> Option<(Point, String)> {
-        let template = self.pack.import_template.as_str();
+        let template = self.spellings().import_template;
         if template.is_empty() {
             return None;
         }
