@@ -84,13 +84,10 @@ pub fn is_conventional_invocant_name(name: &str) -> bool {
     )
 }
 
-/// Strip Perl variable sigils from a typed name: the bare identity token
-/// a rename writes at every collected span (`$total` → `total`). This is
-/// the PERL instance of the per-language name-semantics hook on the
-/// resolution CandidateSet's identity keying (`CandidateSet::bare_new_name`)
-/// — pack languages canonicalize spellings at extraction instead (the
-/// LangPack `shape_name` hook; cpp's `canonical_template_spelling`), so
-/// their typed names pass through bare.
+/// Strip Perl variable sigils from a typed name (`$total` → `total`).
+/// Perl's instance of the rule every language states through its own
+/// spellings (`NameSpellings::bare_name`), for the Perl-only callers that
+/// hold no analysis to ask.
 pub fn strip_variable_sigils(name: &str) -> &str {
     name.trim_start_matches(['$', '@', '%'])
 }

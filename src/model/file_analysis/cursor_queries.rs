@@ -1020,10 +1020,17 @@ impl FileAnalysis {
             .map(|id| self.symbol(id))
             .filter(|v| matches!(v.kind, SymKind::Variable))?;
         // A use span covers the sigiled variable; the group writes the bare
-        // member name, so each use narrows past the variable's OWN sigil.
+        // member name, so each use narrows past the variable's OWN sigil —
+        // asked of the language's spellings where the symbol carries no
+        // Perl-shaped detail (rule #12).
         let sigil_len = match &var.detail {
             SymbolDetail::Variable { sigil, .. } => sigil.len_utf8(),
-            _ => 0,
+            _ => var
+                .name
+                .chars()
+                .next()
+                .filter(|c| self.names().is_sigil(*c))
+                .map_or(0, char::len_utf8),
         };
         let uses = self
             .collect_refs_for_target(var.id, false, None)
