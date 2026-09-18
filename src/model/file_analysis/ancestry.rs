@@ -792,10 +792,13 @@ impl FileAnalysis {
         seen: &mut HashSet<String>,
         depth: usize,
     ) -> bool {
-        // The MRO bound: a tail this deep is not walked, so it makes no
-        // claim either way — silence would be reported as a gap.
+        // The MRO bound: a tail this deep is not walked, so this walk has
+        // NOT seen the whole ancestry and must not say it has. The member
+        // lanes read the answer as their licence to report an undefined
+        // member, so the cap goes quiet — the direction every other arm of
+        // this lane takes when it cannot see.
         if depth > 20 {
-            return true;
+            return false;
         }
         for p in parents_of(class, &self.packages, module_index, &self.plugin.app_surface_consumers) {
             // The synthetic surface edge has no declaration to find.
