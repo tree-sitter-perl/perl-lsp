@@ -51,6 +51,18 @@ pub fn split_qualified<'a>(name: &'a str, names: &NameSpellings) -> (Option<&'a 
     }
 }
 
+/// `split_qualified`'s inverse: the one spelling of a namespace and a leaf
+/// as a single qualified name. The global namespace — an empty `namespace`
+/// — yields the bare leaf, never a dangling separator, which is what makes
+/// this safe to call without first asking whether the name has one.
+pub fn join_qualified(namespace: &str, leaf: &str, sep: &str) -> String {
+    if namespace.is_empty() {
+        leaf.to_string()
+    } else {
+        format!("{namespace}{sep}{leaf}")
+    }
+}
+
 /// The relational ref index's shared key function: rows are keyed by
 /// `name_match_key(ref.target_name)`, retrieval probes
 /// `name_match_key(target.name)` — one function on both sides, so a row can
