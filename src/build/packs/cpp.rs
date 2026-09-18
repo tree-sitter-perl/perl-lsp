@@ -95,8 +95,6 @@ pub fn cpp_pack() -> LangPack {
         },
         // C/C++ methods read members with an implicit `this->`.
         implicit_this_members: true,
-        include_path_tokens: true,
-        preprocessor_macros: true,
         brace_scoped_members: true,
         call_shapes: &[],
         arg_kind: "",

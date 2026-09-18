@@ -159,8 +159,6 @@ pub fn php_pack() -> LangPack {
         rebind_method: |_| false,
         // `$this->` is mandatory — no receiver elision (unlike C++).
         implicit_this_members: false,
-        include_path_tokens: false,
-        preprocessor_macros: false,
         // class/trait/interface bodies are brace-delimited, so a member
         // orphaned by a misparse can re-anchor positionally.
         brace_scoped_members: true,

@@ -70,10 +70,6 @@ pub struct DriverCaps {
     /// closure) — enables the raw-word goto-def/hover fallback lane outside
     /// the CandidateSet.
     pub cross_file_words: bool,
-    /// See `LangPack::include_path_tokens`.
-    pub include_path_tokens: bool,
-    /// See `LangPack::preprocessor_macros`.
-    pub preprocessor_macros: bool,
 }
 
 /// Everything the server needs to host one language: parse + analyze a
@@ -427,8 +423,6 @@ impl LanguageDriver for PackDriver {
             cross_file_words: true,
             // declared by the pack's call shapes — no shapes, no verb
             pack_signature_help: !pack.call_shapes.is_empty(),
-            include_path_tokens: pack.include_path_tokens,
-            preprocessor_macros: pack.preprocessor_macros,
             // The verb walks tree ancestors — no language in it.
             selection_range: true,
             ..Default::default()
@@ -2051,22 +2045,39 @@ impl LanguageRegistry {
 
     pub fn pack_visibility(id: &str) -> crate::model::file_analysis::PackVisibility {
         use crate::model::file_analysis::PackVisibility;
-        static LINKAGE: std::sync::OnceLock<Vec<(&'static str, bool)>> =
-            std::sync::OnceLock::new();
-        LINKAGE
-            .get_or_init(|| {
-                LanguageRegistry::with_enabled()
-                    .drivers
-                    .iter()
-                    .filter_map(|d| d.lang_pack().map(|p| (d.id(), p.include_path_tokens)))
-                    .collect()
+        match LanguageRegistry::with_enabled().for_id(id).and_then(|d| d.lang_pack()) {
+            None => PackVisibility::Host,
+            Some(_) if Self::query_mints(id, "include.path") => PackVisibility::IncludePaths,
+            Some(_) => PackVisibility::NameKeyed,
+        }
+    }
+
+    /// Does `id`'s query document mint `capture`? The capabilities a
+    /// DOCUMENT states are read from what compiles, never from a boolean
+    /// beside it that can disagree with the patterns (rule #15). Memoized
+    /// per language; the compilation is the extractor's own.
+    fn query_mints(id: &str, capture: &str) -> bool {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex, OnceLock};
+        static MINTS: OnceLock<Mutex<HashMap<String, Arc<Vec<String>>>>> = OnceLock::new();
+        let memo = MINTS.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Some(v) = memo.lock().unwrap().get(id) {
+            return v.iter().any(|c| c == capture);
+        }
+        let names = LanguageRegistry::with_enabled()
+            .for_id(id)
+            .and_then(|d| d.lang_pack().map(|p| (d, p)))
+            .map(|(d, p)| {
+                let parser = d.make_parser();
+                match parser.language() {
+                    Some(l) => crate::build::query_extract::query_captures(&l, &p),
+                    None => Vec::new(),
+                }
             })
-            .iter()
-            .find(|(l, _)| *l == id)
-            .map(|(_, inc)| {
-                if *inc { PackVisibility::IncludePaths } else { PackVisibility::NameKeyed }
-            })
-            .unwrap_or(PackVisibility::Host)
+            .unwrap_or_default();
+        let names = Arc::new(names);
+        memo.lock().unwrap().insert(id.to_string(), Arc::clone(&names));
+        names.iter().any(|c| c == capture)
     }
 
     /// The declared capabilities of `id`'s driver — THE generic capability
@@ -2087,7 +2098,7 @@ impl LanguageRegistry {
     /// surfaces — the LSP handlers and their CLI/--batch mirrors — so
     /// editor and gold cannot answer it differently.
     pub fn has_include_tokens(id: &str) -> bool {
-        Self::caps(id).include_path_tokens
+        Self::query_mints(id, "include.path")
     }
 
     /// Does this language's pack declare a C-style preprocessor — `#define`
@@ -2095,7 +2106,7 @@ impl LanguageRegistry {
     /// completion offers? Same asked-never-named contract as
     /// `has_include_tokens`.
     pub fn has_preprocessor_macros(id: &str) -> bool {
-        Self::caps(id).preprocessor_macros
+        Self::query_mints(id, "def.macro")
     }
 
     /// The driver that serves files no driver claims — found by asking each

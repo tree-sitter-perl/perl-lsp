@@ -63,8 +63,6 @@ pub fn cmake_pack() -> LangPack {
         narrow_assertions: &[],
         rebind_method: |_| false,
         implicit_this_members: false,
-        include_path_tokens: false,
-        preprocessor_macros: false,
         brace_scoped_members: false,
         call_shapes: &[],
         arg_kind: "",
