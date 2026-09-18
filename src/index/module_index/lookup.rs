@@ -380,9 +380,14 @@ impl CrossFileLookup for ModuleIndex {
         if paths.len() < 2 || std::env::var_os("PERL_LSP_REFS_NO_PREFETCH").is_some() {
             return;
         }
-        // Bounded so a giant candidate set cannot churn the byte-capped LRU
-        // past the entries the walk is about to read.
-        let take = paths.len().min(4096);
+        /// How many candidates the parallel warm decodes ahead of the walk.
+        /// The rehydration LRU is byte-capped, so a candidate set larger than
+        /// it evicts its own head before the sequential match reaches it —
+        /// the warm would then pay for decodes the walk cannot use. A cap
+        /// keeps the prefetched set at a size the LRU can hold for typical
+        /// analyses; past it the tail decodes lazily, as it did unwarmed.
+        const PREFETCH_CAP: usize = 4096;
+        let take = paths.len().min(PREFETCH_CAP);
         crate::util::ghost_stats::timed("refs.prefetch", || {
             paths[..take].par_iter().for_each(|p| {
                 if let Some(cm) = self.cached_by_path(p) {
