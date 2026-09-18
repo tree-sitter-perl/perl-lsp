@@ -774,7 +774,7 @@ pub fn pack_symbol_diagnostics(
     idx: Option<&dyn CrossFileLookup>,
 ) -> Vec<Diagnostic> {
     use crate::model::file_analysis::{
-        HandlerOwner, IndexState, RailNames, ScopeKind,
+        HandlerOwner, IndexState, RailNames,
     };
     // Whether absence is meaningful is the INDEX's answer about THIS
     // language, never a caller's claim: a store that swept nothing is
@@ -877,179 +877,8 @@ pub fn pack_symbol_diagnostics(
         }
     }
 
-    // ---- undefined variable: an unbound read inside a callable ----
-    // The lane runs on facts: a read the runtime binds carries a binding
-    // (`@ref.var.implicit`), and a pack whose document binds nothing
-    // produces no unbound reads to report.
-    {
-        let callable_of = |scope: crate::model::file_analysis::ScopeId| {
-            analysis.scope_chain(scope).into_iter().find(|&sc| {
-                matches!(analysis.scope(sc).kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. })
-            })
-        };
-        // A bare variable written as a call argument is bound by the call
-        // when the callee declares that position by reference (`&$out`):
-        // the callee's aliasing edge IS the binding, chased from the
-        // argument's own site (`docs/adr/by-ref-binding.md`). A callee this
-        // lane cannot see leaves no edge and answers nothing; a callee that
-        // aliases but names no type answers `Unknown`, which still binds.
-        for r in analysis.refs() {
-            // a WRITE binds (php declares a variable by assigning it)
-            if !matches!(r.kind, RefKind::Variable)
-                || r.binding.is_some()
-                || matches!(r.access, crate::model::file_analysis::AccessKind::Write)
-            {
-                continue;
-            }
-            if matches!(r.binding, Some(crate::model::file_analysis::RefBinding::Runtime)) {
-                continue;
-            }
-            let Some(sc) = callable_of(r.scope) else { continue };
-            // A binding, not a type: a usage observation (`$x + 1` says
-            // numeric) types the read without anything ever writing it.
-            if analysis.variable_is_bound_via_bag(&r.target_name, r.span.start, idx) {
-                continue;
-            }
-            // A bare argument of a callee this file does not declare is
-            // silence, never a guess either way: the callee's own bag says
-            // which positions alias, and php's own functions (`preg_match`'s
-            // `$matches`) have no bag here to say it.
-            if let Some(callee) = analysis.argument_callee(r) {
-                let declared = analysis.symbols_named(callee).iter().any(|&sid| {
-                    matches!(analysis.symbol(sid).kind, FaSymKind::Sub | FaSymKind::Method)
-                });
-                if !declared {
-                    continue;
-                }
-            }
-            // `isset($x)` / `empty($x)` / `unset($x)`: the read IS the
-            // existence question, the member lanes' probe silence
-            if analysis.pack.probe_regions.iter().any(|p| p.contains(&r.span)) {
-                continue;
-            }
-            // a callable that materializes variables dynamically is silent
-            if dynamic_vars(analysis, sc) {
-                continue;
-            }
-            push(&mut out, r.span, DiagnosticSeverity::ERROR, codes::UNDEFINED_VARIABLE,
-                format!("Undefined variable '{}'.", r.target_name));
-        }
-
-        // ---- unused variable: a local written and never read ----
-        // A read counts for the callable it sits in, every enclosing callable
-        // (a closure's `use ($x)` reads the outer `$x` through its own copy)
-        // and every callable nested inside it (a by-reference capture is
-        // written inside the closure and read by the scope around it); a
-        // same-named declaration in a nested callable is the capture itself.
-        let callables_up = |scope: crate::model::file_analysis::ScopeId| -> Vec<u32> {
-            analysis
-                .scope_chain(scope)
-                .into_iter()
-                .filter(|&sc| matches!(analysis.scope(sc).kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. }))
-                .map(|sc| sc.0)
-                .collect()
-        };
-        let mut read_chains: HashMap<String, Vec<Vec<u32>>> = HashMap::new();
-        for r in analysis.refs() {
-            if !matches!(r.kind, RefKind::Variable)
-                || matches!(r.access, crate::model::file_analysis::AccessKind::Write)
-            {
-                continue;
-            }
-            read_chains.entry(r.target_name.clone()).or_default().push(callables_up(r.scope));
-        }
-        let mut decl_chains: HashMap<String, Vec<(u32, Vec<u32>)>> = HashMap::new();
-        for sym in analysis.symbols() {
-            if matches!(sym.kind, FaSymKind::Variable) {
-                if let Some(sc) = callable_of(sym.scope) {
-                    decl_chains.entry(sym.name.clone()).or_default().push((sc.0, callables_up(sym.scope)));
-                }
-            }
-        }
-        for sym in analysis.symbols() {
-            if !matches!(sym.kind, FaSymKind::Variable) {
-                continue;
-            }
-            let Some(sc) = callable_of(sym.scope) else { continue };
-            // an alias (`$h = &$opts['h']`) is written to reach its storage
-            if sym.flags.contains(SymbolFlags::THROWAWAY)
-                || pack.param_regions.iter().any(|p| p.contains(&sym.span))
-                || sym.flags.contains(SymbolFlags::ALIAS)
-            {
-                continue;
-            }
-            if dynamic_vars(analysis, sc) {
-                continue;
-            }
-            let related = |chain: &Vec<u32>| chain.contains(&sc.0) || callables_up(sym.scope).iter().any(|c| chain.first() == Some(c));
-            let read = read_chains.get(&sym.name).is_some_and(|chains| chains.iter().any(related));
-            let captured = decl_chains
-                .get(&sym.name)
-                .is_some_and(|ds| ds.iter().any(|(owner, chain)| *owner != sc.0 && chain.contains(&sc.0)));
-            if read || captured {
-                continue;
-            }
-            out.push(Diagnostic {
-                range: span_to_range(sym.selection_span),
-                severity: Some(DiagnosticSeverity::HINT),
-                code: Some(NumberOrString::String(codes::UNUSED_VARIABLE.to_string())),
-                source: Some("perl-lsp".to_string()),
-                message: format!("'{}' is assigned but never used.", sym.name),
-                tags: Some(vec![DiagnosticTag::UNNECESSARY]),
-                ..Default::default()
-            });
-        }
-    }
-
-    // ---- unused import: a bound name the file never spells ----
-    if pack.imports_bind_names {
-        let pins = analysis.use_map_pins();
-        let ns_heads = namespace_heads(analysis);
-        for row in &pack.include_directives {
-            let (span, raw) = (&row.span, &row.raw);
-            let leaf = name_match_key(raw, analysis.names());
-            let leaf = leaf.as_str();
-            // the alias token has a row of its own; the import's row reports
-            if !is_qualified(raw, analysis) && pack.use_aliases.iter().any(|(alias, _, _)| alias == leaf) {
-                continue;
-            }
-            // the name the row binds: its alias when it has one
-            let bound = pack
-                .use_aliases
-                .iter()
-                .find(|(_, ns, real)| {
-                    real == leaf && join_name(analysis, ns, real) == *raw
-                })
-                .map(|(alias, _, _)| alias.as_str())
-                .unwrap_or(leaf);
-            // a constant import (`use const FOO`) has no spelling the
-            // walker records — silent
-            if bound.is_empty() || row.binds == ImportBinds::Const {
-                continue;
-            }
-            let used = pins.spelled.contains(bound)
-                || ns_heads.contains(bound)
-                || pack.doc_mentions.iter().any(|m| m == bound);
-            if used {
-                continue;
-            }
-            out.push(Diagnostic {
-                range: span_to_range(*span),
-                severity: Some(DiagnosticSeverity::HINT),
-                code: Some(NumberOrString::String(codes::UNUSED_IMPORT.to_string())),
-                source: Some("perl-lsp".to_string()),
-                message: format!("'{bound}' is imported but never used."),
-                tags: Some(vec![DiagnosticTag::UNNECESSARY]),
-                data: pack
-                    .import_rows
-                    .iter()
-                    .find(|r| span_within(*span, **r))
-                    .filter(|r| pack.include_directives.iter().filter(|i| span_within(i.span, **r)).count() == 1)
-                    .map(|r| serde_json::json!({ "row": [r.start.row, r.end.row] })),
-                ..Default::default()
-            });
-        }
-    }
+    out.extend(analysis.liveness_findings(&facts).into_iter().map(render_finding));
+    out.extend(analysis.unused_import_findings().into_iter().map(render_finding));
 
     // ---- undefined rail name: a use on a named rail (`route('home')`)
     // that no definition on that rail answers, here or in the settled
@@ -1145,7 +974,7 @@ pub fn pack_symbol_diagnostics(
             let own_ns = pins.own_namespace.clone().unwrap_or_default();
             {
                 let own = own_ns.as_str();
-                let ns_heads = namespace_heads(analysis);
+                let ns_heads = analysis.namespace_heads();
                 let mut reported: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
                 for r in analysis.refs() {
                     // the class token — a construction site mints one of
@@ -1209,7 +1038,7 @@ pub fn pack_symbol_diagnostics(
                     // the leaf token the ref carries — and the bare use-map
                     // resolve otherwise.
                     let (identity, ns) = match pins.pins.get(leaf) {
-                        Some(Some(ns)) => (join_name(analysis, ns, leaf), ns.clone()),
+                        Some(Some(ns)) => (analysis.join_name(ns, leaf), ns.clone()),
                         _ => {
                             let identity = analysis.class_spelling_identity(written);
                             let ns = analysis
@@ -1244,7 +1073,7 @@ pub fn pack_symbol_diagnostics(
                     // the quick-fix can offer
                     let candidates: Vec<String> = declared
                         .iter()
-                        .map(|d| join_name(analysis, d, leaf))
+                        .map(|d| analysis.join_name(d, leaf))
                         .collect();
                     out.push(Diagnostic {
                         range: span_to_range(r.span),
@@ -1540,49 +1369,7 @@ fn type_namespaces(analysis: &FileAnalysis, idx: &dyn CrossFileLookup, leaf: &st
     out
 }
 
-/// Is `name` written with a qualifier in this file's language?
-fn is_qualified(name: &str, analysis: &FileAnalysis) -> bool {
-    crate::model::file_analysis::split_qualified(name, analysis.names()).0.is_some()
-}
 
-/// `namespace` and `leaf` joined the way this file's language spells a
-/// qualified name — the model's own join, so the global namespace gives
-/// the bare leaf and no caller guards a dangling separator.
-fn join_name(analysis: &FileAnalysis, namespace: &str, leaf: &str) -> String {
-    crate::model::conventions::join_qualified(
-        namespace,
-        leaf,
-        analysis.names().sep().unwrap_or_default(),
-    )
-}
 
-/// The leading segment of every namespace this file writes as a QUALIFIER
-/// (`Psr7\Utils` → `Psr7`): such a segment names a namespace, not a type
-/// and not an unused import.
-fn namespace_heads(analysis: &FileAnalysis) -> std::collections::HashSet<String> {
-    let names = analysis.names();
-    let Some(sep) = names.sep() else { return Default::default() };
-    analysis
-        .pack
-        .qualified_spellings
-        .iter()
-        .filter_map(|(_, prefix)| prefix.trim_start_matches(sep).split(sep).next())
-        .filter(|h| !h.is_empty())
-        .map(str::to_string)
-        .collect()
-}
 
-/// Does the callable owning `scope` materialize variables no declaration
-/// names (php `extract`, `eval`)? The extractor stamped that on the
-/// callable, so the variable lanes read the flag instead of matching call
-/// spans against the body they sit in.
-fn dynamic_vars(analysis: &FileAnalysis, scope: crate::model::file_analysis::ScopeId) -> bool {
-    analysis
-        .scope(scope)
-        .owner
-        .is_some_and(|sid| analysis.symbol(sid).flags.contains(SymbolFlags::DYNAMIC_VARS))
-}
 
-fn span_within(inner: Span, outer: Span) -> bool {
-    outer.contains(&inner)
-}
