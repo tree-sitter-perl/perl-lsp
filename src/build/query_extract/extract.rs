@@ -211,6 +211,25 @@ pub(crate) fn peel<'a>(
     None
 }
 
+/// Drop transparent receiver wrappers (`(*p)`, `(&o)`, `(p)`) to the value
+/// underneath. Depth-capped; the leaf is an invocant of any shape, so —
+/// unlike the declarator peel — nothing is minted per level.
+pub(crate) fn peel_receiver<'a>(
+    mut node: tree_sitter::Node<'a>,
+    wrappers: &std::collections::HashSet<&'static str>,
+) -> tree_sitter::Node<'a> {
+    for _ in 0..32 {
+        if !wrappers.contains(node.kind()) {
+            return node;
+        }
+        match node.named_child(0) {
+            Some(inner) => node = inner,
+            None => return node,
+        }
+    }
+    node
+}
+
 /// The `ImportBinds` a capture-name suffix declares, or `None` when the
 /// suffix is not one. `use function` / `use const` rows bind a callable or a
 /// constant; an unsuffixed row binds a type, so the pack spells only the two
@@ -237,6 +256,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let language = tree.language();
     let query_source = effective_query_source(&language, pack);
     let query = cached_query(&language, query_source)?;
+    // The cursor-time runner serves THIS object, never one of its own.
+    super::cursor_query::remember(pack.lang_id, query, query_source);
+    // A BARE variable: the node kinds the document reads as one. The
+    // by-reference binding lane, the parameter-name walk and the op-DX gate
+    // all mean the same shape, so they ask the same patterns.
+    let simple_var_kinds = super::cursor_query::pattern_root_kinds(query, "expr.read.var");
+    // Transparent receiver wrappers — `(p)`, `*p`, `&o` — named by the
+    // document, so the mint's invocant span lands on the inner expression
+    // `expr_type_at_span` already types.
+    let recv_peel_kinds = super::cursor_query::recv_peel_kinds(query);
     let cap_names: Vec<String> = query
         .capture_names()
         .iter()
@@ -340,22 +369,35 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // wrappers (`(*p)`, `(&o)`, `(p)`) to the typed inner where the
             // node is live, so the minted MethodCall ref's invocant_span lands
             // on the inner expression `expr_type_at_span` already types.
-            if cap == "member.recv" {
+            if matches!(cap, "member.recv" | "member.recv.named" | "hop.recv") {
                 // op-DX applies only to a bare-variable immediate receiver
                 // (its deref_stack resolves by name); a wrapper/chain doesn't.
-                member_simple.insert(match_counter, pack.simple_var_kinds.contains(&node.kind()));
-                let inner = peel(node, &pack.recv_peel, source)
-                    .map(|(leaf, _, _)| leaf)
-                    .unwrap_or(node);
+                member_simple.insert(match_counter, simple_var_kinds.contains(node.kind()));
+                let inner = peel_receiver(node, recv_peel_kinds);
                 events.push(Event {
                     start_byte: inner.start_byte(),
                     end_byte: inner.end_byte(),
                     start: inner.start_position(),
                     end: inner.end_position(),
-                    cap: cap.to_string(),
+                    // One receiver lane whichever capture named it: a
+                    // string-named member and a chain hop have the same
+                    // receiver a written member access does. The spellings
+                    // differ so each capture's patterns keep stating one
+                    // thing — `@member.recv`'s roots ARE the member-access
+                    // kinds the cursor climbs to.
+                    cap: "member.recv".to_string(),
                     text: inner.utf8_text(source).unwrap_or("").to_string(),
                     match_id: match_counter,
                 });
+                continue;
+            }
+            // Declaration-only captures: they state a language fact the
+            // cursor paths read off the compiled query, and mint nothing
+            // here. Dropped before they become events.
+            if matches!(
+                cap,
+                "skip" | "recv.peel" | "recv.peel.deref" | "domain.compare.op" | "def.var.fn"
+            ) {
                 continue;
             }
             // `@arity.args`: a call's argument_list — count its arguments (the
