@@ -40,16 +40,19 @@
 (identifier) @expr.read.var
 
 ; ---- imports: library(pkg) / require(pkg) / source("path") ----
-; Which call names import, and what the argument means, is the pack's
-; import_module predicate — the query only ships the shape.
+; R's imports are CALLS, so the capture says which kind of import the call
+; is and the pack maps the ARGUMENT to a module: a sourced path is one
+; verbatim, a library name resolves in the installed tree.
 (call
-  function: (identifier) @import.fn
+  function: (identifier) @import.call.library
   arguments: (arguments
-    (argument value: (identifier) @import.arg)))
+    (argument value: (identifier) @import.arg))
+  (#any-of? @import.call.library "library" "require"))
 (call
-  function: (identifier) @import.fn
+  function: (identifier) @import.call.source
   arguments: (arguments
-    (argument value: (string (string_content) @import.arg))))
+    (argument value: (string (string_content) @import.arg)))
+  (#eq? @import.call.source "source"))
 
 ; ---- literals ----
 (string) @expr.lit.string
@@ -57,12 +60,12 @@
 (integer) @expr.lit.number
 
 ; ---- keyed shapes: list(a = 1, b = 2) / data.frame(age = ..., ...) ----
-; Named arguments of a shape constructor are the keys; the driver
-; groups @shape.key by enclosing @expr.shape span and asks the pack's
-; shape_ctor predicate which callees actually construct $-accessible
-; values.
+; Named arguments of a shape constructor are the keys; which callees
+; construct a $-accessible value is the pattern's own `#any-of?`, and the
+; driver groups @shape.key by the enclosing @expr.shape span.
 (call
   function: (identifier) @shape.ctor
   arguments: (arguments
     (argument
-      name: (identifier) @shape.key))) @expr.shape
+      name: (identifier) @shape.key))
+  (#any-of? @shape.ctor "list" "data.frame" "tibble")) @expr.shape
