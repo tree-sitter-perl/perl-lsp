@@ -22,6 +22,7 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     namespace_sep: Some(std::borrow::Cow::Borrowed("::")),
     sigils: std::borrow::Cow::Borrowed(&['$', '@', '%']),
     class_spelling: ClassSpelling::Identity,
+    member_sep: Some(std::borrow::Cow::Borrowed("::")),
 };
 
 /// Split a possibly-qualified name into `(Option<package>, basename)`.
@@ -449,6 +450,20 @@ impl<'a> MethodToken<'a> {
             Self::Bare(_) | Self::Super(_) => None,
         }
     }
+
+    /// The token as a method-call site writes it — `parse`'s inverse, and
+    /// the only place the qualifier separator is spelled on the minting
+    /// side. A pack that canonicalizes its own relative-dispatch spelling
+    /// (php `parent::m`) onto this vocabulary renders through here, so the
+    /// mint and the read can never drift apart.
+    pub fn render(&self) -> String {
+        match self {
+            Self::Bare(n) => (*n).to_string(),
+            Self::Super(n) => format!("SUPER::{n}"),
+            Self::Main(n) => format!("::{n}"),
+            Self::Qualified { package, name } => format!("{package}::{name}"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -476,6 +491,7 @@ mod tests {
             namespace_sep: Some(std::borrow::Cow::Borrowed("\\")),
             sigils: std::borrow::Cow::Borrowed(&['$']),
             class_spelling: ClassSpelling::UseMap,
+            member_sep: Some(std::borrow::Cow::Borrowed("::")),
         };
         assert_eq!(super::split_qualified("App\\Models\\User", &php), (Some("App\\Models"), "User"));
         assert_eq!(super::name_match_key("App\\Models\\User", &php), "User");
