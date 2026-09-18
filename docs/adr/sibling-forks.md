@@ -114,7 +114,7 @@ fails; answer out of the walk loop → the second fails).
 > A worked one, because the fork was invisible until the two walks were
 > read side by side: `implementations_of` gathered descendants PLUS the
 > co-ancestors those descendants reach going back up their own MRO,
-> while `method_override_family` gathered descendants only. Nothing
+> while `member_override_family` gathered descendants only. Nothing
 > declared them siblings — they were written for different verbs. But a
 > role that CALLS `$self->m` and the sibling role that DEFINES it are
 > joined only through their shared composer, down one edge and back up
@@ -123,7 +123,7 @@ fails; answer out of the walk loop → the second fails).
 > cursor where `--implementations` answered fine.
 >
 > Collapsed to `dispatch_participants`: one gather, `implementations_of`
-> subtracts its own contract line, `method_override_family` unions the
+> subtracts its own contract line, `member_override_family` unions the
 > root. The residual claim is that the two verbs differ only by those
 > post-filters — which is the shape the leg-2 weakening in class 1 makes
 > explicit from the other side.

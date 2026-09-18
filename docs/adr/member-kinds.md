@@ -66,6 +66,13 @@ construction, since its class content admits only `Variable | Field |
 Enumerator` and a `has` accessor's `HashKeyDef` never reached the callable
 arm.
 
+The MRO walk narrows on the same rule: `resolve_member_in_ancestors` takes
+the family the asking ref NAMES, and per class a declaration of that family
+answers while one the family merely admits is held as the fallback the walk
+returns only when nothing else does. Without it the answer was declaration
+order — a property declared above its same-named method swallowed every
+call to it.
+
 ### Perl accesses that are semantically value reads
 
 A Perl `$o->name` with no arguments is often a value read in intent (a
