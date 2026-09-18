@@ -38,11 +38,7 @@ pub fn pack_completion(
             analysis,
             path,
             base_idx,
-            if crate::build::language_driver::LanguageRegistry::is_pack_language(language) {
-                crate::model::file_analysis::PackVisibility::IncludePaths
-            } else {
-                crate::model::file_analysis::PackVisibility::Host
-            },
+            crate::build::language_driver::LanguageRegistry::pack_visibility(language),
         ),
     );
     let xidx: &dyn crate::model::file_analysis::CrossFileLookup = &scoped;
@@ -53,6 +49,29 @@ pub fn pack_completion(
     // projects it onto LSP items.
     let crate::lsp::cursor_slot::DetectedSlot { slot, .. } =
         crate::lsp::cursor_slot::detect_slot(analysis, tree, source, point, language, Some(xidx));
+    // A string on a rail: the rail's declared names — this file's own and
+    // every registered file's (the owner-tagged handler records) — filtered
+    // by the typed prefix, each item's edit replacing the whole string
+    // content (a client's word boundary never spans `.` / `-` / `/`).
+    if let crate::lsp::cursor_slot::Slot::RailName { rail, prefix, content } = &slot {
+        let cs = crate::index::resolve::resolve(
+            files,
+            analysis,
+            crate::index::file_store::FileKey::Path(
+                path.map(|p| p.to_path_buf()).unwrap_or_default(),
+            ),
+            point,
+            Some(base_idx),
+            crate::index::resolve::OverrideScope::default(),
+        );
+        let mut items: Vec<CompletionItem> = cs
+            .complete_rail_names(rail, prefix)
+            .into_iter()
+            .map(symbols::candidate_to_completion_item)
+            .collect();
+        symbols::retarget_items_to_span(&mut items, *content);
+        return (items, false);
+    }
     if let crate::lsp::cursor_slot::Slot::Member { receiver, .. } = &slot {
         if let Some(class) =
             receiver.receiver_type.as_ref().and_then(|ty| ty.class_name().map(|s| s.to_string()))
@@ -62,10 +81,34 @@ pub fn pack_completion(
             // a different operator than was typed. The diagnostic
             // path (Mode B) is the universal fallback.
             if let Some(items) = symbols::member_completion_for_class(
-                analysis, &class, xidx, receiver.op_fix.clone(), point,
+                analysis, &class, xidx, receiver.op_fix.clone(), point, receiver.scoped,
             ) {
                 return (items, false);
             }
+            // Typed receiver, gather declined. The deliberate fall-through
+            // below serves a class the analysis KNOWS (cpp's
+            // self-access-sees-private gold case — the class is local).
+            // A class nothing declares anywhere (a vendor type with no
+            // vendor/ present — guzzle's PromiseInterface, round 3) has
+            // no honest members to offer, and the identifier universe
+            // after `->` is noise wearing confidence: answer EMPTY.
+            let class_known = !analysis.symbols_named(&class).is_empty()
+                || !xidx.def_candidates(&class).is_empty();
+            if !class_known {
+                return (Vec::new(), true);
+            }
+        }
+        // An UNTYPEABLE receiver's member slot answers EMPTY, never the
+        // file-scope identifier universe: after `->`/`.` only the
+        // receiver's members are valid, and ~200 unrelated locals is noise
+        // wearing confidence (measured on guzzle/laravel, round 1).
+        // `isIncomplete` so the client re-asks as typing narrows the
+        // receiver. A TYPED receiver whose member gather declined falls
+        // through on purpose — the self-access-sees-private cpp path is
+        // served by the in-scope fallback (gold:
+        // cpp-completion-access-specifier-self-access-sees-private).
+        if receiver.receiver_type.is_none() {
+            return (Vec::new(), true);
         }
     }
     // `fmtx::|` — a qualified path completes to the OWNER's members
@@ -177,7 +220,9 @@ fn closure_symbol_completion(
     module_index: &ModuleIndex,
     items: &mut Vec<CompletionItem>,
 ) -> bool {
-    if analysis.pack.include_closure.is_empty() {
+    if analysis.pack.include_closure.is_empty()
+        && !crate::build::language_driver::LanguageRegistry::imports_bind_names(language)
+    {
         return false;
     }
     let cursor = crate::build::cursor_sentinel::point_to_byte(source, point);
@@ -204,6 +249,12 @@ fn closure_symbol_completion(
         crate::util::timings::phase("completion.closure_symbols", || cs.complete(prefix, false));
     for c in candidates {
         if seen.contains(&c.label) {
+            continue;
+        }
+        // an auto-import candidate carries its edit; the closure universe
+        // keeps its trailing sort
+        if !c.additional_edits.is_empty() {
+            items.push(symbols::candidate_to_completion_item(c));
             continue;
         }
         items.push(CompletionItem {

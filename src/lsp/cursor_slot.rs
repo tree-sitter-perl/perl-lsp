@@ -36,6 +36,9 @@ pub struct ReceiverCtx {
     pub receiver_type: Option<InferredType>,
     pub receiver_text: Option<String>,
     pub op_fix: Option<(Span, String)>,
+    /// `Foo::|` / `self::|` — a scoped access completes the class's
+    /// constants and static members; `->`/`.` completes the instance ones.
+    pub scoped: bool,
 }
 
 /// The owner of a `Slot::Key` — `$h->{|`'s hash, resolved by type when
@@ -101,6 +104,12 @@ pub enum Slot {
         index: usize,
         expected: Option<InferredType>,
     },
+    /// `route('ho|')` / `@include('|')` — a string that IS (or, with the
+    /// cursor's position spelled into it, would be) a use on the string
+    /// rail `rail`: the rail's declared names complete here. `content` is
+    /// the string content's span, the replace range an item's edit
+    /// targets (a client's word boundary never spans `.` / `-` / `/`).
+    RailName { rail: String, prefix: String, content: Span },
 }
 
 /// Which detector arm produced a `Slot` — the generic "which detector
@@ -122,6 +131,8 @@ pub enum DetectorArm {
     QualifiedPath,
     DomainCompare,
     CallArg,
+    /// A string on a rail (`route('|')`) — the pack sentinel's rail arm.
+    RailString,
     General,
 }
 
@@ -220,6 +231,16 @@ pub fn detect_slot(
         return bare_identifier();
     };
     let mut parser = driver.make_parser();
+    // A string on a rail first: inside a string no member / qualifier
+    // arm applies, and the rail's names are the only honest answer.
+    if let Some(ctx) = crate::build::cursor_sentinel::rail_string_ctx(
+        &mut parser, &lang_pack, source, tree, cursor, analysis,
+    ) {
+        return DetectedSlot {
+            slot: Slot::RailName { rail: ctx.rail, prefix: ctx.prefix, content: ctx.content },
+            arm: DetectorArm::RailString,
+        };
+    }
     if let Some(ctx) = crate::build::cursor_sentinel::member_completion_ctx_incremental(
         &mut parser, &lang_pack, source, tree, cursor, analysis, module_index,
     ) {
@@ -229,6 +250,7 @@ pub fn detect_slot(
                     receiver_type: ctx.receiver_type,
                     receiver_text: None,
                     op_fix: ctx.op_fix,
+                    scoped: ctx.scoped,
                 },
                 op: ctx.op,
             },
@@ -291,6 +313,7 @@ fn slot_from_cursor_context(ctx: CursorContext) -> DetectedSlot {
                     receiver_type: invocant_type,
                     receiver_text: Some(invocant_text),
                     op_fix: None,
+                    scoped: false,
                 },
                 op: MemberOp::Arrow, // Perl method dispatch is always `->`
             },

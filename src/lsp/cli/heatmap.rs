@@ -22,14 +22,65 @@ fn heatmap_symbol_eligible(sym: &file_analysis::Symbol) -> bool {
         )
 }
 
+/// Is this declaration a pack constructor whose CLASS is referenced
+/// somewhere — a type hint, a `Foo::class`, a `use` row — while nothing
+/// `new`s it? A container or a factory instantiates it, so the constructor
+/// is reachable.
+///
+/// The answer is the CLASS's own `references()` projection, minted at its
+/// declaration exactly like every other count in this report (the ADR's
+/// identity invariant). An earlier row-store oracle read the same question
+/// off `PruneIndex`, which is absent under `PERL_LSP_REF_ROWS=0`, under
+/// `--include-deps`, and on a cold cache — so the shield vanished in the
+/// runs that most want it, and the pre-prune stopped being answer-preserving.
+/// Reached only from the guard chain, i.e. only for a zero-fan-in symbol.
+fn class_is_referenced(
+    ws: &file_store::FileStore,
+    routing_idx: &dyn file_analysis::CrossFileLookup,
+    path: &std::path::Path,
+    analysis: &file_analysis::FileAnalysis,
+    sym: &file_analysis::Symbol,
+    visibility: Option<resolve::RoleMask>,
+    scope: resolve::OverrideScope,
+) -> bool {
+    use file_analysis::{AccessKind, SymKind};
+    if !sym.is_constructor() {
+        return false;
+    }
+    let Some(class) = sym.package.as_deref() else { return false };
+    let key = file_analysis::name_match_key(class, analysis.names());
+    let Some(decl) = analysis.symbols().iter().find(|s| {
+        matches!(s.kind, SymKind::Class | SymKind::Package | SymKind::Module)
+            && file_analysis::name_match_key(&s.name, analysis.names()) == key
+    }) else {
+        return false;
+    };
+    let mut cs = resolve::resolve(
+        ws,
+        analysis,
+        file_store::FileKey::Path(path.to_path_buf()),
+        decl.selection_span.start,
+        Some(routing_idx),
+        scope,
+    );
+    if let Some(mask) = visibility {
+        cs = cs.with_visibility(mask);
+    }
+    cs.references().iter().any(|l| {
+        l.access != AccessKind::Declaration
+            && !(l.span == decl.selection_span
+                && matches!(&l.key, file_store::FileKey::Path(p) if p == path))
+    })
+}
+
 /// One heatmap row for one symbol — the shared body every gather loop
 /// calls, so fan-in counts come from the SAME `references()` projection by
 /// construction (no second ref walk). Tier-specific behavior arrives as
 /// data, never a family flag: `visibility` is the mask override to apply
 /// (`None` when the set's construction-derived routing already widens to
 /// VISIBLE — pack workspace files ride the DEPENDENCY role, a storage
-/// artifact of the per-language cache), and the entry-point guard reads the
-/// analysis language's declared `entrypoint_symbols`.
+/// artifact of the per-language cache), and the entry guard reads the
+/// analysis language's declared entry documents.
 /// Returns `(row, is_callable, dead, dead_export)`.
 ///
 /// `forced_fan_in` is the relational pre-prune verdict: `Some(0)` means the
@@ -142,10 +193,40 @@ fn heatmap_symbol_row(
         None
     } else if exported {
         Some("exported")
-    } else if conventions::is_constructor_name(&sym.name) {
-        Some("constructor")
-    } else if !native {
+    } else if class_is_referenced(ws, routing_idx, path, analysis, sym, visibility, scope) {
+        // A constructor whose CLASS is named somewhere (a type hint,
+        // `Foo::class`, a `use` row) with no construction site of its own: a
+        // container or a factory instantiates it. Over-approximates
+        // reachability on the sound side, like every guard here. One rule
+        // for every language — a constructor whose class nothing names is a
+        // candidate whatever spells it.
+        Some("class-referenced")
+    } else if !native || sym.flags.contains(file_analysis::SymbolFlags::SYNTHESIZED) {
+        // Not user-written: a plugin minted it (Moo accessors, routes, DBIC
+        // rels) or the LANGUAGE gives it (an enum's `->value`). Either way
+        // the caller is machinery the static graph does not model, and no
+        // source edit could reference it into existence.
         Some("framework-synthesized")
+    } else if matches!(sym.kind, SymKind::Sub | SymKind::Method)
+        && framework_entry_claims(analysis, sym, routing_idx)
+    {
+        // A declared entry rule (`entry.json` — bundled per pack + plugin
+        // dirs) claims the symbol: something outside the source graph
+        // invokes it. One lane for every flavour of that — the C ABI
+        // entering `main`, the php engine calling `__toString`, PHPUnit
+        // running `test*` in a TestCase descendant, a queued job's
+        // `handle`. The rules are DATA; the evaluator never compares names
+        // or families itself.
+        Some("framework-entry")
+    } else if analysis.rail_handler_twin(sym).is_some() {
+        // A path rail's handler stands ON this declaration (a policy method
+        // IS an ability, `docs/adr/laravel-rails.md`), and the rail's
+        // dispatch sites name the handler, never the method — so no call
+        // site is the expected state. The relation is the fact the mint
+        // recorded; nothing here asks which rail.
+        Some("rail-handler")
+    } else if matches!(sym.kind, SymKind::Package | SymKind::Class | SymKind::Module) {
+        Some("package-implicit-use")
     } else if has_dynamic_dispatch
         && matches!(sym.kind, SymKind::Sub | SymKind::Method)
         && sym.package.as_deref().is_some_and(|p| p != "main")
@@ -186,6 +267,56 @@ fn heatmap_symbol_row(
         "reachable_guard": guard,
     });
     (row, is_callable, dead, dead_export)
+}
+
+/// Does a declared framework-entry rule (`EntryMarker`) claim this symbol?
+/// A rule matches when EVERY present condition holds — annotation names
+/// against `Symbol.attributes`, method name/prefix, and the isa gate
+/// through the ancestry walk; rules OR across the set. A rule with no
+/// positive condition matches nothing.
+///
+/// The isa gate is keyed on the class LEAF, not on the identity a class
+/// carries everywhere else (`App\Models\User`, docs/prompt-class-identity.md).
+/// `"when_isa": "TestCase"` therefore claims a `TestCase` in ANY namespace.
+/// The widening is deliberate here and nowhere else: this gate only decides
+/// whether a symbol is kept OFF the dead-code queue, where a false claim
+/// costs a missed candidate and a missed claim costs a wrong accusation.
+/// A document that wants the identity writes the FQN and the leaf match
+/// still holds; there is no spelling that NARROWS to one namespace, which
+/// is what a rule needing that would have to say. See
+/// `docs/adr/heatmap.md` §Identity invariant.
+pub(crate) fn framework_entry_claims(
+    analysis: &file_analysis::FileAnalysis,
+    sym: &file_analysis::Symbol,
+    idx: &dyn file_analysis::CrossFileLookup,
+) -> bool {
+    let Some(pack) = crate::build::language_driver::LanguageRegistry::with_enabled()
+        .for_id(&analysis.language)
+        .and_then(|d| d.lang_pack())
+    else {
+        return false;
+    };
+    let markers = crate::build::query_extract::entry_markers_for(&pack);
+    markers.iter().any(|m| {
+        let has_positive =
+            !m.attributes.is_empty() || m.method_prefix.is_some() || !m.methods.is_empty();
+        if !has_positive {
+            return false;
+        }
+        let attr_ok = m.attributes.is_empty()
+            || m.attributes.iter().any(|a| sym.attributes.iter().any(|sa| sa == a));
+        let name_gated = m.method_prefix.is_some() || !m.methods.is_empty();
+        let name_ok = !name_gated
+            || m.method_prefix.as_deref().is_some_and(|p| sym.name.starts_with(p))
+            || m.methods.iter().any(|n| n == &sym.name);
+        let isa_ok = m.when_isa.is_empty()
+            || m.when_isa.iter().any(|base| {
+                sym.package
+                    .as_deref()
+                    .is_some_and(|cls| analysis.class_isa_leaf(cls, base, Some(idx)))
+            });
+        attr_ok && name_ok && isa_ok
+    })
 }
 
 /// --refs-parity <root> — the relational-ref-index migration net
@@ -462,8 +593,9 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
         std::path::PathBuf,
         std::sync::Arc<file_analysis::FileAnalysis>,
         std::sync::Arc<module_index::ModuleIndex>,
+        String,
     )> = Vec::new();
-    idx.for_each_pack_index(|_lang, pack| {
+    idx.for_each_pack_index(|lang, pack| {
         pack.for_each_registered_file(&mut |cached| {
             // Index copies are refs-evicted; fan-out scans + set minting read
             // refs, so take the refs-present view (resident when not evicted,
@@ -472,6 +604,7 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
                 cached.path.clone(),
                 file_analysis::CrossFileLookup::whole_present(pack.as_ref(), cached),
                 std::sync::Arc::clone(pack),
+                lang.to_string(),
             ));
         });
     });
@@ -485,7 +618,7 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
     for entry in ws.workspace_raw().iter() {
         dynamic_dispatch_sites += entry.value().dynamic_dispatch_sites as u64;
     }
-    for (_p, analysis, _pack) in &pack_entries {
+    for (_p, analysis, _pack, _lang) in &pack_entries {
         dynamic_dispatch_sites += analysis.dynamic_dispatch_sites as u64;
     }
     let has_dynamic_dispatch = dynamic_dispatch_sites > 0;
@@ -569,6 +702,39 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
         None
     };
 
+    // The pack tiers carry the same row store in their own sub-index (the
+    // pack persist writer shreds every analysis it commits), so each gets
+    // the same pre-prune — computed once per LANGUAGE, which is what a
+    // sub-index serves, and gated on full coverage of that tier's entries
+    // exactly like the hub's.
+    let mut pack_prunes: Vec<(&str, Option<PruneIndex>)> = Vec::new();
+    if rows_env_on && !include_deps {
+        for (_, _, pack, lang) in &pack_entries {
+            let key = lang.as_str();
+            if pack_prunes.iter().any(|(k, _)| *k == key) {
+                continue;
+            }
+            let prune = match (pack.ref_prune_index(), pack.unused_exported_syms()) {
+                (Some((referenced_names, shredded)), Some(dead)) => {
+                    let covered = pack_entries
+                        .iter()
+                        .filter(|(_, _, _, l)| l == lang)
+                        .all(|(p, _, _, _)| shredded.contains(p.to_string_lossy().as_ref()));
+                    covered.then(|| {
+                        (
+                            referenced_names,
+                            dead.into_iter()
+                                .map(|d| (d.path, d.name, d.start_row, d.start_col))
+                                .collect(),
+                        )
+                    })
+                }
+                _ => None,
+            };
+            pack_prunes.push((key, prune));
+        }
+    }
+
     // One walk per declaration over a frozen index: memoize the relational
     // retrieval for the sweep (same-named declarations share their
     // candidate set; the shredded-path set is fetched once, not per walk),
@@ -603,14 +769,18 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
     }
     // Pack languages route through their own sub-index (VISIBLE-wide —
     // pack workspace files ride the DEPENDENCY role); the set derives that
-    // from the origin's stamped language, so no visibility override — and
-    // no pre-prune: their refs aren't in the hub's row store.
-    for (path, analysis, pack) in &pack_entries {
+    // from the origin's stamped language, so no visibility override. The
+    // pre-prune is the sub-index's own.
+    for (path, analysis, pack, lang) in &pack_entries {
+        let prune = pack_prunes
+            .iter()
+            .find(|(k, _)| k == lang)
+            .and_then(|(_, p)| p.as_ref());
         for sym in analysis.symbols() {
             if sym.hidden_in_outline() || !heatmap_symbol_eligible(sym) {
                 continue;
             }
-            items.push(HeatmapItem { routing: pack.as_ref(), path, analysis, sym, prune: None, visibility: None });
+            items.push(HeatmapItem { routing: pack.as_ref(), path, analysis, sym, prune, visibility: None });
         }
     }
 

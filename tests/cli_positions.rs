@@ -360,3 +360,29 @@ fn positional_definition_renders_engine_coordinates() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `--plugin-check` lints a document against ANY served language, pack or
+/// not. Perl's native builder owns its documents, so the driver declares no
+/// pack — the compile gate and the payload findings still hold, and only
+/// the served-vocabulary comparison (which needs a pack to name the
+/// vocabulary) says it is skipped instead of calling every capture unknown.
+#[test]
+fn plugin_check_lints_a_document_of_a_pack_less_language() {
+    for doc in ["queries/perl/skeleton.scm", "queries/perl/flow.scm"] {
+        let out = Command::new(BIN)
+            .args(["--plugin-check", doc, "--format", "json"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("run --plugin-check");
+        assert!(out.status.success(), "{doc}: {}", String::from_utf8_lossy(&out.stderr));
+        let v: serde_json::Value =
+            serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{doc}: {e}"));
+        assert_eq!(v["language"], "perl", "{doc}");
+        assert_eq!(v["ok"], true, "{doc}: {v}");
+        assert!(v["patterns"].as_u64().unwrap_or(0) > 0, "{doc}: {v}");
+        assert_eq!(
+            v["vocabulary_checked"], false,
+            "{doc}: a language with no pack names no served vocabulary"
+        );
+    }
+}

@@ -133,7 +133,7 @@ pub fn pack_use_after_move_diagnostics(analysis: &FileAnalysis) -> Vec<Diagnosti
         .map(|(name, span)| Diagnostic {
             range: span_to_range(span),
             severity: Some(DiagnosticSeverity::WARNING),
-            code: Some(NumberOrString::String("use-after-move".into())),
+            code: Some(NumberOrString::String(super::diagnostics::codes::USE_AFTER_MOVE.into())),
             source: Some("perl-lsp".into()),
             message: format!("use of `{name}` after `std::move` (moved-from state)"),
             ..Default::default()
@@ -143,9 +143,14 @@ pub fn pack_use_after_move_diagnostics(analysis: &FileAnalysis) -> Vec<Diagnosti
 
 /// Every pack-language (non-Perl) diagnostic for an analysis, concatenated.
 /// One seam so a backend dispatch never enumerates the individual checks.
-pub fn pack_diagnostics(analysis: &FileAnalysis, options: DiagnosticOptions) -> Vec<Diagnostic> {
+pub fn pack_diagnostics(
+    analysis: &FileAnalysis,
+    lookup: Option<&dyn crate::model::file_analysis::CrossFileLookup>,
+    options: DiagnosticOptions,
+) -> Vec<Diagnostic> {
     let mut diags = pack_member_op_diagnostics(analysis);
     diags.extend(pack_member_op_peel_diagnostics(analysis));
+    diags.extend(super::diagnostics::pack_symbol_diagnostics(analysis, lookup));
     // use-after-move is OPT-IN (`DiagnosticOptions.use_after_move`): the wired
     // check is the decidable subset only — gates B/C/E on `use_after_move_reads`
     // keep it to straight-line, in-function, local moves, verified to emit ZERO
@@ -161,11 +166,26 @@ pub fn pack_diagnostics(analysis: &FileAnalysis, options: DiagnosticOptions) -> 
 pub fn code_actions(
     diagnostics: &[Diagnostic],
     analysis: &FileAnalysis,
+    text: &str,
     uri: &Url,
 ) -> Vec<CodeActionOrCommand> {
     let mut actions = Vec::new();
 
     for diag in diagnostics {
+        // A missing return type: the inferred spelling after the parameter list.
+        if matches!(&diag.code, Some(NumberOrString::String(s)) if s == "missing-return-type") {
+            if let Some(action) = make_return_type_action(analysis, uri, diag) {
+                actions.push(action);
+            }
+            continue;
+        }
+        // Unimplemented contracts: one edit declaring every missing method.
+        if matches!(&diag.code, Some(NumberOrString::String(s)) if s == "unimplemented-method") {
+            if let Some(action) = make_implement_contracts_action(analysis, text, uri, diag) {
+                actions.push(action);
+            }
+            continue;
+        }
         // Member-access operator swap: replace the operator token (the
         // diagnostic's range) with the correct one (`data.operator`).
         if matches!(&diag.code, Some(NumberOrString::String(s)) if s == MEMBER_OP_CODE) {
@@ -191,6 +211,19 @@ pub fn code_actions(
             continue;
         }
 
+        // An undefined type the workspace declares elsewhere: one import per
+        // declaring namespace, in the pack's own import syntax.
+        if matches!(&diag.code, Some(NumberOrString::String(s)) if s == "undefined-type") {
+            actions.extend(make_import_type_actions(analysis, uri, diag));
+            continue;
+        }
+        // An unused import whose row binds only that name: delete the row.
+        if matches!(&diag.code, Some(NumberOrString::String(s)) if s == "unused-import") {
+            if let Some(action) = make_remove_import_action(uri, diag) {
+                actions.push(action);
+            }
+            continue;
+        }
         let code_matches = matches!(
             &diag.code,
             Some(NumberOrString::String(s)) if s == "unresolved-function"
@@ -267,6 +300,59 @@ pub fn code_actions(
     actions
 }
 
+/// Delete the whole import row the diagnostic names (`data.row` = its
+/// first and last line), newline included.
+fn make_remove_import_action(uri: &Url, diag: &Diagnostic) -> Option<CodeActionOrCommand> {
+    let row = diag.data.as_ref()?.get("row")?.as_array()?;
+    let (first, last) = (row.first()?.as_u64()? as u32, row.get(1)?.as_u64()? as u32);
+    let edit = TextEdit {
+        range: Range {
+            start: Position { line: first, character: 0 },
+            end: Position { line: last + 1, character: 0 },
+        },
+        new_text: String::new(),
+    };
+    let mut changes = HashMap::new();
+    changes.insert(uri.clone(), vec![edit]);
+    Some(CodeActionOrCommand::CodeAction(CodeAction {
+        title: "Remove unused import".to_string(),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diag.clone()]),
+        edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+        is_preferred: Some(true),
+        ..Default::default()
+    }))
+}
+
+/// `Add 'use Ns\Leaf;'` for each candidate the diagnostic carries, inserted
+/// after the last import row above the site, else after the namespace
+/// declaration above it (a blank line between), else after the first line.
+fn make_import_type_actions(analysis: &FileAnalysis, uri: &Url, diag: &Diagnostic) -> Vec<CodeActionOrCommand> {
+    let Some(candidates) = diag.data.as_ref().and_then(|d| d.get("candidates")).and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let point = position_to_point(diag.range.start);
+    candidates
+        .iter()
+        .filter_map(|c| c.as_str())
+        .filter_map(|fq| analysis.import_edit_for(fq, point.row).map(|e| (fq, e)))
+        .enumerate()
+        .map(|(i, (_fq, (at, text)))| {
+            let pos = point_to_position(at);
+            let mut changes = HashMap::new();
+            changes.insert(uri.clone(), vec![TextEdit { range: Range { start: pos, end: pos }, new_text: text.clone() }]);
+            CodeActionOrCommand::CodeAction(CodeAction {
+                title: format!("Add '{}'", text.trim()),
+                kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: Some(vec![diag.clone()]),
+                edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+                is_preferred: Some(i == 0 && candidates.len() == 1),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
 /// D2 quick-fix: insert `return unless defined $r;` on its own line just
 /// before the flagged dereference. Indented to the receiver's column (the
 /// diagnostic range start), which is exact for a statement-leading deref and
@@ -330,3 +416,135 @@ fn make_add_to_qw_action(
         ..Default::default()
     }))
 }
+
+/// "Implement missing methods": one stub per unfulfilled contract, the
+/// declarator copied from the contract's own declaration (its types kept —
+/// a return type must stay covariant, so it is never dropped) under the
+/// pack's `contract_stub` template, inserted before the class body's
+/// closing brace.
+fn make_implement_contracts_action(
+    analysis: &FileAnalysis,
+    text: &str,
+    uri: &Url,
+    diag: &Diagnostic,
+) -> Option<CodeActionOrCommand> {
+    let template = analysis.spellings().contract_stub;
+    if template.is_empty() {
+        return None;
+    }
+    let data = diag.data.as_ref()?;
+    let class = data.get("class")?.as_str()?;
+    let contracts = data.get("contracts")?.as_array()?;
+    // The class symbol's span ends just past the body's closing brace.
+    let end = analysis
+        .symbols()
+        .iter()
+        .find(|s| s.kind == FaSymKind::Class && s.name == class)?
+        .span
+        .end;
+    let brace = Position { line: end.row as u32, character: end.column.saturating_sub(1) as u32 };
+    let mut stubs = Vec::new();
+    for c in contracts {
+        let role = c.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        let name = c.get("name").and_then(|v| v.as_str())?;
+        let sig = match c.get("sig").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => {
+                let sym = analysis.symbols().iter().find(|s| {
+                    matches!(s.kind, FaSymKind::Sub | FaSymKind::Method)
+                        && s.name == name
+                        && s.package.as_deref() == Some(role)
+                })?;
+                declarator_text(text, sym)?
+            }
+        };
+        let body = template.replace("{}", &sig);
+        stubs.push(
+            body.lines()
+                .map(|l| if l.is_empty() { String::new() } else { format!("    {l}") })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    let lead = if brace.character > 0 { "\n" } else { "" };
+    let new_text = format!("{lead}{}\n", stubs.join("\n\n"));
+    let mut changes = HashMap::new();
+    changes.insert(uri.clone(), vec![TextEdit { range: Range { start: brace, end: brace }, new_text }]);
+    Some(CodeActionOrCommand::CodeAction(CodeAction {
+        title: if contracts.len() == 1 {
+            "Implement missing method".to_string()
+        } else {
+            format!("Implement {} missing methods", contracts.len())
+        },
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diag.clone()]),
+        edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+        is_preferred: Some(true),
+        ..Default::default()
+    }))
+}
+
+/// A callable's declarator as written — from its name token to the end of
+/// its declaration, minus the terminator, whitespace collapsed.
+pub fn declarator_text(src: &str, sym: &crate::model::file_analysis::Symbol) -> Option<String> {
+    let start = crate::build::cursor_sentinel::point_to_byte(src, sym.selection_span.start);
+    let end = crate::build::cursor_sentinel::point_to_byte(src, sym.span.end);
+    let raw = src.get(start..end)?;
+    let t = raw.trim_end().trim_end_matches(';').trim_end();
+    if t.is_empty() {
+        return None;
+    }
+    Some(t.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// "Add return type": the pack's return-annotation template with the
+/// diagnostic's spelling, inserted right after the parameter list the
+/// callable declares — the list's own span, never a re-balanced scan for
+/// its closing parenthesis.
+fn make_return_type_action(
+    analysis: &FileAnalysis,
+    uri: &Url,
+    diag: &Diagnostic,
+) -> Option<CodeActionOrCommand> {
+    let template = analysis.spellings().return_annotation_template;
+    if template.is_empty() {
+        return None;
+    }
+    let spelling = diag.data.as_ref()?.get("spelling")?.as_str()?;
+    let sym = analysis.symbol_at(position_to_point(diag.range.start))?;
+    let at = point_to_position(param_list_end(analysis, sym)?);
+    let mut changes = HashMap::new();
+    changes.insert(uri.clone(), vec![TextEdit { range: Range { start: at, end: at }, new_text: template.replace("{}", spelling) }]);
+    Some(CodeActionOrCommand::CodeAction(CodeAction {
+        title: format!("Add return type `{}`", template.replace("{}", spelling).trim()),
+        kind: Some(CodeActionKind::QUICKFIX),
+        diagnostics: Some(vec![diag.clone()]),
+        edit: Some(WorkspaceEdit { changes: Some(changes), ..Default::default() }),
+        is_preferred: Some(true),
+        ..Default::default()
+    }))
+}
+
+/// Where `sym`'s parameter list ends — just past its closing parenthesis,
+/// which is where a return annotation goes. The callable names its own
+/// list: the parameter region holding its parameters' binding sites, and
+/// for one that declares none, the first region after its name token.
+fn param_list_end(
+    analysis: &FileAnalysis,
+    sym: &crate::model::file_analysis::Symbol,
+) -> Option<Point> {
+    let last_bind = match &sym.detail {
+        SymbolDetail::Sub { params, .. } => params.iter().rev().find_map(|p| p.binding_site),
+        _ => None,
+    };
+    let mine = analysis.pack.param_regions.iter().filter(|r| {
+        sym.span.contains(r)
+            && (r.start.row, r.start.column)
+                >= (sym.selection_span.end.row, sym.selection_span.end.column)
+    });
+    mine.clone()
+        .find(|r| last_bind.is_some_and(|b| r.contains(&Span { start: b, end: b })))
+        .or_else(|| mine.min_by_key(|r| (r.start.row, r.start.column)))
+        .map(|r| r.end)
+}
+

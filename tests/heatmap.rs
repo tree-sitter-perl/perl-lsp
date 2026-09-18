@@ -328,7 +328,7 @@ fn cpp_fan_in_entry_point_and_dead_code() {
     // shielded, never flagged dead.
     let main = sym(&report, "main");
     assert_eq!(main["fan_in"].as_u64(), Some(0));
-    assert_eq!(main["reachable_guard"].as_str(), Some("entry-point"));
+    assert_eq!(main["reachable_guard"].as_str(), Some("framework-entry"));
     assert_eq!(main["dead_code_candidate"].as_bool(), Some(false));
 
     // `main` calls `add` — fan-out is intra-body distinct callees.

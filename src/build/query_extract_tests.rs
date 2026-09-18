@@ -1667,6 +1667,34 @@ void f() {
 }
 
 #[test]
+fn cpp_uam_toggle_gates_pack_diagnostics() {
+    // The diagnostic is opt-in: `pack_diagnostics` emits it only when the toggle
+    // is set, and never for the default (off) options.
+    let src = "\
+void f() {
+  Widget x;
+  sink(std::move(x));
+  x.use();
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    let off = crate::lsp::symbols::pack_diagnostics(&fa, None, crate::lsp::symbols::DiagnosticOptions::default());
+    assert!(
+        !off.iter().any(|d| matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(s)) if s == "use-after-move")),
+        "off by default: {off:?}",
+    );
+    let on = crate::lsp::symbols::pack_diagnostics(
+        &fa,
+        None,
+        crate::lsp::symbols::DiagnosticOptions { use_after_move: true, ..Default::default() },
+    );
+    assert!(
+        on.iter().any(|d| matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(s)) if s == "use-after-move")),
+        "on when toggled: {on:?}",
+    );
+}
+
+#[test]
 fn cpp_dynamic_cast_guard_narrows() {
     // `if (dynamic_cast<Derived*>(b))` refines b to Derived inside the block —
     // the cpp analog of python's `isinstance`, on the same guard patterns.
@@ -2549,7 +2577,7 @@ typedef union {
     assert_eq!(overlay.len(), 1);
     assert!(overlay[0].starts_with("op_pmtargetgv"), "{overlay:?}");
     // completion: real members offered flat on pm; the synthetic container never
-    let cands = fa.complete_members_for_class("pm", None, None);
+    let cands = fa.complete_members_for_class("pm", None, None, crate::model::file_analysis::MemberAccess::Instance);
     let labels: Vec<&str> = cands.iter().map(|c| c.label.as_str()).collect();
     for want in ["op_first", "op_pmreplroot", "op_pmtargetgv", "u2a", "named_u"] {
         assert!(labels.contains(&want), "{want} missing from {labels:?}");

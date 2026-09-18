@@ -1,22 +1,9 @@
 //! Diagnostics: unresolved names, the narrowing family, `DiagnosticOptions`.
 
 use super::*;
+use crate::model::file_analysis::{Finding, FindingData, LaneFacts};
 
-/// Every diagnostic code this adapter mints, spelled ONCE. Metrics key on
-/// these strings (per-file yield counts in the ghost lane), so a literal at a
-/// mint site is a typo away from a silently separate metric bucket — the
-/// wide-table drift failure in string form.
-pub mod codes {
-    pub const UNRESOLVED_FUNCTION: &str = "unresolved-function";
-    pub const UNRESOLVED_METHOD: &str = "unresolved-method";
-    pub const UNDEF_DEREF: &str = "undef-deref";
-    pub const OPTIONAL_DEREF: &str = "optional-deref";
-    pub const DEREF_SHAPE_MISMATCH: &str = "deref-shape-mismatch";
-    pub const ROLE_REQUIRES_UNFULFILLED: &str = "role-requires-unfulfilled";
-    pub const HELPER_NOT_LOADED: &str = "helper-not-loaded";
-    pub const UNRESOLVED_DISPATCH: &str = "unresolved-dispatch";
-    pub const UNKNOWN_HASH_KEY: &str = "unknown-hash-key";
-}
+pub use crate::model::file_analysis::codes;
 
 // ---- Diagnostics ----
 
@@ -73,6 +60,13 @@ pub struct DiagnosticOptions {
     /// guaranteed runtime die. Guard-narrowed reps only; objects are never a
     /// mismatch. Off by default.
     pub deref_shape: bool,
+    /// Silence `doc-type-mismatch` (HINT): a docblock whose type no value can
+    /// share with the declared one on the same slot. On by default — the pair
+    /// is minted at the merge that already chose the declaration, so the lane
+    /// costs a list walk and reports only what the extractor could prove. The
+    /// inverse polarity of the other keys because a hint that needs opting in
+    /// is a hint nobody reads.
+    pub no_doc_type_mismatch: bool,
 }
 
 impl DiagnosticOptions {
@@ -89,6 +83,7 @@ impl DiagnosticOptions {
             optional_deref: has("--optional-deref"),
             redundant_guard: has("--redundant-guard"),
             deref_shape: has("--deref-shape"),
+            no_doc_type_mismatch: has("--no-doc-type-mismatch"),
         }
     }
 }
@@ -118,6 +113,26 @@ pub fn collect_diagnostics(
             message: pd.message.clone(),
             ..Default::default()
         });
+    }
+
+    // A docblock that contradicts the declaration it sits on: the merge kept
+    // the declaration and recorded the pair, so this renders two spellings it
+    // does not have to go looking for.
+    if !options.no_doc_type_mismatch {
+        for d in &analysis.pack.doc_disagreements {
+            diagnostics.push(Diagnostic {
+                range: span_to_range(d.span),
+                severity: Some(DiagnosticSeverity::HINT),
+                code: Some(NumberOrString::String("doc-type-mismatch".to_string())),
+                source: Some("perl-lsp".to_string()),
+                message: format!(
+                    "The docblock says '{}' where the declaration says '{}'; the declaration wins.",
+                    analysis.render_type(&d.documented),
+                    analysis.render_type(&d.declared),
+                ),
+                ..Default::default()
+            });
+        }
     }
 
     // Snapshot each `use` once: its bound set (local→remote) and, when the
@@ -337,15 +352,11 @@ pub fn collect_diagnostics(
             .collect();
     let _g_meth = crate::util::ghost_stats::ScopedNs::start("diag.3_unresolved_method_loop");
     for r in analysis.refs() {
-        let (invocant, _invocant_span) = match &r.kind {
-            // A plugin-bridged token is plugin-resolved, not a receiver we
-            // can flag as an unresolved method — skip it.
-            RefKind::MethodCall { invocant, invocant_span, .. } => match invocant.as_name() {
-                Some(n) => (n, invocant_span),
-                None => continue,
-            },
-            _ => continue,
-        };
+        // A plugin-bridged token is plugin-resolved, not a receiver we can
+        // flag as an unresolved method — skip it.
+        if !matches!(&r.kind, RefKind::MethodCall { invocant, .. } if invocant.as_name().is_some()) {
+            continue;
+        }
         let method_name = &r.target_name;
 
         // Skip methods every class of its kind answers without declaring.
@@ -358,7 +369,7 @@ pub fn collect_diagnostics(
         // to find a method literally named "SUPER::foo" in the MRO always
         // fails. Caller-side package dispatch (`Class::method`) is intentional
         // and not our job to validate here.
-        use crate::model::conventions::{InvocantText, MethodToken};
+        use crate::model::conventions::MethodToken;
         if !matches!(MethodToken::parse(method_name), MethodToken::Bare(_)) {
             continue;
         }
@@ -366,12 +377,7 @@ pub fn collect_diagnostics(
         // Resolve invocant to class name. Diagnostics stays bag-only for
         // scalars — no enclosing-class fallback, which would manufacture
         // warnings on untyped invocants — and skips everything else.
-        let class_name = match invocant.classify() {
-            InvocantText::Bareword(b) => Some(b.to_string()),
-            InvocantText::Scalar(_) => analysis.inferred_type_via_bag(invocant, r.span.start)
-                .and_then(|ty| ty.class_name().map(|s| s.to_string())),
-            _ => None,
-        };
+        let class_name = receiver_class(analysis, r);
         let class_name = match class_name {
             Some(cn) => cn,
             None => continue,
@@ -411,10 +417,10 @@ pub fn collect_diagnostics(
             continue;
         }
 
-        // A class with `AUTOLOAD` anywhere in its MRO answers ANY method name at
-        // runtime, so the static `sub` set isn't its real surface — stay silent
-        // (the role-contracts diagnostic uses the same skip, file_analysis.rs).
-        if analysis.resolve_method_in_ancestors(&class_name, "AUTOLOAD", Some(module_index)).is_some() {
+        // A class that answers any member name at runtime (Perl's
+        // `AUTOLOAD`) has a `sub` set that is not its real surface — stay
+        // silent, exactly as the contract lane does.
+        if analysis.class_answers_any_member(&class_name, Some(module_index)) {
             continue;
         }
 
@@ -730,3 +736,328 @@ fn render_guard_message(g: &crate::model::file_analysis::GuardRedundancy) -> Str
         }
     }
 }
+
+
+/// The class a method call's receiver names, for the Perl unresolved-method
+/// lane: a bareword invocant IS the class, a scalar's class is whatever the
+/// bag typed it as at that point, and nothing else answers.
+///
+/// The lane's silence rule lives here: an untyped scalar gets no
+/// enclosing-class fallback, because manufacturing one turns every
+/// hand-rolled `$self` into a stream of warnings about methods it does
+/// have. The richer receiver ladder — declared receiver names, an
+/// expression's own `Expr` witnesses — is
+/// `FileAnalysis::method_call_invocant_class`, which the pack lanes use.
+fn receiver_class(analysis: &FileAnalysis, r: &crate::model::file_analysis::Ref) -> Option<String> {
+    use crate::model::conventions::InvocantText;
+    let RefKind::MethodCall { invocant, .. } = &r.kind else {
+        return None;
+    };
+    let invocant = invocant.as_name()?;
+    match invocant.classify() {
+        InvocantText::Bareword(b) => Some(b.to_string()),
+        InvocantText::Scalar(_) => analysis
+            .inferred_type_via_bag(invocant, r.span.start)
+            .and_then(|ty| ty.class_name().map(|s| s.to_string())),
+        _ => None,
+    }
+}
+
+
+/// The pack-language symbol lanes, rendered. Each lane is a `FileAnalysis`
+/// query answering `Vec<Finding>` (`model/file_analysis/diagnostics*.rs`);
+/// this is where the findings become `Diagnostic`s, where the language
+/// documents' declared name sets are read for them, and where the one lane
+/// that needs the resolver — the rail names — still runs.
+pub fn pack_symbol_diagnostics(
+    analysis: &FileAnalysis,
+    idx: Option<&dyn CrossFileLookup>,
+) -> Vec<Diagnostic> {
+    use crate::model::file_analysis::{HandlerOwner, IndexState, RailNames};
+    // Whether absence is meaningful is the INDEX's answer about THIS
+    // language, never a caller's claim: a store that swept nothing is
+    // warming, and the lanes that report a name missing stay silent until
+    // it says otherwise.
+    let index_settled = idx
+        .map(|i| i.index_state(&analysis.language))
+        .unwrap_or(IndexState::Warming)
+        .is_settled();
+    // The document-declared sets with no per-site fact to mint, read once
+    // here — the tier that can see the documents, handing them to the lanes
+    // that reason on them.
+    use crate::build::language_driver::LanguageRegistry as Reg;
+    let lang = analysis.language.as_str();
+    let builtins = Reg::builtin_types(lang);
+    let facts = LaneFacts {
+        idx,
+        index_settled,
+        builtin_types: &builtins,
+        imports_bind_names: Reg::imports_bind_names(lang),
+    };
+
+    let mut out: Vec<Diagnostic> = analysis
+        .member_findings(&facts)
+        .into_iter()
+        .chain(analysis.call_arity_findings())
+        .map(render_finding)
+        .collect();
+    let pack = &analysis.pack;
+    out.extend(analysis.deprecated_use_findings(&facts).into_iter().map(render_finding));
+    out.extend(analysis.liveness_findings(&facts).into_iter().map(render_finding));
+    out.extend(analysis.unused_import_findings(&facts).into_iter().map(render_finding));
+
+    // ---- undefined rail name: a use on a named rail (`route('home')`)
+    // that no definition on that rail answers, here or in the settled
+    // index. Names a framework synthesizes (`Route::resource`) have no
+    // definition token, so the lane warns rather than errors.
+    if index_settled {
+        if let Some(idx) = idx {
+            // How the lane phrases a miss, and which rails answer with a
+            // hint: the rail documents' own declarations, reached by
+            // language id because they are the same for every file of it.
+            let rails = crate::build::language_driver::LanguageRegistry::rails(&analysis.language);
+            for r in analysis.refs() {
+                if !matches!(r.kind, RefKind::DispatchCall { .. }) {
+                    continue;
+                }
+                let Some(owner @ HandlerOwner::Rail(rail)) = r.handler_owner() else { continue };
+                // what this rail's names denote: the document's declaration
+                // (`docs/adr/laravel-rails.md` §Identity)
+                let names = owner.names_are(pack);
+                let class_named = names == RailNames::Classes;
+                let name = r.target_name.as_str();
+                // Silence: a name the lane cannot answer for. A name ending
+                // in one of the rail's OWN separators is a prefix the caller
+                // concatenates onto (`view('auth.parts.' . $kind)`), and
+                // which separators a rail's names use is the document's word
+                // — a plugin dir that adds a rail says it there; a `::` names
+                // a package-namespaced rail (`errors::minimal`) whose
+                // provider file lives outside the path rails; a class-keyed
+                // emission with no dispatcher (`Theme::dispatch(X::CONST)`)
+                // is an event the overlay could not name; a `*` is a
+                // wildcard (`->can('*')`), never one name.
+                let member_qualified = analysis
+                    .names()
+                    .member_sep()
+                    .is_some_and(|sep| name.contains(sep));
+                let prefix_of_a_name = rails
+                    .seps
+                    .iter()
+                    .any(|(r, sep)| r == rail && !sep.is_empty() && name.ends_with(sep.as_str()));
+                if prefix_of_a_name || member_qualified || name.contains('*') {
+                    continue;
+                }
+                if let (true, RefKind::DispatchCall { dispatcher }) = (class_named, &r.kind) {
+                    if dispatcher.is_empty() {
+                        continue;
+                    }
+                }
+                if analysis.rail_names(rail).any(|n| n == name) {
+                    continue;
+                }
+                if !crate::index::resolve::handler_definitions(owner, names, name, idx).is_empty() {
+                    continue;
+                }
+                // a class-keyed rail's miss is a dead emission — a hint
+                let severity = if class_named || rails.hints.iter().any(|h| h == rail) {
+                    DiagnosticSeverity::HINT
+                } else {
+                    DiagnosticSeverity::WARNING
+                };
+                let label = rails
+                    .labels
+                    .iter()
+                    .find(|(r, _)| r == rail)
+                    .map(|(_, l)| l.clone())
+                    .unwrap_or_else(|| format!("Undefined {rail}"));
+                // The code the rail's own document declares; a rail that
+                // declares none reports under the one generic code, so the
+                // set a client can filter on stays closed.
+                let code = rails
+                    .codes
+                    .iter()
+                    .find(|(r, _)| r == rail)
+                    .map(|(_, c)| c.as_str())
+                    .unwrap_or(codes::UNDEFINED_RAIL_NAME);
+                out.push(Diagnostic {
+                    range: span_to_range(r.span),
+                    severity: Some(severity),
+                    code: Some(NumberOrString::String(code.to_string())),
+                    source: Some("perl-lsp".to_string()),
+                    message: format!("{label} '{name}'."),
+                    data: Some(serde_json::json!({ "rail": rail })),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    out.extend(analysis.undefined_type_findings(&facts).into_iter().map(render_finding));
+    // The contract's own declarator rides the diagnostic so the quick-fix
+    // needs no resolution: a closed declaring file is read from disk HERE,
+    // where an LSP payload belongs; the open document's is rendered from its
+    // buffer by the action (`sig` = null).
+    for f in analysis.contract_findings(&facts) {
+        let mut d = render_finding(f.clone());
+        if let (Some(i), FindingData::UnimplementedContracts { class, missing }) = (idx, &f.data) {
+            let contracts: Vec<serde_json::Value> = missing
+                .iter()
+                .map(|u| {
+                    let sig = contract_declarator(analysis, i, &u.role, &u.name);
+                    serde_json::json!({"role": u.role, "name": u.name, "sig": sig})
+                })
+                .collect();
+            d.data = Some(serde_json::json!({"class": class, "contracts": contracts}));
+        }
+        out.push(d);
+    }
+    out.extend(analysis.missing_return_type_findings().into_iter().map(render_finding));
+
+    out
+}
+
+
+/// The declarator text of a contract callable declared by a CLOSED file —
+/// `None` when the role is declared in this document (the quick-fix reads
+/// the open buffer) or nothing on disk declares it.
+fn contract_declarator(
+    analysis: &FileAnalysis,
+    idx: &dyn CrossFileLookup,
+    role: &str,
+    name: &str,
+) -> Option<String> {
+    if analysis.symbols().iter().any(|s| s.kind == FaSymKind::Class && s.name == role) {
+        return None;
+    }
+    let cached = idx.candidate_defining_sub_in_package(role, role, name)?;
+    let decls = idx.symbols_present(&cached);
+    let sym = decls.symbols().iter().find(|s| {
+        matches!(s.kind, FaSymKind::Sub | FaSymKind::Method)
+            && s.name == name
+            && s.package.as_deref() == Some(role)
+    })?;
+    // One read per missing contract per publish, attributed: this runs on
+    // didChange, so its cost is the lane's cost.
+    let src = crate::util::timings::phase("lsp::contract_declarator_read", || {
+        std::fs::read_to_string(&cached.path)
+    })
+    .ok()?;
+    declarator_text(&src, sym)
+}
+
+
+/// One lane finding as the wire sees it. THE place a `Finding` becomes
+/// text: severity, phrasing, tags and the quick-fix payload all live here,
+/// so a lane can be asked its answer without the protocol's vocabulary and
+/// the message for a code is written once.
+fn render_finding(f: Finding) -> Diagnostic {
+    use crate::model::file_analysis::{FindingData, MemberKind};
+    let (severity, message, tags, data) = match &f.data {
+        FindingData::UndefinedMember { kind, name } => {
+            let what = match kind {
+                MemberKind::Value => "property",
+                _ => "method",
+            };
+            (DiagnosticSeverity::ERROR, format!("Undefined {what} '{name}'."), None, None)
+        }
+        FindingData::NonPublicAccess { name, owner, from } => (
+            DiagnosticSeverity::ERROR,
+            format!(
+                "Cannot access non-public member '{name}' of {owner} from {} scope.",
+                from.as_deref().unwrap_or("global")
+            ),
+            None,
+            None,
+        ),
+        FindingData::TooFewArguments { expected, found } => (
+            DiagnosticSeverity::ERROR,
+            format!("Not enough arguments. Expected {expected}. Found {found}."),
+            None,
+            None,
+        ),
+        FindingData::TooManyArguments { expected, found } => (
+            DiagnosticSeverity::WARNING,
+            format!("Too many arguments. Expected {expected}. Found {found}."),
+            None,
+            None,
+        ),
+        FindingData::ResolvedByWidening { name, on, wanted } => (
+            DiagnosticSeverity::WARNING,
+            format!(
+                "'{name}' resolved on '{on}': the class this file names, '{wanted}', is not \
+                 indexed, so a same-named class in another namespace answered."
+            ),
+            None,
+            None,
+        ),
+        FindingData::Deprecated { name, note } => (
+            DiagnosticSeverity::HINT,
+            match note {
+                Some(t) => format!("'{name}' is deprecated: {t}"),
+                None => format!("'{name}' is deprecated."),
+            },
+            Some(vec![DiagnosticTag::DEPRECATED]),
+            None,
+        ),
+        FindingData::UndefinedVariable { name } => {
+            (DiagnosticSeverity::ERROR, format!("Undefined variable '{name}'."), None, None)
+        }
+        FindingData::UnusedVariable { name } => (
+            DiagnosticSeverity::HINT,
+            format!("'{name}' is assigned but never used."),
+            Some(vec![DiagnosticTag::UNNECESSARY]),
+            None,
+        ),
+        FindingData::UnusedImport { bound, sole_row } => (
+            DiagnosticSeverity::HINT,
+            format!("'{bound}' is imported but never used."),
+            Some(vec![DiagnosticTag::UNNECESSARY]),
+            sole_row.map(|(a, b)| serde_json::json!({ "row": [a, b] })),
+        ),
+        FindingData::UndefinedType { identity, candidates } => (
+            DiagnosticSeverity::ERROR,
+            format!("Undefined type '{identity}'."),
+            None,
+            (!candidates.is_empty()).then(|| serde_json::json!({ "candidates": candidates })),
+        ),
+        FindingData::UnimplementedContracts { class, missing } => {
+            let list = missing
+                .iter()
+                .map(|u| format!("`{}::{}()`", u.role, u.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (
+                DiagnosticSeverity::ERROR,
+                format!(
+                    "'{class}' does not implement {list}; declare {} or make the class abstract.",
+                    if missing.len() == 1 { "it" } else { "them" }
+                ),
+                None,
+                None,
+            )
+        }
+        FindingData::MissingReturnType { name, spelling } => (
+            DiagnosticSeverity::HINT,
+            format!("'{name}' has no declared return type; it returns `{spelling}`."),
+            None,
+            Some(serde_json::json!({ "spelling": spelling })),
+        ),
+    };
+    Diagnostic {
+        range: span_to_range(f.span),
+        severity: Some(severity),
+        code: Some(NumberOrString::String(f.code().to_string())),
+        source: Some("perl-lsp".to_string()),
+        message,
+        tags,
+        data,
+        ..Default::default()
+    }
+}
+
+
+
+
+
+
+

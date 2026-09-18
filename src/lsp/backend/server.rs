@@ -1350,7 +1350,24 @@ impl LanguageServer for Backend {
             Some(doc) => doc,
             None => return self.not_ready_or_null(uri),
         };
-        if !crate::build::language_driver::LanguageRegistry::caps(doc.language).signature_help {
+        let caps = crate::build::language_driver::LanguageRegistry::caps(doc.language);
+        if caps.pack_signature_help {
+            // A pack document: the call site comes from the pack's own tree
+            // and the callee from the member ladder through the routed pack
+            // index (the blocking hop, like every cross-file verb).
+            let analysis = Arc::clone(&doc.analysis);
+            let tree = doc.tree.clone();
+            let text = doc.text.clone();
+            let language = doc.language;
+            drop(doc);
+            return self
+                .run_query(move |cx| {
+                    let routed = cx.routed(language);
+                    symbols::pack_signature_help(&analysis, &tree, &text, pos, language, routed.as_lookup())
+                })
+                .await;
+        }
+        if !caps.signature_help {
             return Ok(None); // the verb is declared per language
         }
         Ok(symbols::signature_help(&doc.analysis, &doc.tree, &doc.text, pos, &self.module_index))
@@ -1494,7 +1511,7 @@ impl LanguageServer for Backend {
             Some(doc) => doc,
             None => return self.not_ready_or_null(uri),
         };
-        let actions = symbols::code_actions(&params.context.diagnostics, &doc.analysis, uri);
+        let actions = symbols::code_actions(&params.context.diagnostics, &doc.analysis, &doc.text, uri);
         if actions.is_empty() {
             Ok(None)
         } else {
@@ -1526,6 +1543,25 @@ impl LanguageServer for Backend {
             Some(doc) => doc,
             None => return self.not_ready_or_null(uri),
         };
+        let caps = crate::build::language_driver::LanguageRegistry::caps(doc.language);
+        if caps.pack_signature_help {
+            // A pack document: the call sites come from its own tree and
+            // each callee from the member ladder through the routed pack
+            // index — the same hop signature help takes.
+            let analysis = Arc::clone(&doc.analysis);
+            let tree = doc.tree.clone();
+            let text = doc.text.clone();
+            let language = doc.language;
+            let range = params.range;
+            drop(doc);
+            return self
+                .run_query(move |cx| {
+                    let routed = cx.routed(language);
+                    let hints = symbols::pack_inlay_hints(&analysis, &tree, &text, range, language, routed.as_lookup());
+                    if hints.is_empty() { None } else { Some(hints) }
+                })
+                .await;
+        }
         let hints = symbols::inlay_hints(&doc.analysis, params.range);
         if hints.is_empty() {
             Ok(None)
