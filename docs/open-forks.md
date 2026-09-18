@@ -27,6 +27,7 @@ designs live in `docs/prompt-storage-residuals.md`.
 | [Use-map pin with no indexed declaration answers empty](#use-map-pin-with-no-indexed-declaration-answers-empty--2026-09-02--open-claude) | 09-02 | when a php file `use`s a class no indexed file declares (vendor not indexed), should gd/hover answer nothing, or fall back to a same-leaf candidate from another namespace? |
 | [Relation properties typed from the relation's return generic](#relation-properties-typed-from-the-relations-return-generic--2026-09-02--open-claude) | 09-02 | should `@return BelongsTo<Book, $this>` type the magic property `->book` as `Book` by an engine rule ("to-one relation type's first argument"), or stay overlay-shaped (bare/one-modifier `belongsTo(X::class)` only)? |
 | [Stacked refs at one span](#stacked-refs-at-one-span--2026-09-15--open-claude) | 09-15 | when two identities share a token (a class token that is also a rail use), is a companion ref with a cursor tiebreak enough, or should one ref carry several bindings? |
+| [Framework overlays pin their receiver by source-text regex](#framework-overlays-pin-their-receiver-by-source-text-regex--2026-09-18--open-claude) | 09-18 | an overlay asserts WHICH receiver a pattern fires on by matching the receiver node's text; the honest assertion is the receiver's CLASS, which needs a predicate that can ask the analysis — build one, or keep the regex? |
 
 Format per entry:
 
@@ -561,3 +562,40 @@ Format per entry:
   string that is both a route name and a view name is kept APART by the
   rail, so no)? If none does, A is the answer and the fork closes; if one
   does, B is the honest shape and the tiebreak is the tell.
+
+---
+
+## Framework overlays pin their receiver by source-text regex — 2026-09-18 — OPEN (Claude)
+- **Context:** every bundled php overlay that binds a rail to a framework
+  entry point pins its receiver with `#match?` over the receiver node's
+  SOURCE TEXT — `(#match? @_lr_chain "^(Route::|\\$router->|\\$this->router->)")`
+  in `queries/php/frameworks/laravel.scm`, and the same move in
+  `wordpress.scm` and `symfony.scm`. Three overlays reach for it, which is
+  the second-instance question asked at the third.
+- **What it gets wrong:** a fully-qualified receiver
+  (`\Illuminate\Support\Facades\Route::get(...)`), an aliased import
+  (`use Route as R; R::get(...)`), and a long chain
+  (`Route::middleware([...])->get(...)->name(...)`, where the `object:`
+  node's text is the whole chain and the `^` anchor holds by luck). It also
+  runs a regex over a potentially large node on every match.
+- **Options:** A) source-text regex, as today — the only assertion the query
+  medium offers, written per overlay. B) a predicate that asserts the
+  receiver's CLASS (`#receiver-isa? @recv "Illuminate\\Routing\\Router"`),
+  evaluated against the analysis rather than the text: the receiver already
+  resolves to a class through the use-map and the witness bag, so the
+  assertion the overlay wants is one the engine can answer.
+- **Picked:** A. B needs a predicate that can consult the analysis MID-QUERY,
+  and the pack tier deliberately runs its query before the analysis exists —
+  a resolving predicate is a new evaluation phase (match, resolve, re-filter),
+  not a new predicate. A stays honest as an over-approximation: it claims
+  too little (a qualified or aliased receiver goes dark) rather than too
+  much.
+- **Undo cost:** low per overlay, high once. Each `#match?` is one line and
+  the captures around it do not move, so B rewrites the predicate lines
+  only; the cost is the evaluation phase B needs and the caching that
+  follows it. Nothing persists the regex — it is document text.
+- **Discussion needed:** do the shapes A misses matter in real code (how
+  often is a facade written fully-qualified or aliased), and is the
+  resolve-then-filter phase worth building for the overlay tier alone, or
+  does it wait for a consumer that needs it for something other than a
+  receiver?
