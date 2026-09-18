@@ -421,8 +421,10 @@ impl LanguageDriver for PackDriver {
             context_gather: self.gather_macros.is_some() || self.include_closure.is_some(),
             pack_invalidation: true,
             cross_file_words: true,
-            // declared by the pack's call shapes — no shapes, no verb
-            pack_signature_help: !pack.call_shapes.is_empty(),
+            // declared by what the document mints: a pack that captures an
+            // argument list has calls to help with.
+            pack_signature_help: (self.make_parser().language())
+                .is_some_and(|l| crate::build::query_extract::pack_declares_capture(&l, &pack, "arity.args")),
             // The verb walks tree ancestors — no language in it.
             selection_range: true,
             ..Default::default()
@@ -1177,6 +1179,7 @@ fn inject_member_blocks(
                 qualifier_owned: false,
                 doc: None,
                 deprecation: None,
+                flags: Default::default(),
             });
             // The role member emits the SAME `TypeName` edge an expanded field
             // does — the edge is canonical (the hover leaf + the type chase
@@ -1531,10 +1534,7 @@ fn remap_spans(
         qualified_spellings: _,
         var_reads,
         label_refs,
-        receiver_names: _,
-        implicit_variables: _,
-        throwaway_names: _,
-        catch_all_methods: _,
+        lang_id: _,
         member_writes,
         import_rows,
         spellings: _,
@@ -1548,7 +1548,6 @@ fn remap_spans(
         doc_mentions: _,
         // language-wide facts, no spans to remap.
         function_scoped_vars: _,
-        constructor_names: _,
         flow_edges,
         moved_from,
         doc_disagreements,
@@ -1571,6 +1570,7 @@ fn remap_spans(
         return_sites,
         // Scope-keyed, no spans to remap.
         dynamic_markers: _,
+        runtime_bound_reads,
         param_sigs,
         // Populated later (enrich_skeleton) already in original coords — no remap.
         macro_body_member_reads: _,
@@ -1599,6 +1599,7 @@ fn remap_spans(
             qualifier_owned: _,
             doc: _,
             deprecation: _,
+            flags: _,
             // a symbol id, not a position
             declared_with: _,
         } = s;
@@ -1732,6 +1733,9 @@ fn remap_spans(
         *span = rspan(*span);
     }
     for span in probe_regions.iter_mut() {
+        *span = rspan(*span);
+    }
+    for span in runtime_bound_reads.iter_mut() {
         *span = rspan(*span);
     }
     for (sig, _, _, name_span) in by_ref_params.iter_mut() {
@@ -2021,26 +2025,58 @@ impl LanguageRegistry {
             .unwrap_or(&crate::model::file_analysis::NEUTRAL_SPELLINGS)
     }
 
-    /// Does `token` name a class RELATIVE to the one that writes it — the
-    /// pack's `self_class_tokens` (its own class) or its `super_receiver`
-    /// (that class's parent)? Such a spelling is resolved off the writing
-    /// scope, so it names no type a namespace has to supply. Memoized like
-    /// `builtin_types`; a language without a pack claims nothing.
-    pub fn writes_own_class_token(id: &str, token: &str) -> bool {
-        type Tokens = (&'static str, &'static [&'static str], fn(&str) -> bool);
-        static SELF: std::sync::OnceLock<Vec<Tokens>> = std::sync::OnceLock::new();
-        SELF.get_or_init(|| {
-            LanguageRegistry::with_enabled()
-                .drivers
-                .iter()
-                .filter_map(|d| {
-                    d.lang_pack().map(|p| (d.id(), p.self_class_tokens, p.super_receiver))
+    /// The literals `id`'s query document requires `capture` to equal — the
+    /// `#eq?` / `#any-of?` set beside it (`receiver.self`, `receiver.this`,
+    /// …). The document is the one home for a language's small closed
+    /// keyword sets (rule #15), so a consumer that needs the SET reads it
+    /// back off the compiled query rather than keeping a table. Empty for a
+    /// language with no pack, and before that pack has analysed one file —
+    /// which for a consumer holding one of its analyses cannot happen.
+    pub fn pack_capture_literals(
+        id: &str,
+        capture: &str,
+    ) -> &'static std::collections::HashSet<&'static str> {
+        static EMPTY: std::sync::OnceLock<std::collections::HashSet<&'static str>> =
+            std::sync::OnceLock::new();
+        static PACKS: std::sync::OnceLock<
+            Vec<(&'static str, crate::build::query_extract::LangPack)>,
+        > = std::sync::OnceLock::new();
+        let registry = LanguageRegistry::with_enabled();
+        PACKS
+            .get_or_init(|| {
+                registry.drivers.iter().filter_map(|d| d.lang_pack().map(|p| (d.id(), p))).collect()
+            })
+            .iter()
+            .find(|(l, _)| *l == id)
+            .and_then(|(_, pack)| {
+                // The extractor's own object once this language has analysed
+                // anything; otherwise compile it here, through the same memo,
+                // so the answer never depends on what ran first.
+                crate::build::query_extract::pack_query(pack).or_else(|| {
+                    let language = registry.for_id(id)?.make_parser().language()?.clone();
+                    crate::build::query_extract::query_for(&language, pack)
                 })
-                .collect()
-        })
-        .iter()
-        .find(|(l, _, _)| *l == id)
-        .is_some_and(|(_, own, is_super)| own.contains(&token) || is_super(token))
+            })
+            .map(|q| crate::build::query_extract::capture_literals(q, capture))
+            .unwrap_or_else(|| EMPTY.get_or_init(Default::default))
+    }
+
+    /// Does `token` name a class RELATIVE to the one that writes it — the
+    /// writing class itself (`self` / `static`) or its parent (`parent`)?
+    /// Such a spelling resolves off the writing scope, so it names no type a
+    /// namespace has to supply. The receiver captures say which spellings
+    /// those are; a language without a pack claims nothing.
+    pub fn writes_own_class_token(id: &str, token: &str) -> bool {
+        Self::pack_capture_literals(id, "receiver.self").contains(token)
+            || Self::pack_capture_literals(id, "receiver.super").contains(token)
+    }
+
+    /// How `id` spells the object the enclosing method runs on (`$this`,
+    /// `this`, a `self`/`cls` parameter) — the receiver captures' own
+    /// literals.
+    pub fn receiver_spellings(id: &str, token: &str) -> bool {
+        Self::pack_capture_literals(id, "receiver.this").contains(token)
+            || Self::pack_capture_literals(id, "param.receiver").contains(token)
     }
 
     pub fn pack_visibility(id: &str) -> crate::model::file_analysis::PackVisibility {

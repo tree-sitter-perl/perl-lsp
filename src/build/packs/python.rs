@@ -1,6 +1,6 @@
 //! Python's pack.
 
-use crate::build::query_extract::{LangPack, PeelSpec};
+use crate::build::query_extract::LangPack;
 use crate::model::file_analysis::{InferredType, NameSpellings, PackSpellings};
 
 /// Python writes and displays nothing of its own: the engine's type tags are
@@ -31,11 +31,6 @@ pub fn python_pack() -> LangPack {
         declared_return: |t| {
             python_annot_type(t).map(crate::model::witnesses::ReturnExpr::Concrete)
         },
-        super_receiver: |_| false,
-        self_class_tokens: &[],
-        class_token_kinds: &[],
-        function_scoped_vars: false,
-        constructor_names: &[],
         doc_types: |_, _| vec![],
         doc_uses_method_tags: &[],
         module_paths: |m| {
@@ -47,37 +42,10 @@ pub fn python_pack() -> LangPack {
         narrow_type: |ty| Some(InferredType::ClassName(ty.to_string())),
         implicit_this_members: false,
         brace_scoped_members: false,
-        call_shapes: &[],
-        arg_kind: "",
-        implicit_variables: &[],
-        throwaway_names: &[],
-        catch_all_methods: &[],
-        callable_placeholder_kind: "",
-        pair_arrow: "",
-        spread_arg_kind: "",
-        named_arg_field: "",
         imports_bind_names: false,
-        deprecated_attribute: "",
         bundled_builtin_types: &[],
         enum_members: &[],
         trigger_chars: &["."],
-        receiver_names: &["self", "cls"],
-        recv_peel: PeelSpec {
-            wrappers: &[("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer)],
-            annot_kinds: &[],
-            leaf_to_def: &[],
-            record_stack: false,
-        },
-        // Python has one member operator (`.`), so no op-DX (op_map empty).
-        op_map: &[],
-        simple_var_kinds: &["identifier"],
-        dynamic_arg_markers: &[],
-        dynamic_var_markers: &[],
-        member_kinds: &["attribute"],
-        skip_kinds: &["string", "string_content", "comment", "concatenated_string"],
-        call_kinds: &["call"],
-        domain_compare_kinds: &[],
-        domain_compare_ops: &[],
     }
 }
 

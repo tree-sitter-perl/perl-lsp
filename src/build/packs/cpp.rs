@@ -1,6 +1,6 @@
 //! C/C++'s pack.
 
-use crate::build::query_extract::{LangPack, PeelSpec};
+use crate::build::query_extract::LangPack;
 use crate::model::file_analysis::{canonical_template_spelling, InferredType, NameSpellings, PackSpellings};
 
 /// C/C++ writes and displays nothing of its own: the engine's type tags are
@@ -37,11 +37,6 @@ pub fn cpp_pack() -> LangPack {
         // A C++ return spelling is always concrete — no late-bound receiver
         // spelling exists in the language.
         declared_return: |t| cpp_annot_type(t).map(crate::model::witnesses::ReturnExpr::Concrete),
-        super_receiver: |_| false,
-        self_class_tokens: &[],
-        class_token_kinds: &[],
-        function_scoped_vars: false,
-        constructor_names: &[],
         doc_types: |_, _| vec![],
         doc_uses_method_tags: &[],
         // #include "a/b.h" / <vector>: strip the delimiters; a quoted
@@ -68,43 +63,11 @@ pub fn cpp_pack() -> LangPack {
         // C/C++ methods read members with an implicit `this->`.
         implicit_this_members: true,
         brace_scoped_members: true,
-        call_shapes: &[],
-        arg_kind: "",
-        implicit_variables: &[],
-        throwaway_names: &[],
-        catch_all_methods: &[],
-        callable_placeholder_kind: "",
-        pair_arrow: "",
-        spread_arg_kind: "",
-        named_arg_field: "",
         imports_bind_names: false,
-        deprecated_attribute: "",
         bundled_builtin_types: &[],
         enum_members: &[],
         trigger_chars: &[".", ">", ":"],
-        receiver_names: &["this"],
         // DerefKind placeholder — record_stack false, so it's never read.
-        recv_peel: PeelSpec {
-            wrappers: &[
-                ("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer),
-                ("pointer_expression", crate::model::file_analysis::DerefKind::Pointer),
-            ],
-            annot_kinds: &[],
-            leaf_to_def: &[],
-            record_stack: false,
-        },
-        op_map: &[
-            ("->", crate::model::file_analysis::MemberOp::Arrow),
-            (".", crate::model::file_analysis::MemberOp::Dot),
-        ],
-        simple_var_kinds: &["identifier"],
-        dynamic_arg_markers: &[],
-        dynamic_var_markers: &[],
-        member_kinds: &["field_expression"],
-        skip_kinds: &["string_literal", "char_literal", "raw_string_literal", "comment"],
-        call_kinds: &["call_expression"],
-        domain_compare_kinds: &["binary_expression"],
-        domain_compare_ops: &["==", "!="],
     }
 }
 

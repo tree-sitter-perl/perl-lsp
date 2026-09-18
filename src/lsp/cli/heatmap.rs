@@ -44,7 +44,7 @@ fn class_is_referenced(
     scope: resolve::OverrideScope,
 ) -> bool {
     use file_analysis::{AccessKind, SymKind};
-    if !analysis.pack.constructor_names.iter().any(|c| c == &sym.name) {
+    if !sym.is_constructor() {
         return false;
     }
     let Some(class) = sym.package.as_deref() else { return false };

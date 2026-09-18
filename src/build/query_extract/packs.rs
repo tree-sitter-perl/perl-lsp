@@ -64,39 +64,6 @@ pub struct LangPack {
     /// structure out — the engine never branches on the spelling itself
     /// (rule #10), and the writeback publishes what comes back.
     pub declared_return: fn(text: &str) -> Option<crate::model::witnesses::ReturnExpr>,
-    /// Does this receiver spelling mean "dispatch from the parent of the
-    /// writing class, skipping it" (php `parent::`)? The ref is then
-    /// minted with the model's SUPER method token (`SUPER::name`, the
-    /// Perl `$self->SUPER::m` spelling) and a current-package invocant,
-    /// so goto-def, references, and rename all ride the existing SUPER
-    /// lane (`resolve_super_method`, refs_to's SUPER arm) — asked of the
-    /// pack, never a name branch in the engine (rule #10).
-    pub super_receiver: fn(text: &str) -> bool,
-    /// Receiver tokens that name the ENCLOSING class itself for member
-    /// access (php `self::` / `static::`): no typeable value node, the class
-    /// is read off the cursor's scope chain — the `receiver_names` rule for
-    /// a scoped access. Empty = none.
-    pub self_class_tokens: &'static [&'static str],
-    /// Node kinds of a bare CLASS TOKEN in receiver position (php `Foo::m(`,
-    /// `App\Foo::CONST` — `name` / `qualified_name`): the receiver's value
-    /// is the class it spells (leaf-keyed, like every class identity).
-    /// Empty = none.
-    pub class_token_kinds: &'static [&'static str],
-    /// Are local variables FUNCTION-scoped (php: an assignment inside an
-    /// `if` block declares for the whole function, and re-assignment is a
-    /// REBIND of the same variable, not a fresh declaration)? Var defs
-    /// then anchor to the nearest enclosing sub scope and same-scope
-    /// re-assignments demote to write references — one identity per
-    /// function, so references/rename see every site instead of
-    /// per-assignment islands (a rename from any island
-    /// rewrote a fragment and broke the code). False = block-scoped
-    /// (cpp) or handled natively (Perl's `my`).
-    pub function_scoped_vars: bool,
-    /// The pack's constructor-method names (php `__construct`): a Method
-    /// target with one of these names is the class's constructor, and its
-    /// references include the class's `new Foo(...)` sites (non-rewritable
-    /// — the token spells the class). Rides `PackFacts::constructor_names`.
-    pub constructor_names: &'static [&'static str],
     /// Documentation-comment type facts (phpdoc `@return`/`@param`/`@var`):
     /// the pack parses ITS OWN doc vocabulary out of a `@doc.comment`
     /// capture's text, returning type spellings `annot_type` speaks.
@@ -146,45 +113,10 @@ pub struct LangPack {
     /// indentation-scoped (Python) or non-nesting packs.
     /// `docs/adr/config-superposition-declarations.md`.
     pub brace_scoped_members: bool,
-    /// The call expressions signature help can anchor on: node kind, the
-    /// field naming the callee token, the field holding the argument list.
-    /// Empty = the language declares no signature help.
-    pub call_shapes: &'static [CallShape],
-    /// Variables the runtime binds without a declaration (php's `$this`
-    /// and superglobals): never "undefined".
-    pub implicit_variables: &'static [&'static str],
-    /// The language's THROWAWAY binding names (php `$_` in `foreach ($a
-    /// as $k => $_)`): written to be discarded, so never "unused".
-    pub throwaway_names: &'static [&'static str],
-    /// Methods whose presence makes a class answer ANY member name
-    /// (php `__call`/`__callStatic`, `__get`) — the undefined-member lanes
-    /// stay silent on such a class, as Perl's do on `AUTOLOAD`.
-    pub catch_all_methods: &'static [&'static str],
-    /// The node kind of a first-class-callable placeholder in an argument
-    /// list (php `f(...)` → `variadic_placeholder`): such a call passes no
-    /// arguments, so it mints no count. Empty = none.
-    pub callable_placeholder_kind: &'static str,
-    /// The key/value arrow inside a list literal (php `'k' => $v`): what a
-    /// destructuring slot's key is read before, and what makes a list keyed
-    /// rather than positional. Empty for a language whose lists carry no
-    /// written keys.
-    pub pair_arrow: &'static str,
-    /// The node kind of an argument SPREAD (php `f(...$args)` →
-    /// `variadic_unpacking`): the call's count is unknowable, so it mints
-    /// none and the arity lane stands down. Empty = none.
-    pub spread_arg_kind: &'static str,
-    /// Field a named argument carries its label under (php `f(name: 1)`):
-    /// positional parameter hints stop at the first one. Empty = the pack
-    /// has no named-argument form.
-    pub named_arg_field: &'static str,
     /// An import row binds a NAME the file then spells (php `use A\B;`),
     /// as opposed to splicing text (`#include`). Only bound names can be
     /// unused.
     pub imports_bind_names: bool,
-    /// The attribute that marks a declaration deprecated (php
-    /// `#[Deprecated]`); empty = none. Lands as the `deprecated` symbol
-    /// attribute exactly like the docblock tag.
-    pub deprecated_attribute: &'static str,
     /// Bundled builtin-type documents (`builtins.txt`): the class, interface
     /// and attribute names the language itself provides in its global
     /// namespace, one per line. A global reference to one of these is never a
@@ -198,72 +130,11 @@ pub struct LangPack {
     /// declaration, and every consumer resolves it like any other member —
     /// nothing downstream reads this list, so no consumer matches the names.
     pub enum_members: &'static [EnumMember],
-    /// The node kind of ONE argument inside a call's argument list (php
-    /// `argument`); empty = every named child of the list is an argument.
-    pub arg_kind: &'static str,
     /// Completion trigger characters for the LSP
     /// `completionProvider.triggerCharacters` slot — the client auto-fires
     /// completion (and reports the char in `CompletionContext`) when one is
     /// typed. C++ `. > :` cover `.`/`->`/`::`; the member path keys off them.
     pub trigger_chars: &'static [&'static str],
-    /// The language's method-RECEIVER parameter names (Python `self`/`cls`,
-    /// C++ `this`). A receiver param is lexically inside the class body, so
-    /// the sticky class context tags it — but it is NOT a member. Extraction
-    /// clears its package so it reads as a plain local. Lang-specific
-    /// semantics → the pack owns it (NOT core `conventions.rs`, which is
-    /// Perl's `$self`/`$class`).
-    pub receiver_names: &'static [&'static str],
-    /// The member-access RECEIVER peel: transparent expression wrappers
-    /// (`(*p)`, `(&o)`, `(p)` → `p`) dropped so the invocant types via the
-    /// inner. The SAME `peel`, no stack, any leaf.
-    pub recv_peel: PeelSpec,
-    /// Member-access node kinds (`receiver OP member`) — extraction records
-    /// each site (simple-variable receiver, operator token span, `->` vs
-    /// `.`) for the operator-DX consumer (`p.` on a `Box*` should be `->`).
-    /// The member operator's grammar token KIND → the `MemberOp` it means
-    /// (`"->"`→Arrow, `"."`→Dot). The `operator:` field of a member access is
-    /// captured as `@member.op`; the engine maps its `kind()` through this
-    /// table. An OPEN set: unmapped kinds (`.*`) get no op-DX, never a guess.
-    /// Empty = no member-operator DX (Perl, single-operator packs).
-    pub op_map: &'static [(&'static str, crate::model::file_analysis::MemberOp)],
-    /// Simple-variable node kinds (`identifier`). op-DX fires ONLY when the
-    /// IMMEDIATE member-access receiver is one — the receiver whose
-    /// `deref_stack` resolves by name to decide the expected operator. Also the
-    /// cursor-completion "is this receiver a bare variable" test.
-    pub simple_var_kinds: &'static [&'static str],
-    /// Names whose CALL makes the enclosing callable read arguments it never
-    /// declared (php `func_get_args` / `func_num_args` / `func_get_arg`).
-    /// The extractor stamps `SymbolFlags::DYNAMIC_ARGS` on the callable that
-    /// contains such a call, so the arity lanes ask the callable rather than
-    /// re-scanning its body. Empty = the language has no such surface.
-    pub dynamic_arg_markers: &'static [&'static str],
-    /// Names whose CALL makes the enclosing callable materialize variables no
-    /// declaration names (php `extract` / `get_defined_vars` / `eval` /
-    /// `parse_str` / `compact`). The extractor stamps
-    /// `SymbolFlags::DYNAMIC_VARS` on the containing callable, which is what
-    /// the undefined-variable lane asks. Empty = no such surface.
-    pub dynamic_var_markers: &'static [&'static str],
-    /// Member-access node kinds (`field_expression` / `attribute`): a `recv.m`
-    /// the cursor-completion path climbs to + types the receiver of. Empty =
-    /// no member-access completion (Perl uses `cursor_context`).
-    pub member_kinds: &'static [&'static str],
-    /// Node kinds the sentinel must NOT splice into (string/char/comment).
-    pub skip_kinds: &'static [&'static str],
-    /// Call-expression node kinds (`call_expression`/`call`) — a chained
-    /// receiver `f().attr` types through the call's inner member.
-    pub call_kinds: &'static [&'static str],
-    /// Equality-comparison node kinds (`binary_expression`) whose operand
-    /// may be a domain-typed field — the type-constrained-completion slot
-    /// (`o->op_type == |` ranks the field's DOMAIN members first,
-    /// `docs/adr/cursor-slots.md`). The operand order is either side; the
-    /// slot is the member-access operand, the value the other. Paired with
-    /// `domain_compare_ops` so a `<`/`+` binary never opens the slot. Empty
-    /// = no domain-comparison completion.
-    pub domain_compare_kinds: &'static [&'static str],
-    /// The operator tokens (`==`, `!=`) that make a `domain_compare_kinds`
-    /// node a domain comparison — the pack owns which operators mean
-    /// "equality against a domain value" (rule #10). Empty = feature off.
-    pub domain_compare_ops: &'static [&'static str],
 }
 
 impl LangPack {
@@ -292,11 +163,6 @@ impl LangPack {
             default_name: _,
             annot_type: _,
             declared_return: _,
-            super_receiver: _,
-            self_class_tokens,
-            class_token_kinds,
-            function_scoped_vars: _,
-            constructor_names,
             doc_types: _,
             doc_uses_method_tags,
             module_paths: _,
@@ -304,31 +170,10 @@ impl LangPack {
             narrow_type: _,
             implicit_this_members: _,
             brace_scoped_members: _,
-            call_shapes,
-            implicit_variables,
-            throwaway_names,
-            catch_all_methods,
-            callable_placeholder_kind,
-            pair_arrow,
-            spread_arg_kind,
-            named_arg_field,
             imports_bind_names: _,
-            deprecated_attribute,
             bundled_builtin_types: _,
             enum_members,
-            arg_kind,
             trigger_chars,
-            receiver_names,
-            recv_peel,
-            op_map,
-            simple_var_kinds,
-            dynamic_arg_markers,
-            dynamic_var_markers,
-            member_kinds,
-            skip_kinds,
-            call_kinds,
-            domain_compare_kinds,
-            domain_compare_ops,
         } = self;
         let mut out: Vec<(&'static str, &'static str)> = Vec::new();
         fn list(
@@ -338,47 +183,9 @@ impl LangPack {
         ) {
             out.extend(values.iter().map(|v| (field, *v)));
         }
-        list(&mut out, "self_class_tokens", self_class_tokens);
-        list(&mut out, "class_token_kinds", class_token_kinds);
-        list(&mut out, "constructor_names", constructor_names);
         list(&mut out, "doc_uses_method_tags", doc_uses_method_tags);
-        list(&mut out, "implicit_variables", implicit_variables);
-        list(&mut out, "throwaway_names", throwaway_names);
-        list(&mut out, "catch_all_methods", catch_all_methods);
         out.extend(enum_members.iter().map(|m| ("enum_members", m.name)));
         list(&mut out, "trigger_chars", trigger_chars);
-        list(&mut out, "receiver_names", receiver_names);
-        list(&mut out, "simple_var_kinds", simple_var_kinds);
-        list(&mut out, "dynamic_arg_markers", dynamic_arg_markers);
-        list(&mut out, "dynamic_var_markers", dynamic_var_markers);
-        list(&mut out, "member_kinds", member_kinds);
-        list(&mut out, "skip_kinds", skip_kinds);
-        list(&mut out, "call_kinds", call_kinds);
-        list(&mut out, "domain_compare_kinds", domain_compare_kinds);
-        list(&mut out, "domain_compare_ops", domain_compare_ops);
-        for (field, one) in [
-            ("callable_placeholder_kind", *callable_placeholder_kind),
-            ("pair_arrow", *pair_arrow),
-            ("spread_arg_kind", *spread_arg_kind),
-            ("named_arg_field", *named_arg_field),
-            ("deprecated_attribute", *deprecated_attribute),
-            ("arg_kind", *arg_kind),
-        ] {
-            if !one.is_empty() {
-                out.push((field, one));
-            }
-        }
-        for c in *call_shapes {
-            out.push(("call_shapes", c.kind));
-            out.push(("call_shapes", c.callee_field));
-            out.push(("call_shapes", c.args_field));
-        }
-        out.extend(recv_peel.wrappers.iter().map(|(k, _)| ("recv_peel", *k)));
-        list(&mut out, "recv_peel", recv_peel.annot_kinds);
-        for (leaf, _) in recv_peel.leaf_to_def {
-            out.push(("recv_peel", *leaf));
-        }
-        out.extend(op_map.iter().map(|(k, _)| ("op_map", *k)));
         out.retain(|(_, v)| !v.is_empty());
         out
     }
@@ -414,18 +221,6 @@ pub struct EnumMember {
     /// Decides which member kind the synthesis mints, so a call and a read
     /// of the same name can never answer for each other.
     pub callable: bool,
-}
-
-/// A call-expression shape signature help climbs to from the cursor
-/// (`cursor_sentinel::call_at`).
-#[derive(Debug, Clone, Copy)]
-pub struct CallShape {
-    pub kind: &'static str,
-    /// Field naming the callee token (a member call's `name`, a function
-    /// call's `function`); the LAST `name`-like descendant is the token.
-    pub callee_field: &'static str,
-    /// Field holding the argument list node.
-    pub args_field: &'static str,
 }
 
 /// One type fact parsed from a documentation comment (`LangPack::doc_types`).
@@ -515,6 +310,18 @@ pub(super) fn param_return_expr(
                 }))
             }
         },
+        _ => None,
+    }
+}
+
+/// `member.op.<which>` suffix → the operator it names. ENGINE-side
+/// vocabulary like `lit_type`: the suffix set names the model's `MemberOp`,
+/// and a pack chooses which token carries each.
+pub(super) fn member_op_suffix(suffix: &str) -> Option<crate::model::file_analysis::MemberOp> {
+    use crate::model::file_analysis::MemberOp;
+    match suffix {
+        "arrow" => Some(MemberOp::Arrow),
+        "dot" => Some(MemberOp::Dot),
         _ => None,
     }
 }

@@ -35,6 +35,12 @@
 
 (parameters
   (identifier) @def.var.name @def.var)
+; The method RECEIVER parameter: lexically inside the class body, so the
+; sticky class context tags it — but it is the object, not a member. The
+; capture is what the outline and member completion ask (the symbol carries
+; the fact), and what witnesses the receiver as an instance of its class.
+((parameters . (identifier) @param.receiver)
+ (#any-of? @param.receiver "self" "cls"))
 
 (import_statement
   name: (dotted_name) @import.name) @import
@@ -68,6 +74,13 @@
   function: (identifier) @ref.call) @expr.call
 (call
   function: (attribute attribute: (identifier) @ref.method))
+; `recv.attr` is python's member access; its `object:` is the receiver the
+; cursor's member completion types.
+(attribute object: (_) @member.recv)
+; the attribute TOKEN names a member, not a local — without this the
+; identifier read pattern below claims it and `self.x` reads as a variable
+; `x` nothing declares.
+(attribute attribute: (identifier) @var.member)
 (identifier) @expr.read.var
 
 (string) @expr.lit.string
@@ -85,3 +98,12 @@
     arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
   consequence: (block) @scope
   (#eq? @narrow.guard "isinstance"))
+
+; ---- cursor-time shapes ----
+; Where a cursor may not splice: a string or a comment is not code.
+(string) @skip
+(string_content) @skip
+(concatenated_string) @skip
+(comment) @skip
+; A transparent receiver wrapper denotes the same value as its operand.
+(parenthesized_expression) @recv.peel

@@ -66,10 +66,6 @@ impl FileAnalysis {
                     include_directives,
                     // File-internal pack lanes: read LIVE from the
                     // provider's re-registered analysis per query.
-                    receiver_names: _receiver_names, // LangPack-wide convention, identical across the pack's files
-                    implicit_variables: _implicit_variables, // pack-wide convention
-                    throwaway_names: _throwaway_names,       // pack-wide convention
-                    catch_all_methods: _catch_all_methods, // pack-wide convention
                     import_rows: _import_rows, // editing aid, not cross-file-visible
                     rail_labels: _rail_labels,       // pack-wide convention
                     rail_hints: _rail_hints,         // pack-wide convention
@@ -77,7 +73,6 @@ impl FileAnalysis {
                     preamble_end: _preamble_end, // an editing aid
                     imports_bind_names: _imports_bind_names, // pack-wide convention
                     doc_mentions: _doc_mentions, // a file-local lint fact
-                    constructor_names: _constructor_names, // LangPack-wide convention, identical across the pack's files
                     specializes: _specializes,       // family edges; the file re-registers on its own rebuild even when Unchanged
                     use_aliases: _use_aliases,             // this file's OWN spelling table; a consumer never sees an alias
                     qualified_spellings: _qualified_spellings, // same: how THIS file spells classes

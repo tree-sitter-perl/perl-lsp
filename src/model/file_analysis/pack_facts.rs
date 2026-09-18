@@ -13,25 +13,6 @@ use super::*;
 /// is what a Perl analysis carries.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PackFacts {
-    /// The language's method-RECEIVER param names (Python `self`/`cls`),
-    /// from the LangPack. A receiver is lexically inside the class so the
-    /// sticky context tags it, but it is NOT a member — member completion
-    /// and the outline exclude these names. Perl's receiver convention
-    /// lives in `conventions.rs`, so this stays empty there.
-    #[serde(default)]
-    pub receiver_names: Vec<String>,
-    /// Variables the runtime binds without a declaration (php `$this`,
-    /// superglobals) — the undefined-variable lane's silence list.
-    #[serde(default)]
-    pub implicit_variables: Vec<String>,
-    /// The language's throwaway binding names (php `$_`) — written to be
-    /// discarded, so the unused-variable lane never reports them.
-    #[serde(default)]
-    pub throwaway_names: Vec<String>,
-    /// Methods whose presence makes a class answer any member name (php
-    /// `__call`/`__get`) — the undefined-member lanes stay silent on it.
-    #[serde(default)]
-    pub catch_all_methods: Vec<String>,
     /// Whole import-statement spans, in file order.
     #[serde(default)]
     pub import_rows: Vec<Span>,
@@ -63,14 +44,6 @@ pub struct PackFacts {
     /// Imported names a doc comment mentions.
     #[serde(default)]
     pub doc_mentions: Vec<String>,
-
-    /// The language's constructor-method names (php `__construct`), from
-    /// the LangPack — the identity lane marks a Method target with one of
-    /// these names as `ctor_of` its class, admitting construction sites
-    /// into its references. Empty for Perl (`new` is a convention, not a
-    /// keyword — `is_constructor_name` serves the ranking lanes instead).
-    #[serde(default)]
-    pub constructor_names: Vec<String>,
 
     /// Template-specialization family edges: canonical spec spelling
     /// (`formatter<int, char>`) → primary base name (`formatter`). NOT an
@@ -241,16 +214,11 @@ impl PackFacts {
 
         h.misc += map_str_vec(&self.template_params)
             + mcap(&self.specializes)
-            + vcap(&self.receiver_names)
-            + vcap(&self.implicit_variables)
-            + vcap(&self.throwaway_names)
-            + vcap(&self.catch_all_methods)
             + vcap(&self.import_rows)
             + self.rail_labels.iter().map(|(a, b)| a.capacity() + b.capacity()).sum::<usize>()
             + self.rail_hints.iter().map(|a| a.capacity()).sum::<usize>()
             + self.class_named_rails.iter().map(|a| a.capacity()).sum::<usize>()
-            + vcap(&self.doc_mentions)
-            + vcap(&self.constructor_names);
+            + vcap(&self.doc_mentions);
     }
 }
 

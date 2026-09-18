@@ -48,9 +48,11 @@ fn pattern_root_kinds_reads_cpps_member_shapes_off_the_document() {
     let pack = crate::build::query_extract::cpp_pack();
     let query = warm_query(tree_sitter_cpp::LANGUAGE.into(), &pack, "struct A { int x; };\n");
     let kinds = crate::build::query_extract::pattern_root_kinds(query, "member.recv");
-    for expected in ["field_expression", "call_expression"] {
-        assert!(kinds.contains(expected), "{expected} roots a @member.recv pattern: {kinds:?}");
-    }
+    assert!(kinds.contains("field_expression"), "field_expression roots @member.recv: {kinds:?}");
+    // A chain hop's receiver is `@hop.recv`, so the member-access kinds
+    // stay exactly the shapes member completion climbs to.
+    let hops = crate::build::query_extract::pattern_root_kinds(query, "hop.recv");
+    assert!(hops.contains("call_expression"), "call_expression roots @hop.recv: {hops:?}");
 }
 
 /// The bounds, as a cost signature rather than a benchmark: on a file built

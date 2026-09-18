@@ -44,6 +44,18 @@ pub struct RenameOptions {
 }
 
 /// Identifies what we're collecting references to.
+/// Is `name` the constructor SPELLING of `origin`'s language? The document
+/// says so on its own constructor capture; a language whose constructor is
+/// a name convention rather than a spelling (Perl's `new`) declares none,
+/// which is what keeps `new` renameable.
+fn is_ctor_name(origin: &FileAnalysis, name: &str) -> bool {
+    crate::build::language_driver::LanguageRegistry::pack_capture_literals(
+        &origin.language,
+        "def.method.ctor",
+    )
+    .contains(name)
+}
+
 #[derive(Debug, Clone)]
 pub struct TargetRef {
     pub name: String,
@@ -75,8 +87,8 @@ pub struct TargetRef {
     /// alone — the name belongs to the language, so nothing renames it. Its
     /// references need no marker: a construction site mints the constructor
     /// call itself, which the ordinary member arm matches. Set in the
-    /// identity lane from `PackFacts::constructor_names`; `None` everywhere
-    /// else.
+    /// identity lane from the pack document's own constructor capture;
+    /// `None` everywhere else.
     pub ctor_of: Option<String>,
     /// Which member family this target names, minted from the fact that
     /// produced it: a `FieldAccess` cursor or a stored-member declaration is
@@ -120,12 +132,7 @@ impl TargetRef {
         // rename-kind mapping, the identity lanes, implementations — gets
         // the ctor marker from this one speller, so the rename policy reads
         // it wherever the cursor landed.
-        let ctor_of = origin
-            .pack
-            .constructor_names
-            .iter()
-            .any(|c| c == &name)
-            .then(|| class.clone());
+        let ctor_of = is_ctor_name(origin, &name).then(|| class.clone());
         TargetRef {
             name,
             names: origin.names().clone(),
@@ -281,10 +288,7 @@ impl TargetRef {
                 // `__construct` arrives here as a Sub, and the rename policy
                 // must refuse it exactly as it does the call-side Method
                 // target.
-                let ctor_of = package
-                    .as_ref()
-                    .filter(|_| origin.pack.constructor_names.iter().any(|c| c == &name))
-                    .cloned();
+                let ctor_of = package.as_ref().filter(|_| is_ctor_name(origin, &name)).cloned();
                 TargetRef {
                     name,
                     names: origin.names().clone(),

@@ -4,7 +4,7 @@ mod doc;
 
 use doc::{php_annot_type, php_doc_types};
 
-use crate::build::query_extract::{CallShape, EnumMember, LangPack, PeelSpec};
+use crate::build::query_extract::{EnumMember, LangPack};
 use crate::model::file_analysis::{InferredType, NameSpellings, PackSpellings};
 
 /// php's write and display spellings. `type_display` is what a human
@@ -82,8 +82,8 @@ pub fn php_pack() -> LangPack {
         // the model's current-package invocant token so relative static
         // dispatch resolves like Perl's `__PACKAGE__->` (late static
         // binding over-approximates to the writing class; accepted).
-        // `parent::` is `super_receiver`'s job — it spells the model's
-        // SUPER method token, not a receiver shape.
+        // `parent::` is the skeleton's `@receiver.super` — it spells the
+        // model's SUPER method token, not a receiver shape.
         shape_name: |kind, raw| {
             if kind == "member.recv" && matches!(raw, "self" | "static") {
                 return crate::model::conventions::CURRENT_PACKAGE_TOKEN.to_string();
@@ -125,11 +125,6 @@ pub fn php_pack() -> LangPack {
                 t => php_annot_type(t).map(ReturnExpr::Concrete),
             }
         },
-        super_receiver: |t| t == "parent",
-        self_class_tokens: &["self", "static"],
-        class_token_kinds: &["name", "qualified_name"],
-        function_scoped_vars: true,
-        constructor_names: &["__construct"],
         // phpdoc: the type vocabulary of REAL PHP — most of WordPress and
         // half of Laravel's public API type only here.
         doc_types: php_doc_types,
@@ -152,30 +147,8 @@ pub fn php_pack() -> LangPack {
         // class/trait/interface bodies are brace-delimited, so a member
         // orphaned by a misparse can re-anchor positionally.
         brace_scoped_members: true,
-        call_shapes: &[
-            CallShape { kind: "member_call_expression", callee_field: "name", args_field: "arguments" },
-            CallShape { kind: "nullsafe_member_call_expression", callee_field: "name", args_field: "arguments" },
-            CallShape { kind: "scoped_call_expression", callee_field: "name", args_field: "arguments" },
-            CallShape { kind: "function_call_expression", callee_field: "function", args_field: "arguments" },
-            CallShape { kind: "object_creation_expression", callee_field: "", args_field: "arguments" },
-        ],
-        arg_kind: "argument",
-        throwaway_names: &["$_"],
-        implicit_variables: &[
-            "$this", "$GLOBALS", "$_SERVER", "$_GET", "$_POST", "$_FILES", "$_COOKIE",
-            "$_SESSION", "$_REQUEST", "$_ENV", "$argv", "$argc", "$http_response_header",
-        ],
-        catch_all_methods: &["__call", "__callStatic", "__get"],
-        callable_placeholder_kind: "variadic_placeholder",
-        spread_arg_kind: "variadic_unpacking",
-        named_arg_field: "name",
         imports_bind_names: true,
-        deprecated_attribute: "Deprecated",
         bundled_builtin_types: &[include_str!("../../../../queries/php/builtins.txt")],
-        // `['k' => $v]` — the key/value arrow inside a list literal.
-        pair_arrow: "=>",
-        dynamic_arg_markers: &["func_get_args", "func_num_args", "func_get_arg"],
-        dynamic_var_markers: &["extract", "get_defined_vars", "eval", "parse_str", "compact"],
         enum_members: &[
             EnumMember { name: "value", callable: false },
             EnumMember { name: "name", callable: false },
@@ -184,39 +157,9 @@ pub fn php_pack() -> LangPack {
             EnumMember { name: "tryFrom", callable: true },
         ],
         trigger_chars: &["$", ">", ":"],
-        receiver_names: &["$this"],
-        recv_peel: PeelSpec {
-            wrappers: &[("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer)],
-            annot_kinds: &[],
-            leaf_to_def: &[],
-            record_stack: false,
-        },
-        // one meaningful member operator family (`->`/`?->`): no op-DX.
-        op_map: &[],
-        simple_var_kinds: &["variable_name"],
         // calls included: PHP's method call is ONE flat node (unlike cpp,
         // where the call wraps a field_expression), so mid-token member
         // completion (`->ma|p`) must climb to the call node itself.
-        member_kinds: &[
-            "member_access_expression",
-            "member_call_expression",
-            "nullsafe_member_call_expression",
-            // `Foo::m(`, `self::CONST`, `static::$prop`: a scoped access is
-            // a member access whose receiver is the class token.
-            "scoped_call_expression",
-            "scoped_property_access_expression",
-            "class_constant_access_expression",
-        ],
-        skip_kinds: &["string", "string_content", "comment"],
-        call_kinds: &[
-            "function_call_expression",
-            "member_call_expression",
-            "scoped_call_expression",
-            "nullsafe_member_call_expression",
-            "object_creation_expression",
-        ],
-        domain_compare_kinds: &[],
-        domain_compare_ops: &[],
     }
 }
 

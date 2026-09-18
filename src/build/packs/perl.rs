@@ -1,7 +1,7 @@
 //! Perl's pack — the query-engine seam for the language the native
 //! builder owns.
 
-use crate::build::query_extract::{LangPack, PeelSpec};
+use crate::build::query_extract::LangPack;
 use crate::model::file_analysis::PackSpellings;
 
 /// Perl writes and displays nothing of its own: the engine's type tags are
@@ -39,11 +39,6 @@ pub fn perl_pack() -> LangPack {
         },
         annot_type: |_| None,
         declared_return: |_| None,
-        super_receiver: |_| false,
-        self_class_tokens: &[],
-        class_token_kinds: &[],
-        function_scoped_vars: false,
-        constructor_names: &[],
         doc_types: |_, _| vec![],
         doc_uses_method_tags: &[],
         module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
@@ -51,30 +46,9 @@ pub fn perl_pack() -> LangPack {
         narrow_type: |_| None,
         implicit_this_members: false,
         brace_scoped_members: false,
-        call_shapes: &[],
-        arg_kind: "",
-        implicit_variables: &[],
-        throwaway_names: &[],
-        catch_all_methods: &[],
-        callable_placeholder_kind: "",
-        pair_arrow: "=>",
-        spread_arg_kind: "",
-        named_arg_field: "",
         imports_bind_names: false,
-        deprecated_attribute: "",
         bundled_builtin_types: &[],
         enum_members: &[],
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
-        receiver_names: &[],
-        recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
-        op_map: &[],
-        simple_var_kinds: &[],
-        dynamic_arg_markers: &[],
-        dynamic_var_markers: &[],
-        member_kinds: &[],
-        skip_kinds: &[],
-        call_kinds: &[],
-        domain_compare_kinds: &[],
-        domain_compare_ops: &[],
     }
 }

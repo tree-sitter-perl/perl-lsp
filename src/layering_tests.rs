@@ -1453,7 +1453,7 @@ fn language_spellings_have_one_home() {
         ("build/cpp_reparse/defs.rs", 5, "the C++ keyword table — grammar vocabulary in the pack's own tier"),
         ("build/language_driver.rs", 2, "the driver STAMPS two pack attributes (`include_guard`, `non_public`), flag included — the minting side"),
         ("build/packs/php/doc.rs", 2, "php's own doc-tag spellings — the pack IS their home"),
-        ("build/packs/php/mod.rs", 4, "the php pack's own receiver spellings — the `LangPack` IS their home"),
+        ("build/packs/php/mod.rs", 3, "the php pack's own receiver spellings — the `LangPack` IS their home"),
         ("build/plugin/rhai_host.rs", 3, "a manifest signal name in an inline test fixture"),
         ("build/query_extract/extract.rs", 17, "the generic extractor minting the canonical tokens a pack's captures declare"),
         ("build/query_extract/skeleton.rs", 15, "skeleton→model conversion: the kind/attribute vocabulary becomes flags here"),
@@ -1572,32 +1572,9 @@ fn pack_fields_name_no_grammar_shapes() {
         "kept: the LSP client's trigger characters, which collide with the grammar's anonymous \
          tokens by coincidence — a protocol vocabulary, not the language's syntax";
     let allow: &[(&str, &str, usize, &str)] = &[
-        ("cpp", "call_kinds", 1, "B1 — `@hop.call` / `@expr.call` patterns"),
-        ("cpp", "domain_compare_kinds", 1, "B1 — the existing `@domain.slot` patterns"),
-        ("cpp", "domain_compare_ops", 2, "B1 — the pattern's own `#any-of?`"),
-        ("cpp", "member_kinds", 1, "B1 — the `@member.recv` patterns' root kinds"),
-        ("cpp", "op_map", 2, "B1 — `\"->\" @member.op.arrow`, `\".\" @member.op.dot`"),
-        ("cpp", "receiver_names", 1, "B1 — `@receiver.this`"),
-        ("cpp", "recv_peel", 2, "B1 — `@recv.peel` / `@recv.peel.deref`"),
-        ("cpp", "simple_var_kinds", 1, "B1 — `@ref.var` marks a bare variable"),
-        ("cpp", "skip_kinds", 4, "B1 — `(string) @skip (comment) @skip …`"),
         ("cpp", "trigger_chars", 3, TRIGGERS),
-        ("perl", "pair_arrow", 1, "B1 — `\"=>\" @pair.arrow` on the list-literal pattern"),
         ("perl", "trigger_chars", 6, TRIGGERS),
-        ("php", "arg_kind", 1, "B1 — `@arity.arg`"),
-        ("php", "call_kinds", 5, "B1 — `@hop.call` / `@expr.call` patterns"),
-        ("php", "call_shapes", 14, "B1 — the compiled query's `@arity.args` captures"),
-        ("php", "callable_placeholder_kind", 1, "B1 — `@arity.placeholder`"),
-        ("php", "class_token_kinds", 2, "B1 — `@receiver.class` on the scoped-call patterns"),
         ("php", "enum_members", 2, "kept: producer-only — the extractor mints each as a SYNTHESIZED member at every enum, and no consumer reads the list"),
-        ("php", "member_kinds", 6, "B1 — the `@member.recv` patterns' root kinds"),
-        ("php", "named_arg_field", 1, "B1 — `@arity.arg.named`"),
-        ("php", "pair_arrow", 1, "B1 — `\"=>\" @pair.arrow` on the list-literal pattern"),
-        ("php", "recv_peel", 1, "B1 — `@recv.peel`"),
-        ("php", "self_class_tokens", 2, "B1 — `@receiver.self` with `#any-of?`"),
-        ("php", "simple_var_kinds", 1, "B1 — `@ref.var` marks a bare variable"),
-        ("php", "skip_kinds", 3, "B1 — `(string) @skip (comment) @skip …`"),
-        ("php", "spread_arg_kind", 1, "B1 — `@arity.arg.spread`"),
         ("php", "trigger_chars", 3, TRIGGERS),
     ];
     let drift = pack_allowlist_drift("rule #15 (grammar shapes on the pack)", &seen, allow);
@@ -1663,16 +1640,8 @@ fn pack_string_tables_are_ratcheted() {
     let seen: HashMap<String, usize> =
         seen.into_iter().filter(|(k, _)| !k.ends_with(":trigger_chars")).collect();
     let allow: &[(&str, &str, usize, &str)] = &[
-        ("php", "catch_all_methods", 3, "B1 — `@def.method.catch_all` → a class flag"),
-        ("php", "constructor_names", 1, "B1 — `@def.method.ctor` → `SymbolFlags::CONSTRUCTOR`"),
-        ("php", "deprecated_attribute", 1, "B1 — `@sym.attr.deprecated`"),
         ("php", "doc_uses_method_tags", 1, "kept: one framework's docblock tag, data handed to the engine's own reader — the entry-document posture"),
-        ("php", "dynamic_arg_markers", 3, "B1 — `@call.dynamic_args`"),
-        ("php", "dynamic_var_markers", 5, "B1 — `@call.dynamic_vars`"),
         ("php", "enum_members", 3, "kept: producer-only — the extractor mints each as a SYNTHESIZED member at every enum, and no consumer reads the list"),
-        ("php", "implicit_variables", 13, "B1 — `@ref.var.implicit` mints the binding"),
-        ("php", "receiver_names", 1, "B1 — `@param.receiver` / `@receiver.this`"),
-        ("php", "throwaway_names", 1, "B1 — `@def.var.throwaway` → `SymbolFlags::THROWAWAY`"),
     ];
     let drift = pack_allowlist_drift("rule #15 (vocabulary tables on the pack)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
@@ -1760,7 +1729,7 @@ fn pack_facts_fields_are_ratcheted() {
             skipped = false;
         }
     }
-    const RATCHET: usize = 26;
+    const RATCHET: usize = 21;
     assert!(
         fields <= RATCHET,
         "PackFacts grew to {fields} fields (ratchet {RATCHET}). A per-language constant goes on \

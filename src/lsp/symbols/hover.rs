@@ -145,11 +145,14 @@ pub fn pack_hover_markdown(
             }
         }
     }
-    // The current-object receiver (`$this` — the pack's declared receiver
-    // names) has no declaration to land on; its value IS the enclosing
-    // class, which is what a reader hovering it wants to know.
+    // The current-object receiver (`$this`, `this`) has no declaration to
+    // land on; its value IS the enclosing class, which is what a reader
+    // hovering it wants to know.
     if let Some(tok) = analysis.ref_at(point).map(|r| r.target_name.as_str()) {
-        if analysis.pack.receiver_names.iter().any(|n| n == tok) {
+        if crate::build::language_driver::LanguageRegistry::receiver_spellings(
+            &analysis.language,
+            tok,
+        ) {
             if let Some(cls) = analysis
                 .scope_at(point)
                 .and_then(|sc| analysis.enclosing_class_for_scope(sc))

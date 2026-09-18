@@ -892,9 +892,17 @@ pub fn pack_symbol_diagnostics(
                 matches!(s.kind, FaSymKind::Sub | FaSymKind::Method | FaSymKind::Field)
                     && s.package.as_deref() == Some(class.as_str())
             });
-            let owner_catch_all = pack.catch_all_methods.iter().any(|m| {
-                owner.resolve_member(&class, m, MemberKind::Callable, idx).is_some()
-            });
+            // A class with one of these anywhere in its MRO answers ANY
+            // member name at runtime. The document names them on the
+            // capture that fires on their declarations, so the set has one
+            // home and an overlay can widen it.
+            let owner_catch_all =
+                crate::build::language_driver::LanguageRegistry::pack_capture_literals(
+                    &analysis.language,
+                    "def.method.catch_all",
+                )
+                .iter()
+                .any(|m| owner.resolve_member(&class, m, MemberKind::Callable, idx).is_some());
             if !owner_has_members || owner_catch_all || !owner.ancestry_fully_visible(&class, idx) {
                 return None;
             }
@@ -916,7 +924,11 @@ pub fn pack_symbol_diagnostics(
         match owner.resolve_member(&class, name, want, idx) {
             None if facts.is_interface || facts.is_trait => {}
             // a class with no declared constructor has the default one
-            None if pack.constructor_names.iter().any(|c| c == name) => {}
+            None if crate::build::language_driver::LanguageRegistry::pack_capture_literals(
+                &analysis.language,
+                "def.method.ctor",
+            )
+            .contains(name) => {}
             None if named_by_string => {
                 // `[$obj, 'name']` is data until dispatch proves it a
                 // callable: a claim only when it resolves
@@ -957,7 +969,10 @@ pub fn pack_symbol_diagnostics(
                 }
                 // the receiver is the pack's own (`$this`): the runtime class
                 // may be any descendant, and one of them declares the member
-                let own_receiver = pack.receiver_names.iter().any(|n| n == invocant.text());
+                let own_receiver = crate::build::language_driver::LanguageRegistry::receiver_spellings(
+                    &analysis.language,
+                    invocant.text(),
+                );
                 if own_receiver {
                     let declared_below = *below_memo
                         .entry((class.clone(), name.to_string(), matches!(want, MemberKind::Value)))
@@ -1120,7 +1135,10 @@ pub fn pack_symbol_diagnostics(
     }
 
     // ---- undefined variable: an unbound read inside a callable ----
-    if !pack.implicit_variables.is_empty() {
+    // The lane runs on facts: a read the runtime binds carries a binding
+    // (`@ref.var.implicit`), and a pack whose document binds nothing
+    // produces no unbound reads to report.
+    {
         // occurrences per (callable scope, name) — a name read MORE than
         // once is presumed bound by a call the callee lane below cannot
         // resolve; the single stray read is the typo this lane names.
@@ -1151,7 +1169,7 @@ pub fn pack_symbol_diagnostics(
             {
                 continue;
             }
-            if pack.implicit_variables.contains(&r.target_name) {
+            if matches!(r.binding, Some(crate::model::file_analysis::RefBinding::Runtime)) {
                 continue;
             }
             let Some(sc) = callable_of(r.scope) else { continue };
@@ -1225,8 +1243,7 @@ pub fn pack_symbol_diagnostics(
             }
             let Some(sc) = callable_of(sym.scope) else { continue };
             // an alias (`$h = &$opts['h']`) is written to reach its storage
-            if pack.implicit_variables.contains(&sym.name)
-                || pack.throwaway_names.contains(&sym.name)
+            if sym.flags.contains(SymbolFlags::THROWAWAY)
                 || pack.param_regions.iter().any(|p| p.contains(&sym.span))
                 || sym.attributes.iter().any(|a| a == "alias")
             {
@@ -1559,7 +1576,7 @@ pub fn pack_symbol_diagnostics(
             for s in callables {
                 // no annotation to add: a constructor, a contract, a docblock
                 // `@method`, a closure; and none wanted for an already-declared one
-                if pack.constructor_names.iter().any(|c| c == &s.name)
+                if s.is_constructor()
                     || s.flags.intersects(
                         SymbolFlags::CONTRACT
                             | SymbolFlags::DOC_DECLARED

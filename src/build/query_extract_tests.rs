@@ -935,6 +935,7 @@ fn sksym(src: &str, kind: &str, name: &str, occ: usize, package: Option<&str>) -
         qualifier_owned: false,
         doc: None,
         deprecation: None,
+        flags: Default::default(),
     }
 }
 

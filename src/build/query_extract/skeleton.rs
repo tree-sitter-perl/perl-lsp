@@ -62,6 +62,11 @@ pub struct SkelSymbol {
     /// `@deprecated` text (or `Some(None)`-less: the attribute form has
     /// no text) — present iff the symbol carries the `deprecated` attribute.
     pub deprecation: Option<String>,
+    /// Declaration facts the extractor minted from a CAPTURE rather than
+    /// from a written attribute token — a receiver parameter, a
+    /// constructor. Or-ed onto the flags the kind and the attributes give,
+    /// so the two mints never race for one bit.
+    pub flags: SymbolFlags,
 }
 
 #[derive(Debug, Clone)]
@@ -80,8 +85,8 @@ pub struct SkelRef {
     /// function's name (`do_action`, `apply_filters`) — the `RefKind::
     /// DispatchCall::dispatcher` label. `None` for every other kind.
     pub via: Option<String>,
-    /// The written member operator (`.`/`->`) + its span, mapped from the
-    /// `@member.op` token's kind via the pack `op_map`, `Some` only when the
+    /// The written member operator (`.`/`->`) + its span, named by the
+    /// document's own `@member.op.<which>` capture, `Some` only when the
     /// IMMEDIATE receiver is a simple variable. Rides onto the MethodCall ref
     /// so operator-correctness is a ref query, not a separate walk.
     pub member_op: Option<(crate::model::file_analysis::MemberOp, crate::model::file_analysis::Span)>,
@@ -156,13 +161,15 @@ pub struct SkeletonAnalysis {
     /// is a macro parameter with no type, hence the class is frozen from the
     /// field decl rather than inferred from the (untypeable) invocant.
     pub macro_body_member_reads: Vec<(String, crate::model::file_analysis::Span)>,
-    /// The pack's receiver param names (Python `self`/`cls`). A Variable so
-    /// named is the method receiver, not a class member — its (wrongly
-    /// sticky-tagged) class package is cleared in `into_file_analysis`.
-    pub receiver_names: Vec<String>,
-    pub implicit_variables: Vec<String>,
-    pub throwaway_names: Vec<String>,
-    pub catch_all_methods: Vec<String>,
+    /// The pack that produced this skeleton. Set on the analysis so a
+    /// consumer reaching a language's spellings by id (rule #14) finds them
+    /// on an analysis the driver has not stamped yet.
+    pub lang_id: &'static str,
+    /// `@ref.var.implicit` — spans whose variable read the RUNTIME binds
+    /// (php `$this`, the superglobals). The minted ref carries
+    /// `RefBinding::Runtime`, so the undefined-variable lane never sees an
+    /// unbound read instead of consulting a name list.
+    pub runtime_bound_reads: Vec<Span>,
     /// Member tokens on the left of an assignment (dynamic property sites).
     pub member_writes: Vec<Span>,
     /// Whole import-statement spans (`use A\B;` rows), for the insertion
@@ -195,7 +202,6 @@ pub struct SkeletonAnalysis {
     /// unification pass in `into_file_analysis`.
     pub function_scoped_vars: bool,
     /// The pack's constructor-method names, riding to `PackFacts`.
-    pub constructor_names: Vec<String>,
     /// The language's name spellings (`LangPack::names`), baked onto
     /// `PackFacts::names`.
     pub names: crate::model::file_analysis::NameSpellings,
@@ -846,7 +852,7 @@ impl SkeletonAnalysis {
                     }
                     a
                 },
-                flags: symbol_flags_of(&s.kind, &s.attributes),
+                flags: symbol_flags_of(&s.kind, &s.attributes) | s.flags,
                 declared_with: s.declared_with,
                 deref_stack: s.deref_stack.clone(),
                 arity: s.arity,
@@ -1423,17 +1429,23 @@ impl SkeletonAnalysis {
                 )
             }))
             .collect();
+        let runtime_bound: std::collections::HashSet<(usize, usize)> = self
+            .runtime_bound_reads
+            .iter()
+            .map(|s| (s.start.row, s.start.column))
+            .collect();
         for (name, scope, span) in unresolved_reads {
             if claimed.contains(&(span.start.row, span.start.column, name.clone())) {
                 continue;
             }
+            let runtime = runtime_bound.contains(&(span.start.row, span.start.column));
             local_refs.push(crate::model::file_analysis::Ref {
                 kind: crate::model::file_analysis::RefKind::Variable,
                 span,
                 scope,
                 target_name: name,
                 access: crate::model::file_analysis::AccessKind::Read,
-                binding: None,
+                binding: runtime.then_some(crate::model::file_analysis::RefBinding::Runtime),
                 folded_from: None,
                 arg_count: None,
             });
@@ -1597,10 +1609,6 @@ impl SkeletonAnalysis {
             // Pack-declared receiver names ride the FA so core's member /
             // outline filters can exclude them generically (lang semantics in
             // the pack, generic logic in core).
-            receiver_names: std::mem::take(&mut self.receiver_names),
-            implicit_variables: std::mem::take(&mut self.implicit_variables),
-            throwaway_names: std::mem::take(&mut self.throwaway_names),
-            catch_all_methods: std::mem::take(&mut self.catch_all_methods),
             import_rows: std::mem::take(&mut self.import_rows),
             spellings: self.spellings,
             rail_labels: std::mem::take(&mut self.rail_labels),
@@ -1608,7 +1616,6 @@ impl SkeletonAnalysis {
             preamble_end: self.preamble_end,
             imports_bind_names: self.imports_bind_names,
             doc_mentions: std::mem::take(&mut self.doc_mentions),
-            constructor_names: std::mem::take(&mut self.constructor_names),
             names: std::mem::take(&mut self.names),
             // Specialization family edges (spec → primary). NOT an inheritance
             // edge: a spec inherits nothing from its primary (it replaces
@@ -1673,6 +1680,10 @@ impl SkeletonAnalysis {
             flow_edges: std::mem::take(&mut self.flow_edges),
             ..Default::default()
         });
+        // The pack that built it. The driver stamps the same id; setting it
+        // here means an analysis produced without one still answers the
+        // by-language-id lookups (spellings, the document's own literals).
+        fa.language = self.lang_id.to_string();
         // Seal base_*_count so a later enrich pass (the CLI/--batch path
         // runs it unconditionally) truncates to the FULL analysis, not to
         // zero — otherwise enrichment wipes every pack-language symbol.
