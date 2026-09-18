@@ -1,58 +1,9 @@
 //! Diagnostics: unresolved names, the narrowing family, `DiagnosticOptions`.
 
 use super::*;
-use crate::model::file_analysis::{name_match_key, SymbolFlags};
+use crate::model::file_analysis::{name_match_key, Finding, LaneFacts, SymbolFlags};
 
-/// Every diagnostic code this adapter mints, spelled ONCE. Metrics key on
-/// these strings (per-file yield counts in the ghost lane), so a literal at a
-/// mint site is a typo away from a silently separate metric bucket — the
-/// wide-table drift failure in string form.
-pub mod codes {
-    pub const UNRESOLVED_FUNCTION: &str = "unresolved-function";
-    pub const UNRESOLVED_METHOD: &str = "unresolved-method";
-    /// A member found on a same-named class in ANOTHER namespace because
-    /// the class this file names is not indexed — the honest over-
-    /// approximation, said out loud (`docs/prompt-class-identity.md`).
-    pub const RESOLVED_BY_WIDENING: &str = "resolved-by-widening";
-    pub const UNDEF_DEREF: &str = "undef-deref";
-    pub const OPTIONAL_DEREF: &str = "optional-deref";
-    pub const DEREF_SHAPE_MISMATCH: &str = "deref-shape-mismatch";
-    pub const ROLE_REQUIRES_UNFULFILLED: &str = "role-requires-unfulfilled";
-    pub const HELPER_NOT_LOADED: &str = "helper-not-loaded";
-    pub const UNRESOLVED_DISPATCH: &str = "unresolved-dispatch";
-    pub const UNKNOWN_HASH_KEY: &str = "unknown-hash-key";
-    /// A member read as a property that no declaration of the receiver's
-    /// class provides.
-    pub const UNDEFINED_PROPERTY: &str = "undefined-property";
-    /// A member reached from outside the scope its access modifier allows.
-    pub const NON_PUBLIC_ACCESS: &str = "non-public-access";
-    /// A call whose written argument count the callee's declared list
-    /// cannot take.
-    pub const ARITY_MISMATCH: &str = "arity-mismatch";
-    /// A read of a name nothing in the callable binds.
-    pub const UNDEFINED_VARIABLE: &str = "undefined-variable";
-    /// A local written and never read.
-    pub const UNUSED_VARIABLE: &str = "unused-variable";
-    /// An import row binding a name the file never spells.
-    pub const UNUSED_IMPORT: &str = "unused-import";
-    /// A class name the file's namespace evidence cannot supply.
-    pub const UNDEFINED_TYPE: &str = "undefined-type";
-    /// A contract callable a concrete composer neither declares nor
-    /// inherits.
-    pub const UNIMPLEMENTED_METHOD: &str = "unimplemented-method";
-    /// A callable with an inferrable return and no native annotation, in a
-    /// file that writes them.
-    pub const MISSING_RETURN_TYPE: &str = "missing-return-type";
-    /// A use of a declaration marked deprecated.
-    pub const DEPRECATED: &str = "deprecated";
-    /// A use on a named rail that no definition on that rail answers, where
-    /// the rail's own document declares no code of its own. The rail rides
-    /// the diagnostic's `data`, so the set of codes this adapter can mint
-    /// stays closed whatever a plugin's rail document is called.
-    pub const UNDEFINED_RAIL_NAME: &str = "undefined-rail-name";
-    /// A use of a local moved from (`std::move`), opt-in.
-    pub const USE_AFTER_MOVE: &str = "use-after-move";
-}
+pub use crate::model::file_analysis::codes;
 
 // ---- Diagnostics ----
 
@@ -823,7 +774,7 @@ pub fn pack_symbol_diagnostics(
     idx: Option<&dyn CrossFileLookup>,
 ) -> Vec<Diagnostic> {
     use crate::model::file_analysis::{
-        HandlerOwner, IndexState, MemberKind, MethodResolution, RailNames, ScopeKind,
+        HandlerOwner, IndexState, RailNames, ScopeKind,
     };
     // Whether absence is meaningful is the INDEX's answer about THIS
     // language, never a caller's claim: a store that swept nothing is
@@ -833,36 +784,39 @@ pub fn pack_symbol_diagnostics(
         .map(|i| i.index_state(&analysis.language))
         .unwrap_or(IndexState::Warming)
         .is_settled();
-    let mut out = Vec::new();
-    let pack = &analysis.pack;
-    // Every per-class fact is derived ONCE per class, never per ref: a
-    // 10k-line class file has thousands of member calls on a handful of
-    // classes, and a symbol scan per call is quadratic.
-    let local_classes: std::collections::HashSet<&str> = analysis
-        .symbols()
+    // The small closed name sets the language's query DOCUMENT declares,
+    // read once here — the tier that can see the documents, handing them to
+    // the lanes that reason on them.
+    use crate::build::language_driver::LanguageRegistry as Reg;
+    let lang = analysis.language.as_str();
+    let ctor: Vec<&str> = Reg::pack_capture_literals(lang, "def.method.ctor").iter().copied().collect();
+    let receivers: Vec<&str> = Reg::pack_capture_literals(lang, "receiver.this")
         .iter()
-        .filter(|s| matches!(s.kind, FaSymKind::Class | FaSymKind::Package))
-        .map(|s| s.name.as_str())
+        .chain(Reg::pack_capture_literals(lang, "param.receiver").iter())
+        .copied()
         .collect();
-    let local_class = |class: &str| local_classes.contains(class);
-    // The members php declares by WRITING them, per class. A write is a ref
-    // fact, so it stays a per-file set — but resolving each write's invocant
-    // is the work the member loop already pays, so it is derived once, on
-    // the first lane that asks.
-    let mut written: Option<HashMap<String, std::collections::HashSet<String>>> = None;
-    // The class's DEFINING analysis plus the facts every lane asks of it,
-    // memoized per class. `None` = a class the lanes stay silent on.
-    struct OwnerFacts {
-        owner: Option<std::sync::Arc<FileAnalysis>>,
-        is_interface: bool,
-        /// A trait's `$this` is whatever class composes it: every member
-        /// it does not declare may live there.
-        is_trait: bool,
-    }
-    // keyed by (leaf, the namespace the CALL means): a `parent::` call's
-    // parent is the parent-namespace row of the class it is written in — an
-    // aliased parent carrying the child's own leaf is not the child
-    let mut owner_memo: HashMap<(String, Option<String>), Option<OwnerFacts>> = HashMap::new();
+    let own_class: Vec<&str> = Reg::pack_capture_literals(lang, "receiver.self")
+        .iter()
+        .chain(Reg::pack_capture_literals(lang, "receiver.super").iter())
+        .copied()
+        .collect();
+    let builtins = Reg::builtin_types(lang);
+    let facts = LaneFacts {
+        idx,
+        index_settled,
+        constructor_names: &ctor,
+        receiver_tokens: &receivers,
+        own_class_tokens: &own_class,
+        builtin_types: &builtins,
+    };
+
+    let mut out: Vec<Diagnostic> = analysis
+        .member_findings(&facts)
+        .into_iter()
+        .chain(analysis.call_arity_findings())
+        .map(render_finding)
+        .collect();
+    let pack = &analysis.pack;
     let push = |out: &mut Vec<Diagnostic>, span: Span, sev: DiagnosticSeverity, code: &str, msg: String| {
         out.push(Diagnostic {
             range: span_to_range(span),
@@ -873,219 +827,6 @@ pub fn pack_symbol_diagnostics(
             ..Default::default()
         });
     };
-
-    // ---- undefined member / arity, per member access ----
-    // Template method: `$this->step()` in a base whose SUBCLASS declares
-    // `step` dispatches on the runtime class, which is that subclass. One
-    // graph walk per (class, member, kind).
-    let mut below_memo: HashMap<(String, String, bool), bool> = HashMap::new();
-    for r in analysis.refs() {
-        let Some(site) = r.member_site() else { continue };
-        // a member site always states its family
-        let Some(want) = MemberKind::of_ref(&r.kind) else { continue };
-        let invocant = site.invocant;
-        // only a call can be named by a string (`[$obj, 'name']`)
-        let named_by_string = matches!(r.kind, RefKind::MethodCall { named_by_string: true, .. });
-        // The method TOKEN the model spells: a `parent::` call is minted on
-        // the model's SUPER lane (`SUPER::m`), whose qualifier is the
-        // model's own spelling and not the language's namespace separator,
-        // so splitting on that separator left the qualifier on the name and
-        // every `parent::` call read as undefined.
-        let name = crate::model::conventions::MethodToken::parse(
-            r.unqualified_target_name(analysis.names()),
-        )
-        .name();
-        // `$obj->$dyn()` — the member is named by a variable, and a sigil
-        // is a variable only where the language declares one.
-        if name.is_empty() || name.chars().next().is_some_and(|c| analysis.names().is_sigil(c)) {
-            continue;
-        }
-        let class_literal = analysis.spellings().class_literal_member;
-        if !class_literal.is_empty() && name == class_literal {
-            continue; // `Foo::class` is the class-name literal
-        }
-        // The dispatch projection every verb reads (`$this` is a typed
-        // receiver here — the extractor witnesses it at the class body).
-        let Some(class) = analysis.method_call_invocant_class(r, idx) else { continue };
-        // The receiver is an identity: its own namespace names the class's
-        // defining candidate (a pack without namespaces makes no claim).
-        let want_ns = analysis.identity_namespace(&class);
-        let facts = owner_memo.entry((class.clone(), want_ns.clone())).or_insert_with(|| {
-            // The class's DEFINING analysis: this file, or — once the
-            // workspace index is settled — the candidate its namespace
-            // names. An unsettled index would flag every cross-file member.
-            let is_local = local_class(&class)
-                && (want_ns.is_none() || analysis.declared_class_namespace(&class) == want_ns);
-            let owner_arc: Option<std::sync::Arc<FileAnalysis>> = if is_local {
-                None
-            } else if index_settled {
-                let i = idx?;
-                Some(i.defining_analysis(&class, &|a| {
-                    let declared = a.declared_class_namespace(&class);
-                    declared.is_some() && (want_ns.is_none() || declared == want_ns)
-                })?)
-            } else {
-                return None;
-            };
-            let owner: &FileAnalysis = owner_arc.as_deref().unwrap_or(analysis);
-            let owner_has_members = owner.symbols().iter().any(|s| {
-                matches!(s.kind, FaSymKind::Sub | FaSymKind::Method | FaSymKind::Field)
-                    && s.package.as_deref() == Some(class.as_str())
-            });
-            if !owner_has_members
-                || owner.class_answers_any_member(&class, idx)
-                || !owner.ancestry_fully_visible(&class, idx)
-            {
-                return None;
-            }
-            let flavors = owner.class_flags(&class);
-            Some(OwnerFacts {
-                // A receiver typed as an INTERFACE names any implementation.
-                // `instanceof` narrowing retypes a VARIABLE receiver, but a
-                // member subject (`$this->x instanceof T`), a method guard
-                // (`->isT()`) or `is_a()` leave the interface type standing
-                // — so the interface stays silent on undefined members
-                // (resolved ones still check arity).
-                is_interface: flavors.contains(SymbolFlags::INTERFACE),
-                is_trait: flavors.contains(SymbolFlags::TRAIT),
-                owner: owner_arc,
-            })
-        });
-        let Some(facts) = facts.as_ref() else { continue };
-        let owner: &FileAnalysis = facts.owner.as_deref().unwrap_or(analysis);
-        match owner.resolve_member(&class, name, want, idx) {
-            None if facts.is_interface || facts.is_trait => {}
-            // a class with no declared constructor has the default one
-            None if crate::build::language_driver::LanguageRegistry::pack_capture_literals(
-                &analysis.language,
-                "def.method.ctor",
-            )
-            .contains(name) => {}
-            None if named_by_string => {
-                // `[$obj, 'name']` is data until dispatch proves it a
-                // callable: a claim only when it resolves
-            }
-            None => {
-                // php declares a property by writing it: a write of this
-                // member on the same class anywhere in the file is its
-                // declaration
-                if matches!(want, MemberKind::Value) {
-                    let writes = written.get_or_insert_with(|| {
-                        let mut by_class: HashMap<String, std::collections::HashSet<String>> =
-                            HashMap::new();
-                        for w in analysis.refs() {
-                            if w.member_site().is_none()
-                                || !matches!(w.access, crate::model::file_analysis::AccessKind::Write)
-                            {
-                                continue;
-                            }
-                            if let Some(c) = analysis.method_call_invocant_class(w, idx) {
-                                by_class
-                                    .entry(c)
-                                    .or_default()
-                                    .insert(w.unqualified_target_name(analysis.names()).to_string());
-                            }
-                        }
-                        by_class
-                    });
-                    if writes.get(&class).is_some_and(|m| m.contains(name)) {
-                        continue;
-                    }
-                }
-                // a read inside an existence probe (`isset($x->p)`) IS the
-                // question of whether the member exists
-                if matches!(want, MemberKind::Value)
-                    && analysis.pack.probe_regions.iter().any(|p| p.contains(&r.span))
-                {
-                    continue;
-                }
-                // the receiver is the pack's own (`$this`): the runtime class
-                // may be any descendant, and one of them declares the member
-                let own_receiver = crate::build::language_driver::LanguageRegistry::receiver_spellings(
-                    &analysis.language,
-                    invocant.text(),
-                );
-                if own_receiver {
-                    let declared_below = *below_memo
-                        .entry((class.clone(), name.to_string(), matches!(want, MemberKind::Value)))
-                        .or_insert_with(|| {
-                            owner
-                                .dispatch_participants(&class, idx)
-                                .iter()
-                                .filter(|p| **p != class)
-                                .any(|p| owner.resolve_member(p, name, want, idx).is_some())
-                        });
-                    if declared_below {
-                        continue;
-                    }
-                }
-                // a same-named member of the OTHER kind is a different
-                // finding (a method read as a property) — still undefined
-                let (code, what) = match want {
-                    MemberKind::Value => (codes::UNDEFINED_PROPERTY, "property"),
-                    _ => (codes::UNRESOLVED_METHOD, "method"),
-                };
-                push(&mut out, r.span, DiagnosticSeverity::ERROR, code, format!("Undefined {what} '{name}'."));
-            }
-            Some(MethodResolution::Local { sym_id, .. }) => {
-                let sym = owner.symbol(sym_id);
-                if let Some(text) = deprecation_of(sym) {
-                    out.push(deprecated_diag(r.span, name, &text));
-                }
-                // non-public member reached from outside its class — unless
-                // from inside a closure, whose `$this` may be rebound to the
-                // owner (`Closure::bind`, `->call($obj)`: the private-access
-                // idiom tests live on)
-                let in_closure = analysis
-                    .scope_chain(r.scope)
-                    .into_iter()
-                    .filter_map(|sc| analysis.scope(sc).owner)
-                    .any(|sid| analysis.symbol(sid).flags.contains(SymbolFlags::ANONYMOUS));
-                // a property READ that resolved only to a same-named METHOD
-                // (or the reverse) is not an access violation
-                let kind_agrees = MemberKind::of_sym(sym.kind) == want;
-                if kind_agrees && !in_closure && sym.flags.contains(SymbolFlags::NON_PUBLIC) {
-                    let from = analysis.enclosing_class_for_scope(r.scope);
-                    let owner = sym.package.clone().unwrap_or_default();
-                    if from.as_deref() != Some(owner.as_str())
-                        && !from.as_deref().is_some_and(|f| analysis.class_isa(f, &owner, idx))
-                    {
-                        push(&mut out, r.span, DiagnosticSeverity::ERROR, codes::NON_PUBLIC_ACCESS,
-                            format!("Cannot access non-public member '{name}' of {owner} from {} scope.", from.as_deref().unwrap_or("global")));
-                    }
-                }
-                // arity: the written argument count against the declared list
-                if let (Some(n), Some(a)) = (r.arg_count, sym.arity) {
-                    if !sym.flags.contains(SymbolFlags::DYNAMIC_ARGS) {
-                        if n < a.required {
-                            push(&mut out, r.span, DiagnosticSeverity::ERROR, codes::ARITY_MISMATCH,
-                                format!("Not enough arguments. Expected {}. Found {n}.", a.required));
-                        } else if !a.variadic && n > a.total {
-                            push(&mut out, r.span, DiagnosticSeverity::WARNING, codes::ARITY_MISMATCH,
-                                format!("Too many arguments. Expected {}. Found {n}.", a.total));
-                        }
-                    }
-                }
-            }
-            Some(MethodResolution::CrossFile { class: on, widened: true, .. }) => {
-                // The answer stands (goto-def, hover and completion all
-                // serve it), but it is confidently wrong whenever the code
-                // is — an import not yet written, a namespace typo — so
-                // the widening is a finding of its own.
-                push(
-                    &mut out,
-                    r.span,
-                    DiagnosticSeverity::WARNING,
-                    codes::RESOLVED_BY_WIDENING,
-                    format!(
-                        "'{name}' resolved on '{on}': the class this file names, '{class}', is not \
-                         indexed, so a same-named class in another namespace answered."
-                    ),
-                );
-            }
-            Some(MethodResolution::CrossFile { .. }) => {}
-        }
-    }
 
     // ---- deprecated functions and classes, local or cross-file ----
     for r in analysis.refs() {
@@ -1133,36 +874,6 @@ pub fn pack_symbol_diagnostics(
         });
         if let Some(text) = found {
             out.push(deprecated_diag(r.span, leaf, &text));
-        }
-    }
-
-    // ---- arity on plain calls (local callees only) ----
-    // A construction mints its constructor call, so `new Foo(...)` is
-    // checked by the member arity lane above — where a class declaring no
-    // constructor is silent, and the default constructor takes any
-    // argument list by not resolving.
-    for r in analysis.refs() {
-        if !matches!(r.kind, RefKind::FunctionCall) {
-            continue;
-        }
-        let Some(n) = r.arg_count else { continue };
-        let name = r.unqualified_target_name(analysis.names());
-        let callee = analysis
-            .symbols_named(name)
-            .iter()
-            .map(|&sid| analysis.symbol(sid))
-            .find(|s| matches!(s.kind, FaSymKind::Sub));
-        let Some(sym) = callee else { continue };
-        let Some(a) = sym.arity else { continue };
-        if sym.flags.contains(SymbolFlags::DYNAMIC_ARGS) {
-            continue;
-        }
-        if n < a.required {
-            push(&mut out, r.span, DiagnosticSeverity::ERROR, codes::ARITY_MISMATCH,
-                format!("Not enough arguments. Expected {}. Found {n}.", a.required));
-        } else if !a.variadic && n > a.total {
-            push(&mut out, r.span, DiagnosticSeverity::WARNING, codes::ARITY_MISMATCH,
-                format!("Too many arguments. Expected {}. Found {n}.", a.total));
         }
     }
 
@@ -1687,6 +1398,115 @@ fn deprecation_of(sym: &crate::model::file_analysis::Symbol) -> Option<Option<St
     sym.flags
         .contains(SymbolFlags::DEPRECATED)
         .then(|| sym.presentation.deprecation.clone())
+}
+
+/// One lane finding as the wire sees it. THE place a `Finding` becomes
+/// text: severity, phrasing, tags and the quick-fix payload all live here,
+/// so a lane can be asked its answer without the protocol's vocabulary and
+/// the message for a code is written once.
+fn render_finding(f: Finding) -> Diagnostic {
+    use crate::model::file_analysis::{FindingData, MemberKind};
+    let (severity, message, tags, data) = match &f.data {
+        FindingData::UndefinedMember { kind, name } => {
+            let what = match kind {
+                MemberKind::Value => "property",
+                _ => "method",
+            };
+            (DiagnosticSeverity::ERROR, format!("Undefined {what} '{name}'."), None, None)
+        }
+        FindingData::NonPublicAccess { name, owner, from } => (
+            DiagnosticSeverity::ERROR,
+            format!(
+                "Cannot access non-public member '{name}' of {owner} from {} scope.",
+                from.as_deref().unwrap_or("global")
+            ),
+            None,
+            None,
+        ),
+        FindingData::TooFewArguments { expected, found } => (
+            DiagnosticSeverity::ERROR,
+            format!("Not enough arguments. Expected {expected}. Found {found}."),
+            None,
+            None,
+        ),
+        FindingData::TooManyArguments { expected, found } => (
+            DiagnosticSeverity::WARNING,
+            format!("Too many arguments. Expected {expected}. Found {found}."),
+            None,
+            None,
+        ),
+        FindingData::ResolvedByWidening { name, on, wanted } => (
+            DiagnosticSeverity::WARNING,
+            format!(
+                "'{name}' resolved on '{on}': the class this file names, '{wanted}', is not \
+                 indexed, so a same-named class in another namespace answered."
+            ),
+            None,
+            None,
+        ),
+        FindingData::Deprecated { name, note } => (
+            DiagnosticSeverity::HINT,
+            match note {
+                Some(t) => format!("'{name}' is deprecated: {t}"),
+                None => format!("'{name}' is deprecated."),
+            },
+            Some(vec![DiagnosticTag::DEPRECATED]),
+            None,
+        ),
+        FindingData::UndefinedVariable { name } => {
+            (DiagnosticSeverity::ERROR, format!("Undefined variable '{name}'."), None, None)
+        }
+        FindingData::UnusedVariable { name } => (
+            DiagnosticSeverity::HINT,
+            format!("'{name}' is assigned but never used."),
+            Some(vec![DiagnosticTag::UNNECESSARY]),
+            None,
+        ),
+        FindingData::UnusedImport { bound, sole_row } => (
+            DiagnosticSeverity::HINT,
+            format!("'{bound}' is imported but never used."),
+            Some(vec![DiagnosticTag::UNNECESSARY]),
+            sole_row.map(|(a, b)| serde_json::json!({ "row": [a, b] })),
+        ),
+        FindingData::UndefinedType { identity, candidates } => (
+            DiagnosticSeverity::ERROR,
+            format!("Undefined type '{identity}'."),
+            None,
+            (!candidates.is_empty()).then(|| serde_json::json!({ "candidates": candidates })),
+        ),
+        FindingData::UnimplementedContracts { class, missing } => {
+            let list = missing
+                .iter()
+                .map(|u| format!("`{}::{}()`", u.role, u.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (
+                DiagnosticSeverity::ERROR,
+                format!(
+                    "'{class}' does not implement {list}; declare {} or make the class abstract.",
+                    if missing.len() == 1 { "it" } else { "them" }
+                ),
+                None,
+                None,
+            )
+        }
+        FindingData::MissingReturnType { name, spelling } => (
+            DiagnosticSeverity::HINT,
+            format!("'{name}' has no declared return type; it returns `{spelling}`."),
+            None,
+            Some(serde_json::json!({ "spelling": spelling })),
+        ),
+    };
+    Diagnostic {
+        range: span_to_range(f.span),
+        severity: Some(severity),
+        code: Some(NumberOrString::String(f.code.to_string())),
+        source: Some("perl-lsp".to_string()),
+        message,
+        tags,
+        data,
+        ..Default::default()
+    }
 }
 
 /// The deprecated-tagged hint at a use site.

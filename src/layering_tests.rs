@@ -1463,7 +1463,7 @@ fn language_spellings_have_one_home() {
         ("model/file_analysis/outline.rs", 2, "outline detail text for a union container and a param decl kind"),
         ("model/witnesses/registry.rs", 1, "the `param` owner-keyed fallback key — a witness attachment name"),
         ("lsp/symbols/hover.rs", 1, "the hover LABEL for a macro-shaped Sub — display text (the fact itself is read as a flag)"),
-        ("lsp/symbols/diagnostics.rs", 1, "the `deprecated` diagnostic CODE — LSP wire text, not the declaration fact"),
+        ("model/file_analysis/diagnostics.rs", 1, "the `deprecated` diagnostic CODE — client-facing wire text, not the declaration fact"),
     ];
     drift.extend(allowlist_drift("rule #12 (attribute spellings)", &seen, allow));
 

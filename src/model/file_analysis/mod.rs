@@ -49,6 +49,9 @@ mod hover;
 mod sym_index;
 mod completion;
 pub use completion::*;
+mod diagnostics;
+pub use diagnostics::*;
+mod diagnostics_members;
 
 // ---- FileAnalysis ----
 
