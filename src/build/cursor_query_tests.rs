@@ -150,3 +150,30 @@ fn the_bounded_runner_classifies_one_node_on_an_adversarial_file() {
         "classifying a large node took {elapsed:?} — the walk descended into it"
     );
 }
+
+/// A predicate's literals may contain the character that ends the predicate.
+/// Stopping at the first `)` dropped every argument after it and abandoned
+/// the rest of the pattern — a keyword quietly missing from a set.
+#[test]
+fn a_predicate_literal_may_contain_a_closing_paren() {
+    let mut out = std::collections::HashSet::new();
+    super::collect_capture_literals(
+        "((name) @kw (#any-of? @kw \"a)b\" \"c\"))\n((name) @other (#eq? @other \"d\"))",
+        "kw",
+        &mut out,
+    );
+    let mut got: Vec<&str> = out.into_iter().collect();
+    got.sort();
+    assert_eq!(got, ["a)b", "c"], "both literals, and the scan survives the first");
+    let mut other = std::collections::HashSet::new();
+    super::collect_capture_literals(
+        "((name) @kw (#any-of? @kw \"a)b\" \"c\"))\n((name) @other (#eq? @other \"d\"))",
+        "other",
+        &mut other,
+    );
+    assert_eq!(
+        other.into_iter().collect::<Vec<_>>(),
+        ["d"],
+        "a later predicate is still reached"
+    );
+}
