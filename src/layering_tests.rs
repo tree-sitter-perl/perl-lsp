@@ -1586,7 +1586,6 @@ fn rendered_strings_are_not_reparsed() {
         ("model/file_analysis/use_map.rs", 3, "resolving WRITTEN spellings"),
         ("lsp/cli/positions.rs", 1, "a `file:line:col` CLI argument — what the user typed, not what we rendered"),
         ("lsp/cursor_context.rs", 1, "Perl source text at the cursor, split on Perl's own separator"),
-        ("model/file_analysis/diagnostics_liveness.rs", 1, "a written qualified spelling, split on the separator the analysis declares"),
         ("lsp/symbols/links.rs", 2, "POD link text and a module path as the source wrote them"),
     ];
     let drift = allowlist_drift("rule #13 (rendered strings)", &seen, allow);

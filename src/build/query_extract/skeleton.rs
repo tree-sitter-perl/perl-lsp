@@ -130,7 +130,7 @@ pub struct SkeletonAnalysis {
     pub use_aliases: Vec<(String, String, String)>,
     /// Class spellings written WITH a qualifier: (leaf, written prefix).
     /// Carried onto `FileAnalysis.pack.qualified_spellings`.
-    pub qualified_spellings: Vec<(String, String)>,
+    pub qualified_spellings: Vec<crate::model::file_analysis::QualifiedSpelling>,
     pub scope_count: usize,
     pub scopes: Vec<crate::model::file_analysis::Scope>,
     pub witnesses: Vec<crate::model::witnesses::Witness>,

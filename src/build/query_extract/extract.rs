@@ -262,6 +262,16 @@ fn param_name_node<'t>(
     None
 }
 
+/// The namespace segments a WRITTEN qualifier spells, in order. Source
+/// text, split on the language's own separator — the parts the
+/// `QualifiedSpelling` keeps so that nothing downstream has to.
+fn segments_of(raw: &str, sep: &str) -> Vec<String> {
+    if sep.is_empty() {
+        return Vec::new();
+    }
+    raw.split(sep).filter(|s| !s.is_empty()).map(str::to_string).collect()
+}
+
 /// The `ImportBinds` a capture-name suffix declares, or `None` when the
 /// suffix is not one. `use function` / `use const` rows bind a callable or a
 /// constant; an unsuffixed row binds a type, so the pack spells only the two
@@ -2152,7 +2162,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 if let Some((qual, method, sep)) = split {
                     let (leaf, ns) = split_ns_leaf(qual, sep);
                     if !ns.is_empty() {
-                        out.qualified_spellings.push((leaf.clone(), format!("{sep}{ns}")));
+                        // a class named through a member qualifier reaches the
+                        // global namespace outright (`A\F::cb`, never relative)
+                        out.qualified_spellings.push(
+                            crate::model::file_analysis::QualifiedSpelling {
+                                leaf: leaf.clone(),
+                                segments: ns.split(sep).map(str::to_string).collect(),
+                                absolute: true,
+                            },
+                        );
                     }
                     // The ref's span is the METHOD tail only — rename rewrites
                     // exactly those characters; the invocant span is the
@@ -2511,14 +2529,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         let leaf = (pack.shape_name)(&e.cap, &e.text);
                         let raw = q.strip_suffix(leaf.as_str()).unwrap_or_default();
                         let sep = pack.names.use_map_sep().unwrap_or_default();
-                        let mut prefix = raw.trim_end_matches(sep).to_string();
-                        // `\Throwable`: no segments, but ABSOLUTE — the
-                        // leading separator is the whole spelling
-                        if prefix.is_empty() && !sep.is_empty() && raw.starts_with(sep) {
-                            prefix = sep.to_string();
-                        }
-                        if !prefix.is_empty() {
-                            out.qualified_spellings.push((leaf, prefix));
+                        // `\Throwable` carries no segments and is still
+                        // ABSOLUTE — the leading separator is the whole claim.
+                        let spelling = crate::model::file_analysis::QualifiedSpelling {
+                            leaf,
+                            segments: segments_of(raw, sep),
+                            absolute: !sep.is_empty() && raw.starts_with(sep),
+                        };
+                        if spelling.absolute || !spelling.segments.is_empty() {
+                            out.qualified_spellings.push(spelling);
                         }
                     }
                     // The chain-hop witness: the whole call's value is
@@ -2971,10 +2990,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // head — the import that head binds is USED here, the
                     // same fact a qualified call records.
                     if let Some(q) = head {
+                        let sep = pack.names.use_map_sep().unwrap_or_default();
                         let raw = q.strip_suffix(name.as_str()).unwrap_or_default();
-                        let prefix = raw.trim_end_matches(pack.names.use_map_sep().unwrap_or_default()).to_string();
-                        if !prefix.is_empty() {
-                            out.qualified_spellings.push((name.clone(), prefix));
+                        let segments = segments_of(raw, sep);
+                        if !segments.is_empty() {
+                            out.qualified_spellings.push(
+                                crate::model::file_analysis::QualifiedSpelling {
+                                    leaf: name.clone(),
+                                    segments,
+                                    absolute: !sep.is_empty() && raw.starts_with(sep),
+                                },
+                            );
                         }
                     }
                     let span = Span { start: e.start, end: e.end };
