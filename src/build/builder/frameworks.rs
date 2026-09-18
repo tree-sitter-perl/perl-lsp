@@ -393,7 +393,7 @@ impl<'a> Builder<'a> {
                             node_to_span(node),
                             *sel_span,
                             SymbolDetail::Sub {
-                                params: vec![ParamInfo {
+                                params: vec![ParamInfo { declared_type: None,
                                     name: "$val".into(),
                                     default: None,
                                     is_slurpy: false,
@@ -436,7 +436,7 @@ impl<'a> Builder<'a> {
                             node_to_span(node),
                             *sel_span,
                             SymbolDetail::Sub {
-                                params: vec![ParamInfo {
+                                params: vec![ParamInfo { declared_type: None,
                                     name: "$val".into(),
                                     default: None,
                                     is_slurpy: false,
@@ -553,7 +553,7 @@ impl<'a> Builder<'a> {
                         node_to_span(node),
                         *sel_span,
                         SymbolDetail::Sub {
-                            params: vec![ParamInfo {
+                            params: vec![ParamInfo { declared_type: None,
                                 name: "$val".into(),
                                 default: None,
                                 is_slurpy: false,

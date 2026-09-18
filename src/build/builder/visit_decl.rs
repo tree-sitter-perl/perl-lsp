@@ -978,7 +978,7 @@ impl<'a> Builder<'a> {
                                 .into_iter()
                                 .map(|(name, span)| {
                                     let is_slurpy = name.starts_with('@') || name.starts_with('%');
-                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false, binding_site: Some(span.start) }
+                                    ParamInfo { declared_type: None, name, default: None, is_slurpy, is_invocant: false, binding_site: Some(span.start) }
                                 })
                                 .collect();
                             // Combine any preceding shift params with @_ params
@@ -1006,7 +1006,7 @@ impl<'a> Builder<'a> {
                                 .into_iter()
                                 .map(|(name, span)| {
                                     let is_slurpy = name.starts_with('@') || name.starts_with('%');
-                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false, binding_site: Some(span.start) }
+                                    ParamInfo { declared_type: None, name, default: None, is_slurpy, is_invocant: false, binding_site: Some(span.start) }
                                 })
                                 .collect();
                             if !list_params.is_empty() {
@@ -1023,7 +1023,7 @@ impl<'a> Builder<'a> {
                         .and_then(|l| self.collect_vars_from_decl(l).into_iter().next())
                         .map(|(_, span)| span.start);
                     if let Some((var_name, default)) = self.extract_shift_param(assign, right) {
-                        shift_params.push(ParamInfo {
+                        shift_params.push(ParamInfo { declared_type: None,
                             name: var_name,
                             default,
                             is_slurpy: false,
@@ -1035,7 +1035,7 @@ impl<'a> Builder<'a> {
 
                     // Pattern: my $var = $_[N];
                     if let Some(var_name) = self.extract_subscript_param(assign, right) {
-                        shift_params.push(ParamInfo {
+                        shift_params.push(ParamInfo { declared_type: None,
                             name: var_name,
                             default: None,
                             is_slurpy: false,
@@ -1130,7 +1130,7 @@ impl<'a> Builder<'a> {
                 match param.kind() {
                     "mandatory_parameter" => {
                         if let Some(var) = self.first_var_child(param) {
-                            params.push(ParamInfo { name: var, default: None, is_slurpy: false, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { declared_type: None, name: var, default: None, is_slurpy: false, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     "optional_parameter" => {
@@ -1143,18 +1143,18 @@ impl<'a> Builder<'a> {
                             .and_then(|d| d.utf8_text(self.source).ok())
                             .map(|s| s.to_string());
                         if let Some(name) = var {
-                            params.push(ParamInfo { name, default, is_slurpy: false, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { declared_type: None, name, default, is_slurpy: false, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     "slurpy_parameter" => {
                         if let Some(var) = self.first_var_child(param) {
-                            params.push(ParamInfo { name: var, default: None, is_slurpy: true, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { declared_type: None, name: var, default: None, is_slurpy: true, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     "scalar" | "array" | "hash" => {
                         if let Ok(text) = param.utf8_text(self.source) {
                             let is_slurpy = matches!(param.kind(), "array" | "hash");
-                            params.push(ParamInfo { name: text.to_string(), default: None, is_slurpy, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { declared_type: None, name: text.to_string(), default: None, is_slurpy, is_invocant: false, binding_site: Some(param.start_position()) });
                         }
                     }
                     _ => {}
@@ -1476,7 +1476,7 @@ impl<'a> Builder<'a> {
                         node_to_span(node),
                         bare_span,
                         SymbolDetail::Sub {
-                            params: vec![ParamInfo {
+                            params: vec![ParamInfo { declared_type: None,
                                 name: format!("${}", bare_name),
                                 default: None,
                                 is_slurpy: false,

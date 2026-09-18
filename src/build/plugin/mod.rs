@@ -215,7 +215,7 @@ pub struct EmittedParam {
 
 impl From<EmittedParam> for ParamInfo {
     fn from(p: EmittedParam) -> Self {
-        ParamInfo {
+        ParamInfo { declared_type: None,
             name: p.name,
             default: p.default,
             is_slurpy: p.is_slurpy,
