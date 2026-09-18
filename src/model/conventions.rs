@@ -187,9 +187,17 @@ pub const PERL_PACK_SPELLINGS: crate::model::file_analysis::PackSpellings =
 /// reference.
 pub static PERL_SPELLINGS_PACK: crate::model::file_analysis::PackSpellings = PERL_PACK_SPELLINGS;
 
+/// `__PACKAGE__` — the compile-time token for the enclosing package. Perl's
+/// own word, written by Perl's builder and read back by
+/// `is_current_package_token`; a pack whose receiver names the class it is
+/// written in says so on its capture (`@receiver.self`) and the extractor
+/// mints the class, never this token
+/// (`layering_tests::packs_do_not_borrow_perls_current_package_token`).
+pub const CURRENT_PACKAGE_TOKEN: &str = "__PACKAGE__";
+
 /// `__PACKAGE__` — the compile-time token for the enclosing package.
 pub fn is_current_package_token(text: &str) -> bool {
-    text == "__PACKAGE__"
+    text == CURRENT_PACKAGE_TOKEN
 }
 
 /// A name that can be written as a method / sub call — a syntactically valid
