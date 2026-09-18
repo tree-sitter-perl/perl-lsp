@@ -451,6 +451,21 @@
 (array_creation_expression
   (array_element_initializer (_) (_) @tuple.keyed)) @tuple.arr
 
+; ---- call arguments ----
+; What the arity lane counts and what signature help points at: one
+; capture per written argument, in source order, plus the three shapes
+; that END positional matching. A named argument is matched by name, a
+; spread makes the count unknowable, and `f(...)` passes nothing at all —
+; each says so on its own argument, so no consumer re-reads the list.
+(arguments (_) @arity.arg)
+(arguments (argument name: (name)) @arity.arg.named)
+(arguments (argument (variadic_unpacking)) @arity.arg.spread)
+(arguments (variadic_placeholder) @arity.placeholder)
+; A BARE variable argument: the token a by-reference parameter binds
+; (docs/adr/by-ref-binding.md). Anchored both ends, so `f(name: $x)` — a
+; named argument that also holds one — is not one.
+(arguments (argument . (variable_name) @arity.arg.var .))
+
 ; ---- references ----
 (function_call_expression
   function: (name) @ref.call

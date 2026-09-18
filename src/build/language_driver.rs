@@ -434,8 +434,10 @@ impl LanguageDriver for PackDriver {
             cross_file_words: true,
             entrypoint_symbols: pack.entrypoint_symbols,
             runtime_invoked_methods: pack.runtime_invoked_methods,
-            // declared by the pack's call shapes — no shapes, no verb
-            pack_signature_help: !pack.call_shapes.is_empty(),
+            // declared by what the document mints: a pack that captures an
+            // argument list has calls to help with.
+            pack_signature_help: (self.make_parser().language())
+                .is_some_and(|l| crate::build::query_extract::pack_declares_capture(&l, &pack, "arity.args")),
             include_path_tokens: pack.include_path_tokens,
             preprocessor_macros: pack.preprocessor_macros,
             // The verb walks tree ancestors — no language in it.

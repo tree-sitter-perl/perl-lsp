@@ -78,19 +78,19 @@ pub(crate) fn peel<'a>(
 /// token, so they ask the same function.
 fn param_name_node<'t>(
     ch: tree_sitter::Node<'t>,
-    simple_var_kinds: &[&str],
+    simple_var_kinds: &std::collections::HashSet<&'static str>,
 ) -> Option<tree_sitter::Node<'t>> {
     // The `name` field where the grammar names the variable directly; a
     // by-reference spelling WRAPS it (php's `by_ref`) and a C declarator
     // buries it under pointers and arrays, so either way the identity is
     // the simple variable underneath.
     let named = ch.child_by_field_name("name");
-    if named.is_some_and(|n| simple_var_kinds.contains(&n.kind())) {
+    if named.is_some_and(|n| simple_var_kinds.contains(n.kind())) {
         return named;
     }
     let mut stack = vec![named.unwrap_or(ch)];
     while let Some(n) = stack.pop() {
-        if n != ch && simple_var_kinds.contains(&n.kind()) {
+        if n != ch && simple_var_kinds.contains(n.kind()) {
             return Some(n);
         }
         let mut w = n.walk();
@@ -137,6 +137,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let query = cached_query(&language, query_source)?;
     // The cursor-time runner serves THIS object, never one of its own.
     super::cursor_query::remember(pack.lang_id, query, query_source);
+    // A BARE variable: the node kinds the document reads as one. The
+    // by-reference binding lane, the parameter-name walk and the op-DX gate
+    // all mean the same shape, so they ask the same patterns.
+    let simple_var_kinds = super::cursor_query::pattern_root_kinds(query, "expr.read.var");
     let cap_names: Vec<String> = query
         .capture_names()
         .iter()
@@ -167,6 +171,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // for shapes whose list lands in another match.
     let mut arg_counts_by_match: HashMap<usize, usize> = HashMap::new();
     let mut placeholder_by_match: std::collections::HashSet<usize> = Default::default();
+    // The `@arity.args` lists, with the match that captured each, and every
+    // `@arity.arg*` capture in the file. Joined below: a capture belongs to
+    // the nearest enclosing list, which is what nests `f(g($x))` correctly.
+    let mut arity_lists: Vec<(usize, tree_sitter::Node)> = Vec::new();
+    let mut arg_caps: Vec<(&str, tree_sitter::Node)> = Vec::new();
     // A callable's declared parameter arity AND the parameters themselves,
     // keyed by the parameter_list span. Associated to its def symbol by span
     // containment in `into_file_analysis` (`@arity.sig` fires a separate match
@@ -285,7 +294,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             if cap == "member.recv" {
                 // op-DX applies only to a bare-variable immediate receiver
                 // (its deref_stack resolves by name); a wrapper/chain doesn't.
-                member_simple.insert(match_counter, pack.simple_var_kinds.contains(&node.kind()));
+                member_simple.insert(match_counter, simple_var_kinds.contains(node.kind()));
                 let inner = peel(node, &pack.recv_peel, source)
                     .map(|(leaf, _, _)| leaf)
                     .unwrap_or(node);
@@ -300,57 +309,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 });
                 continue;
             }
-            // `@arity.args`: a call's argument_list — count its arguments (the
-            // named children; the C `...` at a CALL site never appears here).
-            // Keyed by the list's start so the callee ref finds it by adjacency.
+            // `@arity.args`: a call's argument list. What is IN it the
+            // document says argument by argument (`@arity.arg` and its
+            // marks), so the count and the by-reference sites are joined
+            // after the walk — a list's captures and its call's can sit in
+            // different matches.
             if cap == "arity.args" {
-                // `f(...)` passes nothing — a first-class callable, not a call;
-                // `f(...$args)` passes an unknowable number. Neither mints a
-                // count: the callee still reads as callable, the arity lane
-                // stands down.
-                let placeholder = (0..node.named_child_count())
-                    .filter_map(|i| node.named_child(i))
-                    .any(|c| {
-                        (!pack.callable_placeholder_kind.is_empty()
-                            && c.kind() == pack.callable_placeholder_kind)
-                            // the spread sits inside an `argument` wrapper
-                            || (!pack.spread_arg_kind.is_empty()
-                                && (c.kind() == pack.spread_arg_kind
-                                    || c.named_child(0).is_some_and(|g| g.kind() == pack.spread_arg_kind)))
-                    });
-                if !placeholder {
-                    arg_counts_by_start
-                        .insert((node.start_position().row, node.start_position().column),
-                                node.named_child_count());
-                    arg_counts_by_match.insert(match_counter, node.named_child_count());
-                    for (position, arg) in
-                        (0..node.named_child_count()).filter_map(|i| node.named_child(i)).enumerate()
-                    {
-                        // a named argument (`f(out: $x)`) is matched by
-                        // name, not position — no site
-                        if arg.child_by_field_name("name").is_some() {
-                            continue;
-                        }
-                        // the bare variable itself, or its one-child wrapper
-                        // (php's `argument` node)
-                        let inner = if pack.simple_var_kinds.contains(&arg.kind()) {
-                            Some(arg)
-                        } else if arg.named_child_count() == 1 {
-                            arg.named_child(0).filter(|n| pack.simple_var_kinds.contains(&n.kind()))
-                        } else {
-                            None
-                        };
-                        let Some(inner) = inner else { continue };
-                        let text = inner.utf8_text(source).unwrap_or("");
-                        arg_vars_by_start
-                            .entry((node.start_position().row, node.start_position().column))
-                            .or_default()
-                            .push((position as u32, (pack.shape_name)("def.var", text), inner.start_position()));
-                    }
-                } else {
-                    placeholder_call_at.insert((node.start_position().row, node.start_position().column));
-                    placeholder_by_match.insert(match_counter);
-                }
+                arity_lists.push((match_counter, node));
+                continue;
+            }
+            if cap == "arity.arg" || cap.starts_with("arity.arg.") || cap == "arity.placeholder" {
+                arg_caps.push((cap, node));
                 continue;
             }
             // `@arity.sig`: a callable's parameter_list — count declared params
@@ -382,7 +351,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     if !by_ref {
                         return;
                     }
-                    let name_node = param_name_node(ch, pack.simple_var_kinds);
+                    let name_node = param_name_node(ch, simple_var_kinds);
                     let Some(name_node) = name_node else { return };
                     let text = name_node.utf8_text(source).unwrap_or("");
                     by_ref_params.push((
@@ -402,7 +371,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // `void f(int)`) binds nothing and mints nothing.
                 let mut params: Vec<crate::model::file_analysis::ParamInfo> = Vec::new();
                 let mut note_param = |ch: tree_sitter::Node, is_slurpy: bool| {
-                    let Some(name_node) = param_name_node(ch, pack.simple_var_kinds) else {
+                    let Some(name_node) = param_name_node(ch, simple_var_kinds) else {
                         return;
                     };
                     let text = name_node.utf8_text(source).unwrap_or("");
@@ -482,6 +451,85 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             });
         }
     }
+    // ---- join each argument capture to its list, then each list to its call ----
+    // The node kinds an argument list IS come from the patterns that capture
+    // an argument, so a document that teaches the language a new call shape
+    // teaches the arity lane with it.
+    {
+        let arg_list_kinds = super::cursor_query::pattern_root_kinds(query, "arity.arg");
+        #[derive(Default)]
+        struct ListArgs<'t> {
+            args: Vec<tree_sitter::Node<'t>>,
+            named: std::collections::HashSet<usize>,
+            spread: bool,
+            placeholder: bool,
+            vars: Vec<tree_sitter::Node<'t>>,
+        }
+        let mut by_list: HashMap<usize, ListArgs> = HashMap::new();
+        for (cap, node) in arg_caps {
+            // the nearest enclosing list — `f(g($x))` gives `$x` to g's
+            let mut owner = node.parent();
+            for _ in 0..8 {
+                match owner {
+                    Some(n) if arg_list_kinds.contains(n.kind()) => break,
+                    Some(n) => owner = n.parent(),
+                    None => break,
+                }
+            }
+            let Some(owner) = owner.filter(|n| arg_list_kinds.contains(n.kind())) else { continue };
+            let slot = by_list.entry(owner.id()).or_default();
+            match cap {
+                "arity.arg" => slot.args.push(node),
+                "arity.arg.named" => {
+                    slot.named.insert(node.id());
+                }
+                "arity.arg.spread" => slot.spread = true,
+                "arity.arg.var" => slot.vars.push(node),
+                "arity.placeholder" => slot.placeholder = true,
+                _ => {}
+            }
+        }
+        for slot in by_list.values_mut() {
+            slot.args.sort_by_key(|n| n.start_byte());
+        }
+        let empty = ListArgs::default();
+        for (match_id, list) in arity_lists {
+            let at = (list.start_position().row, list.start_position().column);
+            let slot = by_list.get(&list.id()).unwrap_or(&empty);
+            // `f(...)` passes nothing — a first-class callable, not a call;
+            // `f(...$args)` passes an unknowable number. Neither mints a
+            // count: the callee still reads as callable, the arity lane
+            // stands down.
+            if slot.placeholder || slot.spread {
+                placeholder_call_at.insert(at);
+                placeholder_by_match.insert(match_id);
+                continue;
+            }
+            arg_counts_by_start.insert(at, slot.args.len());
+            arg_counts_by_match.insert(match_id, slot.args.len());
+            for (position, arg) in slot.args.iter().enumerate() {
+                // a named argument (`f(out: $x)`) is matched by name, not
+                // position — no site
+                if slot.named.contains(&arg.id()) {
+                    continue;
+                }
+                let Some(var) = slot
+                    .vars
+                    .iter()
+                    .find(|v| v.start_byte() >= arg.start_byte() && v.end_byte() <= arg.end_byte())
+                else {
+                    continue;
+                };
+                let text = var.utf8_text(source).unwrap_or("");
+                arg_vars_by_start.entry(at).or_default().push((
+                    position as u32,
+                    (pack.shape_name)("def.var", text),
+                    var.start_position(),
+                ));
+            }
+        }
+    }
+
     // Source order; outermost first on ties so scopes push before their
     // contents. A `@scope` on the SAME node as a `@def` (a function_definition
     // carries its own body scope) must open AFTER the def is recorded, so the

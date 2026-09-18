@@ -4,7 +4,7 @@ mod doc;
 
 use doc::{php_annot_type, php_doc_types, PHP_BUILTIN_TYPES};
 
-use crate::build::query_extract::{CallShape, LangPack, OutOfLineSpec, PeelSpec};
+use crate::build::query_extract::{LangPack, OutOfLineSpec, PeelSpec};
 use crate::model::file_analysis::{InferredType, NameSpellings, PackSpellings};
 
 /// php's write and display spellings. `type_display` is what a human
@@ -165,23 +165,12 @@ pub fn php_pack() -> LangPack {
         // class/trait/interface bodies are brace-delimited, so a member
         // orphaned by a misparse can re-anchor positionally.
         brace_scoped_members: true,
-        call_shapes: &[
-            CallShape { kind: "member_call_expression", callee_field: "name", args_field: "arguments" },
-            CallShape { kind: "nullsafe_member_call_expression", callee_field: "name", args_field: "arguments" },
-            CallShape { kind: "scoped_call_expression", callee_field: "name", args_field: "arguments" },
-            CallShape { kind: "function_call_expression", callee_field: "function", args_field: "arguments" },
-            CallShape { kind: "object_creation_expression", callee_field: "", args_field: "arguments" },
-        ],
-        arg_kind: "argument",
         throwaway_names: &["$_"],
         implicit_variables: &[
             "$this", "$GLOBALS", "$_SERVER", "$_GET", "$_POST", "$_FILES", "$_COOKIE",
             "$_SESSION", "$_REQUEST", "$_ENV", "$argv", "$argc", "$http_response_header",
         ],
         catch_all_methods: &["__call", "__callStatic", "__get"],
-        callable_placeholder_kind: "variadic_placeholder",
-        spread_arg_kind: "variadic_unpacking",
-        named_arg_field: "name",
         imports_bind_names: true,
         deprecated_attribute: "Deprecated",
         builtin_types: PHP_BUILTIN_TYPES,
@@ -200,7 +189,6 @@ pub fn php_pack() -> LangPack {
         },
         // one meaningful member operator family (`->`/`?->`): no op-DX.
         op_map: &[],
-        simple_var_kinds: &["variable_name"],
         qualifier_peel: &[],
         // calls included: PHP's method call is ONE flat node (unlike cpp,
         // where the call wraps a field_expression), so mid-token member

@@ -52,6 +52,30 @@ pub(crate) fn pack_query(pack: &LangPack) -> Option<&'static Query> {
     memo().lock().unwrap().get(pack.lang_id).map(|(q, _)| *q)
 }
 
+/// Does this pack's document DECLARE `capture` at all? A capability is
+/// "what the query mints", never a Rust list's emptiness (rule #15): a
+/// pack that spells `@arity.args` has a call shape and therefore a
+/// signature, whichever nodes it spelled it on.
+///
+/// Answered off the base query, compiled once per language here because a
+/// capability is asked before the language has analysed anything (the
+/// extractor's object is not yet remembered).
+pub(crate) fn pack_declares_capture(
+    language: &tree_sitter::Language,
+    pack: &LangPack,
+    capture: &str,
+) -> bool {
+    static CACHE: OnceLock<Mutex<HashMap<&'static str, Vec<String>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap();
+    let names = guard.entry(pack.lang_id).or_insert_with(|| {
+        Query::new(language, pack.query_source)
+            .map(|q| q.capture_names().iter().map(|s| s.to_string()).collect())
+            .unwrap_or_default()
+    });
+    names.iter().any(|n| n == capture)
+}
+
 /// The captures of every match whose pattern roots AT `node`.
 ///
 /// Three bounds, all load-bearing — a reader who drops one gets the same

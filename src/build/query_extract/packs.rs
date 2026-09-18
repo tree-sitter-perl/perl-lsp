@@ -184,10 +184,6 @@ pub struct LangPack {
     /// indentation-scoped (Python) or non-nesting packs.
     /// `docs/adr/config-superposition-declarations.md`.
     pub brace_scoped_members: bool,
-    /// The call expressions signature help can anchor on: node kind, the
-    /// field naming the callee token, the field holding the argument list.
-    /// Empty = the language declares no signature help.
-    pub call_shapes: &'static [CallShape],
     /// Variables the runtime binds without a declaration (php's `$this`
     /// and superglobals): never "undefined".
     pub implicit_variables: &'static [&'static str],
@@ -198,23 +194,11 @@ pub struct LangPack {
     /// (php `__call`/`__callStatic`, `__get`) — the undefined-member lanes
     /// stay silent on such a class, as Perl's do on `AUTOLOAD`.
     pub catch_all_methods: &'static [&'static str],
-    /// The node kind of a first-class-callable placeholder in an argument
-    /// list (php `f(...)` → `variadic_placeholder`): such a call passes no
-    /// arguments, so it mints no count. Empty = none.
-    pub callable_placeholder_kind: &'static str,
     /// The key/value arrow inside a list literal (php `'k' => $v`): what a
     /// destructuring slot's key is read before, and what makes a list keyed
     /// rather than positional. Empty for a language whose lists carry no
     /// written keys.
     pub pair_arrow: &'static str,
-    /// The node kind of an argument SPREAD (php `f(...$args)` →
-    /// `variadic_unpacking`): the call's count is unknowable, so it mints
-    /// none and the arity lane stands down. Empty = none.
-    pub spread_arg_kind: &'static str,
-    /// Field a named argument carries its label under (php `f(name: 1)`):
-    /// positional parameter hints stop at the first one. Empty = the pack
-    /// has no named-argument form.
-    pub named_arg_field: &'static str,
     /// An import row binds a NAME the file then spells (php `use A\B;`),
     /// as opposed to splicing text (`#include`). Only bound names can be
     /// unused.
@@ -230,9 +214,6 @@ pub struct LangPack {
     /// Members every enum carries by language rule (php: `->value`,
     /// `->name`, `::cases()`, `::from()`, `::tryFrom()`).
     pub enum_members: &'static [&'static str],
-    /// The node kind of ONE argument inside a call's argument list (php
-    /// `argument`); empty = every named child of the list is an argument.
-    pub arg_kind: &'static str,
     /// Completion trigger characters for the LSP
     /// `completionProvider.triggerCharacters` slot — the client auto-fires
     /// completion (and reports the char in `CompletionContext`) when one is
@@ -256,11 +237,6 @@ pub struct LangPack {
     /// table. An OPEN set: unmapped kinds (`.*`) get no op-DX, never a guess.
     /// Empty = no member-operator DX (Perl, single-operator packs).
     pub op_map: &'static [(&'static str, crate::model::file_analysis::MemberOp)],
-    /// Simple-variable node kinds (`identifier`). op-DX fires ONLY when the
-    /// IMMEDIATE member-access receiver is one — the receiver whose
-    /// `deref_stack` resolves by name to decide the expected operator. Also the
-    /// cursor-completion "is this receiver a bare variable" test.
-    pub simple_var_kinds: &'static [&'static str],
     /// Names whose CALL makes the enclosing callable read arguments it never
     /// declared (php `func_get_args` / `func_num_args` / `func_get_arg`).
     /// The extractor stamps `SymbolFlags::DYNAMIC_ARGS` on the callable that
@@ -349,24 +325,18 @@ impl LangPack {
             entrypoint_symbols,
             runtime_invoked_methods,
             brace_scoped_members: _,
-            call_shapes,
             implicit_variables,
             throwaway_names,
             catch_all_methods,
-            callable_placeholder_kind,
             pair_arrow,
-            spread_arg_kind,
-            named_arg_field,
             imports_bind_names: _,
             deprecated_attribute,
             builtin_types,
             enum_members,
-            arg_kind,
             trigger_chars,
             nested_peel,
             recv_peel,
             op_map,
-            simple_var_kinds,
             dynamic_arg_markers,
             dynamic_var_markers,
             qualifier_peel,
@@ -396,7 +366,6 @@ impl LangPack {
         list(&mut out, "builtin_types", builtin_types);
         list(&mut out, "enum_members", enum_members);
         list(&mut out, "trigger_chars", trigger_chars);
-        list(&mut out, "simple_var_kinds", simple_var_kinds);
         list(&mut out, "dynamic_arg_markers", dynamic_arg_markers);
         list(&mut out, "dynamic_var_markers", dynamic_var_markers);
         list(&mut out, "qualifier_peel", qualifier_peel);
@@ -406,23 +375,14 @@ impl LangPack {
         list(&mut out, "domain_compare_kinds", domain_compare_kinds);
         list(&mut out, "domain_compare_ops", domain_compare_ops);
         for (field, one) in [
-            ("callable_placeholder_kind", *callable_placeholder_kind),
             ("pair_arrow", *pair_arrow),
-            ("spread_arg_kind", *spread_arg_kind),
-            ("named_arg_field", *named_arg_field),
             ("deprecated_attribute", *deprecated_attribute),
-            ("arg_kind", *arg_kind),
             ("oolfn", oolfn.function_declarator),
             ("oolfn", oolfn.qualified_name),
         ] {
             if !one.is_empty() {
                 out.push((field, one));
             }
-        }
-        for c in *call_shapes {
-            out.push(("call_shapes", c.kind));
-            out.push(("call_shapes", c.callee_field));
-            out.push(("call_shapes", c.args_field));
         }
         for (field, peel) in [("nested_peel", nested_peel), ("recv_peel", recv_peel)] {
             out.extend(peel.wrappers.iter().map(|(k, _)| (field, *k)));
@@ -542,18 +502,6 @@ pub(super) fn walk_qualifier_chain<'a>(
         node = node.child_by_field_name("name")?;
     }
     None
-}
-
-/// A call-expression shape signature help climbs to from the cursor
-/// (`cursor_sentinel::call_at`).
-#[derive(Debug, Clone, Copy)]
-pub struct CallShape {
-    pub kind: &'static str,
-    /// Field naming the callee token (a member call's `name`, a function
-    /// call's `function`); the LAST `name`-like descendant is the token.
-    pub callee_field: &'static str,
-    /// Field holding the argument list node.
-    pub args_field: &'static str,
 }
 
 /// One type fact parsed from a documentation comment (`LangPack::doc_types`).
