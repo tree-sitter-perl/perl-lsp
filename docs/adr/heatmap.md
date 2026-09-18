@@ -211,6 +211,16 @@ The dynamic-dispatch signal rides `FileAnalysis.dynamic_dispatch_sites` (`u32`,
 `#[serde(default)]` on the bincode blob), populated in
 `Builder::visit_method_call` when the method name is a scalar.
 
+**The framework-entry isa gate is leaf-keyed.** `framework_entry_claims`
+resolves an entry document's `when_isa` through `class_isa_leaf`, so
+`"when_isa": "TestCase"` claims a `TestCase` in any namespace — an
+over-approximation against the project's own rule that a class's identity is
+its fully-qualified name. It stands because this gate's only effect is to keep
+a symbol OFF the dead-code queue: a claim that is too wide loses a candidate,
+a claim that is too narrow accuses live code. A document can write the FQN and
+the leaf match still holds; there is no spelling that narrows the gate to one
+namespace, and a rule that needs one is the reason to add it.
+
 **Known references-side asymmetry**: a Moo `rwp`/`writer` synthesized method
 shares the attr's declaration token, and the decl-side group answer does not
 include the writer's call sites (references at the call site does link back). Its

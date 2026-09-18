@@ -288,9 +288,14 @@ impl PackSpellings {
         return_annotation_template: "",
         static_property_sigil: "",
         members_are_package_bound: false,
-        // Perl's answer: it declares no pack of its own, and its member
-        // reads are accessor calls.
-        member_reads_are_calls: true,
+        // The SAFE answer, not the lenient one: a language that has not
+        // said its member read is a call gets the strict rule, where
+        // `$obj->name()` does not resolve to a property `name`. Leniency
+        // is what hides a missing `()`, so it is opted INTO — Perl opts in
+        // (`conventions::PERL_PACK_SPELLINGS`), and a new pack that forgets
+        // to declare inherits the answer that reports rather than the one
+        // that goes quiet.
+        member_reads_are_calls: false,
     };
 }
 

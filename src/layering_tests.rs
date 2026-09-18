@@ -1453,7 +1453,7 @@ fn language_spellings_have_one_home() {
         ("build/cpp_reparse/defs.rs", 5, "the C++ keyword table — grammar vocabulary in the pack's own tier"),
         ("build/language_driver.rs", 2, "the driver STAMPS two pack attributes (`include_guard`, `non_public`), flag included — the minting side"),
         ("build/packs/php/doc.rs", 2, "php's own doc-tag spellings — the pack IS their home"),
-        ("build/packs/php/mod.rs", 3, "the php pack's own receiver spellings — the `LangPack` IS their home"),
+        ("build/packs/php/mod.rs", 1, "php's late-bound RETURN spellings (`static`/`self`/`$this` in `declared_return`) — the `LangPack` IS their home"),
         ("build/plugin/rhai_host.rs", 3, "a manifest signal name in an inline test fixture"),
         ("build/query_extract/extract.rs", 17, "the generic extractor minting the canonical tokens a pack's captures declare"),
         ("build/query_extract/skeleton.rs", 15, "skeleton→model conversion: the kind/attribute vocabulary becomes flags here"),
@@ -1467,6 +1467,38 @@ fn language_spellings_have_one_home() {
     ];
     drift.extend(allowlist_drift("rule #12 (attribute spellings)", &seen, allow));
     assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// A pack declares its OWN spellings; it never borrows another language's.
+/// `__PACKAGE__` is Perl's token for the enclosing package, and a pack that
+/// canonicalizes its receiver onto it puts Perl's vocabulary into an
+/// analysis of a language that has no such word. A receiver that names the
+/// class it is written in says so on its capture (`@receiver.self`), and
+/// the extractor mints the class itself.
+#[test]
+fn packs_do_not_borrow_perls_current_package_token() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/build/packs");
+    let mut offenders: Vec<String> = Vec::new();
+    let mut stack = vec![dir.clone()];
+    while let Some(d) = stack.pop() {
+        for entry in fs::read_dir(&d).expect("read packs dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let text = fs::read_to_string(&path).expect("read pack source");
+                if text.contains("CURRENT_PACKAGE_TOKEN") || text.contains("__PACKAGE__") {
+                    offenders.push(path.strip_prefix(&dir).expect("under packs/").display().to_string());
+                }
+            }
+        }
+    }
+    offenders.sort();
+    assert!(
+        offenders.is_empty(),
+        "pack sources spelling Perl's current-package token: {offenders:?} — \
+         declare the receiver on its capture and mint the class at extraction"
+    );
 }
 
 /// Every attribute spelling with a `SymbolFlags` twin, read out of the
@@ -1572,10 +1604,13 @@ fn pack_fields_name_no_grammar_shapes() {
         "kept: the LSP client's trigger characters, which collide with the grammar's anonymous \
          tokens by coincidence — a protocol vocabulary, not the language's syntax";
     let allow: &[(&str, &str, usize, &str)] = &[
+        ("cmake", "trigger_chars", 2, TRIGGERS),
         ("cpp", "trigger_chars", 3, TRIGGERS),
         ("perl", "trigger_chars", 6, TRIGGERS),
         ("php", "enum_members", 2, "kept: producer-only — the extractor mints each as a SYNTHESIZED member at every enum, and no consumer reads the list"),
         ("php", "trigger_chars", 3, TRIGGERS),
+        ("python", "trigger_chars", 1, TRIGGERS),
+        ("r", "trigger_chars", 3, TRIGGERS),
     ];
     let drift = pack_allowlist_drift("rule #15 (grammar shapes on the pack)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));

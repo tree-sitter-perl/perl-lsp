@@ -2,15 +2,6 @@
 //! builder owns.
 
 use crate::build::query_extract::LangPack;
-use crate::model::file_analysis::PackSpellings;
-
-/// Perl writes and displays nothing of its own: the engine's type tags are
-/// its vocabulary, and it offers no import or annotation quick-fix. Its
-/// members belong to the container that declares them.
-const SPELLINGS: PackSpellings = PackSpellings {
-    members_are_package_bound: true,
-    ..PackSpellings::NONE
-};
 
 /// The Perl-on-query-engine seam (go-live map ARC 3, the builder.rs shrink):
 /// not registered as a driver — the native builder still owns Perl — but the
@@ -21,7 +12,8 @@ pub fn perl_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/perl/skeleton.scm"),
         bundled_overlays: &[],
-        spellings: &SPELLINGS,
+        // Perl's spellings have one home, and it is not here.
+        spellings: &crate::model::conventions::PERL_SPELLINGS_PACK,
         lang_id: "perl",
         bundled_entry_markers: &[],
         bundled_rail_docs: &[],

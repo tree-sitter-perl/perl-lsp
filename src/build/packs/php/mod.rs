@@ -1,5 +1,9 @@
-//! php's pack.
+//! php's pack: the declaration, its phpdoc type reader, and composer's
+//! install-map discovery (php's dependency-root source).
 
+// No caller outside the pack tests when php is compiled out.
+#[cfg_attr(not(feature = "php"), allow(dead_code))]
+pub mod composer;
 mod doc;
 
 use doc::{php_annot_type, php_doc_types};
@@ -79,27 +83,11 @@ pub fn php_pack() -> LangPack {
             member_sep: Some(std::borrow::Cow::Borrowed("::")),
         },
         // variable_name captures carry the `$` (PHP spells it at every
-        // use, like Perl); names/classes pass through verbatim. A
-        // `self::`/`static::` receiver IS the enclosing class — spelled as
-        // the model's current-package invocant token so relative static
-        // dispatch resolves like Perl's `__PACKAGE__->` (late static
-        // binding over-approximates to the writing class; accepted).
-        // `parent::` is the skeleton's `@receiver.super` — it spells the
-        // model's SUPER method token, not a receiver shape.
-        shape_name: |kind, raw| {
-            if kind == "member.recv" && matches!(raw, "self" | "static") {
-                return crate::model::conventions::CURRENT_PACKAGE_TOKEN.to_string();
-            }
-            // The chain-hop lane's receiver: `$this` is the enclosing class
-            // instance, so a `$this->a()->b()` chain bases its first hop on
-            // the class (`self`/`static` arrive already canonicalized by the
-            // member.recv arm above). Scoped to hop shaping — the minted
-            // ref's invocant keeps the written `$this` spelling.
-            if kind == "hop.recv" && matches!(raw, "$this" | "self" | "static") {
-                return crate::model::conventions::CURRENT_PACKAGE_TOKEN.to_string();
-            }
-            raw.to_string()
-        },
+        // use, like Perl); names/classes pass through verbatim. Nothing is
+        // canonicalized here: which receiver spellings name the enclosing
+        // class is the skeleton's `@receiver.self` / `@receiver.this`, and
+        // the extractor mints the class itself from the class-body scope.
+        shape_name: |_, raw| raw.to_string(),
         default_name: |kind, row, col| match kind {
             "anon" => Some("(anon)".to_string()),
             // `new class(...) {...}` — PHP's own runtime spelling is

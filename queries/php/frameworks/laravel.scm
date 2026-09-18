@@ -4,6 +4,14 @@
 ; below). Framework VOCABULARY only — every pattern here is spelled in
 ; the standard captures, so the engine carries no Laravel names.
 
+; Four patterns, two relation families (to-one / to-many) x two chain
+; shapes (bare / ONE modifier). The chain depth is the limit the query
+; medium imposes: a pattern names a fixed nesting, so
+; `belongsTo(X::class)->withTrashed()->withDefault()` — two modifiers —
+; matches none of these and the property stays untyped, silently. Read
+; the four arms as the shapes we cover, not as the shapes that exist;
+; a third nesting level is a fifth and sixth pattern, which is where
+; this stops being worth writing by hand.
 (method_declaration
   name: (name) @def.field.name @def.field @flow.target
   body: (compound_statement

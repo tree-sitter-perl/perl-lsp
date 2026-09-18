@@ -6,12 +6,10 @@ A `LangPack` is the per-language half of query-driven extraction
 (`query-extraction-rings.md`): the query document plus the host
 predicates a pattern cannot express. The predicates are the escape
 hatch, and an escape hatch widens. Over five languages the pack
-accumulated Rust tables of node kinds (`member_kinds`, `skip_kinds`,
-`call_kinds`, `simple_var_kinds`), field names (`named_arg_field`,
-`CallShape::callee_field`), operator tokens (`op_map`,
-`domain_compare_ops`) and callee names (`narrow_assertions`,
-`rebind_method`, `cmd_effects`) — each one a fact the `.scm` beside it
-already states, restated in a place the query cannot see.
+accumulated Rust tables of grammar: lists of node kinds, tables of field
+names, sets of operator tokens, and lists of the callee names a rule
+fires on — each one a fact the `.scm` beside it already states, restated
+in a place the query cannot see.
 
 Two things go wrong, both quietly. A table and a document disagree
 after one of them is edited, and the consumer that reads the table
@@ -108,6 +106,25 @@ this seam has — an unattached analysis answers the neutral defaults,
 indistinguishable from a language that declares none — so
 `layering_tests::decoded_pack_analyses_carry_spellings` round-trips every
 registered pack through both codecs.
+
+## Query gotchas
+
+**A query step holds at most three captures.** tree-sitter's
+`MAX_STEP_CAPTURE_COUNT` is 3 and `query_step__add_capture` no-ops past
+the third: the document compiles, `Query::capture_names()` still lists the
+fourth name, and the capture simply never fires. The symptom is a whole
+lane going dark with nothing to read — php's assignment pattern lost
+`@flow.target` this way and every assignment stopped typing, with no
+error anywhere. The fix is to anchor the extra capture on the pattern
+root or on a sibling node, which is usually where it belonged: four
+captures on one node is generally four questions asked of one token.
+
+`--plugin-check` reports it (`dropped_step_capture_findings`), counted
+over the document SOURCE rather than the compiled query — the Rust
+`Query` API exposes patterns, capture names and quantifiers, but no
+per-step capture list, so the compiled form cannot answer which capture
+was dropped. Four or more consecutive `@name` tokens in the source is one
+node's capture list.
 
 ## Structure
 
