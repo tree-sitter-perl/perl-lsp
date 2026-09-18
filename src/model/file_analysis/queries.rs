@@ -9,6 +9,15 @@ impl FileAnalysis {
         &self.pack.names
     }
 
+    /// This language's write and display spellings — what a quick-fix
+    /// inserts and what a human surface renders. Attached by language id
+    /// (never serialized per file, rule #14); a language that declares
+    /// none, and an analysis nothing has attached to, answer the neutral
+    /// defaults, which is what every surface assumed before packs existed.
+    pub fn spellings(&self) -> &'static PackSpellings {
+        self.pack.spellings.unwrap_or(&NEUTRAL_SPELLINGS)
+    }
+
     /// Where `var` is bound inside `scope` — the earliest declaring
     /// `Variable` symbol within the scope's span. The anchor every fact
     /// about a parameter lands at (a declaration's write marker retires
