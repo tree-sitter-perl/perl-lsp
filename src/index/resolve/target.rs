@@ -43,7 +43,6 @@ pub struct RenameOptions {
     pub override_scope: OverrideScope,
 }
 
-/// Identifies what we're collecting references to.
 /// Is `name` the constructor SPELLING of `origin`'s language? The document
 /// says so on its own constructor capture; a language whose constructor is
 /// a name convention rather than a spelling (Perl's `new`) declares none,
@@ -56,6 +55,7 @@ fn is_ctor_name(origin: &FileAnalysis, name: &str) -> bool {
     .contains(name)
 }
 
+/// Identifies what we're collecting references to.
 #[derive(Debug, Clone)]
 pub struct TargetRef {
     pub name: String,

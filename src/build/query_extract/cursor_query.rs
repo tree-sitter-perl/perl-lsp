@@ -13,10 +13,6 @@
 //! keystroke on a large file (a full-tree traversal of a 600-pattern
 //! query); with them it is ~2 µs, because the cursor visits one node.
 
-// The sentinel's node-kind tables are what these replace; until that
-// switch lands they ship tested and unused.
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
