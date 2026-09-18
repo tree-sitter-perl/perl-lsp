@@ -3290,9 +3290,9 @@ class Repo {
 
 #[test]
 fn php_self_and_static_calls_dispatch_as_the_enclosing_class() {
-    // `self::helper()` / `static::helper()` are current-package dispatch —
-    // the receiver canonicalizes to the model's `__PACKAGE__` token, so
-    // gd/hover/refs ride the same lane as Perl's `__PACKAGE__->helper`.
+    // `self::helper()` / `static::helper()` dispatch on the class they are
+    // written in, and the invocant carries that class — the receiver token
+    // never reaches a consumer.
     let src = "\
 <?php
 class Util {
@@ -3311,10 +3311,15 @@ class Util {
         .iter()
         .filter(|r| {
             matches!(&r.kind, RefKind::MethodCall { invocant, .. }
-                if invocant.text() == "__PACKAGE__")
+                if invocant.text() == "Util")
         })
         .collect();
-    assert_eq!(self_calls.len(), 2, "both relative static calls canonicalize");
+    assert_eq!(self_calls.len(), 2, "both relative static calls name the enclosing class");
+    assert!(
+        !fa.refs().iter().any(|r| matches!(&r.kind, RefKind::MethodCall { invocant, .. }
+            if invocant.text() == "__PACKAGE__")),
+        "Perl's current-package token never appears in a php analysis",
+    );
     // and the dispatch class resolves to the enclosing class
     for r in self_calls {
         assert_eq!(
@@ -5037,7 +5042,7 @@ fn php_get_subscribed_events_map_strings_are_method_refs() {
     let members: Vec<&str> = skel
         .refs
         .iter()
-        .filter(|r| r.kind == "member" && r.invocant.as_ref().is_some_and(|(_, t)| t == "__PACKAGE__"))
+        .filter(|r| r.kind == "member" && r.invocant.as_ref().is_some_and(|(_, t)| t == "Sub"))
         .map(|r| r.name.as_str())
         .collect();
     for want in ["onRequest", "onException", "first", "second"] {

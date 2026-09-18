@@ -809,6 +809,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // SUPER lane. A per-match fact, because the ref and its receiver kind
     // arrive in the same match by construction.
     let mut super_recv_matches: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // `@receiver.self` — the match whose receiver NAMES the enclosing class
+    // (php `self::` / `static::`). The class is in hand at the mint (the
+    // class-body scope's package), so the invocant carries it and no
+    // consumer re-derives a receiver token's meaning.
+    let mut self_recv_matches: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // `@param.receiver` — the receiver PARAMETER's name span (python
     // `self`/`cls`): the symbol carries `RECEIVER`, and outline / member
     // completion ask the symbol instead of matching its name.
@@ -939,6 +944,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "receiver.super" {
             super_recv_matches.insert(e.match_id);
+        }
+        if e.cap == "receiver.self" {
+            self_recv_matches.insert(e.match_id);
         }
         if e.cap == "param.receiver" {
             receiver_name_spans.insert((e.start, e.end));
@@ -1466,6 +1474,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         let cur_scope = scope_stack.last().unwrap().1;
         let package: Option<String> = context_stack.last().map(|(_, p, _)| p.clone());
+        // The innermost CLASS context, spelled the way THIS file spells it —
+        // what a receiver that names "the class I am written in" desugars
+        // to. Distinct from `package`, which is whatever context is open (a
+        // namespace body has one too). A use-map language writes the
+        // declaration's own leaf, which its use-map resolves back to the
+        // identity; an identity language writes the identity. Either way a
+        // consumer that re-resolves the spelling lands on the same class.
+        let enclosing_class: Option<String> = context_stack
+            .iter()
+            .rev()
+            .find(|(_, _, is_class)| *is_class)
+            .map(|(_, p, _)| match pack.names.use_map_sep() {
+                Some(sep) => p.rsplit(sep).next().unwrap_or(p).to_string(),
+                None => p.clone(),
+            });
         let import_binds = binds_by_match.get(&e.match_id).copied().unwrap_or_default();
         match strip_import_binds(&e.cap) {
             // `@scope` = a plain lexical Block; `@scope.sub` = sub-body
@@ -1938,16 +1961,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 ));
             }
             "member.recv" => {
-                // Shaped: a pack can canonicalize a receiver spelling to the
-                // model's invocant vocabulary (php `self::`/`static::` → the
-                // current-package token), so relative static dispatch rides
-                // the same lane as Perl's `__PACKAGE__->`.
+                // A receiver the document tags `@receiver.self` names the
+                // class it is written in, so the invocant IS that class —
+                // minted here, where the class-body scope has it, rather
+                // than left as a token every consumer would have to know.
+                // Late static binding over-approximates to the writing
+                // class (accepted).
+                let text = match (self_recv_matches.contains(&e.match_id), &enclosing_class) {
+                    (true, Some(cls)) => cls.clone(),
+                    _ => (pack.shape_name)("member.recv", &e.text),
+                };
                 member_recv.insert(
                     e.match_id,
-                    (
-                        crate::model::file_analysis::Span { start: e.start, end: e.end },
-                        (pack.shape_name)("member.recv", &e.text),
-                    ),
+                    (crate::model::file_analysis::Span { start: e.start, end: e.end }, text),
                 );
             }
             // A call whose callee makes its ENCLOSING callable read
@@ -2070,8 +2096,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             "dispatch.via" => {}
             // `.self` flavor: the string names a method of the ENCLOSING
             // class (a PHPUnit attribute argument) — no receiver node
-            // exists, so the invocant is the current-package token,
-            // resolved by the enclosing-class walk like `self::`.
+            // exists, so the invocant is that class, taken from the scope
+            // the attribute is written in.
             "ref.method.named.self" => {
                 out.refs.push(SkelRef {
                     via: None,
@@ -2080,10 +2106,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     start: e.start,
                     end: e.end,
                     scope: cur_scope,
-                    invocant: Some((
-                        crate::model::file_analysis::Span { start: e.start, end: e.end },
-                        crate::model::conventions::CURRENT_PACKAGE_TOKEN.to_string(),
-                    )),
+                    invocant: enclosing_class.clone().map(|cls| {
+                        (crate::model::file_analysis::Span { start: e.start, end: e.end }, cls)
+                    }),
                     member_op: None,
                     arg_count: None,
                     value_read: false,
@@ -2124,20 +2149,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         });
                 // `new self(...)` / `new static(...)`: the token spells no class
                 // name — it IS a call of the constructor on the current class.
-                // Minted as that member call (invocant = the current-package
-                // token, name = the pack's constructor), so the ctor's
-                // references, hover and goto-def see the site while a class
-                // rename never rewrites the `self` token.
+                // Minted as that member call (invocant = the enclosing class,
+                // name = the pack's constructor), so the ctor's references,
+                // hover and goto-def see the site while a class rename never
+                // rewrites the `self` token. Which spellings name the
+                // enclosing class is the document's `@receiver.self`.
                 if !inside_def
                     && e.cap == "ref.call"
                     && ctor_matches.contains(&e.match_id)
-                    // `hop.recv` is the pack's receiver-shaping kind — the one
-                    // place its `self`/`static` → current-package table lives.
-                    && crate::model::conventions::is_current_package_token(
-                        &(pack.shape_name)("hop.recv", &e.text),
-                    )
+                    && self_class_tokens.contains(&e.text.as_str())
                 {
-                    if let Some(ctor) = ctor_name {
+                    if let (Some(ctor), Some(cls_recv)) = (ctor_name, enclosing_class.clone()) {
                         let span = Span { start: e.start, end: e.end };
                         out.refs.push(SkelRef {
                             via: None,
@@ -2146,7 +2168,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             start: e.start,
                             end: e.end,
                             scope: cur_scope,
-                            invocant: Some((span, crate::model::conventions::CURRENT_PACKAGE_TOKEN.to_string())),
+                            invocant: Some((span, cls_recv)),
                             member_op: None,
                             arg_count: arg_counts_by_start.get(&(e.end.row, e.end.column)).copied(),
                             value_read: false,
@@ -2242,10 +2264,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // A SUPER receiver (php `parent::`) spells the model's
                     // SUPER method token: dispatch starts above the writing
                     // class, and gd/references/rename ride the existing
-                    // SUPER lane. The invocant becomes the current-package
-                    // token (the receiver is still this object); the ref
-                    // span stays the bare name token, so rename rewrites
-                    // only the name.
+                    // SUPER lane. The invocant becomes the enclosing class
+                    // (the receiver is still this object); the ref span
+                    // stays the bare name token, so rename rewrites only
+                    // the name.
                     // A call of a name the pack declares a dynamic-argument
                     // or dynamic-variable marker makes its ENCLOSING callable
                     // one. Recorded against the call's scope; the skeleton's
@@ -2266,9 +2288,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         end: e.end,
                         scope: cur_scope,
                         invocant: if super_recv {
-                            member_recv
-                                .get(&e.match_id)
-                                .map(|(sp, _)| (*sp, crate::model::conventions::CURRENT_PACKAGE_TOKEN.to_string()))
+                            member_recv.get(&e.match_id).and_then(|(sp, _)| {
+                                enclosing_class.clone().map(|cls| (*sp, cls))
+                            })
                         } else {
                             member_recv.get(&e.match_id).cloned()
                         },
@@ -2378,6 +2400,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 *recv_span,
                                 recv_text,
                                 member_simple.get(&e.match_id).copied().unwrap_or(false),
+                                self_recv_matches.contains(&e.match_id),
                                 cur_scope,
                                 arg_counts_by_start
                                     .get(&(e.end.row, e.end.column))
@@ -2404,6 +2427,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         *recv_span,
                         recv_text,
                         member_simple.get(&e.match_id).copied().unwrap_or(false),
+                        self_recv_matches.contains(&e.match_id),
                         cur_scope,
                         arg_counts_by_start
                             .get(&(e.end.row, e.end.column))
@@ -2752,12 +2776,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     let span = Span { start: e.start, end: e.end };
                     lit_spans.push((e.start_byte, e.end_byte, span));
                     // `new self()` / `new static()`: the class is the
-                    // ENCLOSING one (the pack's `hop.recv` shaping names
-                    // the current-class spellings) — a bare `TypeName`
-                    // edge would chase a class literally named "self".
-                    let payload = if crate::model::conventions::is_current_package_token(
-                        &(pack.shape_name)("hop.recv", &name),
-                    ) {
+                    // ENCLOSING one (the document's `@receiver.self` names
+                    // the spellings) — a bare `TypeName` edge would chase a
+                    // class literally named "self".
+                    let payload = if self_class_tokens.contains(&name.as_str()) {
                         // `self` outside a class (invalid source) has no
                         // enclosing class — mint nothing.
                         package.as_ref().map(|cls| {
@@ -4434,14 +4456,18 @@ fn push_hop_witness(
     recv_span: crate::model::file_analysis::Span,
     recv_text: &str,
     recv_simple: bool,
+    // The document tagged this receiver `@receiver.self` — it names the
+    // class it is written in, so the hop bases on that class. A receiver
+    // TOKEN (`$this`, `self`, `this`) is not this: it is a value the class
+    // body already witnesses, and it bases as the variable it is.
+    recv_names_enclosing_class: bool,
     scope: crate::model::file_analysis::ScopeId,
     arity: Option<u32>,
     enclosing_class: Option<&str>,
     class_ident: &dyn Fn(&str) -> String,
 ) {
     use crate::model::witnesses as wit;
-    let hop_recv = (pack.shape_name)("hop.recv", recv_text);
-    let base = if crate::model::conventions::is_current_package_token(&hop_recv) {
+    let base = if recv_names_enclosing_class {
         let Some(cls) = enclosing_class else { return };
         witnesses.push(wit::Witness {
             attachment: wit::WitnessAttachment::Expr(recv_span),
