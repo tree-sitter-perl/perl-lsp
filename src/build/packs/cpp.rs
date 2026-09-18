@@ -33,7 +33,8 @@ pub fn cpp_pack() -> LangPack {
         bundled_overlays: &[],
         spellings: &SPELLINGS,
         lang_id: "cpp",
-        bundled_entry_markers: &[],
+        // `main` is entered over the ABI, never from a source call site.
+        bundled_entry_markers: &[include_str!("../../../queries/cpp/cpp.entry.json")],
         bundled_rail_docs: &[],
         names: NameSpellings::with_separator("::"),
         // Template spellings get ONE canonical whitespace form so a
@@ -96,8 +97,6 @@ pub fn cpp_pack() -> LangPack {
         implicit_this_members: true,
         include_path_tokens: true,
         preprocessor_macros: true,
-        entrypoint_symbols: &["main"],
-        runtime_invoked_methods: &[],
         brace_scoped_members: true,
         call_shapes: &[],
         arg_kind: "",
@@ -110,7 +109,7 @@ pub fn cpp_pack() -> LangPack {
         named_arg_field: "",
         imports_bind_names: false,
         deprecated_attribute: "",
-        builtin_types: &[],
+        bundled_builtin_types: &[],
         enum_members: &[],
         trigger_chars: &[".", ">", ":"],
         receiver_names: &["this"],

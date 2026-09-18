@@ -1459,8 +1459,11 @@ pub fn pack_symbol_diagnostics(
                     if ns.is_empty() {
                         if declared.is_empty()
                             || declared.iter().any(|d| d.is_empty())
-                            || crate::build::language_driver::LanguageRegistry::builtin_types(&analysis.language)
-                                .contains(&leaf)
+                            || crate::build::language_driver::LanguageRegistry::builtin_types(
+                                &analysis.language,
+                            )
+                            .iter()
+                            .any(|b| b == leaf)
                         {
                             continue;
                         }

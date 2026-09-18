@@ -163,11 +163,10 @@ So the honest framing for this epic:
    it adopted.
 4. `scan_entrypoint_scripts` is Perl-specific (a shebang scan over root
    + `bin/` + `script/`). A pack language's entry points come from its
-   language capability — the heatmap already reads
-   `entrypoint_symbols` from `LanguageRegistry::caps`. Keep the Perl
-   scanner where it is; if Phase B needs "the entry points for this
-   workspace", route through the capability so a pack language answers
-   for itself.
+   own entry document — the heatmap already reads those
+   (`entry_markers_for`). Keep the Perl scanner where it is; if Phase B
+   needs "the entry points for this workspace", route through the entry
+   documents so a pack language answers for itself.
 
 ## Scaling beat
 

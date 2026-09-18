@@ -79,8 +79,8 @@ fn class_is_referenced(
 /// data, never a family flag: `visibility` is the mask override to apply
 /// (`None` when the set's construction-derived routing already widens to
 /// VISIBLE — pack workspace files ride the DEPENDENCY role, a storage
-/// artifact of the per-language cache), and the entry-point guard reads the
-/// analysis language's declared `entrypoint_symbols`.
+/// artifact of the per-language cache), and the entry guard reads the
+/// analysis language's declared entry documents.
 /// Returns `(row, is_callable, dead, dead_export)`.
 ///
 /// `forced_fan_in` is the relational pre-prune verdict: `Some(0)` means the
@@ -203,33 +203,16 @@ fn heatmap_symbol_row(
         Some("class-referenced")
     } else if !native {
         Some("framework-synthesized")
-    } else if is_callable
-        && crate::build::language_driver::LanguageRegistry::caps(&analysis.language)
-            .entrypoint_symbols
-            .contains(&sym.name.as_str())
-    {
-        // Runtime entry (C/C++ `main`): entered over the ABI, never a source
-        // call site the static graph can see. The language declares which
-        // names are entry points; nothing here compares names or families.
-        Some("entry-point")
-    } else if matches!(sym.kind, SymKind::Method)
-        && crate::build::language_driver::LanguageRegistry::caps(&analysis.language)
-            .runtime_invoked_methods
-            .contains(&sym.name.as_str())
-    {
-        // php magic methods (`__toString`, `__invoke`, ...): the runtime
-        // invokes them structurally, so zero call sites is the expected
-        // state. The language declares the set — the method-shaped sibling
-        // of `entrypoint_symbols`.
-        Some("runtime-invoked")
     } else if matches!(sym.kind, SymKind::Sub | SymKind::Method)
         && framework_entry_claims(analysis, sym, routing_idx)
     {
-        // A declared framework-entry rule (`entry.json` — bundled per pack
-        // + plugin dirs) claims the symbol: a runner invokes it (PHPUnit
-        // `#[Test]` / `test*` in a TestCase descendant, a queued job's
-        // `handle`). The rules are DATA; the evaluator never compares
-        // framework names itself.
+        // A declared entry rule (`entry.json` — bundled per pack + plugin
+        // dirs) claims the symbol: something outside the source graph
+        // invokes it. One lane for every flavour of that — the C ABI
+        // entering `main`, the php engine calling `__toString`, PHPUnit
+        // running `test*` in a TestCase descendant, a queued job's
+        // `handle`. The rules are DATA; the evaluator never compares names
+        // or families itself.
         Some("framework-entry")
     } else if analysis.rail_handler_twin(sym).is_some() {
         // A path rail's handler stands ON this declaration (a policy method

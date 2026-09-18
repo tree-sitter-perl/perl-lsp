@@ -70,13 +70,6 @@ pub struct DriverCaps {
     /// closure) — enables the raw-word goto-def/hover fallback lane outside
     /// the CandidateSet.
     pub cross_file_words: bool,
-    /// See `LangPack::entrypoint_symbols` — symbols the runtime enters
-    /// through the ABI, alive at zero fan-in by contract.
-    pub entrypoint_symbols: &'static [&'static str],
-    /// See `LangPack::runtime_invoked_methods` — method names the runtime
-    /// invokes structurally (php magic methods); the heatmap's dead-code
-    /// flagging shields them.
-    pub runtime_invoked_methods: &'static [&'static str],
     /// See `LangPack::include_path_tokens`.
     pub include_path_tokens: bool,
     /// See `LangPack::preprocessor_macros`.
@@ -432,8 +425,6 @@ impl LanguageDriver for PackDriver {
             context_gather: self.gather_macros.is_some() || self.include_closure.is_some(),
             pack_invalidation: true,
             cross_file_words: true,
-            entrypoint_symbols: pack.entrypoint_symbols,
-            runtime_invoked_methods: pack.runtime_invoked_methods,
             // declared by the pack's call shapes — no shapes, no verb
             pack_signature_help: !pack.call_shapes.is_empty(),
             include_path_tokens: pack.include_path_tokens,
@@ -2003,23 +1994,15 @@ impl LanguageRegistry {
     /// host derives its search path. Read from the pack's own
     /// `include_path_tokens` declaration — never a language-name branch.
     /// Memoized like `is_pack_language`.
-    /// The classes a language provides in its global namespace — the
-    /// pack's `builtin_types`; empty for a language without a pack.
-    pub fn builtin_types(id: &str) -> &'static [&'static str] {
-        static TYPES: std::sync::OnceLock<Vec<(&'static str, &'static [&'static str])>> =
-            std::sync::OnceLock::new();
-        TYPES
-            .get_or_init(|| {
-                LanguageRegistry::with_enabled()
-                    .drivers
-                    .iter()
-                    .filter_map(|d| d.lang_pack().map(|p| (d.id(), p.builtin_types)))
-                    .collect()
-            })
-            .iter()
-            .find(|(l, _)| *l == id)
-            .map(|(_, t)| *t)
-            .unwrap_or(&[])
+    /// The classes a language provides in its global namespace — its
+    /// `builtins.txt` documents (bundled + plugin dirs), read through
+    /// `builtin_types_for`. Empty for a language without a pack.
+    pub fn builtin_types(id: &str) -> std::sync::Arc<Vec<String>> {
+        LanguageRegistry::with_enabled()
+            .for_id(id)
+            .and_then(|d| d.lang_pack())
+            .map(|p| crate::build::query_extract::builtin_types_for(&p))
+            .unwrap_or_default()
     }
 
     /// The write/display spellings of `id`'s language — the pack's own

@@ -43,7 +43,7 @@ per-verb/per-name list in core):
 | Listing policy | `lsp/cli/heatmap.rs` | `grep -n 'heatmap_symbol_eligible' src/lsp/cli/heatmap.rs` — admits `Sub\|Method\|Package\|Class\|Module`, elides `Handler` |
 | Declaration subtraction | `lsp/cli/heatmap.rs` | the fan-in logic subtracts `AccessKind::Declaration` + the decl name-token span — insufficient for Handlers, whose registration IS one of their refs |
 | Guards | `lsp/cli/heatmap.rs` | `grep -n 'reachable_guard' src/lsp/cli/heatmap.rs` |
-| The language capability already consulted | `lsp/cli/heatmap.rs` | `grep -n 'entrypoint_symbols\|LanguageRegistry::caps\|Namespace::Language' src/lsp/cli/heatmap.rs` — the entry-point guard already reads the analysis language's declared symbols. **This is the pattern to extend, not to invent.** |
+| The language capability already consulted | `lsp/cli/heatmap.rs` | `grep -n 'framework_entry_claims\|LanguageRegistry::caps\|Namespace::Language' src/lsp/cli/heatmap.rs` — the entry guard already reads the analysis language's declared entry documents. **This is the pattern to extend, not to invent.** |
 | Handler minting | `src/build/plugin/mod.rs` | `grep -n 'Handler' src/build/plugin/mod.rs \| head` |
 | Handlers in the bundled plugins | `frameworks/*.rhai` | `grep -ln 'Handler' frameworks/*.rhai` |
 | The HTML viewer | `src/heatmap.html` | embedded via `include_str!` |
@@ -121,9 +121,8 @@ per-verb/per-name list in core):
 maintenance obligation, not an opportunity.**
 
 `lsp/cli/heatmap.rs` already asks the language for its capabilities:
-the entry-point guard reads the analysis language's declared
-`entrypoint_symbols`, and `Namespace::Language` distinguishes native
-symbols. A C++ heatmap run exists and works. That means:
+the entry guard reads the analysis language's declared entry
+documents, and `Namespace::Language` distinguishes native symbols. A C++ heatmap run exists and works. That means:
 
 1. **Phase B's eligibility change is cross-language by default.** A
    pack language that mints Handler-shaped symbols gets them listed;
@@ -134,11 +133,11 @@ symbols. A C++ heatmap run exists and works. That means:
    hook, and pack languages have no rhai plugin tier.** Their framework
    knowledge, when it exists, arrives as query overlays and driver
    capabilities. So `framework_consumed` needs a second producer to be
-   honest cross-language: **the language capability**. `entrypoint_symbols`
-   is the precedent sitting right there — a C++ language declaring
-   `main` as an entry point is the same idea. Design the guard to
-   consume a UNION of (plugin manifest ∪ language capability), so the
-   pack side has a door even before anyone walks through it.
+   honest cross-language: **the language's own documents**. The entry
+   documents are the precedent sitting right there — `cpp.entry.json`
+   declaring `main` is the same idea. Design the guard to consume a UNION
+   of (plugin manifest ∪ declared documents), so the pack side has a door
+   even before anyone walks through it.
 3. Do NOT let the guard become a name list in `heatmap.rs`. That is the
    rule-#10 failure this epic exists to prevent, and it is the exact
    shape a "just add `main` for C++" fix would take.

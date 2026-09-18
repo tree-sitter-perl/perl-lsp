@@ -2,7 +2,7 @@
 
 mod doc;
 
-use doc::{php_annot_type, php_doc_types, PHP_BUILTIN_TYPES};
+use doc::{php_annot_type, php_doc_types};
 
 use crate::build::query_extract::{CallShape, LangPack, OutOfLineSpec, PeelSpec};
 use crate::model::file_analysis::{InferredType, NameSpellings, PackSpellings};
@@ -54,6 +54,10 @@ pub fn php_pack() -> LangPack {
         spellings: &SPELLINGS,
         lang_id: "php",
         bundled_entry_markers: &[
+            // The language's OWN runtime surface: magic methods and the SPL
+            // interface contracts the engine calls structurally, so zero
+            // in-repo call sites is the expected state.
+            include_str!("../../../../queries/php/php.entry.json"),
             include_str!("../../../../queries/php/frameworks/phpunit.entry.json"),
             include_str!("../../../../queries/php/frameworks/laravel.entry.json"),
             include_str!("../../../../queries/php/frameworks/symfony.entry.json"),
@@ -157,18 +161,6 @@ pub fn php_pack() -> LangPack {
         implicit_this_members: false,
         include_path_tokens: false,
         preprocessor_macros: false,
-        entrypoint_symbols: &[],
-        runtime_invoked_methods: &[
-            "__toString", "__invoke", "__get", "__set", "__isset", "__unset",
-            "__call", "__callStatic", "__clone", "__destruct", "__wakeup",
-            "__sleep", "__serialize", "__unserialize", "__debugInfo",
-            "__set_state", "__toBool",
-            // SPL interface contracts the engine calls structurally
-            // (`count($x)`, `foreach`, `$x[$k]`, `json_encode`, `serialize`).
-            "count", "getIterator", "current", "key", "next", "rewind", "valid",
-            "offsetExists", "offsetGet", "offsetSet", "offsetUnset",
-            "jsonSerialize", "serialize", "unserialize",
-        ],
         // class/trait/interface bodies are brace-delimited, so a member
         // orphaned by a misparse can re-anchor positionally.
         brace_scoped_members: true,
@@ -191,7 +183,7 @@ pub fn php_pack() -> LangPack {
         named_arg_field: "name",
         imports_bind_names: true,
         deprecated_attribute: "Deprecated",
-        builtin_types: PHP_BUILTIN_TYPES,
+        bundled_builtin_types: &[include_str!("../../../../queries/php/builtins.txt")],
         // `['k' => $v]` — the key/value arrow inside a list literal.
         pair_arrow: "=>",
         dynamic_arg_markers: &["func_get_args", "func_num_args", "func_get_arg"],

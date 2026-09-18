@@ -172,20 +172,6 @@ pub struct LangPack {
     /// preprocessor (Perl, Python, R, CMake). Gates `macro_completion` — asked
     /// of the pack, never a language-name branch (rule #10).
     pub preprocessor_macros: bool,
-    /// Symbols the runtime enters from OUTSIDE the source graph (C/C++
-    /// `main`: reached through the ABI, never a source call site) — a
-    /// zero-fan-in callable with one of these names is alive by contract.
-    /// Empty for languages whose entry is the file itself (Perl, Python
-    /// scripts). Consumed by the heatmap's reachability guard — asked of
-    /// the pack, never a name/language branch (rule #10).
-    pub entrypoint_symbols: &'static [&'static str],
-    /// Method names the RUNTIME invokes structurally (php magic methods —
-    /// `__toString`, `__invoke`, `__get`, ...): zero in-repo call sites is
-    /// the EXPECTED state, so the heatmap's dead-code flagging shields
-    /// them (the method-shaped sibling of `entrypoint_symbols`). The
-    /// constructor stays on its own lane (`constructor_names` — its call
-    /// sites are real `new` refs, so an unconstructed ctor honestly flags).
-    pub runtime_invoked_methods: &'static [&'static str],
     /// Container membership (class/struct/union/namespace) is delimited by
     /// literal `{`/`}` in the source, so a member that lost its enclosing
     /// container to a tree-sitter misparse can be re-anchored by matching the
@@ -233,10 +219,13 @@ pub struct LangPack {
     /// `#[Deprecated]`); empty = none. Lands as the `deprecated` symbol
     /// attribute exactly like the docblock tag.
     pub deprecated_attribute: &'static str,
-    /// Class, interface and attribute names the language itself provides
-    /// in the global namespace (php's core + SPL): a global reference to
-    /// one is never a type missing its import.
-    pub builtin_types: &'static [&'static str],
+    /// Bundled builtin-type documents (`builtins.txt`): the class, interface
+    /// and attribute names the language itself provides in its global
+    /// namespace, one per line. A global reference to one of these is never a
+    /// type missing its import. A runtime's surface grows and differs per
+    /// build, so it is a document a plugin dir extends, never a table
+    /// (rule #15) — read through `builtin_types_for`.
+    pub bundled_builtin_types: &'static [&'static str],
     /// Members every enum carries by language rule (php: `->value`,
     /// `->name`, `::cases()`, `::from()`, `::tryFrom()`).
     pub enum_members: &'static [&'static str],
@@ -329,9 +318,9 @@ impl LangPack {
     /// Hand-written and exhaustive on purpose: the destructure below makes
     /// a new `LangPack` field a compile error here until its strings are
     /// declared, which is what stops a fresh table of node kinds from
-    /// arriving unwatched. The four DOCUMENT fields (`query_source`, the
-    /// bundled overlays, the entry markers, the rail docs) are the
-    /// documents themselves, `names` is the language's own spelling seam,
+    /// arriving unwatched. The DOCUMENT fields (`query_source`, the bundled
+    /// overlays, the entry markers, the rail docs, the builtin-type lists)
+    /// are the documents themselves, `names` is the language's own spelling seam,
     /// and `lang_id` is a registration — none is a vocabulary this rule
     /// governs, so none is yielded.
     #[allow(dead_code)] // the rule #15 tripwires are its only caller
@@ -365,8 +354,6 @@ impl LangPack {
             implicit_this_members: _,
             include_path_tokens: _,
             preprocessor_macros: _,
-            entrypoint_symbols,
-            runtime_invoked_methods,
             brace_scoped_members: _,
             call_shapes,
             implicit_variables,
@@ -378,7 +365,7 @@ impl LangPack {
             named_arg_field,
             imports_bind_names: _,
             deprecated_attribute,
-            builtin_types,
+            bundled_builtin_types: _,
             enum_members,
             arg_kind,
             trigger_chars,
@@ -410,12 +397,9 @@ impl LangPack {
         list(&mut out, "constructor_names", constructor_names);
         list(&mut out, "doc_uses_method_tags", doc_uses_method_tags);
         list(&mut out, "narrow_assertions", narrow_assertions);
-        list(&mut out, "entrypoint_symbols", entrypoint_symbols);
-        list(&mut out, "runtime_invoked_methods", runtime_invoked_methods);
         list(&mut out, "implicit_variables", implicit_variables);
         list(&mut out, "throwaway_names", throwaway_names);
         list(&mut out, "catch_all_methods", catch_all_methods);
-        list(&mut out, "builtin_types", builtin_types);
         list(&mut out, "enum_members", enum_members);
         list(&mut out, "trigger_chars", trigger_chars);
         list(&mut out, "receiver_names", receiver_names);
