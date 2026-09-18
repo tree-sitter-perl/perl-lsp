@@ -233,26 +233,24 @@ pub(crate) fn peel_receiver<'a>(
     node
 }
 
-/// A parameter's NAME token inside its declaration node: the `name` field
-/// where the grammar has one (php's `simple_parameter`), else the first
-/// simple-variable descendant — a C++ declarator nests the `identifier` under
-/// however many pointer/array/reference declarators the type wrote. `None`
-/// for an unnamed parameter (`void f(int)`, a bare `...`), which binds
-/// nothing. The by-reference lane and the parameter lane locate the same
-/// token, so they ask the same function.
+/// A parameter's NAME token inside its declaration node: the one the
+/// document named (`@arity.param.name`), else the first simple-variable
+/// descendant — a C++ declarator nests the `identifier` under however many
+/// pointer/array/reference declarators the type wrote, which no fixed-depth
+/// pattern reaches. `None` for an unnamed parameter (`void f(int)`, a bare
+/// `...`), which binds nothing. The by-reference lane and the parameter lane
+/// locate the same token, so they ask the same function.
 fn param_name_node<'t>(
     ch: tree_sitter::Node<'t>,
+    captured: Option<tree_sitter::Node<'t>>,
     simple_var_kinds: &std::collections::HashSet<&'static str>,
 ) -> Option<tree_sitter::Node<'t>> {
-    // The `name` field where the grammar names the variable directly; a
-    // by-reference spelling WRAPS it (php's `by_ref`) and a C declarator
-    // buries it under pointers and arrays, so either way the identity is
-    // the simple variable underneath.
-    let named = ch.child_by_field_name("name");
-    if named.is_some_and(|n| simple_var_kinds.contains(n.kind())) {
-        return named;
+    if captured.is_some() {
+        return captured;
     }
-    let mut stack = vec![named.unwrap_or(ch)];
+    // The descent's stopping kinds are the document's own too: the nodes its
+    // read patterns root at ARE this language's simple variables.
+    let mut stack = vec![ch];
     while let Some(n) = stack.pop() {
         if n != ch && simple_var_kinds.contains(n.kind()) {
             return Some(n);
@@ -261,7 +259,7 @@ fn param_name_node<'t>(
         let kids: Vec<_> = n.named_children(&mut w).collect();
         stack.extend(kids.into_iter().rev());
     }
-    named
+    None
 }
 
 /// The `ImportBinds` a capture-name suffix declares, or `None` when the
@@ -346,6 +344,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // the nearest enclosing list, which is what nests `f(g($x))` correctly.
     let mut arity_lists: Vec<(usize, tree_sitter::Node)> = Vec::new();
     let mut arg_caps: Vec<(&str, tree_sitter::Node)> = Vec::new();
+    // The `@arity.sig` signatures and every `@arity.param*` capture in the
+    // file. Joined below: a parameter belongs to the signature it is a child
+    // of, a part (`name` / `default` / `type`) to the parameter that contains
+    // it — so a signature nested inside a parameter (a function-pointer
+    // parameter) counts its own.
+    let mut arity_sigs: Vec<tree_sitter::Node> = Vec::new();
+    let mut param_caps: Vec<(&str, tree_sitter::Node)> = Vec::new();
     // A callable's declared parameter arity AND the parameters themselves,
     // keyed by the parameter_list span. Associated to its def symbol by span
     // containment in `into_file_analysis` (`@arity.sig` fires a separate match
@@ -491,101 +496,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 arg_caps.push((cap, node));
                 continue;
             }
-            // `@arity.sig`: a callable's parameter_list — count declared params
-            // structurally. `optional_parameter_declaration` carries a default
-            // (counts toward `total`, not `required`); a template pack
-            // (`variadic_parameter_declaration`) or a C `...` token makes the
-            // signature variadic.
+            // `@arity.sig`: a callable's parameter list. WHICH children of
+            // it are parameters, and what each one carries, the document
+            // states capture by capture (`@arity.param*`) — joined to the
+            // signature after the walk, because a part's capture and its
+            // parameter's can sit in different matches.
             if cap == "arity.sig" {
-                let mut total = 0usize;
-                let mut required = 0usize;
-                let mut variadic = false;
-                let sig_span = crate::model::file_analysis::Span {
-                    start: node.start_position(),
-                    end: node.end_position(),
-                };
-                // A by-reference position (php `&$out`, C++ `T& x`): record
-                // the parameter's variable name so the def mints the
-                // aliasing edge the call sites bind through.
-                let mut note_by_ref = |ch: tree_sitter::Node, position: usize| {
-                    // The three spellings a grammar gives `&`: a modifier
-                    // beside the name, a reference declarator around it, or a
-                    // wrapper AROUND the name (php's promoted `private int
-                    // &$n`, whose `name` field is the `by_ref` node).
-                    let by_ref = ch.child_by_field_name("reference_modifier").is_some()
-                        || ch
-                            .child_by_field_name("declarator")
-                            .is_some_and(|d| d.kind() == "reference_declarator")
-                        || ch.child_by_field_name("name").is_some_and(|n| n.kind() == "by_ref");
-                    if !by_ref {
-                        return;
-                    }
-                    let name_node = param_name_node(ch, simple_var_kinds);
-                    let Some(name_node) = name_node else { return };
-                    let text = name_node.utf8_text(source).unwrap_or("");
-                    by_ref_params.push((
-                        sig_span,
-                        position as u32,
-                        (pack.shape_name)("def.var", text),
-                        crate::model::file_analysis::Span {
-                            start: name_node.start_position(),
-                            end: name_node.end_position(),
-                        },
-                    ));
-                };
-                // The parameter itself, in source order: the name token the
-                // by-ref lane already locates, plus the default as SOURCE
-                // TEXT (rule #13 — a rendering would have to be parsed back).
-                // A parameter with no name token (C's bare `...`, an unnamed
-                // `void f(int)`) binds nothing and mints nothing.
-                let mut params: Vec<crate::model::file_analysis::ParamInfo> = Vec::new();
-                let mut note_param = |ch: tree_sitter::Node, is_slurpy: bool| {
-                    let Some(name_node) = param_name_node(ch, simple_var_kinds) else {
-                        return;
-                    };
-                    let text = name_node.utf8_text(source).unwrap_or("");
-                    params.push(crate::model::file_analysis::ParamInfo {
-                        name: (pack.shape_name)("def.var", text),
-                        default: ch
-                            .child_by_field_name("default_value")
-                            .and_then(|d| d.utf8_text(source).ok())
-                            .map(str::to_string),
-                        is_slurpy,
-                        is_invocant: false,
-                        binding_site: Some(name_node.start_position()),
-                        declared_type: ch
-                            .child_by_field_name("type")
-                            .and_then(|t| t.utf8_text(source).ok())
-                            .map(str::to_string),
-                    });
-                };
-                let mut c = node.walk();
-                for ch in node.children(&mut c) {
-                    match ch.kind() {
-                        "parameter_declaration" => { note_by_ref(ch, total); note_param(ch, false); total += 1; required += 1; }
-                        "optional_parameter_declaration" => { note_by_ref(ch, total); note_param(ch, false); total += 1; }
-                        // PHP: a parameter with a default is optional; a
-                        // promoted ctor param still counts toward arity.
-                        "simple_parameter" | "property_promotion_parameter" => {
-                            note_by_ref(ch, total);
-                            note_param(ch, false);
-                            total += 1;
-                            if ch.child_by_field_name("default_value").is_none() {
-                                required += 1;
-                            }
-                        }
-                        "variadic_parameter_declaration" | "variadic_parameter" | "..." => {
-                            note_param(ch, true);
-                            variadic = true
-                        }
-                        _ => {}
-                    }
-                }
-                param_sigs.push((
-                    sig_span,
-                    crate::model::file_analysis::ParamArity { total, required, variadic },
-                    params,
-                ));
+                arity_sigs.push(node);
+                continue;
+            }
+            if cap.starts_with("arity.param") {
+                param_caps.push((cap, node));
                 continue;
             }
             // A `@def.*` capture may declare that this match's defs are
@@ -608,6 +529,123 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 text,
                 match_id: match_counter,
             });
+        }
+    }
+    // ---- declared parameters: the arity counts and the parameters
+    // themselves. Each `@arity.param*` capture states what its parameter
+    // does to the count — one that must be written, one carrying a default,
+    // one that absorbs the rest — so a language that grows a parameter
+    // spelling grows a pattern, and an overlay can teach the lane one.
+    {
+        let param_ids: std::collections::HashSet<usize> = param_caps
+            .iter()
+            .filter(|(c, _)| !matches!(*c, "arity.param.name" | "arity.param.default" | "arity.param.type"))
+            .map(|(_, n)| n.id())
+            .collect();
+        // parameters by the signature they sit in, parts by the parameter
+        // that encloses them, and the by-reference mark as a set: it lands
+        // on the parameter node its own pattern already captured.
+        let mut params_of: HashMap<usize, Vec<(&str, tree_sitter::Node)>> = HashMap::new();
+        let mut parts_of: HashMap<usize, Vec<(&str, tree_sitter::Node)>> = HashMap::new();
+        let mut by_ref_ids: std::collections::HashSet<usize> = Default::default();
+        for (cap, node) in &param_caps {
+            match *cap {
+                "arity.param" | "arity.param.optional" | "arity.param.variadic" => {
+                    if let Some(sig) = node.parent() {
+                        params_of.entry(sig.id()).or_default().push((cap, *node));
+                    }
+                }
+                "arity.param.byref" => {
+                    by_ref_ids.insert(node.id());
+                }
+                _ => {
+                    let mut owner = node.parent();
+                    while let Some(n) = owner {
+                        if param_ids.contains(&n.id()) {
+                            parts_of.entry(n.id()).or_default().push((cap, *node));
+                            break;
+                        }
+                        owner = n.parent();
+                    }
+                }
+            }
+        }
+        let mut seen_sigs: std::collections::HashSet<usize> = Default::default();
+        for sig in &arity_sigs {
+            if !seen_sigs.insert(sig.id()) {
+                continue;
+            }
+            let sig_span = crate::model::file_analysis::Span {
+                start: sig.start_position(),
+                end: sig.end_position(),
+            };
+            let mut declared = params_of.remove(&sig.id()).unwrap_or_default();
+            declared.sort_by_key(|(_, n)| n.start_byte());
+            let mut total = 0usize;
+            let mut required = 0usize;
+            let mut variadic = false;
+            let mut params: Vec<crate::model::file_analysis::ParamInfo> = Vec::new();
+            for (cap, ch) in declared {
+                let is_slurpy = cap == "arity.param.variadic";
+                let parts = parts_of.get(&ch.id());
+                let part = |want: &str| {
+                    parts
+                        .and_then(|ps| ps.iter().find(|(c, _)| *c == want))
+                        .map(|(_, n)| *n)
+                };
+                let name_node = param_name_node(ch, part("arity.param.name"), simple_var_kinds);
+                // A by-reference position (php `&$out`, C++ `T& x`): the
+                // parameter's variable name, so the def mints the aliasing
+                // edge the call sites bind through. A slurpy parameter takes
+                // no position, so it claims none.
+                if by_ref_ids.contains(&ch.id()) && !is_slurpy {
+                    if let Some(name_node) = name_node {
+                        by_ref_params.push((
+                            sig_span,
+                            total as u32,
+                            (pack.shape_name)("def.var", name_node.utf8_text(source).unwrap_or("")),
+                            crate::model::file_analysis::Span {
+                                start: name_node.start_position(),
+                                end: name_node.end_position(),
+                            },
+                        ));
+                    }
+                }
+                // The parameter itself, in source order, with the default as
+                // SOURCE TEXT (rule #13 — a rendering would have to be parsed
+                // back). A parameter with no name token (C's bare `...`, an
+                // unnamed `void f(int)`) binds nothing and mints nothing.
+                if let Some(name_node) = name_node {
+                    params.push(crate::model::file_analysis::ParamInfo {
+                        name: (pack.shape_name)(
+                            "def.var",
+                            name_node.utf8_text(source).unwrap_or(""),
+                        ),
+                        default: part("arity.param.default")
+                            .and_then(|d| d.utf8_text(source).ok())
+                            .map(str::to_string),
+                        is_slurpy,
+                        is_invocant: false,
+                        binding_site: Some(name_node.start_position()),
+                        declared_type: part("arity.param.type")
+                            .and_then(|t| t.utf8_text(source).ok())
+                            .map(str::to_string),
+                    });
+                }
+                match cap {
+                    "arity.param" => {
+                        total += 1;
+                        required += 1;
+                    }
+                    "arity.param.optional" => total += 1,
+                    _ => variadic = true,
+                }
+            }
+            param_sigs.push((
+                sig_span,
+                crate::model::file_analysis::ParamArity { total, required, variadic },
+                params,
+            ));
         }
     }
     // ---- `@nested.target`: a declarator CHAIN of any depth. Peel it to the

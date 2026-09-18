@@ -190,8 +190,26 @@
 (arrow_function) @def.anon @scope.sub
 
 ; declared-parameter arity: overload-family ranking fuel (a call's written
-; arg count floats the fitting signature above a same-named stub).
+; arg count floats the fitting signature above a same-named stub). WHICH
+; children are parameters, and what each does to the count, the document
+; states: @arity.param must be written, @arity.param.optional carries a
+; default, @arity.param.variadic absorbs the rest and makes the signature
+; variadic. The parts a parameter carries ride their own captures —
+; @arity.param.name is the token a by-reference argument binds through,
+; @arity.param.byref marks the parameter that aliases its caller's variable,
+; @arity.param.default and @arity.param.type travel as source text.
 (formal_parameters) @arity.sig
+(formal_parameters (simple_parameter !default_value) @arity.param)
+(formal_parameters (simple_parameter default_value: (_)) @arity.param.optional)
+(formal_parameters (property_promotion_parameter !default_value) @arity.param)
+(formal_parameters (property_promotion_parameter default_value: (_)) @arity.param.optional)
+(formal_parameters (variadic_parameter) @arity.param.variadic)
+(formal_parameters (simple_parameter reference_modifier: (_)) @arity.param.byref)
+(formal_parameters (property_promotion_parameter name: (by_ref)) @arity.param.byref)
+(formal_parameters (_ name: (variable_name) @arity.param.name))
+(formal_parameters (_ name: (by_ref (variable_name) @arity.param.name)))
+(formal_parameters (_ default_value: (_) @arity.param.default))
+(formal_parameters (_ type: (_) @arity.param.type))
 
 ; docblocks: the pack's `doc_types` parses `@return`/`@param`/`@var` out of
 ; the comment. The bare capture feeds the mention scan (a name spelled only

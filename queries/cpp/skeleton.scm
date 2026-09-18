@@ -676,6 +676,21 @@
 (argument_list (_) @arity.arg)
 (argument_list (identifier) @arity.arg.var)
 (function_declarator parameters: (parameter_list) @arity.sig)
+; WHICH children of a signature are parameters, and what each does to the
+; count, the document states: @arity.param must be written,
+; @arity.param.optional carries a default, @arity.param.variadic (a template
+; pack or a bare `...`) absorbs the rest. @arity.param.byref marks the
+; parameter that aliases its caller's variable; the name token stays a
+; descent (a declarator nests it under however many pointer/array wrappers
+; the type wrote, which no fixed-depth pattern reaches).
+(parameter_list (parameter_declaration) @arity.param)
+(parameter_list (optional_parameter_declaration) @arity.param.optional)
+(parameter_list (variadic_parameter_declaration) @arity.param.variadic)
+(parameter_list "..." @arity.param.variadic)
+(parameter_list (parameter_declaration declarator: (reference_declarator)) @arity.param.byref)
+(parameter_list (optional_parameter_declaration declarator: (reference_declarator)) @arity.param.byref)
+(parameter_list (optional_parameter_declaration default_value: (_) @arity.param.default))
+(parameter_list (_ type: (_) @arity.param.type))
 
 ; ---- member access (`recv.field` / `recv->field`, AND `recv.method(...)`):
 ; the field is the "method", the receiver subtree the invocant. Mints the same
