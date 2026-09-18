@@ -284,10 +284,6 @@ impl FileAnalysis {
         self.refs.seal_baseline();
     }
 
-    pub fn refs_mut(&mut self) -> &mut [Ref] {
-        self.refs.as_mut_slice()
-    }
-
     /// The call-shaped ref anchored at `start` — what the token at a call
     /// site CALLS. A construction site mints its class token and its
     /// constructor call on one span, so `ref_at`'s companion tiebreak

@@ -639,6 +639,21 @@ fn simple_var_kinds(
     kinds(at, cfg, "expr.read.var")
 }
 
+/// Does `node` itself carry the document's bare-variable-read capture? The
+/// pattern roots at the token, so the bounded cursor answers for this node
+/// and no descendant — which is the question, and not one a kind list can
+/// answer for a language whose reads are a shape rather than a node kind.
+fn is_bare_var_read(
+    node: Node,
+    cfg: &crate::build::query_extract::LangPack,
+    src: &str,
+) -> bool {
+    let Some(query) = query_at(node, cfg) else { return false };
+    crate::build::query_extract::captures_at(query, node, src.as_bytes())
+        .iter()
+        .any(|(cap, n)| *cap == "expr.read.var" && n.id() == node.id())
+}
+
 /// Type a receiver node. A member-access node (`field_expression` /
 /// `attribute`) is field-on-class — recurse the base, look the field up on
 /// its class; anything else (an identifier, a call) resolves by its exact
@@ -688,9 +703,9 @@ fn resolve_node_type(
             return resolve_node_type(node.named_child(0)?, cfg, src, analysis, module_index);
         }
     }
-    // Implicit-`this` member receiver: a bare identifier (`iter_->`, `mem_->`,
-    // `options_.`) with NO local declaration IS `this->name` where the pack
-    // elides the receiver (`implicit_this_members`). Resolve it on the
+    // Implicit receiver: a bare variable read (`iter_->`, `mem_->`,
+    // `options_.`) with NO local declaration IS `this->name` inside a scope
+    // whose document says the receiver may be elided. Resolve it on the
     // enclosing class — `member_value_type` runs the SAME dispatch ladder +
     // cross-file field lookup member access uses, so a field declared in the
     // class's header (an out-of-line method body reads it cross-file) resolves
@@ -699,9 +714,9 @@ fn resolve_node_type(
     // "local" flow witnesses on the name (here typing it `Numeric` off a buried
     // literal) that would otherwise shadow the true member type. A genuine
     // local/param keeps its flow-narrowed value (it has a Variable symbol, so
-    // this branch is skipped). Gated on the pack capability so Python/R
-    // (mandatory receiver) never treat a bare name as a member.
-    if cfg.implicit_this_members && simple_var_kinds(node, cfg).contains(node.kind()) {
+    // this branch is skipped). Both halves are the document's word: the scope
+    // says the language elides, the capture says this token is a bare read.
+    if is_bare_var_read(node, cfg, src) {
         if let Ok(name) = node.utf8_text(src.as_bytes()) {
             if !analysis.has_local_variable_at(name, node.start_position()) {
                 if let Some(t) =
