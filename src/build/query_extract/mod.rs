@@ -409,6 +409,19 @@ pub fn entry_markers_for(pack: &LangPack) -> std::sync::Arc<Vec<EntryMarker>> {
     arc
 }
 
+/// The capture names the pack's effective query mints — the bundled document
+/// plus every discovered overlay, read off the compilation the extractor
+/// itself uses (content-keyed, so asking costs no second compile). A
+/// capability the DOCUMENT states — "these import tokens are paths"
+/// (`@include.path`), "this language has a preprocessor" (`@def.macro`) — is
+/// read from here, so a pack cannot declare one its patterns do not back.
+pub fn query_captures(language: &Language, pack: &LangPack) -> Vec<String> {
+    let source = effective_query_source(language, pack);
+    cached_query(language, source)
+        .map(|q| q.capture_names().iter().map(|c| c.to_string()).collect())
+        .unwrap_or_default()
+}
+
 /// The builtin type names in force for a language: the pack's bundled
 /// `builtins.txt` documents plus every discovered
 /// `<plugin-dir>/<name>/builtins.txt`. Cached per (lang, plugin-path set)

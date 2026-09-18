@@ -68,10 +68,6 @@ pub struct DriverCaps {
     /// See `LangPack::entrypoint_symbols` — symbols the runtime enters
     /// through the ABI, alive at zero fan-in by contract.
     pub entrypoint_symbols: &'static [&'static str],
-    /// See `LangPack::include_path_tokens`.
-    pub include_path_tokens: bool,
-    /// See `LangPack::preprocessor_macros`.
-    pub preprocessor_macros: bool,
 }
 
 /// Everything the server needs to host one language: parse + analyze a
@@ -405,8 +401,6 @@ impl LanguageDriver for PackDriver {
             pack_invalidation: true,
             cross_file_words: true,
             entrypoint_symbols: pack.entrypoint_symbols,
-            include_path_tokens: pack.include_path_tokens,
-            preprocessor_macros: pack.preprocessor_macros,
             ..Default::default()
         }
     }
@@ -1582,6 +1576,43 @@ impl LanguageRegistry {
             .unwrap_or_default()
     }
 
+    pub fn pack_visibility(id: &str) -> crate::model::file_analysis::PackVisibility {
+        use crate::model::file_analysis::PackVisibility;
+        match LanguageRegistry::with_enabled().for_id(id).and_then(|d| d.lang_pack()) {
+            None => PackVisibility::Host,
+            Some(_) if Self::query_mints(id, "include.path") => PackVisibility::IncludePaths,
+            Some(_) => PackVisibility::NameKeyed,
+        }
+    }
+
+    /// Does `id`'s query document mint `capture`? The capabilities a
+    /// DOCUMENT states are read from what compiles, never from a boolean
+    /// beside it that can disagree with the patterns (rule #15). Memoized
+    /// per language; the compilation is the extractor's own.
+    fn query_mints(id: &str, capture: &str) -> bool {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex, OnceLock};
+        static MINTS: OnceLock<Mutex<HashMap<String, Arc<Vec<String>>>>> = OnceLock::new();
+        let memo = MINTS.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Some(v) = memo.lock().unwrap().get(id) {
+            return v.iter().any(|c| c == capture);
+        }
+        let names = LanguageRegistry::with_enabled()
+            .for_id(id)
+            .and_then(|d| d.lang_pack().map(|p| (d, p)))
+            .map(|(d, p)| {
+                let parser = d.make_parser();
+                match parser.language() {
+                    Some(l) => crate::build::query_extract::query_captures(&l, &p),
+                    None => Vec::new(),
+                }
+            })
+            .unwrap_or_default();
+        let names = Arc::new(names);
+        memo.lock().unwrap().insert(id.to_string(), Arc::clone(&names));
+        names.iter().any(|c| c == capture)
+    }
+
     /// The declared capabilities of `id`'s driver — THE generic capability
     /// asker (the collapse the two-boolean ceiling in docs/PARKED.md
     /// called for). An id no driver claims answers `DriverCaps::default()`
@@ -1600,7 +1631,7 @@ impl LanguageRegistry {
     /// surfaces — the LSP handlers and their CLI/--batch mirrors — so
     /// editor and gold cannot answer it differently.
     pub fn has_include_tokens(id: &str) -> bool {
-        Self::caps(id).include_path_tokens
+        Self::query_mints(id, "include.path")
     }
 
     /// Does this language's pack declare a C-style preprocessor — `#define`
@@ -1608,7 +1639,7 @@ impl LanguageRegistry {
     /// completion offers? Same asked-never-named contract as
     /// `has_include_tokens`.
     pub fn has_preprocessor_macros(id: &str) -> bool {
-        Self::caps(id).preprocessor_macros
+        Self::query_mints(id, "def.macro")
     }
 
     /// The driver that serves files no driver claims — found by asking each
