@@ -1578,7 +1578,6 @@ fn pack_fields_name_no_grammar_shapes() {
         ("cpp", "member_kinds", 1, "B1 — the `@member.recv` patterns' root kinds"),
         ("cpp", "nested_peel", 5, "B2 — per-level `@deref.*` captures"),
         ("cpp", "oolfn", 5, "B2 — `@ool.declarator` / `@ool.qualifier` / `@ool.wrap`"),
-        ("cpp", "op_map", 2, "B1 — `\"->\" @member.op.arrow`, `\".\" @member.op.dot`"),
         ("cpp", "qualifier_peel", 1, "B2 — `@qualifier.name` on `template_type`"),
         ("cpp", "recv_peel", 2, "B1 — `@recv.peel` / `@recv.peel.deref`"),
         ("cpp", "skip_kinds", 4, "B1 — `(string) @skip (comment) @skip …`"),

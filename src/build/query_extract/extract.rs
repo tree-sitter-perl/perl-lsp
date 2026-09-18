@@ -574,9 +574,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // `@member.recv` → the receiver span of a `recv.field` access, joined to
     // its `@ref.member` by match_id so the minted MethodCall ref carries it.
     let mut member_recv: HashMap<usize, (crate::model::file_analysis::Span, String)> = HashMap::new();
-    // `@member.op` → the written operator mapped through `pack.op_map` + its
-    // span; joined to `@ref.member` so op-DX rides the minted ref.
+    // `@member.op` → the written operator + its span; joined to
+    // `@ref.member` so op-DX rides the minted ref.
     let mut member_op_raw: HashMap<usize, (crate::model::file_analysis::MemberOp, crate::model::file_analysis::Span)> =
+        HashMap::new();
+    // `@member.op.<which>` — the operator token span the document names as
+    // an arrow or a dot. A separate pattern per operator, so the general
+    // `@member.op` arm above keeps minting the reference for an operator
+    // neither names.
+    let mut member_op_by_span: HashMap<(Point, Point), crate::model::file_analysis::MemberOp> =
         HashMap::new();
     // `@hop.call` → the WHOLE member-call expression's span, joined to its
     // `@ref.member` so the chain-hop witness (`Projected{base, MethodHop}`)
@@ -712,6 +718,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "nonpublic.target" {
             nonpublic_name_spans.insert((e.start, e.end));
+        }
+        if let Some(which) = e.cap.strip_prefix("member.op.") {
+            if let Some(op) = member_op_suffix(which) {
+                member_op_by_span.insert((e.start, e.end), op);
+            }
         }
         if e.cap == "receiver.super" {
             super_recv_matches.insert(e.match_id);
@@ -1704,10 +1715,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 );
             }
             "member.op" => {
-                // Map the operator token's KIND (== its text, an anonymous
-                // token) to a MemberOp via the pack's open op_map. Unmapped
-                // (`.*`) → no entry → no op-DX. No source-text re-decision.
-                if let Some((_, op)) = pack.op_map.iter().find(|(k, _)| *k == e.text) {
+                // The operator the document NAMED at this span
+                // (`@member.op.arrow` / `.dot`). An operator the document
+                // names neither way (`.*`) has no entry and gets no op-DX —
+                // never a re-decision from the token's text.
+                if let Some(op) = member_op_by_span.get(&(e.start, e.end)) {
                     member_op_raw.insert(
                         e.match_id,
                         (*op, crate::model::file_analysis::Span { start: e.start, end: e.end }),
@@ -1921,7 +1933,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // a Rebind FlowEdge at the RECEIVER position so the moved-from
                     // window (and the narrowing cutoff) end there, sparing the
                     // receiver read itself. The pack owns which method names
-                    // rebind (cpp vocab, like its op_map).
+                    // rebind (cpp vocab).
                     if e.cap == "ref.member"
                         && (pack.rebind_method)(&e.text)
                         && member_simple.get(&e.match_id).copied().unwrap_or(false)

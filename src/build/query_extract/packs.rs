@@ -135,7 +135,7 @@ pub struct LangPack {
     /// Does calling `method` on a variable REBIND it — putting a moved-from
     /// object back into a known state (`clear`/`reset`/`assign`/…)? Used to end
     /// a moved-from region (and any narrowing) at the reset call, so a use after
-    /// it is clean. Pack-owned language vocab (like `op_map`): core asks the
+    /// it is clean. Pack-owned language vocab: core asks the
     /// value, never enumerates names itself.
     pub rebind_method: fn(method: &str) -> bool,
     /// Can a bare, receiver-less identifier resolve through an implicit
@@ -228,15 +228,6 @@ pub struct LangPack {
     /// (`(*p)`, `(&o)`, `(p)` → `p`) dropped so the invocant types via the
     /// inner. The SAME `peel`, no stack, any leaf.
     pub recv_peel: PeelSpec,
-    /// Member-access node kinds (`receiver OP member`) — extraction records
-    /// each site (simple-variable receiver, operator token span, `->` vs
-    /// `.`) for the operator-DX consumer (`p.` on a `Box*` should be `->`).
-    /// The member operator's grammar token KIND → the `MemberOp` it means
-    /// (`"->"`→Arrow, `"."`→Dot). The `operator:` field of a member access is
-    /// captured as `@member.op`; the engine maps its `kind()` through this
-    /// table. An OPEN set: unmapped kinds (`.*`) get no op-DX, never a guess.
-    /// Empty = no member-operator DX (Perl, single-operator packs).
-    pub op_map: &'static [(&'static str, crate::model::file_analysis::MemberOp)],
     /// Names whose CALL makes the enclosing callable read arguments it never
     /// declared (php `func_get_args` / `func_num_args` / `func_get_arg`).
     /// The extractor stamps `SymbolFlags::DYNAMIC_ARGS` on the callable that
@@ -336,7 +327,6 @@ impl LangPack {
             trigger_chars,
             nested_peel,
             recv_peel,
-            op_map,
             dynamic_arg_markers,
             dynamic_var_markers,
             qualifier_peel,
@@ -391,7 +381,6 @@ impl LangPack {
                 out.push((field, *leaf));
             }
         }
-        out.extend(op_map.iter().map(|(k, _)| ("op_map", *k)));
         list(&mut out, "oolfn", oolfn.declarator_wrappers);
         out.retain(|(_, v)| !v.is_empty());
         out
@@ -609,6 +598,18 @@ pub(super) fn param_return_expr(
                 }))
             }
         },
+        _ => None,
+    }
+}
+
+/// `member.op.<which>` suffix → the operator it names. ENGINE-side
+/// vocabulary like `lit_type`: the suffix set names the model's `MemberOp`,
+/// and a pack chooses which token carries each.
+pub(super) fn member_op_suffix(suffix: &str) -> Option<crate::model::file_analysis::MemberOp> {
+    use crate::model::file_analysis::MemberOp;
+    match suffix {
+        "arrow" => Some(MemberOp::Arrow),
+        "dot" => Some(MemberOp::Dot),
         _ => None,
     }
 }

@@ -63,7 +63,6 @@ pub fn r_pack() -> LangPack {
         trigger_chars: &["$", "@", ":"],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
         recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
-        op_map: &[],
         dynamic_arg_markers: &[],
         dynamic_var_markers: &[],
         qualifier_peel: &[],

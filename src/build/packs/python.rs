@@ -74,8 +74,6 @@ pub fn python_pack() -> LangPack {
             leaf_to_def: &[],
             record_stack: false,
         },
-        // Python has one member operator (`.`), so no op-DX (op_map empty).
-        op_map: &[],
         dynamic_arg_markers: &[],
         dynamic_var_markers: &[],
         qualifier_peel: &[],

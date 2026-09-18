@@ -647,6 +647,12 @@
   argument: (_) @member.recv
   operator: _ @member.op
   field: (field_identifier) @ref.member)
+; WHICH operator was written rides its own capture suffix — the operator-DX
+; lane (`p.` on a `Box*` should be `->`) asks the capture, never the token's
+; text. An OPEN set on purpose: `.*` / `->*` match neither arm, so they mint
+; the reference above with no operator claim.
+(field_expression operator: "->" @member.op.arrow)
+(field_expression operator: "." @member.op.dot)
 
 ; `this` is the object the enclosing method runs on — no typeable value
 ; node, the class comes off the scope chain. The receiver's own capture,

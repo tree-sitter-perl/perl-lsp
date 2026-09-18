@@ -187,8 +187,6 @@ pub fn php_pack() -> LangPack {
             leaf_to_def: &[],
             record_stack: false,
         },
-        // one meaningful member operator family (`->`/`?->`): no op-DX.
-        op_map: &[],
         qualifier_peel: &[],
         // calls included: PHP's method call is ONE flat node (unlike cpp,
         // where the call wraps a field_expression), so mid-token member
