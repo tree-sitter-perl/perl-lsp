@@ -419,3 +419,163 @@ fn dynamic_dispatch_shields_unreferenced_methods() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Framework-entry guard: declared `entry.json` rules (PHPUnit bundled)
+/// shield runner-invoked symbols from the dead queue — by attribute
+/// (`#[Test]`), by convention (`test*` + isa TestCase, lifecycle methods)
+/// — while a genuinely unreferenced method still flags.
+#[cfg(feature = "php")]
+#[test]
+fn php_framework_entry_symbols_leave_the_dead_queue() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-heatmap-entry-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("TestCase.php"),
+        "<?php\nclass TestCase {\n    public function expect(): void {}\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("UserTest.php"),
+        "<?php\n\
+         class UserTest extends TestCase {\n\
+             protected function setUp(): void {}\n\
+             public function testAdd(): void {}\n\
+             #[Test]\n\
+             public function edgeCases(): void {}\n\
+             public function neverCalledHelper(): int { return 1; }\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("BlogController.php"),
+        "<?php\n\
+         class BlogController {\n\
+             #[Route('/blog', name: 'blog_index')]\n\
+             public function index(): string { return 'x'; }\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Console.php"),
+        "<?php\n\
+         class Application {}\n\
+         class Console extends Application {\n\
+             protected function getDefaultCommands(): array { return []; }\n\
+             public function getLongVersion(): string { return 'v'; }\n\
+         }\n",
+    )
+    .unwrap();
+    let report = run_heatmap(&dir);
+    for name in ["setUp", "testAdd", "edgeCases", "index", "getDefaultCommands", "getLongVersion"] {
+        let row = sym(&report, name);
+        assert_eq!(
+            row["reachable_guard"].as_str(),
+            Some("framework-entry"),
+            "{name}: {row}"
+        );
+        assert_eq!(row["dead_code_candidate"].as_bool(), Some(false), "{name}: {row}");
+    }
+    let helper = sym(&report, "neverCalledHelper");
+    assert_eq!(helper["dead_code_candidate"].as_bool(), Some(true), "{helper}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A path rail whose `methods` arm names every method of a file (Laravel
+/// policies under `app/Policies/` — each method IS an ability) mints a rail
+/// Handler on the method's own name token, so the rail's dispatch sites
+/// (`$this->authorize('update', …)`, `@can('update', …)`) name the handler
+/// and the method itself has no call site. The co-declaration relation is
+/// what shields it; a plain helper beside it still reaches the dead queue.
+#[cfg(feature = "php")]
+#[test]
+fn php_policy_method_behind_a_rail_handler_leaves_the_dead_queue() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-heatmap-rail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("app/Policies")).unwrap();
+    std::fs::create_dir_all(dir.join("app/Http")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w(
+        "app/Policies/PostPolicy.php",
+        "<?php\n\
+         namespace App\\Policies;\n\
+         class PostPolicy {\n\
+             public function update($user, $post) { return true; }\n\
+         }\n",
+    );
+    w(
+        "app/Http/PostController.php",
+        "<?php\n\
+         namespace App\\Http;\n\
+         class PostController {\n\
+             public function show($post) { $this->authorize('update', $post); }\n\
+             public function neverCalledHelper(): int { return 1; }\n\
+         }\n",
+    );
+    let report = run_heatmap(&dir);
+    let policy = report["symbols"]
+        .as_array()
+        .expect("symbols array")
+        .iter()
+        .find(|s| s["name"].as_str() == Some("update")
+            && s["package"].as_str() == Some("App\\Policies\\PostPolicy"))
+        .unwrap_or_else(|| panic!("no PostPolicy::update in {}", report["symbols"]));
+    assert_eq!(policy["reachable_guard"].as_str(), Some("rail-handler"), "{policy}");
+    assert_eq!(policy["dead_code_candidate"].as_bool(), Some(false), "{policy}");
+    let helper = sym(&report, "neverCalledHelper");
+    assert_eq!(helper["dead_code_candidate"].as_bool(), Some(true), "{helper}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same guard on the shape real code has: the base classes live in a
+/// framework namespace reached through a `use` row, and one of them sits a
+/// project-local hop away. The entry documents spell the LEAF a human
+/// writes (`TestCase`), the extractor mints the use-map-resolved identity
+/// (`PHPUnit\Framework\TestCase`), and the gate joins the two on the
+/// relational key — every hop of the ancestry walk, not just the symbol's
+/// own class.
+#[cfg(feature = "php")]
+#[test]
+fn php_framework_entry_isa_gate_is_leaf_keyed_across_namespaces() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-heatmap-ns-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/Tests")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w(
+        "src/Tests/AbstractIntegrationTest.php",
+        "<?php\n\
+         namespace App\\Tests;\n\
+         use PHPUnit\\Framework\\TestCase;\n\
+         abstract class AbstractIntegrationTest extends TestCase {}\n",
+    );
+    w(
+        "src/Tests/UserTest.php",
+        "<?php\n\
+         namespace App\\Tests;\n\
+         class UserTest extends AbstractIntegrationTest {\n\
+             protected function setUp(): void {}\n\
+             public function testAdd(): void {}\n\
+             public function neverCalledHelper(): int { return 1; }\n\
+         }\n",
+    );
+    w(
+        "src/Console.php",
+        "<?php\n\
+         namespace App;\n\
+         use Symfony\\Component\\Console\\Application;\n\
+         class Console extends Application {\n\
+             protected function getDefaultCommands(): array { return []; }\n\
+             public function getLongVersion(): string { return 'v'; }\n\
+         }\n",
+    );
+    let report = run_heatmap(&dir);
+    for name in ["setUp", "testAdd", "getDefaultCommands", "getLongVersion"] {
+        let row = sym(&report, name);
+        assert_eq!(row["reachable_guard"].as_str(), Some("framework-entry"), "{name}: {row}");
+        assert_eq!(row["dead_code_candidate"].as_bool(), Some(false), "{name}: {row}");
+    }
+    let helper = sym(&report, "neverCalledHelper");
+    assert_eq!(helper["dead_code_candidate"].as_bool(), Some(true), "{helper}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

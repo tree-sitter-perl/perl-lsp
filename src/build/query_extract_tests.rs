@@ -2788,6 +2788,866 @@ void go() {
 
 // ==== PHP pack: the fifth language on the same driver ====
 
+fn php_parser() -> tree_sitter::Parser {
+    let mut p = tree_sitter::Parser::new();
+    p.set_language(&tree_sitter_php::LANGUAGE_PHP.into()).unwrap();
+    p
+}
+
+fn php_fa(src: &str) -> (crate::model::file_analysis::FileAnalysis, Vec<String>) {
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let imports = skel.imports.clone();
+    (skel.into_file_analysis(), imports)
+}
+
+#[test]
+fn php_pack_same_driver_same_engine() {
+    // Same shape as `python_pack_same_driver_same_engine`: a different
+    // grammar, one query pack, the production engine end to end.
+    let src = "\
+<?php
+namespace App;
+
+use App\\Support\\Str;
+
+class Greeter {
+    public string $prefix;
+    public function greet(string $name): string {
+        $msg = \"hi\";
+        return $msg;
+    }
+}
+
+$x = \"hello\";
+$n = 42;
+$y = $x;
+";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+
+    let names: Vec<(String, String)> = skel
+        .symbols
+        .iter()
+        .map(|s| (s.kind.clone(), s.name.clone()))
+        .collect();
+    assert!(names.contains(&("package".into(), "App".into())), "{names:?}");
+    assert!(names.contains(&("class".into(), "App\\Greeter".into())), "{names:?}");
+    assert!(names.contains(&("method".into(), "greet".into())), "{names:?}");
+    assert!(names.contains(&("field".into(), "prefix".into())), "{names:?}");
+    assert!(names.contains(&("var".into(), "$x".into())), "{names:?}");
+    assert!(skel.imports.contains(&"App\\Support\\Str".to_string()), "{:?}", skel.imports);
+    // the method tags with its class, not the namespace
+    let greet = skel.symbols.iter().find(|s| s.name == "greet").unwrap();
+    assert_eq!(greet.package.as_deref(), Some("App\\Greeter"));
+
+    let fa = skel.into_file_analysis();
+    let end = tree_sitter::Point { row: 16, column: 0 };
+    use crate::model::file_analysis::InferredType;
+    assert_eq!(fa.inferred_type_via_bag("$x", end), Some(InferredType::String));
+    assert_eq!(fa.inferred_type_via_bag("$n", end), Some(InferredType::Numeric));
+    // edge chase across variables
+    assert_eq!(fa.inferred_type_via_bag("$y", end), Some(InferredType::String));
+    // typed parameter + string literal, inside the method body
+    let inside = tree_sitter::Point { row: 9, column: 8 };
+    assert_eq!(fa.inferred_type_via_bag("$name", inside), Some(InferredType::String));
+    assert_eq!(fa.inferred_type_via_bag("$msg", inside), Some(InferredType::String));
+}
+
+#[test]
+fn php_new_and_method_return_chain_through_package_symbol() {
+    // `$u = new User()` types via call-site→Class resolution; the
+    // declared return on name() then chains through PackageSymbol —
+    // the same chase Perl and C++ use, zero new engine code.
+    let src = "\
+<?php
+class User {
+    public function name(): string {
+        return \"n\";
+    }
+}
+$u = new User();
+$n = $u->name();
+";
+    let (fa, _) = php_fa(src);
+    let end = tree_sitter::Point { row: 8, column: 0 };
+    use crate::model::file_analysis::InferredType;
+    assert_eq!(
+        fa.inferred_type_via_bag("$u", end),
+        Some(InferredType::ClassName("User".into())),
+        "new User() should type the variable as the class",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$n", end),
+        Some(InferredType::String),
+        "$u->name() should flow the declared return type",
+    );
+}
+
+#[test]
+fn php_instanceof_narrows_within_the_guard() {
+    let src = "\
+<?php
+function f($x) {
+    if ($x instanceof User) {
+        $y = $x;
+    }
+    $z = $x;
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    // inside the guarded block: refined
+    let inside = tree_sitter::Point { row: 3, column: 8 };
+    assert_eq!(
+        fa.inferred_type_via_bag("$x", inside),
+        Some(InferredType::ClassName("User".into())),
+    );
+    // after the block: the refinement is gone
+    let after = tree_sitter::Point { row: 5, column: 4 };
+    assert_eq!(fa.inferred_type_via_bag("$x", after), None);
+}
+
+#[test]
+fn php_parent_edges_from_extends_implements_and_trait_use() {
+    let src = "\
+<?php
+trait T {}
+interface I {}
+class B {}
+class C extends B implements I {
+    use T;
+}
+";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    for parent in ["B", "I", "T"] {
+        assert!(
+            skel.parents.contains(&("C".to_string(), parent.to_string())),
+            "expected C -> {parent}, got {:?}",
+            skel.parents,
+        );
+    }
+}
+
+#[test]
+fn php_keyed_array_literal_types_as_hash_with_keys() {
+    let src = "\
+<?php
+$cfg = ['timeout' => 30, 'retries' => 3];
+";
+    let (fa, _) = php_fa(src);
+    let end = tree_sitter::Point { row: 2, column: 0 };
+    match fa.inferred_type_via_bag("$cfg", end) {
+        Some(crate::model::file_analysis::InferredType::HashWithKeys { keys, .. }) => {
+            let names: Vec<&str> = keys.iter().map(|(k, _)| k.as_str()).collect();
+            assert!(names.contains(&"timeout") && names.contains(&"retries"), "{names:?}");
+        }
+        other => panic!("expected HashWithKeys, got {other:?}"),
+    }
+}
+
+#[test]
+fn php_concat_observation_types_untyped_var() {
+    // The Perl edge alive in PHP: `.` is string-only, so an untyped
+    // parameter types from HOW IT'S USED — no initializer needed.
+    let src = "\
+<?php
+function g($s) {
+    $t = $s . \"!\";
+}
+";
+    let (fa, _) = php_fa(src);
+    let inside = tree_sitter::Point { row: 3, column: 0 };
+    assert_eq!(
+        fa.inferred_type_via_bag("$s", inside),
+        Some(crate::model::file_analysis::InferredType::String),
+    );
+}
+
+#[test]
+fn php_cross_file_function_refs_through_refs_to() {
+    // Declaration in a.php, call in b.php, the production refs_to
+    // walks both — Perl parity for the references verb.
+    let (fa_a, _) = php_fa("<?php\nfunction helper($x) {\n    return $x;\n}\n");
+    let (fa_b, _) = php_fa("<?php\n$z = helper(1);\n");
+    // the cursor's file keys the target's name with php's spellings
+    let fa_a_for_names = fa_a.clone();
+
+    let store = crate::index::file_store::FileStore::new();
+    let pa = std::path::PathBuf::from("/fake/php/a.php");
+    let pb = std::path::PathBuf::from("/fake/php/b.php");
+    store.insert_workspace(pa.clone(), fa_a);
+    store.insert_workspace(pb.clone(), fa_b);
+
+    let target = crate::index::resolve::TargetRef::new(
+        "helper".into(),
+        crate::index::resolve::TargetKind::Sub { package: None },
+        &fa_a_for_names,
+    );
+    let locs = crate::index::resolve::refs_to(&store, None, &target, crate::index::resolve::RoleMask::EDITABLE);
+    let by_file: Vec<(String, crate::model::file_analysis::AccessKind)> = locs
+        .iter()
+        .map(|l| {
+            let f = match &l.key {
+                crate::index::file_store::FileKey::Path(p) => {
+                    p.file_name().unwrap().to_string_lossy().to_string()
+                }
+                crate::index::file_store::FileKey::Url(u) => u.to_string(),
+            };
+            (f, l.access)
+        })
+        .collect();
+    assert!(
+        by_file.contains(&("a.php".into(), crate::model::file_analysis::AccessKind::Declaration)),
+        "expected the def in a.php, got {by_file:?}",
+    );
+    assert!(
+        by_file.contains(&("b.php".into(), crate::model::file_analysis::AccessKind::Read)),
+        "expected the call in b.php, got {by_file:?}",
+    );
+}
+
+#[test]
+fn php_enum_cases_are_enumerators_typed_by_their_enum() {
+    let src = "\
+<?php
+enum Suit {
+    case Hearts;
+    case Spades;
+}
+";
+    let (fa, _) = php_fa(src);
+    let case_sym = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "Hearts")
+        .expect("enum case symbol");
+    assert_eq!(case_sym.kind, crate::model::file_analysis::SymKind::Enumerator);
+    assert_eq!(case_sym.package.as_deref(), Some("Suit"));
+}
+
+#[test]
+fn php_enum_carries_the_members_the_language_gives_it() {
+    // `->value` / `::cases()` have no declaration token, so the extractor
+    // mints them at the enum's name as real members — SYNTHESIZED. Every
+    // consumer resolves them through the symbol table; none matches names.
+    let src = "\
+<?php
+enum Suit {
+    case Hearts;
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{MemberKind, SymbolFlags, SymKind};
+    let member = |n: &str| {
+        fa.symbols()
+            .iter()
+            .find(|s| s.name == n && s.package.as_deref() == Some("Suit"))
+            .unwrap_or_else(|| panic!("Suit::{n}: {:?}", fa.symbols().iter().map(|s| &s.name).collect::<Vec<_>>()))
+    };
+    assert_eq!(member("value").kind, SymKind::Field);
+    assert_eq!(member("cases").kind, SymKind::Method);
+    for n in ["value", "name", "cases", "from", "tryFrom"] {
+        assert!(
+            member(n).flags.contains(SymbolFlags::SYNTHESIZED),
+            "Suit::{n} is not user-written"
+        );
+        // minted at the enum's own name token — the one honest site
+        assert_eq!(member(n).span.start.row, 1, "Suit::{n}");
+    }
+    // the member lanes answer for them by KIND, so a read and a call of the
+    // same name can never stand in for each other
+    assert!(fa.resolve_member("Suit", "value", MemberKind::Value, None).is_some());
+    assert!(fa.resolve_member("Suit", "cases", MemberKind::Callable, None).is_some());
+    assert!(fa.resolve_member("Suit", "nope", MemberKind::Value, None).is_none());
+}
+
+#[test]
+fn php_static_return_substitutes_the_receiver_fluently() {
+    // `: static` publishes ReturnExpr::Receiver — the member-chain arm
+    // threads the real receiver, and the MCB path's default receiver
+    // (ClassName of the declaring class) covers plain assignments.
+    let src = "\
+<?php
+class Query {
+    public function where(string $c): static {
+        return $this;
+    }
+    public function count(): int {
+        return 1;
+    }
+}
+$q = new Query();
+$r = $q->where('a');
+$n = $r->count();
+";
+    // (An inline multi-hop chain `$q->where('a')->count()` does NOT type
+    // the assigned variable yet — the registry has no member-chain lane,
+    // for any pack; ledgered in docs/prompt-php-target.md.)
+    let (fa, _) = php_fa(src);
+    let end = tree_sitter::Point { row: 12, column: 0 };
+    use crate::model::file_analysis::InferredType;
+    assert_eq!(
+        fa.inferred_type_via_bag("$r", end),
+        Some(InferredType::ClassName("Query".into())),
+        "a fluent assignment keeps the builder's class",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$n", end),
+        Some(InferredType::Numeric),
+        "the fluent result dispatches the next hop's concrete return",
+    );
+}
+
+#[test]
+fn php_property_field_is_sigil_less_and_joins_its_member_access() {
+    // Declared `$name`, accessed `$this->name` — the field keys on the
+    // inner name token so the access site's target joins the symbol
+    // (sigil-ful fields never matched their own uses).
+    let src = "\
+<?php
+class User {
+    public string $name;
+    public function greet(): string {
+        return $this->name;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{RefKind, SymKind};
+    let field = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "name" && matches!(s.kind, SymKind::Field))
+        .expect("sigil-less Field symbol");
+    assert_eq!(field.package.as_deref(), Some("User"));
+    assert!(
+        fa.refs().iter().any(|r| {
+            matches!(r.kind, RefKind::FieldAccess { .. }) && r.target_name == "name"
+        }),
+        "the $this->name read mints a FieldAccess targeting the field's name",
+    );
+}
+
+#[test]
+fn php_type_display_speaks_php_not_perl() {
+    let (fa, _) = php_fa("<?php\n$x = 1;\n");
+    use crate::model::file_analysis::InferredType;
+    assert_eq!(fa.render_type(&InferredType::HashRef), "array");
+    assert_eq!(fa.render_type(&InferredType::Numeric), "int|float");
+    assert_eq!(fa.render_type(&InferredType::String), "string");
+    // unmapped output passes through
+    assert_eq!(fa.render_type(&InferredType::ClassName("User".into())), "User");
+}
+
+#[test]
+fn php_docblock_types_fill_what_the_syntax_left_untyped() {
+    // phpdoc is the type vocabulary of real PHP: `@return`/`@param`/`@var`
+    // facts fill syntax-untyped slots (declared types always win), with
+    // generics stripped and `X|null` collapsed.
+    let src = "\
+<?php
+class Repo {
+    /** @var array<string,int> */
+    public $counts;
+
+    /**
+     * @param string $name
+     * @return User|null
+     */
+    public function find($name) {
+        $x = $name;
+        return null;
+    }
+
+    /** @return static */
+    public function fresh(): static {
+        return $this;
+    }
+}
+/** @return Collection<int> */
+function collect($v = null) {}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    // @param on a syntax-untyped parameter
+    let inside = tree_sitter::Point { row: 10, column: 8 };
+    assert_eq!(fa.inferred_type_via_bag("$name", inside), Some(InferredType::String));
+    // @return with a null-collapsed union → the sub's return
+    assert_eq!(
+        fa.sub_return_type_at_arity("find", None),
+        Some(InferredType::ClassName("User".into())),
+    );
+    // generic-stripped @return on a free function
+    assert_eq!(
+        fa.sub_return_type_at_arity("collect", None),
+        Some(InferredType::ClassName("Collection".into())),
+    );
+    // @var on an untyped property — class-wide extent. A string-keyed
+    // `array<K, V>` doc keeps BOTH axes as a two-argument parametric
+    // instance (the foreach Key/Element peels read them).
+    let in_class = tree_sitter::Point { row: 4, column: 0 };
+    assert_eq!(
+        fa.inferred_type_via_bag("counts", in_class),
+        Some(InferredType::Parametric(
+            crate::model::file_analysis::ParametricType::Instance {
+                base: "array".into(),
+                args: vec![InferredType::String, InferredType::Numeric],
+            }
+        ))
+    );
+}
+
+#[test]
+fn php_docblock_joins_its_def_across_an_attribute_line() {
+    // The doc and the def it documents are ONE query match, so anything the
+    // grammar puts between them — an attribute list, a modifier on its own
+    // line — is the query's business, not a row distance the engine measures.
+    // A property's def token is its NAME, which an attribute line pushes a
+    // row further down than the row arithmetic this join replaced could see.
+    let src = "\
+<?php
+class Repo {
+    /** @var list<User> */
+    #[SomeAttr]
+    protected array $rows = [];
+
+    /** @return Post */
+    #[Other]
+    public function latest() {}
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let in_class = tree_sitter::Point { row: 4, column: 0 };
+    assert_eq!(
+        fa.inferred_type_via_bag("rows", in_class),
+        Some(InferredType::Sequence(vec![InferredType::ClassName("User".into())])),
+        "the @var row types the property the attribute line separates it from"
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("latest", None),
+        Some(InferredType::ClassName("Post".into())),
+    );
+}
+
+#[test]
+fn php_docs_narrow_a_declaration_and_never_contradict_it() {
+    // A docblock exists to say what the syntax could not spell, so it wins a
+    // slot only where the declaration already admits it. `: object` spells no
+    // type at all, so `@return Post` fills it; a documented subclass narrows
+    // its declared base; `: int` + `@return string` is a pair no value
+    // satisfies — the declaration stands and the mismatch is recorded.
+    let src = "\
+<?php
+class Base {}
+class Post extends Base {}
+class Repo {
+    /** @return Post */
+    public function any(): object {}
+
+    /** @return Post */
+    public function narrowed(): Base {}
+
+    /** @return string */
+    public function clash(): int {}
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    assert_eq!(
+        fa.sub_return_type_at_arity("any", None),
+        Some(InferredType::ClassName("Post".into())),
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("narrowed", None),
+        Some(InferredType::ClassName("Post".into())),
+        "a documented subclass narrows the declared base"
+    );
+    assert_eq!(
+        fa.sub_return_type_at_arity("clash", None),
+        Some(InferredType::Numeric),
+        "the declaration wins a contradiction"
+    );
+    let clash: Vec<_> = fa
+        .pack
+        .doc_disagreements
+        .iter()
+        .map(|d| (d.declared.clone(), d.documented.clone()))
+        .collect();
+    assert_eq!(
+        clash,
+        vec![(InferredType::Numeric, InferredType::String)],
+        "only the contradiction is recorded: {:?}",
+        fa.pack.doc_disagreements
+    );
+}
+
+#[test]
+fn php_self_and_static_calls_dispatch_as_the_enclosing_class() {
+    // `self::helper()` / `static::helper()` dispatch on the class they are
+    // written in, and the invocant carries that class — the receiver token
+    // never reaches a consumer.
+    let src = "\
+<?php
+class Util {
+    public static function helper(): string {
+        return \"h\";
+    }
+    public function run(): string {
+        return self::helper() . static::helper();
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::RefKind;
+    let self_calls: Vec<_> = fa
+        .refs()
+        .iter()
+        .filter(|r| {
+            matches!(&r.kind, RefKind::MethodCall { invocant, .. }
+                if invocant.text() == "Util")
+        })
+        .collect();
+    assert_eq!(self_calls.len(), 2, "both relative static calls name the enclosing class");
+    assert!(
+        !fa.refs().iter().any(|r| matches!(&r.kind, RefKind::MethodCall { invocant, .. }
+            if invocant.text() == "__PACKAGE__")),
+        "Perl's current-package token never appears in a php analysis",
+    );
+    // and the dispatch class resolves to the enclosing class
+    for r in self_calls {
+        assert_eq!(
+            fa.method_call_invocant_class(r, None).as_deref(),
+            Some("Util"),
+            "relative static dispatch lands on the enclosing class",
+        );
+    }
+}
+
+#[test]
+fn php_foreach_loop_vars_are_declarations_but_the_source_is_not() {
+    // Loop-bound vars minted no symbol, so refs/hover/
+    // highlight/rename were all dark on one of PHP's most common shapes.
+    // The `"as" .` anchor keeps the iterated SOURCE a plain read — a
+    // pseudo-def there would steal the real decl's later references.
+    let src = "\
+<?php
+function walk($items, $map) {
+    foreach ($items as $item) {
+        echo $item;
+    }
+    foreach ($map as $k => $v) {
+        echo $k . $v;
+    }
+    foreach ($items as &$ref) {
+        $ref = 1;
+    }
+    return $items;
+}
+";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let var_defs: Vec<&str> = skel
+        .symbols
+        .iter()
+        .filter(|s| s.kind == "var")
+        .map(|s| s.name.as_str())
+        .collect();
+    for bound in ["$item", "$k", "$v", "$ref"] {
+        assert!(var_defs.contains(&bound), "{bound} must be declared; got {var_defs:?}");
+    }
+    // exactly one $items declaration — the parameter, not a foreach pseudo-def
+    assert_eq!(
+        var_defs.iter().filter(|n| **n == "$items").count(),
+        1,
+        "the iterated source must not re-declare: {var_defs:?}",
+    );
+    // and the loop var's use resolves to its binding (ref minted + bound)
+    let fa = skel.into_file_analysis();
+    use crate::model::file_analysis::RefKind;
+    assert!(
+        fa.refs().iter().any(|r| {
+            matches!(r.kind, RefKind::Variable)
+                && r.target_name == "$item"
+                && r.resolved_symbol().is_some()
+        }),
+        "the echo use of $item resolves to the loop binding",
+    );
+}
+
+#[test]
+fn php_parent_edges_resolve_aliases_and_record_namespaces() {
+    // The FQ identity lane: `use X\Y as Z` parents recorded under Z were
+    // dead edges (Laravel's `Repository as CacheContract` hid the direct
+    // implementer from implementations); unqualified parents bind to the
+    // file's own namespace; written qualifiers carry their own.
+    let src = "\
+<?php
+namespace App\\Cache;
+
+use Illuminate\\Contracts\\Cache\\Repository as CacheContract;
+use Psr\\Log\\{LoggerInterface, NullLogger as Quiet};
+
+class Repo extends \\Vendor\\Base implements CacheContract
+{
+}
+class Local extends Helper
+{
+}
+class Logging extends Quiet
+{
+}
+";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let edges: Vec<(&str, &str)> = skel.parents.iter().map(|(c, p)| (c.as_str(), p.as_str())).collect();
+    // an alias resolves to the real identity, namespace from the import;
+    // the edge carries both ends' identities
+    assert!(
+        edges.contains(&("App\\Cache\\Repo", "Illuminate\\Contracts\\Cache\\Repository")),
+        "the edge must carry the real identity, not the alias: {edges:?}"
+    );
+    // written qualifier is authoritative
+    assert!(edges.contains(&("App\\Cache\\Repo", "Vendor\\Base")), "{edges:?}");
+    // unqualified binds to the file's own namespace
+    assert!(edges.contains(&("App\\Cache\\Local", "App\\Cache\\Helper")), "{edges:?}");
+    // group-use alias resolves through the shared prefix
+    assert!(edges.contains(&("App\\Cache\\Logging", "Psr\\Log\\NullLogger")), "{edges:?}");
+}
+
+#[test]
+fn php_implementations_disambiguate_same_leaf_interfaces() {
+    // Two unrelated `Repository` interfaces in different namespaces, one
+    // implementer each. From a file that imports the CACHE one,
+    // implementations must list the cache implementer and NOT the log one
+    // (Laravel's three Repositories polluted the family walks).
+    let contract_cache =
+        "<?php\nnamespace Contracts\\Cache;\n\ninterface Repository\n{\n    public function pull(): string;\n}\n";
+    let contract_log =
+        "<?php\nnamespace Contracts\\Log;\n\ninterface Repository\n{\n    public function pull(): string;\n}\n";
+    let impl_cache = "\
+<?php
+namespace Cache;
+
+use Contracts\\Cache\\Repository;
+
+class CacheRepo implements Repository
+{
+    public function pull(): string { return \"c\"; }
+}
+";
+    let impl_log = "\
+<?php
+namespace Log;
+
+use Contracts\\Log\\Repository;
+
+class LogRepo implements Repository
+{
+    public function pull(): string { return \"l\"; }
+}
+";
+    let (fa_cc, _) = php_fa(contract_cache);
+    let (fa_cl, _) = php_fa(contract_log);
+    let (fa_ic, _) = php_fa(impl_cache);
+    let (fa_il, _) = php_fa(impl_log);
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let mk = |path: &str, fa: crate::model::file_analysis::FileAnalysis| {
+        std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+            std::path::PathBuf::from(path),
+            std::sync::Arc::new(fa),
+        ))
+    };
+    let cc = mk("/fq/contracts/cache/Repository.php", fa_cc.clone());
+    let cl = mk("/fq/contracts/log/Repository.php", fa_cl);
+    let ic = mk("/fq/cache/CacheRepo.php", fa_ic);
+    let il = mk("/fq/log/LogRepo.php", fa_il);
+    idx.insert_cache_providers("Repository", Some(vec![cc.clone(), cl.clone()]));
+    idx.insert_cache("Contracts\\Cache\\Repository", Some(cc));
+    idx.insert_cache("Contracts\\Log\\Repository", Some(cl));
+    idx.insert_cache("CacheRepo", Some(ic.clone()));
+    idx.insert_cache("Cache\\CacheRepo", Some(ic));
+    idx.insert_cache("LogRepo", Some(il.clone()));
+    idx.insert_cache("Log\\LogRepo", Some(il));
+
+    // Origin = the cache contract's own file; cursor identity = the class.
+    let target = crate::index::resolve::TargetRef::new(
+        "Contracts\\Cache\\Repository".into(),
+        crate::index::resolve::TargetKind::Package,
+        &fa_cc,
+    );
+    let locs = crate::index::resolve::implementations_of(&fa_cc, Some(&idx), &target);
+    let files: Vec<String> = locs
+        .iter()
+        .map(|l| match &l.key {
+            crate::index::file_store::FileKey::Path(p) => p.to_string_lossy().into_owned(),
+            crate::index::file_store::FileKey::Url(u) => u.to_string(),
+        })
+        .collect();
+    assert!(
+        files.iter().any(|f| f.contains("CacheRepo")),
+        "the agreeing family's implementer must be listed: {files:?}"
+    );
+    assert!(
+        !files.iter().any(|f| f.contains("LogRepo")),
+        "a same-leaf stranger's implementer must NOT be listed: {files:?}"
+    );
+}
+
+#[test]
+fn php_implementations_reach_same_leaf_direct_implementer() {
+    // Laravel's aliased-contract idiom: `class Repository implements
+    // CacheContract` where the alias resolves to `Contracts\Cache\
+    // Repository` — a SELF-LOOP in leaf space. The contract-line
+    // exclusion used to eat the direct implementer; the namespace rows
+    // re-admit it, and a third same-leaf family (config) stays out.
+    let contract_cache =
+        "<?php\nnamespace Contracts\\Cache;\n\ninterface Repository\n{\n    public function pull(): string;\n}\n";
+    let contract_config =
+        "<?php\nnamespace Contracts\\Config;\n\ninterface Repository\n{\n    public function pull(): string;\n}\n";
+    let impl_cache = "\
+<?php
+namespace Cache;
+
+use Contracts\\Cache\\Repository as CacheContract;
+
+class Repository implements CacheContract
+{
+    public function pull(): string { return \"c\"; }
+}
+";
+    let impl_config = "\
+<?php
+namespace Config;
+
+use Contracts\\Config\\Repository as ConfigContract;
+
+class Repository implements ConfigContract
+{
+    public function pull(): string { return \"k\"; }
+}
+";
+    let (fa_cc, _) = php_fa(contract_cache);
+    let (fa_kc, _) = php_fa(contract_config);
+    let (fa_ic, _) = php_fa(impl_cache);
+    let (fa_ik, _) = php_fa(impl_config);
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let mk = |path: &str, fa: crate::model::file_analysis::FileAnalysis| {
+        std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+            std::path::PathBuf::from(path),
+            std::sync::Arc::new(fa),
+        ))
+    };
+    let cc = mk("/fq2/contracts/cache/Repository.php", fa_cc.clone());
+    let kc = mk("/fq2/contracts/config/Repository.php", fa_kc);
+    let ic = mk("/fq2/cache/Repository.php", fa_ic);
+    let ik = mk("/fq2/config/Repository.php", fa_ik);
+    idx.insert_cache_providers(
+        "Repository",
+        Some(vec![cc.clone(), kc.clone(), ic.clone(), ik.clone()]),
+    );
+    idx.insert_cache("Contracts\\Cache\\Repository", Some(cc));
+    idx.insert_cache("Contracts\\Config\\Repository", Some(kc));
+    idx.insert_cache("Cache\\Repository", Some(ic));
+    idx.insert_cache("Config\\Repository", Some(ik));
+
+    // Cursor on `pull` in the CACHE contract.
+    let target = crate::index::resolve::TargetRef::method(
+        "pull".into(),
+        "Contracts\\Cache\\Repository".into(),
+        Some(crate::model::file_analysis::MemberKind::Callable),
+        &fa_cc,
+        Some(&idx),
+        crate::index::resolve::OverrideScope::Hierarchy,
+    );
+    let locs = crate::index::resolve::implementations_of(&fa_cc, Some(&idx), &target);
+    let files: Vec<String> = locs
+        .iter()
+        .map(|l| match &l.key {
+            crate::index::file_store::FileKey::Path(p) => p.to_string_lossy().into_owned(),
+            crate::index::file_store::FileKey::Url(u) => u.to_string(),
+        })
+        .collect();
+    assert!(
+        files.iter().any(|f| f.contains("/fq2/cache/")),
+        "the same-leaf direct implementer's pull must be listed: {files:?}"
+    );
+    assert!(
+        !files.iter().any(|f| f.contains("/fq2/config/")),
+        "a third same-leaf family must NOT be listed: {files:?}"
+    );
+    assert!(
+        !files.iter().any(|f| f.contains("/fq2/contracts/")),
+        "the contracts themselves are not implementations: {files:?}"
+    );
+
+    // Package arm (cursor on the interface NAME): same self-loop, same rows.
+    let target = crate::index::resolve::TargetRef::new(
+        "Contracts\\Cache\\Repository".into(),
+        crate::index::resolve::TargetKind::Package,
+        &fa_cc,
+    );
+    let locs = crate::index::resolve::implementations_of(&fa_cc, Some(&idx), &target);
+    let files: Vec<String> = locs
+        .iter()
+        .map(|l| match &l.key {
+            crate::index::file_store::FileKey::Path(p) => p.to_string_lossy().into_owned(),
+            crate::index::file_store::FileKey::Url(u) => u.to_string(),
+        })
+        .collect();
+    assert!(
+        files.iter().any(|f| f.contains("/fq2/cache/")),
+        "the same-leaf direct implementer's class must be listed: {files:?}"
+    );
+    assert!(
+        !files.iter().any(|f| f.contains("/fq2/config/")),
+        "a third same-leaf family must NOT be listed: {files:?}"
+    );
+}
+
+#[test]
+fn php_member_chain_types_through_method_hops() {
+    // The registry member-chain lane: `$x = $a->b()->c()` has no variable
+    // for the outer hop's receiver, so no MethodCallBinding bridges it —
+    // the per-call `MethodHop` projection defers each dispatch to query
+    // time and chains through the receiver span's own hop witness.
+    let src = "\
+<?php
+class B {
+    public function c(): string { return \"s\"; }
+}
+class A {
+    public function b(): B { return new B(); }
+}
+function f(A $a) {
+    $x = $a->b()->c();
+    $y = $a->b();
+    echo $x;
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    // the single hop still types (was the MCB bridge's case)
+    let y = fa.inferred_type_via_bag("$y", tree_sitter::Point { row: 10, column: 8 });
+    assert_eq!(
+        y.as_ref().and_then(|t| t.class_name()),
+        Some("B"),
+        "single hop must type: {y:?}"
+    );
+    // the two-hop chain resolves through MethodHop → MethodHop → return
+    let x = fa.inferred_type_via_bag("$x", tree_sitter::Point { row: 10, column: 8 });
+    assert_eq!(x, Some(InferredType::String), "chain must type: {x:?}");
+}
+
 #[test]
 fn cpp_member_chain_types_through_method_hops() {
     // The identical gap on the cpp side: `auto x = w.get().spin();` — the
@@ -2819,6 +3679,1579 @@ int f(Widget w) {
         Some(InferredType::Numeric),
         "two-hop chain must type",
     );
+}
+
+#[test]
+fn php_this_receiver_chain_types_through_hops() {
+    // `$this->helper()->render()` — the first hop's receiver is the
+    // enclosing class instance (the pack's `hop.recv` shaping), whose
+    // class only extraction knows; the companion witness carries it.
+    let src = "\
+<?php
+class View {
+    public function render(): string { return \"html\"; }
+}
+class Controller {
+    public function helper(): View { return new View(); }
+    public function page(): void {
+        $out = $this->helper()->render();
+        echo $out;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let out = fa.inferred_type_via_bag("$out", tree_sitter::Point { row: 8, column: 12 });
+    assert_eq!(out, Some(InferredType::String), "$this chain must type: {out:?}");
+}
+
+#[test]
+fn php_property_receiver_and_static_factory_chains() {
+    // `$this->handler->close()` never dispatched —
+    // the property ACCESS carried no hop, and field types live as
+    // Variable witnesses the PackageSymbol chase couldn't reach. Both
+    // halves land here; the static-factory chain rides the scoped-call
+    // hop with a bareword class receiver.
+    let src = "\
+<?php
+class Handler {
+    public function close(): string { return \"ok\"; }
+}
+class Registry {
+    public static function instance(): Registry { return new Registry(); }
+    public function register(): int { return 1; }
+}
+class Logger {
+    private Handler $handler;
+    public function shutdown(): void {
+        $x = $this->handler->close();
+        $r = Registry::instance()->register();
+        echo $x . $r;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let at = tree_sitter::Point { row: 13, column: 12 };
+    let x = fa.inferred_type_via_bag("$x", at);
+    assert_eq!(x, Some(InferredType::String), "property-receiver chain: {x:?}");
+    let r = fa.inferred_type_via_bag("$r", at);
+    assert_eq!(r, Some(InferredType::Numeric), "static factory chain: {r:?}");
+}
+
+#[test]
+fn php_builder_generics_project_the_model_back_out() {
+    // The Eloquent Builder lane: `@template TModel` on the class feeds
+    // the same per-class param axis cpp templates use; `@return
+    // Builder2<static>` publishes InstanceOf{Builder2, [Receiver]}; a
+    // `@return TModel|null` method projects the receiver's arg back
+    // out via the existing ParamOf writeback. Net: `Book2::query()
+    // ->first()` types as Book2 with zero engine special-cases.
+    let src = "\
+<?php
+/**
+ * @template TModel of Model
+ */
+class Builder2 {
+    /** @return $this */
+    public function whereX(string $c) { return $this; }
+    /** @return TModel|null */
+    public function first() { return null; }
+}
+class Book2 {
+    /** @return Builder2<static> */
+    public static function query() { return new Builder2(); }
+}
+function f(): string {
+    $b = Book2::query();
+    $x = Book2::query()->whereX('a')->first();
+    echo $x;
+    return 's';
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let at = tree_sitter::Point { row: 17, column: 4 };
+    let b = fa.inferred_type_via_bag("$b", at);
+    assert_eq!(
+        b.as_ref().and_then(|t| t.class_name()),
+        Some("Builder2"),
+        "query() carries a Builder instance: {b:?}"
+    );
+    let x = fa.inferred_type_via_bag("$x", at);
+    assert_eq!(
+        x,
+        Some(InferredType::ClassName("Book2".into())),
+        "first() projects the receiver's model back out: {x:?}"
+    );
+}
+
+#[cfg(feature = "php")]
+#[test]
+fn php_new_sites_are_constructor_references_but_never_rename_targets() {
+    // A construction site is two facts on one token: the token names the
+    // CLASS, and the site calls that class's constructor. References on
+    // `__construct` therefore see every `new Client(` — without them a
+    // constructor answered 1 (itself) against 304 call sites and landed in
+    // the heatmap's dead queue — while the ctor's name is the LANGUAGE's,
+    // so no rename rewrites it.
+    let src = "\
+<?php
+class Client {
+    public function __construct(string $base) {
+    }
+}
+$a = new Client('x');
+$b = new Client('y');
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::RefKind;
+    // the class token of `new Client('x')` (row 5, col 9)
+    let at = tree_sitter::Point { row: 5, column: 9 };
+    let class_ref = fa.ref_at(at).expect("the token answers as a class");
+    assert_eq!(class_ref.target_name, "Client");
+    assert!(matches!(class_ref.kind, RefKind::PackageRef), "{:?}", class_ref.kind);
+    let call = fa.call_ref_at_start(at).expect("and as a constructor call");
+    assert_eq!(call.target_name, "__construct");
+    assert!(matches!(call.kind, RefKind::MethodCall { .. }), "{:?}", call.kind);
+    assert_eq!(call.arg_count, Some(1), "the written argument list is the ctor's");
+
+    // cursor on the __construct decl (row 2, col 21)
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 2, column: 21 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("__construct decl must mint a target: {other:?}"),
+    };
+    assert_eq!(target.ctor_of.as_deref(), Some("Client"), "ctor marker");
+    assert!(target.rename_is_language_owned(), "nothing renames `__construct`");
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/ctor/t.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let new_sites: Vec<_> = locs.iter().filter(|l| l.span.start.row >= 5).collect();
+    assert_eq!(new_sites.len(), 2, "both new-sites are references: {locs:?}");
+}
+
+/// A class that declares no constructor still constructs: the class token
+/// answers as the class, the member arm answers the construction sites when
+/// references start from the class, and the arity lane — which has no
+/// declaration to compare against — stays silent whatever the call passes.
+#[test]
+fn php_default_constructor_sites_reference_the_class_and_never_mismatch_arity() {
+    let src = "\
+<?php
+class Bare {
+    public function go(): int { return 1; }
+}
+$a = new Bare();
+$b = new Bare('x', 2);
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::RefKind;
+    for row in [4usize, 5] {
+        let at = tree_sitter::Point { row, column: 9 };
+        let class_ref = fa.ref_at(at).unwrap_or_else(|| panic!("row {row} names the class"));
+        assert_eq!(class_ref.target_name, "Bare");
+        assert!(matches!(class_ref.kind, RefKind::PackageRef), "{:?}", class_ref.kind);
+        let call = fa
+            .call_ref_at_start(at)
+            .unwrap_or_else(|| panic!("row {row} calls the constructor"));
+        assert_eq!(call.target_name, "__construct");
+    }
+    // no `__construct` symbol exists, so no declared arity to mismatch
+    assert!(
+        !fa.symbols().iter().any(|s| s.name == "__construct"),
+        "the default constructor is declared by nothing"
+    );
+    let diags = crate::lsp::symbols::pack_symbol_diagnostics(&fa, None);
+    assert!(
+        !diags.iter().any(|d| matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(c)) if c == "arity-mismatch")),
+        "the arity lane stays silent for a default constructor: {diags:?}"
+    );
+}
+
+#[test]
+fn php_global_docblock_types_the_binding() {
+    // WordPress's typing convention: `@global wpdb $wpdb` above the
+    // function + `global $wpdb;` inside. The global statement is a real
+    // declaration (uses hang off it), and the doc row types it — so
+    // `$wpdb->query(...)` dispatches.
+    let src = "\
+<?php
+class wpdb {
+    public function query(string $sql): int { return 1; }
+}
+/**
+ * @global wpdb $wpdb
+ */
+function get_things(): int {
+    global $wpdb;
+    $n = $wpdb->query('SELECT 1');
+    return $n;
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let at = tree_sitter::Point { row: 10, column: 4 };
+    let w = fa.inferred_type_via_bag("$wpdb", at);
+    assert_eq!(
+        w,
+        Some(InferredType::ClassName("wpdb".into())),
+        "the global binding types from the doc row: {w:?}"
+    );
+    let n = fa.inferred_type_via_bag("$n", at);
+    assert_eq!(n, Some(InferredType::Numeric), "and the call off it dispatches: {n:?}");
+}
+
+#[test]
+fn php_builder_generics_cross_file_through_self_leaf_parent() {
+    // The BookStack shape end-to-end ACROSS FILES: app User extends app
+    // Model, which extends the vendor Model under an ALIAS (self-leaf
+    // edge), whose query() returns Builder<static>; Builder's
+    // firstWhere() projects TModel. The all-local twin passes — this
+    // pins the cross-file walk.
+    let vendor_model = "\
+<?php
+namespace Acme\\Eloquent;
+class Model {
+    /** @return \\Acme\\Eloquent\\Builder5<static> */
+    public static function query() { return new Builder5(); }
+}
+";
+    let vendor_builder = "\
+<?php
+namespace Acme\\Eloquent;
+/**
+ * @template TModel of \\Acme\\Eloquent\\Model
+ */
+class Builder5 {
+    /** @return TModel|null */
+    public function firstWhere(string $c) { return null; }
+}
+";
+    let app_model = "\
+<?php
+namespace App5;
+use Acme\\Eloquent\\Model as EloquentModel;
+class Model extends EloquentModel {
+}
+";
+    let app_user = "\
+<?php
+namespace App5;
+class User5 extends Model {
+}
+";
+    let run = "\
+<?php
+use App5\\User5;
+$u = User5::query()->firstWhere('id');
+echo $u;
+";
+    let (fa_vm, _) = php_fa(vendor_model);
+    let (fa_vb, _) = php_fa(vendor_builder);
+    let (fa_am, _) = php_fa(app_model);
+    let (fa_au, _) = php_fa(app_user);
+    let (fa_run, _) = php_fa(run);
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let mk = |path: &str, fa: crate::model::file_analysis::FileAnalysis| {
+        std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+            std::path::PathBuf::from(path),
+            std::sync::Arc::new(fa),
+        ))
+    };
+    // Registered as the linkage feed does: under the identity AND the
+    // leaf it binds.
+    let am = mk("/gen/app/Model.php", fa_am);
+    let vm = mk("/gen/vendor/Model.php", fa_vm);
+    let vb = mk("/gen/vendor/Builder5.php", fa_vb);
+    let au = mk("/gen/app/User5.php", fa_au);
+    idx.insert_cache_providers("Model", Some(vec![am.clone(), vm.clone()]));
+    idx.insert_cache("App5\\Model", Some(am));
+    idx.insert_cache("Acme\\Eloquent\\Model", Some(vm));
+    idx.insert_cache("Builder5", Some(vb.clone()));
+    idx.insert_cache("Acme\\Eloquent\\Builder5", Some(vb));
+    idx.insert_cache("User5", Some(au.clone()));
+    idx.insert_cache("App5\\User5", Some(au));
+
+    use crate::model::file_analysis::InferredType;
+    let u = fa_run.inferred_type_via_bag_ctx(
+        "$u",
+        tree_sitter::Point { row: 3, column: 0 },
+        Some(&idx),
+    );
+    assert_eq!(
+        u,
+        Some(InferredType::ClassName("App5\\User5".into())),
+        "cross-file generics chain: {u:?}"
+    );
+}
+
+#[test]
+fn php_enum_cases_are_not_bare_constants() {
+    // A php enum case is only ever
+    // `Level::Debug`-reachable — never a bare token — so it must not
+    // take cpp's unscoped-enum hoisting lane (bare_constant), which
+    // let ANY same-named PackageRef match: renaming a case rewrote an
+    // unrelated class's use-import leaf.
+    let src = "\
+<?php
+enum Level: int {
+    case Debug = 100;
+}
+class User {
+    const VERSION = \"1\";
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::SymKind;
+    for name in ["Debug", "VERSION"] {
+        let sym = fa
+            .symbols()
+            .iter()
+            .find(|s| matches!(s.kind, SymKind::Enumerator) && s.name == name)
+            .unwrap();
+        assert!(
+            !fa.class_content_is_bare_constant(sym),
+            "{name} must not be bare-reachable",
+        );
+    }
+}
+
+#[test]
+fn php_reassignment_rebinds_one_variable_identity() {
+    // The rename hazard: PHP vars are FUNCTION-scoped —
+    // an assignment in an `if` block declares for the whole function
+    // and re-assignment REBINDS. One declaration per (name, function),
+    // re-anchored to the sub scope; later assignments are write refs.
+    let src = "\
+<?php
+function orderBooks(bool $flip): string {
+    $order = 'name';
+    if ($flip) {
+        $order = 'desc';
+    } else {
+        $order = 'asc';
+    }
+    echo $order;
+    return $order;
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{RefKind, SymKind};
+    let decls: Vec<_> = fa
+        .symbols()
+        .iter()
+        .filter(|s| matches!(s.kind, SymKind::Variable) && s.name == "$order")
+        .collect();
+    assert_eq!(decls.len(), 1, "one identity per function: {decls:?}");
+    let writes = fa
+        .refs()
+        .iter()
+        .filter(|r| {
+            matches!(r.kind, RefKind::Variable)
+                && r.target_name == "$order"
+                && matches!(r.access, crate::model::file_analysis::AccessKind::Write)
+        })
+        .count();
+    assert_eq!(writes, 2, "each re-assignment is a write ref");
+    // and a use in a DIFFERENT block resolves to the one declaration
+    let reads_bound = fa.refs().iter().any(|r| {
+        matches!(r.kind, RefKind::Variable)
+            && r.target_name == "$order"
+            && r.span.start.row == 8
+            && r.resolved_symbol().is_some()
+    });
+    assert!(reads_bound, "the echo use binds the function-scoped decl");
+}
+
+#[test]
+fn php_new_self_types_as_enclosing_class() {
+    // `(new self())->forceFill(...)` — `new self()` is the ENCLOSING
+    // class, not a class named "self"; the ctor witness carries it so
+    // the chain dispatches (BookStack's createForEntity idiom).
+    let src = "\
+<?php
+class Deletion
+{
+    public function label(): string
+    {
+        return \"d\";
+    }
+
+    public static function make(): string
+    {
+        $record = new self();
+        $x = (new self())->label();
+        return $x;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let at = tree_sitter::Point { row: 12, column: 8 };
+    assert_eq!(
+        fa.inferred_type_via_bag("$record", at),
+        Some(InferredType::ClassName("Deletion".into())),
+        "new self() types as the enclosing class",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$x", at),
+        Some(InferredType::String),
+        "and the chained call off it dispatches (the flow edge must not
+         narrow onto the ctor literal when the rhs has its own hop)",
+    );
+}
+
+#[test]
+fn php_eloquent_relations_declare_accessor_properties() {
+    // The Laravel overlay (queries/php/frameworks/laravel.scm): a
+    // relation method declares the same-named PROPERTY Eloquent's
+    // __get serves. To-one relations carry the related class, so
+    // `$b->cover->path` chains; to-many stay untyped Collections but
+    // still navigate by name.
+    let src = "\
+<?php
+class Image {
+    public string $path;
+}
+class Book {
+    public function cover() { return $this->belongsTo(Image::class); }
+    public function pages() { return $this->hasMany(Page::class); }
+    public function author() { return $this->plainCall(Image::class); }
+}
+function f(Book $b): string {
+    $x = $b->cover->path;
+    echo $x;
+    return $x;
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{InferredType, SymKind};
+    let fields: Vec<&str> = fa
+        .symbols()
+        .iter()
+        .filter(|s| matches!(s.kind, SymKind::Field) && s.package.as_deref() == Some("Book"))
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(fields.contains(&"cover"), "to-one relation field: {fields:?}");
+    assert!(fields.contains(&"pages"), "to-many relation field: {fields:?}");
+    assert!(
+        !fields.contains(&"author"),
+        "a non-relation call must NOT mint a field: {fields:?}"
+    );
+    let x = fa.inferred_type_via_bag("$x", tree_sitter::Point { row: 11, column: 4 });
+    assert_eq!(
+        x,
+        Some(InferredType::String),
+        "to-one relation chains through the related class: {x:?}"
+    );
+}
+
+#[test]
+fn php_method_docblock_synthesizes_class_methods() {
+    // `@method` rows on a CLASS docblock are Laravel's facade surface
+    // (and Eloquent's `__call` documentation): each becomes a real
+    // method symbol, so `CacheFacade::store(...)` dispatches, types,
+    // and completes like a declared method.
+    let src = "\
+<?php
+/**
+ * @method static \\App\\Cache\\Repo store(string $name)
+ * @method static mixed get(string $key)
+ * @method bool has(string $key)
+ */
+class CacheFacade
+{
+}
+$r = CacheFacade::store('x');
+echo $r;
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{InferredType, SymKind};
+    let names: Vec<&str> = fa
+        .symbols()
+        .iter()
+        .filter(|s| {
+            matches!(s.kind, SymKind::Method) && s.package.as_deref() == Some("CacheFacade")
+        })
+        .map(|s| s.name.as_str())
+        .collect();
+    for m in ["store", "get", "has"] {
+        assert!(names.contains(&m), "{m} synthesized: {names:?}");
+    }
+    // the documented return drives the scoped-call hop
+    let r = fa.inferred_type_via_bag("$r", tree_sitter::Point { row: 10, column: 0 });
+    assert_eq!(
+        r,
+        Some(InferredType::ClassName("App\\Cache\\Repo".into())),
+        "documented return types the call: {r:?}"
+    );
+}
+
+#[test]
+fn php_parent_call_mints_super_token() {
+    // `parent::normalize()` rides the model's SUPER lane: the ref's
+    // target is the SUPER-qualified token with a current-package
+    // invocant, dispatch starts ABOVE the writing class — gd/refs missed
+    // every `parent::` site and rename corrupted code.
+    let src = "\
+<?php
+class Base {
+    public function normalize(): string { return \"b\"; }
+}
+class Child extends Base {
+    public function normalize(): string {
+        return parent::normalize() . \"c\";
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::RefKind;
+    let sup = fa
+        .refs()
+        .iter()
+        .find(|r| r.target_name == "SUPER::normalize")
+        .expect("parent:: call carries the SUPER token");
+    assert!(matches!(sup.kind, RefKind::MethodCall { .. }));
+    // the ref span is the bare name token (rename rewrites only it)
+    assert_eq!(sup.span.end.column - sup.span.start.column, "normalize".len());
+    // and no ClassName(\"parent\") ghost witness leaked from the hop lane
+    use crate::model::witnesses::WitnessPayload;
+    use crate::model::file_analysis::InferredType;
+    assert!(
+        !fa.witnesses.all().iter().any(|w| matches!(
+            &w.payload,
+            WitnessPayload::InferredType(InferredType::ClassName(c)) if c == "parent"
+        )),
+        "no fake class 'parent'",
+    );
+}
+
+#[test]
+fn php_class_constant_and_enum_case_access() {
+    // `User::VERSION` / `Level::Debug` are class-keyed member READS: the
+    // access site mints a `FieldAccess` (gd/references connect, and the
+    // value walk never reaches a method of the same name), and a TRUE enum
+    // case's value types as its enum. A class const's VALUE stays untyped
+    // (typing it as the class would be wrong — residual).
+    let src = "\
+<?php
+class User {
+    const VERSION = \"1.0\";
+}
+enum Level: int {
+    case Debug = 100;
+}
+$v = User::VERSION;
+$d = Level::Debug;
+echo $v;
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{InferredType, RefKind};
+    let version_ref = fa.refs().iter().find(|r| {
+        matches!(r.kind, RefKind::FieldAccess { .. }) && r.target_name == "VERSION"
+    });
+    assert!(version_ref.is_some(), "const access mints a value-read member ref");
+    let d = fa.inferred_type_via_bag("$d", tree_sitter::Point { row: 9, column: 0 });
+    assert_eq!(
+        d,
+        Some(InferredType::ClassName("Level".into())),
+        "enum case types as its enum: {d:?}"
+    );
+    let v = fa.inferred_type_via_bag("$v", tree_sitter::Point { row: 9, column: 0 });
+    assert_ne!(
+        v,
+        Some(InferredType::ClassName("User".into())),
+        "a const's VALUE must never type as the owning class"
+    );
+}
+
+#[test]
+fn php_fluent_chain_substitutes_receiver_through_hops() {
+    // `: static` returns are receiver-relative; the hop passes the base's
+    // type as the dispatch receiver, so a fluent builder chain keeps the
+    // concrete class through every hop.
+    let src = "\
+<?php
+class Query {
+    public function where(string $c): static { return $this; }
+    public function limit(int $n): static { return $this; }
+    public function first(): string { return \"row\"; }
+}
+function f(Query $q) {
+    $r = $q->where('a')->limit(3)->first();
+    echo $r;
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let r = fa.inferred_type_via_bag("$r", tree_sitter::Point { row: 8, column: 8 });
+    assert_eq!(r, Some(InferredType::String), "fluent chain must type: {r:?}");
+}
+
+#[test]
+fn php_wp_hook_string_callbacks_are_function_refs() {
+    // The string in `add_action('init', 'wp_cron')` names the function
+    // (docs/prompt-pack-plugins.md tier 1). The WordPress
+    // overlay's `@ref.call.named` mints an ordinary FunctionCall ref whose
+    // span is the content between the quotes — references connect both
+    // directions and rename rewrites exactly those characters.
+    let src = "\
+<?php
+function wp_cron(): int { return 1; }
+add_action('init', 'wp_cron');
+add_filter('the_content', 'wp_cron', 10, 2);
+remove_action('init', 'wp_cron');
+";
+    let (fa, _) = php_fa(src);
+    // cursor on the wp_cron decl name
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 1, column: 10 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("wp_cron decl must mint a target: {other:?}"),
+    };
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/wp/t.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let hook_sites: Vec<_> = locs.iter().filter(|l| l.span.start.row >= 2).collect();
+    assert_eq!(hook_sites.len(), 3, "all three registration strings are refs: {locs:?}");
+    assert!(
+        hook_sites.iter().all(|l| l.is_rewritable()),
+        "rename rewrites the string content: {hook_sites:?}"
+    );
+    // the span is the content INSIDE the quotes: `add_action('init', 'wp_cron');`
+    let first = hook_sites.iter().find(|l| l.span.start.row == 2).expect("row-2 site");
+    assert_eq!((first.span.start.column, first.span.end.column), (20, 27), "span is the quoted content: {first:?}");
+}
+
+#[test]
+fn php_wp_hook_array_callbacks_are_method_refs() {
+    // The `array($this, 'on_save')` / `[$this, 'on_save']` callback forms:
+    // the overlay's `@ref.method.named` + same-match `@member.recv` mint the
+    // SAME MethodCall ref a written `$this->on_save()` carries, so the
+    // method's references include its hook registrations.
+    let src = "\
+<?php
+class Plugin {
+    public function register(): void {
+        add_action('save_post', array($this, 'on_save'));
+        add_filter('the_content', [$this, 'on_save']);
+    }
+    public function on_save(): int { return 1; }
+}
+";
+    let (fa, _) = php_fa(src);
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 6, column: 21 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("on_save decl must mint a target: {other:?}"),
+    };
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/wp/p.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let hook_sites: Vec<_> =
+        locs.iter().filter(|l| l.span.start.row == 3 || l.span.start.row == 4).collect();
+    assert_eq!(hook_sites.len(), 2, "both array-callback strings are refs: {locs:?}");
+    assert!(hook_sites.iter().all(|l| l.is_rewritable()), "rename reaches them: {hook_sites:?}");
+}
+
+#[test]
+fn php_promoted_property_navigation_and_rename_group() {
+    // `public readonly Level $level` in a ctor signature
+    // declares BOTH the class field and the ctor param with ONE token.
+    // The access token must navigate (the class-content gate exempts
+    // Fields from the method-scope refusal), and the identity is a GROUP:
+    // rename from any spelling rewrites the decl, the member accesses,
+    // AND the `$level` body uses — leaving any of them behind breaks code.
+    let src = "\
+<?php
+class Level {
+    public function name(): string { return 'x'; }
+}
+class Record {
+    public function __construct(public readonly Level $level) {
+        echo $level->name();
+    }
+}
+function use_it(Record $record): Level {
+    return $record->level;
+}
+";
+    let (fa, _) = php_fa(src);
+    // From the ACCESS token (`$record->level`, row 10 col 20):
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 10, column: 20 },
+        None,
+    );
+    let Some(crate::index::resolve::ResolvedTarget::Group { local_spans, decl_spans, members, .. }) =
+        resolved
+    else {
+        panic!("promoted-property access must resolve to the param group: {resolved:?}");
+    };
+    assert_eq!(members.len(), 1, "one walked member (the field target)");
+    assert_eq!(members[0].target.name, "level");
+    // The decl axis is the field token (row 5, cols 55-60 — bare name).
+    assert_eq!(decl_spans.len(), 1);
+    assert_eq!(
+        (decl_spans[0].1.start.row, decl_spans[0].1.start.column),
+        (5, 55),
+        "decl span is the bare field token: {decl_spans:?}"
+    );
+    // The ctor-body use (`$level` row 6 col 13) rides sigil-narrowed.
+    assert!(
+        local_spans
+            .iter()
+            .any(|s| s.start.row == 6 && s.start.column == 14),
+        "the param body use joins the group sigil-narrowed: {local_spans:?}"
+    );
+    // From the DECL token: the same group (the Variable wins symbol_at;
+    // the field twin re-targets it).
+    let from_decl = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 5, column: 57 },
+        None,
+    );
+    assert!(
+        matches!(from_decl, Some(crate::index::resolve::ResolvedTarget::Group { .. })),
+        "decl-side cursor resolves to the same group: {from_decl:?}"
+    );
+}
+
+#[test]
+fn php_wp_hook_name_identity_connects_registration_and_firing() {
+    // Hook-NAME identity on the `hook` rail: `add_action('init', …)`
+    // declares the hook (a Handler named by the string, owned by the rail
+    // the overlay's capture suffix names) and `do_action('init')` fires
+    // it. References from either side list both; rename rewrites the name
+    // inside the quotes at every site.
+    let src = "\
+<?php
+function wp_cron(): int { return 1; }
+add_action('init', 'wp_cron');
+add_action('init', 'other_cb');
+do_action('init');
+do_action('shutdown');
+";
+    let (fa, _) = php_fa(src);
+    // cursor on the FIRING string ('init' at row 4, inside quotes)
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 4, column: 12 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("firing string must mint the Handler target: {other:?}"),
+    };
+    assert!(
+        matches!(
+            &target.kind,
+            crate::index::resolve::TargetKind::Handler {
+                owner: crate::model::file_analysis::HandlerOwner::Rail(rail),
+                name,
+                names: crate::model::file_analysis::RailNames::Strings,
+            } if rail == "hook" && name == "init"
+        ),
+        "the hook rail's names are the strings themselves: {target:?}"
+    );
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/wp/h.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let rows: Vec<usize> = locs.iter().map(|l| l.span.start.row).collect();
+    assert!(rows.contains(&2) && rows.contains(&3), "both registrations: {locs:?}");
+    assert!(rows.contains(&4), "the firing site: {locs:?}");
+    assert!(!rows.contains(&5), "'shutdown' is a different hook: {locs:?}");
+    assert!(locs.iter().all(|l| l.is_rewritable()), "rename rewrites inside quotes: {locs:?}");
+    // …and the other direction: a cursor on a REGISTRATION string resolves
+    // to the same target, so "from either side" is pinned, not assumed.
+    let from_reg = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 2, column: 12 },
+        None,
+    );
+    let reg_target = match from_reg {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("registration string must mint the Handler target: {other:?}"),
+    };
+    let reg_rows: Vec<usize> = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &reg_target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/wp/h.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    )
+    .iter()
+    .map(|l| l.span.start.row)
+    .collect();
+    assert_eq!(reg_rows, rows, "either side lists the same sites");
+}
+
+/// An unsuffixed `@def.handler.named` names no rail, and a rail is the
+/// namespace one framework owns — an unnamed one would claim the whole
+/// program. The lint reports it; this pins that the extractor also mints
+/// NOTHING for it, with the rail-suffixed spelling as the control.
+#[cfg(feature = "php")]
+#[test]
+fn php_an_unsuffixed_handler_capture_mints_no_handler() {
+    const PATTERN: &str = "(function_call_expression \
+        function: (name) @_uh \
+        arguments: (arguments . (argument (string . (string_content) @CAP .))) \
+        (#eq? @_uh \"add_action\"))";
+    let src = "<?php\nadd_action('init', 'cb');\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    // The pattern rides the pack's OWN query source, not an overlay: the
+    // overlay assembly caches per (lang_id, query_source) because a
+    // bundled set is a compile-time constant of the language.
+    let handlers = |capture: &str| -> usize {
+        let base = crate::build::query_extract::php_pack();
+        let source: &'static str = Box::leak(
+            format!("{}\n{}", base.query_source, PATTERN.replace("@CAP", capture))
+                .into_boxed_str(),
+        );
+        let pack = crate::build::query_extract::LangPack {
+            query_source: source,
+            bundled_overlays: &[],
+            ..base
+        };
+        let skel = extract(&tree, src.as_bytes(), &pack).unwrap();
+        let minted = skel.symbols.iter().filter(|s| s.kind == "handler").count();
+        let fa = skel.into_file_analysis();
+        assert_eq!(
+            fa.symbols()
+                .iter()
+                .filter(|s| matches!(
+                    s.detail,
+                    crate::model::file_analysis::SymbolDetail::Handler { .. }
+                ))
+                .count(),
+            minted,
+            "every minted handler reaches the model"
+        );
+        minted
+    };
+    assert_eq!(handlers("@def.handler.named.hook"), 1, "the rail-suffixed spelling mints it");
+    assert_eq!(handlers("@def.handler.named"), 0, "an unnamed rail mints nothing");
+}
+
+#[test]
+fn php_member_rename_never_rewrites_import_leaves() {
+    // Renaming a class-owned member (enum case / class const) named like
+    // an UNRELATED class's import leaf must not rewrite the `use` line —
+    // a class member never appears as a php import leaf.
+    let src = "\
+<?php
+namespace App;
+use PhpConsole\\Dispatcher\\Debug as DebugTool;
+enum Level {
+    case Debug;
+}
+class Cfg {
+    public const Debug = 1;
+}
+function pick(): int {
+    $x = Level::Debug;
+    return Cfg::Debug;
+}
+";
+    let (fa, _) = php_fa(src);
+    for (row, col, what) in [(4usize, 10usize, "enum case"), (7, 18, "class const")] {
+        let resolved = crate::index::resolve::resolve_symbol(
+            &fa,
+            tree_sitter::Point { row, column: col },
+            None,
+        );
+        let target = match resolved {
+            Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+            other => panic!("{what} decl must mint a target: {other:?}"),
+        };
+        let locs = crate::index::resolve::refs_to_in_file(
+            &crate::index::file_store::FileStore::new(),
+            None,
+            &target,
+            &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/r4/t.php")),
+            &fa,
+            crate::index::resolve::RoleMask::VISIBLE,
+        );
+        assert!(
+            !locs.iter().any(|l| l.span.start.row == 2),
+            "{what}: the import line is not a reference of the member: {locs:?}"
+        );
+        assert!(
+            locs.iter().any(|l| l.span.start.row >= 9),
+            "{what}: the real access still answers: {locs:?}"
+        );
+    }
+}
+
+#[test]
+fn php_self_const_in_property_defaults_resolves() {
+    // R11: `self::CONST` in a class-LEVEL initializer (property default)
+    // was deterministically dark while the method-body form worked — the
+    // class-body scope opens under the OUTER package context, so the
+    // invocant ladder's scope-chain walk found no enclosing class.
+    // The structural fallback (narrowest containing Class symbol) fixes it.
+    let src = "\
+<?php
+class Fmt {
+    public const FORMAT = 'Y-m-d';
+    protected string $fmt = self::FORMAT;
+    public function render(): string {
+        return self::FORMAT;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 3, column: 35 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("property-default self::FORMAT must resolve: {other:?}"),
+    };
+    assert!(
+        matches!(&target.kind, crate::index::resolve::TargetKind::Method { class } if class == "Fmt"),
+        "resolves to the class const: {target:?}"
+    );
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/r5/t.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let rows: Vec<usize> = locs.iter().map(|l| l.span.start.row).collect();
+    assert!(rows.contains(&2), "the const decl: {locs:?}");
+    assert!(rows.contains(&3), "the property-default use: {locs:?}");
+    assert!(rows.contains(&5), "the method-body use: {locs:?}");
+}
+
+#[test]
+fn php_foreach_element_typing_peels_doc_sequences() {
+    // R10: `foreach ($this->handlers as $handler)` — the loop var types as
+    // the collection's ELEMENT: `@var list<X>` / `X[]` doc rows parse to a
+    // one-slot Sequence (REFINING a bare declared `array` — the spelling
+    // that cannot carry an element), and the foreach binder's
+    // `Projected{base, Element}` witness peels it, for member-access and
+    // simple-variable collections both.
+    let src = "\
+<?php
+class HandlerInterface {
+    public function handle(): string { return 'x'; }
+}
+class Stack {
+    /** @var list<HandlerInterface> */
+    protected array $handlers = [];
+    public function run(): void {
+        foreach ($this->handlers as $handler) {
+            $r = $handler->handle();
+        }
+    }
+    /** @param HandlerInterface[] $items */
+    public function drain(array $items): void {
+        foreach ($items as $h) {
+            $s = $h->handle();
+        }
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let h = fa.inferred_type_via_bag("$handler", tree_sitter::Point { row: 9, column: 17 });
+    assert_eq!(
+        h,
+        Some(InferredType::ClassName("HandlerInterface".into())),
+        "member-access collection peels to the element: {h:?}"
+    );
+    let r = fa.inferred_type_via_bag("$r", tree_sitter::Point { row: 9, column: 13 });
+    assert_eq!(r, Some(InferredType::String), "and the element dispatches: {r:?}");
+    let h2 = fa.inferred_type_via_bag("$h", tree_sitter::Point { row: 15, column: 17 });
+    assert_eq!(
+        h2,
+        Some(InferredType::ClassName("HandlerInterface".into())),
+        "simple-variable collection (X[] param doc) peels too: {h2:?}"
+    );
+    // The sequence spellings never mint bogus classes.
+    assert_eq!((crate::build::query_extract::php_pack().annot_type)("list<A>"),
+        Some(InferredType::Sequence(vec![InferredType::ClassName("A".into())])));
+    // A qualified element keeps its spelling: the extractor's identity
+    // pass resolves it, the predicate only checks the shape.
+    assert_eq!((crate::build::query_extract::php_pack().annot_type)("array<int, \\App\\User>"),
+        Some(InferredType::Sequence(vec![InferredType::ClassName("\\App\\User".into())])));
+}
+
+#[test]
+fn php_var_row_description_starts_after_the_type_token() {
+    let doc_types = crate::build::query_extract::php_pack().doc_types;
+    // A generic's inner whitespace belongs to the type token, so a
+    // `@var`-only docblock describes nothing.
+    let facts = doc_types("/** @var array<int, string> */", &[]);
+    assert!(
+        !facts.iter().any(|f| matches!(f, DocFact::Description(_))),
+        "a bare @var row has no trailer to describe with: {facts:?}"
+    );
+    // The real trailer still describes — with and without a `$name`.
+    for row in [
+        "/** @var array Default request options */",
+        "/** @var array<string, string> $opts Default request options */",
+    ] {
+        let facts = doc_types(row, &[]);
+        assert!(
+            facts.iter().any(
+                |f| matches!(f, DocFact::Description(d) if d == "Default request options")
+            ),
+            "{row}: {facts:?}"
+        );
+    }
+}
+
+#[test]
+fn php_attributes_land_on_symbols() {
+    // `#[Attr]` annotations ride the @sym.attr lane onto Symbol.attributes
+    // — the substrate the framework-entry machinery and hover read.
+    let src = "\
+<?php
+#[AllowDynamicProperties]
+class Foo {
+    #[Test]
+    #[DataProvider('cases')]
+    public function testAdd(): void {}
+}
+#[AsCommand]
+function run_it(): void {}
+";
+    let (fa, _) = php_fa(src);
+    let cls = fa.symbols().iter().find(|s| s.name == "Foo").expect("class");
+    assert!(cls.attributes.iter().any(|a| a == "AllowDynamicProperties"), "{:?}", cls.attributes);
+    let m = fa.symbols().iter().find(|s| s.name == "testAdd").expect("method");
+    assert!(m.attributes.iter().any(|a| a == "Test"), "{:?}", m.attributes);
+    assert!(m.attributes.iter().any(|a| a == "DataProvider"), "{:?}", m.attributes);
+    let f = fa.symbols().iter().find(|s| s.name == "run_it").expect("fn");
+    assert!(f.attributes.iter().any(|a| a == "AsCommand"), "{:?}", f.attributes);
+}
+
+#[test]
+fn php_class_array_callables_are_method_refs() {
+    // `[UserController::class, 'index']` names a dispatchable method — the
+    // Laravel route / event-map convention. The pair mints the same
+    // MethodCall ref a written `UserController::index()` carries, so the
+    // controller action's references include its route registrations (and
+    // it leaves the heatmap dead queue as genuinely referenced).
+    let src = "\
+<?php
+class UserController {
+    public function index(): string { return 'ok'; }
+}
+route_get('/users', [UserController::class, 'index']);
+listen_on('ev', array(UserController::class, 'index'));
+";
+    let (fa, _) = php_fa(src);
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 2, column: 21 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("index decl must mint a target: {other:?}"),
+    };
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/cc/t.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let sites: Vec<_> = locs.iter().filter(|l| l.span.start.row >= 4).collect();
+    assert_eq!(sites.len(), 2, "both callable-array strings are refs: {locs:?}");
+    assert!(sites.iter().all(|l| l.is_rewritable()), "rename rewrites in-quotes: {sites:?}");
+}
+
+#[test]
+fn php_visibility_gates_member_completion() {
+    // private/protected members complete only from inside their own
+    // class's body: the `@_nonpublic_mark` patterns stamp the same
+    // `non_public` attribute cpp access regions stamp, and the existing
+    // requesting_class gate does the rest. Covers methods, properties,
+    // consts, and promoted ctor params.
+    let src = "\
+<?php
+class Acct {
+    private string $secret;
+    private const SALT = 'x';
+    protected function guard(): bool { return true; }
+    private function inner(): int { return 1; }
+    public function api(): int { return $this->inner(); }
+    public function __construct(private string $key) {}
+}
+";
+    let (fa, _) = php_fa(src);
+    let labels = |requesting: Option<&str>| -> Vec<String> {
+        fa.complete_members_for_class("Acct", None, requesting, crate::model::file_analysis::MemberAccess::Instance)
+            .into_iter()
+            .map(|c| c.label)
+            .collect()
+    };
+    let external = labels(None);
+    for hidden in ["secret", "SALT", "guard", "inner", "key"] {
+        assert!(
+            !external.iter().any(|n| n == hidden),
+            "{hidden} must not complete externally: {external:?}"
+        );
+    }
+    assert!(external.iter().any(|n| n == "api"), "public stays: {external:?}");
+    let internal = labels(Some("Acct"));
+    // (consts complete via the qualified `Acct::` lane, not the member
+    // gather — SALT is asserted absent above and not expected here)
+    for own in ["secret", "guard", "inner", "key", "api"] {
+        assert!(
+            internal.iter().any(|n| n == own),
+            "{own} completes from inside the class: {internal:?}"
+        );
+    }
+}
+
+#[test]
+fn php_foreach_pair_form_types_key_and_value() {
+    // `foreach ($m as $k => $v)`: the value peels the collection's
+    // element (as before), and the KEY peels its key axis — Numeric for
+    // sequences (keys ARE positions: list<X>, X[], array<int,X>), and
+    // the declared key type for `array<string, X>` docs (carried as a
+    // two-argument parametric instance).
+    let src = "\
+<?php
+class User {
+    public function name(): string { return 'n'; }
+}
+class Reg {
+    /** @var array<string, User> */
+    protected array $byEmail = [];
+    /** @var list<User> */
+    protected array $ordered = [];
+    public function scan(): void {
+        foreach ($this->byEmail as $email => $user) {
+            $n = $user->name();
+        }
+        foreach ($this->ordered as $i => $u) {
+            $m = $u->name();
+        }
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let email = fa.inferred_type_via_bag("$email", tree_sitter::Point { row: 11, column: 17 });
+    assert_eq!(email, Some(InferredType::String), "map key types from the doc: {email:?}");
+    let user = fa.inferred_type_via_bag("$user", tree_sitter::Point { row: 11, column: 17 });
+    assert_eq!(
+        user,
+        Some(InferredType::ClassName("User".into())),
+        "map value peels through the Instance carrier: {user:?}"
+    );
+    let i = fa.inferred_type_via_bag("$i", tree_sitter::Point { row: 14, column: 17 });
+    assert_eq!(i, Some(InferredType::Numeric), "sequence keys are positions: {i:?}");
+    let u = fa.inferred_type_via_bag("$u", tree_sitter::Point { row: 14, column: 17 });
+    assert_eq!(u, Some(InferredType::ClassName("User".into())), "value still peels: {u:?}");
+}
+
+#[test]
+fn php_inherit_doc_param_edges_and_publication() {
+    use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+    // Publication half: the interface's @param array<Rec> lands class-keyed
+    // as PackageSymbol{Iface, "handleBatch#p#$records"}.
+    let (iface, _) = php_fa(
+        "<?php\nnamespace App;\ninterface Iface\n{\n    /**\n     * @param array<Rec> $records\n     */\n    public function handleBatch(array $records): void;\n}\n",
+    );
+    let published: Vec<String> = iface
+        .witnesses
+        .all()
+        .iter()
+        .filter_map(|w| match (&w.attachment, &w.payload) {
+            (
+                WitnessAttachment::PackageSymbol { package, name },
+                WitnessPayload::InferredType(_),
+            ) if name.contains("#p#") => Some(format!("{package}::{name}")),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        published.iter().any(|p| p.contains("Iface") && p.contains("handleBatch#p#")),
+        "publication missing: {published:?}"
+    );
+
+    // Subscription half: the bare-`array` override param edges to its OWN
+    // class's row (the registry inheritance walk carries it to Iface).
+    let (impl_fa, _) = php_fa(
+        "<?php\nnamespace App;\nclass Impl implements Iface\n{\n    /**\n     * @inheritDoc\n     */\n    public function handleBatch(array $records): void\n    {\n        foreach ($records as $record) {\n            echo $record->level;\n        }\n    }\n}\n",
+    );
+    let edges: Vec<String> = impl_fa
+        .witnesses
+        .all()
+        .iter()
+        .filter_map(|w| match (&w.attachment, &w.payload) {
+            (
+                WitnessAttachment::Variable { name, .. },
+                WitnessPayload::Edge(WitnessAttachment::PackageSymbol { package, name: ps }),
+            ) => Some(format!("{name} -> {package}::{ps}")),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        edges.iter().any(|e| e.contains("records") && e.contains("Impl::handleBatch#p#")),
+        "subscription edge missing: {edges:?}"
+    );
+}
+#[test]
+fn php_data_provider_docblock_mints_member_ref_on_name_token() {
+    let src = "<?php\nnamespace App\\Tests;\nclass T\n{\n    /**\n     * @dataProvider algorithmProvider\n     */\n    public function testX(string $a): void {}\n\n    public static function algorithmProvider(): iterable\n    {\n        yield ['md5'];\n    }\n}\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    // The `@dataProvider` doc fact mints a member ref SPANNING the
+    // provider-name token (rename rewrites it in place). The invocant is
+    // the CLASS NAME (not `__PACKAGE__`): the doc row's scope is the
+    // class body, whose package is the NAMESPACE, so the current-package
+    // walk would resolve the wrong owner.
+    let r = skel
+        .refs
+        .iter()
+        .find(|r| r.name == "algorithmProvider" && r.kind == "member")
+        .expect("@dataProvider member ref missing");
+    assert_eq!((r.start.row, r.start.column), (5, 21), "name-token span");
+    assert_eq!(r.end.column, 21 + "algorithmProvider".len());
+    assert_eq!(r.invocant.as_ref().map(|(_, t)| t.as_str()), Some("App\\Tests\\T"));
+}
+
+#[test]
+fn php_get_subscribed_events_map_strings_are_method_refs() {
+    // Every method-name string in a `getSubscribedEvents()` return map is
+    // a dispatch target: 'e' => 'm', 'e' => ['m', $prio], and
+    // 'e' => [['m1', $p], ['m2']] all mint self-flavored member refs
+    // (the symfony bundled overlay). Event-name keys never do.
+    let src = "<?php\nnamespace App;\nclass Sub\n{\n    public static function getSubscribedEvents(): array\n    {\n        return [\n            'kernel.request' => 'onRequest',\n            'kernel.exception' => ['onException', 10],\n            'kernel.view' => [['first', 10], ['second']],\n        ];\n    }\n}\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let members: Vec<&str> = skel
+        .refs
+        .iter()
+        .filter(|r| r.kind == "member" && r.invocant.as_ref().is_some_and(|(_, t)| t == "Sub"))
+        .map(|r| r.name.as_str())
+        .collect();
+    for want in ["onRequest", "onException", "first", "second"] {
+        assert!(members.contains(&want), "{want} missing from {members:?}");
+    }
+    for key in ["kernel.request", "kernel.exception", "kernel.view"] {
+        assert!(!members.contains(&key), "event key {key} must not be a method ref: {members:?}");
+    }
+}
+
+#[test]
+fn php_stdlib_string_callables_mint_call_refs() {
+    // Callback-slot strings in the fixed-position stdlib builtins are
+    // function refs (`@ref.call.named`): arg-0 family (array_map,
+    // function_exists) and arg-1 family (array_filter, usort). Data
+    // strings in non-callback slots never mint.
+    let src = "<?php\n$a = array_map('fnA', $rows);\nif (function_exists('fnB')) {}\n$b = array_filter($rows, 'fnC');\nusort($rows, 'fnD');\nin_array('notafn', $rows);\narray_map('fnE');\narray_filter('notafn2');\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let calls: Vec<&str> = skel
+        .refs
+        .iter()
+        .filter(|r| r.kind == "call")
+        .map(|r| r.name.as_str())
+        .collect();
+    for want in ["fnA", "fnB", "fnC", "fnD", "fnE"] {
+        assert!(calls.contains(&want), "{want} missing from {calls:?}");
+    }
+    // `in_array`'s needle is data; `array_filter`'s arg 0 is the ARRAY slot.
+    assert!(!calls.contains(&"notafn"), "data string minted: {calls:?}");
+    assert!(!calls.contains(&"notafn2"), "array-slot string minted: {calls:?}");
+}
+
+#[test]
+fn php_destructuring_slots_bind_positionally() {
+    use crate::model::file_analysis::Extraction;
+    // `[$a, $b] = …` / `list(...)` / `[, $b]` bind each scalar slot to its
+    // POSITION (top-level commas before it); a keyed list declares its
+    // vars but binds none of them positionally; foreach list slots index
+    // off the collection's element (the list span carries the Element hop).
+    let src = "<?php\n[$a, $b] = f();\nlist($c, $d) = g();\n[, $e] = h();\n['k' => $v] = k();\nforeach ($rows as [$x, $y]) {}\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let pos = |name: &str| -> Option<Extraction> {
+        skel.flow_edges
+            .iter()
+            .find(|f| f.target_name == name)
+            .map(|f| f.extraction.clone())
+    };
+    assert_eq!(pos("$a"), Some(Extraction::Positional(0)));
+    assert_eq!(pos("$b"), Some(Extraction::Positional(1)));
+    assert_eq!(pos("$c"), Some(Extraction::Positional(0)));
+    assert_eq!(pos("$d"), Some(Extraction::Positional(1)));
+    assert_eq!(pos("$e"), Some(Extraction::Positional(1)), "skipped slot counts");
+    assert_eq!(pos("$v"), Some(Extraction::KeyOf("k".into())), "keyed list binds by key, never by position");
+    assert!(skel.symbols.iter().any(|s| s.kind == "var" && s.name == "$v"), "…but still declares");
+    assert_eq!(pos("$y"), Some(Extraction::Positional(1)), "foreach list slot");
+    let (_, y_src) = skel
+        .flow_edges
+        .iter()
+        .find(|f| f.target_name == "$y")
+        .map(|f| (f.target_name.clone(), f.source))
+        .unwrap();
+    assert!(
+        skel.witnesses.iter().any(|w| matches!(
+            (&w.attachment, &w.payload),
+            (crate::model::witnesses::WitnessAttachment::Expr(sp),
+             crate::model::witnesses::WitnessPayload::Projected { step: crate::model::witnesses::ProjectionStep::Element, .. })
+            if *sp == y_src
+        )),
+        "the list span peels the collection's Element"
+    );
+}
+
+#[test]
+fn php_narrowing_guard_shapes() {
+    // instanceof narrows in every guard position a body can sit under: a
+    // namespace-qualified class token, an `elseif` arm, and either
+    // conjunct of `&&` — each mints a narrowing witness for the block.
+    use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+    let src = "<?php\nnamespace App;\nfunction f($a, $b, $c, $d): void {\n    if ($a instanceof Op\\Install) { $a->m(); }\n    if (is_null($b)) { return; } elseif ($b instanceof Install) { $b->m(); }\n    if ($c instanceof Install && $c->ok()) { $c->m(); }\n    if ($d->ok() && $d instanceof Install) { $d->m(); }\n}\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let narrowed = |v: &str, cls: &str| {
+        skel.witnesses.iter().any(|w| matches!(
+            (&w.attachment, &w.payload),
+            (WitnessAttachment::Variable { name, .. }, WitnessPayload::InferredType(InferredType::ClassName(c)))
+            if name == v && c == cls
+        ))
+    };
+    // the guard's class token resolves through the file's use-map: the
+    // relative qualifier hangs off the namespace, the bare leaf joins it
+    assert!(narrowed("$a", "App\\Op\\Install"), "$a narrowed to the qualified class");
+    for v in ["$b", "$c", "$d"] {
+        assert!(narrowed(v, "App\\Install"), "{v} narrowed to the class");
+    }
+}
+
+#[test]
+fn php_keyed_destructuring_binds_through_hash_keys() {
+    use crate::model::file_analysis::Extraction;
+    let src = "<?php\n['advisories' => $adv, \"count\" => $n] = f();\nforeach ($rows as ['k' => $v]) {}\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let ext = |name: &str| skel.flow_edges.iter().find(|f| f.target_name == name).map(|f| f.extraction.clone());
+    assert_eq!(ext("$adv"), Some(Extraction::KeyOf("advisories".into())));
+    assert_eq!(ext("$n"), Some(Extraction::KeyOf("count".into())));
+    assert_eq!(ext("$v"), Some(Extraction::KeyOf("k".into())), "foreach keyed list");
+}
+
+#[test]
+fn php_branch_arms_and_subscripts_project() {
+    use crate::model::witnesses::{ProjectionStep, WitnessAttachment, WitnessPayload};
+    let src = "<?php\n$t = match ($c) { 'a' => X::A, default => X::B };\n$u = $c ? f() : g();\n$m = f()[0];\n$r = $row['name'];\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let arms = |row: usize| skel.witnesses.iter().filter(|w| matches!(&w.attachment, WitnessAttachment::BranchArm(sp) if sp.start.row == row)).count();
+    assert_eq!(arms(1), 2, "match: one arm witness per arm");
+    assert_eq!(arms(2), 2, "ternary: both arms");
+    assert!(skel.witnesses.iter().any(|w| matches!((&w.attachment, &w.payload), (WitnessAttachment::Expr(sp), WitnessPayload::Edge(WitnessAttachment::BranchArm(_))) if sp.start.row == 1)), "the match's own Expr edges to its arms");
+    let has_step = |row: usize, pred: &dyn Fn(&ProjectionStep) -> bool| skel.witnesses.iter().any(|w| matches!((&w.attachment, &w.payload), (WitnessAttachment::Expr(sp), WitnessPayload::Projected { step, .. }) if sp.start.row == row && pred(step)));
+    assert!(has_step(3, &|s| matches!(s, ProjectionStep::ArrayIndex(0))), "f()[0] peels slot 0");
+    assert!(has_step(4, &|s| matches!(s, ProjectionStep::HashKey(k) if k == "name")), "$row['name'] drills the key");
+}
+
+/// A union spelling is `Unknown` — the value this lattice cannot hold — at
+/// the top level only: `A|null` is its one arm, a `|` nested inside a
+/// generic is the element's business (and must not re-read the same
+/// text forever), and a container with an untypable element is untypable
+/// as a whole, so `Unknown` never nests past the boundary scrub.
+#[test]
+fn php_union_spellings_are_unknown_and_never_nest() {
+    let at = php_pack().annot_type;
+    assert_eq!(at("Err|User"), Some(InferredType::Unknown));
+    assert_eq!(at("int|string"), Some(InferredType::Unknown));
+    assert_eq!(at("Err|null"), Some(InferredType::ClassName("Err".into())));
+    assert_eq!(at("?Err"), Some(InferredType::ClassName("Err".into())));
+    // a `|` inside a generic is the element's: an untypable element makes
+    // the container untypable, a nullable one is its arm
+    assert_eq!(at("array<int|string>"), Some(InferredType::Unknown));
+    assert_eq!(at("list<Err|User>"), Some(InferredType::Unknown));
+    assert_eq!(at("(Err|User)[]"), None);
+    assert_eq!(at("array{a: int|string}"), Some(InferredType::Unknown));
+    assert_eq!(at("array{int|string, int}"), Some(InferredType::Unknown));
+    assert_eq!(at("array<int, string|null>"), Some(InferredType::Sequence(vec![InferredType::String])));
+}
+
+/// `$this->m (1)` — whitespace before the argument list — is the call its
+/// tree says it is: the callee joins its list through the match, not the
+/// byte after the name, so both sites mint a call and neither a value read.
+#[test]
+fn php_spaced_call_keeps_its_callable_shape() {
+    let src = "<?php\nclass D { function m($a) { return 1; } function f() { return $this->m (1) + $this->m(2); } }\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let calls: Vec<(Option<usize>, bool)> = skel
+        .refs
+        .iter()
+        .filter(|r| r.kind == "member" && r.name == "m")
+        .map(|r| (r.arg_count, r.value_read))
+        .collect();
+    assert_eq!(calls, vec![(Some(1), false), (Some(1), false)], "{calls:?}");
+}
+
+#[test]
+fn php_instance_array_callable_is_a_method_ref() {
+    let src = "<?php\nclass L { function on(): void {} function reg(): void { $d = [$this, 'on']; $e = [$obj, 'other']; } }\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let names: Vec<(&str, Option<&str>)> = skel.refs.iter().filter(|r| r.kind == "member").map(|r| (r.name.as_str(), r.invocant.as_ref().map(|(_, t)| t.as_str()))).collect();
+    assert!(names.contains(&("on", Some("$this"))), "{names:?}");
+    assert!(names.contains(&("other", Some("$obj"))), "{names:?}");
+}
+
+/// Every bundled php DOCUMENT loads alone — a query overlay against the
+/// grammar with captures the extractor reads, an entry document and a rail
+/// document against the shapes their loaders deserialize. Each loader drops
+/// a broken document and serves the rest, so a malformed one ships as a
+/// silent feature loss, not an error a verb reports: this is the tripwire.
+#[cfg(feature = "php")]
+#[test]
+fn php_bundled_documents_each_load_alone() {
+    let pack = crate::build::query_extract::php_pack();
+    let language: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP.into();
+    tree_sitter::Query::new(&language, pack.query_source).expect("skeleton compiles");
+    let conv = crate::build::query_extract::rail_conventions_for(&pack);
+    let mut every_capture: Vec<String> = Vec::new();
+    for (name, src) in pack.bundled_overlays {
+        match tree_sitter::Query::new(&language, src) {
+            Ok(q) => {
+                every_capture.extend(q.capture_names().iter().map(|c| c.to_string()));
+                let findings =
+                    crate::build::query_extract::overlay_capture_findings(q.capture_names());
+                assert!(findings.is_empty(), "bundled php overlay {name}: {findings:?}");
+                // a class-keyed capture whose rail no document declares
+                // class-keyed mints handlers every lane then reads as
+                // strings — the two halves of one fact, pinned together
+                let undeclared = crate::build::query_extract::class_rail_capture_findings(
+                    &conv.class_named_rails,
+                    q.capture_names(),
+                );
+                assert!(undeclared.is_empty(), "bundled php overlay {name}: {undeclared:?}");
+                // and every capture it spells is one the extractor serves —
+                // a bundled document that reads as "matches but mints
+                // nothing" is either a typo or a vocabulary gap.
+                let unserved = crate::build::query_extract::unserved_captures(
+                    &pack,
+                    &language,
+                    q.capture_names(),
+                );
+                assert!(unserved.is_empty(), "bundled php overlay {name} spells {unserved:?}");
+            }
+            Err(e) => panic!("bundled php overlay {name} does not compile: {e}"),
+        }
+    }
+    for src in pack.bundled_entry_markers {
+        let doc: serde_json::Value =
+            serde_json::from_str(src).expect("a bundled entry document parses");
+        assert_eq!(doc["language"], "php", "a bundled entry document declares its language");
+        let rules: Vec<crate::build::query_extract::EntryMarker> =
+            serde_json::from_value(doc["entries"].clone()).expect("the entry rule shape");
+        assert!(!rules.is_empty(), "a bundled entry document declares rules");
+        // a rule with no positive condition claims nothing — the evaluator
+        // rejects it, so shipping one is a silent loss too
+        assert!(
+            rules.iter().all(|r| !r.attributes.is_empty()
+                || r.method_prefix.is_some()
+                || !r.methods.is_empty()),
+            "every bundled entry rule carries a positive condition"
+        );
+    }
+    let path_rails = crate::build::query_extract::path_rails_for(&pack);
+    let text_rails = crate::build::query_extract::text_rails_for(&pack);
+    for src in pack.bundled_rail_docs {
+        let doc: serde_json::Value =
+            serde_json::from_str(src).expect("a bundled rail document parses");
+        assert_eq!(doc["language"], "php", "a bundled rail document declares its language");
+        // every family a document declares reaches ITS loader: a family
+        // loaded by nothing is inert with nothing saying so, which is how
+        // `path_rails` stayed bundled-only.
+        let parsed: crate::build::query_extract::RailsDoc =
+            serde_json::from_str(src).expect("the rail document shape");
+        for r in &parsed.path_rails {
+            assert!(
+                path_rails.iter().any(|p| p.rail == r.rail && p.under == r.under),
+                "path rail '{}' under '{}' reaches the driver",
+                r.rail,
+                r.under
+            );
+        }
+        for r in &parsed.text_rails {
+            assert!(
+                text_rails.iter().any(|t| t.rail == r.rail && t.calls == r.calls),
+                "text rail '{}' reaches the scanner",
+                r.rail
+            );
+        }
+    }
+    // and the loaders serve what the documents declare
+    assert!(
+        !crate::build::query_extract::entry_markers_for(&pack).is_empty(),
+        "the bundled entry rules reach the evaluator"
+    );
+    assert!(!conv.labels.is_empty(), "the bundled rail labels reach the diagnostics lane");
+    // and the other half: every declared class rail has a capture family
+    // that mints it, answerable only over the pack's whole capture set.
+    let caps: Vec<&str> = every_capture.iter().map(|s| s.as_str()).collect();
+    let unminted =
+        crate::build::query_extract::class_rail_declaration_findings(&conv.class_named_rails, &caps);
+    assert!(unminted.is_empty(), "{unminted:?}");
 }
 
 /// The overlay lint's findings: a rail family with no rail names a
@@ -2858,6 +5291,316 @@ fn overlay_capture_findings_name_the_unhonourable_captures() {
         && k.is_class_named()));
 }
 
+/// The inputs the missing-return-type lane reads: a declared return
+/// annotation is a `cpp_method_return` witness on the symbol, and a bodied
+/// callable without one still types through its return arms.
+#[cfg(feature = "php")]
+#[test]
+fn php_declared_and_inferred_returns_reach_the_symbol() {
+    let src = "\
+<?php
+namespace App;
+class Queue {
+    private array $items = [];
+    public function push(string $x): void { $this->items[] = $x; }
+    public function all() { return $this->items; }
+    public function name() { return \"q\"; }
+    public function me() { return $this; }
+    public function maybe($x) { if ($x) { return \"a\"; } return null; }
+}
+";
+    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let driver = reg.for_id("php").expect("php driver");
+    let fa = driver.analyze(src);
+    use crate::model::file_analysis::{InferredType, SymKind};
+    let sym = |n: &str| fa.symbols().iter().find(|s| matches!(s.kind, SymKind::Method | SymKind::Sub) && s.name == n).unwrap_or_else(|| panic!("no {n}")).id;
+    let declared = |n: &str| fa.symbol(sym(n)).declared_return();
+    assert_eq!(declared("push"), Some(": void"), "`: void` is a declared return even though it names no type");
+    assert_eq!(declared("all"), None);
+    let all = fa.symbol_return_type_via_bag(sym("all"), None);
+    let name = fa.symbol_return_type_via_bag(sym("name"), None);
+    let me = fa.symbol_return_type_via_bag(sym("me"), None);
+    assert!(matches!(all, Some(InferredType::HashRef) | Some(InferredType::ArrayRef)), "all(): {all:?}");
+    assert_eq!(name, Some(InferredType::String), "name(): {name:?}");
+    assert_eq!(me, Some(InferredType::ClassName("App\\Queue".into())), "me(): {me:?}");
+    // a null arm makes the return nullable: the fold answers `string` (right
+    // for a hover), the total view does not (right for writing the type)
+    assert_eq!(fa.total_inferred_return(sym("maybe")), None, "maybe(): a null arm");
+    assert_eq!(fa.total_inferred_return(sym("name")), Some(InferredType::String));
+}
+
+
+/// A three-operand `&&` chain: the guard narrows every later operand, not
+/// only the second (`(A instanceof X && B) && C` nests left).
+#[cfg(feature = "php")]
+#[test]
+fn php_instanceof_narrows_later_operands_of_a_longer_and_chain() {
+    let src = "\
+<?php
+function f($p) {
+    if ($p instanceof User && !$p instanceof Alias && $p->getFunding()) {
+        return 1;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let third = tree_sitter::Point { row: 2, column: 55 };
+    assert_eq!(
+        fa.inferred_type_via_bag("$p", third),
+        Some(InferredType::ClassName("User".into())),
+        "the third operand holds under the guard",
+    );
+}
+
+/// `Sql\Column::class` spells the `Sql` head: the import that head binds is
+/// used (the unused-import lane reads `qualified_spellings`).
+#[cfg(feature = "php")]
+#[test]
+fn php_class_literal_with_a_qualified_head_records_the_spelling() {
+    let src = "\
+<?php
+namespace App;
+use App\\Controllers\\Sql;
+$m = [Sql\\ColumnController::class => 1];
+";
+    let (fa, _) = php_fa(src);
+    assert!(
+        fa.pack.qualified_spellings.iter().any(|q| {
+            q.leaf == "ColumnController" && q.segments == ["Sql"] && !q.absolute
+        }),
+        "{:?}",
+        fa.pack.qualified_spellings
+    );
+}
+
+/// The routes rail: `Route::get(…)->name('home')` declares the name on
+/// `Rail("route")`; `route('home')` / `redirect()->route('home')` use it;
+/// a group prefix (`->name('admin.')`) declares nothing; and a WordPress
+/// hook spelled `home` (the `hook` rail) does not connect — rails are
+/// namespaces, not one flat hook space.
+#[cfg(feature = "php")]
+#[test]
+fn php_laravel_route_names_connect_on_their_own_rail() {
+    let src = "\
+<?php
+use Illuminate\\Support\\Facades\\Route;
+Route::get('/', [HomeController::class, 'index'])->name('home');
+Route::prefix('/admin')->name('admin.')->group(function () {});
+function go() { return redirect()->route('home'); }
+function url() { return route('home', ['x' => 1]); }
+add_action('home', 'cb');
+do_action('home');
+";
+    let (fa, _) = php_fa(src);
+    assert!(
+        !fa.symbols().iter().any(|s| s.name == "admin."),
+        "a group prefix is not a route name"
+    );
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 5, column: 32 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("route('home') must mint the rail target: {other:?}"),
+    };
+    assert!(
+        matches!(
+            &target.kind,
+            crate::index::resolve::TargetKind::Handler {
+                owner: crate::model::file_analysis::HandlerOwner::Rail(rail),
+                name,
+                names: crate::model::file_analysis::RailNames::Strings,
+            } if name == "home" && rail == "route"
+        ),
+        "route rail identity: {target:?}"
+    );
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/app/routes/web.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let mut rows: Vec<usize> = locs.iter().map(|l| l.span.start.row).collect();
+    rows.sort();
+    assert_eq!(rows, vec![2, 4, 5], "declaration + both uses, never the hook: {locs:?}");
+    assert!(locs.iter().all(|l| l.is_rewritable()), "rename rewrites inside quotes: {locs:?}");
+}
+
+/// Middleware aliases, abilities and container bindings are string rails:
+/// a kernel alias map / `Gate::define` / `->singleton('key')` define, and
+/// `->middleware('throttle:60,1')` names `throttle` — the head before the
+/// rail's parameter separator, span included — while `->authorize` /
+/// `->can` and `app('key')` use theirs.
+#[cfg(feature = "php")]
+#[test]
+fn php_laravel_middleware_ability_binding_rails() {
+    let src = "\
+<?php
+namespace App;
+use Illuminate\\Support\\Facades\\Route;
+use Illuminate\\Support\\Facades\\Gate;
+class Kernel { protected $middlewareAliases = ['auth' => Authenticate::class, 'throttle' => Throttle::class]; }
+class Provider {
+    public function boot() {
+        Gate::define('edit-post', fn ($u) => true);
+        $this->app->singleton('users.default', fn () => 1);
+    }
+}
+Route::get('/x', 'C@a')->middleware('throttle:60,1');
+Route::middleware(['auth', 'guest'])->group(fn () => 1);
+class C {
+    public function a($u, $p) { $this->authorize('edit-post', $p); $u->can('edit-post'); return app('users.default'); }
+}
+";
+    let (fa, _) = php_fa(src);
+    let lines: Vec<&str> = src.lines().collect();
+    let at = |row: usize, needle: &str| tree_sitter::Point { row, column: lines[row].find(needle).unwrap() + 1 };
+    let rail_rows = |row: usize, needle: &str, rail: &str, name: &str| -> Vec<usize> {
+        let resolved = crate::index::resolve::resolve_symbol(&fa, at(row, needle), None);
+        let target = match resolved {
+            Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+            other => panic!("{needle} must mint the {rail} rail target: {other:?}"),
+        };
+        assert!(
+            matches!(
+                &target.kind,
+                crate::index::resolve::TargetKind::Handler {
+                    owner: crate::model::file_analysis::HandlerOwner::Rail(r),
+                    name: n,
+                    names: crate::model::file_analysis::RailNames::Strings,
+                } if n == name && r == rail
+            ),
+            "{rail} rail identity for {needle}: {target:?}"
+        );
+        let locs = crate::index::resolve::refs_to_in_file(
+            &crate::index::file_store::FileStore::new(),
+            None,
+            &target,
+            &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/app/x.php")),
+            &fa,
+            crate::index::resolve::RoleMask::VISIBLE,
+        );
+        let mut rows: Vec<usize> = locs.iter().map(|l| l.span.start.row).collect();
+        rows.sort();
+        rows
+    };
+    // the use names the head; its span ends at the separator
+    let throttle = fa.ref_at(at(11, "'throttle:")).expect("throttle use ref");
+    assert_eq!(throttle.target_name, "throttle");
+    assert_eq!(throttle.span.end.column, throttle.span.start.column + "throttle".len(), "{throttle:?}");
+    assert_eq!(rail_rows(11, "'throttle:", "middleware", "throttle"), vec![4, 11]);
+    assert_eq!(rail_rows(12, "'auth'", "middleware", "auth"), vec![4, 12]);
+    assert!(!fa.symbols().iter().any(|s| s.name == "guest"), "an alias nothing declares has no symbol");
+    assert_eq!(rail_rows(14, "'edit-post'", "ability", "edit-post"), vec![7, 14, 14]);
+    assert_eq!(rail_rows(14, "'users.default'", "binding", "users.default"), vec![8, 14]);
+}
+
+/// `app(Foo::class)` / `resolve(Foo::class)` / `->make(Foo::class)` IS a
+/// Foo: the overlay declares the call's value, so a chain off it
+/// dispatches on Foo and the callee's own (untypable) return never wins.
+#[cfg(feature = "php")]
+#[test]
+fn php_laravel_container_resolution_types_the_expression() {
+    let src = "\
+<?php
+namespace App;
+class Repo { public function find() { return 1; } }
+class Svc {
+    public function go() { return app(Repo::class)->find(); }
+    public function go2() { return $this->app->make(Repo::class)->find(); }
+    public function go3() { return resolve(Repo::class)->find(); }
+}
+";
+    let (fa, _) = php_fa(src);
+    let lines: Vec<&str> = src.lines().collect();
+    for (row, head) in [(4, "app(Repo::class)"), (5, "$this->app->make(Repo::class)"), (6, "resolve(Repo::class)")] {
+        let start = lines[row].find(head).unwrap();
+        let span = crate::model::file_analysis::Span {
+            start: tree_sitter::Point { row, column: start },
+            end: tree_sitter::Point { row, column: start + head.len() },
+        };
+        let t = fa.expr_type_at_span(span, None);
+        assert!(
+            matches!(&t, Some(crate::model::file_analysis::InferredType::ClassName(c)) if c.ends_with("Repo")),
+            "{head} is a Repo: {t:?}"
+        );
+    }
+}
+
+/// The event bus is a class-keyed rail: `event(new X)` / `X::dispatch()`
+/// emit, a listener's `handle(X $e)`, a `$listen` key and `Event::listen`
+/// register — references from either side list all of them; the rail is
+/// never renameable (the class rename owns `X`); a job's `handle` is the
+/// handler of `dispatch(new Job)`; an injected dependency's type is not
+/// an emission's target; and `X::dispatch( )` emits exactly as
+/// `X::dispatch()` does (the empty list is a shape, not a spelling).
+#[cfg(feature = "php")]
+#[test]
+fn php_laravel_event_bus_connects_emissions_and_handlers() {
+    let src = "\
+<?php
+namespace App;
+class Provider { protected $listen = [ Liked::class => [ LoveIt::class ] ]; }
+class LoveIt { public function handle(Liked $event): void {} }
+class SendMail { public function handle(Mailer $mailer): void {} }
+function emit($x) { event(new Liked($x)); Liked::dispatch($x); dispatch(new SendMail()); }
+function reg() { Event::listen(Liked::class, fn (Liked $e) => 1); }
+function spaced() { Liked::dispatch( ); }
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{HandlerOwner, RailNames, SymbolDetail};
+    assert!(
+        fa.pack.class_named_rails.iter().any(|r| r == "event"),
+        "the rail document declares the rail class-keyed: {:?}",
+        fa.pack.class_named_rails
+    );
+    let handlers: Vec<(String, usize)> = fa
+        .symbols()
+        .iter()
+        .filter(|s| matches!(&s.detail, SymbolDetail::Handler { owner: owner @ HandlerOwner::Rail(r), .. }
+            if r == "event" && owner.names_are(&fa.pack) == RailNames::Classes))
+        .map(|s| (s.name.clone(), s.selection_span.start.row))
+        .collect();
+    assert!(handlers.contains(&("Liked".to_string(), 2)), "$listen key: {handlers:?}");
+    assert!(handlers.contains(&("Liked".to_string(), 3)), "listener handle: {handlers:?}");
+    assert!(handlers.contains(&("Liked".to_string(), 6)), "Event::listen: {handlers:?}");
+    assert!(handlers.contains(&("SendMail".to_string(), 4)), "a job's own handle: {handlers:?}");
+    assert!(handlers.contains(&("Mailer".to_string(), 4)), "typed first param (noise, hidden): {handlers:?}");
+    assert!(
+        fa.symbols().iter().filter(|s| s.name == "Mailer").all(|s| s.hidden_in_outline()),
+        "class-rail handlers stay out of the outline"
+    );
+    let target = crate::index::resolve::TargetRef::new(
+        "Liked".to_string(),
+        crate::index::resolve::TargetKind::Handler {
+            owner: HandlerOwner::Rail("event".to_string()),
+            name: "Liked".to_string(),
+            names: RailNames::Classes,
+        },
+        &fa,
+    );
+    assert!(!target.supports_cross_file_rename(), "a class-keyed rail is never renamed");
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/app/bus.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let mut rows: Vec<usize> = locs.iter().map(|l| l.span.start.row).collect();
+    rows.sort();
+    rows.dedup();
+    // Row 7 is the argument-less form spelled with a space: the empty
+    // argument list is a fact of the TREE, never of the source text.
+    assert_eq!(rows, vec![2, 3, 5, 6, 7], "registrations + every emission: {locs:?}");
+    assert!(locs.iter().all(|l| !l.is_rewritable()), "never rewritable: {locs:?}");
+}
 
 /// A row says what it binds through its capture suffix, and an unsuffixed
 /// capture binds a type — the default every include/`use` row without the
@@ -2874,4 +5617,238 @@ fn import_capture_suffix_declares_what_the_row_binds() {
     assert_eq!(strip_import_binds("import.name"), "import.name");
     // Only the import family; a `.const` elsewhere is somebody else's capture.
     assert_eq!(strip_import_binds("def.const"), "def.const");
+}
+
+/// php's three row flavours each say what they bind, so no lane has to
+/// read a leaf's capitalization to guess — in the GROUP spelling too,
+/// where the keyword sits on the clause rather than the row.
+#[cfg(feature = "php")]
+#[test]
+fn php_import_rows_say_whether_they_bind_a_type_a_function_or_a_const() {
+    use crate::model::file_analysis::ImportBinds;
+    let src = "\
+<?php
+namespace App;
+use App\\Models\\User;
+use function App\\Helpers\\slugify;
+use const App\\Config\\MAX_ROWS;
+";
+    let (fa, _) = php_fa(src);
+    let rows: Vec<(&str, ImportBinds)> =
+        fa.pack.include_directives.iter().map(|r| (r.raw.as_str(), r.binds)).collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("App\\Models\\User", ImportBinds::Type),
+            ("App\\Helpers\\slugify", ImportBinds::Function),
+            ("App\\Config\\MAX_ROWS", ImportBinds::Const),
+        ],
+        "one row per `use`, each carrying its own binding: {rows:?}"
+    );
+    let grouped = "\
+<?php
+namespace App;
+use App\\Mixed\\{User, function slugify, const MAX_ROWS};
+";
+    let (fa, _) = php_fa(grouped);
+    let mut rows: Vec<(&str, ImportBinds)> =
+        fa.pack.include_directives.iter().map(|r| (r.raw.as_str(), r.binds)).collect();
+    rows.sort_by_key(|(raw, _)| *raw);
+    assert_eq!(
+        rows,
+        vec![
+            ("App\\Mixed\\MAX_ROWS", ImportBinds::Const),
+            ("App\\Mixed\\User", ImportBinds::Type),
+            ("App\\Mixed\\slugify", ImportBinds::Function),
+        ],
+        "a mixed group binds per CLAUSE, like three flat rows: {rows:?}"
+    );
+}
+
+/// A by-reference parameter binds the caller's variable through the bag:
+/// the aliasing edge is the callee's, and a bare argument of a callee
+/// nothing here declares is silence, never a guess. Both php spellings of
+/// `&` reach the mint — the modifier beside a plain parameter's name and
+/// the wrapper around a promoted one's.
+#[cfg(feature = "php")]
+#[test]
+fn php_by_reference_parameters_bind_their_call_arguments() {
+    use crate::model::file_analysis::InferredType;
+    let src = "\
+<?php
+namespace App;
+function fill(&$out): void {}
+function fillTyped(array &$rows): void {}
+function plain(string $x): int { return 1; }
+class Box {
+    public function __construct(private array &$bag) {}
+}
+class Runner {
+    public function run(): int {
+        fill($local);
+        fillTyped($table);
+        preg_match('/a/', 'abc', $m);
+        plain($typo);
+        new Box($boxed);
+        return 1;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    let at = |row: usize| tree_sitter::Point { row, column: 30 };
+    assert_eq!(
+        fa.inferred_type_via_bag("$local", at(10)),
+        Some(InferredType::Unknown),
+        "an untyped by-reference parameter still binds: a value flowed here, \
+         and silence would read as by-value",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$table", at(11)),
+        Some(InferredType::HashRef),
+        "and a typed one leaves its type in the caller's variable",
+    );
+    // a PROMOTED parameter spells `&` by wrapping its name, and that
+    // spelling mints the same aliasing edge
+    use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+    assert!(
+        fa.witnesses.all().iter().any(|w| matches!(
+            (&w.attachment, &w.payload),
+            (
+                WitnessAttachment::Param { package, name, index: 0 },
+                WitnessPayload::Edge(WitnessAttachment::Variable { name: bound, .. })
+            ) if package == "App\\Box" && name == "__construct" && bound == "$bag"
+        )),
+        "the promoted `&$bag` aliases its position",
+    );
+    // a construction site IS a call of the constructor, so its arguments
+    // bind through the same edge — the class is known statically there.
+    // `Unknown` is the bound-but-untyped answer the lane needs; silence
+    // would read as by-value and report `$boxed` undefined.
+    assert_eq!(
+        fa.inferred_type_via_bag("$boxed", at(15)),
+        Some(InferredType::Unknown),
+        "`new Box($boxed)` binds through the promoted `&$bag`",
+    );
+    assert!(
+        fa.witnesses.all().iter().any(|w| matches!(
+            (&w.attachment, &w.payload),
+            (
+                crate::model::witnesses::WitnessAttachment::Variable { name, .. },
+                crate::model::witnesses::WitnessPayload::Edge(
+                    crate::model::witnesses::WitnessAttachment::Param { package, name: ctor, index: 0 }
+                )
+            ) if name == "$boxed" && package == "App\\Box" && ctor == "__construct"
+        )),
+        "the argument edge names the constructor of the class the site spells",
+    );
+    // the callee decides: a by-value position leaves the argument as it was
+    assert_eq!(fa.inferred_type_via_bag("$typo", at(13)), None);
+    // and a callee with no declaration here names itself, so the lane can
+    // stay silent instead of guessing
+    let arg = |name: &str| {
+        fa.refs()
+            .iter()
+            .find(|r| r.target_name == name && matches!(r.kind, crate::model::file_analysis::RefKind::Variable))
+            .and_then(|r| fa.argument_callee(r))
+    };
+    assert_eq!(arg("$m"), Some("preg_match"));
+    assert_eq!(arg("$typo"), Some("plain"));
+}
+
+#[test]
+fn php_a_catch_all_in_another_file_silences_the_member_lane() {
+    // The catch-all is a fact about the CLASS that declares it, and it
+    // reaches a child through the MRO like any other inherited fact — so an
+    // ancestor in a file this one only inherits from is enough to keep the
+    // undefined-member lane quiet.
+    let base = "\
+<?php
+namespace App;
+class Base {
+    public function __call($name, $args) { return null; }
+}
+";
+    let (base_fa, _) = php_fa(base);
+    assert!(
+        base_fa
+            .class_flags("App\\Base")
+            .contains(crate::model::file_analysis::SymbolFlags::DYNAMIC_MEMBERS),
+        "the declaring class carries the fact: {:?}",
+        base_fa.symbols().iter().map(|s| (&s.name, s.flags)).collect::<Vec<_>>()
+    );
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.register_symbols(
+        std::path::PathBuf::from("/fake/php/Base.php"),
+        std::sync::Arc::new(base_fa),
+    );
+    idx.mark_language_indexed("php");
+
+    let child = "\
+<?php
+namespace App;
+class Child extends Base {
+    public function run() { return $this->whatever(); }
+}
+";
+    let (child_fa, _) = php_fa(child);
+    assert!(
+        child_fa.class_answers_any_member("App\\Child", Some(&idx)),
+        "the MRO walk finds the ancestor's catch-all"
+    );
+    let diags = crate::lsp::symbols::pack_symbol_diagnostics(&child_fa, Some(&idx));
+    assert!(
+        !diags.iter().any(|d| matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(c))
+            if c == "unresolved-method" || c == "undefined-property")),
+        "a catch-all ancestor silences the member lane: {diags:?}"
+    );
+
+    // The control: the same ancestor without the catch-all, so the lane is
+    // loud and the silence above is the fact's doing, not an unresolved MRO.
+    let plain = "\
+<?php
+namespace App;
+class Base {
+    public function known() { return 1; }
+}
+";
+    let (plain_fa, _) = php_fa(plain);
+    let plain_idx = crate::index::module_index::ModuleIndex::new_for_test();
+    plain_idx.register_symbols(
+        std::path::PathBuf::from("/fake/php/Base.php"),
+        std::sync::Arc::new(plain_fa),
+    );
+    plain_idx.mark_language_indexed("php");
+    let loud = crate::lsp::symbols::pack_symbol_diagnostics(&child_fa, Some(&plain_idx));
+    assert!(
+        loud.iter().any(|d| matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(c))
+            if c == "unresolved-method")),
+        "without the catch-all the member is undefined: {loud:?}"
+    );
+}
+
+#[test]
+fn php_a_typo_read_twice_is_still_undefined() {
+    // The lane's silence rule is the callee edge, not a repetition count: a
+    // name nothing binds is a typo however many times it is written, and
+    // counting occurrences masked exactly the case the lane exists for.
+    let src = "\
+<?php
+function f(): int {
+    $result = 1;
+    return $reuslt + $reuslt;
+}
+";
+    let (fa, _) = php_fa(src);
+    let diags = crate::lsp::symbols::pack_symbol_diagnostics(&fa, None);
+    let undefined: Vec<_> = diags
+        .iter()
+        .filter(|d| matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(c))
+            if c == "undefined-variable"))
+        .collect();
+    assert_eq!(undefined.len(), 2, "both reads of the typo report: {diags:?}");
+    assert!(
+        undefined.iter().all(|d| d.message.contains("$reuslt")),
+        "and name the typo, not the binding: {undefined:?}"
+    );
 }
