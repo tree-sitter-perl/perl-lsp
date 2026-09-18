@@ -1389,21 +1389,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // resolves up the guard's scope chain (innermost first), so a
                     // same-named var in a sibling function never supplies the
                     // inner type — the nearest enclosing declaration wins.
-                    let declared = scope_stack
-                        .iter()
-                        .rev()
-                        .find_map(|&(_, sid)| {
+                    let captured = narrow_type_txt.get(&nmid).cloned();
+                    let declared = match captured {
+                        Some(_) => None,
+                        None => scope_stack.iter().rev().find_map(|&(_, sid)| {
                             annot_text_by_var.get(&(subject.clone(), sid)).cloned()
-                        });
-                    let ty = narrow_type_txt.get(&nmid).cloned().or_else(|| declared.clone());
+                        }),
+                    };
                     // A refinement that lands back on the subject's own
                     // declaration refines nothing, and the witness would shadow
                     // a stronger refinement already in force at that point.
                     let refines_nothing = |r: &crate::model::file_analysis::InferredType| {
-                        narrow_type_txt.get(&nmid).is_none()
-                            && declared.as_deref().and_then(pack.annot_type).as_ref() == Some(r)
+                        declared.as_deref().and_then(pack.annot_type).as_ref() == Some(r)
                     };
-                    if let Some(refined) = ty
+                    if let Some(refined) = captured
+                        .or_else(|| declared.clone())
                         .and_then(|t| (pack.narrow_type)(&t))
                         .filter(|r| !refines_nothing(r))
                         .map(|r| ident_type(r, e.start))
