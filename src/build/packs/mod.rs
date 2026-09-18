@@ -9,10 +9,12 @@
 
 pub mod cmake;
 pub mod perl;
+pub mod php;
 pub mod python;
 pub mod r;
 
 pub use cmake::cmake_pack;
 pub use perl::perl_pack;
+pub use php::php_pack;
 pub use python::python_pack;
 pub use r::r_pack;
