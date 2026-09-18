@@ -62,6 +62,9 @@ pub struct SkelRef {
     /// structurally from the argument list. Flows to `Ref.arg_count`; `None`
     /// for non-call refs.
     pub arg_count: Option<usize>,
+    /// What the document said at this site — the receiver's flavour, whether
+    /// the call constructs. Rides onto `Ref::flags` unchanged.
+    pub flags: crate::model::file_analysis::RefFlags,
 }
 
 #[derive(Debug, Default)]
@@ -870,6 +873,7 @@ impl SkeletonAnalysis {
                     binding: Some(crate::model::file_analysis::RefBinding::Symbol(did)),
                     folded_from: None,
                     arg_count: None,
+                    flags: Default::default(),
                 }),
                 None => unresolved_reads.push((name.clone(), *read_scope, *read_span)),
             }
@@ -898,6 +902,7 @@ impl SkeletonAnalysis {
                     binding: Some(crate::model::file_analysis::RefBinding::Symbol(did)),
                     folded_from: None,
                     arg_count: None,
+                    flags: Default::default(),
                 });
             }
         }
@@ -981,6 +986,7 @@ impl SkeletonAnalysis {
                     binding,
                     folded_from: None,
                     arg_count: r.arg_count,
+                    flags: r.flags,
                 })
             })
             .collect();
@@ -1026,6 +1032,7 @@ impl SkeletonAnalysis {
                 binding: None,
                 folded_from: None,
                 arg_count: None,
+                flags: Default::default(),
             });
         }
         refs.extend(local_refs);
@@ -1096,6 +1103,7 @@ impl SkeletonAnalysis {
                         )),
                         folded_from: None,
                         arg_count: None,
+                        flags: Default::default(),
                     });
                 }
             }

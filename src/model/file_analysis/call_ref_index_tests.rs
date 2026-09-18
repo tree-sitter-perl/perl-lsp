@@ -328,6 +328,7 @@ fn equal_span_first_write_wins() {
             binding: None,
             folded_from: None,
             arg_count: None,
+            flags: Default::default(),
         },
         Ref {
             kind: RefKind::MethodCall {
@@ -350,6 +351,7 @@ fn equal_span_first_write_wins() {
             binding: None,
             folded_from: None,
             arg_count: None,
+            flags: Default::default(),
         },
     ];
 
