@@ -3,5 +3,8 @@
   "labels": {
     "hook": "No handler for hook"
   },
+  "codes": {
+    "hook": "undefined-hook"
+  },
   "hints": ["hook"]
 }

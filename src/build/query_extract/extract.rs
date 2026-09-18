@@ -453,17 +453,28 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 });
                 continue;
             }
+            // `@def.method.catch_all`: the member spellings whose presence
+            // makes the CLASS answer any member name at runtime. The
+            // declaration mints as the ordinary method it is; only its name
+            // span travels, so the fact can land on the class below.
+            if cap == "def.method.catch_all" {
+                events.push(Event {
+                    start_byte: node.start_byte(),
+                    end_byte: node.end_byte(),
+                    start: node.start_position(),
+                    end: node.end_position(),
+                    cap: cap.to_string(),
+                    text: node.utf8_text(source).unwrap_or("").to_string(),
+                    match_id: match_counter,
+                });
+                continue;
+            }
             // Declaration-only captures: they state a language fact the
             // cursor paths read off the compiled query, and mint nothing
             // here. Dropped before they become events.
             if matches!(
                 cap,
-                "skip"
-                    | "recv.peel"
-                    | "recv.peel.deref"
-                    | "domain.compare.op"
-                    | "def.method.catch_all"
-                    | "def.var.fn"
+                "skip" | "recv.peel" | "recv.peel.deref" | "domain.compare.op" | "def.var.fn"
             ) {
                 continue;
             }
@@ -865,6 +876,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // carries `THROWAWAY`, which is what the unused-variable lane asks.
     let mut throwaway_name_spans: std::collections::HashSet<(Point, Point)> =
         std::collections::HashSet::new();
+    // `@def.method.catch_all` — the def NAME spans of catch-all members. The
+    // CLASS that declares one carries `DYNAMIC_MEMBERS`, which is what the
+    // undefined-member lanes ask before they call a member missing.
+    let mut catch_all_name_spans: std::collections::HashSet<(Point, Point)> =
+        std::collections::HashSet::new();
     // `@sym.attr.deprecated` — the ATTRIBUTE spelling of `@deprecated`,
     // per match, so the def it annotates carries the same fact the docblock
     // tag gives.
@@ -993,6 +1009,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "def.var.throwaway" {
             throwaway_name_spans.insert((e.start, e.end));
+        }
+        if e.cap == "def.method.catch_all" {
+            catch_all_name_spans.insert((e.start, e.end));
         }
         if e.cap == "sym.attr" && deprecated_attr_spans.contains(&(e.start, e.end)) {
             deprecated_matches.insert(e.match_id);
@@ -1309,8 +1328,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     out.lang_id = pack.lang_id;
     {
         let conv = crate::build::query_extract::rail_conventions_for(pack);
-        out.rail_labels = conv.labels.clone();
-        out.rail_hints = conv.hints.clone();
         out.rail_name_seps = conv.name_seps.clone();
         out.class_named_rails = conv.class_named_rails.clone();
     }
@@ -4099,6 +4116,24 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 if sym.kind == "class" && !sym.attributes.iter().any(|a| a == flavor) {
                     sym.attributes.push(flavor.clone());
                 }
+            }
+        }
+    }
+
+    // A catch-all member is a fact about the CLASS that declares it, not
+    // about the member's own name: the class answers ANY member at runtime.
+    // The declaring container is the sticky package the member sits under,
+    // so the flag lands on that class and every lane asks the class.
+    if !catch_all_name_spans.is_empty() {
+        let dynamic: std::collections::HashSet<String> = out
+            .symbols
+            .iter()
+            .filter(|s| catch_all_name_spans.contains(&(s.name_start, s.name_end)))
+            .filter_map(|s| s.package.clone())
+            .collect();
+        for sym in &mut out.symbols {
+            if sym.kind == "class" && dynamic.contains(&sym.name) {
+                sym.flags |= crate::model::file_analysis::SymbolFlags::DYNAMIC_MEMBERS;
             }
         }
     }

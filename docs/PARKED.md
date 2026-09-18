@@ -30,11 +30,11 @@ marked otherwise; the drain re-derived each rationale against current code.
 - **A reference-assignment alias is a per-symbol tag, not a relation.**
   `$h = &$opts['h']` makes `$h` reach `$opts['h']`'s storage, so a write
   through `$h` is a use of that storage and the unused-variable lane must
-  stay silent. The extractor states that as an `alias` attribute string on
-  the variable symbol, which the lane compares back — the one declaration
-  fact in `docs/adr/symbol-flags.md`'s family that deliberately did NOT
-  become a flag, because it is a RELATION between two storages and an
-  adjective on one of them loses the other end. Target shape: the
+  stay silent. The extractor states that as `SymbolFlags::ALIAS` on the
+  variable symbol — which is enough for the lane, and gets the attribute
+  string out of the adapter, but is still an ADJECTIVE on one storage
+  where the fact is a RELATION between two: nothing says which storage
+  `$h` reaches, so nothing else can use it. Target shape: the
   aliasing edge the by-reference lane already speaks
   (`docs/adr/by-ref-binding.md`) — a witness on the aliased variable
   pointing at the storage the `@flow.source` capture already names — and
@@ -42,7 +42,30 @@ marked otherwise; the drain re-derived each rationale against current code.
   needs first: an attachment/payload that says "aliases" rather than
   "flows from", since a plain `$h = $opts['h']` mints the same flow edge
   and a `WitnessSource` tag read for meaning is rule #14's own
-  antipattern. [recorded 2026-09-17]
+  antipattern. [recorded 2026-09-17; the string became a flag 2026-09-18,
+  the relation is still unmodelled]
+
+- **A contract's declarator text is re-read from disk by each consumer.**
+  `contract_declarator` reads the declaring file inside the diagnostics
+  publish so the unimplemented-method quick-fix can carry a stub, and
+  cross-file member hover reads the same kind of file again for its
+  signature. The producer HAS the declarator: it is the declaration the
+  symbol was minted from, and putting it on the symbol's presentation
+  would give both consumers one source. Measured before parking — 0.01–
+  0.02 ms per read, ~0.07 ms for a six-contract publish
+  (`bench/RESULTS.md`, 2026-09-18) — so this is a rule #11 shape
+  argument, NOT a latency fix, and the number is what keeps it from
+  being sold as one. What it needs: a decision about blob size, since a
+  declarator per contract callable rides every analysis that has one.
+  [recorded 2026-09-18]
+
+- **The pack diagnostics lanes' cost at scale is unmeasured.** Each lane
+  is a `FileAnalysis` query now, and the two liveness lanes share one
+  walk, but the family still makes several full passes over `refs()` and
+  `symbols()` per publish — and a publish runs on didChange. The
+  adversarial shape to measure: the largest file in the Laravel corpus,
+  didChange every 40 ms, with the per-lane phases attributed. Nothing
+  suggests a problem; nothing has looked. [recorded 2026-09-18]
 
 - **A keyed destructuring slot's key is read from the list's text.**
   `query_extract::slot_key` / `slot_position` scan the destructuring

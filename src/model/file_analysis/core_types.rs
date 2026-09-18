@@ -414,10 +414,19 @@ bitflags::bitflags! {
         /// candidate, because nothing in the source could reference it into
         /// existence.
         const SYNTHESIZED = 1 << 25;
+        /// A binding written to REACH another slot's storage (php `$h =
+        /// &$opts['h']`): the write IS the point of it, so the liveness lanes
+        /// never ask whether anything read it.
+        const ALIAS = 1 << 26;
+        /// This class answers ANY member name at runtime — a php `__call`,
+        /// a Perl `AUTOLOAD` — so its declared member set is not its
+        /// surface. Minted on the CLASS by whoever sees the catch-all
+        /// declaration; the lanes ask `class_answers_any_member`.
+        const DYNAMIC_MEMBERS = 1 << 27;
         /// A stored slot whose VALUE is called (a C function-pointer member,
         /// `int (*read)(char *)`). The declarator says so, so a call landing
         /// on the slot asks the declaration instead of a callback-name list.
-        const CALLABLE_VALUE = 1 << 26;
+        const CALLABLE_VALUE = 1 << 28;
     }
 }
 
@@ -476,6 +485,8 @@ impl TryFrom<&str> for SymbolFlags {
             "contract" => SymbolFlags::CONTRACT,
             "documented" => SymbolFlags::DOC_DECLARED,
             "synthesized" => SymbolFlags::SYNTHESIZED,
+            "alias" => SymbolFlags::ALIAS,
+            "dynamic_members" => SymbolFlags::DYNAMIC_MEMBERS,
             other => return Err(UnknownAttribute(other.to_string())),
         })
     }

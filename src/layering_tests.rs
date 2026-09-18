@@ -1455,17 +1455,35 @@ fn language_spellings_have_one_home() {
         ("build/packs/php/doc.rs", 2, "php's own doc-tag spellings — the pack IS their home"),
         ("build/packs/php/mod.rs", 1, "php's late-bound RETURN spellings (`static`/`self`/`$this` in `declared_return`) — the `LangPack` IS their home"),
         ("build/plugin/rhai_host.rs", 3, "a manifest signal name in an inline test fixture"),
-        ("build/query_extract/extract.rs", 17, "the generic extractor minting the canonical tokens a pack's captures declare"),
+        ("build/query_extract/extract.rs", 19, "the generic extractor minting the canonical tokens a pack's captures declare"),
         ("build/query_extract/skeleton.rs", 15, "skeleton→model conversion: the kind/attribute vocabulary becomes flags here"),
         ("model/conventions.rs", 3, "Perl's own attribute spellings (`field_attribute_flag`) — Perl's home"),
-        ("model/file_analysis/core_types.rs", 23, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`) — the one table every language maps its spellings onto"),
+        ("model/file_analysis/core_types.rs", 25, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`) — the one table every language maps its spellings onto"),
         ("model/file_analysis/completion.rs", 1, "a `DeclKind` rendered as completion detail text, not an attribute read"),
         ("model/file_analysis/outline.rs", 2, "outline detail text for a union container and a param decl kind"),
         ("model/witnesses/registry.rs", 1, "the `param` owner-keyed fallback key — a witness attachment name"),
         ("lsp/symbols/hover.rs", 1, "the hover LABEL for a macro-shaped Sub — display text (the fact itself is read as a flag)"),
-        ("lsp/symbols/diagnostics.rs", 1, "the `deprecated` diagnostic CODE — LSP wire text, not the declaration fact"),
+        ("model/file_analysis/diagnostics.rs", 1, "the `deprecated` diagnostic CODE — client-facing wire text, not the declaration fact"),
     ];
     drift.extend(allowlist_drift("rule #12 (attribute spellings)", &seen, allow));
+
+    // Half three: the derived probe above can only see spellings that ALREADY
+    // have a flag, so an attribute with no twin is invisible to it — which is
+    // exactly where the next leak lives. Every attribute literal the ADAPTER
+    // compares is named here: either it has a twin (and the probe covers it)
+    // or it is on this list, which is count-exact and shrink-only.
+    for (rel, text) in layer_files(&[Layer::Lsp]) {
+        for lit in attribute_literals(&text) {
+            let ok = twinned.iter().any(|t| t.trim_matches('"') == lit)
+                || UNTWINNED_ATTRIBUTES.contains(&lit.as_str());
+            if !ok {
+                drift.push(format!(
+                    "{rel}: the adapter compares the attribute `{lit}`, which no SymbolFlags \
+                     bit answers to — mint a flag for it, or name it in UNTWINNED_ATTRIBUTES"
+                ));
+            }
+        }
+    }
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
@@ -1499,6 +1517,28 @@ fn packs_do_not_borrow_perls_current_package_token() {
         "pack sources spelling Perl's current-package token: {offenders:?} — \
          declare the receiver on its capture and mint the class at extraction"
     );
+}
+
+/// Attribute spellings the adapter compares that no `SymbolFlags` bit
+/// answers to. Shrink-only: an entry here is a declaration fact the model
+/// should be carrying as a flag, and the derived probe cannot see it.
+const UNTWINNED_ATTRIBUTES: &[&str] = &[];
+
+/// Every string literal on a line that reads a symbol's `attributes` — the
+/// shape of an attribute comparison in a consumer.
+fn attribute_literals(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines().filter(|l| !l.trim_start().starts_with("//")) {
+        if !line.contains("attributes") {
+            continue;
+        }
+        for (i, part) in line.split('"').enumerate() {
+            if i % 2 == 1 && !part.is_empty() && !part.contains(' ') {
+                out.push(part.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// Every attribute spelling with a `SymbolFlags` twin, read out of the
@@ -1544,7 +1584,7 @@ fn rendered_strings_are_not_reparsed() {
         ("model/file_analysis/use_map.rs", 3, "resolving WRITTEN spellings"),
         ("lsp/cli/positions.rs", 1, "a `file:line:col` CLI argument — what the user typed, not what we rendered"),
         ("lsp/cursor_context.rs", 1, "Perl source text at the cursor, split on Perl's own separator"),
-        ("lsp/symbols/diagnostics.rs", 1, "a written qualified spelling, split on the separator the analysis declares"),
+        ("model/file_analysis/diagnostics_liveness.rs", 1, "a written qualified spelling, split on the separator the analysis declares"),
         ("lsp/symbols/links.rs", 2, "POD link text and a module path as the source wrote them"),
     ];
     let drift = allowlist_drift("rule #13 (rendered strings)", &seen, allow);
@@ -1764,7 +1804,7 @@ fn pack_facts_fields_are_ratcheted() {
             skipped = false;
         }
     }
-    const RATCHET: usize = 21;
+    const RATCHET: usize = 19;
     assert!(
         fields <= RATCHET,
         "PackFacts grew to {fields} fields (ratchet {RATCHET}). A per-language constant goes on \

@@ -7,6 +7,8 @@ use crate::model::file_analysis::{InferredType, NameSpellings, PackSpellings};
 /// its vocabulary, and it offers no import or annotation quick-fix. Its
 /// members belong to the container that declares them.
 const SPELLINGS: PackSpellings = PackSpellings {
+    variadic_marker: "*",
+    default_sep: "=",
     members_are_package_bound: true,
     // a member read and a member call are different syntax here
     member_reads_are_calls: false,

@@ -1,6 +1,7 @@
 //! Signature help and string-dispatch completion (dispatch arg-0, mid-string).
 
 use super::*;
+use crate::model::file_analysis::PackSpellings;
 
 // ---- Signature help ----
 
@@ -755,9 +756,9 @@ pub fn signature_help(
 /// Signature help for a pack-language document: the cursor's call site
 /// (`cursor_sentinel::call_at`), the callee resolved through the same
 /// member ladder goto-def uses, and the signature rendered from the
-/// DEFINING file's own text — the parameter list between the declaration's
-/// parentheses, the return annotation after them, the docblock summary
-/// under it. One rule for local and cross-file callees.
+/// declaration facts the callee's own extraction minted — its `ParamInfo`
+/// list, its declared return, its docblock summary. One rule for local and
+/// cross-file callees.
 pub fn pack_signature_help(
     analysis: &FileAnalysis,
     tree: &Tree,
@@ -775,7 +776,10 @@ pub fn pack_signature_help(
     let (label, params, doc) = pack_callee_signature(analysis, site.callee.start, module_index)?;
     let parameters: Vec<ParameterInformation> = params
         .iter()
-        .map(|p| ParameterInformation { label: ParameterLabel::Simple(render_param(p)), documentation: None })
+        .map(|p| ParameterInformation {
+            label: ParameterLabel::Simple(render_param(p, analysis.spellings())),
+            documentation: None,
+        })
         .collect();
     let active = (site.active_param as u32).min(parameters.len().saturating_sub(1) as u32);
     Some(SignatureHelp {
@@ -814,7 +818,7 @@ pub fn pack_callee_signature(
         let class = analysis.method_call_invocant_class(r, Some(module_index))?;
         match analysis.resolve_member(&class, &name, want, Some(module_index))? {
             crate::model::file_analysis::MethodResolution::Local { sym_id, .. } => {
-                found = rendered_signature(analysis.symbol(sym_id));
+                found = rendered_signature(analysis.symbol(sym_id), analysis.spellings());
             }
             crate::model::file_analysis::MethodResolution::CrossFile { class, def_module, .. } => {
                 let module = def_module.as_deref().unwrap_or(class.as_str());
@@ -828,7 +832,7 @@ pub fn pack_callee_signature(
                         && s.name == name
                         && s.package.as_deref() == Some(class.as_str())
                 })?;
-                found = rendered_signature(sym);
+                found = rendered_signature(sym, analysis.spellings());
             }
         }
     } else if matches!(r.kind, RefKind::FunctionCall) {
@@ -843,7 +847,7 @@ pub fn pack_callee_signature(
                 .any(|s| matches!(s.kind, FaSymKind::Sub | FaSymKind::Method) && s.name == name)
         };
         if let Some(sym) = local {
-            found = rendered_signature(sym);
+            found = rendered_signature(sym, analysis.spellings());
         } else if let Some(decls) = module_index.defining_analysis(&name, &declares) {
             // The file that DECLARES the callee, not whichever candidate
             // the visibility axis listed first.
@@ -851,26 +855,28 @@ pub fn pack_callee_signature(
                 .symbols()
                 .iter()
                 .find(|s| matches!(s.kind, FaSymKind::Sub | FaSymKind::Method) && s.name == name)
-                .and_then(rendered_signature);
+                .and_then(|s| rendered_signature(s, analysis.spellings()));
         }
     }
     found
 }
 
 /// One parameter as a signature shows it: the name its declaration bound,
-/// and the default exactly as the source wrote it.
-fn render_param(p: &ParamInfo) -> String {
+/// and the default exactly as the source wrote it. Slurpiness and having a
+/// default are facts on the parameter; how each is WRITTEN is the
+/// language's, so both come off its spellings.
+fn render_param(p: &ParamInfo, spellings: &PackSpellings) -> String {
     let mut out = String::new();
     if let Some(t) = &p.declared_type {
         out.push_str(t);
         out.push(' ');
     }
     if p.is_slurpy {
-        out.push_str("...");
+        out.push_str(spellings.variadic_marker);
     }
     out.push_str(&p.name);
     if let Some(d) = &p.default {
-        out.push_str(" = ");
+        out.push_str(spellings.default_sep);
         out.push_str(d);
     }
     out
@@ -880,13 +886,16 @@ fn render_param(p: &ParamInfo) -> String {
 /// extraction minted (`SymbolDetail::Sub`'s parameters and the return
 /// annotation as written). The invocant a caller never writes is dropped,
 /// so the label shows what is typed.
-fn rendered_signature(sym: &crate::model::file_analysis::Symbol) -> Option<RenderedSignature> {
+fn rendered_signature(
+    sym: &crate::model::file_analysis::Symbol,
+    spellings: &PackSpellings,
+) -> Option<RenderedSignature> {
     let SymbolDetail::Sub { params, declared_return, .. } = &sym.detail else { return None };
     let shown: Vec<ParamInfo> = params.iter().filter(|p| !p.is_invocant).cloned().collect();
     let label = format!(
         "{}({}){}",
         sym.name,
-        shown.iter().map(render_param).collect::<Vec<_>>().join(", "),
+        shown.iter().map(|p| render_param(p, spellings)).collect::<Vec<_>>().join(", "),
         declared_return.as_deref().map(|r| format!(" {r}")).unwrap_or_default()
     );
     Some((label, shown, sym.presentation.doc.clone()))

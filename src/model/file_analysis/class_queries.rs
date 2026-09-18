@@ -337,6 +337,21 @@ impl FileAnalysis {
     /// `candidates`, deduped by `seen`. Called per-class in the ancestor
     /// walk: on `self` for local classes, on a cached module's analysis
     /// for cross-file ones.
+    /// How a member is WRITTEN wherever it is offered: php spells a static
+    /// property `Foo::$bar`, and that sigil belongs to the name its producer
+    /// mints, never to a rewrite of the label further down (rule #11). A
+    /// language that declares no sigil writes the bare name.
+    pub(crate) fn written_label(&self, sym: &Symbol) -> String {
+        let sigil = self.spellings().static_property_sigil;
+        if sigil.is_empty()
+            || !sym.flags.contains(SymbolFlags::STATIC)
+            || MemberKind::of_sym(sym.kind) != MemberKind::Value
+        {
+            return sym.name.clone();
+        }
+        format!("{sigil}{}", sym.name)
+    }
+
     fn collect_class_fields(
         &self,
         cls: &str,
@@ -398,7 +413,7 @@ impl FileAnalysis {
                 && seen.insert(sym.name.clone())
             {
                 candidates.push(CompletionCandidate {
-                    label: sym.name.clone(),
+                    label: self.written_label(sym),
                     kind: sym.kind,
                     is_static: sym.flags.contains(SymbolFlags::STATIC),
                     detail: None,
@@ -421,7 +436,7 @@ impl FileAnalysis {
                 && seen.insert(sym.name.clone())
             {
                 candidates.push(CompletionCandidate {
-                    label: sym.name.clone(),
+                    label: self.written_label(sym),
                     kind: sym.kind,
                     is_static: sym.flags.contains(SymbolFlags::STATIC),
                     detail: None,
@@ -491,17 +506,6 @@ impl FileAnalysis {
                 MemberAccess::Instance => !constant && !static_value,
             }
         });
-        // A scoped static property is WRITTEN with its sigil (php
-        // `Foo::$bar`), so the candidate carries that spelling.
-        let sigil = self.spellings().static_property_sigil;
-        if access == MemberAccess::Scoped && !sigil.is_empty() {
-            for c in candidates.iter_mut() {
-                if c.is_static && MemberKind::of_sym(c.kind) == MemberKind::Value {
-                    c.label = format!("{sigil}{}", c.label);
-                    c.insert_text = None;
-                }
-            }
-        }
         // The class-name literal (`Foo::class`) is a member of every class
         // the pack declares it for — a convention on the pack, not a symbol.
         let literal = self.spellings().class_literal_member;

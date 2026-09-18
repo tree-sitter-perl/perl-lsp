@@ -133,7 +133,7 @@ pub fn pack_use_after_move_diagnostics(analysis: &FileAnalysis) -> Vec<Diagnosti
         .map(|(name, span)| Diagnostic {
             range: span_to_range(span),
             severity: Some(DiagnosticSeverity::WARNING),
-            code: Some(NumberOrString::String("use-after-move".into())),
+            code: Some(NumberOrString::String(super::diagnostics::codes::USE_AFTER_MOVE.into())),
             source: Some("perl-lsp".into()),
             message: format!("use of `{name}` after `std::move` (moved-from state)"),
             ..Default::default()
@@ -146,12 +146,11 @@ pub fn pack_use_after_move_diagnostics(analysis: &FileAnalysis) -> Vec<Diagnosti
 pub fn pack_diagnostics(
     analysis: &FileAnalysis,
     lookup: Option<&dyn crate::model::file_analysis::CrossFileLookup>,
-    index_settled: bool,
     options: DiagnosticOptions,
 ) -> Vec<Diagnostic> {
     let mut diags = pack_member_op_diagnostics(analysis);
     diags.extend(pack_member_op_peel_diagnostics(analysis));
-    diags.extend(super::diagnostics::pack_symbol_diagnostics(analysis, lookup, index_settled));
+    diags.extend(super::diagnostics::pack_symbol_diagnostics(analysis, lookup));
     // use-after-move is OPT-IN (`DiagnosticOptions.use_after_move`): the wired
     // check is the decidable subset only — gates B/C/E on `use_after_move_reads`
     // keep it to straight-line, in-function, local moves, verified to emit ZERO

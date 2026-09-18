@@ -1420,7 +1420,7 @@ fn for_each_enriched_diagnostic(
             let file = cm.path.display().to_string();
             // Same whole-view routing: pack index copies are evicted.
             let whole = file_analysis::CrossFileLookup::whole_present(pack.as_ref(), cm);
-            for d in symbols::pack_diagnostics(&whole, Some(pack.as_ref()), true, options) {
+            for d in symbols::pack_diagnostics(&whole, Some(pack.as_ref()), options) {
                 emit(&file, d);
             }
         });

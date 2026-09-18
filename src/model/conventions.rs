@@ -172,12 +172,18 @@ pub const PERL_PACK_SPELLINGS: crate::model::file_analysis::PackSpellings =
         contract_stub: "",
         return_annotation_template: "",
         static_property_sigil: "",
+        // A Perl signature writes neither a variadic marker nor a default
+        // separator — `@_` is the whole convention.
+        variadic_marker: "",
+        default_sep: "",
         // Typeglobs install a sub into another package, so a member
         // declaration does NOT belong to the container that encloses it.
         members_are_package_bound: false,
         // `$o->name` invokes the accessor — a call legitimately lands on a
         // stored slot, so a callable ask admits a value declaration.
         member_reads_are_calls: true,
+        // An `AUTOLOAD` answers a role's required method at runtime.
+        catch_all_satisfies_contracts: true,
     };
 
 /// A `'static` address for Perl's spellings, so the driver can hand out a

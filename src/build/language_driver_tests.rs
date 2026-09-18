@@ -1220,7 +1220,7 @@ fn assert_undefined_variable_silence(
     fa: &crate::model::file_analysis::FileAnalysis,
     lang: &str,
 ) {
-    let diags = crate::lsp::symbols::pack_symbol_diagnostics(fa, None, true);
+    let diags = crate::lsp::symbols::pack_symbol_diagnostics(fa, None);
     let hits: Vec<&tower_lsp::lsp_types::Diagnostic> = diags
         .iter()
         .filter(|d| {

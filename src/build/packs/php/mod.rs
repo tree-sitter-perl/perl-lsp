@@ -40,9 +40,14 @@ const SPELLINGS: PackSpellings = PackSpellings {
     contract_stub: "public function {}\n{\n    // TODO: implement\n}",
     return_annotation_template: ": {}",
     static_property_sigil: "$",
+    variadic_marker: "...",
+    default_sep: " = ",
     members_are_package_bound: true,
     // a member read and a member call are different syntax here
     member_reads_are_calls: false,
+    // `implements` is checked where the class is declared: `__call` catches
+    // calls a compile error would never let happen
+    catch_all_satisfies_contracts: false,
 };
 
 pub fn php_pack() -> LangPack {

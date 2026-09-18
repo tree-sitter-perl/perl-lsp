@@ -593,8 +593,9 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
         std::path::PathBuf,
         std::sync::Arc<file_analysis::FileAnalysis>,
         std::sync::Arc<module_index::ModuleIndex>,
+        String,
     )> = Vec::new();
-    idx.for_each_pack_index(|_lang, pack| {
+    idx.for_each_pack_index(|lang, pack| {
         pack.for_each_registered_file(&mut |cached| {
             // Index copies are refs-evicted; fan-out scans + set minting read
             // refs, so take the refs-present view (resident when not evicted,
@@ -603,6 +604,7 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
                 cached.path.clone(),
                 file_analysis::CrossFileLookup::whole_present(pack.as_ref(), cached),
                 std::sync::Arc::clone(pack),
+                lang.to_string(),
             ));
         });
     });
@@ -616,7 +618,7 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
     for entry in ws.workspace_raw().iter() {
         dynamic_dispatch_sites += entry.value().dynamic_dispatch_sites as u64;
     }
-    for (_p, analysis, _pack) in &pack_entries {
+    for (_p, analysis, _pack, _lang) in &pack_entries {
         dynamic_dispatch_sites += analysis.dynamic_dispatch_sites as u64;
     }
     let has_dynamic_dispatch = dynamic_dispatch_sites > 0;
@@ -702,12 +704,13 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
 
     // The pack tiers carry the same row store in their own sub-index (the
     // pack persist writer shreds every analysis it commits), so each gets
-    // the same pre-prune — computed once per distinct sub-index, gated on
-    // full coverage of that tier's entries exactly like the hub's.
-    let mut pack_prunes: Vec<(*const module_index::ModuleIndex, Option<PruneIndex>)> = Vec::new();
+    // the same pre-prune — computed once per LANGUAGE, which is what a
+    // sub-index serves, and gated on full coverage of that tier's entries
+    // exactly like the hub's.
+    let mut pack_prunes: Vec<(&str, Option<PruneIndex>)> = Vec::new();
     if rows_env_on && !include_deps {
-        for (_, _, pack) in &pack_entries {
-            let key = std::sync::Arc::as_ptr(pack);
+        for (_, _, pack, lang) in &pack_entries {
+            let key = lang.as_str();
             if pack_prunes.iter().any(|(k, _)| *k == key) {
                 continue;
             }
@@ -715,8 +718,8 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
                 (Some((referenced_names, shredded)), Some(dead)) => {
                     let covered = pack_entries
                         .iter()
-                        .filter(|(_, _, p)| std::sync::Arc::as_ptr(p) == key)
-                        .all(|(p, _, _)| shredded.contains(p.to_string_lossy().as_ref()));
+                        .filter(|(_, _, _, l)| l == lang)
+                        .all(|(p, _, _, _)| shredded.contains(p.to_string_lossy().as_ref()));
                     covered.then(|| {
                         (
                             referenced_names,
@@ -768,10 +771,10 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
     // pack workspace files ride the DEPENDENCY role); the set derives that
     // from the origin's stamped language, so no visibility override. The
     // pre-prune is the sub-index's own.
-    for (path, analysis, pack) in &pack_entries {
+    for (path, analysis, pack, lang) in &pack_entries {
         let prune = pack_prunes
             .iter()
-            .find(|(k, _)| *k == std::sync::Arc::as_ptr(pack))
+            .find(|(k, _)| k == lang)
             .and_then(|(_, p)| p.as_ref());
         for sym in analysis.symbols() {
             if sym.hidden_in_outline() || !heatmap_symbol_eligible(sym) {

@@ -16,19 +16,13 @@ pub struct PackFacts {
     /// Whole import-statement spans, in file order.
     #[serde(default)]
     pub import_rows: Vec<Span>,
-    /// rail → how the undefined-name lane phrases a miss on it (`"event"`
-    /// → `No listener for event`); default `Undefined <rail>`.
-    #[serde(default)]
-    pub rail_labels: Vec<(String, String)>,
-    /// Rails whose miss is a hint: their definitions are partly
-    /// runtime-only, so an unmatched name is a lead, not an error.
-    #[serde(default)]
-    pub rail_hints: Vec<String>,
     /// Rails whose names are CLASS identities (the rail document's
     /// `names_are: class` — Laravel's event bus). Per-overlay data the file
-    /// carries, like `rail_labels`: which overlays load is a property of the
-    /// workspace, not of the language, so it is not a language convention
-    /// reached by id. Baked from the DECLARATION for every file of the pack,
+    /// carries: which overlays load is a property of the workspace, not of
+    /// the language, so it is not a language convention reached by id. Unlike
+    /// the lane's labels and hint rails it changes what a MINT means, so
+    /// every span-free minting path has to agree with it. Baked from the
+    /// DECLARATION for every file of the pack,
     /// so the span-free minting paths (`scan_text_rails`, `adopt_path_rails`)
     /// carry it by construction and a rail cannot answer differently in two
     /// files. Read through `HandlerOwner::names_are`.
@@ -215,8 +209,6 @@ impl PackFacts {
         h.misc += map_str_vec(&self.template_params)
             + mcap(&self.specializes)
             + vcap(&self.import_rows)
-            + self.rail_labels.iter().map(|(a, b)| a.capacity() + b.capacity()).sum::<usize>()
-            + self.rail_hints.iter().map(|a| a.capacity()).sum::<usize>()
             + self.class_named_rails.iter().map(|a| a.capacity()).sum::<usize>()
             + vcap(&self.doc_mentions);
     }
@@ -264,6 +256,13 @@ pub struct PackSpellings {
     /// The sigil a static property carries after the scope operator (php
     /// `self::$count`); empty = the bare name in both positions.
     pub static_property_sigil: &'static str,
+    /// What a signature writes before a parameter that takes the rest of the
+    /// argument list (php/C++ `...`, python `*`); empty = the language marks
+    /// one on the parameter's own name, or has none.
+    pub variadic_marker: &'static str,
+    /// What a signature writes between a parameter and its default value;
+    /// empty = the language writes no defaults.
+    pub default_sep: &'static str,
     /// A member declaration belongs to the container that encloses it and
     /// nothing else — no cross-package installs (Perl's typeglobs), so
     /// contract provision is package-attributed.
@@ -275,6 +274,13 @@ pub struct PackSpellings {
     /// syntaxes name two different members, and admitting the value one is
     /// how a missing `()` resolves to a property instead of being reported.
     pub member_reads_are_calls: bool,
+    /// Does a catch-all member SATISFY a declared obligation? Perl's
+    /// `AUTOLOAD` answers a required method at runtime and role composition
+    /// cannot see past it, so a class carrying one is silent on unfulfilled
+    /// requires. A language that checks its contracts where the class is
+    /// DECLARED (php's `implements`) says `false`: `__call` catches calls
+    /// that a compile error would never let happen.
+    pub catch_all_satisfies_contracts: bool,
 }
 
 impl PackSpellings {
@@ -287,6 +293,8 @@ impl PackSpellings {
         contract_stub: "",
         return_annotation_template: "",
         static_property_sigil: "",
+        variadic_marker: "",
+        default_sep: "",
         members_are_package_bound: false,
         // The SAFE answer, not the lenient one: a language that has not
         // said its member read is a call gets the strict rule, where
@@ -296,6 +304,9 @@ impl PackSpellings {
         // to declare inherits the answer that reports rather than the one
         // that goes quiet.
         member_reads_are_calls: false,
+        // Same rule: a catch-all (`__call`, `AUTOLOAD`) satisfying a contract
+        // obligation is the quiet answer, so it is opted into per language.
+        catch_all_satisfies_contracts: false,
     };
 }
 

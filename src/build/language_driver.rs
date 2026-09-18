@@ -1427,8 +1427,6 @@ fn remap_spans(
         member_writes,
         import_rows,
         spellings: _,
-        rail_labels: _,
-        rail_hints: _,
         rail_name_seps: _,
         class_named_rails: _,
         annot_expr_spans: _,
@@ -1883,6 +1881,18 @@ impl LanguageRegistry {
     /// The classes a language provides in its global namespace — its
     /// `builtins.txt` documents (bundled + plugin dirs), read through
     /// `builtin_types_for`. Empty for a language without a pack.
+    /// The rail conventions in force for `id`'s language — how the
+    /// undefined-name lane phrases a miss per rail, and which rails answer
+    /// with a hint. Display constants of the LANGUAGE's documents, so they
+    /// are reached by id and never copied into a file's blob (rule #14).
+    pub fn rails(id: &str) -> std::sync::Arc<crate::build::query_extract::RailConventions> {
+        LanguageRegistry::with_enabled()
+            .for_id(id)
+            .and_then(|d| d.lang_pack())
+            .map(|p| crate::build::query_extract::rail_conventions_for(&p))
+            .unwrap_or_default()
+    }
+
     pub fn builtin_types(id: &str) -> std::sync::Arc<Vec<String>> {
         LanguageRegistry::with_enabled()
             .for_id(id)
@@ -1955,17 +1965,23 @@ impl LanguageRegistry {
     /// Such a spelling resolves off the writing scope, so it names no type a
     /// namespace has to supply. The receiver captures say which spellings
     /// those are; a language without a pack claims nothing.
-    pub fn writes_own_class_token(id: &str, token: &str) -> bool {
-        Self::pack_capture_literals(id, "receiver.self").contains(token)
-            || Self::pack_capture_literals(id, "receiver.super").contains(token)
+    pub fn own_class_tokens(id: &str) -> Vec<&'static str> {
+        Self::pack_capture_literals(id, "receiver.self")
+            .iter()
+            .chain(Self::pack_capture_literals(id, "receiver.super").iter())
+            .copied()
+            .collect()
     }
 
     /// How `id` spells the object the enclosing method runs on (`$this`,
     /// `this`, a `self`/`cls` parameter) — the receiver captures' own
     /// literals.
-    pub fn receiver_spellings(id: &str, token: &str) -> bool {
-        Self::pack_capture_literals(id, "receiver.this").contains(token)
-            || Self::pack_capture_literals(id, "param.receiver").contains(token)
+    pub fn receiver_tokens(id: &str) -> Vec<&'static str> {
+        Self::pack_capture_literals(id, "receiver.this")
+            .iter()
+            .chain(Self::pack_capture_literals(id, "param.receiver").iter())
+            .copied()
+            .collect()
     }
 
     pub fn pack_visibility(id: &str) -> crate::model::file_analysis::PackVisibility {

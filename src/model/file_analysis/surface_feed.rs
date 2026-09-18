@@ -67,8 +67,6 @@ impl FileAnalysis {
                     // File-internal pack lanes: read LIVE from the
                     // provider's re-registered analysis per query.
                     import_rows: _import_rows, // editing aid, not cross-file-visible
-                    rail_labels: _rail_labels,       // pack-wide convention
-                    rail_hints: _rail_hints,         // pack-wide convention
                     class_named_rails: _class_named_rails, // overlay-wide convention
                     preamble_end: _preamble_end, // an editing aid
                     imports_bind_names: _imports_bind_names, // pack-wide convention
