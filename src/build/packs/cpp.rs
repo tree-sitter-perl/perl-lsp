@@ -3,22 +3,6 @@
 use crate::build::query_extract::{LangPack, PeelSpec};
 use crate::model::file_analysis::{canonical_template_spelling, InferredType, NameSpellings, PackSpellings};
 
-/// The declarator peel for C/C++ struct fields and locals: pointer/reference
-/// wrappers, `field_identifier`/`identifier` leaves, recording the deref stack.
-/// The cpp pack's `nested_peel` AND the member-block synth lane
-/// (`cpp_reparse::synth_base`) both peel through this, so a pointer field's
-/// `*`s are extracted by ONE walker whether the field was written plainly or
-/// pasted from a `#define BASEOP` body (rule #10 — no second deref walker).
-pub(crate) const C_FIELD_DECL_PEEL: PeelSpec = PeelSpec {
-    wrappers: &[
-        ("pointer_declarator", crate::model::file_analysis::DerefKind::Pointer),
-        ("reference_declarator", crate::model::file_analysis::DerefKind::Reference),
-    ],
-    annot_kinds: &["type_qualifier"],
-    leaf_to_def: &[("identifier", "def.local"), ("field_identifier", "def.field")],
-    record_stack: true,
-};
-
 /// C/C++ writes and displays nothing of its own: the engine's type tags are
 /// its vocabulary, and it offers no import or annotation quick-fix. Its
 /// members belong to the container that declares them.
@@ -103,11 +87,6 @@ pub fn cpp_pack() -> LangPack {
         enum_members: &[],
         trigger_chars: &[".", ">", ":"],
         receiver_names: &["this"],
-        // `field_identifier` only ever names a struct/class member (the
-        // grammar's own distinction from a plain `identifier` local), so
-        // "def.field" matches the plain (non-pointer) field pattern above.
-        // Shared with the member-block synth lane (rule #10).
-        nested_peel: C_FIELD_DECL_PEEL,
         // DerefKind placeholder — record_stack false, so it's never read.
         recv_peel: PeelSpec {
             wrappers: &[

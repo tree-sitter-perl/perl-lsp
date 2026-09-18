@@ -249,11 +249,6 @@ pub struct LangPack {
     /// semantics → the pack owns it (NOT core `conventions.rs`, which is
     /// Perl's `$self`/`$class`).
     pub receiver_names: &'static [&'static str],
-    /// The pointer/reference DECLARATOR peel: a `@nested.target` chain
-    /// flattened to its leaf + per-level deref stack — `Box**`, `char****`,
-    /// `Box* const&`. THE recursion S-queries can't express (unbounded depth);
-    /// the pack declares the grammar, the generic `peel` walks it.
-    pub nested_peel: PeelSpec,
     /// The member-access RECEIVER peel: transparent expression wrappers
     /// (`(*p)`, `(&o)`, `(p)` → `p`) dropped so the invocant types via the
     /// inner. The SAME `peel`, no stack, any leaf.
@@ -367,7 +362,6 @@ impl LangPack {
             arg_kind,
             trigger_chars,
             receiver_names,
-            nested_peel,
             recv_peel,
             op_map,
             simple_var_kinds,
@@ -425,12 +419,10 @@ impl LangPack {
             out.push(("call_shapes", c.callee_field));
             out.push(("call_shapes", c.args_field));
         }
-        for (field, peel) in [("nested_peel", nested_peel), ("recv_peel", recv_peel)] {
-            out.extend(peel.wrappers.iter().map(|(k, _)| (field, *k)));
-            list(&mut out, field, peel.annot_kinds);
-            for (leaf, _) in peel.leaf_to_def {
-                out.push((field, *leaf));
-            }
+        out.extend(recv_peel.wrappers.iter().map(|(k, _)| ("recv_peel", *k)));
+        list(&mut out, "recv_peel", recv_peel.annot_kinds);
+        for (leaf, _) in recv_peel.leaf_to_def {
+            out.push(("recv_peel", *leaf));
         }
         out.extend(op_map.iter().map(|(k, _)| ("op_map", *k)));
         out.retain(|(_, v)| !v.is_empty());
@@ -440,9 +432,9 @@ impl LangPack {
 
 /// A declarative peel: descend a wrapper chain tree-sitter's fixed-depth
 /// S-expression queries cannot express, to the leaf, optionally accumulating a
-/// per-level deref stack. ONE combinator the pack parameterizes — `nested_peel`
-/// (declarators, stack, leaf→def) and `recv_peel` (expr wrappers, no stack, any
-/// leaf) are both instances of it. Empty `wrappers` = the capture is absent.
+/// per-level deref stack. The pack parameterizes it: `recv_peel` (expr
+/// wrappers, no stack, any leaf) is what it carries. Empty `wrappers` = the
+/// capture is absent.
 #[derive(Clone, Copy)]
 pub struct PeelSpec {
     /// Wrapper node kinds → the `DerefKind` each contributes (only consulted

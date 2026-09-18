@@ -1576,7 +1576,6 @@ fn pack_fields_name_no_grammar_shapes() {
         ("cpp", "domain_compare_kinds", 1, "B1 — the existing `@domain.slot` patterns"),
         ("cpp", "domain_compare_ops", 2, "B1 — the pattern's own `#any-of?`"),
         ("cpp", "member_kinds", 1, "B1 — the `@member.recv` patterns' root kinds"),
-        ("cpp", "nested_peel", 5, "B2 — per-level `@deref.*` captures"),
         ("cpp", "op_map", 2, "B1 — `\"->\" @member.op.arrow`, `\".\" @member.op.dot`"),
         ("cpp", "receiver_names", 1, "B1 — `@receiver.this`"),
         ("cpp", "recv_peel", 2, "B1 — `@recv.peel` / `@recv.peel.deref`"),

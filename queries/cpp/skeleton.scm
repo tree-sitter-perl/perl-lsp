@@ -338,13 +338,23 @@
 ; — the universal `(function_definition) @scope.sub` mints it.
 (function_definition type: (_) @rettype) @ool.def
 (function_definition !type) @ool.def
-; the three shapes that unwrap: a declarator WRAPPER the peel descends
-; through, the function declarator it stops at, and the qualified name whose
-; chain names the owner. Captured as themselves, so the depth is the walk's
-; business and the kinds are the document's.
-[(pointer_declarator) (reference_declarator) (parenthesized_declarator)] @ool.wrap
+; the declarator shapes, captured as themselves — the walks own the DEPTH
+; (unbounded: `Foo**& Class::m()`, `char* const& b`), the document owns the
+; kinds. @ool.wrap is a wrapper the out-of-line unwrap descends through to the
+; @ool.declarator it stops at, whose @ool.qualifier chain names the owner;
+; @deref.* is one level of the declarator peel, @deref.annot its cv-qualifiers,
+; and @deref.leaf.<kind> the chain's leaf — the suffix names the def the leaf
+; mints, so a member outlines as a field and a local as a local.
+(pointer_declarator) @ool.wrap @deref.pointer
+(reference_declarator) @ool.wrap @deref.ref
+(parenthesized_declarator) @ool.wrap
 (function_declarator) @ool.declarator
 (qualified_identifier) @ool.qualifier
+(pointer_declarator (type_qualifier) @deref.annot)
+(pointer_declarator (identifier) @deref.leaf.local)
+(pointer_declarator (field_identifier) @deref.leaf.field)
+(reference_declarator (identifier) @deref.leaf.local)
+(reference_declarator (field_identifier) @deref.leaf.field)
 ; a templated owner (`Buf<T>::grow`) owns by its BASE class name: the name
 ; field IS the class, so every qualifier segment peels through this capture
 ; instead of a string split on `<`.

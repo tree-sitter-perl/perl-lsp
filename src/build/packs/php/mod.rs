@@ -190,7 +190,6 @@ pub fn php_pack() -> LangPack {
         enum_members: &["value", "name", "cases", "from", "tryFrom"],
         trigger_chars: &["$", ">", ":"],
         receiver_names: &["$this"],
-        nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
         recv_peel: PeelSpec {
             wrappers: &[("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer)],
             annot_kinds: &[],
