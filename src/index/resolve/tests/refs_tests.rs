@@ -715,7 +715,7 @@ $b->run;
 
     // ---- (3) references — via rename_kind_at → TargetRef → refs_to.
     let target_from_f = match fa.rename_kind_at(f_run_call, None) {
-        Some(RenameKind::Method { name, class }) => {
+        Some(RenameKind::Method { name, class, .. }) => {
             TargetRef::for_test(name, TargetKind::Method { class })
         }
         other => panic!(
@@ -871,7 +871,7 @@ hi();
             name.clone(),
             TargetKind::Sub { package: package.clone() },
         ),
-        Some(RenameKind::Method { name, class }) => TargetRef::for_test(
+        Some(RenameKind::Method { name, class, .. }) => TargetRef::for_test(
             name.clone(),
             TargetKind::Method { class: class.clone() },
         ),
@@ -882,7 +882,7 @@ hi();
         Some(RenameKind::Function { name, package }) => {
             fa.rename_sub_in_package(name, package, "renamed_hi", None)
         }
-        Some(RenameKind::Method { name, class }) => {
+        Some(RenameKind::Method { name, class, .. }) => {
             fa.rename_method_in_class(name, class, "renamed_hi", None)
         }
         _ => Vec::new(),
@@ -1168,7 +1168,7 @@ $u->create(name => 'alice');
 
     let kind = f1_fa.rename_kind_at(cursor, Some(&idx));
     let target = match kind {
-        Some(RenameKind::Method { name, class }) => {
+        Some(RenameKind::Method { name, class, .. }) => {
             TargetRef::for_test(name, TargetKind::Method { class })
         }
         other => panic!("expected Method, got {:?}", other),
@@ -2248,7 +2248,7 @@ fn references_cross_file_sub_fans_out_and_stays_package_scoped() {
 /// This is the crm role case (`GenericCo::Role::REST::success` called as
 /// `$c->success` in every controller that `with`s the role) and the
 /// `todays_rate`/`add_data` shape generally. The matcher uses
-/// `method_rename_chain`, so the parent is on the invocant's
+/// `member_rename_chain`, so the parent is on the invocant's
 /// resolution chain; an unrelated class sharing the method name is
 /// not, and stays out.
 #[test]

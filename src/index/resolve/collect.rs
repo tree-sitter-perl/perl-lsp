@@ -368,12 +368,16 @@ pub(super) fn method_classes_for(
     origin: &FileAnalysis,
     class: &str,
     name: &str,
+    member_kind: Option<MemberKind>,
     module_index: Option<&dyn CrossFileLookup>,
     scope: OverrideScope,
 ) -> Vec<String> {
+    // A target with no family stated is a callable ask, which is what every
+    // caller of these walks meant before the family axis existed.
+    let want = member_kind.unwrap_or(MemberKind::Callable);
     match scope {
-        OverrideScope::Hierarchy => origin.method_override_family(class, name, module_index),
-        OverrideScope::Dispatch => origin.method_rename_chain(class, name, module_index),
+        OverrideScope::Hierarchy => origin.member_override_family(class, name, want, module_index),
+        OverrideScope::Dispatch => origin.member_rename_chain(class, name, want, module_index),
     }
 }
 
@@ -1199,7 +1203,7 @@ pub(super) fn collect_from_analysis(
                 // into a cross-file parent; enrichment re-stamps OPEN docs
                 // only) — re-resolve lazily here, where the index is in hand,
                 // rather than silently excluding the site. Either way the
-                // class then fans out over `method_rename_chain` so
+                // class then fans out over `member_rename_chain` so
                 // `$child->m` matches an ancestor-defined target while
                 // unrelated same-named methods stay out.
                 // Same derived-from-the-same-match invariant as the FunctionCall
@@ -1253,7 +1257,12 @@ pub(super) fn collect_from_analysis(
                                     || rename_chain_cache
                                         .entry(cn.clone())
                                         .or_insert_with(|| {
-                                            analysis.method_rename_chain(&cn, method, module_index)
+                                            analysis.member_rename_chain(
+                                                &cn,
+                                                method,
+                                                target.member_kind.unwrap_or(MemberKind::Callable),
+                                                module_index,
+                                            )
                                         })
                                         .iter()
                                         .any(|c| target.method_classes.iter().any(|f| f == c))
@@ -1265,7 +1274,12 @@ pub(super) fn collect_from_analysis(
                                 cn == *pkg || rename_chain_cache
                                     .entry(cn.clone())
                                     .or_insert_with(|| {
-                                        analysis.method_rename_chain(&cn, method, module_index)
+                                        analysis.member_rename_chain(
+                                                &cn,
+                                                method,
+                                                target.member_kind.unwrap_or(MemberKind::Callable),
+                                                module_index,
+                                            )
                                     })
                                     .iter()
                                     .any(|c| c == pkg)

@@ -370,15 +370,16 @@ impl FileAnalysis {
     /// edges only (`@ISA`/`use parent`/Moo via `GraphView`), NEVER name matches
     /// — two unrelated classes both defining `sub render {}` with no edge
     /// between them are not a family.
-    pub fn method_override_family(
+    pub fn member_override_family(
         &self,
         class_name: &str,
         method_name: &str,
+        want: MemberKind,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<String> {
         let defines = |cls: &str| {
             matches!(
-                self.resolve_method_in_ancestors(cls, method_name, module_index),
+                self.resolve_member(cls, method_name, want, module_index),
                 Some(MethodResolution::Local { class: ref c, .. })
                     | Some(MethodResolution::CrossFile { class: ref c, .. })
                     if c == cls
@@ -420,7 +421,7 @@ impl FileAnalysis {
     /// empty answer rather than a wrong one.
     ///
     /// One gather, two readers: `implementations_of` (which then subtracts
-    /// its own contract line) and `method_override_family`. They disagreed
+    /// its own contract line) and `member_override_family`. They disagreed
     /// while each had its own walk — `--implementations` found the sibling
     /// and `references` did not, from the same cursor.
     pub fn dispatch_participants(
@@ -457,7 +458,7 @@ impl FileAnalysis {
     /// A root class plus every transitive descendant that inherits from it,
     /// over PROVEN inheritance edges only (`GraphView`'s `INHERITS_INV`
     /// walk, which excludes the origin — re-added as the family head).
-    /// The shared descendant-walk tail of `method_override_family` and
+    /// The shared descendant-walk tail of `member_override_family` and
     /// `owned_accessor_family`; the two differ only in how they choose the
     /// root (contract-root search UP vs the owning class itself).
     fn descendant_family(
@@ -485,7 +486,7 @@ impl FileAnalysis {
     /// The rename family for a class-OWNED synthesized accessor (a Moo `has`
     /// reader, a DBIC column/relationship accessor): the owning class plus
     /// every transitive descendant that inherits it. Unlike
-    /// `method_override_family`, it never searches UPWARD for a contract
+    /// `member_override_family`, it never searches UPWARD for a contract
     /// root — a synthesized accessor is owned by its declaring class, and a
     /// same-named method in a framework ancestor (`DBIx::Class::PK::id` vs a
     /// synthesized `id` column) is a name collision, not the same symbol.
@@ -502,13 +503,14 @@ impl FileAnalysis {
         self.descendant_family(class_name.to_string(), module_index)
     }
 
-    pub fn method_rename_chain(
+    pub fn member_rename_chain(
         &self,
         class_name: &str,
         method_name: &str,
+        want: MemberKind,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<String> {
-        let defining = match self.resolve_method_in_ancestors(class_name, method_name, module_index) {
+        let defining = match self.resolve_member(class_name, method_name, want, module_index) {
             Some(MethodResolution::Local { class, .. })
             | Some(MethodResolution::CrossFile { class, .. }) => class,
             None => return vec![class_name.to_string()],

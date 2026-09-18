@@ -122,11 +122,13 @@ impl TargetRef {
     pub fn method(
         name: String,
         class: String,
+        member_kind: Option<MemberKind>,
         origin: &FileAnalysis,
         module_index: Option<&dyn CrossFileLookup>,
         scope: OverrideScope,
     ) -> Self {
-        let method_classes = method_classes_for(origin, &class, &name, module_index, scope);
+        let method_classes =
+            method_classes_for(origin, &class, &name, member_kind, module_index, scope);
         // The pack's constructor convention (php `__construct`) is a fact of
         // the METHOD TARGET itself: every builder of a Method target — the
         // rename-kind mapping, the identity lanes, implementations — gets
@@ -142,7 +144,7 @@ impl TargetRef {
             def_paths: Vec::new(),
             bare_constant: false,
             ctor_of,
-            member_kind: None,
+            member_kind,
         }
     }
 
@@ -280,7 +282,14 @@ impl TargetRef {
                 // dispatch sites. A package-less script sub has no class, hence
                 // no family.
                 let method_classes = match &package {
-                    Some(class) => method_classes_for(origin, class, &name, module_index, scope),
+                    Some(class) => method_classes_for(
+                        origin,
+                        class,
+                        &name,
+                        Some(MemberKind::Callable),
+                        module_index,
+                        scope,
+                    ),
                     None => Vec::new(),
                 };
                 // Function targets keep empty def_paths HERE: a Sub cursor
@@ -309,8 +318,8 @@ impl TargetRef {
                     member_kind: Some(MemberKind::Callable),
                 }
             }
-            RenameKind::Method { name, class } => {
-                TargetRef::method(name, class, origin, module_index, scope)
+            RenameKind::Method { name, class, member } => {
+                TargetRef::method(name, class, member, origin, module_index, scope)
             }
             RenameKind::Package(name) => {
                 // A class-name cursor names an identity; the matcher
