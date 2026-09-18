@@ -1290,3 +1290,35 @@ fn python_from_import_binds_the_name_not_the_module() {
     assert_eq!(aliased.len(), 1, "{aliased:?}");
     assert!(aliased[0].contains("'p'"), "an alias binds the alias: {aliased:?}");
 }
+
+/// A body-typed return survives enrichment. The arm and chain witnesses are
+/// minted before `finalize_post_walk` seals the enrichment baseline, so the
+/// truncate-back-to-baseline that every enrich pass starts with cannot take
+/// them; pushed after it, a multi-return function lost its type the first
+/// time the file was enriched, and the CLI/`--batch` path enriches
+/// unconditionally.
+#[cfg(feature = "cpp")]
+#[test]
+fn a_body_typed_return_survives_repeated_enrichment() {
+    use crate::model::file_analysis::InferredType;
+    let mut fa = cpp_driver()
+        .analyze("auto pick(int c) {\n  if (c) { return 1; }\n  return 2;\n}\n");
+    let sid = fa.symbols().iter().find(|s| s.name == "pick").unwrap().id;
+    let arms = |fa: &crate::model::file_analysis::FileAnalysis| {
+        fa.witnesses
+            .for_attachment(&crate::model::witnesses::WitnessAttachment::SymbolReturnArm(sid))
+            .len()
+    };
+    assert_eq!(arms(&fa), 2, "both return sites are arms");
+    let typed = fa.sub_return_type_at_arity("pick", Some(1));
+    assert_eq!(typed, Some(InferredType::Numeric), "the body types the return");
+    for pass in 1..=2 {
+        fa.enrich_imported_types_with_keys(None);
+        assert_eq!(arms(&fa), 2, "arms survive enrichment pass {pass}");
+        assert_eq!(
+            fa.sub_return_type_at_arity("pick", Some(1)),
+            typed,
+            "the return still types after enrichment pass {pass}"
+        );
+    }
+}
