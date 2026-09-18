@@ -188,6 +188,12 @@ pub struct RailConventions {
     pub labels: Vec<(String, String)>,
     /// rail → the diagnostic code its findings carry.
     pub codes: Vec<(String, String)>,
+    /// rail → every separator its names are written with: a path rail's
+    /// hierarchy `sep`, and the parameter separator `name_seps` gives it. A
+    /// name that ENDS with one is a prefix the caller concatenates onto
+    /// (`view('parts.' . $kind)`), which the undefined-name lane cannot
+    /// answer for.
+    pub seps: Vec<(String, String)>,
     pub hints: Vec<String>,
     pub name_seps: Vec<(String, String)>,
     /// The rails the documents declare class-keyed — baked onto every file
@@ -321,6 +327,9 @@ pub fn rail_conventions_for(pack: &LangPack) -> std::sync::Arc<RailConventions> 
         out.codes.extend(doc.codes.iter().map(|(k, v)| (k.clone(), v.clone())));
         out.hints.extend(doc.hints.iter().cloned());
         out.name_seps.extend(doc.name_seps.iter().map(|(k, v)| (k.clone(), v.clone())));
+        out.seps.extend(doc.name_seps.iter().map(|(k, v)| (k.clone(), v.clone())));
+        out.seps
+            .extend(doc.path_rails.iter().map(|r| (r.rail.clone(), r.sep.clone())));
         out.class_named_rails.extend(
             doc.names_are
                 .iter()
@@ -332,6 +341,8 @@ pub fn rail_conventions_for(pack: &LangPack) -> std::sync::Arc<RailConventions> 
     out.codes.sort();
     out.hints.sort();
     out.name_seps.sort();
+    out.seps.sort();
+    out.seps.dedup();
     out.class_named_rails.sort();
     out.class_named_rails.dedup();
     let arc = Arc::new(out);

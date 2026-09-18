@@ -1374,9 +1374,11 @@ pub fn pack_symbol_diagnostics(
                 let names = owner.names_are(pack);
                 let class_named = names == RailNames::Classes;
                 let name = r.target_name.as_str();
-                // Silence: a name the lane cannot answer for. A trailing
-                // separator is a PREFIX the caller concatenates onto
-                // (`view('auth.parts.login-form-' . $kind)`); a `::` names
+                // Silence: a name the lane cannot answer for. A name ending
+                // in one of the rail's OWN separators is a prefix the caller
+                // concatenates onto (`view('auth.parts.' . $kind)`), and
+                // which separators a rail's names use is the document's word
+                // — a plugin dir that adds a rail says it there; a `::` names
                 // a package-namespaced rail (`errors::minimal`) whose
                 // provider file lives outside the path rails; a class-keyed
                 // emission with no dispatcher (`Theme::dispatch(X::CONST)`)
@@ -1386,7 +1388,11 @@ pub fn pack_symbol_diagnostics(
                     .names()
                     .member_sep()
                     .is_some_and(|sep| name.contains(sep));
-                if name.ends_with(['.', '_', '-']) || member_qualified || name.contains('*') {
+                let prefix_of_a_name = rails
+                    .seps
+                    .iter()
+                    .any(|(r, sep)| r == rail && !sep.is_empty() && name.ends_with(sep.as_str()));
+                if prefix_of_a_name || member_qualified || name.contains('*') {
                     continue;
                 }
                 if let (true, RefKind::DispatchCall { dispatcher }) = (class_named, &r.kind) {
