@@ -1315,6 +1315,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         span: Span { start: tree.root_node().start_position(), end: tree.root_node().end_position() },
         package: None,
         owner: None,
+        implicit_receiver: false,
     });
     scope_stack.push((tree.root_node().end_byte(), ScopeId(0)));
 
@@ -1472,14 +1473,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // content (function bodies, prototype signatures, explicit
             // instantiations, requires-expressions) — the kind
             // `scope_within_sub_body` reads to shield params/locals from the
-            // outline and the class-content lane. Pack subs carry no name on
-            // the scope (the Symbol holds identity).
-            "scope" | "scope.sub" => {
+            // outline and the class-content lane. The
+            // `.implicit_receiver` suffix is the language saying a bare name
+            // in this body may elide the member receiver. Pack subs carry no
+            // name on the scope (the Symbol holds identity).
+            cap @ ("scope" | "scope.sub" | "scope.sub.implicit_receiver") => {
                 let id = ScopeId(out.scopes.len() as u32);
                 out.scopes.push(Scope {
                     id,
                     parent: Some(cur_scope),
-                    kind: if e.cap == "scope.sub" {
+                    kind: if cap.starts_with("scope.sub") {
                         ScopeKind::Sub { name: String::new() }
                     } else {
                         ScopeKind::Block
@@ -1487,6 +1490,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     span: Span { start: e.start, end: e.end },
                     package: package.clone(),
                     owner: None,
+                    implicit_receiver: cap == "scope.sub.implicit_receiver",
                 });
                 scope_stack.push((e.end_byte, id));
                 out.scope_count += 1;

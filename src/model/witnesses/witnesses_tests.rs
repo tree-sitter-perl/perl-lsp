@@ -1429,7 +1429,7 @@ fn a_parent_class_aliased_position_answers_the_child_dispatch() {
     packages.entry("Child".into()).or_default().parents = vec!["S".into()];
     // The context's scope chain is what the callee's `Variable` edge walks.
     let scopes: Vec<Scope> = vec![
-        Scope { id: ScopeId(0), parent: None, kind: crate::model::file_analysis::ScopeKind::File, span: span(0, 0, 9, 0), package: None, owner: None },
+        Scope { id: ScopeId(0), parent: None, kind: crate::model::file_analysis::ScopeKind::File, span: span(0, 0, 9, 0), package: None, owner: None, implicit_receiver: false },
         Scope {
             id: ScopeId(1),
             parent: Some(ScopeId(0)),
@@ -1437,6 +1437,7 @@ fn a_parent_class_aliased_position_answers_the_child_dispatch() {
             span: span(1, 0, 3, 0),
             package: Some("S".into()),
             owner: None,
+            implicit_receiver: false,
         },
     ];
     let ctx = BagContext {

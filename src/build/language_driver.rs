@@ -1153,6 +1153,7 @@ fn inject_member_blocks(
             span: base.body_scope_span,
             package: Some(base.macro_name.clone()),
             owner: None,
+            implicit_receiver: false,
         });
         skel.scope_count = skel.scopes.len();
         for m in &base.members {

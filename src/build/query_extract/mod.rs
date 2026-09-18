@@ -507,6 +507,10 @@ pub fn rail_of(cap: &str) -> Option<(RailCapture, &str)> {
 /// array key a path rail promotes to a name, and a call expression whose
 /// value the overlay declares. The extractor serves them all, so a
 /// baseline that does not know them calls every one of them unserved.
+///
+/// A suffix only ONE bundled skeleton spells belongs here too: the
+/// extractor's arm is language-generic, so another language's overlay may
+/// state the same fact about a body its own skeleton left plain.
 const OVERLAY_ONLY_CAPTURES: &[&str] = &[
     "ref.call.named",
     "ref.method.named.self",
@@ -515,6 +519,7 @@ const OVERLAY_ONLY_CAPTURES: &[&str] = &[
     "def.handler.key",
     "key.elem",
     "expr.annot",
+    "scope.sub.implicit_receiver",
 ];
 
 /// The captures in `declared` the extractor does NOT serve — `--plugin-check`'s
