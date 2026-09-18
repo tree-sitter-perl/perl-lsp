@@ -121,7 +121,6 @@ pub fn php_pack() -> LangPack {
                 t => php_annot_type(t).map(ReturnExpr::Concrete),
             }
         },
-        field_registry_edges: true,
         super_receiver: |t| t == "parent",
         self_class_tokens: &["self", "static"],
         class_token_kinds: &["name", "qualified_name"],

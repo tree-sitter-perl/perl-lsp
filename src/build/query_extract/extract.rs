@@ -1478,11 +1478,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     out.specializations
                         .push((shaped.clone(), (pack.shape_name)("spec.primary", primary)));
                 }
-                // Registry field edge (pack-gated — see `field_registry_edges`
-                // on `LangPack`): a data member's type lives as a Variable
-                // witness in its declaring scope, and this edge lets a
-                // property-access hop dispatch the field through the same
-                // class-keyed chase methods use.
                 // Foreach element peel: the loop var's value IS the
                 // collection's uniform element, deferred to query time via
                 // `Projected{base, Element}`. A simple-variable collection
@@ -1530,13 +1525,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         });
                     }
                 }
-                if kind == "field" && pack.field_registry_edges {
+                if kind == "field" {
                     if let Some(cls) = &pkg {
                         use crate::model::witnesses as wit;
                         // The field's VALUE edge on its own attachment
                         // (`docs/adr/member-kinds.md`): a `ValueHop` chases
                         // `Field`, a `MethodHop` chases `PackageSymbol`, so
-                        // no tag partitions one attachment by kind.
+                        // no tag partitions one attachment by kind. Minted for
+                        // every language — the hop substitutes the class's
+                        // template params against the receiver, so a
+                        // parametric field answers `int`, not `T`.
                         out.witnesses.push(wit::Witness {
                             attachment: wit::WitnessAttachment::Field {
                                 owner: cls.clone(),

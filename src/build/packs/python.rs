@@ -31,7 +31,6 @@ pub fn python_pack() -> LangPack {
         declared_return: |t| {
             python_annot_type(t).map(crate::model::witnesses::ReturnExpr::Concrete)
         },
-        field_registry_edges: false,
         super_receiver: |_| false,
         self_class_tokens: &[],
         class_token_kinds: &[],

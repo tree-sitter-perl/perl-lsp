@@ -27,7 +27,6 @@ pub fn cmake_pack() -> LangPack {
         default_name: |_, _, _| None,
         annot_type: |_| None,
         declared_return: |_| None,
-        field_registry_edges: false,
         super_receiver: |_| false,
         self_class_tokens: &[],
         class_token_kinds: &[],

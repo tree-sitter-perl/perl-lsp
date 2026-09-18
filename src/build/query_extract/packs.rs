@@ -64,15 +64,6 @@ pub struct LangPack {
     /// structure out — the engine never branches on the spelling itself
     /// (rule #10), and the writeback publishes what comes back.
     pub declared_return: fn(text: &str) -> Option<crate::model::witnesses::ReturnExpr>,
-    /// Field types answer through the registry: each data-member decl mints
-    /// `PackageSymbol{class, field} → Edge(Variable)` so a property-access
-    /// hop (`$this->query->where(...)`) dispatches the field and chains.
-    /// True only where the registry IS the field-type authority (php).
-    /// False for cpp: its field answers go through the instantiation-aware
-    /// `member_value_type` lane (template-param substitution, typedef
-    /// display), and a registry edge answers the RAW declared type first —
-    /// `item_: T` instead of the substituted `int`.
-    pub field_registry_edges: bool,
     /// Does this receiver spelling mean "dispatch from the parent of the
     /// writing class, skipping it" (php `parent::`)? The ref is then
     /// minted with the model's SUPER method token (`SUPER::name`, the
@@ -357,7 +348,6 @@ impl LangPack {
             default_name: _,
             annot_type: _,
             declared_return: _,
-            field_registry_edges: _,
             super_receiver: _,
             self_class_tokens,
             class_token_kinds,

@@ -804,6 +804,7 @@ impl FileAnalysis {
                 module_index,
                 package_parents: &self.packages,
                 app_surface_consumers: &self.plugin.app_surface_consumers,
+                class_params: &self.pack.template_params,
             };
             crate::model::witnesses::emit_mutation_extension_witnesses(
                 &mut self.witnesses,
