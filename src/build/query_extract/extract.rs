@@ -20,12 +20,19 @@ struct Event {
 
 
 /// What the document says about one declarator node: a level of the peel, a
-/// per-level cv-qualifier, or the chain's leaf (whose capture suffix names the
-/// def the synthetic leaf event mints — `@deref.leaf.field` → `def.field`).
+/// per-level cv-qualifier, a level that says the declared name holds a value
+/// that is CALLED, a level that only groups, or the chain's leaf (whose
+/// capture suffix names the def the synthetic leaf event mints —
+/// `@deref.leaf.field` → `def.field`).
 #[derive(Clone)]
 enum DerefCap {
     Step(crate::model::file_analysis::DerefKind),
     Annot,
+    /// `@deref.callable` — the declared name is invoked (a function-pointer
+    /// declarator). Adds no level to the stack; the leaf carries the fact.
+    Callable,
+    /// `@deref.paren` — a grouping level that denotes nothing of its own.
+    Transparent,
     Leaf(String),
 }
 
@@ -49,6 +56,8 @@ impl DerefCaps {
             "pointer" => DerefCap::Step(DerefKind::Pointer),
             "ref" => DerefCap::Step(DerefKind::Reference),
             "annot" => DerefCap::Annot,
+            "callable" => DerefCap::Callable,
+            "paren" => DerefCap::Transparent,
             _ => match rest.strip_prefix("leaf.") {
                 Some(kind) => DerefCap::Leaf(format!("def.{kind}")),
                 None => return false,
@@ -80,46 +89,68 @@ impl DerefCaps {
     /// Flatten a declarator chain — the recursion tree-sitter's fixed-depth
     /// queries cannot express — to its leaf, recording a `DerefStep` per level.
     /// Outermost level first (left-to-right display order, `Box*&` →
-    /// `[Pointer, Reference]`); depth-capped. `None` when the chain reaches no
-    /// leaf the document named (a function-pointer declarator), which mints
-    /// nothing rather than a half-read shape.
+    /// `[Pointer, Reference]`); depth-capped. The `callable` verdict is true
+    /// when some level said the declared value is invoked. `None` when the
+    /// chain reaches no leaf the document named, which mints nothing rather
+    /// than a half-read shape.
     pub fn peel<'a>(
         &self,
         mut node: tree_sitter::Node<'a>,
         src: &[u8],
-    ) -> Option<(tree_sitter::Node<'a>, Vec<crate::model::file_analysis::DerefStep>, String)> {
+    ) -> Option<PeeledChain<'a>> {
         use crate::model::file_analysis::DerefStep;
         let at = |n: &tree_sitter::Node| self.0.get(&(n.start_byte(), n.end_byte()));
+        // The one descent: the first child the document named. A level's
+        // inner declarator is the only child it captures, so this needs no
+        // field name and no kind list.
+        let inner_of = |n: tree_sitter::Node<'a>| -> Option<tree_sitter::Node<'a>> {
+            let mut cur = n.walk();
+            let found =
+                n.children(&mut cur).find(|ch| !matches!(at(ch), None | Some(DerefCap::Annot)));
+            found
+        };
         let mut stack = Vec::new();
+        let mut callable = false;
         for _ in 0..32 {
             match at(&node) {
                 Some(DerefCap::Step(kind)) => {
                     let mut annotations = Vec::new();
-                    let mut inner = None;
                     let mut cur = node.walk();
                     for ch in node.children(&mut cur) {
-                        match at(&ch) {
-                            Some(DerefCap::Annot) => {
-                                if let Ok(t) = ch.utf8_text(src) {
-                                    annotations.push(t.to_string());
-                                }
+                        if let Some(DerefCap::Annot) = at(&ch) {
+                            if let Ok(t) = ch.utf8_text(src) {
+                                annotations.push(t.to_string());
                             }
-                            Some(_) if inner.is_none() => inner = Some(ch),
-                            _ => {}
                         }
                     }
                     stack.push(DerefStep { kind: *kind, annotations });
-                    node = inner?;
+                    node = inner_of(node)?;
                 }
+                Some(DerefCap::Callable) => {
+                    callable = true;
+                    node = inner_of(node)?;
+                }
+                Some(DerefCap::Transparent) => node = inner_of(node)?,
                 // `identifier`→`def.local` (param/local), `field_identifier`→
                 // `def.field` (a class member), so a pointer field outlines as a
                 // member.
-                Some(DerefCap::Leaf(def_cap)) => return Some((node, stack, def_cap.clone())),
+                Some(DerefCap::Leaf(def_cap)) => {
+                    return Some(PeeledChain { leaf: node, stack, def_cap: def_cap.clone(), callable })
+                }
                 _ => return None,
             }
         }
         None
     }
+}
+
+/// A declarator chain read to its end: the name token, the levels above it,
+/// the def capture its suffix names, and whether the value is invoked.
+pub struct PeeledChain<'a> {
+    pub leaf: tree_sitter::Node<'a>,
+    pub stack: Vec<crate::model::file_analysis::DerefStep>,
+    pub def_cap: String,
+    pub callable: bool,
 }
 
 /// Peel declarator wrappers (`@ool.wrap`, ANY depth) to the inner function
@@ -288,6 +319,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut events: Vec<Event> = Vec::new();
     // match_id → the pointer/reference declarator stack a `@nested.target`
     // capture unravelled to. Read by the `def.*` handler to stamp the symbol.
+    // Matches whose peeled chain said the declared value is CALLED.
+    let mut nested_callable: std::collections::HashSet<usize> = Default::default();
     let mut nested_stacks: std::collections::HashMap<usize, Vec<crate::model::file_analysis::DerefStep>> =
         std::collections::HashMap::new();
     // match_id → was the IMMEDIATE member-access receiver a simple variable?
@@ -571,10 +604,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // it directly — downstream join/symbol/witness paths are unchanged, and
     // arbitrary nesting works without enumerating it.
     for (node, match_id) in &nested_targets {
-        let Some((leaf, stack, def_cap)) = deref_caps.peel(*node, source) else { continue };
-        nested_stacks.insert(*match_id, stack);
+        let Some(chain) = deref_caps.peel(*node, source) else { continue };
+        nested_stacks.insert(*match_id, chain.stack);
+        if chain.callable {
+            nested_callable.insert(*match_id);
+        }
+        let leaf = chain.leaf;
         let ltext = leaf.utf8_text(source).unwrap_or("").to_string();
-        for syn in ["flow.target", &def_cap] {
+        for syn in ["flow.target", &chain.def_cap] {
             events.push(Event {
                 start_byte: leaf.start_byte(),
                 end_byte: leaf.end_byte(),
@@ -1323,6 +1360,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         span: Span { start: tree.root_node().start_position(), end: tree.root_node().end_position() },
         package: None,
         owner: None,
+        implicit_receiver: false,
     });
     scope_stack.push((tree.root_node().end_byte(), ScopeId(0)));
 
@@ -1495,14 +1533,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // content (function bodies, prototype signatures, explicit
             // instantiations, requires-expressions) — the kind
             // `scope_within_sub_body` reads to shield params/locals from the
-            // outline and the class-content lane. Pack subs carry no name on
-            // the scope (the Symbol holds identity).
-            "scope" | "scope.sub" => {
+            // outline and the class-content lane. The
+            // `.implicit_receiver` suffix is the language saying a bare name
+            // in this body may elide the member receiver. Pack subs carry no
+            // name on the scope (the Symbol holds identity).
+            cap @ ("scope" | "scope.sub" | "scope.sub.implicit_receiver") => {
                 let id = ScopeId(out.scopes.len() as u32);
                 out.scopes.push(Scope {
                     id,
                     parent: Some(cur_scope),
-                    kind: if e.cap == "scope.sub" {
+                    kind: if cap.starts_with("scope.sub") {
                         ScopeKind::Sub { name: String::new() }
                     } else {
                         ScopeKind::Block
@@ -1510,6 +1550,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     span: Span { start: e.start, end: e.end },
                     package: package.clone(),
                     owner: None,
+                    implicit_receiver: cap == "scope.sub.implicit_receiver",
                 });
                 scope_stack.push((e.end_byte, id));
                 out.scope_count += 1;
@@ -1949,7 +1990,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     params: Vec::new(),
                     doc: None,
                     deprecation: None,
-                    flags: Default::default(),
+                    // A member whose declarator says its value is invoked
+                    // (`int (*read)(char *)`): the declaration carries the
+                    // fact, so a call landing on it needs no name list.
+                    flags: if nested_callable.contains(&e.match_id) {
+                        crate::model::file_analysis::SymbolFlags::CALLABLE_VALUE
+                    } else {
+                        Default::default()
+                    },
                     qualifier_owned: qualifier_by_match.contains_key(&e.match_id),
                 });
             }

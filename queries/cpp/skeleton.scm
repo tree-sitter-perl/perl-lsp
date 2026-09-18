@@ -358,6 +358,11 @@
 (pointer_declarator (field_identifier) @deref.leaf.field)
 (reference_declarator (identifier) @deref.leaf.local)
 (reference_declarator (field_identifier) @deref.leaf.field)
+; two more levels the peel descends: @deref.callable says the declared name
+; holds a value that is INVOKED (a function-pointer declarator), and
+; @deref.paren is the grouping level that denotes nothing of its own.
+(function_declarator) @deref.callable
+(parenthesized_declarator) @deref.paren
 ; a templated owner (`Buf<T>::grow`) owns by its BASE class name: the name
 ; field IS the class, so every qualifier segment peels through this capture
 ; instead of a string split on `<`.
@@ -390,7 +395,10 @@
 ; sub-body content — `scope_within_sub_body` shields them from the outline
 ; and keeps them out of the class-content lane a sticky class package
 ; would otherwise drag them into.
-(function_definition) @scope.sub
+; `.implicit_receiver`: a body in this language elides the member receiver
+; for reads AND for sibling calls (`return inner_;`, `grow()`) — C++ name
+; lookup finds the member before any free function of that name.
+(function_definition) @scope.sub.implicit_receiver
 
 ; ---- top-level / namespaced function prototypes (the bulk of any
 ; header file) — a `declaration`, not a `function_definition`. A
@@ -633,6 +641,15 @@
 (field_declaration
   type: (_) @type.annot
   declarator: [(pointer_declarator) (reference_declarator)] @nested.target)
+; a function-POINTER data member (`int (*read)(char *);`) — a stored slot
+; whose value is called. The parenthesized declarator is what distinguishes
+; it from a method prototype (`int read();`), whose declarator names the
+; member directly; the chain's @deref.callable level is what makes
+; `ops->read(buf)` resolve to the slot.
+(field_declaration
+  type: (_) @type.annot
+  declarator: (function_declarator
+    declarator: (parenthesized_declarator)) @nested.target)
 
 ; ---- C goto labels: `done:` is a nav target, `goto done;` jumps to it.
 ; The def is an unpackaged Variable symbol (outline-hidden, like a local);

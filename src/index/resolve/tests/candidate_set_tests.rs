@@ -490,15 +490,16 @@ fn goto_def_agrees_with_references_on_template_method() {
 #[test]
 fn a_call_admits_a_stored_member_only_where_a_member_read_is_a_call() {
     use crate::build::language_driver::LanguageRegistry;
-    use crate::model::file_analysis::{MemberKind, SymKind};
+    use crate::model::file_analysis::{MemberKind, SymKind, SymbolFlags};
 
+    let none = SymbolFlags::empty();
     let perl = LanguageRegistry::spellings("perl");
     assert!(
-        MemberKind::Callable.admits_decl(SymKind::Field, perl),
+        MemberKind::Callable.admits_decl(SymKind::Field, none, perl),
         "a Perl accessor call lands on the slot it reads",
     );
     assert!(
-        !MemberKind::Value.admits_decl(SymKind::Method, perl),
+        !MemberKind::Value.admits_decl(SymKind::Method, none, perl),
         "a value read never answers with a callable",
     );
 
@@ -506,12 +507,16 @@ fn a_call_admits_a_stored_member_only_where_a_member_read_is_a_call() {
     {
         let php = LanguageRegistry::spellings("php");
         assert!(
-            !MemberKind::Callable.admits_decl(SymKind::Field, php),
+            !MemberKind::Callable.admits_decl(SymKind::Field, none, php),
             "php spells its calls: a property is not a method",
         );
         assert!(
-            MemberKind::Callable.admits_decl(SymKind::Method, php),
+            MemberKind::Callable.admits_decl(SymKind::Method, none, php),
             "the method itself still answers",
+        );
+        assert!(
+            MemberKind::Callable.admits_decl(SymKind::Field, SymbolFlags::CALLABLE_VALUE, php),
+            "a slot the declaration says is invoked answers a call, in any language",
         );
     }
 }

@@ -570,80 +570,127 @@ fn cpp_splice_remaps_domain_sites() {
     );
 }
 
-// The implicit-`this->field` read pass is a C/C++ semantic (a bare name can
-// mean `this->field`); the pack declares whether it applies. Only cpp mints
-// the `SymKind::Field` + unresolved-bare-ref shape the pass keys on, so we
-// drive it through cpp extraction and run `emit_return_fuel` with the flag
-// both ways on fresh copies — the flag is the ONLY difference.
+// A bare name that names a field of the enclosing class is an implicit
+// `this->field` read where the document says the body elides the receiver
+// (`@scope.sub.implicit_receiver`). The read binds to the field AND mints
+// the `Expr → Edge(Variable{field})` edge that types it; a lambda body
+// nested in the method elides too, because the scope CHAIN carries the
+// fact.
 #[cfg(feature = "cpp")]
 #[test]
-fn implicit_field_read_pass_gated_by_pack_capability() {
+fn implicit_field_read_binds_and_types_through_the_scope_chain() {
+    use crate::model::file_analysis::{RefKind, SymKind};
     use crate::model::witnesses::WitnessSource;
-    let src = "struct C { int inner_; int get() { return inner_; } };\n";
-    let build = || {
-        let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&tree_sitter_cpp::LANGUAGE.into()).unwrap();
-        let tree = parser.parse(src, None).unwrap();
-        let pack = crate::build::query_extract::cpp_pack();
-        let mut skel = crate::build::query_extract::extract(&tree, src.as_bytes(), &pack).unwrap();
-        let sites = std::mem::take(&mut skel.return_sites);
-        (skel.into_file_analysis(), sites)
-    };
-    let count = |fa: &FileAnalysis| {
-        fa.witnesses
-            .all()
-            .iter()
-            .filter(|w| matches!(&w.source, WitnessSource::Builder(s) if s == "cpp_implicit_field_read"))
-            .count()
-    };
-
-    let (mut fa_on, sites) = build();
-    emit_return_fuel(&mut fa_on, &sites, true);
-    assert_eq!(count(&fa_on), 1, "capability on → bare-member read minted");
-
-    let (mut fa_off, sites) = build();
-    emit_return_fuel(&mut fa_off, &sites, false);
-    assert_eq!(count(&fa_off), 0, "capability off → pass gated, nothing minted");
-
-    assert!(!crate::build::query_extract::python_pack().implicit_this_members,
-        "python: a bare name is never self.field");
-    assert!(crate::build::query_extract::cpp_pack().implicit_this_members,
-        "cpp: methods read members with implicit this->");
-
+    let src = "struct C { int inner_; int get() { return inner_; } \
+int lam() { auto f = [&]{ return inner_; }; return f(); } };\n";
+    let fa = cpp_driver().analyze(src);
+    let edges = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter(|w| matches!(&w.source, WitnessSource::Builder(s) if s == "implicit_field_read"))
+        .count();
+    assert_eq!(edges, 2, "both bare reads type through the field's own attachment");
+    let field = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "inner_" && s.kind == SymKind::Field)
+        .expect("the field declaration");
+    let bound: Vec<_> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "inner_" && matches!(r.kind, RefKind::Variable))
+        .map(|r| r.resolved_symbol())
+        .collect();
+    assert_eq!(
+        bound,
+        vec![Some(field.id), Some(field.id)],
+        "the method body AND the lambda body inside it bind to the field"
+    );
 }
 
-// The by-id capability askers on the registry are THE include-token /
-// preprocessor gates for both serving surfaces (LSP handlers and their
-// CLI/--batch mirrors) — pin their answers so the shared gate can't
-// silently regress to a language-name probe on either side. Each answer is
-// the compiled query's own (`@include.path`, `@def.macro`), so a pack whose
-// document stops minting one stops claiming it.
+// The complement: php spells the receiver, so its document leaves every
+// sub scope plain and a bare name inside a method binds to nothing —
+// whatever the class declares.
+#[cfg(feature = "php")]
+#[test]
+fn a_spelled_receiver_language_declares_no_implicit_scope() {
+    use crate::model::file_analysis::{RefKind, SymKind};
+    let src = "<?php\nclass C { private int $inner; function get() { return $inner; } }\n";
+    let fa = crate::build::language_driver::LanguageRegistry::with_enabled()
+        .for_id("php")
+        .expect("php driver")
+        .analyze(src);
+    assert!(
+        fa.scopes.iter().all(|sc| !sc.implicit_receiver),
+        "php's document states the fact nowhere"
+    );
+    // Not vacuous: the property IS declared and the bare name IS read.
+    assert!(
+        fa.symbols().iter().any(|s| s.name == "inner" && s.kind == SymKind::Field),
+        "the property is a Field symbol"
+    );
+    let read = fa
+        .refs()
+        .iter()
+        .find(|r| r.target_name == "$inner" && matches!(r.kind, RefKind::Variable))
+        .expect("the bare read is a Variable ref");
+    assert_eq!(read.resolved_symbol(), None, "php: a bare name is never the property");
+}
+
+// A C callback member (`int (*read)(char *)`) is a stored slot the source
+// CALLS. The declarator says so — the peel's `@deref.callable` level mints
+// `SymbolFlags::CALLABLE_VALUE` — so `ops->read(buf)` resolves to the slot
+// while a call on a plain `int count` still resolves to nothing. The rule is
+// on the declaration, never on a list of callback names.
 #[cfg(feature = "cpp")]
 #[test]
-fn capability_askers_answer_by_language_id() {
-    use crate::build::language_driver::LanguageRegistry;
-    assert!(LanguageRegistry::has_include_tokens("cpp"),
-        "cpp declares include path tokens — CLI + server both gate on this");
-    assert!(LanguageRegistry::has_preprocessor_macros("cpp"));
-    assert!(!LanguageRegistry::has_include_tokens("perl"),
-        "perl has no LangPack: the asker answers false, no name branch");
-    assert!(!LanguageRegistry::has_preprocessor_macros("perl"));
-    assert!(!LanguageRegistry::has_include_tokens("no-such-language"));
-    #[cfg(feature = "python")]
-    {
-        assert!(!LanguageRegistry::has_include_tokens("python"),
-            "python imports are name-keyed, no path tokens");
-        assert!(!LanguageRegistry::has_preprocessor_macros("python"));
-    }
+fn a_callback_member_answers_a_call_and_a_plain_one_does_not() {
+    use crate::model::file_analysis::{SymKind, SymbolFlags};
+    let src = "\
+struct Ops {\n\
+  int (*read)(char *buf);\n\
+  int count;\n\
+};\n\
+int a(struct Ops *o) { return o->read(\"x\"); }\n\
+int b(struct Ops *o) { return o->count(1); }\n";
+    let fa = cpp_driver().analyze(src);
+    let field = |name: &str| {
+        fa.symbols()
+            .iter()
+            .find(|s| s.name == name && s.kind == SymKind::Field)
+            .unwrap_or_else(|| panic!("{name} is a Field"))
+    };
+    assert!(
+        field("read").flags.contains(SymbolFlags::CALLABLE_VALUE),
+        "the function-pointer declarator states the slot is invoked"
+    );
+    assert!(
+        !field("count").flags.contains(SymbolFlags::CALLABLE_VALUE),
+        "a plain int member states nothing of the kind"
+    );
+    let at = |row: usize, needle: &str| {
+        let line = src.lines().nth(row).unwrap();
+        tree_sitter::Point { row, column: line.find(needle).unwrap() }
+    };
+    assert_eq!(
+        fa.find_definition(at(4, "read("), None),
+        Some(field("read").selection_span),
+        "the call lands on the callback member"
+    );
+    assert_eq!(
+        fa.find_definition(at(5, "count("), None),
+        None,
+        "a call on a non-callable slot resolves to nothing"
+    );
 }
 
-// Implicit-`this` sibling method CALLs — the call half of the same
-// capability. A bare `foo(...)` inside a method body pins its enclosing
+// Implicit-`this` sibling method CALLs — the call half of the same fact. A
+// bare `foo(...)` inside a body that elides the receiver pins its enclosing
 // class onto the `FunctionCall`'s `resolved_package` (in-class AND
-// out-of-line/template bodies — the class comes off the peeled method
+// out-of-line/template bodies — the class comes off the scope's OWNER
 // symbol, not the body scope which is package-less out of line), so
-// goto-def lands on the sibling. A free-function-only name stays unpinned;
-// the capability gate governs the whole pass.
+// goto-def lands on the sibling. A free-function-only name stays unpinned.
 #[cfg(feature = "cpp")]
 #[test]
 fn sibling_method_call_pins_enclosing_class() {
@@ -657,15 +704,6 @@ template <class T> struct Buf { void grow(int n); void reserve(int n); };\n\
 template <class T> void Buf<T>::reserve(int n) { grow(n); }\n\
 int helper();\n\
 struct Gadget { void run() { helper(); } };\n";
-    let build = || {
-        let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&tree_sitter_cpp::LANGUAGE.into()).unwrap();
-        let tree = parser.parse(src, None).unwrap();
-        let pack = crate::build::query_extract::cpp_pack();
-        let mut skel = crate::build::query_extract::extract(&tree, src.as_bytes(), &pack).unwrap();
-        let sites = std::mem::take(&mut skel.return_sites);
-        (skel.into_file_analysis(), sites)
-    };
     let pin_of = |fa: &FileAnalysis, name: &str| -> Option<Option<String>> {
         fa.refs()
             .iter()
@@ -673,8 +711,7 @@ struct Gadget { void run() { helper(); } };\n";
             .map(|r| r.resolved_package().map(str::to_string))
     };
 
-    let (mut fa, sites) = build();
-    emit_return_fuel(&mut fa, &sites, true);
+    let fa = cpp_driver().analyze(src);
     assert_eq!(pin_of(&fa, "paint"), Some(Some("Widget".into())), "in-class sibling call pins its class");
     assert_eq!(pin_of(&fa, "grow"), Some(Some("Buf".into())), "out-of-line template sibling call pins the peeled class");
     assert_eq!(pin_of(&fa, "helper"), Some(None), "free-function-only call stays unpinned");
@@ -698,10 +735,6 @@ struct Gadget { void run() { helper(); } };\n";
             "{call}: sibling call resolves to the class method"
         );
     }
-
-    let (mut fa_off, sites2) = build();
-    emit_return_fuel(&mut fa_off, &sites2, false);
-    assert_eq!(pin_of(&fa_off, "paint"), Some(None), "capability off → no sibling-call pin");
 }
 
 // H7-13: a CLASS FIELD used as a member-access receiver must type to its

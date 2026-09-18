@@ -108,6 +108,16 @@ pub struct Scope {
     /// question — so neither is a span scan. `None` for every other scope.
     #[serde(default)]
     pub owner: Option<SymbolId>,
+    /// A bare name in this scope may elide the member receiver — the
+    /// language's own rule, stated by the capture that mints the scope
+    /// (`@scope.sub.implicit_receiver`). The chain carries it: a block or
+    /// lambda body nested in such a scope elides too, so a consumer walks
+    /// to the nearest scope that declares it and reads its `owner`'s
+    /// package. Whether a class is in fact there is resolution, not syntax
+    /// — a free function's body carries the flag and no owning package, so
+    /// nothing binds.
+    #[serde(default)]
+    pub implicit_receiver: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -404,6 +414,10 @@ bitflags::bitflags! {
         /// candidate, because nothing in the source could reference it into
         /// existence.
         const SYNTHESIZED = 1 << 25;
+        /// A stored slot whose VALUE is called (a C function-pointer member,
+        /// `int (*read)(char *)`). The declarator says so, so a call landing
+        /// on the slot asks the declaration instead of a callback-name list.
+        const CALLABLE_VALUE = 1 << 26;
     }
 }
 
@@ -979,18 +993,22 @@ impl MemberKind {
         }
     }
 
-    /// May a declaration of `kind` define a target of this family? The value
-    /// side is strict. The callable side asks the LANGUAGE
+    /// May a declaration of `kind` carrying `flags` define a target of this
+    /// family? The value side is strict. The callable side asks the LANGUAGE
     /// (`PackSpellings::member_reads_are_calls`): where a member read is an
     /// accessor call, a call legitimately lands on a stored slot; where the
     /// call is spelled, `$obj->name()` and the property `name` are two
     /// members and admitting the property is how a missing `()` resolves to
-    /// the wrong one.
-    pub fn admits_decl(self, kind: SymKind, spellings: &PackSpellings) -> bool {
+    /// the wrong one. A slot the declaration marks `CALLABLE_VALUE` is the
+    /// exception the declaration itself states: `ops->read(buf)` on a
+    /// function-pointer member IS a call on that member.
+    pub fn admits_decl(self, kind: SymKind, flags: SymbolFlags, spellings: &PackSpellings) -> bool {
         match self {
             MemberKind::Value => MemberKind::of_sym(kind) == MemberKind::Value,
             MemberKind::Callable => {
-                spellings.member_reads_are_calls || MemberKind::of_sym(kind) == MemberKind::Callable
+                spellings.member_reads_are_calls
+                    || flags.contains(SymbolFlags::CALLABLE_VALUE)
+                    || MemberKind::of_sym(kind) == MemberKind::Callable
             }
         }
     }

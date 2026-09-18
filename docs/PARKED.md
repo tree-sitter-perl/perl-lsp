@@ -270,7 +270,7 @@ marked otherwise; the drain re-derived each rationale against current code.
   headers that surface as bare identifiers) must be **calibrated against the
   macro-heavy real substrate** (spdlog/fmt/onednn), the same bar
   use-after-move cleared. Default-off + opt-in + pack-capability gate
-  (declared like `implicit_this_members`, never `lang == cpp`) is understood;
+  (a pack capability, never `lang == cpp`) is understood;
   only the valve + its calibration remain. `docs/adr/narrowing-diagnostics.md`.
 - **PR #100** re-extraction onto the projection engine (user closes or
   reworks; the `projection.rs` PoC now rests in git history — the design

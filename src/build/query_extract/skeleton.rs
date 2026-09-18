@@ -1539,6 +1539,86 @@ impl SkeletonAnalysis {
                 }
             }
         }
+        // Implicit receiver: where the document says a body elides it
+        // (`@scope.sub.implicit_receiver`), a bare name is a member of the
+        // enclosing class. The scope chain carries the fact — a nested block
+        // or lambda body inside such a body elides too — and the declaring
+        // scope's `owner` names the callable whose package IS that class,
+        // in-class and out-of-line alike (a `void Buf<T>::reserve(…)` body is
+        // lexically at file scope, so only the peeled method symbol carries
+        // `Buf`). Whether a class is there at all is resolution: a free
+        // function's scope carries the flag and its owner names no package,
+        // so nothing binds.
+        {
+            use crate::model::file_analysis::RefKind;
+            use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
+            let implicit_class = |scope: crate::model::file_analysis::ScopeId| -> Option<&str> {
+                std::iter::successors(Some(scope), |sc| scope_parent.get(sc).copied().flatten())
+                    .find(|sc| self.scopes[sc.0 as usize].implicit_receiver)
+                    .and_then(|sc| self.scopes[sc.0 as usize].owner)
+                    .and_then(|sid| symbols.get(sid.0 as usize))
+                    .and_then(|s| s.package.as_deref())
+            };
+            let mut fields: std::collections::HashMap<
+                (&str, &str),
+                (crate::model::file_analysis::ScopeId, SymbolId),
+            > = Default::default();
+            let mut methods: std::collections::HashSet<(&str, &str)> = Default::default();
+            for s in &symbols {
+                let Some(pkg) = s.package.as_deref() else { continue };
+                match s.kind {
+                    SymKind::Field => {
+                        fields.entry((pkg, s.name.as_str())).or_insert((s.scope, s.id));
+                    }
+                    SymKind::Method => {
+                        methods.insert((pkg, s.name.as_str()));
+                    }
+                    _ => {}
+                }
+            }
+            let mut field_reads: Vec<(usize, SymbolId, String, crate::model::file_analysis::ScopeId, Span)> =
+                Vec::new();
+            let mut sibling_calls: Vec<(usize, String)> = Vec::new();
+            for (i, r) in refs.iter().enumerate() {
+                if matches!(r.kind, RefKind::Variable) && r.resolved_symbol().is_none() {
+                    let Some(class) = implicit_class(r.scope) else { continue };
+                    let Some(&(fscope, fsym)) = fields.get(&(class, r.target_name.as_str())) else {
+                        continue;
+                    };
+                    field_reads.push((i, fsym, r.target_name.clone(), fscope, r.span));
+                } else if matches!(r.kind, RefKind::FunctionCall) && r.binding.is_none() {
+                    let Some(class) = implicit_class(r.scope) else { continue };
+                    if methods.contains(&(class, r.target_name.as_str())) {
+                        sibling_calls.push((i, class.to_string()));
+                    }
+                }
+            }
+            for (i, fsym, name, fscope, span) in field_reads {
+                // Bind the read to the field it names, so goto-def /
+                // references / rename land on the declaration; the edge to the
+                // field's own `Variable` attachment is what types it, chasing
+                // the general Variable path instead of dead-ending. A binding
+                // without the edge answers goto-def and types nothing; the
+                // edge without the binding types and answers goto-def empty
+                // while references still names the declaration — the
+                // projection disagreement the consistency net flags as I4.
+                refs[i].bind_symbol(fsym);
+                bag.push(Witness {
+                    attachment: WA::Expr(span),
+                    source: WitnessSource::Builder("implicit_field_read".into()),
+                    payload: WP::Edge(WA::Variable { name, scope: fscope }),
+                    span,
+                });
+            }
+            // Pinning a bare sibling call's `Function` binding to the class
+            // routes it through the SAME package-scoped callable resolution a
+            // qualified `Class::foo()` uses, so goto-def / references / rename
+            // land on the sibling. A name no member answers to is left alone —
+            // a free-function call still resolves free.
+            for (i, class) in sibling_calls {
+                refs[i].bind_function_package(class);
+            }
+        }
         let mut packages: std::collections::HashMap<
             String,
             crate::model::file_analysis::PackageFacts,
