@@ -4876,7 +4876,7 @@ listen_on('ev', array(UserController::class, 'index'));
 #[test]
 fn php_visibility_gates_member_completion() {
     // private/protected members complete only from inside their own
-    // class's body: the `@nonpublic.mark` patterns stamp the same
+    // class's body: the `@_nonpublic_mark` patterns stamp the same
     // `non_public` attribute cpp access regions stamp, and the existing
     // requesting_class gate does the rest. Covers methods, properties,
     // consts, and promoted ctor params.

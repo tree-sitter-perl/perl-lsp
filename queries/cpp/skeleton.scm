@@ -876,8 +876,8 @@
 (call_expression
   function: (field_expression
     argument: (identifier) @flow.rebind
-    field: (field_identifier) @move.rebind)
-  (#any-of? @move.rebind "clear" "reset" "assign" "emplace" "swap"))
+    field: (field_identifier) @_move_rebind)
+  (#any-of? @_move_rebind "clear" "reset" "assign" "emplace" "swap"))
 
 ; `std::move(x)` leaves x in a moved-from (valid-but-unspecified) state: a
 ; subsequent READ of x before it is reassigned is a use-after-move bug.
@@ -938,12 +938,12 @@
   condition: (condition_clause
     value: (call_expression
       function: (template_function
-        name: (identifier) @narrow.guard
+        name: (identifier) @_narrow_guard
         arguments: (template_argument_list
           (type_descriptor type: (type_identifier) @narrow.type)))
       arguments: (argument_list (identifier) @narrow.var)))
   consequence: (compound_statement) @narrow.block
-  (#eq? @narrow.guard "dynamic_cast"))
+  (#eq? @_narrow_guard "dynamic_cast"))
 
 ; `std::optional<T>` engaged-state narrowing. Guard-testing an optional as
 ; engaged proves it HOLDS a T inside the block, so `opt->m` / `*opt` resolve on
@@ -963,9 +963,9 @@
     value: (call_expression
       function: (field_expression
         argument: (identifier) @narrow.var
-        field: (field_identifier) @narrow.guard)))
+        field: (field_identifier) @_narrow_guard)))
   consequence: (compound_statement) @narrow.block
-  (#eq? @narrow.guard "has_value"))
+  (#eq? @_narrow_guard "has_value"))
 
 ; ---- branch arms are lexical scopes (conditional-move soundness) ----
 ; if/else arm bodies each mint a @scope, so a `std::move` in one arm bounds its

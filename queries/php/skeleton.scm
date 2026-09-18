@@ -137,21 +137,21 @@
 ; post-pass (the ns.inline precedent) so the def patterns stay
 ; modifier-blind; the vocabulary lives in the #any-of?, not in engine code.
 (method_declaration
-  (visibility_modifier) @nonpublic.mark
+  (visibility_modifier) @_nonpublic_mark
   name: (name) @nonpublic.target
-  (#any-of? @nonpublic.mark "private" "protected"))
+  (#any-of? @_nonpublic_mark "private" "protected"))
 (property_declaration
-  (visibility_modifier) @nonpublic.mark
+  (visibility_modifier) @_nonpublic_mark
   (property_element name: (variable_name (name) @nonpublic.target))
-  (#any-of? @nonpublic.mark "private" "protected"))
+  (#any-of? @_nonpublic_mark "private" "protected"))
 (const_declaration
-  (visibility_modifier) @nonpublic.mark
+  (visibility_modifier) @_nonpublic_mark
   (const_element (name) @nonpublic.target)
-  (#any-of? @nonpublic.mark "private" "protected"))
+  (#any-of? @_nonpublic_mark "private" "protected"))
 (property_promotion_parameter
-  visibility: (visibility_modifier) @nonpublic.mark
+  visibility: (visibility_modifier) @_nonpublic_mark
   name: (variable_name (name) @nonpublic.target)
-  (#any-of? @nonpublic.mark "private" "protected"))
+  (#any-of? @_nonpublic_mark "private" "protected"))
 ; `static` members: the same post-pass stamp (`static` attribute) — what a
 ; scoped access (`Foo::`) completes.
 (method_declaration
@@ -806,14 +806,14 @@
   condition: (parenthesized_expression
     (binary_expression
       left: (variable_name) @narrow.var
-      "instanceof" @narrow.guard
+      "instanceof" @_narrow_guard
       right: [(name) (qualified_name)] @narrow.type))
   body: (compound_statement) @scope)
 (else_if_clause
   condition: (parenthesized_expression
     (binary_expression
       left: (variable_name) @narrow.var
-      "instanceof" @narrow.guard
+      "instanceof" @_narrow_guard
       right: [(name) (qualified_name)] @narrow.type))
   body: (compound_statement) @scope)
 (if_statement
@@ -821,7 +821,7 @@
     (binary_expression
       left: (binary_expression
         left: (variable_name) @narrow.var
-        "instanceof" @narrow.guard
+        "instanceof" @_narrow_guard
         right: [(name) (qualified_name)] @narrow.type)
       "&&"))
   body: (compound_statement) @scope)
@@ -831,7 +831,7 @@
       "&&"
       right: (binary_expression
         left: (variable_name) @narrow.var
-        "instanceof" @narrow.guard
+        "instanceof" @_narrow_guard
         right: [(name) (qualified_name)] @narrow.type)))
   body: (compound_statement) @scope)
 (if_statement
@@ -840,7 +840,7 @@
       left: (binary_expression
         left: (binary_expression
           left: (variable_name) @narrow.var
-          "instanceof" @narrow.guard
+          "instanceof" @_narrow_guard
           right: [(name) (qualified_name)] @narrow.type)
         "&&")
       "&&"))
@@ -858,12 +858,12 @@
       argument: [
         (binary_expression
           left: (variable_name) @narrow.var
-          "instanceof" @narrow.guard
+          "instanceof" @_narrow_guard
           right: [(name) (qualified_name)] @narrow.type)
         (parenthesized_expression
           (binary_expression
             left: (variable_name) @narrow.var
-            "instanceof" @narrow.guard
+            "instanceof" @_narrow_guard
             right: [(name) (qualified_name)] @narrow.type))]))
   body: [
     (return_statement)
@@ -876,21 +876,21 @@
 ;; teaches a new asserting callee by adding a pattern, not by editing Rust.
 (expression_statement
   (function_call_expression
-    function: (name) @narrow.assert
+    function: (name) @_narrow_assert
     arguments: (arguments
       (argument
         (binary_expression
           left: (variable_name) @narrow.var
-          "instanceof" @narrow.guard
+          "instanceof" @_narrow_guard
           right: [(name) (qualified_name)] @narrow.type))))
-  (#eq? @narrow.assert "assert")) @narrow.after
+  (#eq? @_narrow_assert "assert")) @narrow.after
 ;; Expression-level regions: the refinement holds WITHIN the marked node —
 ;; the right operand of `&&`, the ternary's true arm, a `match` arm's
 ;; return expression.
 (binary_expression
   left: (binary_expression
     left: (variable_name) @narrow.var
-    "instanceof" @narrow.guard
+    "instanceof" @_narrow_guard
     right: [(name) (qualified_name)] @narrow.type)
   "&&"
   right: (_) @narrow.within)
@@ -901,7 +901,7 @@
   left: (binary_expression
     left: (binary_expression
       left: (variable_name) @narrow.var
-      "instanceof" @narrow.guard
+      "instanceof" @_narrow_guard
       right: [(name) (qualified_name)] @narrow.type)
     "&&")
   "&&"
@@ -911,7 +911,7 @@
     left: (binary_expression
       left: (binary_expression
         left: (variable_name) @narrow.var
-        "instanceof" @narrow.guard
+        "instanceof" @_narrow_guard
         right: [(name) (qualified_name)] @narrow.type)
       "&&")
     "&&")
@@ -921,19 +921,19 @@
   condition: [
     (binary_expression
       left: (variable_name) @narrow.var
-      "instanceof" @narrow.guard
+      "instanceof" @_narrow_guard
       right: [(name) (qualified_name)] @narrow.type)
     (parenthesized_expression
       (binary_expression
         left: (variable_name) @narrow.var
-        "instanceof" @narrow.guard
+        "instanceof" @_narrow_guard
         right: [(name) (qualified_name)] @narrow.type))]
   body: (_) @narrow.within)
 (match_conditional_expression
   conditional_expressions: (match_condition_list
     (binary_expression
       left: (variable_name) @narrow.var
-      "instanceof" @narrow.guard
+      "instanceof" @_narrow_guard
       right: [(name) (qualified_name)] @narrow.type))
   return_expression: (_) @narrow.within)
 

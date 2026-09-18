@@ -109,6 +109,17 @@ registered pack through both codecs.
 
 ## Query gotchas
 
+**An underscore capture is a predicate anchor and nothing reads it.**
+`@_plain_row`, `@_narrow_guard`, `@_cmd`: the name exists so an `#eq?` /
+`#any-of?` / `#not-match?` can be written beside it, and the fact the
+pattern states is minted by its MATCH or by a sibling capture. The
+spelling says so — a reader looking for what consumes `@_narrow_guard`
+stops at the sigil instead of grepping — and `unserved_captures` treats a
+`_` capture as served by definition. A capture the extractor or the cursor
+runner reads BY NAME (`@skip`, `@recv.peel`, `@arity.arg`, `@member.recv`,
+`@expr.read.var`, `@domain.compare.op`) carries no underscore however
+declaration-like it looks: those are read.
+
 **A query step holds at most three captures.** tree-sitter's
 `MAX_STEP_CAPTURE_COUNT` is 3 and `query_step__add_capture` no-ops past
 the third: the document compiles, `Query::capture_names()` still lists the
