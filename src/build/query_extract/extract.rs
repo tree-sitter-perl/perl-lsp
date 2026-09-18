@@ -18,56 +18,6 @@ struct Event {
     match_id: usize,
 }
 
-/// Flatten a wrapper chain — the recursion tree-sitter's fixed-depth queries
-/// cannot express — to its leaf, recording a `DerefStep` per level when
-/// `spec.record_stack`. A non-empty `leaf_to_def` REQUIRES the leaf to match
-/// (returns its def capture); an empty one accepts ANY leaf and mints nothing
-/// (the receiver peel — the leaf is an invocant). Outermost level first
-/// (left-to-right display order, `Box*&` → `[Pointer, Reference]`). Depth-
-/// capped.
-pub(crate) fn peel<'a>(
-    mut node: tree_sitter::Node<'a>,
-    spec: &PeelSpec,
-    src: &[u8],
-) -> Option<(tree_sitter::Node<'a>, Vec<crate::model::file_analysis::DerefStep>, Option<&'static str>)> {
-    use crate::model::file_analysis::DerefStep;
-    let is_leaf = |k: &str| spec.leaf_to_def.iter().find(|(lk, _)| *lk == k);
-    let mut stack = Vec::new();
-    for _ in 0..32 {
-        if let Some((_, dk)) = spec.wrappers.iter().find(|(k, _)| *k == node.kind()) {
-            let mut annotations = Vec::new();
-            let mut inner = None;
-            let mut cur = node.walk();
-            for ch in node.children(&mut cur) {
-                if spec.annot_kinds.contains(&ch.kind()) {
-                    if let Ok(t) = ch.utf8_text(src) {
-                        annotations.push(t.to_string());
-                    }
-                } else if inner.is_none()
-                    && (spec.wrappers.iter().any(|(k, _)| *k == ch.kind())
-                        || is_leaf(ch.kind()).is_some()
-                        || (spec.leaf_to_def.is_empty() && ch.is_named()))
-                {
-                    inner = Some(ch);
-                }
-            }
-            if spec.record_stack {
-                stack.push(DerefStep { kind: *dk, annotations });
-            }
-            node = inner?;
-        } else if spec.leaf_to_def.is_empty() {
-            // receiver peel: the leaf is an invocant of any shape, no def minted.
-            return Some((node, stack, None));
-        } else if let Some((_, def_cap)) = is_leaf(node.kind()) {
-            // `identifier`→`def.local` (param/local), `field_identifier`→
-            // `def.var` (a class member), so a pointer field outlines as a member.
-            return Some((node, stack, Some(def_cap)));
-        } else {
-            return None;
-        }
-    }
-    None
-}
 
 /// What the document says about one declarator node: a level of the peel, a
 /// per-level cv-qualifier, or the chain's leaf (whose capture suffix names the

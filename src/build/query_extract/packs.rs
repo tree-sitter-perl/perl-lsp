@@ -191,26 +191,6 @@ impl LangPack {
     }
 }
 
-/// A declarative peel: descend a wrapper chain tree-sitter's fixed-depth
-/// S-expression queries cannot express, to the leaf, optionally accumulating a
-/// per-level deref stack. The pack parameterizes it: `recv_peel` (expr
-/// wrappers, no stack, any leaf) is what it carries. Empty `wrappers` = the
-/// capture is absent.
-#[derive(Clone, Copy)]
-pub struct PeelSpec {
-    /// Wrapper node kinds → the `DerefKind` each contributes (only consulted
-    /// when `record_stack`; a placeholder otherwise).
-    pub wrappers: &'static [(&'static str, crate::model::file_analysis::DerefKind)],
-    /// Per-level annotation node kinds (cv-qualifiers) collected onto a step.
-    pub annot_kinds: &'static [&'static str],
-    /// Leaf node kind → the `def.*` capture the synthetic leaf event mints
-    /// (`identifier`→`def.local`, `field_identifier`→`def.var`). EMPTY = accept
-    /// ANY leaf and mint no def (the receiver-peel case — the leaf is an
-    /// invocant, not a declaration).
-    pub leaf_to_def: &'static [(&'static str, &'static str)],
-    /// Accumulate the per-level `DerefStep` stack (pointer depth) vs descend only.
-    pub record_stack: bool,
-}
 
 /// One member the LANGUAGE gives every enum of a language. Read at
 /// extraction and nowhere else — the mint turns it into a real member.
