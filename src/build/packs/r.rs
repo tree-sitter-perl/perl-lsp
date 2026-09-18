@@ -40,7 +40,6 @@ pub fn r_pack() -> LangPack {
         // sourced path verbatim, a library name into the installed tree.
         import_module: |_, arg| Some(arg.to_string()),
         narrow_type: |_| None,
-        implicit_this_members: false,
         brace_scoped_members: false,
         imports_bind_names: false,
         bundled_builtin_types: &[],

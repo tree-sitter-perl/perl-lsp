@@ -96,15 +96,6 @@ pub struct LangPack {
     /// structure out — which guards narrow is the document's `#eq?`.
     /// `None` = this spelling refines nothing.
     pub narrow_type: fn(type_text: &str) -> Option<InferredType>,
-    /// Can a bare, receiver-less identifier resolve through an implicit
-    /// `this->` — both a field read (`return inner_;` = `this->inner_`) AND a
-    /// sibling method call (`foo()` = `this->foo()`)? True for C/C++ (the
-    /// receiver is elided for both members and methods); false for Python/R
-    /// (the receiver is mandatory for both). One language fact, not two: no
-    /// language elides fields but not methods. Gates the member-access half of
-    /// `language_driver::emit_return_fuel` — asked of the pack, never a
-    /// language-name branch.
-    pub implicit_this_members: bool,
     /// Container membership (class/struct/union/namespace) is delimited by
     /// literal `{`/`}` in the source, so a member that lost its enclosing
     /// container to a tree-sitter misparse can be re-anchored by matching the
@@ -168,7 +159,6 @@ impl LangPack {
             module_paths: _,
             import_module: _,
             narrow_type: _,
-            implicit_this_members: _,
             brace_scoped_members: _,
             imports_bind_names: _,
             bundled_builtin_types: _,

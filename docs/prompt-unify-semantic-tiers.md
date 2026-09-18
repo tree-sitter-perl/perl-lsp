@@ -84,10 +84,11 @@ strings won't.
   `SymbolReturnArm(sid) → Edge(Expr(ret_span))` +
   `Symbol(sid) → Edge(SymbolReturnArm(sid))` — the SAME shape as Perl's
   implicit-return chain, spelled independently (source tags
-  `"cpp_return_arm"` / `"cpp_return_arm_chain"`); gated on
-  `pack.implicit_this_members`: implicit-`this` field reads →
-  `Expr(span) → Edge(Variable{field,scope})` + sibling-call
-  `resolved_package` pinning.
+  `"return_arm"` / `"return_arm_chain"`).
+- `SkeletonAnalysis::into_file_analysis`: a bare read inside a scope the
+  document marks `implicit_receiver` → `Expr(span) →
+  Edge(Variable{field,scope})` (tag `"implicit_field_read"`), beside the
+  ref binding it shares a site with.
 
 **The Perl-only fold:**
 
@@ -118,9 +119,10 @@ strings won't.
   `CrossFileLookup::enriched_present` fallback-on-miss.
 
 **Pack capabilities live on `LangPack`** (`query_extract.rs`, one struct
-literal per language in `language_driver.rs`): `implicit_this_members`,
-`shape_name`, etc. New capabilities go here — a capability is a language
-FACT ("this language elides the receiver"), never a feature toggle.
+literal per language in `language_driver.rs`): `shape_name`, etc. New
+capabilities go here — a capability is a language FACT, never a feature
+toggle. A fact about a SHAPE goes in the query document instead, on the
+capture that mints it (receiver elision is `@scope.sub.implicit_receiver`).
 
 ---
 
@@ -170,7 +172,7 @@ pub fn emit_call_return_edge(bag: &mut WitnessBag, refidx: usize,
 **Migration (mechanical, one commit per side):**
 
 1. `emit_return_fuel`'s return-arm block → `emit_return_arm` (keep the
-   `"cpp_return_arm"` source tags — they are load-bearing for
+   `"return_arm"` source tags — they are load-bearing for
    clear-and-emit and tests). The `for_attachment(&WA::Symbol(sid))
    .is_empty()` declared-return guard stays at the CALLER — it is pack
    policy (declared return wins), not shape.
