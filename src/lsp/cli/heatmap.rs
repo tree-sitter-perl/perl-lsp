@@ -146,17 +146,6 @@ fn heatmap_symbol_row(
         Some("constructor")
     } else if !native {
         Some("framework-synthesized")
-    } else if is_callable
-        && crate::build::language_driver::LanguageRegistry::caps(&analysis.language)
-            .entrypoint_symbols
-            .contains(&sym.name.as_str())
-    {
-        // Runtime entry (C/C++ `main`): entered over the ABI, never a source
-        // call site the static graph can see. The language declares which
-        // names are entry points; nothing here compares names or families.
-        Some("entry-point")
-    } else if matches!(sym.kind, SymKind::Package | SymKind::Class | SymKind::Module) {
-        Some("package-implicit-use")
     } else if has_dynamic_dispatch
         && matches!(sym.kind, SymKind::Sub | SymKind::Method)
         && sym.package.as_deref().is_some_and(|p| p != "main")

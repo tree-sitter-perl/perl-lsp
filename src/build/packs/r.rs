@@ -29,7 +29,6 @@ pub fn r_pack() -> LangPack {
         narrow_guard: |_, _| None,
         rebind_method: |_| false,
         implicit_this_members: false,
-        entrypoint_symbols: &[],
         brace_scoped_members: false,
         bundled_builtin_types: &[],
         trigger_chars: &["$", "@", ":"],
