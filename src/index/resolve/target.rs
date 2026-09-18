@@ -524,9 +524,17 @@ pub enum NotRewritable {
 
 impl NotRewritable {
     /// Would leaving this site unedited silently break the code? Then rename
-    /// refuses the whole set rather than emitting a partial edit.
+    /// refuses the whole set rather than emitting a partial edit. Exhaustive
+    /// on purpose: a reason added without an answer would default to "skip",
+    /// which is the verdict that emits the partial edit.
     pub fn refuses_rename(self) -> bool {
-        matches!(self, NotRewritable::MacroDelegated)
+        match self {
+            NotRewritable::MacroDelegated => true,
+            NotRewritable::ConstFolded
+            | NotRewritable::RailEmission
+            | NotRewritable::OtherNameToken
+            | NotRewritable::NoNameToken => false,
+        }
     }
 
     /// What a refusal tells the user — the real reason, never a stand-in for
