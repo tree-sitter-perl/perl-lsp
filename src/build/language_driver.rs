@@ -136,6 +136,15 @@ pub trait LanguageDriver: Send + Sync {
     fn lang_pack(&self) -> Option<crate::build::query_extract::LangPack> {
         None
     }
+    /// This language's write and display spellings. Every language has
+    /// them, pack or not — a driver with a pack declares them there, and
+    /// one without says so itself rather than inheriting whatever the
+    /// neutral default happens to be.
+    fn spellings(&self) -> &'static crate::model::file_analysis::PackSpellings {
+        self.lang_pack()
+            .map(|p| p.spellings)
+            .unwrap_or(&crate::model::file_analysis::NEUTRAL_SPELLINGS)
+    }
     /// Fingerprint of the EXTERNAL inputs this driver's analyses depend on
     /// beyond the source files themselves (C++: the probed toolchain — its
     /// system include roots decide what a gather reaches). The persist tier
@@ -237,6 +246,9 @@ impl LanguageDriver for PerlDriver {
     }
     fn claims_unclaimed(&self) -> bool {
         true
+    }
+    fn spellings(&self) -> &'static crate::model::file_analysis::PackSpellings {
+        &crate::model::conventions::PERL_SPELLINGS_PACK
     }
     fn trigger_chars(&self) -> &[&'static str] {
         // Sigils open variable completion; `>`/`:`/`{` open
@@ -2016,7 +2028,7 @@ impl LanguageRegistry {
                 LanguageRegistry::with_enabled()
                     .drivers
                     .iter()
-                    .filter_map(|d| d.lang_pack().map(|p| (d.id(), p.spellings)))
+                    .map(|d| (d.id(), d.spellings()))
                     .collect()
             })
             .iter()

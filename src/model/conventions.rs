@@ -152,6 +152,38 @@ pub fn field_attribute_flag(attr: &str) -> Option<crate::model::file_analysis::S
     })
 }
 
+/// Perl's WRITE and DISPLAY spellings — the same declaration every pack
+/// language makes, reached the same way (`LanguageRegistry::spellings`,
+/// `FileAnalysis::spellings()`). Perl has no pack driver of its own, so
+/// without this it would read whatever the neutral default happens to be,
+/// and a default nobody chose for Perl is a rule the next pack inherits
+/// by forgetting.
+///
+/// Almost everything is empty because Perl genuinely writes none of it:
+/// the engine's type tags ARE its vocabulary, there is no declared type to
+/// insert, no return annotation, no class-name literal member, no static
+/// sigil. The two that matter are the booleans.
+pub const PERL_PACK_SPELLINGS: crate::model::file_analysis::PackSpellings =
+    crate::model::file_analysis::PackSpellings {
+        type_display: &[],
+        native_type_spellings: &[],
+        class_literal_member: "",
+        import_template: "",
+        contract_stub: "",
+        return_annotation_template: "",
+        static_property_sigil: "",
+        // Typeglobs install a sub into another package, so a member
+        // declaration does NOT belong to the container that encloses it.
+        members_are_package_bound: false,
+        // `$o->name` invokes the accessor — a call legitimately lands on a
+        // stored slot, so a callable ask admits a value declaration.
+        member_reads_are_calls: true,
+    };
+
+/// A `'static` address for Perl's spellings, so the driver can hand out a
+/// reference.
+pub static PERL_SPELLINGS_PACK: crate::model::file_analysis::PackSpellings = PERL_PACK_SPELLINGS;
+
 /// `__PACKAGE__` — the compile-time token for the enclosing package. The
 /// one spelling: a producer that needs to MINT the token (a pack
 /// canonicalizing `self::` onto the model's invocant vocabulary) writes
