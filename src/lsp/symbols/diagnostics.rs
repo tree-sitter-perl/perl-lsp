@@ -788,16 +788,8 @@ pub fn pack_symbol_diagnostics(
     use crate::build::language_driver::LanguageRegistry as Reg;
     let lang = analysis.language.as_str();
     let ctor: Vec<&str> = Reg::pack_capture_literals(lang, "def.method.ctor").iter().copied().collect();
-    let receivers: Vec<&str> = Reg::pack_capture_literals(lang, "receiver.this")
-        .iter()
-        .chain(Reg::pack_capture_literals(lang, "param.receiver").iter())
-        .copied()
-        .collect();
-    let own_class: Vec<&str> = Reg::pack_capture_literals(lang, "receiver.self")
-        .iter()
-        .chain(Reg::pack_capture_literals(lang, "receiver.super").iter())
-        .copied()
-        .collect();
+    let receivers = Reg::receiver_tokens(lang);
+    let own_class = Reg::own_class_tokens(lang);
     let builtins = Reg::builtin_types(lang);
     let facts = LaneFacts {
         idx,

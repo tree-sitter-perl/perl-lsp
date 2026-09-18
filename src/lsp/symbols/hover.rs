@@ -154,10 +154,9 @@ pub fn pack_hover_markdown(
     // land on; its value IS the enclosing class, which is what a reader
     // hovering it wants to know.
     if let Some(tok) = analysis.ref_at(point).map(|r| r.target_name.as_str()) {
-        if crate::build::language_driver::LanguageRegistry::receiver_spellings(
-            &analysis.language,
-            tok,
-        ) {
+        if crate::build::language_driver::LanguageRegistry::receiver_tokens(&analysis.language)
+            .contains(&tok)
+        {
             if let Some(cls) = analysis
                 .scope_at(point)
                 .and_then(|sc| analysis.enclosing_class_for_scope(sc))

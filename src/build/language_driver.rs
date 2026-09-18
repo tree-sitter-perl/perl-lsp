@@ -2076,17 +2076,23 @@ impl LanguageRegistry {
     /// Such a spelling resolves off the writing scope, so it names no type a
     /// namespace has to supply. The receiver captures say which spellings
     /// those are; a language without a pack claims nothing.
-    pub fn writes_own_class_token(id: &str, token: &str) -> bool {
-        Self::pack_capture_literals(id, "receiver.self").contains(token)
-            || Self::pack_capture_literals(id, "receiver.super").contains(token)
+    pub fn own_class_tokens(id: &str) -> Vec<&'static str> {
+        Self::pack_capture_literals(id, "receiver.self")
+            .iter()
+            .chain(Self::pack_capture_literals(id, "receiver.super").iter())
+            .copied()
+            .collect()
     }
 
     /// How `id` spells the object the enclosing method runs on (`$this`,
     /// `this`, a `self`/`cls` parameter) — the receiver captures' own
     /// literals.
-    pub fn receiver_spellings(id: &str, token: &str) -> bool {
-        Self::pack_capture_literals(id, "receiver.this").contains(token)
-            || Self::pack_capture_literals(id, "param.receiver").contains(token)
+    pub fn receiver_tokens(id: &str) -> Vec<&'static str> {
+        Self::pack_capture_literals(id, "receiver.this")
+            .iter()
+            .chain(Self::pack_capture_literals(id, "param.receiver").iter())
+            .copied()
+            .collect()
     }
 
     pub fn pack_visibility(id: &str) -> crate::model::file_analysis::PackVisibility {
