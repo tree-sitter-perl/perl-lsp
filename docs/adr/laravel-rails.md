@@ -19,6 +19,22 @@ and every namespace is NAMED:
   match: a route name and a view name may coincide and must not connect,
   and the rail is the reason they do not.
 
+**What a rail's names DENOTE is the rail document's own declaration** —
+this section is its one home; every other site points here. The document
+carries `names_are` beside `labels` / `hints` (`"names_are": { "event":
+"class" }`; a rail absent from it names strings), the loader bakes it onto
+every file of the pack as `PackFacts::class_named_rails`, and
+`HandlerOwner::names_are` answers `RailNames`:
+
+- `Strings`, for every rail nothing declares otherwise: the name is the
+  string the framework matches, renameable, the edit rewriting inside the
+  quotes at every site.
+- `Classes`, Laravel's `event`: the names are class identities and the
+  spans sit on class tokens (an emission's `new X`, a listener's
+  parameter type). Navigable — goto-def lists the class AND the handlers
+  rather than picking — and never renameable, because the class rename
+  owns the name.
+
 ## Where a name comes from
 
 - **The overlay** (`queries/php/frameworks/laravel.scm`) declares rails in
