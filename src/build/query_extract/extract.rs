@@ -301,6 +301,15 @@ pub(super) fn strip_import_binds(cap: &str) -> &str {
     }
 }
 
+/// The capture suffix by which a query DECLARES that the defs one match
+/// mints are co-declared — one token, two symbols, `Symbol::declared_with`
+/// each way (php's promoted constructor property and its ctor-body local).
+/// It is opt-in at the capture because "two defs in one match" is a
+/// property of those patterns, not of the capture vocabulary: a future
+/// bundled pattern, or a plugin overlay's query, that happens to capture
+/// two defs would otherwise mint a false pair (rule #10).
+pub(super) const CODECLARED_SUFFIX: &str = ".declared_with";
+
 pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAnalysis, String> {
     let language = tree.language();
     let query_source = effective_query_source(&language, pack);
@@ -370,6 +379,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     )> = Vec::new();
     // A callable's by-reference parameter positions with their names, keyed
     // by the parameter list's span (joined to the def symbol like the arity).
+    // The def symbols each MATCH minted, in mint order — paired where the
+    // match's captures declared it (`CODECLARED_SUFFIX`).
+    let mut defs_by_match: HashMap<usize, Vec<u32>> = HashMap::new();
+    // Matches whose `@def.*` captures declared the pair (`CODECLARED_SUFFIX`).
+    let mut codeclared_matches: std::collections::HashSet<usize> = Default::default();
     let mut by_ref_params: Vec<(crate::model::file_analysis::Span, u32, String, crate::model::file_analysis::Span)> =
         Vec::new();
     // The out-of-line-definition vocabulary, by byte range: the declarator
@@ -487,6 +501,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 param_caps.push((cap, node));
                 continue;
             }
+            // A `@def.*` capture may declare that this match's defs are
+            // co-declared; the marker is read and stripped here, so every
+            // path below sees the plain capture it already knows.
+            let cap = match cap.strip_suffix(CODECLARED_SUFFIX) {
+                Some(base) if base.starts_with("def.") => {
+                    codeclared_matches.insert(match_counter);
+                    base
+                }
+                _ => cap,
+            };
             let text = node.utf8_text(source).unwrap_or("").to_string();
             events.push(Event {
                 start_byte: node.start_byte(),
@@ -1451,6 +1475,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     out.rails.push((span, rail.to_string()));
                 }
                 out.symbols.push(SkelSymbol {
+                    declared_with: None,
                     return_annotation: None,
                     name,
                     kind: "handler".to_string(),
@@ -1529,7 +1554,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     out.specializations
                         .push((shaped.clone(), (pack.shape_name)("spec.primary", primary)));
                 }
+                defs_by_match.entry(e.match_id).or_default().push(out.symbols.len() as u32);
                 out.symbols.push(SkelSymbol {
+                    declared_with: None,
                     name: shaped,
                     kind,
                     start: e.start,
@@ -1870,6 +1897,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             "cmd.def.name" => {
                 if let Some((kind, cmd_start, scope)) = cmd_defs.get(&e.match_id) {
                     out.symbols.push(SkelSymbol {
+                        declared_with: None,
                         flags: Default::default(),
                         return_annotation: None,
                         kind: kind.clone(),
@@ -1966,6 +1994,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
             _ => {}
         }
+    }
+
+    // A declaration token whose query DECLARED the pair and minted exactly
+    // two defs declared both: link them each way where they were minted, so
+    // goto-def, references and rename read the relation instead of
+    // reconstructing it from spans (rule #11).
+    for mid in &codeclared_matches {
+        let Some(defs) = defs_by_match.get(mid) else { continue };
+        let [a, b] = defs[..] else { continue };
+        out.symbols[a as usize].declared_with =
+            Some(crate::model::file_analysis::SymbolId(b));
+        out.symbols[b as usize].declared_with =
+            Some(crate::model::file_analysis::SymbolId(a));
     }
 
     // ---- inline namespaces: tag the Package symbol by name span ----
@@ -2066,8 +2107,46 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 }
             }
         }
+        // Renumbering invalidates symbol ids, and the co-declaration pairs
+        // minted above are the only ones held this early — remap them here
+        // (a partner that did not survive leaves no link).
+        let mut renumbered: Vec<Option<u32>> = vec![None; keep.len()];
+        let mut next = 0u32;
+        for (i, k) in keep.iter().enumerate() {
+            if *k {
+                renumbered[i] = Some(next);
+                next += 1;
+            }
+        }
         let mut it = keep.iter();
         out.symbols.retain(|_| *it.next().unwrap());
+        for sym in out.symbols.iter_mut() {
+            sym.declared_with = sym.declared_with.and_then(|id| {
+                renumbered[id.0 as usize].map(crate::model::file_analysis::SymbolId)
+            });
+        }
+        // The pair the dedup just kept IS a relation, so mint it as one
+        // (rule #11): a stored member and a callable declared at ONE name
+        // token are two spellings of a single declaration (an Eloquent
+        // relation — `pages()` the method, `->pages` the accessor through
+        // `__get`), and without the fact a rename of either spelling leaves
+        // the other stale. Pairs the query already declared
+        // (`CODECLARED_SUFFIX`) keep theirs.
+        let mut by_site: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        for (i, sym) in out.symbols.iter().enumerate() {
+            by_site.entry((sym.name_start.row, sym.name_start.column)).or_default().push(i);
+        }
+        for at in by_site.values() {
+            let stored = at.iter().copied().find(|&i| out.symbols[i].kind == "field");
+            let callable =
+                at.iter().copied().find(|&i| matches!(out.symbols[i].kind.as_str(), "method" | "sub"));
+            let (Some(f), Some(c)) = (stored, callable) else { continue };
+            if out.symbols[f].declared_with.is_some() || out.symbols[c].declared_with.is_some() {
+                continue;
+            }
+            out.symbols[f].declared_with = Some(crate::model::file_analysis::SymbolId(c as u32));
+            out.symbols[c].declared_with = Some(crate::model::file_analysis::SymbolId(f as u32));
+        }
     }
 
     // ---- command dispatch: classify each command's effects ----
