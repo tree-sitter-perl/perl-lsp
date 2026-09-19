@@ -76,10 +76,31 @@ fn aliased_leaf_alone_falls_to_own_namespace() {
 
 #[test]
 fn split_keeps_the_global_namespace_empty() {
+    let bare = |leaf: &str| crate::model::file_analysis::QualifiedSpelling {
+        leaf: leaf.to_string(),
+        segments: Vec::new(),
+        absolute: false,
+    };
     let m = map(&[], &[], None);
-    assert_eq!(m.resolve_split("Exception"), ("".to_string(), "Exception".to_string()));
+    assert_eq!(m.resolve_split_parts(&bare("Exception")), ("".to_string(), "Exception".to_string()));
     let n = map(&[], &[], Some("A\\B"));
-    assert_eq!(n.resolve_split("C"), ("A\\B".to_string(), "C".to_string()));
+    assert_eq!(n.resolve_split_parts(&bare("C")), ("A\\B".to_string(), "C".to_string()));
+    // an absolute spelling is its own identity, whatever this file imports
+    let abs = crate::model::file_analysis::QualifiedSpelling {
+        leaf: "Throwable".to_string(),
+        segments: Vec::new(),
+        absolute: true,
+    };
+    assert_eq!(n.resolve_split_parts(&abs), ("".to_string(), "Throwable".to_string()));
+    let deep = crate::model::file_analysis::QualifiedSpelling {
+        leaf: "Utils".to_string(),
+        segments: vec!["GuzzleHttp".to_string(), "Psr7".to_string()],
+        absolute: true,
+    };
+    assert_eq!(
+        n.resolve_split_parts(&deep),
+        ("GuzzleHttp\\Psr7".to_string(), "Utils".to_string())
+    );
 }
 
 /// `resolve` takes a WRITTEN spelling. It is not idempotent: an identity

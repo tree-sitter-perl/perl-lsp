@@ -8,6 +8,18 @@
 
 use super::*;
 
+/// A class spelling written with a qualifier, in the parts the producer
+/// had: the leaf, the namespace segments ahead of it, and whether the
+/// spelling reached the global namespace outright (php's leading `\`). The
+/// producer never joins them into a prefix, so no consumer takes one apart
+/// (rule #13) — `UseMap::resolve_split_parts` reads them as they are.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QualifiedSpelling {
+    pub leaf: String,
+    pub segments: Vec<String>,
+    pub absolute: bool,
+}
+
 /// Everything a pack driver records that Perl has no analog for. Stamped
 /// by the pack driver's extract/skeleton pipeline; `Default` (all empty)
 /// is what a Perl analysis carries.
@@ -110,12 +122,10 @@ pub struct PackFacts {
     #[serde(default)]
     pub use_aliases: Vec<(String, String, String)>,
 
-    /// Class spellings written with a qualifier: (leaf, written prefix —
-    /// absolute when it starts with `\`, else relative to the file's
-    /// namespace). A qualified spelling pins the leaf to that namespace
-    /// rather than counting as a bare spelling.
+    /// Class spellings written with a qualifier. A qualified spelling pins
+    /// the leaf to that namespace rather than counting as a bare spelling.
     #[serde(default)]
-    pub qualified_spellings: Vec<(String, String)>,
+    pub qualified_spellings: Vec<QualifiedSpelling>,
 
     /// How this analysis's language spells names — its separator and its
     /// sigils — the data every key function reads (rule #12). Perl's

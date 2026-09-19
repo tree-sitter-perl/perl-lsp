@@ -1272,9 +1272,9 @@ impl FileAnalysis {
         // resolver's answer for the whole spelling, split back to the pin's
         // (namespace, leaf) shape.
         if let Some(map) = self.use_map_with(own_ns.as_deref()) {
-            for (leaf, prefix) in &self.pack.qualified_spellings {
-                let (ns, _) = map.resolve_split(&format!("{prefix}{}{leaf}", map.sep));
-                pin(&mut pins, leaf, &ns);
+            for q in &self.pack.qualified_spellings {
+                let (ns, _) = map.resolve_split_parts(q);
+                pin(&mut pins, &q.leaf, &ns);
             }
         }
         let mut spelled: std::collections::HashSet<String> = std::collections::HashSet::new();
