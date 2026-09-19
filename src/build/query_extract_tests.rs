@@ -3630,3 +3630,49 @@ fn import_capture_suffix_declares_what_the_row_binds() {
     // Only the import family; a `.const` elsewhere is somebody else's capture.
     assert_eq!(strip_import_binds("def.const"), "def.const");
 }
+/// php's three row flavours each say what they bind, so no lane has to
+/// read a leaf's capitalization to guess — in the GROUP spelling too,
+/// where the keyword sits on the clause rather than the row.
+#[cfg(feature = "php")]
+#[test]
+fn php_import_rows_say_whether_they_bind_a_type_a_function_or_a_const() {
+    use crate::model::file_analysis::ImportBinds;
+    let src = "\
+<?php
+namespace App;
+use App\\Models\\User;
+use function App\\Helpers\\slugify;
+use const App\\Config\\MAX_ROWS;
+";
+    let (fa, _) = php_fa(src);
+    let rows: Vec<(&str, ImportBinds)> =
+        fa.pack.include_directives.iter().map(|r| (r.raw.as_str(), r.binds)).collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("App\\Models\\User", ImportBinds::Type),
+            ("App\\Helpers\\slugify", ImportBinds::Function),
+            ("App\\Config\\MAX_ROWS", ImportBinds::Const),
+        ],
+        "one row per `use`, each carrying its own binding: {rows:?}"
+    );
+    let grouped = "\
+<?php
+namespace App;
+use App\\Mixed\\{User, function slugify, const MAX_ROWS};
+";
+    let (fa, _) = php_fa(grouped);
+    let mut rows: Vec<(&str, ImportBinds)> =
+        fa.pack.include_directives.iter().map(|r| (r.raw.as_str(), r.binds)).collect();
+    rows.sort_by_key(|(raw, _)| *raw);
+    assert_eq!(
+        rows,
+        vec![
+            ("App\\Mixed\\MAX_ROWS", ImportBinds::Const),
+            ("App\\Mixed\\User", ImportBinds::Type),
+            ("App\\Mixed\\slugify", ImportBinds::Function),
+        ],
+        "a mixed group binds per CLAUSE, like three flat rows: {rows:?}"
+    );
+}
+

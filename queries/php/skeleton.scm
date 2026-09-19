@@ -336,3 +336,113 @@
 (php_tag) @preamble
 (declare_statement) @preamble
 
+; ---- imports ----
+; What a row BINDS rides its capture suffix: `use function` binds a
+; callable, `use const` a constant, an unsuffixed row a type. The keyword
+; is an anonymous token, so the unsuffixed arms exclude it by the clause's
+; own text rather than letting both arms mint the same row. The leading
+; anchor pins the un-fielded `(name)` to the clause's FIRST child: without
+; it the alias node matches that alternative too and `use G as H` mints a
+; second row for `H`.
+; `@import.binds` is the NAME the row brings into the file — the alias when
+; the clause writes one, the leaf otherwise. The two spellings ride one
+; capture and the later byte wins, so a reader never asks which arm fired.
+(namespace_use_declaration
+  (namespace_use_clause "function" (qualified_name (name) @import.binds) @import.name.function
+    alias: (name)? @import.binds)) @import
+(namespace_use_declaration
+  (namespace_use_clause "function" . (name) @import.name.function @import.binds
+    alias: (name)? @import.binds)) @import
+(namespace_use_declaration
+  (namespace_use_clause "const" (qualified_name (name) @import.binds) @import.name.const
+    alias: (name)? @import.binds)) @import
+(namespace_use_declaration
+  (namespace_use_clause "const" . (name) @import.name.const @import.binds
+    alias: (name)? @import.binds)) @import
+(namespace_use_declaration
+  (namespace_use_clause (qualified_name (name) @import.binds) @import.name
+    alias: (name)? @import.binds) @_plain_row
+  (#not-match? @_plain_row "^(function|const)[ \t\r\n]")) @import
+(namespace_use_declaration
+  (namespace_use_clause . (name) @import.name @import.binds
+    alias: (name)? @import.binds) @_plain_row
+  (#not-match? @_plain_row "^(function|const)[ \t\r\n]")) @import
+; the imported leaf is a live class reference — cross-file rename
+; rewrites the use line too.
+(namespace_use_clause (qualified_name (name) @ref.type))
+; a group clause that binds a callable or a constant names no class — the
+; same keyword exclusion the unsuffixed row arms use.
+(namespace_use_group
+  (namespace_use_clause . (name) @ref.type) @_plain_clause
+  (#not-match? @_plain_clause "^(function|const)[ \t\r\n]"))
+; A type position (`Collection $c`, `?Request $r`, `: static`, a union's
+; class arms) spells the class: references/rename on the class reach the
+; hints, and the file's use-map counts the leaf as spelled here.
+; Primitives (`int`, `array`) are `primitive_type`, never matched.
+(named_type (name) @ref.type)
+; `self` / `static` / `parent` written where a class NAME goes: they name the
+; class this code is written in, or its parent, and resolve off the enclosing
+; scope rather than out of a namespace. The reference says so, so the lane
+; that reports a name its namespace cannot supply never matches the spelling.
+((named_type (name) @receiver.self) (#any-of? @receiver.self "self" "static"))
+((named_type (name) @receiver.super) (#eq? @receiver.super "parent"))
+((binary_expression "instanceof" right: (name) @receiver.self)
+ (#any-of? @receiver.self "self" "static"))
+((binary_expression "instanceof" right: (name) @receiver.super)
+ (#eq? @receiver.super "parent"))
+((object_creation_expression (name) @receiver.super)
+ (#eq? @receiver.super "parent"))
+(named_type (qualified_name (name) @ref.type) @ref.qualified)
+;; `$x instanceof Foo` names the class; `#[Foo]` / `#[Ns\Foo(...)]` names an
+;; attribute class — both are class references (goto-def, rename, the
+;; use-map's spelled set).
+(binary_expression "instanceof" right: (name) @ref.type)
+(binary_expression "instanceof" right: (qualified_name (name) @ref.type) @ref.qualified)
+(attribute (name) @ref.type)
+(attribute (qualified_name (name) @ref.type) @ref.qualified)
+;; `#[Deprecated]` is the attribute spelling of the `@deprecated` docblock
+;; tag — the declaration below it carries the `deprecated` attribute.
+((attribute (name) @sym.attr.deprecated)
+ (#eq? @sym.attr.deprecated "Deprecated"))
+
+; ---- the file's use-map (alias- and group-aware) ----
+; What each imported leaf/alias MEANS — parents resolve through it
+; before the namespace-relative default. Direct clauses anchor on the
+; declaration so the group form (whose clauses are bare names under a
+; shared prefix) never double-mints.
+; the leading `.` anchors pin the import name to the clause's FIRST child:
+; without them the un-fielded (name) alternative also matches the alias
+; node as its own combination, and that poison row races the real one for
+; the same use-map key (HashMap order decided the winner — flaky by build).
+(namespace_use_declaration
+  (namespace_use_clause
+    . (qualified_name) @use.fqn
+    alias: (name)? @use.alias))
+(namespace_use_declaration
+  (namespace_use_clause
+    . (name) @use.fqn
+    alias: (name)? @use.alias))
+; A group clause binds what its own keyword says, exactly as a flat row
+; does: the binds suffix rides the row capture of the arm that matched, so
+; a mixed group (`use A\{Z, function b, const C}`) gives each clause its
+; own `ImportBinds` — one match per clause, one arm per keyword.
+(namespace_use_declaration
+  (namespace_name) @use.prefix
+  body: (namespace_use_group
+    (namespace_use_clause "function"
+      . (name) @use.leaf @import.binds
+      alias: (name)? @use.alias @import.binds))) @import.function
+(namespace_use_declaration
+  (namespace_name) @use.prefix
+  body: (namespace_use_group
+    (namespace_use_clause "const"
+      . (name) @use.leaf @import.binds
+      alias: (name)? @use.alias @import.binds))) @import.const
+(namespace_use_declaration
+  (namespace_name) @use.prefix
+  body: (namespace_use_group
+    (namespace_use_clause
+      . (name) @use.leaf @import.binds
+      alias: (name)? @use.alias @import.binds) @_plain_group_clause)
+  (#not-match? @_plain_group_clause "^(function|const)[ \t\r\n]")) @import
+
