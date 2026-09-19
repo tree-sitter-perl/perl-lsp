@@ -48,6 +48,12 @@ recovery parser) — none read the broken tree.
 
 ### The seam: sentinel reparse (`cursor_sentinel.rs`)
 
+Which nodes ARE a member access, a call, or a token to skip is the query
+document's answer, read through the bounded cursor-time runner
+(`pack_query` / `captures_at` / `pattern_root_kinds`,
+`docs/adr/pack-vocabulary.md`) — never a node-kind table beside the
+document.
+
 A member of the reparse family (`cpp_reparse.rs`, `reparse.rs`): a source
 edit + reparse + span remap. The others fix a parse corrupted by a
 *declaration* (a macro, a prototype); this one fixes a parse corrupted by
@@ -74,12 +80,13 @@ Two properties make it cheap and exact:
   exact: tree-sitter reparses only the damaged region around the cursor,
   reusing the document tree `document.rs` already holds.
 
-Per-language config comes from `LangPack` — a single struct, not a
-branch. The member-access node kinds (`member_kinds`) and the "don't
-splice into strings/comments" set (`skip_kinds`) are the facts this seam
-reads, alongside the pack's other per-language config for the rest of
-completion. `LanguageDriver::lang_pack(language)` maps a driver id to its
-`LangPack`; `None` means the language gets in-scope completion only.
+Which nodes are a member access, and which are the tokens not to splice
+into, are the query document's own patterns — `@member.recv`'s roots and
+`@skip` — read through the bounded runner above. `LanguageDriver::
+lang_pack(language)` maps a driver id to its `LangPack`, which carries
+what is left: the language's write and display spellings, and its
+text→structure predicates. `None` means the language gets in-scope
+completion only.
 
 ### Receiver → members: tree-free, reusing the bag
 
