@@ -18,6 +18,30 @@ impl FileAnalysis {
         self.pack.spellings.unwrap_or(&NEUTRAL_SPELLINGS)
     }
 
+    /// The callee a bare variable READ is passed to, when the read is a call
+    /// argument: the call site's own binding edge names it
+    /// (`docs/adr/by-ref-binding.md`), so no consumer joins an argument to a
+    /// call by span. `None` when the read is not an argument.
+    pub fn argument_callee(&self, read: &Ref) -> Option<&str> {
+        use crate::model::witnesses::{ProjectionStep, WitnessAttachment, WitnessPayload};
+        let att = WitnessAttachment::Variable {
+            name: read.target_name.clone(),
+            scope: read.scope,
+        };
+        self.witnesses.for_attachment(&att).into_iter().find_map(|w| {
+            if w.span.start != read.span.start {
+                return None;
+            }
+            match &w.payload {
+                WitnessPayload::Edge(WitnessAttachment::Param { name, .. }) => Some(name.as_str()),
+                WitnessPayload::Projected { step: ProjectionStep::ParamOf { member, .. }, .. } => {
+                    Some(member.as_str())
+                }
+                _ => None,
+            }
+        })
+    }
+
     /// Where `var` is bound inside `scope` — the earliest declaring
     /// `Variable` symbol within the scope's span. The anchor every fact
     /// about a parameter lands at (a declaration's write marker retires
