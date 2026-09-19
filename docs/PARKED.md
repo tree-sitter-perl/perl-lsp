@@ -637,6 +637,20 @@ marked otherwise; the drain re-derived each rationale against current code.
   fork (`docs/open-forks.md`) and pinned by
   `php_phpunit_mock_chain_ceiling_is_the_mock_api`.
 
+- **Goto-def on a leaf forty files declare rehydrates each of them**
+  (index, `member_def_location`). The bareword-scoped member lookup asks
+  `visible_def_candidates` for every class on the ancestor walk and
+  `whole_present`s each candidate to read its symbols — on a keystroke.
+  A common leaf (`Model`, `Controller`) has one candidate per declaring
+  file, so the cost is (ancestors x declarers) rehydrations per request,
+  bounded only by the bag cache. Target shape: the candidate's DECLARED
+  MEMBER NAMES as a row-store projection, so a candidate that cannot
+  hold the member is rejected without decoding it — the same narrowing
+  `refs_to` gets from the `refs` rows. Parked because that is a row
+  family the store does not have yet; the walk itself is now the model's
+  one graph walk, so the cost is the only thing left here.
+  [recorded 2026-09-18]
+
 ## Cross-references
 - Gap shapes behind open xfails: `gold-corpus/KNOWN-GAPS.md`
 - Open architectural forks: `docs/open-forks.md`; resolved ledger:
