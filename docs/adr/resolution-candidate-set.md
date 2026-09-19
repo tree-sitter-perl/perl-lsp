@@ -230,6 +230,51 @@ RoleMask knob) and
 closure fact) each turn ONE construction knob and assert gd, gr, rename,
 and completion gathering move together.
 
+## The php axes on the seam
+
+UseMap's pin sources are two axes, not one, and a class-keyed family
+filter must read both. An ALIASED `use` row (`use A\B\Parser as
+DeclarationParser;`) persists `use_aliases`: the alias spelling pins to
+the row's namespace, but the row's real leaf is untouched by it — an
+aliased row makes no claim about its own leaf (a same-file `Parser`
+elsewhere still pins by its own evidence). Every namespace-qualified
+spelling the file writes (a call/ctor/type/parent-clause prefix)
+persists as `qualified_spellings`: the leaf pins to `own_ns\prefix`, or
+to the absolute prefix after a leading `\`. `leaf_namespace` — the
+explicit family-filter speller most consumers call — reads BOTH pin
+sources (the own-namespace default plus every qualified claim), so decl,
+references, and rename agree with the axis without a filter re-deriving
+the pin logic.
+
+A cursor landing INSIDE a `use`/import row names its class in full,
+never a bareword lookup: `FileAnalysis::import_row_namespace` is the one
+speller, read by the local goto-def/hover arms and the cross-file
+Package lane, and word-keyed goto-def fallbacks stand down there —
+including a middle segment of a qualified `use` (`use
+Illuminate\Http\Request;`, cursor on `Http`), which falls to silence
+rather than a same-leaf stranger.
+
+A scoped call whose receiver is an EXPRESSION, not a bareword/`self`/
+`parent`/`static` (`$this->prop::m()`, `$cls::m()` with `$cls =
+Foo::class`), needs no separate scoped-call arm: the receiver types like
+any member access, and `Foo::class` itself types as the class (the
+constructor's alias-graph edge, `expr.classref`).
+
+A class reference is minted at every spelling a pack's convention
+recognizes, not only its declaration and type-hint sites: a bareword
+static receiver (`Foo::m()`, `Foo::CONST`, `Foo::$p`, `Foo::class`)
+mints one, and a group-use clause (`use A\{Foo, Bar as Baz};`) mints the
+same import row a flat `use` does (leaf spelled in full) — so a class's
+references/rename reach every static-access and group-import spelling.
+
+A construction site is TWO facts on one token, both minted by the
+producer where the pack declares a constructor convention: a Package ref
+(the token names the class, so the class's references and rename own it)
+and a member call of the convention's name on that class (so the
+constructor's own references and goto-def see the site). No consumer
+asks whether a call that spells a class name constructs — the ordinary
+Package and member arms each claim their fact.
+
 ## Consequences
 
 - New-axis review question shrinks from "did every feature get it?" to
