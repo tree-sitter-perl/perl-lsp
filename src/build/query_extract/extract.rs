@@ -1830,7 +1830,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // keys by) — override the enclosing-namespace context.
                 let pkg = qualifier_by_match
                     .get(&e.match_id)
-                    .map(|q| q.rsplit("::").next().unwrap_or(q).to_string())
+                    .map(|q| match pack.names.sep() {
+                        Some(sep) => q.rsplit(sep).next().unwrap_or(q).to_string(),
+                        None => q.to_string(),
+                    })
                     .or_else(|| package.clone());
                 // A class's package is its NAMESPACE, whatever context it
                 // sits in (an anonymous class inside a method is still
