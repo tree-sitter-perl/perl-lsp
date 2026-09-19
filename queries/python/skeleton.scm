@@ -27,6 +27,12 @@
 
 (parameters
   (identifier) @def.var.name @def.var)
+; The method RECEIVER parameter: lexically inside the class body, so the
+; sticky class context tags it — but it is the object, not a member. The
+; capture is what the outline and member completion ask (the symbol carries
+; the fact), and what witnesses the receiver as an instance of its class.
+((parameters . (identifier) @param.receiver)
+ (#any-of? @param.receiver "self" "cls"))
 
 (import_statement
   name: (dotted_name) @import.name) @import
