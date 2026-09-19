@@ -569,6 +569,36 @@ fn test_code_action_multiple_exporters_not_preferred() {
 }
 
 #[test]
+fn lexical_subs_complete_only_inside_their_block() {
+    // `my sub helper` is callable only inside its declaring block, from
+    // its declaration down — the grammar's `lexical` field marks it, the
+    // builder stamps `SymbolDetail::Sub{lexical}`, and `complete_general`
+    // gates on the declaring scope. File-wide subs stay file-wide.
+    let source = "\
+sub outer {
+    my sub helper { return 42; }
+    return helper();
+}
+sub plain { return 1; }
+";
+    let analysis = parse_analysis(source);
+    let names_at = |row: usize, col: usize| -> Vec<String> {
+        analysis
+            .complete_general(tree_sitter::Point { row, column: col })
+            .into_iter()
+            .map(|c| c.label)
+            .collect()
+    };
+    // Inside outer's block, after the decl: helper offered.
+    let inside = names_at(2, 4);
+    assert!(inside.iter().any(|n| n == "helper"), "in-scope: {inside:?}");
+    // At file level (inside `plain`'s body): helper is NOT offered.
+    let outside = names_at(4, 12);
+    assert!(!outside.iter().any(|n| n == "helper"), "out-of-scope leak: {outside:?}");
+    assert!(outside.iter().any(|n| n == "outer"), "file-wide subs stay: {outside:?}");
+}
+
+#[test]
 fn lexical_methods_complete_with_amp_prefix_in_scope_only() {
     // `my method hidden` dispatches ONLY as `$invocant->&hidden` — the
     // member lane must offer it with the `&` prefix, never bare, and only
@@ -615,4 +645,28 @@ class Widget {
         .map(|c| c.label)
         .collect();
     assert!(!general.iter().any(|n| n == "hidden"), "bare-lane leak: {general:?}");
+}
+
+#[test]
+fn perl_list_return_destructures_positionally() {
+    // `return (A->new, B->new)` is a positional tuple (`list_expression` in
+    // value position types as `Sequence`), so `my ($q, $a) = mk()` binds
+    // each slot to its element (docs/adr/destructuring.md). A slurpy tail
+    // from a later position has no projection step and stays untyped.
+    let source = "\
+package Queue; sub new { bless {}, shift }
+package Agent; sub new { bless {}, shift }
+package main;
+sub mk { return (Queue->new, Agent->new); }
+my ($q, $a) = mk();
+my ($first, @rest) = mk();
+";
+    use crate::model::file_analysis::InferredType;
+    let analysis = parse_analysis(source);
+    let at = tree_sitter::Point { row: 5, column: 0 };
+    assert_eq!(analysis.inferred_type_via_bag("$q", at), Some(InferredType::ClassName("Queue".into())));
+    assert_eq!(analysis.inferred_type_via_bag("$a", at), Some(InferredType::ClassName("Agent".into())));
+    let at2 = tree_sitter::Point { row: 6, column: 0 };
+    assert_eq!(analysis.inferred_type_via_bag("$first", at2), Some(InferredType::ClassName("Queue".into())));
+    assert_eq!(analysis.inferred_type_via_bag("@rest", at2), None, "slurpy tail: no projection step, untyped");
 }
