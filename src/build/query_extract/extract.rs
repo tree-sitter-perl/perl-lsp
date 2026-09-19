@@ -3488,6 +3488,67 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
         }
     }
+
+    // Every enum carries the members the LANGUAGE gives it (php's
+    // `->value`, `::cases()`). Which containers are enums is the query's
+    // word (`@classattr.enum`), read as the capture suffix it is.
+    //
+    // They have no token of their own, so they are
+    // minted here, at the enum's name, as real members — SYNTHESIZED says
+    // no source could reference them into existence. A consumer resolves
+    // them through the symbol table like any other member; none matches
+    // their names.
+    if !pack.enum_members.is_empty() {
+        let enums: Vec<(std::string::String, Point, Point, crate::model::file_analysis::ScopeId)> =
+            out.symbols
+                .iter()
+                .filter(|s| {
+                    s.kind == "class"
+                        && classattr_by_name_span.get(&(s.name_start, s.name_end)).map(String::as_str)
+                            == Some(ENUM_CLASSATTR)
+                })
+                .map(|s| {
+                    // The enum's BODY scope is where its declared members
+                    // live, so the synthesized ones live there too.
+                    let body = out
+                        .scopes
+                        .iter()
+                        .find(|sc| {
+                            sc.package.as_deref() == Some(s.name.as_str())
+                                && (sc.span.start.row, sc.span.start.column)
+                                    >= (s.start.row, s.start.column)
+                        })
+                        .map(|sc| sc.id)
+                        .unwrap_or(s.scope);
+                    (s.name.clone(), s.name_start, s.name_end, body)
+                })
+                .collect();
+        for (name, name_start, name_end, scope) in enums {
+            for m in pack.enum_members {
+                out.symbols.push(SkelSymbol {
+                    declared_with: None,
+                    flags: Default::default(),
+                    declared_return: None,
+                    return_annotation: None,
+                    kind: if m.callable { "method" } else { "field" }.to_string(),
+                    name: m.name.to_string(),
+                    start: name_start,
+                    end: name_end,
+                    name_start,
+                    name_end,
+                    package: Some(name.clone()),
+                    scope,
+                    deref_stack: Vec::new(),
+                    attributes: vec!["synthesized".to_string()],
+                    arity: None,
+                    params: Vec::new(),
+                    qualifier_owned: false,
+                    doc: None,
+                    deprecation: None,
+                });
+            }
+        }
+    }
     // What the document said AT each reference site, stamped once. A
     // receiver's flavour and a constructor call are facts a capture stated;
     // a consumer that matched the token text back against a set of spellings
@@ -3544,6 +3605,10 @@ fn bind_call_args(
     }
 }
 
+/// The `@classattr.<flavor>` suffix a container-def carries when the query
+/// calls it an enumeration — the capture's own word, not the attribute
+/// string a consumer would otherwise compare.
+const ENUM_CLASSATTR: &str = "enum";
 
 /// Resolve every class name a declared return mentions through the file's
 /// use map. The shape is the pack's; what its names MEAN is the file's, and

@@ -119,6 +119,18 @@ pub struct LangPack {
     /// build, so it is a document a plugin dir extends, never a table
     /// (rule #15) — read through `builtin_types_for`.
     pub bundled_builtin_types: &'static [&'static str],
+    /// Members every enum carries by language rule (php: `->value`,
+    /// `->name`, `::cases()`, `::from()`, `::tryFrom()`). PRODUCER-only
+    /// data: the extractor mints each as a SYNTHESIZED member at every enum
+    /// declaration, and every consumer resolves it like any other member —
+    /// nothing downstream reads this list, so no consumer matches the names.
+    ///
+    /// TODO: still five token texts a plugin dir cannot extend, two fields
+    /// below the builtin-class list that IS a document. The replacement is
+    /// the same shape — `queries/<lang>/enum-members.txt`, one name per
+    /// line with its callable-ness, read through the `builtins.txt` reader
+    /// — and it retires this field's rule #15 allowlist entry with it.
+    pub enum_members: &'static [EnumMember],
     /// Completion trigger characters for the LSP
     /// `completionProvider.triggerCharacters` slot — the client auto-fires
     /// completion (and reports the char in `CompletionContext`) when one is
@@ -126,6 +138,16 @@ pub struct LangPack {
     pub trigger_chars: &'static [&'static str],
 }
 
+/// One member the LANGUAGE gives every enum of a language. Read at
+/// extraction and nowhere else — the mint turns it into a real member.
+#[derive(Debug, Clone, Copy)]
+pub struct EnumMember {
+    pub name: &'static str,
+    /// A callable (php `::cases()`), as against a value read (`->value`).
+    /// Decides which member kind the synthesis mints, so a call and a read
+    /// of the same name can never answer for each other.
+    pub callable: bool,
+}
 /// One type fact parsed from a documentation comment (`LangPack::doc_types`).
 /// The type is a raw spelling the pack has already normalized to what its
 /// `annot_type` accepts (generics stripped, `X|null` collapsed to `X`).
