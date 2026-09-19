@@ -1436,6 +1436,38 @@ fn language_spellings_have_one_home() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// A pack declares its OWN spellings; it never borrows another language's.
+/// `__PACKAGE__` is Perl's token for the enclosing package, and a pack that
+/// canonicalizes its receiver onto it puts Perl's vocabulary into an
+/// analysis of a language that has no such word. A receiver that names the
+/// class it is written in says so on its capture (`@receiver.self`), and
+/// the extractor mints the class itself.
+#[test]
+fn packs_do_not_borrow_perls_current_package_token() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/build/packs");
+    let mut offenders: Vec<String> = Vec::new();
+    let mut stack = vec![dir.clone()];
+    while let Some(d) = stack.pop() {
+        for entry in fs::read_dir(&d).expect("read packs dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let text = fs::read_to_string(&path).expect("read pack source");
+                if text.contains("CURRENT_PACKAGE_TOKEN") || text.contains("__PACKAGE__") {
+                    offenders.push(path.strip_prefix(&dir).expect("under packs/").display().to_string());
+                }
+            }
+        }
+    }
+    offenders.sort();
+    assert!(
+        offenders.is_empty(),
+        "pack sources spelling Perl's current-package token: {offenders:?} — \
+         declare the receiver on its capture and mint the class at extraction"
+    );
+}
+
 /// Rule #13: the model and the adapter never parse a string this codebase
 /// rendered. Every `split`-family call in those tiers is allowlisted with
 /// the reason it is SOURCE-side (a written spelling, a source-spelled name,
