@@ -1663,6 +1663,32 @@ impl SkeletonAnalysis {
         for (child, parent) in &self.parents {
             packages.entry(child.clone()).or_default().parents.push(parent.clone());
         }
+        // Contracts: an interface, a trait or an abstract class is a role —
+        // it defers its obligations to a concrete composer — and each of
+        // its contract callables is a require that composer must provide
+        // (`unfulfilled_role_requires`, docs/adr/role-contracts.md). The
+        // contract symbols are excluded from provision the way Perl's
+        // `requires` markers are.
+        let mut contract_symbols: std::collections::HashSet<SymbolId> = Default::default();
+        for (i, sym) in symbols.iter().enumerate() {
+            let defers = sym
+                .flags
+                .intersects(SymbolFlags::INTERFACE | SymbolFlags::TRAIT | SymbolFlags::ABSTRACT);
+            if sym.kind == SymKind::Class && defers {
+                packages.entry(sym.name.clone()).or_default().is_role = true;
+            }
+            if matches!(sym.kind, SymKind::Sub | SymKind::Method)
+                && sym.flags.contains(SymbolFlags::CONTRACT)
+            {
+                contract_symbols.insert(SymbolId(i as u32));
+                if let Some(pkg) = &sym.package {
+                    let facts = packages.entry(pkg.clone()).or_default();
+                    if !facts.requires.contains(&sym.name) {
+                        facts.requires.push(sym.name.clone());
+                    }
+                }
+            }
+        }
         let pack = crate::model::file_analysis::PackFacts {
             import_rows: std::mem::take(&mut self.import_rows),
             spellings: self.spellings,
@@ -1722,6 +1748,7 @@ impl SkeletonAnalysis {
         let mut fa = FileAnalysis::new(FileAnalysisParts {
             scopes: self.scopes,
             fold_ranges,
+            contract_symbols,
             symbols,
             refs,
             witnesses: bag,
