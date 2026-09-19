@@ -145,6 +145,14 @@ Two unverified observations from the cpp adversarial review:
   writers' panic-arm LRU-pin fix is the drift it would have prevented.
 - **Stamp-capture helper.** The stamp-before-read + re-stat-after-parse
   protocol is spelled in both fresh workers.
+- **The tier belongs on `CachedModule`, stamped at registration.** A
+  file's role (WORKSPACE vs read-only DEPENDENCY) is decided when the
+  index registers it, and every reader re-derives it from a prefix test
+  against the registered dependency roots. `DependencyTier` made that one
+  lock read per walk instead of one per file, which is the cheap half;
+  the real shape is a role on the registered `CachedModule`, so no query
+  path computes anything. `has_workspace_tier` is already reaching for
+  it.
 
 ## The reader side of the residency ladder
 
