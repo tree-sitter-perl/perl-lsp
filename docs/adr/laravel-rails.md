@@ -129,6 +129,11 @@ at the method's own name token (`@def.field` on
   like one whether or not the ancestry is readable, and an `isa` gate
   would be a shape branch that silently drops every model whose base
   lives in an absent vendor tree (rule #10).
+- The method and the property are ONE declaration in two member families,
+  linked by `Symbol::declared_with` where the extractor's dedup keeps the
+  pair (`docs/adr/member-kinds.md`). The identity carries both, so rename
+  from either spelling rewrites the `->cover()` calls and the `->cover`
+  reads together, and the outline lists the member once (the callable).
 
 ## Cross-file
 
