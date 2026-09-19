@@ -24,6 +24,13 @@ handler def minted from a class-keyed rail capture (`@def.handler.class.
 <rail>`), whose token belongs to another symbol: `CLASS_RAIL` is what
 the listing verdict asks, never the attribute string.
 
+A flag can also state what a declaration's SHAPE says about its value:
+`CALLABLE_VALUE` marks a stored slot whose value is invoked (a C
+function-pointer member, `int (*read)(char *)`), minted from the
+`@deref.callable` level of the declarator peel. `MemberKind::admits_decl`
+asks it, so `ops->read(buf)` resolves to the slot a call would otherwise
+miss — without a list of callback names anywhere.
+
 ## Why closed
 
 Every flag added so far has turned out to have a language-generic
