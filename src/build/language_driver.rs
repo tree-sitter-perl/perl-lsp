@@ -1299,6 +1299,8 @@ fn remap_spans(
         annot_expr_spans: _,
         preamble_end: _,
         doc_mentions: _,
+        // language-wide facts, no spans to remap.
+        function_scoped_vars: _,
         flow_edges,
         moved_from,
         doc_disagreements,
