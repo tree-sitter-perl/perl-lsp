@@ -2910,6 +2910,23 @@ class C extends B implements I {
 }
 
 #[test]
+fn php_keyed_array_literal_types_as_hash_with_keys() {
+    let src = "\
+<?php
+$cfg = ['timeout' => 30, 'retries' => 3];
+";
+    let (fa, _) = php_fa(src);
+    let end = tree_sitter::Point { row: 2, column: 0 };
+    match fa.inferred_type_via_bag("$cfg", end) {
+        Some(crate::model::file_analysis::InferredType::HashWithKeys { keys, .. }) => {
+            let names: Vec<&str> = keys.iter().map(|(k, _)| k.as_str()).collect();
+            assert!(names.contains(&"timeout") && names.contains(&"retries"), "{names:?}");
+        }
+        other => panic!("expected HashWithKeys, got {other:?}"),
+    }
+}
+
+#[test]
 fn php_cross_file_function_refs_through_refs_to() {
     // Declaration in a.php, call in b.php, the production refs_to
     // walks both — Perl parity for the references verb.
@@ -4815,6 +4832,22 @@ fn php_keyed_destructuring_binds_through_hash_keys() {
     assert_eq!(ext("$adv"), Some(Extraction::KeyOf("advisories".into())));
     assert_eq!(ext("$n"), Some(Extraction::KeyOf("count".into())));
     assert_eq!(ext("$v"), Some(Extraction::KeyOf("k".into())), "foreach keyed list");
+}
+
+#[test]
+fn php_branch_arms_and_subscripts_project() {
+    use crate::model::witnesses::{ProjectionStep, WitnessAttachment, WitnessPayload};
+    let src = "<?php\n$t = match ($c) { 'a' => X::A, default => X::B };\n$u = $c ? f() : g();\n$m = f()[0];\n$r = $row['name'];\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let arms = |row: usize| skel.witnesses.iter().filter(|w| matches!(&w.attachment, WitnessAttachment::BranchArm(sp) if sp.start.row == row)).count();
+    assert_eq!(arms(1), 2, "match: one arm witness per arm");
+    assert_eq!(arms(2), 2, "ternary: both arms");
+    assert!(skel.witnesses.iter().any(|w| matches!((&w.attachment, &w.payload), (WitnessAttachment::Expr(sp), WitnessPayload::Edge(WitnessAttachment::BranchArm(_))) if sp.start.row == 1)), "the match's own Expr edges to its arms");
+    let has_step = |row: usize, pred: &dyn Fn(&ProjectionStep) -> bool| skel.witnesses.iter().any(|w| matches!((&w.attachment, &w.payload), (WitnessAttachment::Expr(sp), WitnessPayload::Projected { step, .. }) if sp.start.row == row && pred(step)));
+    assert!(has_step(3, &|s| matches!(s, ProjectionStep::ArrayIndex(0))), "f()[0] peels slot 0");
+    assert!(has_step(4, &|s| matches!(s, ProjectionStep::HashKey(k) if k == "name")), "$row['name'] drills the key");
 }
 
 /// A union spelling is `Unknown` — the value this lattice cannot hold — at
