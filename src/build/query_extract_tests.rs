@@ -3765,6 +3765,46 @@ function f(Query $q) {
 }
 
 #[test]
+fn php_wp_hook_array_callbacks_are_method_refs() {
+    // The `array($this, 'on_save')` / `[$this, 'on_save']` callback forms:
+    // the overlay's `@ref.method.named` + same-match `@member.recv` mint the
+    // SAME MethodCall ref a written `$this->on_save()` carries, so the
+    // method's references include its hook registrations.
+    let src = "\
+<?php
+class Plugin {
+    public function register(): void {
+        add_action('save_post', array($this, 'on_save'));
+        add_filter('the_content', [$this, 'on_save']);
+    }
+    public function on_save(): int { return 1; }
+}
+";
+    let (fa, _) = php_fa(src);
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 6, column: 21 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("on_save decl must mint a target: {other:?}"),
+    };
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/wp/p.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let hook_sites: Vec<_> =
+        locs.iter().filter(|l| l.span.start.row == 3 || l.span.start.row == 4).collect();
+    assert_eq!(hook_sites.len(), 2, "both array-callback strings are refs: {locs:?}");
+    assert!(hook_sites.iter().all(|l| l.is_rewritable()), "rename reaches them: {hook_sites:?}");
+}
+
+#[test]
 fn php_promoted_property_navigation_and_rename_group() {
     // `public readonly Level $level` in a ctor signature
     // declares BOTH the class field and the ctor param with ONE token.
@@ -3825,6 +3865,54 @@ function use_it(Record $record): Level {
         matches!(from_decl, Some(crate::index::resolve::ResolvedTarget::Group { .. })),
         "decl-side cursor resolves to the same group: {from_decl:?}"
     );
+}
+
+/// An unsuffixed `@def.handler.named` names no rail, and a rail is the
+/// namespace one framework owns — an unnamed one would claim the whole
+/// program. The lint reports it; this pins that the extractor also mints
+/// NOTHING for it, with the rail-suffixed spelling as the control.
+#[cfg(feature = "php")]
+#[test]
+fn php_an_unsuffixed_handler_capture_mints_no_handler() {
+    const PATTERN: &str = "(function_call_expression \
+        function: (name) @_uh \
+        arguments: (arguments . (argument (string . (string_content) @CAP .))) \
+        (#eq? @_uh \"add_action\"))";
+    let src = "<?php\nadd_action('init', 'cb');\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    // The pattern rides the pack's OWN query source, not an overlay: the
+    // overlay assembly caches per (lang_id, query_source) because a
+    // bundled set is a compile-time constant of the language.
+    let handlers = |capture: &str| -> usize {
+        let base = crate::build::query_extract::php_pack();
+        let source: &'static str = Box::leak(
+            format!("{}\n{}", base.query_source, PATTERN.replace("@CAP", capture))
+                .into_boxed_str(),
+        );
+        let pack = crate::build::query_extract::LangPack {
+            query_source: source,
+            bundled_overlays: &[],
+            ..base
+        };
+        let skel = extract(&tree, src.as_bytes(), &pack).unwrap();
+        let minted = skel.symbols.iter().filter(|s| s.kind == "handler").count();
+        let fa = skel.into_file_analysis();
+        assert_eq!(
+            fa.symbols()
+                .iter()
+                .filter(|s| matches!(
+                    s.detail,
+                    crate::model::file_analysis::SymbolDetail::Handler { .. }
+                ))
+                .count(),
+            minted,
+            "every minted handler reaches the model"
+        );
+        minted
+    };
+    assert_eq!(handlers("@def.handler.named.hook"), 1, "the rail-suffixed spelling mints it");
+    assert_eq!(handlers("@def.handler.named"), 0, "an unnamed rail mints nothing");
 }
 
 #[test]
@@ -4027,6 +4115,44 @@ function run_it(): void {}
 }
 
 #[test]
+fn php_class_array_callables_are_method_refs() {
+    // `[UserController::class, 'index']` names a dispatchable method — the
+    // Laravel route / event-map convention. The pair mints the same
+    // MethodCall ref a written `UserController::index()` carries, so the
+    // controller action's references include its route registrations (and
+    // it leaves the heatmap dead queue as genuinely referenced).
+    let src = "\
+<?php
+class UserController {
+    public function index(): string { return 'ok'; }
+}
+route_get('/users', [UserController::class, 'index']);
+listen_on('ev', array(UserController::class, 'index'));
+";
+    let (fa, _) = php_fa(src);
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 2, column: 21 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("index decl must mint a target: {other:?}"),
+    };
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/cc/t.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let sites: Vec<_> = locs.iter().filter(|l| l.span.start.row >= 4).collect();
+    assert_eq!(sites.len(), 2, "both callable-array strings are refs: {locs:?}");
+    assert!(sites.iter().all(|l| l.is_rewritable()), "rename rewrites in-quotes: {sites:?}");
+}
+
+#[test]
 fn php_visibility_gates_member_completion() {
     // private/protected members complete only from inside their own
     // class's body: the `@_nonpublic_mark` patterns stamp the same
@@ -4182,6 +4308,30 @@ fn php_data_provider_docblock_mints_member_ref_on_name_token() {
 }
 
 #[test]
+fn php_stdlib_string_callables_mint_call_refs() {
+    // Callback-slot strings in the fixed-position stdlib builtins are
+    // function refs (`@ref.call.named`): arg-0 family (array_map,
+    // function_exists) and arg-1 family (array_filter, usort). Data
+    // strings in non-callback slots never mint.
+    let src = "<?php\n$a = array_map('fnA', $rows);\nif (function_exists('fnB')) {}\n$b = array_filter($rows, 'fnC');\nusort($rows, 'fnD');\nin_array('notafn', $rows);\narray_map('fnE');\narray_filter('notafn2');\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let calls: Vec<&str> = skel
+        .refs
+        .iter()
+        .filter(|r| r.kind == "call")
+        .map(|r| r.name.as_str())
+        .collect();
+    for want in ["fnA", "fnB", "fnC", "fnD", "fnE"] {
+        assert!(calls.contains(&want), "{want} missing from {calls:?}");
+    }
+    // `in_array`'s needle is data; `array_filter`'s arg 0 is the ARRAY slot.
+    assert!(!calls.contains(&"notafn"), "data string minted: {calls:?}");
+    assert!(!calls.contains(&"notafn2"), "array-slot string minted: {calls:?}");
+}
+
+#[test]
 fn php_destructuring_slots_bind_positionally() {
     use crate::model::file_analysis::Extraction;
     // `[$a, $b] = …` / `list(...)` / `[, $b]` bind each scalar slot to its
@@ -4256,6 +4406,35 @@ fn php_union_spellings_are_unknown_and_never_nest() {
     assert_eq!(at("array{a: int|string}"), Some(InferredType::Unknown));
     assert_eq!(at("array{int|string, int}"), Some(InferredType::Unknown));
     assert_eq!(at("array<int, string|null>"), Some(InferredType::Sequence(vec![InferredType::String])));
+}
+
+/// `$this->m (1)` — whitespace before the argument list — is the call its
+/// tree says it is: the callee joins its list through the match, not the
+/// byte after the name, so both sites mint a call and neither a value read.
+#[test]
+fn php_spaced_call_keeps_its_callable_shape() {
+    let src = "<?php\nclass D { function m($a) { return 1; } function f() { return $this->m (1) + $this->m(2); } }\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let calls: Vec<(Option<usize>, bool)> = skel
+        .refs
+        .iter()
+        .filter(|r| r.kind == "member" && r.name == "m")
+        .map(|r| (r.arg_count, r.value_read))
+        .collect();
+    assert_eq!(calls, vec![(Some(1), false), (Some(1), false)], "{calls:?}");
+}
+
+#[test]
+fn php_instance_array_callable_is_a_method_ref() {
+    let src = "<?php\nclass L { function on(): void {} function reg(): void { $d = [$this, 'on']; $e = [$obj, 'other']; } }\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let names: Vec<(&str, Option<&str>)> = skel.refs.iter().filter(|r| r.kind == "member").map(|r| (r.name.as_str(), r.invocant.as_ref().map(|(_, t)| t.as_str()))).collect();
+    assert!(names.contains(&("on", Some("$this"))), "{names:?}");
+    assert!(names.contains(&("other", Some("$obj"))), "{names:?}");
 }
 
 /// The overlay lint's findings: a rail family with no rail names a
