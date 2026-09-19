@@ -389,10 +389,10 @@ pub fn collect_diagnostics(
             continue;
         }
 
-        // A class with `AUTOLOAD` anywhere in its MRO answers ANY method name at
-        // runtime, so the static `sub` set isn't its real surface — stay silent
-        // (the role-contracts diagnostic uses the same skip, file_analysis.rs).
-        if analysis.resolve_method_in_ancestors(&class_name, "AUTOLOAD", Some(module_index)).is_some() {
+        // A class that answers any member name at runtime (Perl's
+        // `AUTOLOAD`) has a `sub` set that is not its real surface — stay
+        // silent, exactly as the contract lane does.
+        if analysis.class_answers_any_member(&class_name, Some(module_index)) {
             continue;
         }
 
