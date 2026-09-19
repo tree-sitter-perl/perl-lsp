@@ -5111,6 +5111,104 @@ fn php_instance_array_callable_is_a_method_ref() {
     assert!(names.contains(&("other", Some("$obj"))), "{names:?}");
 }
 
+/// Every bundled php DOCUMENT loads alone — a query overlay against the
+/// grammar with captures the extractor reads, an entry document and a rail
+/// document against the shapes their loaders deserialize. Each loader drops
+/// a broken document and serves the rest, so a malformed one ships as a
+/// silent feature loss, not an error a verb reports: this is the tripwire.
+#[cfg(feature = "php")]
+#[test]
+fn php_bundled_documents_each_load_alone() {
+    let pack = crate::build::query_extract::php_pack();
+    let language: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP.into();
+    tree_sitter::Query::new(&language, pack.query_source).expect("skeleton compiles");
+    let conv = crate::build::query_extract::rail_conventions_for(&pack);
+    let mut every_capture: Vec<String> = Vec::new();
+    for (name, src) in pack.bundled_overlays {
+        match tree_sitter::Query::new(&language, src) {
+            Ok(q) => {
+                every_capture.extend(q.capture_names().iter().map(|c| c.to_string()));
+                let findings =
+                    crate::build::query_extract::overlay_capture_findings(q.capture_names());
+                assert!(findings.is_empty(), "bundled php overlay {name}: {findings:?}");
+                // a class-keyed capture whose rail no document declares
+                // class-keyed mints handlers every lane then reads as
+                // strings — the two halves of one fact, pinned together
+                let undeclared = crate::build::query_extract::class_rail_capture_findings(
+                    &conv.class_named_rails,
+                    q.capture_names(),
+                );
+                assert!(undeclared.is_empty(), "bundled php overlay {name}: {undeclared:?}");
+                // and every capture it spells is one the extractor serves —
+                // a bundled document that reads as "matches but mints
+                // nothing" is either a typo or a vocabulary gap.
+                let unserved = crate::build::query_extract::unserved_captures(
+                    &pack,
+                    &language,
+                    q.capture_names(),
+                );
+                assert!(unserved.is_empty(), "bundled php overlay {name} spells {unserved:?}");
+            }
+            Err(e) => panic!("bundled php overlay {name} does not compile: {e}"),
+        }
+    }
+    for src in pack.bundled_entry_markers {
+        let doc: serde_json::Value =
+            serde_json::from_str(src).expect("a bundled entry document parses");
+        assert_eq!(doc["language"], "php", "a bundled entry document declares its language");
+        let rules: Vec<crate::build::query_extract::EntryMarker> =
+            serde_json::from_value(doc["entries"].clone()).expect("the entry rule shape");
+        assert!(!rules.is_empty(), "a bundled entry document declares rules");
+        // a rule with no positive condition claims nothing — the evaluator
+        // rejects it, so shipping one is a silent loss too
+        assert!(
+            rules.iter().all(|r| !r.attributes.is_empty()
+                || r.method_prefix.is_some()
+                || !r.methods.is_empty()),
+            "every bundled entry rule carries a positive condition"
+        );
+    }
+    let path_rails = crate::build::query_extract::path_rails_for(&pack);
+    let text_rails = crate::build::query_extract::text_rails_for(&pack);
+    for src in pack.bundled_rail_docs {
+        let doc: serde_json::Value =
+            serde_json::from_str(src).expect("a bundled rail document parses");
+        assert_eq!(doc["language"], "php", "a bundled rail document declares its language");
+        // every family a document declares reaches ITS loader: a family
+        // loaded by nothing is inert with nothing saying so, which is how
+        // `path_rails` stayed bundled-only.
+        let parsed: crate::build::query_extract::RailsDoc =
+            serde_json::from_str(src).expect("the rail document shape");
+        for r in &parsed.path_rails {
+            assert!(
+                path_rails.iter().any(|p| p.rail == r.rail && p.under == r.under),
+                "path rail '{}' under '{}' reaches the driver",
+                r.rail,
+                r.under
+            );
+        }
+        for r in &parsed.text_rails {
+            assert!(
+                text_rails.iter().any(|t| t.rail == r.rail && t.calls == r.calls),
+                "text rail '{}' reaches the scanner",
+                r.rail
+            );
+        }
+    }
+    // and the loaders serve what the documents declare
+    assert!(
+        !crate::build::query_extract::entry_markers_for(&pack).is_empty(),
+        "the bundled entry rules reach the evaluator"
+    );
+    assert!(!conv.labels.is_empty(), "the bundled rail labels reach the diagnostics lane");
+    // and the other half: every declared class rail has a capture family
+    // that mints it, answerable only over the pack's whole capture set.
+    let caps: Vec<&str> = every_capture.iter().map(|s| s.as_str()).collect();
+    let unminted =
+        crate::build::query_extract::class_rail_declaration_findings(&conv.class_named_rails, &caps);
+    assert!(unminted.is_empty(), "{unminted:?}");
+}
+
 /// The overlay lint's findings: a rail family with no rail names a
 /// namespace nobody declared, and a `@classattr.` spelling outside the
 /// flag table stamps a string no consumer reads. Both mint nothing, so
