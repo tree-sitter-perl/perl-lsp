@@ -133,7 +133,7 @@ pub fn pack_use_after_move_diagnostics(analysis: &FileAnalysis) -> Vec<Diagnosti
         .map(|(name, span)| Diagnostic {
             range: span_to_range(span),
             severity: Some(DiagnosticSeverity::WARNING),
-            code: Some(NumberOrString::String("use-after-move".into())),
+            code: Some(NumberOrString::String(super::diagnostics::codes::USE_AFTER_MOVE.into())),
             source: Some("perl-lsp".into()),
             message: format!("use of `{name}` after `std::move` (moved-from state)"),
             ..Default::default()
