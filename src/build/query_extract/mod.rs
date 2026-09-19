@@ -544,6 +544,64 @@ pub fn rail_of(cap: &str) -> Option<(RailCapture, &str)> {
     })
 }
 
+/// Capture names the extractor READS that no bundled skeleton spells.
+/// A skeleton describes the language; these describe a FRAMEWORK's shapes
+/// — a call or member whose name is a string, the companion token that
+/// names a rail handler declared by another capture of the same match, an
+/// array key a path rail promotes to a name, and a call expression whose
+/// value the overlay declares. The extractor serves them all, so a
+/// baseline that does not know them calls every one of them unserved.
+///
+/// A suffix only ONE bundled skeleton spells belongs here too: the
+/// extractor's arm is language-generic, so another language's overlay may
+/// state the same fact about a body its own skeleton left plain.
+const OVERLAY_ONLY_CAPTURES: &[&str] = &[
+    "ref.call.named",
+    "ref.method.named.self",
+    "dispatch.via",
+    "handler.name",
+    "def.handler.key",
+    "key.elem",
+    "expr.annot",
+    // spelled by cpp's skeleton, which is why it is here rather than
+    // absent: the extractor's arm is language-generic, so a php or python
+    // overlay may say the same about a body its own skeleton left plain
+    "scope.sub.implicit_receiver",
+    "import.binds",
+    "arity.param.name",
+    "ref.method.ctor",
+];
+
+/// The captures in `declared` the extractor does NOT serve — `--plugin-check`'s
+/// vocabulary lint, answered here so the CLI holds no vocabulary of its own.
+///
+/// A query document's capture list is a SUBSET of the served vocabulary,
+/// never the vocabulary itself: the skeleton spells what the skeleton
+/// needs, the rail families are open by construction (the rail is an
+/// overlay's own word), and [`OVERLAY_ONLY_CAPTURES`] is the rest. A
+/// `_`-prefixed capture is a query-internal anchor, served by definition.
+pub fn unserved_captures(
+    pack: &LangPack,
+    language: &tree_sitter::Language,
+    declared: &[&str],
+) -> Vec<String> {
+    let skeleton: std::collections::HashSet<String> =
+        match tree_sitter::Query::new(language, pack.query_source) {
+            Ok(base) => base.capture_names().iter().map(|s| s.to_string()).collect(),
+            Err(_) => Default::default(),
+        };
+    declared
+        .iter()
+        .filter(|c| {
+            !c.starts_with('_')
+                && !skeleton.contains(**c)
+                && !OVERLAY_ONLY_CAPTURES.contains(*c)
+                && rail_of(c).is_none()
+        })
+        .map(|s| s.to_string())
+        .collect()
+}
+
 /// What an overlay's capture names say that the extractor cannot honour.
 ///
 /// A capture outside the vocabulary is inert by design (an overlay written
