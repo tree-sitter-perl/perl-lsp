@@ -121,15 +121,6 @@ pub struct LangPack {
     /// (`(*p)`, `(&o)`, `(p)` → `p`) dropped so the invocant types via the
     /// inner. The SAME `peel`, no stack, any leaf.
     pub recv_peel: PeelSpec,
-    /// Member-access node kinds (`receiver OP member`) — extraction records
-    /// each site (simple-variable receiver, operator token span, `->` vs
-    /// `.`) for the operator-DX consumer (`p.` on a `Box*` should be `->`).
-    /// The member operator's grammar token KIND → the `MemberOp` it means
-    /// (`"->"`→Arrow, `"."`→Dot). The `operator:` field of a member access is
-    /// captured as `@member.op`; the engine maps its `kind()` through this
-    /// table. An OPEN set: unmapped kinds (`.*`) get no op-DX, never a guess.
-    /// Empty = no member-operator DX (Perl, single-operator packs).
-    pub op_map: &'static [(&'static str, crate::model::file_analysis::MemberOp)],
     /// Simple-variable node kinds (`identifier`). op-DX fires ONLY when the
     /// IMMEDIATE member-access receiver is one — the receiver whose
     /// `deref_stack` resolves by name to decide the expected operator. Also the
@@ -224,6 +215,18 @@ pub(super) fn param_return_expr(
     }
 }
 
+
+/// `member.op.<which>` suffix → the operator it names. ENGINE-side
+/// vocabulary like `lit_type`: the suffix set names the model's `MemberOp`,
+/// and a pack chooses which token carries each.
+pub(super) fn member_op_suffix(suffix: &str) -> Option<crate::model::file_analysis::MemberOp> {
+    use crate::model::file_analysis::MemberOp;
+    match suffix {
+        "arrow" => Some(MemberOp::Arrow),
+        "dot" => Some(MemberOp::Dot),
+        _ => None,
+    }
+}
 
 /// `expr.lit.<t>` suffix → type. ENGINE-side vocabulary, not per-pack:
 /// the suffix set names the engine's value lattice, packs just choose
