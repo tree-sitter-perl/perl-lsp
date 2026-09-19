@@ -2255,6 +2255,51 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             // (cheap heuristic: same start)
                             s == e.start_byte || en == e.end_byte
                         });
+                // `new self(...)` / `new static(...)`: the token spells no class
+                // name — it IS a call of the constructor on the current class.
+                // Minted as that member call (invocant = the enclosing class,
+                // name = the pack's constructor), so the ctor's references,
+                // hover and goto-def see the site while a class rename never
+                // rewrites the `self` token. Which spellings name the
+                // enclosing class is the document's `@receiver.self`.
+                if !inside_def
+                    && e.cap == "ref.call"
+                    && ctor_matches.contains(&e.match_id)
+                    && self_class_tokens.contains(&e.text.as_str())
+                {
+                    if let (Some(ctor), Some(cls_recv)) = (ctor_name, enclosing_class.clone()) {
+                        let span = Span { start: e.start, end: e.end };
+                        out.refs.push(SkelRef {
+                            via: None,
+                            kind: "member".to_string(),
+                            name: ctor.to_string(),
+                            start: e.start,
+                            end: e.end,
+                            scope: cur_scope,
+                            invocant: Some((span, cls_recv)),
+                            member_op: None,
+                            arg_count: arg_counts_by_start.get(&(e.end.row, e.end.column)).copied(),
+                            value_read: false,
+                            named_by_string: false,
+                            flags: crate::model::file_analysis::RefFlags::CONSTRUCTS,
+                        });
+                        if let (Some(vars), Some(cls)) = (
+                            arg_vars_by_start.get(&(e.end.row, e.end.column)),
+                            package.clone(),
+                        ) {
+                            bind_call_args(&mut out.witnesses, vars, cur_scope, |index| {
+                                Some(crate::model::witnesses::WitnessPayload::Edge(
+                                    crate::model::witnesses::WitnessAttachment::Param {
+                                        package: cls.clone(),
+                                        name: ctor.to_string(),
+                                        index,
+                                    },
+                                ))
+                            });
+                        }
+                        continue;
+                    }
+                }
                 if !inside_def {
                     let member_op = member_simple
                         .get(&e.match_id)
