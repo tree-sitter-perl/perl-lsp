@@ -6,6 +6,11 @@ impl<'a> CandidateSet<'a> {
     /// The def site of `member` on `class` — origin symbols first, then the
     /// class's own cached file. Serves the template-family ranked goto-def
     /// (one location per ladder class that actually defines the member).
+    /// `class` is an IDENTITY: a caller holding a written spelling (a
+    /// qualifier the cursor sits after) resolves it first, and a ladder
+    /// class is already one — resolving an identity again re-qualifies a
+    /// head that collides with an import alias (`class_spelling_identity`
+    /// is not idempotent).
     pub(super) fn member_def_location(&self, class: &str, member: &str) -> Option<RefLocation> {
         // The member's def span in `fa` under `class`'s owner set, expanded
         // through inline-namespace transparency so a symbol filed under an
@@ -13,14 +18,14 @@ impl<'a> CandidateSet<'a> {
         // parent `absl`. The set is derived once per scanned fa (the inline
         // attribution rides the file that opened the namespace, so it is
         // recomputed per file, never shared).
-        let member_span_in = |fa: &crate::model::file_analysis::FileAnalysis| -> Option<Span> {
-            let owners = pack_inline_owner_set(fa, class);
+        let member_span_in = |fa: &crate::model::file_analysis::FileAnalysis, cls: &str| -> Option<Span> {
+            let owners = pack_inline_owner_set(fa, cls);
             fa.symbols()
                 .iter()
                 .find(|s| s.name == member && pack_member_of(fa, s, &owners))
                 .map(|s| s.selection_span)
         };
-        if let Some(span) = member_span_in(self.origin) {
+        if let Some(span) = member_span_in(self.origin, class) {
             return Some(self.origin_decl(span));
         }
         let idx = self.idx()?;
@@ -37,9 +42,35 @@ impl<'a> CandidateSet<'a> {
         // Class-keyed cached module — the fast path when `class` names a
         // struct/class/enum that is itself a cache key. Every candidate
         // file declaring the class may hold the member.
-        for cached in idx.visible_def_candidates(class) {
-            if let Some(span) = member_span_in(&idx.whole_present(&cached)) {
-                return loc_of(&cached, span);
+        {
+            let member_of_class = |cls: &str| -> Option<RefLocation> {
+                // The origin's use-map pins the leaf to ONE namespace
+                // (`use Support\Facades\Cache;` — without this, gd on
+                // `Cache::store` landed on an unrelated same-leaf class in
+                // a never-imported namespace). A candidate declaring the
+                // class under a DIFFERENT namespace is not the class this
+                // file means; candidates with no namespace claim stay
+                // admissible. The pin table is leaf-keyed, so a qualified
+                // hop asks it by its leaf.
+                let leaf = crate::model::file_analysis::name_match_key(cls, self.origin.names());
+                let want_ns = self.origin.leaf_namespace(&leaf);
+                for cached in idx.visible_def_candidates(cls) {
+                    let a = idx.whole_present(&cached);
+                    if let (Some(want), Some(cand)) =
+                        (&want_ns, a.declared_class_namespace(&leaf))
+                    {
+                        if want != &cand {
+                            continue;
+                        }
+                    }
+                    if let Some(span) = member_span_in(&a, cls) {
+                        return loc_of(&cached, span);
+                    }
+                }
+                None
+            };
+            if let Some(loc) = member_of_class(class) {
+                return Some(loc);
             }
         }
         let Some((self_path, visible)) = idx.visibility_scope() else {
@@ -60,7 +91,7 @@ impl<'a> CandidateSet<'a> {
                 if !connected(&cached) {
                     continue;
                 }
-                if let Some(span) = member_span_in(&idx.whole_present(&cached)) {
+                if let Some(span) = member_span_in(&idx.whole_present(&cached), class) {
                     return loc_of(&cached, span);
                 }
             }
@@ -79,7 +110,7 @@ impl<'a> CandidateSet<'a> {
             }
             // Broad scan, cold tail only (both keyed lookups missed) — the
             // rehydration LRU bounds the per-file cost for evicted copies.
-            if let Some(span) = member_span_in(&idx.whole_present(cached)) {
+            if let Some(span) = member_span_in(&idx.whole_present(cached), class) {
                 let p = cached.path.to_string_lossy().into_owned();
                 if hit.as_ref().is_none_or(|(hp, _)| p < *hp) {
                     hit = Some((p, span));
@@ -488,7 +519,8 @@ impl<'a> CandidateSet<'a> {
             if let Some(source) = self.source {
                 if let Some(owner) = qualifier_at_point(source, point) {
                     if let Some(name) = word_at_point(source, point) {
-                        if let Some(loc) = self.member_def_location(owner, name) {
+                        let owner = self.origin.class_spelling_identity(owner);
+                        if let Some(loc) = self.member_def_location(&owner, name) {
                             // The member lookup lands on the class DECLARATION;
                             // hop to the out-of-line body (decl→def axis).
                             return self.prefer_member_defs(loc);
