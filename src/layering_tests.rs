@@ -1436,22 +1436,26 @@ fn language_spellings_have_one_home() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
-/// Rule #13: the model never parses a string this codebase rendered. Every
-/// `split`-family call in the model is allowlisted with the reason it is
-/// SOURCE-side (a written spelling, a source-spelled name); a rendered
-/// label, a joined row, or a formatted type being split is a violation.
+/// Rule #13: the model and the adapter never parse a string this codebase
+/// rendered. Every `split`-family call in those tiers is allowlisted with
+/// the reason it is SOURCE-side (a written spelling, a source-spelled name,
+/// a CLI argument); a rendered label, a joined row, or a formatted type
+/// being split is a violation.
 #[test]
 fn rendered_strings_are_not_reparsed() {
-    let files = layer_files(&[Layer::Model]);
+    let files = layer_files(&[Layer::Model, Layer::Lsp]);
     let fns = [".split(", ".rsplit(", ".split_once(", ".rsplit_once(", ".splitn(", ".rsplitn("];
     let seen = count_lines(&files, &|l| fns.iter().any(|f| l.contains(f)));
     let allow: &[(&str, usize, &str)] = &[
-        ("model/conventions.rs", 3, "source text: a name split on its language's declared separator, class-token segments, and Perl method tokens"),
+        ("model/conventions.rs", 3, "source text: a name split on its language's declared separator, class-token segments, and Perl method tokens — `MethodToken::parse` is paired with `MethodToken::render`, so a pack that MINTS one of these tokens spells it here too, never by hand"),
         ("model/file_analysis/class_queries.rs", 1, "`use` rows as written, split on the pack's declared separator"),
         ("model/file_analysis/enrichment.rs", 1, "Perl package leaf vs a load name — both source-spelled"),
         ("model/file_analysis/invocants.rs", 2, "Perl `::` on source-spelled class and sub names"),
         ("model/file_analysis/types.rs", 1, "canonical_template_spelling — a C++ instance as written in source"),
         ("model/file_analysis/use_map.rs", 3, "resolving WRITTEN spellings"),
+        ("lsp/cli/positions.rs", 1, "a `file:line:col` CLI argument — what the user typed, not what we rendered"),
+        ("lsp/cursor_context.rs", 1, "Perl source text at the cursor, split on Perl's own separator"),
+        ("lsp/symbols/links.rs", 2, "POD link text and a module path as the source wrote them"),
     ];
     let drift = allowlist_drift("rule #13 (rendered strings)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
