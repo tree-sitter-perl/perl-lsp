@@ -474,6 +474,22 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 });
                 continue;
             }
+            // `@def.method.catch_all`: the member spellings whose presence
+            // makes the CLASS answer any member name at runtime. The
+            // declaration mints as the ordinary method it is; only its name
+            // span travels, so the fact can land on the class below.
+            if cap == "def.method.catch_all" {
+                events.push(Event {
+                    start_byte: node.start_byte(),
+                    end_byte: node.end_byte(),
+                    start: node.start_position(),
+                    end: node.end_position(),
+                    cap: cap.to_string(),
+                    text: node.utf8_text(source).unwrap_or("").to_string(),
+                    match_id: match_counter,
+                });
+                continue;
+            }
             // Declaration-only captures: they state a language fact the
             // cursor paths read off the compiled query, and mint nothing
             // here. Dropped before they become events.
