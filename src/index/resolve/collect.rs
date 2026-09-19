@@ -309,7 +309,7 @@ pub(super) fn pack_symbol_def_location(
                 key: origin_key.clone(),
                 span: sym.selection_span,
                 access: AccessKind::Declaration,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None,
             },
         ));
@@ -335,7 +335,7 @@ pub(super) fn pack_symbol_def_location(
                     key: FileKey::Path(cached.path.clone()),
                     span: sym.selection_span,
                     access: AccessKind::Declaration,
-                    rewritable: true,
+                    rewritable: Rewritable::Yes,
                     label: None,
                 },
             ));
@@ -495,9 +495,12 @@ pub(super) fn pack_class_def_paths(
     out
 }
 
-/// A dispatch name that is actually spelled by *another* identifier, so the
+/// The OTHER identifier a dispatch name is actually spelled by, when the
 /// token at `span` is not the literal name and rename must not rewrite it
-/// (references still resolve through the fold). A variable fold
+/// (references still resolve through the fold). The name is what tells the
+/// caller WHICH reason the site carries — a variable or constant it folded
+/// out of, or a delegating macro whose body no edit set reaches. A variable
+/// fold
 /// (`$obj->on($evt)`, `$self->$m()` — a `Variable`/`ContainerAccess` ref covers
 /// the span) always counts. A const fold (`$obj->on(EVT)` — a `FunctionCall`
 /// ref to the constant covers it) counts only when `include_calls` — for a
@@ -510,18 +513,22 @@ pub(super) fn pack_class_def_paths(
 /// the literal name — that's the collected use, not a fold, and it must stay
 /// rewritable. (Perl variable names carry their sigil, so they can never
 /// coincide with a callable name.)
-pub(super) fn span_is_folded_name(
-    analysis: &FileAnalysis,
+pub(super) fn folded_name_at<'a>(
+    analysis: &'a FileAnalysis,
     span: Span,
     include_calls: bool,
     literal_name: &str,
-) -> bool {
-    analysis.refs().iter().any(|r| {
-        (matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess)
-            || (include_calls && matches!(r.kind, RefKind::FunctionCall { .. })))
-            && r.span == span
-            && r.target_name != literal_name
-    })
+) -> Option<&'a str> {
+    analysis
+        .refs()
+        .iter()
+        .find(|r| {
+            (matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess)
+                || (include_calls && matches!(r.kind, RefKind::FunctionCall { .. })))
+                && r.span == span
+                && r.target_name != literal_name
+        })
+        .map(|r| r.target_name.as_str())
 }
 
 /// True when `sym` is a declaration of `target` (decl-span match).
@@ -795,7 +802,7 @@ pub(super) fn collect_package_var(
                 key: key.clone(),
                 span: tail(sym.selection_span),
                 access: AccessKind::Declaration,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None
             });
         }
@@ -812,7 +819,7 @@ pub(super) fn collect_package_var(
                     key: key.clone(),
                     span: tail(r.span),
                     access: r.access,
-                    rewritable: true,
+                    rewritable: Rewritable::Yes,
                     label: None
                 });
             }
@@ -822,7 +829,7 @@ pub(super) fn collect_package_var(
                 key: key.clone(),
                 span: tail(r.span),
                 access: r.access,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None
             });
         }
@@ -991,8 +998,23 @@ pub(super) fn collect_from_analysis(
         TargetKind::Sub { .. } | TargetKind::Method { .. } => (true, false),
         _ => (false, false),
     };
-    let rewritable_at = |span: Span| {
-        !(foldable && span_is_folded_name(analysis, span, folds_through_calls, &target.name))
+    let rewritable_at = |span: Span| -> Rewritable {
+        if let Some(other) =
+            foldable.then(|| folded_name_at(analysis, span, folds_through_calls, &target.name)).flatten()
+        {
+            // A token that names a MACRO is not a fold: the expansion
+            // re-mints the use under the target's name while the source keeps
+            // the macro's, and the macro's body is not a span any edit set
+            // reaches — so the site says so, and rename refuses rather than
+            // skipping it the way it skips a fold, whose own literal is
+            // collected separately and carries the edit.
+            return Rewritable::No(if names_visible_macro(other, analysis, module_index) {
+                NotRewritable::MacroDelegated
+            } else {
+                NotRewritable::ConstFolded
+            });
+        }
+        Rewritable::Yes
     };
 
     // Include declaration spans when this file defines the target. Name
@@ -1342,7 +1364,11 @@ pub(super) fn collect_from_analysis(
                 key: key.clone(),
                 span,
                 access: r.access,
-                rewritable: !alias_matched && rewritable_at(span),
+                rewritable: if alias_matched {
+                    Rewritable::No(NotRewritable::MacroDelegated)
+                } else {
+                    rewritable_at(span)
+                },
                 label: None
             });
             // A call folded from a variable (`my $m = 'process'; $self->$m()`)

@@ -143,7 +143,7 @@ impl<'a> CandidateSet<'a> {
                         key: FileKey::Path(cached.path.clone()),
                         span: s.selection_span,
                         access: AccessKind::Declaration,
-                        rewritable: true,
+                        rewritable: Rewritable::Yes,
                         label: None,
                     });
                 }
@@ -161,7 +161,7 @@ impl<'a> CandidateSet<'a> {
                             end: tree_sitter::Point::new(0, 0),
                         },
                         access: AccessKind::Declaration,
-                        rewritable: false,
+                        rewritable: Rewritable::No(NotRewritable::NoNameToken),
                         label: None,
                     });
                 }
@@ -314,7 +314,7 @@ impl<'a> CandidateSet<'a> {
                         key: location.key,
                         span: s.selection_span,
                         access: AccessKind::Declaration,
-                        rewritable: false,
+                        rewritable: Rewritable::No(NotRewritable::OtherNameToken),
                         label: None,
                     },
                 });
@@ -373,7 +373,7 @@ impl<'a> CandidateSet<'a> {
                                 key: loc.key.clone(),
                                 span: caller.selection_span,
                                 access: AccessKind::Declaration,
-                                rewritable: false,
+                                rewritable: Rewritable::No(NotRewritable::OtherNameToken),
                                 label: None,
                             },
                         },
