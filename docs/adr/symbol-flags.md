@@ -38,6 +38,14 @@ other. The flag is what the dead-code guard asks — nothing in the source
 could reference such a member into existence — so no consumer has to know
 which names a runtime provides.
 
+A class that answers ANY member name at runtime carries
+`DYNAMIC_MEMBERS` — php's `__call` / `__callStatic` / `__get`, Perl's
+`AUTOLOAD`. The fact is the CLASS's, not the member's: the extractor
+stamps it on the container whose body holds a `@def.method.catch_all`
+declaration and the Perl builder stamps it on the package that declares
+`AUTOLOAD`, so `class_answers_any_member` answers it with one `INHERITS`
+walk and no lane compares a member name against a per-language list.
+
 ## Why closed
 
 Every flag added so far has turned out to have a language-generic
