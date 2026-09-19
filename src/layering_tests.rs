@@ -1823,6 +1823,14 @@ fn decoded_pack_analyses_carry_spellings() {
     }
     // A pack that declares nothing would make every assertion above hold
     // vacuously, so pin one that declares plenty.
+    #[cfg(feature = "php")]
+    {
+        assert!(checked.contains(&"php"), "php was not exercised: {checked:?}");
+        assert!(
+            !LanguageRegistry::spellings("php").import_template.is_empty(),
+            "php declares an import template — otherwise this test proves nothing"
+        );
+    }
     #[cfg(feature = "cpp")]
     assert!(checked.contains(&"cpp"), "cpp was not exercised: {checked:?}");
     assert!(checked.contains(&"perl"), "perl was not exercised: {checked:?}");
