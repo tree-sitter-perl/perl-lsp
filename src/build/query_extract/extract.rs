@@ -291,6 +291,15 @@ pub(crate) fn peel_receiver<'a>(
     node
 }
 
+/// The namespace segments a WRITTEN qualifier spells, in order. Source
+/// text, split on the language's own separator — the parts the
+/// `QualifiedSpelling` keeps so that nothing downstream has to.
+fn segments_of(raw: &str, sep: &str) -> Vec<String> {
+    if sep.is_empty() {
+        return Vec::new();
+    }
+    raw.split(sep).filter(|s| !s.is_empty()).map(str::to_string).collect()
+}
 /// The `ImportBinds` a capture-name suffix declares, or `None` when the
 /// suffix is not one. `use function` / `use const` rows bind a callable or a
 /// constant; an unsuffixed row binds a type, so the pack spells only the two
@@ -788,9 +797,173 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     }
     let mut annot_text_by_var: HashMap<(String, crate::model::file_analysis::ScopeId), String> =
         HashMap::new();
+    // ---- the file's use-map + written parent qualifiers ----
+    // `binding leaf (or alias) → (namespace, real leaf)`, from the `@use.*`
+    // captures; `@parent.fq` carries a parent's own written qualifier. Both
+    // feed the class-identity resolver below (packs with a namespace
+    // separator only — empty otherwise).
+    let mut out_use_aliases: Vec<(String, String, String)> = Vec::new();
+    let mut use_map: HashMap<String, (String, String)> = HashMap::new();
+    let mut group_import_sites:
+        Vec<(String, Span, crate::model::file_analysis::ImportBinds, Option<String>)> = Vec::new();
+    let mut parent_fq_by_match: HashMap<usize, String> = HashMap::new();
+    // `@ref.qualified`: the WRITTEN qualifier of a call/ctor/type/parent
+    // spelling (`Downloader\DownloadManager`, `\A\B`) — the use-map pins
+    // the leaf to that namespace instead of counting it as a bare spelling.
+    let qualified_by_match: HashMap<usize, String> = events
+        .iter()
+        .filter(|e| e.cap == "ref.qualified")
+        .map(|e| (e.match_id, e.text.clone()))
+        .collect();
+    if let Some(sep) = pack.names.use_map_sep() {
+        let mut use_fqn: HashMap<usize, String> = HashMap::new();
+        let mut use_prefix: HashMap<usize, String> = HashMap::new();
+        let mut use_leaf: HashMap<usize, (String, Span)> = HashMap::new();
+        let mut use_alias: HashMap<usize, String> = HashMap::new();
+        for e in &events {
+            match e.cap.as_str() {
+                "use.fqn" => {
+                    use_fqn.insert(e.match_id, e.text.clone());
+                }
+                "use.prefix" => {
+                    use_prefix.insert(e.match_id, e.text.clone());
+                }
+                "use.leaf" => {
+                    use_leaf.insert(e.match_id, (e.text.clone(), Span { start: e.start, end: e.end }));
+                }
+                "use.alias" => {
+                    use_alias.insert(e.match_id, e.text.clone());
+                }
+                "parent.fq" => {
+                    parent_fq_by_match.insert(e.match_id, e.text.clone());
+                }
+                _ => {}
+            }
+        }
+        for (mid, fqn) in &use_fqn {
+            let (leaf, ns) = split_ns_leaf(fqn, sep);
+            let key = use_alias.get(mid).cloned().unwrap_or_else(|| leaf.clone());
+            if use_alias.contains_key(mid) {
+                out_use_aliases.push((key.clone(), ns.clone(), leaf.clone()));
+            }
+            use_map.insert(key, (ns, leaf));
+        }
+        // group form: `use A\B\{C, D as E}` — the prefix is the namespace,
+        // each clause's own name the leaf.
+        for (mid, (leaf, span)) in &use_leaf {
+            let Some(prefix) = use_prefix.get(mid) else { continue };
+            let key = use_alias.get(mid).cloned().unwrap_or_else(|| leaf.clone());
+            let ns = prefix.trim_start_matches(sep).to_string();
+            if use_alias.contains_key(mid) {
+                out_use_aliases.push((key.clone(), ns.clone(), leaf.clone()));
+            }
+            // A group clause is an import row like any flat one: the same
+            // `include_directives` row (spelled in full, spanning the leaf
+            // token) feeds the use-map pin and the row-namespace lanes.
+            group_import_sites.push((
+                format!("{ns}{sep}{leaf}"),
+                *span,
+                binds_by_match.get(mid).copied().unwrap_or_default(),
+                bound_name_by_match.get(mid).map(|(_, n)| n.clone()),
+            ));
+            use_map.insert(key, (ns, leaf.clone()));
+        }
+    }
+    // ---- class identities ----
+    // With a namespace separator every class spelling resolves ONCE, here,
+    // to the identity it names: `UseMap::resolve` — the same ladder the
+    // query side's pins are built from — over the rows just collected and
+    // the namespace in force at the spelling's position. A declaration
+    // joins its namespace directly. Without a separator a spelling IS its
+    // identity, and every resolver below is the identity function.
+    let ident_rows: Vec<crate::model::file_analysis::ImportRow> = use_map
+        .iter()
+        .filter(|(key, (_, leaf))| *key == leaf)
+        .map(|(_, (ns, leaf))| {
+            let zero = Point { row: 0, column: 0 };
+            // rows exist only where the use-map block above ran, i.e. a
+            // declared separator
+            let sep = pack.names.use_map_sep().unwrap_or_default();
+            let row = if ns.is_empty() { leaf.clone() } else { format!("{ns}{sep}{leaf}") };
+            // A class-identity row, by construction: this is the ladder that
+            // resolves class SPELLINGS, so the function/const rows are not
+            // what it is built from — but they never key a spelling either,
+            // and the span is synthetic (nothing resolves against it).
+            crate::model::file_analysis::ImportRow {
+                span: Span { start: zero, end: zero },
+                raw: row,
+                binds: crate::model::file_analysis::ImportBinds::Type,
+                bound: None,
+            }
+        })
+        .collect();
+    let ident_aliases = out_use_aliases.clone();
+    let namespace_marks: Vec<(Point, String)> = {
+        let mut v: Vec<(Point, String)> = events
+            .iter()
+            .filter(|e| e.cap == "def.package.name")
+            .map(|e| (e.start, e.text.trim_start_matches(pack.names.use_map_sep().unwrap_or_default()).to_string()))
+            .collect();
+        v.sort_by_key(|(p, _)| (p.row, p.column));
+        v
+    };
+    let namespace_at = |at: Point| -> Option<&str> {
+        namespace_marks
+            .iter()
+            .rev()
+            .find(|(p, _)| (p.row, p.column) <= (at.row, at.column))
+            .map(|(_, n)| n.as_str())
+    };
+    // The spellings that name the WRITING class rather than a namespaced
+    // one (`self`, `static`): the document says which, on the receiver
+    // capture that fires on them, and every reader asks the document.
+    let self_class_tokens = super::cursor_query::capture_literals(query, "receiver.self");
+    let ident = |written: &str, at: Point| -> String {
+        // the current-class spellings name no namespace; the model
+        // resolves them to the enclosing class
+        if self_class_tokens.contains(written)
+            || crate::model::conventions::is_current_package_token(written)
+        {
+            return written.to_string();
+        }
+        match pack.names.use_map_sep() {
+            None => written.to_string(),
+            Some(sep) => crate::model::file_analysis::UseMap {
+                rows: &ident_rows,
+                aliases: &ident_aliases,
+                own_namespace: namespace_at(at),
+                sep,
+            }
+            .resolve(written),
+        }
+    };
+    let ident_type = |ty: InferredType, at: Point| -> InferredType {
+        match pack.names.use_map_sep() {
+            None => ty,
+            Some(_) => ty.map_class_names(&mut |c| ident(c, at)),
+        }
+    };
+    let annot_ident = |text: &str, at: Point| -> Option<InferredType> {
+        (pack.annot_type)(text).map(|t| ident_type(t, at))
+    };
+    let decl_ident = |leaf: &str, at: Point| -> String {
+        match (pack.names.use_map_sep(), namespace_at(at)) {
+            (Some(sep), Some(ns)) if !ns.is_empty() => format!("{ns}{sep}{leaf}"),
+            _ => leaf.to_string(),
+        }
+    };
 
     // ---- the state machine: scope stack + sticky contexts ----
     let mut out = SkeletonAnalysis::default();
+    out.use_aliases = out_use_aliases;
+    // Group rows land ahead of the flat rows the main loop pushes in
+    // document order; every reader of these lanes is span- or map-keyed,
+    // so the order carries no meaning — do not make a consumer assume it.
+    for (raw, span, binds, bound) in group_import_sites {
+        out.imports.push(raw.clone());
+        out.import_sites
+            .push(crate::model::file_analysis::ImportRow { span, raw, binds, bound });
+    }
     out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
     out.spellings = Some(pack.spellings);
     out.runtime_bound_reads = std::mem::take(&mut runtime_bound_reads);
@@ -1094,8 +1267,22 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // Shaped like the child's def name (cpp canonicalizes a
                     // template-spelled base) so the edge joins the identity
                     // the target class was filed under.
-                    out.parents
-                        .push((child.clone(), (pack.shape_name)("parent", &e.text)));
+                    let shaped = (pack.shape_name)("parent", &e.text);
+                    // The parent pattern is its own match: its name entry
+                    // is the pre-scan leaf, so the child's identity joins
+                    // the namespace here exactly as the def handler did.
+                    let child = decl_ident(child, e.start);
+                    match pack.names.use_map_sep() {
+                        None => out.parents.push((child.clone(), shaped)),
+                        Some(_) => {
+                            // The written spelling — its own qualifier when
+                            // it has one, else the (possibly aliased) leaf —
+                            // resolves to the parent's identity.
+                            let written =
+                                parent_fq_by_match.get(&e.match_id).cloned().unwrap_or(shaped);
+                            out.parents.push((child.clone(), ident(&written, e.start)));
+                        }
+                    }
                 }
             }
             cap if cap.starts_with("def.") && !cap.ends_with(".name") => {
@@ -1109,6 +1296,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             .map(|n| (n.to_string(), e.start, e.start, true))
                     })
                     .unwrap_or((e.text.clone(), e.start, e.end, false));
+                // A class declaration's identity is its FQN — the leaf
+                // joined to the namespace in force — so its members file
+                // under it and every spelling of it resolves to one key.
+                // The match's name entry carries it too: the `@context` and
+                // `@parent` handlers of the same match read ONE identity.
+                let name = if kind == "class" {
+                    let fqn = decl_ident(&name, e.start);
+                    if fqn != name {
+                        names_by_match
+                            .insert((e.match_id, e.cap.clone()), (fqn.clone(), name_start, name_end));
+                    }
+                    fqn
+                } else {
+                    name
+                };
                 def_name_spans.push((e.start_byte, e.end_byte));
                 // An out-of-line def's `Class::` qualifier names its owner
                 // (the LAST `::` segment, the unqualified class the engine
@@ -1117,6 +1319,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     .get(&e.match_id)
                     .map(|q| q.rsplit("::").next().unwrap_or(q).to_string())
                     .or_else(|| package.clone());
+                // A class's package is its NAMESPACE, whatever context it
+                // sits in (an anonymous class inside a method is still
+                // filed under the namespace its identity carries).
+                let pkg = if kind == "class" && pack.names.use_map_sep().is_some() {
+                    namespace_at(e.start).map(str::to_string)
+                } else {
+                    pkg
+                };
                 let shaped = (pack.shape_name)(&format!("def.{kind}"), &name);
                 // A class-spec def carries its primary's name — the
                 // (spec, primary) family edge `Specializes` derives from.
@@ -1239,6 +1449,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             .flatten(),
                         flags: Default::default(),
                     });
+                    if let Some(q) = qualified_by_match.get(&e.match_id) {
+                        let leaf = (pack.shape_name)(&e.cap, &e.text);
+                        let raw = q.strip_suffix(leaf.as_str()).unwrap_or_default();
+                        let sep = pack.names.use_map_sep().unwrap_or_default();
+                        // `\Throwable` carries no segments and is still
+                        // ABSOLUTE — the leading separator is the whole claim.
+                        let spelling = crate::model::file_analysis::QualifiedSpelling {
+                            leaf,
+                            segments: segments_of(raw, sep),
+                            absolute: !sep.is_empty() && raw.starts_with(sep),
+                        };
+                        if spelling.absolute || !spelling.segments.is_empty() {
+                            out.qualified_spellings.push(spelling);
+                        }
+                    }
                 }
             }
             // One import row either way; the two spellings differ in what the
@@ -1734,7 +1959,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // primitives stay leaves; `None` (auto/void) defers to the flow
             // edge as before. `TypeName` chases the typedef or falls back to
             // the same `ClassName`, so a plain struct/class is unchanged.
-            let payload = match (pack.annot_type)(annot) {
+            let payload = match annot_ident(annot, *at) {
                 Some(InferredType::ClassName(cn)) => Some(
                     crate::model::witnesses::WitnessPayload::Edge(
                         crate::model::witnesses::WitnessAttachment::TypeName(cn),
@@ -1892,6 +2117,16 @@ pub(crate) fn looks_like_type_spelling(body: &str) -> bool {
     b.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':' || c == ' ')
 }
 
+/// Split a written qualified name into `(leaf, namespace)` at its last
+/// separator, a leading separator (a global-anchored spelling) trimmed. A
+/// separator-less spelling is a bare leaf in the global namespace.
+fn split_ns_leaf(fq: &str, sep: &str) -> (String, String) {
+    let t = fq.trim_start_matches(sep);
+    match t.rsplit_once(sep) {
+        Some((ns, leaf)) => (leaf.to_string(), ns.to_string()),
+        None => (t.to_string(), String::new()),
+    }
+}
 /// A bare identifier lexeme — the only shape that can name an enumerator.
 /// Pure string test (no node-kind probe) so every language's capture text
 /// routes through the same rule.
