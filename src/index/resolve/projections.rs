@@ -22,19 +22,13 @@ impl<'a> CandidateSet<'a> {
         self
     }
 
-    /// Per-language name semantics on the set's identity keying: normalize
-    /// a typed NEW NAME to the bare identity token edits write. Perl names
-    /// carry sigils (`conventions.rs` owns the rule); pack languages
-    /// canonicalize spellings at extraction (the LangPack `shape_name`
-    /// hook — cpp's `canonical_template_spelling` is that seam's cpp
-    /// instance), so their typed names pass through bare. New per-language
-    /// spelling rules plug in HERE, never inline in a projection.
+    /// Normalize a typed NEW NAME to the bare identity token edits write.
+    /// The origin's own spellings own the rule — a language's variable
+    /// sigils are spelling, not identity (`$total` renames `total` at every
+    /// collected span), and a language that declares none passes its names
+    /// through.
     pub(super) fn bare_new_name<'n>(&self, typed: &'n str) -> &'n str {
-        if self.pack {
-            typed
-        } else {
-            crate::model::conventions::strip_variable_sigils(typed)
-        }
+        self.origin.names().bare_name(typed)
     }
 
     /// The origin-scoped index — every forward resolution (identity,
