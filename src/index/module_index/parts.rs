@@ -291,6 +291,26 @@ impl ModuleEdgeIndexes {
         out
     }
 
+    /// Every handler name declared on the string rail `rail` across the
+    /// recorded feeds — the rail-name completion source. Owners ride the
+    /// records, so this never rehydrates a file.
+    pub fn rail_names(&self, rail: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .handler_records
+            .iter()
+            .flat_map(|e| {
+                e.value()
+                    .iter()
+                    .filter(|(_, o)| matches!(o, crate::model::file_analysis::HandlerOwner::Rail(r) if r == rail))
+                    .map(|(n, _)| n.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// Publish ONE specialization edge (primary → spec). The pack path
     /// records these outside `feed`, and every publication must mark its
     /// member fed or `purge_module`'s guard will skip a module that does
