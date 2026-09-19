@@ -273,6 +273,24 @@
         "none": []
       },
       "status": "gold"
+    },
+    {
+      "id": "php-lar-def-container-resolution-typed",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`app(PostRepo::class)->find(...)`: the container resolves what the argument spells, so the chain dispatches on PostRepo.",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 28,
+      "col": 38,
+      "expect": {
+        "all": [
+          "PostRepo.php:7:21"
+        ],
+        "none": []
+      },
+      "status": "gold"
     }
   ]
 }
