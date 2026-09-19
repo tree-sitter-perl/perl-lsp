@@ -98,6 +98,12 @@ declares, or a declared class rail no capture family mints, is a finding
 | `ability` (hint; path `methods` under `app/Policies/`) | `Gate::define`, `$gate->define`, every policy method | `->authorize`, `->can` / `->cannot` / `->cant`, `Gate::allows` and kin, `@can` / `@cannot` / `@elsecan` / `@elsecannot` |
 | `binding` (hint) | `->singleton('key')` / `bind` / `bindIf` / `singletonIf` / `scoped` / `instance` / `alias`, `App::…`, the core aliases of `registerCoreContainerAliases` | `app('key')`, `resolve`, `->make` / `makeWith` / `bound` / `get` on the app, `App::make` |
 
+The container resolves what the argument spells: `app(Foo::class)`,
+`resolve(Foo::class)`, `->make(Foo::class)`, `App::make(Foo::class)` IS a
+Foo — `@expr.annot` declares the call's value from the same match's
+`@type.annot`, minted as a plugin-priority `Expr → TypeName` witness that
+outranks the callee's own return in `expr_type_at_span`.
+
 ## Cross-file
 
 A handler feed rides the reverse index under the file's PATH key
