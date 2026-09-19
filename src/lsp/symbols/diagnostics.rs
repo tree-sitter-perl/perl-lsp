@@ -801,10 +801,60 @@ pub fn pack_symbol_diagnostics(
         .chain(analysis.call_arity_findings())
         .map(render_finding)
         .collect();
+    out.extend(analysis.deprecated_use_findings(&facts).into_iter().map(render_finding));
     out.extend(analysis.liveness_findings(&facts).into_iter().map(render_finding));
     out.extend(analysis.unused_import_findings(&facts).into_iter().map(render_finding));
+    out.extend(analysis.undefined_type_findings(&facts).into_iter().map(render_finding));
+    // The contract's own declarator rides the diagnostic so the quick-fix
+    // needs no resolution: a closed declaring file is read from disk HERE,
+    // where an LSP payload belongs; the open document's is rendered from its
+    // buffer by the action (`sig` = null).
+    for f in analysis.contract_findings(&facts) {
+        let mut d = render_finding(f.clone());
+        if let (Some(i), FindingData::UnimplementedContracts { class, missing }) = (idx, &f.data) {
+            let contracts: Vec<serde_json::Value> = missing
+                .iter()
+                .map(|u| {
+                    let sig = contract_declarator(analysis, i, &u.role, &u.name);
+                    serde_json::json!({"role": u.role, "name": u.name, "sig": sig})
+                })
+                .collect();
+            d.data = Some(serde_json::json!({"class": class, "contracts": contracts}));
+        }
+        out.push(d);
+    }
+    out.extend(analysis.missing_return_type_findings().into_iter().map(render_finding));
 
     out
+}
+
+
+/// The declarator text of a contract callable declared by a CLOSED file —
+/// `None` when the role is declared in this document (the quick-fix reads
+/// the open buffer) or nothing on disk declares it.
+fn contract_declarator(
+    analysis: &FileAnalysis,
+    idx: &dyn CrossFileLookup,
+    role: &str,
+    name: &str,
+) -> Option<String> {
+    if analysis.symbols().iter().any(|s| s.kind == FaSymKind::Class && s.name == role) {
+        return None;
+    }
+    let cached = idx.candidate_defining_sub_in_package(role, role, name)?;
+    let decls = idx.symbols_present(&cached);
+    let sym = decls.symbols().iter().find(|s| {
+        matches!(s.kind, FaSymKind::Sub | FaSymKind::Method)
+            && s.name == name
+            && s.package.as_deref() == Some(role)
+    })?;
+    // One read per missing contract per publish, attributed: this runs on
+    // didChange, so its cost is the lane's cost.
+    let src = crate::util::timings::phase("lsp::contract_declarator_read", || {
+        std::fs::read_to_string(&cached.path)
+    })
+    .ok()?;
+    declarator_text(&src, sym)
 }
 
 
