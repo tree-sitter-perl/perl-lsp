@@ -1481,6 +1481,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // joined per match after the loop.
     let mut branch_expr_by_match: HashMap<usize, Span> = HashMap::new();
     let mut branch_arm_by_match: HashMap<usize, Span> = HashMap::new();
+    let mut subscript_by_match: HashMap<usize, (Span, Option<Span>, Option<i32>, Option<String>)> =
+        HashMap::new();
     let mut annots: HashMap<usize, String> = HashMap::new();
     // keyed-shape collection: ctor + keys grouped per @expr.shape span
     let mut shape_spans: Vec<(usize, usize, Span)> = Vec::new();
@@ -2704,6 +2706,30 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             "branch.arm" => {
                 branch_arm_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
             }
+            "subscript.expr" => {
+                subscript_by_match
+                    .entry(e.match_id)
+                    .or_insert((Span { start: e.start, end: e.end }, None, None, None))
+                    .0 = Span { start: e.start, end: e.end };
+            }
+            "subscript.base" => {
+                subscript_by_match
+                    .entry(e.match_id)
+                    .or_insert((Span { start: e.start, end: e.end }, None, None, None))
+                    .1 = Some(Span { start: e.start, end: e.end });
+            }
+            "subscript.int" => {
+                subscript_by_match
+                    .entry(e.match_id)
+                    .or_insert((Span { start: e.start, end: e.end }, None, None, None))
+                    .2 = e.text.trim().parse::<i32>().ok();
+            }
+            "subscript.key" => {
+                subscript_by_match
+                    .entry(e.match_id)
+                    .or_insert((Span { start: e.start, end: e.end }, None, None, None))
+                    .3 = Some(e.text.clone());
+            }
             "flow.target" => {
                 flow_targets.insert(
                     e.match_id,
@@ -3548,6 +3574,26 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 span: arr_span,
             });
         }
+    }
+    // Subscripts project off their base: an integer index peels a slot, a
+    // literal string key drills a keyed shape — the same `Projected` steps
+    // the foreach/destructuring binders ride.
+    for (expr, base, idx, key) in subscript_by_match.values() {
+        let Some(base) = base else { continue };
+        let step = match (idx, key) {
+            (Some(i), _) => crate::model::witnesses::ProjectionStep::ArrayIndex(*i),
+            (None, Some(k)) => crate::model::witnesses::ProjectionStep::HashKey(k.clone()),
+            _ => continue,
+        };
+        out.witnesses.push(crate::model::witnesses::Witness {
+            attachment: crate::model::witnesses::WitnessAttachment::Expr(*expr),
+            source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+            payload: crate::model::witnesses::WitnessPayload::Projected {
+                base: crate::model::witnesses::WitnessAttachment::Expr(*base),
+                step,
+            },
+            span: *expr,
+        });
     }
     // Lower the value-flow edges to type-tier witnesses (the bag is canonical
     // for types; the edges are the provenance tier above it).
