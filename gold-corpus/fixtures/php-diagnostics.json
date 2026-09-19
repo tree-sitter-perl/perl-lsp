@@ -61,6 +61,30 @@
         ]
       },
       "status": "gold"
+    },
+    {
+      "id": "php-diag-arity-unused-variable-unused-import",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "comment": "`use App\\Sql;` spelled only as the head of `Sql\\ColumnController::class` is used; no member/variable lane fires anywhere in the fixture.",
+      "line": 0,
+      "col": 0,
+      "expect": {
+        "all": [
+          "\"code\":\"arity-mismatch\",\"col\":\"31\",\"file\":\"Home.php\",\"line\":\"23\"",
+          "\"code\":\"unused-variable\",\"col\":\"8\",\"file\":\"Home.php\",\"line\":\"17\"",
+          "\"code\":\"unused-import\",\"col\":\"4\",\"file\":\"services.php\",\"line\":\"5\""
+        ],
+        "none": [
+          "\"code\":\"unused-import\",\"col\":\"4\",\"file\":\"services.php\",\"line\":\"3\"",
+          "\"code\":\"unresolved-method\"",
+          "\"code\":\"undefined-property\"",
+          "\"code\":\"undefined-variable\""
+        ]
+      },
+      "status": "gold"
     }
   ]
 }

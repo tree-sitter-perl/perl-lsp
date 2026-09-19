@@ -732,6 +732,30 @@ pub fn class_rail_capture_findings(declared: &[String], captures: &[&str]) -> Ve
         .collect()
 }
 
+/// Rails a document declares class-keyed that NO capture family mints —
+/// answerable only over a pack's whole capture set (one overlay of several
+/// legitimately carries none of them), which only the bundled-documents
+/// tripwire holds; `--plugin-check` lints one document at a time.
+#[cfg(test)]
+pub fn class_rail_declaration_findings(declared: &[String], captures: &[&str]) -> Vec<String> {
+    declared
+        .iter()
+        .filter(|d| {
+            !captures
+                .iter()
+                .filter_map(|c| rail_of(c))
+                .any(|(k, r)| k.is_class_named() && r == d.as_str())
+        })
+        .map(|d| {
+            format!(
+                "the rail document declares `{d}` class-keyed, but no overlay capture \
+                 (@def.handler.class.{d} / @def.handler.by.{d} / @ref.dispatch.class.{d}) \
+                 mints one"
+            )
+        })
+        .collect()
+}
+
 /// The pack's effective query source: the bundled query plus every
 /// surviving discovered overlay, assembled once per distinct overlay set
 /// and leaked (`cached_query` then compiles it once by content).
