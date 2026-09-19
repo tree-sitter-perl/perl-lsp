@@ -1296,6 +1296,7 @@ fn remap_spans(
         spellings: _,
         rail_name_seps: _,
         class_named_rails: _,
+        annot_expr_spans: _,
         preamble_end: _,
         doc_mentions: _,
         flow_edges,

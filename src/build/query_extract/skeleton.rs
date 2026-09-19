@@ -186,6 +186,9 @@ pub struct SkeletonAnalysis {
     pub rail_name_seps: Vec<(String, String)>,
     /// The rails the pack's documents declare class-keyed (`names_are`).
     pub class_named_rails: Vec<String>,
+    /// Expression spans whose value an overlay declared (`@expr.annot`) —
+    /// the callee-return edge is not minted for them.
+    pub annot_expr_spans: Vec<crate::model::file_analysis::Span>,
     /// The last row of the file preamble (open tag, `declare` rows): an
     /// inserted import goes after it when no import or namespace anchors.
     pub preamble_end: Option<usize>,
@@ -1040,7 +1043,14 @@ impl SkeletonAnalysis {
             // call resolves to its n-th argument's value witness.
             let call_args: std::collections::HashMap<Span, &Vec<Span>> =
                 self.macro_call_arg_spans.iter().map(|(s, a)| (*s, a)).collect();
+            let annot_exprs: std::collections::HashSet<Span> =
+                self.annot_expr_spans.iter().copied().collect();
             for (span, name) in &self.call_sites {
+                // An overlay declared this call's value (`@expr.annot`) —
+                // the callee's return is not its type.
+                if annot_exprs.contains(span) {
+                    continue;
+                }
                 // Identity/projection macro: the call's value IS its n-th
                 // argument. Edge to the argument's own `Expr` witness rather
                 // than the param-agnostic Symbol return (edges-not-values).
