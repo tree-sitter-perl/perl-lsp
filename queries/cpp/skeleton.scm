@@ -668,6 +668,9 @@
 ; joined to its callee ref by adjacency (`ref.end == arglist.start`); a
 ; def's parameter list is joined to the def by span containment. ----
 (argument_list) @arity.args
+; one capture per written argument (the arity count and signature help's
+; active slot), and the bare-variable ones a by-reference parameter binds.
+(argument_list (_) @arity.arg)
 (function_declarator parameters: (parameter_list) @arity.sig)
 
 ; ---- member access (`recv.field` / `recv->field`, AND `recv.method(...)`):
