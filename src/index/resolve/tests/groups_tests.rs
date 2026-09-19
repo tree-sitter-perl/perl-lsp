@@ -957,9 +957,9 @@ fn folded_method_dispatch_site_is_non_rewritable() {
         lines[r.span.start.row][r.span.start.column..r.span.end.column].starts_with("$m")
     });
     let folded = folded.expect("the folded $m dispatch site is a reference");
-    assert!(!folded.rewritable, "the folded dispatch site must NOT be rewritten: {folded:?}");
+    assert!(!folded.is_rewritable(), "the folded dispatch site must NOT be rewritten: {folded:?}");
     assert!(
-        refs.iter().any(|r| r.rewritable),
+        refs.iter().any(|r| r.is_rewritable()),
         "the `sub poke` decl must still be rewritable: {refs:?}",
     );
 }
@@ -986,7 +986,7 @@ fn folded_method_dispatch_rewrites_source_literal() {
     // The source literal `'poke'` (row 2) must be a rewritable edit covering
     // exactly the inside-the-quotes name, distinct from the `$m` call token.
     let source_edit = refs.iter().find(|r| {
-        r.span.start.row == 2 && r.rewritable && span_text(r) == "poke"
+        r.span.start.row == 2 && r.is_rewritable() && span_text(r) == "poke"
     });
     assert!(
         source_edit.is_some(),
@@ -995,7 +995,7 @@ fn folded_method_dispatch_rewrites_source_literal() {
     // The folded `$self->$m()` site stays frozen (renaming it corrupts `$m`).
     let folded = refs.iter().find(|r| span_text(r).starts_with("$m"));
     assert!(
-        folded.is_some_and(|r| !r.rewritable),
+        folded.is_some_and(|r| !r.is_rewritable()),
         "the folded `$m` dispatch site must NOT be rewritten: {refs:?}",
     );
 }
@@ -1203,7 +1203,7 @@ fn test_event_handler_refs_mark_folded_site_non_rewritable() {
     let mut frozen = std::collections::BTreeSet::new();
     for r in &refs {
         let slice = &lines[r.span.start.row][r.span.start.column..r.span.end.column];
-        if r.rewritable {
+        if r.is_rewritable() {
             // Quote-preservation: the rewrite is the bare name, never `'connect'`.
             assert_eq!(slice, "connect", "rewritable site must be the inner name: {r:?}");
             rewritable += 1;
@@ -2101,7 +2101,7 @@ mod pack_symmetry {
             .iter()
             .find(|r| r.span.start == tree_sitter::Point::new(2, 11))
             .unwrap_or_else(|| panic!("WRAP call site is a reference to `real`: {results:?}"));
-        assert!(!wrap_call.rewritable, "an alias site never renames");
+        assert!(!wrap_call.is_rewritable(), "an alias site never renames");
     }
 
     #[test]
@@ -2166,7 +2166,7 @@ fn test_implementations_on_primary_enumerates_specialization_family() {
         "both specs' def sites, from the OTHER file: {results:?}"
     );
     // never rewritable — the spec's selection span is the whole spelling
-    assert!(results.iter().all(|r| !r.rewritable));
+    assert!(results.iter().all(|r| !r.is_rewritable()));
 }
 
 /// `initializationOptions.rename` deserializes via the `RenameOptions` serde

@@ -30,7 +30,7 @@ impl<'a> CandidateSet<'a> {
                 key: FileKey::Path(cached.path.clone()),
                 span: sym.selection_span,
                 access: AccessKind::Declaration,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None
             })
         })

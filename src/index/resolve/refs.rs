@@ -144,7 +144,7 @@ pub fn group_refs(
             key: origin.clone(),
             span: *span,
             access: AccessKind::Read,
-            rewritable: true,
+            rewritable: Rewritable::Yes,
             label: None
         })
         .collect();
@@ -152,7 +152,7 @@ pub fn group_refs(
         key: FileKey::Path(path.clone()),
         span: *span,
         access: AccessKind::Read,
-        rewritable: true,
+        rewritable: Rewritable::Yes,
         label: None
     }));
     for m in members {
@@ -238,7 +238,7 @@ pub fn group_rename_edits(
         .iter()
         .map(|span| {
             (
-                RefLocation { key: origin.clone(), span: *span, access: AccessKind::Read, rewritable: true, label: None},
+                RefLocation { key: origin.clone(), span: *span, access: AccessKind::Read, rewritable: Rewritable::Yes, label: None},
                 bare_new.to_string(),
             )
         })
@@ -249,7 +249,7 @@ pub fn group_rename_edits(
                 key: FileKey::Path(path.clone()),
                 span: *span,
                 access: AccessKind::Read,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None
             },
             bare_new.to_string(),
@@ -833,7 +833,7 @@ pub fn implementations_of(
                                 key: FileKey::Path(cached.path.clone()),
                                 span: s.selection_span,
                                 access: AccessKind::Declaration,
-                                rewritable: false,
+                                rewritable: Rewritable::No(NotRewritable::OtherNameToken),
                                 label: None,
                             });
                         }
@@ -938,7 +938,7 @@ pub fn implementations_of(
                         key: FileKey::Path(cached.path.clone()),
                         span: s.selection_span,
                         access: AccessKind::Declaration,
-                        rewritable: true,
+                        rewritable: Rewritable::Yes,
                         label: None
                     });
                 }
@@ -997,7 +997,7 @@ pub(super) fn specialization_family(
                         key: FileKey::Path(cached.path.clone()),
                         span: s.selection_span,
                         access: AccessKind::Declaration,
-                        rewritable: false,
+                        rewritable: Rewritable::No(NotRewritable::OtherNameToken),
                         label: None
                     });
                 }

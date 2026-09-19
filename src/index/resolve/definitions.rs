@@ -30,7 +30,7 @@ impl<'a> CandidateSet<'a> {
                 key: FileKey::Path(cached.path.clone()),
                 span,
                 access: AccessKind::Declaration,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None,
             })
         };
@@ -90,7 +90,7 @@ impl<'a> CandidateSet<'a> {
             key: FileKey::Path(PathBuf::from(p)),
             span,
             access: AccessKind::Declaration,
-            rewritable: true,
+            rewritable: Rewritable::Yes,
             label: None,
         })
     }
@@ -172,7 +172,7 @@ impl<'a> CandidateSet<'a> {
                 key: key.clone(),
                 span,
                 access: AccessKind::Declaration,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None,
             });
         };
@@ -247,7 +247,7 @@ impl<'a> CandidateSet<'a> {
                                     key: key.clone(),
                                     span: s.selection_span,
                                     access: AccessKind::Declaration,
-                                    rewritable: true,
+                                    rewritable: Rewritable::Yes,
                                     label: None,
                                 },
                             ));
@@ -377,7 +377,7 @@ impl<'a> CandidateSet<'a> {
                     key: key.clone(),
                     span,
                     access: AccessKind::Declaration,
-                    rewritable: true,
+                    rewritable: Rewritable::Yes,
                     label: None,
                 },
             ));
@@ -460,7 +460,7 @@ impl<'a> CandidateSet<'a> {
             key: self.origin_key.clone(),
             span,
             access: AccessKind::Declaration,
-            rewritable: true,
+            rewritable: Rewritable::Yes,
             label: None
         }
     }
@@ -524,7 +524,7 @@ impl<'a> CandidateSet<'a> {
                                 key: key.clone(),
                                 span: m.selection_span,
                                 access: AccessKind::Declaration,
-                                rewritable: true,
+                                rewritable: Rewritable::Yes,
                                 label: r.label(),
                             })
                             .collect();
@@ -672,7 +672,7 @@ impl<'a> CandidateSet<'a> {
                 key: FileKey::Path(path),
                 span: Span { start: p, end: p },
                 access: AccessKind::Declaration,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None
             }
         };
@@ -711,7 +711,7 @@ impl<'a> CandidateSet<'a> {
                                 key: FileKey::Path(cached.path.clone()),
                                 span: def.selection_span,
                                 access: AccessKind::Declaration,
-                                rewritable: true,
+                                rewritable: Rewritable::Yes,
                                 label: None
                             }];
                         }
@@ -855,7 +855,7 @@ impl<'a> CandidateSet<'a> {
                             key: FileKey::Path(cached.path.clone()),
                             span,
                             access: AccessKind::Declaration,
-                            rewritable: true,
+                            rewritable: Rewritable::Yes,
                             label: None,
                         };
                         if let Some(s) = whole.symbols().iter().find(|s| {
@@ -972,7 +972,7 @@ impl<'a> CandidateSet<'a> {
                                                 key: FileKey::Path(cached.path.clone()),
                                                 span: sym.selection_span,
                                                 access: AccessKind::Declaration,
-                                                rewritable: true,
+                                                rewritable: Rewritable::Yes,
                                                 label: None,
                                             });
                                         }
@@ -998,7 +998,7 @@ impl<'a> CandidateSet<'a> {
                                         key: FileKey::Path(cached.path.clone()),
                                         span: sym.selection_span,
                                         access: AccessKind::Declaration,
-                                        rewritable: true,
+                                        rewritable: Rewritable::Yes,
                                         label: None
                                     }];
                                 }
@@ -1039,7 +1039,7 @@ impl<'a> CandidateSet<'a> {
                                     key: FileKey::Path(cached.path.clone()),
                                     span: sym.selection_span,
                                     access: AccessKind::Declaration,
-                                    rewritable: true,
+                                    rewritable: Rewritable::Yes,
                                     label: None,
                                 },
                                 &whole,
@@ -1066,7 +1066,7 @@ impl<'a> CandidateSet<'a> {
                     key: path.clone().map_or_else(|| self.origin_key.clone(), FileKey::Path),
                     span: *span,
                     access: AccessKind::Declaration,
-                    rewritable: true,
+                    rewritable: Rewritable::Yes,
                     label: None,
                 })
                 .collect();
