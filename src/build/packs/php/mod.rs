@@ -62,6 +62,7 @@ pub fn php_pack() -> LangPack {
         bundled_overlays: &[
             ("frameworks/wordpress.scm", include_str!("../../../../queries/php/frameworks/wordpress.scm")),
             ("frameworks/phpunit.scm", include_str!("../../../../queries/php/frameworks/phpunit.scm")),
+            ("frameworks/symfony.scm", include_str!("../../../../queries/php/frameworks/symfony.scm")),
             ("stdlib.scm", include_str!("../../../../queries/php/stdlib.scm")),
         ],
         spellings: &SPELLINGS,
@@ -72,6 +73,7 @@ pub fn php_pack() -> LangPack {
             // in-repo call sites is the expected state.
             include_str!("../../../../queries/php/php.entry.json"),
             include_str!("../../../../queries/php/frameworks/phpunit.entry.json"),
+            include_str!("../../../../queries/php/frameworks/symfony.entry.json"),
         ],
         bundled_rail_docs: &[
             include_str!("../../../../queries/php/frameworks/wordpress.rails.json"),
