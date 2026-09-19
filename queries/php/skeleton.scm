@@ -446,3 +446,118 @@
       alias: (name)? @use.alias @import.binds) @_plain_group_clause)
   (#not-match? @_plain_group_clause "^(function|const)[ \t\r\n]")) @import
 
+; a member on the LEFT of an assignment: php declares a property by
+; writing it (`$this->x = ...`) — the undefined-property lane treats the
+; write as its declaration.
+(assignment_expression
+  left: (member_access_expression name: (name) @member.write))
+(assignment_expression
+  left: (scoped_property_access_expression name: (variable_name (name) @member.write)))
+
+; ---- assignment IS declaration (Perl-loose, Python-identical) ----
+; `@def.var.fn`: assignment declares for the whole FUNCTION, and a second
+; assignment REBINDS the same variable rather than declaring a new one —
+; one identity per function, so references and rename see every site
+; instead of one island per assignment. It rides the pattern's ROOT: a
+; query STEP holds three captures, and the variable's are spoken for.
+(assignment_expression
+  left: (variable_name) @def.var.name @def.var @flow.target
+  right: (_) @flow.source) @flow.assign @def.var.fn
+; `$d = &$this->x` binds `$d` to the value's storage — the same
+; declaration, typed by the same flow; `@alias.target` (on the inner
+; name — a query step holds three captures) marks it, so a write through
+; it (`$d[] = 1`) counts as a use of the storage.
+(reference_assignment_expression
+  left: (variable_name (name) @alias.target) @def.var.name @def.var @flow.target
+  right: (_) @flow.source) @flow.assign
+; `$this->x = <value>`: a property typed by what is written to it. The
+; flow edge lands at the CLASS-BODY scope (`@flow.target.member`), where
+; the field's readers look; `$this` is the receiver spelling.
+(assignment_expression
+  left: (member_access_expression
+    object: (variable_name) @_prop_recv
+    name: (name) @flow.target.member)
+  right: (_) @flow.source
+  (#eq? @_prop_recv "$this"))
+
+; `global $wpdb;` BINDS the global into this function — a declaration
+; the uses hang off, and the anchor a `@global wpdb $wpdb` docblock row
+; types (the Param-style doc join): WordPress's whole `$wpdb->` surface.
+(global_declaration
+  (variable_name) @def.var.name @def.var @flow.target)
+
+; foreach BINDS its loop vars — real declarations (refs/hover/highlight/
+; rename all hang off the def) that rebind per element (the narrowing
+; cutoff). The `"as" .` anchor keeps the ITERATED SOURCE out: `$items` in
+; `foreach ($items as $item)` is a read of an existing variable, and a
+; pseudo-def there would steal the real declaration's later references.
+; The collection joins the same match (`@seq.source`) so the bound var
+; types as the collection's ELEMENT — the `Projected{base, Element}`
+; witness peels a doc-typed sequence (`@var list<Handler>`); the
+; key=>value pair form stays untyped (the key needs its own axis).
+(foreach_statement
+  . (_) @seq.source
+  "as"
+  .
+  (variable_name) @def.var.name @def.var @flow.rebind)
+(foreach_statement
+  . (_) @seq.source
+  "as"
+  .
+  (by_ref (variable_name) @def.var.name @def.var @flow.rebind))
+; pair form: the KEY (first child) peels the collection's key axis, the
+; VALUE (last child) its element — same source join, different step.
+(foreach_statement
+  . (_) @seq.source.key
+  (pair . (variable_name) @def.var.name @def.var @flow.rebind))
+(foreach_statement
+  . (_) @seq.source
+  (pair (variable_name) @def.var.name @def.var @flow.rebind .))
+
+; ---- return sites ----
+; The returned expression's own witness (literal / read / call / tuple
+; literal) types the enclosing function through the driver's return-fuel
+; phase when the signature declares nothing — or declares only a bare
+; container the value refines (`: array` over `return [$q, $a]`,
+; docs/adr/destructuring.md).
+(return_statement (_) @expr.return.value)
+
+; ---- destructuring (docs/adr/destructuring.md) ----
+; `[$a, $b] = f()` / `list($a, $b) = f()`: every slot is a declaration
+; bound POSITIONALLY off the RHS through the same FlowEdge lowering Perl's
+; `my ($a, $b) = f()` uses (Extraction::Positional → ArrayIndex(n)); the
+; position is counted over the list text's top-level commas (`[, $b]`).
+; A keyed list (`['k' => $v]`) declares but never binds positionally;
+; nested list slots are not direct children and stay out.
+(assignment_expression
+  left: (list_literal
+    (variable_name) @def.var.name @def.var @flow.slot) @flow.slot.list
+  right: (_) @flow.source)
+; `foreach ($pairs as [$k, $v])` / `foreach ($m as $i => [$a, $b])`: the
+; list IS the collection's element — slots peel Element, then index.
+(foreach_statement
+  . (_) @seq.source
+  "as"
+  . (list_literal
+      (variable_name) @def.var.name @def.var @flow.slot) @flow.slot.list)
+(foreach_statement
+  . (_) @seq.source
+  (pair
+    (variable_name)
+    (list_literal
+      (variable_name) @def.var.name @def.var @flow.slot) @flow.slot.list .))
+
+; The key/value arrow inside a destructuring list (`['k' => $v]`): what
+; makes a list KEYED rather than positional, and what a slot's key is read
+; before.
+(list_literal "=>" @pair.arrow)
+
+; A key-less array literal is a positional TUPLE of its elements' edges
+; (`return [$queue, $agent]`): one match per element, grouped by the
+; array span in extraction; a keyed element or a spread disqualifies the
+; literal (it is a map / open list, never a tuple).
+(array_creation_expression
+  (array_element_initializer . (_) @tuple.elem .) @tuple.init) @tuple.arr
+(array_creation_expression
+  (array_element_initializer (_) (_) @tuple.keyed)) @tuple.arr
+
