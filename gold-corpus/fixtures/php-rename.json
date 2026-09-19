@@ -1,0 +1,25 @@
+{
+  "capability": "rename",
+  "rows": [
+    {
+      "id": "php-rename-method-cross-file",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "file": "src/Util/Grid.php",
+      "line": 8,
+      "col": 20,
+      "newname": "slot",
+      "expect": {
+        "all": [
+          "Narrow.php\":[{\"col\":\"32\",\"end_col\":\"36\",\"end_line\":\"14\",\"line\":\"14\",\"new_text\":\"slot\"}",
+          "Grid.php\":[{\"col\":\"20\",\"end_col\":\"24\",\"end_line\":\"8\",\"line\":\"8\",\"new_text\":\"slot\"}",
+          "Home.php\":[{\"col\":\"17\",\"end_col\":\"21\",\"end_line\":\"15\",\"line\":\"15\",\"new_text\":\"slot\"}"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    }
+  ]
+}

@@ -969,3 +969,30 @@ fn diagnostic_options_deserialize_from_lsp_shape() {
     assert!(!opts.redundant_guard, "absent key defaults to false");
     assert!(!opts.unresolved_dispatch, "absent key defaults to false");
 }
+
+/// A docblock that contradicts its declaration is a HINT on by default, and
+/// the key silences it. Pack-language lane — the pair is minted at the merge,
+/// so this only renders.
+#[cfg(feature = "php")]
+#[test]
+fn doc_type_mismatch_hints_by_default_and_the_key_silences_it() {
+    let src = "<?php\nclass R {\n    /** @return string */\n    public function n(): int {}\n}\n";
+    let analysis =
+        crate::build::language_driver::LanguageRegistry::with_enabled().for_id("php").unwrap().analyze(src);
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let of = |o: DiagnosticOptions| {
+        collect_diagnostics(&analysis, &idx, o)
+            .into_iter()
+            .filter(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == "doc-type-mismatch"))
+            .collect::<Vec<_>>()
+    };
+    let on = of(DiagnosticOptions::default());
+    assert_eq!(on.len(), 1, "{on:?}");
+    assert_eq!(on[0].severity, Some(DiagnosticSeverity::HINT));
+    assert!(on[0].message.contains("string"), "{}", on[0].message);
+    assert!(on[0].message.contains("int"), "{}", on[0].message);
+    assert!(
+        of(DiagnosticOptions { no_doc_type_mismatch: true, ..Default::default() }).is_empty(),
+        "the key silences the lane"
+    );
+}

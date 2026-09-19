@@ -27,6 +27,65 @@ marked otherwise; the drain re-derived each rationale against current code.
   declared example until ts-parser-perl 2.0.0 landed it; the list is
   empty today.
 
+- **A reference-assignment alias is a per-symbol tag, not a relation.**
+  `$h = &$opts['h']` makes `$h` reach `$opts['h']`'s storage, so a write
+  through `$h` is a use of that storage and the unused-variable lane must
+  stay silent. The extractor states that as `SymbolFlags::ALIAS` on the
+  variable symbol — which is enough for the lane, and gets the attribute
+  string out of the adapter, but is still an ADJECTIVE on one storage
+  where the fact is a RELATION between two: nothing says which storage
+  `$h` reaches, so nothing else can use it. Target shape: the
+  aliasing edge the by-reference lane already speaks
+  (`docs/adr/by-ref-binding.md`) — a witness on the aliased variable
+  pointing at the storage the `@flow.source` capture already names — and
+  the lane asks whether the variable has an aliasing binding. What it
+  needs first: an attachment/payload that says "aliases" rather than
+  "flows from", since a plain `$h = $opts['h']` mints the same flow edge
+  and a `WitnessSource` tag read for meaning is rule #14's own
+  antipattern. [recorded 2026-09-17; the string became a flag 2026-09-18,
+  the relation is still unmodelled]
+
+- **A contract's declarator text is re-read from disk by each consumer.**
+  `contract_declarator` reads the declaring file inside the diagnostics
+  publish so the unimplemented-method quick-fix can carry a stub, and
+  cross-file member hover reads the same kind of file again for its
+  signature. The producer HAS the declarator: it is the declaration the
+  symbol was minted from, and putting it on the symbol's presentation
+  would give both consumers one source. Measured before parking — 0.01–
+  0.02 ms per read, ~0.07 ms for a six-contract publish
+  (`bench/RESULTS.md`, 2026-09-18) — so this is a rule #11 shape
+  argument, NOT a latency fix, and the number is what keeps it from
+  being sold as one. What it needs: a decision about blob size, since a
+  declarator per contract callable rides every analysis that has one.
+  [recorded 2026-09-18]
+
+- **The pack diagnostics lanes' cost at scale is unmeasured.** Each lane
+  is a `FileAnalysis` query now, and the two liveness lanes share one
+  walk, but the family still makes several full passes over `refs()` and
+  `symbols()` per publish — and a publish runs on didChange. The
+  adversarial shape to measure: the largest file in the Laravel corpus,
+  didChange every 40 ms, with the per-lane phases attributed. Nothing
+  suggests a problem; nothing has looked.
+
+  The same measurement owes a second number: the publish PREAMBLE, the
+  per-language constants a publish gathers before any lane runs. The
+  registry is a process-wide `OnceLock` and the builtin-type list is
+  Arc-cached, so what is left is `is_builtin_type`'s linear scan of ~164
+  `String`s per unresolved global-namespace type reference. Attribute it
+  separately from the lanes with `PERL_LSP_PHASE_TIMING`. [recorded
+  2026-09-18]
+
+- **A keyed destructuring slot's key is read from the list's text.**
+  `query_extract::slot_key` / `slot_position` scan the destructuring
+  list's source text for the pack's pair arrow to find the key a slot
+  binds under (`['k' => $v] = f()`), where the tree already holds the
+  pair node with its key child. The producer could say it directly: a
+  `@destructure.key` capture on the pair's key, joined to the slot the
+  way `@key.elem` joins `@def.handler.key`. Rule #11 debt, confined to
+  the extractor; the arrow is at least the document's own capture
+  (`@pair.arrow`), not a literal. Lands with the php query,
+  which is the only one that writes keyed lists. [recorded 2026-09-16]
+
 - **`PackFacts` is one lane for every pack language** (recorded
   2026-09-15, for after the php release). Thirty-four fields, of which a
   Perl analysis carries none and a php analysis carries the cpp ones
@@ -35,8 +94,8 @@ marked otherwise; the drain re-derived each rationale against current code.
   ratchet (`layering_tests::pack_facts_fields_are_ratcheted`) stops the
   lane growing, not the sharing. The shape wanted: one sub-struct per
   language family the pack declares (`CppFacts`, `PhpFacts`), each
-  default-empty, with the language-generic rows (`receiver_names`,
-  `import_rows`, `names`, the region spans) staying on
+  default-empty, with the language-generic rows (`import_rows`, `names`,
+  the region spans) staying on
   `PackFacts`; `surface_feed` destructures each exhaustively the way it
   does the lanes today. Cost: an `EXTRACT_VERSION` bump and every
   `pack.<field>` reader re-pathed; the win is that a cpp field cannot be
@@ -66,13 +125,6 @@ marked otherwise; the drain re-derived each rationale against current code.
   (spaces over comment bytes, newlines kept) so byte offsets stay in
   original coordinates for member positioning. Not a merge target.
   [re-ratified 2026-07-17]
-- **Two "enclosing class" notions in `emit_return_fuel`**: the implicit-
-  field half reads the ref's own `scope.package`; the sibling-CALL half
-  walks up to the enclosing method SYMBOL's package (so out-of-line bodies,
-  whose body scope carries no package, still resolve). Deliberately
-  different robustness; unifying is a behavior change, not a cleanup
-  (out-of-line bodies would gain implicit-field edges). [re-ratified
-  2026-07-17]
 - **Two domain/type completion rankers** (`backend::rank_domain_members`
   for pack enum members vs `symbols::rank_candidates_by_expected_type` for
   Perl scope vars): different item types (`CompletionItem` vs
@@ -218,7 +270,7 @@ marked otherwise; the drain re-derived each rationale against current code.
   `arrow_deref_sites`) are minted only by `src/builder/narrowing.rs`, a
   child of the Perl-only tree-sitter consumer. cpp goes through
   `query_extract` and never runs `build()`. The cpp hover/goto **type**
-  tier already narrows (`narrow_guard` refines inside `dynamic_cast` /
+  tier already narrows (the guard patterns refine inside `dynamic_cast` /
   `std::optional` guards — `cpp_dynamic_cast_guard_narrows`); what's missing
   is the **diagnostics** layer. Needs a cpp nullability pass that lowers
   `nullptr` comparisons + `std::optional` engagement state into the
@@ -242,7 +294,7 @@ marked otherwise; the drain re-derived each rationale against current code.
   headers that surface as bare identifiers) must be **calibrated against the
   macro-heavy real substrate** (spdlog/fmt/onednn), the same bar
   use-after-move cleared. Default-off + opt-in + pack-capability gate
-  (declared like `implicit_this_members`, never `lang == cpp`) is understood;
+  (a pack capability, never `lang == cpp`) is understood;
   only the valve + its calibration remain. `docs/adr/narrowing-diagnostics.md`.
 - **PR #100** re-extraction onto the projection engine (user closes or
   reworks; the `projection.rs` PoC now rests in git history — the design
@@ -496,6 +548,131 @@ marked otherwise; the drain re-derived each rationale against current code.
   same-named classes in other namespaces collide. The Perl owner-gate half
   landed (`62426fa`); the cpp half needs namespace-qualified class identity
   in the rename target. Destructive-if-applied.
+- **PHP method-level `@template`** (round-3 R6/R10b): a class-level
+  `@template T` row feeds the same per-class param axis cpp templates use,
+  but a METHOD-level `@template TValue` (e.g. Laravel's `BuildsQueries`
+  trait `first()`) is a separate binding the class-keyed axis doesn't
+  model. Laravel 12's CONDITIONAL generic returns (`($id is ... ?
+  Collection<...> : TModel|null)` on `find`) are beyond the parser and
+  correctly rejected — not a target, stays untyped. Rendering doc PROSE on
+  hover is also still unread.
+- **PHP completion: declared type loses to the bag in one lane** (round-3
+  R11 tail): a declared `: int` return annotates as `int|float` in
+  completion specifically (the bag beats the decl there; elsewhere the
+  decl wins). Multi-line signatures also truncate in completion detail.
+- **PHP `global $x` refs are always empty** (round-3 R11 tail): `global
+  $wpdb;`-style bindings never collect refs; hover on `$wpdb` answers the
+  CLASS by name coincidence, not the global binding.
+- **PHP string-callable overlay residuals** (round-4 H7): the
+  variadic-tail callback family (`array_udiff` & co — callback LAST
+  positional arg) and key-position forms (`'sanitize_callback' => 'fn'`)
+  aren't covered by the fixed-position `stdlib.scm` overlay. (The
+  `'Class::method'` string spelling resolves on both segments, and
+  `[$obj, 'm']` / `[$this, 'm']` instance-array callables mint member refs
+  through the skeleton — neither is parked.) Two rename
+  residuals from the same family, root-caused but not fixed: LogglyHandler
+  (a closure param threaded through an `array_filter` callback) and
+  MailHandler's `$highestRecord` (assignment flow into a null-guarded
+  accumulator local).
+- **PHP vendor-resolved method hover drops the signature** (round-4 H12):
+  cross-file method hover through the vendor/dependency tier renders the
+  generic member arm instead of the method-signature arm.
+- **PHP `--heatmap` fan-in walk cost on large corpora** (round-5 R5-4): a
+  1,232-file phpMyAdmin heatmap costs ~2 minutes cold and warm. Indexing
+  is 3.0s cold / 0.2s warm; the rest is the per-symbol `references()`
+  walk. Attributed 2026-09-02 (warm, `PERL_LSP_GHOST_STATS`, quiet box,
+  one run — wall 74-78s, well under the 1m50s recorded from an earlier,
+  possibly loaded-box run, so the three-run protocol still owes a
+  baseline): both per-walk rehydration memos are defeated on the heatmap
+  path — `sweep.lookup`/`sweep.memo_miss` both 1,536,053 (the
+  thread-local `SWEEP_MEMO` is never open on the heatmap's walk loop) and
+  `session.foreign_index` 1,586,824 (the session memo sees an index id
+  other than the walk's) — so a file rehydrates once PER WALK instead of
+  once per run: `rehydrate.loader` 19.1s over 1.54M calls (mostly
+  `bagcache.hit`, ~12µs each — it is the call count that hurts),
+  `bagcache.decode` 12.3s over 35,564 decodes, `bag.rebuild_index_witnesses`
+  4.09M calls. Unblock: open the sweep memo (or the shared
+  `SWEEP_PROVIDERS`) for the heatmap's walk loop, and give the heatmap's
+  session the walk's index id — not the matcher, which is already
+  row-narrowed (the pack tier's own-row-store pre-prune already landed).
+- **PHP method names are case-insensitive; the lookup is exact** (monolog
+  dogfood, one row; WordPress `sodium_compat` a second — `::substR()` on a
+  method declared `substr()`): `$formatter->indentStackTraces()` on a
+  method declared `indentStacktraces()` reports unresolved. `symbols_named` and the
+  cross-file by-name index are exact-case; a pack convention
+  (`methods_case_insensitive`) would need a folded name index on both the
+  local and the module tiers, for the Callable shape only (properties and
+  constants stay exact). Two corpora now show a row each — the next
+  diagnostics slice.
+- **Two WordPress `unresolved-method` rows resolve to the wrong receiver
+  class** (build 8fe1bc1): `$user->has_cap()` in `wp-login.php` (the
+  receiver comes out of `wp_signon()`'s `WP_User|WP_Error` and an
+  `is_wp_error()` function guard the narrowing lane does not read) and
+  `$class::test()` in `Requests::get_transport()` (`$class` iterates
+  `self::$transports`, an array of class-strings; `test` is the
+  `Transport` interface's static method). Both need the receiver dumped
+  before a fix; neither is a lane rule.
+- **Laravel facade aliases (`use DB;`, bare `DB::` in a namespace-less
+  migration)** report an undefined type: the alias is registered at
+  runtime (`Facade::defaultAliases()` + `config/app.php`), no static
+  source declares `class DB`. A Laravel overlay reading the framework's
+  default alias map is the honest fix; the qualified spelling
+  (`use Illuminate\Support\Facades\DB;`) already resolves. Evidence
+  against building it: across BookStack, panel and koel there are zero
+  bare-alias spellings (`use DB;`, `\DB::`) and zero `class_alias()`
+  calls — every facade use imports the FQ class. A global-alias class
+  declaration is a seam no corpus asks for.
+- **PHP `self::VOID`-style constant names read as undefined properties**
+  (round-8): tree-sitter-php lexes a keyword-spelled constant NAME
+  (`VOID`, `STRING`, `ARRAY` — PHP keywords are case-insensitive) as the
+  `void` type keyword, so `const VOID = 'void';` is an ERROR node the
+  extractor never sees; both reads of `self::VOID` in WordPress's
+  `class-wp-block-processor.php` report `undefined-property`. A grammar
+  fix upstream; recovering the declaration out of the ERROR node (rule
+  #1: scan ERROR children for `const NAME =`) is deferred until a corpus
+  shows more than the two known rows.
+
+- **A path rail's directory is Laravel's layout, not the project's**
+  (measured 2026-09-03, `bench/RESULTS.md` round 3). `laravel.rails.json`
+  hardcodes `"under": "/config/"`, and BookStack keeps its config under
+  `app/Config/` — so all 213 `config('…')` uses in that corpus miss their
+  definition and the undefined-name lane files 213 `warning` rows on a
+  real project. The rails whose `under` is a convention rather than a
+  framework guarantee (`config`, `lang`, `view`) all carry the same
+  exposure. Target shape: a workspace-config root per path rail — the
+  document declares the default, the project overrides it — which is a
+  configuration surface this build does not have yet (nothing else reads
+  a per-project setting, so the seam would exist for this alone).
+  Parked, not silenced: the misses are honest warnings about names the
+  lane genuinely cannot resolve. [recorded 2026-09-17]
+
+- **The mock lane enumerates builder-chain shapes** (php, branch 6). The
+  PHPUnit overlay types `getMockBuilder(X::class)->…->getMock()` with a
+  pattern per modifier count (zero, one, two) and covers the property
+  form for the `createMock` family only, so a third modifier — and
+  `$this->prop = $this->getMockBuilder(…)` in `setUp()`, the commonest
+  spelling — falls back to `getMock()`'s declared `MockObject`. Each new
+  shape is another pattern, which is rule #10 in data form. Target shape:
+  let `@type.annot` RIDE the chain hops the skeleton already mints, so the
+  annotation attaches to the receiver value and every hop count follows
+  from one pattern. Parked because that is a chain-typing change in the
+  engine, not overlay data; the ceiling is recorded on the intersection
+  fork (`docs/open-forks.md`) and pinned by
+  `php_phpunit_mock_chain_ceiling_is_the_mock_api`.
+
+- **Goto-def on a leaf forty files declare rehydrates each of them**
+  (index, `member_def_location`). The bareword-scoped member lookup asks
+  `visible_def_candidates` for every class on the ancestor walk and
+  `whole_present`s each candidate to read its symbols — on a keystroke.
+  A common leaf (`Model`, `Controller`) has one candidate per declaring
+  file, so the cost is (ancestors x declarers) rehydrations per request,
+  bounded only by the bag cache. Target shape: the candidate's DECLARED
+  MEMBER NAMES as a row-store projection, so a candidate that cannot
+  hold the member is rejected without decoding it — the same narrowing
+  `refs_to` gets from the `refs` rows. Parked because that is a row
+  family the store does not have yet; the walk itself is now the model's
+  one graph walk, so the cost is the only thing left here.
+  [recorded 2026-09-18]
 
 ## Cross-references
 - Gap shapes behind open xfails: `gold-corpus/KNOWN-GAPS.md`

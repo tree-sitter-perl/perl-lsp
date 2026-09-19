@@ -124,6 +124,431 @@ See `docs/cpp-status.md`.
   completion (`ns::`, `Class::`) filters by owner; member-receiver chains
   (`this->`, `field_->`) narrow correctly.
 
+### PHP support — alpha (opt-in build feature `php`)
+
+A PHP language pack joins the alpha tier (`--features php`, included in
+`all-langs`), dogfooded in its first round against WordPress core,
+laravel/framework, monolog, and guzzle — zero crashes, zero parse
+failures across PHP 5-era legacy through 8.x syntax (enums, attributes,
+promoted constructor properties, first-class callables, HTML-interleaved
+templates). Market case and build-out plan in `docs/prompt-php-target.md`.
+
+- **Navigation.** Goto-definition, references, hover, outline, and
+  workspace-symbol — cross-file, through namespaces, `use` imports,
+  `extends`/`implements`/trait composition, static calls, and `$this`.
+  Measured on WordPress core: references on `esc_attr` finds all ~1300
+  call sites across 267 files in ~1.5s warm.
+- **Typing.** Declared types (params, properties, returns) drive
+  hover/completion; `new ClassName()` types the variable even when the
+  class lives in another file; `: static`/`$this` returns chain fluent
+  builders; `instanceof` guards narrow; PHP's `.`/`.=` concat operators
+  type untyped variables from use, Perl-style. Types display in PHP's
+  own vocabulary (`string`, `array`, `int|float`).
+- **Completion.** Member completion after `->` is receiver-typed and
+  inheritance/trait-aware, labeled with provenance
+  (`touch — Post (from HasTimestamps) → string`).
+- **Duplicate declarations** (WordPress's `noop.php` stubs) answer the
+  full ranked definition family — the real signature first by arity fit —
+  instead of one confidently-wrong winner.
+- **Composer vendor tier.** `vendor/` is indexed as the dependency tier
+  even though it's gitignored — install paths come from
+  `vendor/composer/installed.json`. Goto-def and references reach
+  library code; rename never rewrites it.
+- **Namespace identity.** `use X\Y as Z` aliases resolve on inheritance
+  edges (Laravel's `Repository as CacheContract` now reaches the
+  implementer), and same-leaf classes in different namespaces
+  (Laravel's three `Repository`s) no longer pollute each other's
+  implementations/type-hierarchy answers.
+- **Method-chain typing** (all pack languages, C/C++ included).
+  `$x = $a->b()->c()` and `auto x = w.get().spin()` now type without an
+  intermediate variable — each call hop resolves lazily off the
+  receiver's class, and `: static` fluent builders keep the concrete
+  class through every hop.
+- **Class constants and enum cases.** `User::VERSION`, `self::LIMIT`,
+  and `Level::Debug` navigate (goto-def, references, hover), and an
+  enum case's value types as its enum.
+- **`parent::` calls.** Goto-def lands on the parent's own method
+  (skipping the writing class's override), references include the
+  `parent::` call sites, and rename rewrites them — previously a
+  rename silently missed every `parent::` site and broke the code.
+- **Property receivers chain.** `$this->handler->handleBatch(...)`
+  dispatches through the property's declared type; static factory
+  chains (`Registry::get_instance()->register(...)`) resolve the same
+  way, including through a docblock-only `@return` on the factory.
+- **One identity per local variable.** PHP variables are
+  function-scoped, and the analyzer now models that: re-assignment
+  rebinds instead of re-declaring, so references and rename see every
+  site of a variable instead of per-assignment fragments (renaming
+  from any site previously rewrote a fragment and broke the code).
+- **Constructors are referenced by their `new` sites.** References on
+  `__construct` include every `new Client(...)` (1 → 193 on guzzle),
+  the heatmap stops flagging constructed classes' ctors as dead code,
+  and renaming `__construct` never rewrites a `new` site.
+- **WordPress globals type.** `@global wpdb $wpdb` docblocks type the
+  `global $wpdb;` binding, so `$wpdb->get_results(...)` hovers,
+  navigates, and completes across WordPress core.
+- **Honest member completion.** `->` on a receiver whose class nothing
+  declares (a vendor type without `vendor/` installed) now answers
+  empty instead of dumping ~200 unrelated in-scope identifiers.
+- **Eloquent Builder generics.** `@template` class docblocks and
+  `@return Builder<static>` / `@return TModel` rows now carry through
+  chains: `User::query()` types as `Builder<User>`, and
+  `->firstWhere(...)` gives back a `User` — hover, completion, and
+  goto-def all follow. Renaming an enum case no longer rewrites an
+  unrelated same-named class's import line.
+- **Laravel framework tier.** Facades work — `Cache::get(...)`
+  navigates and types through the facade's `@method` docblock rows
+  (any library documenting a `__call` surface with `@method` benefits,
+  not just Laravel). Eloquent relation methods declare their
+  same-named magic property: `$book->pages` navigates to the
+  `pages()` relation, and to-one relations (`$page->book->name`)
+  chain through the related class. Dogfooded against BookStack with
+  a real composer `vendor/` tree.
+- **WordPress hooks connect.** `add_action('init', 'wp_cron')` and the
+  `array($this, 'method')` / `[$this, 'method']` callback forms are
+  real references of the named function or method: references find
+  every registration, rename rewrites the name inside the quotes, and
+  hook-driven functions leave the heatmap's dead-code queue. Hook
+  NAMES connect too: `do_action('init')` / `apply_filters(...)` and
+  every `add_action('init', …)` registration are one identity —
+  references from either side list all of them (190 sites across 127
+  WordPress core files for `'init'`), and renaming a hook rewrites
+  the string at every site.
+- **PHP attributes are modeled.** `#[Test]`, `#[Route(...)]`,
+  `#[AllowDynamicProperties]` land on their symbols; hover shows the
+  real signature line instead of the annotation (cpp's
+  `template<...>`-first-line hovers improved the same way).
+- **The dead-code report understands frameworks.** Runner-invoked
+  symbols no longer flood the heatmap's dead queue: `#[Test]` /
+  `test*` methods in TestCase descendants, queued-job and command
+  `handle()`s, service-provider `boot()`s (declared in `entry.json`
+  rule documents — bundled PHPUnit and Laravel sets included, plugin
+  dirs can add their own), and PHP's magic methods (`__toString`,
+  `__invoke`, …) are shielded with a labeled reason instead of
+  flagged. Route/event callables (`[UserController::class, 'index']`)
+  are real references now, so controller actions count as used.
+  Bundled rule sets cover PHPUnit, Laravel, and Symfony (#[Route]
+  actions, command lifecycle, form types, Twig extensions), and
+  `perl-lsp --plugin-check <entry.json>` lints a rule document.
+  Measured on guzzle: the dead queue dropped from 2,195 symbols to
+  352; on symfony/demo, 67 runner-invoked symbols are shielded with
+  labeled reasons — what remains is plausibly actually dead.
+- **Completion respects visibility.** `->` completion no longer
+  offers another class's private/protected members (methods,
+  properties, and promoted constructor params) — they complete only
+  from inside their own class, the same rule C++ access regions
+  already enforced. Perl's lexical subs (`my sub helper`) now
+  complete only inside their declaring block.
+- **foreach keys type too.** `foreach ($m as $k => $v)` with
+  `array<string, User>` docs gives `$k: string` and `$v: User`;
+  list-shaped docs give `$k: int`. (Spaced generics like
+  `array<string, User>` previously lost their arguments entirely.)
+- **foreach loop variables type as the element.**
+  `foreach ($this->handlers as $handler)` with
+  `@var HandlerInterface[]` (or `list<X>` / `array<K, V>` /
+  `iterable<X>`) types `$handler` as `HandlerInterface` — hover,
+  member completion, and goto-def off the loop variable all follow.
+  A `@var`/`@param` sequence doc now refines a bare declared `array`
+  (previously it was discarded as conflicting), and sequence
+  spellings no longer mint bogus class names like `list<X>`.
+- **Same-leaf classes resolve through the file's own `use` map.** With
+  three `Collection`s and three `Request`s in one tree, goto-def on a
+  type hint, `new Collection(...)`, or a typed receiver now lands on
+  the class the file imported (or its own namespace's), never the most
+  common same-named class; references and rename stay inside that
+  class's family — renaming `Http\Client\Factory::$recorded` no longer
+  rewrites `Process\Factory`. A `use`d class that no indexed file
+  declares answers empty rather than a stranger. Type hints count as
+  class references (rename rewrites them). Aliased imports
+  (`use Script\Event as ScriptEvent;`) no longer capture the bare leaf —
+  the file's own `Event` stays its own — and a namespace-relative
+  spelling (`new Downloader\DownloadManager()`) resolves to the class it
+  names, so its call sites stay in that class's references.
+- **A property and a method sharing a name keep their own identity.**
+  `$this->recorded` hovers/goes to the property, `$this->recorded()` to
+  the method; renaming either leaves the other untouched. Applies only
+  where a class actually overloads the name — everything else is
+  unchanged.
+- **Static calls on expression receivers.** `$this->helper::make()` and
+  `$cls::make()` (with `$cls = Helper::class`) resolve; `Foo::class`
+  types as the class. Class-name references and rename now reach
+  `new Foo()` sites, `Foo::class`, and bareword static receivers.
+- **Nested generics over `mixed`.** `@var array<array<mixed>>` types the
+  loop element as an array instead of collapsing the whole annotation.
+- **Goto-def on a call lands on the method, not a same-named property.**
+  A same-file `$this->hasAuth()` goes to `hasAuth()`, `$this->hasAuth`
+  to the property (the build-time call stamp now honors the written
+  shape). A keyed two-pair array (`['chapter' => $c, 'book' => $c->book]`)
+  is no longer mistaken for a `[$obj, 'method']` callable, so its key is
+  not a method reference a rename would rewrite.
+- **Eloquent relations behind a modifier.** `return
+  $this->belongsTo(Book::class)->withTrashed();` still types the magic
+  `->book` property, so `$chapter->book->getUrl()` resolves.
+- **String callables and `new self`.** `'A\B\X::method'` strings (in
+  `call_user_func`, `array_map`, …) are references to the method, and a
+  rename rewrites exactly the method tail inside the string. `new
+  self(...)` / `new static(...)` count for the constructor's references,
+  hover and goto-def; constructor names are not renameable.
+- **Import rows.** A middle segment of `use Illuminate\Http\Request;`
+  no longer jumps to a same-named class elsewhere; an aliased import
+  (`use Script\Event as ScriptEvent;`) leaves the bare leaf to the
+  file's own class.
+- **Dead-code queue honesty.** A constructor of a class that is named
+  anywhere (a type hint, `Foo::class`, a `use` row) is treated as
+  container-instantiated (`class-referenced`) rather than dead
+  (symfony/demo: 42 → 36 candidates). A broken bundled framework overlay
+  now drops with a diagnostic instead of silently disabling every PHP
+  verb.
+- **`--heatmap` on PHP: same answers, less work.** The PHP tier now
+  pre-prunes its fan-in walk from its own reference rows, and a file's
+  `use`-map is derived once per analysis instead of once per scanned
+  file per query. Net on phpMyAdmin (1,232 files): warm 1m57s before
+  this round's visibility work → 1m50s after it, every fan-in
+  identical to the unpruned walk. Symfony Console `Application`
+  overrides (`getDefaultCommands`, `getLongVersion`, …) count as
+  framework entries.
+- **Diagnostics.** PHP documents now report what a typed-language editor
+  expects: undefined methods and properties (through typed `$this->prop`
+  chains, cross-file once the workspace index is settled), non-public
+  access from outside the class, argument-count mismatches both ways,
+  undefined variables, and undefined types resolved through the file's
+  `use` rows and namespace. Every lane carries a named silence rule for
+  what it cannot see — an unreadable ancestor, a `__call` class, an
+  interface-typed receiver, a closure's rebound `$this`, a dynamically
+  declared property, a by-reference out-parameter — so a PHPUnit test
+  suite without vendored PHPUnit stays quiet. `docs/adr/php-diagnostics.md`.
+- **A by-reference out-parameter binds its argument.**
+  `$process->execute($cmd, $output)` against `execute($command, &$output =
+  null)` declares `$output`, locally or across files, through a receiver
+  or by name; the lane names the stray read into a by-value parameter and
+  stays silent for a callee it cannot resolve (php's own `preg_match`).
+  `$d = &$this->x` declares `$d`; `\Vendor\Init::$files` reads as a
+  member, never a local; `...$args` declares its parameter; a variable
+  inside `isset` / `empty` / `unset` is the existence question. composer:
+  35 undefined-variable rows → 0; WordPress 24 → 2.
+- **Laravel route names are a rail.** `Route::get(…)->name('home')`
+  declares the name, `route('home')`, `to_route`, `redirect()->route`,
+  `URL::route` and `Route::has` use it: goto-definition, references and
+  rename connect them across files, and `undefined-route` warns on a
+  name no routes file declares. A rail is a named flat handler namespace
+  (`HandlerOwner::Rail`, declared by the overlay capture's suffix), so a
+  route name and a same-spelled WordPress hook or view name never
+  connect. Handler names — a hook, a route — now reach the reverse
+  index from classless files (a routes file declares no class), which
+  also makes WordPress hook navigation work across files. Blade
+  templates are text to the grammar, so their `route('x')` uses are
+  scanned as a text rail (`laravel.rails.json`) into the same refs.
+- **The Laravel event bus is a graph.** `event(new X)`, `X::dispatch()`,
+  `Anything::dispatch(new Job)`, `broadcast(new X)` emit; a listener's
+  `handle(X $e)`, a `$listen` map row, `Event::listen(X::class, …)` and
+  a job's own `handle()` register — on a class-keyed rail whose names
+  are the event classes. Goto-definition on the emission's class token
+  lists the class and every handler; call hierarchy on a listener's
+  `handle` counts the emissions as incoming calls; `undefined-event`
+  hints "No listener for event 'X'" on an emission nothing answers.
+  The rail is never renamed — the class rename owns the name.
+- **Views, config keys and translation keys are rails defined by
+  files.** A Blade template defines its view name from its path
+  (`resources/views/a/b.blade.php` → `a.b`), a config file's array keys
+  define dotted keys (`config/app.php` → `app.mail.from`), a lang file's
+  keys define translation keys per locale; `view('a.b')`, `@extends`,
+  `@include`, `config('app.name')`, `Config::get`, `__('auth.failed')`,
+  `trans`, `@lang` use them — goto-definition lands on the template or
+  the key row, references list every use (templates included), and
+  `undefined-view` / `undefined-config` / `undefined-lang` name what no
+  file defines. A translation string with spaces is a JSON-file string,
+  never a key path.
+- **Gates, middleware aliases and container bindings are rails.** A
+  kernel's `$middlewareAliases` / `$middlewareGroups`, `$middleware->alias([…])`,
+  `Route::aliasMiddleware` and the framework's defaults define middleware
+  names; `->middleware('throttle:60,1')` names `throttle` (the parameter
+  separator ends the name). `Gate::define('x')` and every policy method
+  under `app/Policies/` define abilities; `->authorize`, `->can`,
+  `Gate::allows` and Blade `@can` use them. `->singleton('key')` / `->bind`
+  / `->instance` define container bindings; `app('key')`, `resolve`,
+  `App::make` use them. `app(Foo::class)` / `resolve(Foo::class)` /
+  `->make(Foo::class)` IS a Foo, so a chain off it navigates. Misses on
+  these rails are hints (`undefined-middleware` / `-ability` / `-binding`)
+  — their definitions are partly runtime-only.
+- **Rail names complete inside the string.** `route('|')`, `view('pa|')`,
+  `config('app.|')`, `__('auth.|')`, `->middleware('|')`, `->authorize('|')`,
+  `app('|')` and a template's `@extends('|')` / `@include('|')` offer the
+  rail's declared names across the project, each edit replacing the whole
+  string content. The contract for every Laravel rail is
+  `docs/adr/laravel-rails.md`.
+- **Signature help.** `$obj->method(` and `Foo::method(` on PHP now show
+  the declaration's parameter list with the active parameter, the return
+  annotation, and the docblock summary, for local and cross-file
+  callees alike.
+- **Hover shows the docblock.** A method's, property's or class's
+  docblock summary (or a property's `@var` trailer) renders under the
+  signature.
+- **The outline nests.** A PHP class's methods and properties are its
+  children in the document outline (breadcrumbs, sticky scroll).
+- **An import row's leaf resolves by its row.** Goto-def and hover on
+  the `Parser` of `use SimplePie\XML\Declaration\Parser as
+  DeclarationParser;` land on that class — never the file's own or a
+  stranger's same-leaf `Parser`. Group-use rows (`use A\{Foo, Bar as
+  Baz};`) are import rows like the flat spelling: references and rename
+  on the class reach the row and the `new` sites it enables. SPL contract methods (`count`,
+  `getIterator`, `offsetGet`, `jsonSerialize`, …) count as
+  runtime-invoked, so a `Countable` implementation's `count()` no
+  longer flags dead.
+- **Anonymous classes are their own identity.** `new class(...)
+  extends Base { ... }` used to register its members under the
+  enclosing class or namespace, so references on an outer class's
+  same-named property reached into the anonymous body and a rename
+  corrupted it. Each anonymous class is now a position-keyed class of
+  its own (`class_anonymous_<line>_<col>`): `$this` inside resolves to
+  its members, `extends`/`implements` inside it are inheritance edges
+  (its overrides answer `implementations`), and the `class` keyword is
+  its constructor's call site, so those constructors no longer flag
+  dead.
+- **`self::CONST` in property defaults resolves.**
+  `protected string $fmt = self::FORMAT;` — goto-def and references
+  on the class-level initializer now answer like the method-body
+  form.
+- **Promoted constructor properties navigate.**
+  `public readonly Level $level` in a ctor signature: goto-def, hover,
+  and references now work from the `$record->level` access token, and
+  the property is ONE identity across its three spellings — renaming
+  it rewrites the declaration, every member access, and the `$level`
+  uses inside the constructor body.
+- **Pack query plugins.** Framework support for pack languages is now
+  loadable: drop `<plugin-dir>/<name>/queries/<lang>.scm` (the same
+  search path as `.rhai` plugins) and its patterns extend that
+  language's extraction — the bundled Laravel and WordPress overlays
+  are written in exactly this form. A malformed overlay is dropped
+  alone with a diagnostic (the base language keeps serving), editing
+  an overlay invalidates the analysis cache, and
+  `perl-lsp --plugin-check <overlay.scm>` lints one: compile errors,
+  plus capture names outside the served vocabulary.
+- **`instanceof` narrows past the `if` block.** A negated guard whose
+  body exits (`if (!$x instanceof T) { return; }`, `throw`, `continue`,
+  `break`) types `$x` as `T` for the rest of the scope; `assert($x
+  instanceof T)` does the same; the right operand of `&&`, a ternary's
+  true arm and a `match` arm narrow within themselves. Hover, completion
+  and goto-def on an interface-typed parameter answer with the concrete
+  class after the guard.
+- **Import-class quick-fix.** An undefined type the workspace or a
+  composer dependency declares elsewhere offers `Add 'use Ns\Leaf;'`
+  (one per declaring namespace), inserted after the file's last `use`
+  row. The undefined-type diagnostic itself now publishes in the editor
+  once the workspace index has settled.
+- **Unused imports.** A `use` row whose bound name the file never spells
+  (tree or docblock) is an unnecessary-tagged hint with a "Remove unused
+  import" quick-fix.
+- **Attributes, `instanceof` operands and qualified static receivers are
+  class references.** `#[Route('/x')]`, `$x instanceof Foo` and
+  `Psr7\Utils::make()` now answer goto-def, references and rename on the
+  class token (and count as uses of its import).
+- **PHPUnit mocks are the class they double.** `$m = $this->createMock(Foo::class)`
+  (and `createStub`, `createConfiguredMock`, `createPartialMock`,
+  `getMockForAbstractClass`, a `getMockBuilder(Foo::class)->…->getMock()`
+  chain, the `$this->foo = …` property form) types the target as `Foo`,
+  so completion, goto-def, hover and the lanes reach the doubled class.
+- **Properties typed by assignment.** `$this->mailer = new Mailer()` in
+  a constructor types `$this->mailer` for every reader in the class,
+  with no declared type or docblock — chains through it resolve.
+- **A reassignment forgets the earlier type.** `$u = new WP_Error(...)`
+  then `$u = wp_signon(...)` (a union return the analyzer cannot hold)
+  no longer leaves `$u` typed as `WP_Error`, so `$u->ID` stops reporting
+  an undefined property — in Perl and PHP alike, a reassignment whose
+  value cannot be typed resets the variable instead of standing aside.
+  A function whose arms return two different classes no longer reports
+  whichever came last as its return type, a documented or declared union
+  (`@return WP_Term|WP_Error`, `@var A|B $skin`, `@param A|B $x`,
+  `A|B $x`) is honoured as "cannot be typed" instead of letting the
+  body's arms or one member speak for it, and a reassignment to a
+  typed value (`$r = json_decode(...)` after `$r = new WP_Error(...)`)
+  ends the earlier class rather than the class outranking it. A method
+  call written with a space before its parentheses (`$this->m (1)`) is a
+  call, not a property read, and `$this->step()` in a base class whose
+  subclass declares `step` is the template-method idiom, not an
+  unresolved method. A namespaced `class Exception extends \Exception`
+  no longer resolves its parent to itself and report every inherited
+  `getMessage()`, and a member read inside `isset(...)` / `empty(...)` is
+  the existence question, not an undefined property; `$_` is the
+  throwaway name and never an unused variable. An untyped or by-reference
+  constructor-promoted property (`__construct(protected $stream,
+  protected &$container)`) declares the property, a spread argument
+  (`...func_get_args()`) no longer reads as one argument, and a
+  `[$obj, 'name']` tuple names a method only when it resolves. A static
+  property read through an expression (`$cls::$fields`,
+  `$this->resource::$wrap`) is the class's member, not a local variable,
+  and completion after `self::` / `static::` / `Foo::` offers that
+  class's constants, `static` members and `::class` instead of every name
+  in scope (`->` keeps the instance members).
+- Pack documents (php, C/C++, python, R) now answer `foldingRange` (every
+  multi-line class/function/block scope) and `selectionRange` (the tree's
+  ancestors); a method's outgoing calls list its callees only — a member
+  read (`$this->items`, `self::LIMIT`) is a value, not a call.
+- Cold start on a pack-only workspace no longer pays the Perl plugin
+  registry's ~500 ms pattern warm, and a pack's assembled query compiles
+  once per process instead of once per indexing worker (a two-file php
+  `--check`: 2.6 s → 0.7 s; the same floor sat under every CLI test).
+- `unimplemented-method`: a php class that implements an interface, uses a
+  trait or extends an abstract class and leaves a contract method
+  undeclared is reported (an abstract composer and a class with `__call`
+  are not), with an "Implement missing methods" quick-fix that declares
+  the stubs from the contracts' own declarators.
+- `missing-return-type`: in a php file that writes native return types, a
+  bodied method or function without one whose every return arm types to
+  something the pack can spell (`string`, `bool`, `array`, `callable`, a
+  visible class) gets a hint and an "Add return type" quick-fix; a `null`
+  arm, an ambiguous numeric, a fluent `return $this` and closures stay
+  silent.
+- After `self::` / `Foo::` a php static property completes as `$count`
+  (the spelling php requires); it no longer appears after `->`.
+- A php gold fixture (`gold-corpus/php-fixture`, 35 rows across
+  definition, hover, completion, references, signature help,
+  implementations, type-at, rename, highlights, outline, call hierarchy
+  and the diagnostics lanes) runs cold and warm with the rest of the
+  harness; the CLI's `--signature-help` routes pack documents the way the
+  server does.
+- An `instanceof` guard narrows every later operand of its `&&` chain
+  (`$p instanceof User && !$p instanceof Alias && $p->getFunding()`), not
+  only the second; and `Sql\Column::class` counts as a use of the `Sql`
+  import (phpmyadmin: 32 unused-import rows → 0).
+- A php `parent::` call under a same-leaf alias (`use App\Base\Manager as
+  BaseManager; class Manager extends BaseManager`) is checked against the
+  parent's declaration, not the child's own.
+- php completion offers every class the workspace or its dependencies
+  declare under the typed prefix; accepting one the file cannot spell yet
+  inserts its `use` row after the last import (an already-imported or
+  same-namespace class completes without an edit; a leaf that names
+  another class here is not offered).
+- Hovering a php method or function that declares no return type shows
+  what it returns (`*returns: array*`), the same total inferred return the
+  quick-fix would write.
+- `--check`'s summary counts every file it swept (pack files included),
+  not only the Perl workspace.
+- Parameter-name inlay hints on pack documents: every positional argument
+  of a call whose callee resolves shows `name:` (php `f(name: 1)` named
+  arguments and spreads end the positional run; a variadic parameter
+  covers the rest; an argument that is the same-named variable shows
+  nothing), alongside the type hints untyped locals already get.
+- **A php value read never means a method.** `$this->session` on a
+  class declaring only `session()` is an undeclared property for the
+  lane, goto-def and hover alike (Perl's accessor calls keep their
+  either-kind resolution).
+- **Lanes hardened on WordPress and laravel.** Trait and enum bodies
+  composing traits, aliases of global classes and `Str::$method()`
+  receivers count as uses of their imports; the global namespace knows
+  php's own classes, so `new Exception` never reads as a missing import;
+  an escaped string callable is no type reference; a php value read
+  never resolves to a method.
+- **Unused variables.** A local assigned and never read is an
+  unnecessary-tagged hint at its declaration; parameters, closure
+  captures and dynamically-materialized scopes stay quiet.
+- **Deprecations.** A use of a method, function or class whose
+  declaration carries `@deprecated [text]` or `#[Deprecated]` — in this
+  file, the workspace or a dependency — is a deprecated-tagged hint with
+  the notice.
+- **typeDefinition on member tokens.** `$this->mailer` and
+  `$svc->getMailer()` jump to the member's type: a method's return, a
+  field's declared type.
+
 ### Storage engine — warm starts, bounded memory
 
 The on-disk cache (`~/.cache/perl-lsp`) now covers your whole workspace, not

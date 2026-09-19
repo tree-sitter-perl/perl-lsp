@@ -503,4 +503,45 @@ fn a_call_admits_a_stored_member_only_where_a_member_read_is_a_call() {
         "a value read never answers with a callable",
     );
 
+    #[cfg(feature = "php")]
+    {
+        let php = LanguageRegistry::spellings("php");
+        assert!(
+            !MemberKind::Callable.admits_decl(SymKind::Field, none, php),
+            "php spells its calls: a property is not a method",
+        );
+        assert!(
+            MemberKind::Callable.admits_decl(SymKind::Method, none, php),
+            "the method itself still answers",
+        );
+        assert!(
+            MemberKind::Callable.admits_decl(SymKind::Field, SymbolFlags::CALLABLE_VALUE, php),
+            "a slot the declaration says is invoked answers a call, in any language",
+        );
+    }
+}
+
+/// End to end on the resolution the rule exists to keep honest: a php class
+/// with a property and no method of that name answers the FIELD ask and
+/// stays silent on the CALL ask — the missing `()` is a bug to report, not
+/// a property to resolve to.
+#[cfg(feature = "php")]
+#[test]
+fn a_php_call_does_not_resolve_to_a_same_named_property() {
+    let fa = crate::build::language_driver::LanguageRegistry::with_enabled()
+        .for_id("php")
+        .unwrap()
+        .analyze("<?php\nclass Box {\n    public $name;\n    public function size() { return 1; }\n}\n");
+    assert!(
+        fa.resolve_field_in_ancestors("Box", "name", None).is_some(),
+        "the property answers a value ask",
+    );
+    assert!(
+        fa.resolve_method_in_ancestors("Box", "name", None).is_none(),
+        "the property must not answer a call",
+    );
+    assert!(
+        fa.resolve_method_in_ancestors("Box", "size", None).is_some(),
+        "the real method still answers",
+    );
 }
