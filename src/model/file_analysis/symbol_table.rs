@@ -218,6 +218,7 @@ impl FileAnalysis {
     /// Adopt build-time symbols minted after assembly (the driver's path
     /// rails): ids assigned in order, indexed, and sealed into the
     /// enrichment baseline — facts of the build, not enrichment.
+    #[cfg_attr(not(feature = "pack-langs"), allow(dead_code))]
     pub fn adopt_path_symbols(&mut self, symbols: Vec<Symbol>) {
         if symbols.is_empty() {
             return;
