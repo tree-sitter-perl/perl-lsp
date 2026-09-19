@@ -94,6 +94,10 @@ pub struct SkelRef {
     /// structurally from the argument list. Flows to `Ref.arg_count`; `None`
     /// for non-call refs.
     pub arg_count: Option<usize>,
+    /// A member token read as a VALUE (no argument list follows it): mints
+    /// `RefKind::FieldAccess`; a callable member mints `MethodCall`
+    /// (`docs/adr/member-kinds.md`). Only member refs set it.
+    pub value_read: bool,
     /// Named by a string literal (`[$obj, 'method']`) — see
     /// `RefKind::MethodCall::named_by_string`.
     pub named_by_string: bool,
@@ -1316,12 +1320,25 @@ impl SkeletonAnalysis {
                     // `find_definition`/`refs_to`/hover all flow from it.
                     "member" => {
                         let (inv_span, inv_text) = r.invocant.clone()?;
-                        RefKind::MethodCall {
-                            invocant: crate::model::conventions::Invocant::assume_canonical(inv_text),
-                            invocant_span: Some(inv_span),
-                            method_name_span: Span { start: r.start, end: r.end },
-                            member_op: r.member_op,
-                            named_by_string: r.named_by_string,
+                        let invocant = crate::model::conventions::Invocant::assume_canonical(inv_text);
+                        if r.value_read {
+                            // A value read is its own ref kind: it resolves to
+                            // the class's value members and never to a
+                            // same-named method (`docs/adr/member-kinds.md`).
+                            RefKind::FieldAccess {
+                                invocant,
+                                invocant_span: Some(inv_span),
+                                member_name_span: Span { start: r.start, end: r.end },
+                                member_op: r.member_op,
+                            }
+                        } else {
+                            RefKind::MethodCall {
+                                invocant,
+                                invocant_span: Some(inv_span),
+                                method_name_span: Span { start: r.start, end: r.end },
+                                member_op: r.member_op,
+                                named_by_string: r.named_by_string,
+                            }
                         }
                     }
                     // A hook-firing string (`do_action('init')` arg 1): the

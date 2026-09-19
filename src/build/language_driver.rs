@@ -1391,6 +1391,7 @@ fn remap_spans(
             invocant,
             member_op,
             arg_count: _,
+            value_read: _,
             named_by_string: _,
             flags: _,
         } = rf;
