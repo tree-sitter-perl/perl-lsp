@@ -36,7 +36,6 @@ pub fn python_pack() -> LangPack {
         narrow_guard: |guard, ty| (guard == Some("isinstance")).then(|| InferredType::ClassName(ty.to_string())),
         rebind_method: |_| false,
         implicit_this_members: false,
-        entrypoint_symbols: &[],
         brace_scoped_members: false,
         bundled_builtin_types: &[],
         trigger_chars: &["."],
