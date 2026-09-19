@@ -567,13 +567,15 @@ impl FileAnalysis {
     /// same edge resolves to. `None` when the field's declared type is a
     /// primitive/committed value rather than an alias edge. Reads the field's
     /// OWNING analysis (cross-file fields resolve, like `field_type_on_class`).
+    /// A stored slot is what this asks for — the cross-file arm below already
+    /// reads one — so it is the VALUE ask, in every language.
     pub fn member_type_spelling(
         &self,
         class: &str,
         field: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<String> {
-        match self.resolve_method_in_ancestors(class, field, module_index)? {
+        match self.resolve_field_in_ancestors(class, field, module_index)? {
             MethodResolution::Local { sym_id, .. } => {
                 self.type_name_edge_of(&self.symbol(sym_id).name, self.symbol(sym_id).scope)
             }
@@ -817,7 +819,7 @@ impl FileAnalysis {
         let r = self
             .refs
             .iter()
-            .find(|r| r.span == site.slot_span && matches!(r.kind, RefKind::MethodCall { .. }))?;
+            .find(|r| r.span == site.slot_span && r.member_site().is_some())?;
         let class = self.method_call_invocant_class(r, module_index)?;
         let crate::model::witnesses::WitnessAttachment::Field { owner, .. } =
             self.field_subject(&class, &site.slot, module_index)
