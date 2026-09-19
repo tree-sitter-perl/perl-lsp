@@ -2887,6 +2887,61 @@ $n = $u->name();
 }
 
 #[test]
+fn php_enum_cases_are_enumerators_typed_by_their_enum() {
+    let src = "\
+<?php
+enum Suit {
+    case Hearts;
+    case Spades;
+}
+";
+    let (fa, _) = php_fa(src);
+    let case_sym = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "Hearts")
+        .expect("enum case symbol");
+    assert_eq!(case_sym.kind, crate::model::file_analysis::SymKind::Enumerator);
+    assert_eq!(case_sym.package.as_deref(), Some("Suit"));
+}
+
+#[test]
+fn php_enum_carries_the_members_the_language_gives_it() {
+    // `->value` / `::cases()` have no declaration token, so the extractor
+    // mints them at the enum's name as real members — SYNTHESIZED. Every
+    // consumer resolves them through the symbol table; none matches names.
+    let src = "\
+<?php
+enum Suit {
+    case Hearts;
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{MemberKind, SymbolFlags, SymKind};
+    let member = |n: &str| {
+        fa.symbols()
+            .iter()
+            .find(|s| s.name == n && s.package.as_deref() == Some("Suit"))
+            .unwrap_or_else(|| panic!("Suit::{n}: {:?}", fa.symbols().iter().map(|s| &s.name).collect::<Vec<_>>()))
+    };
+    assert_eq!(member("value").kind, SymKind::Field);
+    assert_eq!(member("cases").kind, SymKind::Method);
+    for n in ["value", "name", "cases", "from", "tryFrom"] {
+        assert!(
+            member(n).flags.contains(SymbolFlags::SYNTHESIZED),
+            "Suit::{n} is not user-written"
+        );
+        // minted at the enum's own name token — the one honest site
+        assert_eq!(member(n).span.start.row, 1, "Suit::{n}");
+    }
+    // the member lanes answer for them by KIND, so a read and a call of the
+    // same name can never stand in for each other
+    assert!(fa.resolve_member("Suit", "value", MemberKind::Value, None).is_some());
+    assert!(fa.resolve_member("Suit", "cases", MemberKind::Callable, None).is_some());
+    assert!(fa.resolve_member("Suit", "nope", MemberKind::Value, None).is_none());
+}
+
+#[test]
 fn php_static_return_substitutes_the_receiver_fluently() {
     // `: static` publishes ReturnExpr::Receiver — the member-chain arm
     // threads the real receiver, and the MCB path's default receiver
@@ -3452,6 +3507,37 @@ function get_things(): int {
 }
 
 #[test]
+fn php_enum_cases_are_not_bare_constants() {
+    // A php enum case is only ever
+    // `Level::Debug`-reachable — never a bare token — so it must not
+    // take cpp's unscoped-enum hoisting lane (bare_constant), which
+    // let ANY same-named PackageRef match: renaming a case rewrote an
+    // unrelated class's use-import leaf.
+    let src = "\
+<?php
+enum Level: int {
+    case Debug = 100;
+}
+class User {
+    const VERSION = \"1\";
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::SymKind;
+    for name in ["Debug", "VERSION"] {
+        let sym = fa
+            .symbols()
+            .iter()
+            .find(|s| matches!(s.kind, SymKind::Enumerator) && s.name == name)
+            .unwrap();
+        assert!(
+            !fa.class_content_is_bare_constant(sym),
+            "{name} must not be bare-reachable",
+        );
+    }
+}
+
+#[test]
 fn php_reassignment_rebinds_one_variable_identity() {
     // The rename hazard: PHP vars are FUNCTION-scoped —
     // an assignment in an `if` block declares for the whole function
@@ -3617,6 +3703,45 @@ class Child extends Base {
 }
 
 #[test]
+fn php_class_constant_and_enum_case_access() {
+    // `User::VERSION` / `Level::Debug` are class-keyed member READS: the
+    // access site mints a `FieldAccess` (gd/references connect, and the
+    // value walk never reaches a method of the same name), and a TRUE enum
+    // case's value types as its enum. A class const's VALUE stays untyped
+    // (typing it as the class would be wrong — residual).
+    let src = "\
+<?php
+class User {
+    const VERSION = \"1.0\";
+}
+enum Level: int {
+    case Debug = 100;
+}
+$v = User::VERSION;
+$d = Level::Debug;
+echo $v;
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{InferredType, RefKind};
+    let version_ref = fa.refs().iter().find(|r| {
+        matches!(r.kind, RefKind::FieldAccess { .. }) && r.target_name == "VERSION"
+    });
+    assert!(version_ref.is_some(), "const access mints a value-read member ref");
+    let d = fa.inferred_type_via_bag("$d", tree_sitter::Point { row: 9, column: 0 });
+    assert_eq!(
+        d,
+        Some(InferredType::ClassName("Level".into())),
+        "enum case types as its enum: {d:?}"
+    );
+    let v = fa.inferred_type_via_bag("$v", tree_sitter::Point { row: 9, column: 0 });
+    assert_ne!(
+        v,
+        Some(InferredType::ClassName("User".into())),
+        "a const's VALUE must never type as the owning class"
+    );
+}
+
+#[test]
 fn php_fluent_chain_substitutes_receiver_through_hops() {
     // `: static` returns are receiver-relative; the hop passes the base's
     // type as the dispatch receiver, so a fluent builder chain keeps the
@@ -3700,6 +3825,56 @@ function use_it(Record $record): Level {
         matches!(from_decl, Some(crate::index::resolve::ResolvedTarget::Group { .. })),
         "decl-side cursor resolves to the same group: {from_decl:?}"
     );
+}
+
+#[test]
+fn php_member_rename_never_rewrites_import_leaves() {
+    // Renaming a class-owned member (enum case / class const) named like
+    // an UNRELATED class's import leaf must not rewrite the `use` line —
+    // a class member never appears as a php import leaf.
+    let src = "\
+<?php
+namespace App;
+use PhpConsole\\Dispatcher\\Debug as DebugTool;
+enum Level {
+    case Debug;
+}
+class Cfg {
+    public const Debug = 1;
+}
+function pick(): int {
+    $x = Level::Debug;
+    return Cfg::Debug;
+}
+";
+    let (fa, _) = php_fa(src);
+    for (row, col, what) in [(4usize, 10usize, "enum case"), (7, 18, "class const")] {
+        let resolved = crate::index::resolve::resolve_symbol(
+            &fa,
+            tree_sitter::Point { row, column: col },
+            None,
+        );
+        let target = match resolved {
+            Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+            other => panic!("{what} decl must mint a target: {other:?}"),
+        };
+        let locs = crate::index::resolve::refs_to_in_file(
+            &crate::index::file_store::FileStore::new(),
+            None,
+            &target,
+            &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/r4/t.php")),
+            &fa,
+            crate::index::resolve::RoleMask::VISIBLE,
+        );
+        assert!(
+            !locs.iter().any(|l| l.span.start.row == 2),
+            "{what}: the import line is not a reference of the member: {locs:?}"
+        );
+        assert!(
+            locs.iter().any(|l| l.span.start.row >= 9),
+            "{what}: the real access still answers: {locs:?}"
+        );
+    }
 }
 
 #[test]
