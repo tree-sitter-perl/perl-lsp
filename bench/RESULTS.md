@@ -349,3 +349,218 @@ Known residual, named: Glyphs standalone still spends 7.9 s (build) +
 N queries × W witnesses, clone-free but not fold-free, temporal semantics
 make naive memoization wrong. Separate design question; the checked-in
 baselines will hold the line meanwhile.
+
+## 2026-09-02 — PHP answers vs Intelephense (free) and phpactor (sha ee285f2)
+
+Three servers over stdio (`bench/compare/`), same probe battery, same
+checkouts, no `vendor/` in any root (so vendor-defined symbols are dark for
+all three equally): guzzle (10 probes), monolog (8), symfony/demo (3).
+Intelephense 1.x free tier via npm, phpactor 2026.06.23.0 phar with
+`index:build` run first, ours = the r69 binary (`--features cpp,php`),
+cold cache. One run each; latencies are first-call numbers on a shared box.
+
+| | ready (guzzle / monolog / demo) | RSS at end (guzzle / monolog / demo) |
+|---|---|---|
+| ours | 3.5 s / 1.3 s / 1.1 s | 213 / 73 / 63 MB |
+| intelephense | 0.8 / 0.7 / 1.7 s | 316 / 203 / 197 MB |
+| phpactor | 7.2 / 0.8 / 0.3 s (+ index:build 14 / 9 / 10 s) | 133 / 96 / 80 MB |
+
+Answers. Every goto-definition probe (13: `$this->method()`, `Class::static()`,
+`new Foo()`, trait method, property, `parent::__construct`, a `use` leaf, a
+typed parameter) lands on the same symbol in all three tools (Intelephense
+anchors the range at the docblock, the others at the declaration). Reference
+counts against grep truth:
+
+| probe | grep | ours | intelephense | phpactor |
+|---|---|---|---|---|
+| guzzle `Client::sendAsync` | 10 sites + decl | 12 (incl. interface decl) | 12 | 10 (misses `ClientInterface` decl, `Pool.php` site) |
+| guzzle trait `request` | 6 trait sites | 61 | 60 (no interface decl) | 59 (no `Client::request` impl) |
+| guzzle `new Client(` | 304 | 304 | 304 | 304 |
+| guzzle `CookieJar::count` | decl | 1 | 2 — the second is `MockHandler::count()`, another class's same-named method | 1 |
+| monolog `Logger::$handlers` | 10 + decl | 11 | 11 | 11 |
+| monolog `pushHandler` | 50 sites + decl | 42 | 42 | 42 |
+| monolog `addRecord` | 15 + decl | 16 | 16 | 16 |
+| demo `Post::getTitle` | 4 + decl | 5 | 5 | 5 |
+
+(`pushHandler`: all three agree at 42; the grep's extra 8 are `->pushHandler(`
+on receivers no tool types — the count is the tools' shared ceiling, not a
+gap of ours.) Rename: ours = phpactor on both probes (a private method: 3
+edits; a protected property read by a subclass: 16 edits across
+`StreamHandler` + `RotatingFileHandler`); Intelephense free returns none.
+Completion after `$this->`: identical member sets (64 / 43 items) in all
+three. Hover: ours shows the signature and the inferred type
+(`handlers: list<HandlerInterface>` where phpactor shows the docblock's
+`array<int,HandlerInterface>`), but NOT the docblock description text both
+others render — the one visible gap in this battery. Latency: ours is
+single-digit to tens of ms warm like the others, except the first
+cross-file references walk on guzzle (1,057 ms vs Intelephense 110 ms) —
+the cold rehydration cost the R5-4 attribution names.
+
+## 2026-09-02 — the other tools' axes: signature help, docblocks, outline, diagnostics (sha pending net)
+
+Same three servers, same driver (`bench/compare/lspq.py` grew
+`signatureHelp`, `codeAction`, `implementation`, `typeDefinition`,
+`documentSymbol` and a `publishDiagnostics` capture). A two-file fixture
+(`Service` calling a `Mailer` with every mistake an editor should catch)
+plus the round-1 corpora, guzzle and monolog hand-vendored with their PSR
+dependencies (composer's dist downloads are refused by the sandbox proxy).
+
+| axis (fixture) | ours before | ours after | Intelephense free | phpactor |
+|---|---|---|---|---|
+| signature help in `$this->mailer->send($who, │)` | none | `send(string $to, string $subject, string $body = '') : bool`, active 1, docblock | 3 params, active 0/1 | 3 params |
+| hover on a method | signature + type | + docblock summary | docblock | docblock |
+| document outline of a class | 2 flat items | class with its members | 9 (params too) | 3 |
+| diagnostics on `Service.php` | 0 | 8: not enough / too many arguments, undefined method ×2, non-public access, undefined variable, undefined type ×2 | 8 real + 2 "declared but not used" | 0 (phpactor lints docblocks) |
+| type definition on `$this->mailer` | none | none (open) | none (licensed) | `Mailer` |
+| implementations of an interface method | (works) | (works) | none (licensed) | works |
+
+Diagnostics on the corpora (`--check`, every remaining row read —
+`docs/adr/php-diagnostics.md`): guzzle `undefined-type` 1,331 of which
+1,091 are one missing test class and 208 the unvendored PHPUnit;
+`unresolved-method` 2; `undefined-variable` 0; `non-public-access` 0.
+monolog `undefined-type` 158 (PHPUnit attributes, optional transports),
+`unresolved-method` 9 (PHPUnit `createMock` receivers), everything else
+0. symfony/demo without vendor: 358 undefined types, the same storm
+Intelephense reports (35 on `BlogController.php` alone). On the
+battery's own opened files Intelephense's remaining rows are lanes we
+do not have yet: unused symbols, deprecations, documented-vs-declared
+type checks, argument type checks.
+
+Where the answers differ, ours read as the more honest one twice:
+Intelephense counts a same-named `count()` on another class as a
+reference (round 1), and its free tier answers neither implementations
+nor type definitions. Where they lead: the unused/deprecated/type-check
+lanes, and vendor stubs for the global namespace (we carry none, so
+`\Exception` and friends are simply silent).
+
+### `instanceof` narrowing, round 2 (2026-09-02, evening)
+
+Fixture: an interface-typed parameter (`Shape $s`) with the eight guard
+shapes, hover on the receiver at the member call (`bench/compare`,
+`spec-narrow.json`; `ours` = the round-2 build).
+
+| shape | ours | Intelephense | phpactor |
+|---|---|---|---|
+| `if (!$s instanceof Circle) { return; }` then `$s->` | Circle | Circle | Circle |
+| `if (!($s instanceof Circle)) throw …;` then `$s->` | Circle | Circle | Circle |
+| `assert($s instanceof Square);` then `$s->` | Square | Square | Square |
+| `$s instanceof Circle && $s->…` | Circle | Circle | Circle |
+| `$s instanceof Square ? $s->… : 0` | Square | Square | Square |
+| `match (true) { $s instanceof Circle => $s->… }` | Circle | Circle | Circle |
+| `foreach … { if (!$i instanceof Square) continue; $i->… }` | Square | Square | **Shape** |
+| after the loop, `$s->` | Shape | Shape | Shape |
+| negated guard whose body does NOT exit, then `$s->` | Shape | Shape | Shape |
+
+Before round 2 ours answered `Shape` on the first seven rows. The
+diagnostics counts on guzzle / monolog / demo are unchanged by design:
+the interface silence rule stays (member subjects, method guards and
+`is_a()` leave the interface standing), so narrowing pays off on hover,
+completion and goto-def over interface receivers, not on the linter
+surface.
+
+Real sites (monolog, `spec-narrow-monolog.json`):
+
+| site | ours | Intelephense | phpactor |
+|---|---|---|---|
+| `MandrillHandler::__construct`: `$message` (`callable\|Swift_Message` param) after `if (!$message instanceof Swift_Message) { throw … }` | Swift_Message | Swift_Message | Swift_Message |
+| same, before the guard | untyped | mixed | untyped |
+| `Logger::log`: `$level` after `if (!$level instanceof Level) { … $level = static::toMonologLevel($level); }` | Level | Level | mixed\|Level |
+
+Verdict: parity with Intelephense on every narrowing shape probed; ahead
+of phpactor on the loop `continue` form and the reassigning non-exit
+guard.
+
+### Import-class quick-fix (2026-09-02, evening)
+
+Fixture: `Service.php` under `namespace App` calling `Helper::go()` with
+`App\Util\Helper` declared in another file, one unused `use App\Mailer;`
+row. `bench/compare` codeAction probe on the `Helper` token with the
+published diagnostics in context (`spec-import.json`).
+
+| tool | diagnostics on the file | code actions on `Helper` | latency |
+|---|---|---|---|
+| ours | `undefined-type` App\Helper | `Add 'use App\Util\Helper;'` | 1 ms |
+| Intelephense (free) | P1009 undefined type; P1003 `Mailer` declared but not used | none | 2 ms |
+| phpactor | unresolved name; unused import | `Import class "App\Util\Helper"`; `Remove unused imports` | 348 ms |
+
+The undefined-type diagnostic now publishes in the editor once the pack
+index has settled (it was CLI-only).
+
+### Unused imports (2026-09-02, late evening)
+
+The `unused-import` lane on the corpora (`--check --severity hint`):
+
+| corpus | first cut | after minting the missing class refs | verified real |
+|---|---|---|---|
+| guzzle | 21 | 0 | — |
+| monolog | 43 | 2 | 2 (`Aws\Sdk`, `Monolog\Utils`, imported and never mentioned) |
+| symfony demo | 37 | 0 | — |
+
+Every first-cut row was a class the walker had not minted a reference
+for: `#[Attribute]` names, `instanceof` right operands, and namespace-
+qualified static receivers (`Psr7\Utils::x()`). Fixed at the source, so
+goto-def, references and rename now reach those tokens too — the price is
+more `undefined-type` rows on corpora without their vendor tree (monolog
+158 → 257, demo 358 → 512: `PHPUnit\Framework\Attributes\DataProvider`,
+`Symfony\Component\Routing\Attribute\Route`, …), which is the honest
+answer for an uninstalled attribute class, the same one Intelephense gives.
+
+### PHPUnit mocks and typeDefinition (2026-09-02, night)
+
+Mock fixture (`spec-mock.json`: a `TestCase` stub declaring
+`createMock(string $c): MockObject`, `Foo` with `bar()`, a test doing
+`$m = $this->createMock(Foo::class); $m->bar();`):
+
+| tool | hover `$m` | typeDefinition `$m` | goto-def `bar` | completion after `$m->` |
+|---|---|---|---|---|
+| ours | `$m: Foo` | Foo.php | Foo.php:4 | 3 |
+| Intelephense (free) | `mixed $m` | none | none | 0 |
+| phpactor | `MockObject&Foo` | none | Foo.php:4 | 2 |
+
+Ours reads the doubled class from the overlay rule alone; phpactor
+reads PHPUnit's `@template` docblock (with the real PHPUnit installed
+Intelephense would too). Neither of the others answers typeDefinition
+on the mock.
+
+typeDefinition on monolog (`spec-typedef-monolog.json`; ours measured
+with an 8 s settle after open — the harness's readiness probe was a
+same-file definition, which answers before the pack index attaches, and
+the first cross-file probe raced it in the unsettled run):
+
+| token | ours | Intelephense (free) | phpactor |
+|---|---|---|---|
+| `$handler` (param typed `HandlerInterface`) | HandlerInterface.php:20 | none | HandlerInterface.php:20 |
+| `->getFormatter()` (returns `FormatterInterface`) | FormatterInterface.php:20 | none | FormatterInterface.php:20 |
+| `$record->level` (promoted property `Level`) | Level.php:31 | none | Level.php:31 |
+
+Parity with phpactor on every row; Intelephense's free tier answers no
+typeDefinition at all. Latency 2–6 ms per answer.
+
+### Deprecations and the cold references walk (2026-09-02, night)
+
+Deprecation fixture (`spec-depr.json`: a class, two methods — one
+`@deprecated`, one `#[Deprecated]` — and a function, all used from
+another file; published diagnostics captured):
+
+| tool | rows | attribute form (`#[Deprecated]`) | notice text |
+|---|---|---|---|
+| ours | 4 | yes | yes (`'Legacy' is deprecated: use Modern instead`) |
+| Intelephense (free) | 3 | no | no |
+| phpactor | 3 | no | yes |
+
+Cold references, editor path (guzzle `Client::__construct`, 304
+references, workspace persisted, server restarted; three runs each):
+
+| build | first answer (ms) | warm (ms) |
+|---|---|---|
+| decode under the connection lock, no prefetch | 224 / 245 / 271 | ~25 |
+| decode under the lock, rayon prefetch | 245 / 267 / 287 (flat) | ~25 |
+| decode outside the lock, rayon prefetch | 174 / 194 / 189 | ~25 |
+| decode outside the lock, no prefetch | 229 / 209 / 237 | ~25 |
+
+The lock split is what let the prefetch pay: the rehydration loader ran
+zstd + bincode inside the retained SQLite connection's mutex, so
+parallel decodes queued. Intelephense's first references answer on the
+same site was 110 ms in the round-1 ledger; the remaining gap is the
+rows→whole upgrades (10 double-decodes) and the matcher itself.
+
