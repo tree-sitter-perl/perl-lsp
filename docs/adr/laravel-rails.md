@@ -181,4 +181,10 @@ BookStack, panel and koel there are zero bare-alias spellings and zero
 `class_alias()` calls — every facade use imports the FQ class, which the
 `@method` lane resolves (`docs/PARKED.md`).
 
+A path rail's `under` is also not project-configurable: it spells
+Laravel's own layout, so a project that keeps its config elsewhere
+(BookStack's `app/Config/`) misses every key on that rail — 213 warning
+rows, measured, parked in `docs/PARKED.md` behind a workspace-config root
+per path rail.
+
 Measured behaviour per round: `bench/RESULTS.md`, "Laravel parity arc".
