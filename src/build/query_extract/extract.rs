@@ -1207,6 +1207,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // `@ref.qualified`: the WRITTEN qualifier of a call/ctor/type/parent
     // spelling (`Downloader\DownloadManager`, `\A\B`) — the use-map pins
     // the leaf to that namespace instead of counting it as a bare spelling.
+    // `@expr.ctor` matches: a `new self(...)` / `new static(...)` names the
+    // ENCLOSING class, so its ctor ref carries that class's name (the
+    // references and heatmap key), not the literal token.
+    let ctor_matches: std::collections::HashSet<usize> = events
+        .iter()
+        .filter(|e| e.cap == "expr.ctor")
+        .map(|e| e.match_id)
+        .collect();
     let qualified_by_match: HashMap<usize, String> = events
         .iter()
         .filter(|e| e.cap == "ref.qualified")
@@ -1326,6 +1334,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // one (`self`, `static`): the document says which, on the receiver
     // capture that fires on them, and every reader asks the document.
     let self_class_tokens = super::cursor_query::capture_literals(query, "receiver.self");
+    // The constructor's name — the document's own `#eq?` on the capture that
+    // flags it, so the construction sites and the declaration agree by
+    // construction. `None` for a language whose constructor is a convention
+    // rather than a spelling (Perl).
+    let ctor_name: Option<&'static str> =
+        super::cursor_query::capture_literals(query, "def.method.ctor").iter().copied().next();
     let ident = |written: &str, at: Point| -> String {
         // the current-class spellings name no namespace; the model
         // resolves them to the enclosing class
@@ -2243,6 +2257,69 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         .unwrap_or(false)
                         .then(|| member_op_raw.get(&e.match_id).copied())
                         .flatten();
+                    // A construction site (`new Foo(...)`) is two facts on one
+                    // token: the token names the CLASS (a `PackageRef`, so the
+                    // class's references and rename own it), and the site calls
+                    // the class's constructor (a member call of the pack's
+                    // constructor name on that class, so the constructor's
+                    // references and goto-def see it). Neither consumer has to
+                    // ask whether a call that spells a class name constructs.
+                    if e.cap == "ref.call" && ctor_matches.contains(&e.match_id) {
+                        if let Some(ctor) = ctor_name {
+                            let span = Span { start: e.start, end: e.end };
+                            let class = (pack.shape_name)("ref.type", &e.text);
+                            out.refs.push(SkelRef {
+                                via: None,
+                                kind: "type".to_string(),
+                                name: class.clone(),
+                                start: e.start,
+                                end: e.end,
+                                scope: cur_scope,
+                                invocant: None,
+                                member_op: None,
+                                arg_count: None,
+                                named_by_string: false,
+                                flags: Default::default(),
+                            });
+                            out.refs.push(SkelRef {
+                                via: None,
+                                kind: "member".to_string(),
+                                name: ctor.to_string(),
+                                start: e.start,
+                                end: e.end,
+                                scope: cur_scope,
+                                invocant: Some((span, class)),
+                                member_op: None,
+                                arg_count: arg_counts_by_match
+                                    .get(&e.match_id)
+                                    .or_else(|| arg_counts_by_start.get(&(e.end.row, e.end.column)))
+                                    .copied(),
+                                named_by_string: false,
+                                flags: crate::model::file_analysis::RefFlags::CONSTRUCTS,
+                            });
+                            // The construction site calls the constructor, so
+                            // its arguments bind exactly as any other call's
+                            // do — the class is known statically here, which
+                            // is the only thing this arm supplies.
+                            if let Some(vars) = arg_vars_by_start.get(&(e.end.row, e.end.column)) {
+                                let written = qualified_by_match
+                                    .get(&e.match_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| (pack.shape_name)("ref.type", &e.text));
+                                let cls = ident(&written, e.start);
+                                bind_call_args(&mut out.witnesses, vars, cur_scope, |index| {
+                                    Some(crate::model::witnesses::WitnessPayload::Edge(
+                                        crate::model::witnesses::WitnessAttachment::Param {
+                                            package: cls.clone(),
+                                            name: ctor.to_string(),
+                                            index,
+                                        },
+                                    ))
+                                });
+                            }
+                            continue;
+                        }
+                    }
                     // A SUPER receiver (php `parent::`) spells the model's
                     // SUPER method token: dispatch starts above the writing
                     // class, and gd/references/rename ride the existing
