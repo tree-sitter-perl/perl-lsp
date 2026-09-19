@@ -324,15 +324,11 @@ pub fn collect_diagnostics(
             .collect();
     let _g_meth = crate::util::ghost_stats::ScopedNs::start("diag.3_unresolved_method_loop");
     for r in analysis.refs() {
-        let (invocant, _invocant_span) = match &r.kind {
-            // A plugin-bridged token is plugin-resolved, not a receiver we
-            // can flag as an unresolved method — skip it.
-            RefKind::MethodCall { invocant, invocant_span, .. } => match invocant.as_name() {
-                Some(n) => (n, invocant_span),
-                None => continue,
-            },
-            _ => continue,
-        };
+        // A plugin-bridged token is plugin-resolved, not a receiver we can
+        // flag as an unresolved method — skip it.
+        if !matches!(&r.kind, RefKind::MethodCall { invocant, .. } if invocant.as_name().is_some()) {
+            continue;
+        }
         let method_name = &r.target_name;
 
         // Skip methods every class of its kind answers without declaring.
@@ -345,7 +341,7 @@ pub fn collect_diagnostics(
         // to find a method literally named "SUPER::foo" in the MRO always
         // fails. Caller-side package dispatch (`Class::method`) is intentional
         // and not our job to validate here.
-        use crate::model::conventions::{InvocantText, MethodToken};
+        use crate::model::conventions::MethodToken;
         if !matches!(MethodToken::parse(method_name), MethodToken::Bare(_)) {
             continue;
         }
@@ -353,12 +349,7 @@ pub fn collect_diagnostics(
         // Resolve invocant to class name. Diagnostics stays bag-only for
         // scalars — no enclosing-class fallback, which would manufacture
         // warnings on untyped invocants — and skips everything else.
-        let class_name = match invocant.classify() {
-            InvocantText::Bareword(b) => Some(b.to_string()),
-            InvocantText::Scalar(_) => analysis.inferred_type_via_bag(invocant, r.span.start)
-                .and_then(|ty| ty.class_name().map(|s| s.to_string())),
-            _ => None,
-        };
+        let class_name = receiver_class(analysis, r);
         let class_name = match class_name {
             Some(cn) => cn,
             None => continue,
@@ -715,6 +706,32 @@ fn render_guard_message(g: &crate::model::file_analysis::GuardRedundancy) -> Str
         (GuardVerdict::AlwaysFalse, GuardPredicate::IsType(t)) => {
             format!("'{subject}' is not {} here; this guard can never pass", format_inferred_type(t))
         }
+    }
+}
+
+
+/// The class a method call's receiver names, for the Perl unresolved-method
+/// lane: a bareword invocant IS the class, a scalar's class is whatever the
+/// bag typed it as at that point, and nothing else answers.
+///
+/// The lane's silence rule lives here: an untyped scalar gets no
+/// enclosing-class fallback, because manufacturing one turns every
+/// hand-rolled `$self` into a stream of warnings about methods it does
+/// have. The richer receiver ladder — declared receiver names, an
+/// expression's own `Expr` witnesses — is
+/// `FileAnalysis::method_call_invocant_class`, which the pack lanes use.
+fn receiver_class(analysis: &FileAnalysis, r: &crate::model::file_analysis::Ref) -> Option<String> {
+    use crate::model::conventions::InvocantText;
+    let RefKind::MethodCall { invocant, .. } = &r.kind else {
+        return None;
+    };
+    let invocant = invocant.as_name()?;
+    match invocant.classify() {
+        InvocantText::Bareword(b) => Some(b.to_string()),
+        InvocantText::Scalar(_) => analysis
+            .inferred_type_via_bag(invocant, r.span.start)
+            .and_then(|ty| ty.class_name().map(|s| s.to_string())),
+        _ => None,
     }
 }
 
