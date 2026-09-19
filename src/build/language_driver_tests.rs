@@ -1087,6 +1087,83 @@ fn dynamic_markers_land_on_the_enclosing_callable() {
     assert_eq!(stamped, vec!["wide", "narrow"], "only the two containing callables");
 }
 
+/// The undefined-variable lane runs on FACTS, not on a per-language switch:
+/// a read the runtime binds carries `RefBinding::Runtime` (php's
+/// `@ref.var.implicit`), and a pack whose document binds nothing must
+/// produce no unbound reads at all. Deleting the lane's on-switch is only
+/// safe if that holds, so it is pinned here for the packs that declare no
+/// implicit variables.
+#[cfg(any(feature = "cpp", feature = "python", feature = "r"))]
+#[test]
+fn packs_that_bind_nothing_implicitly_report_no_undefined_variables() {
+    let mut checked: Vec<&str> = Vec::new();
+    #[cfg(feature = "cpp")]
+    {
+        let fa = cpp_driver().analyze(
+            "int g = 1;\nint f(int a) { int b = a + g; for (int i = 0; i < b; i++) { b += i; } return b; }\n",
+        );
+        assert_undefined_variable_silence(&fa, "cpp");
+        checked.push("cpp");
+    }
+    #[cfg(feature = "python")]
+    {
+        let fa = python_driver().analyze(
+            "g = 1\nclass C:\n    def m(self, a):\n        b = a + g\n        return b + self.x\n",
+        );
+        assert_undefined_variable_silence(&fa, "python");
+        checked.push("python");
+    }
+    #[cfg(feature = "r")]
+    {
+        let fa = r_driver().analyze("g <- 1\nf <- function(a) {\n  b <- a + g\n  b\n}\n");
+        assert_undefined_variable_silence(&fa, "r");
+        checked.push("r");
+    }
+    assert!(!checked.is_empty(), "no pack language in this build");
+}
+
+#[cfg(any(feature = "cpp", feature = "python", feature = "r"))]
+fn assert_undefined_variable_silence(
+    fa: &crate::model::file_analysis::FileAnalysis,
+    lang: &str,
+) {
+    let diags = crate::lsp::symbols::pack_symbol_diagnostics(fa, None);
+    let hits: Vec<&tower_lsp::lsp_types::Diagnostic> = diags
+        .iter()
+        .filter(|d| {
+            matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(c)) if c == "undefined-variable")
+        })
+        .collect();
+    assert!(hits.is_empty(), "{lang} must report no undefined variables: {hits:?}");
+}
+
+/// `from x import y` binds `y` — so the never-spelled lane reports `y` and
+/// never the module it came from, and stays silent once `y` is spelled.
+/// `import x` binds the head package, which no token of the row spells: the
+/// row states no binding and the lane says nothing about it.
+#[cfg(feature = "python")]
+#[test]
+fn python_from_import_binds_the_name_not_the_module() {
+    let unused = |src: &str| -> Vec<String> {
+        let fa = python_driver().analyze(src);
+        crate::lsp::symbols::pack_symbol_diagnostics(&fa, None)
+            .iter()
+            .filter(|d| {
+                matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(c)) if c == "unused-import")
+            })
+            .map(|d| d.message.clone())
+            .collect()
+    };
+    assert!(unused("from a.b import c\n\nc()\n").is_empty(), "a spelled name is used");
+    let hits = unused("import os\nfrom a.b import c\n\nprint(1)\n");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert!(hits[0].contains("'c'"), "reports the bound name: {hits:?}");
+    assert!(!hits[0].contains("a.b"), "never the module: {hits:?}");
+    let aliased = unused("import os.path as p\n\nprint(1)\n");
+    assert_eq!(aliased.len(), 1, "{aliased:?}");
+    assert!(aliased[0].contains("'p'"), "an alias binds the alias: {aliased:?}");
+}
+
 /// A body-typed return survives enrichment. The arm and chain witnesses are
 /// minted before `finalize_post_walk` seals the enrichment baseline, so the
 /// truncate-back-to-baseline that every enrich pass starts with cannot take

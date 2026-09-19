@@ -801,6 +801,8 @@ pub fn pack_symbol_diagnostics(
         .chain(analysis.call_arity_findings())
         .map(render_finding)
         .collect();
+    out.extend(analysis.liveness_findings(&facts).into_iter().map(render_finding));
+    out.extend(analysis.unused_import_findings(&facts).into_iter().map(render_finding));
 
     out
 }
