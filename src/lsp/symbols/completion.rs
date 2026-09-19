@@ -729,6 +729,7 @@ pub fn member_completion_for_class(
     module_index: &dyn crate::model::file_analysis::CrossFileLookup,
     op_fix: Option<(crate::model::file_analysis::Span, String)>,
     point: Point,
+    scoped: bool,
 ) -> Option<Vec<CompletionItem>> {
     // The access-specifier gate needs to know whether the
     // CURSOR itself is lexically inside `class`'s own body — self-access
@@ -736,8 +737,13 @@ pub fn member_completion_for_class(
     let requesting_class = analysis
         .scope_at(point)
         .and_then(|sc| analysis.enclosing_class_for_scope(sc));
+    let access = if scoped {
+        crate::model::file_analysis::MemberAccess::Scoped
+    } else {
+        crate::model::file_analysis::MemberAccess::Instance
+    };
     let candidates = analysis.complete_members_for_class(
-        class, Some(module_index), requesting_class.as_deref(),
+        class, Some(module_index), requesting_class.as_deref(), access,
     );
     if candidates.is_empty() {
         return None;

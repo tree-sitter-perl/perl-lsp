@@ -36,6 +36,9 @@ pub struct ReceiverCtx {
     pub receiver_type: Option<InferredType>,
     pub receiver_text: Option<String>,
     pub op_fix: Option<(Span, String)>,
+    /// `Foo::|` / `self::|` — a scoped access completes the class's
+    /// constants and static members; `->`/`.` completes the instance ones.
+    pub scoped: bool,
 }
 
 /// The owner of a `Slot::Key` — `$h->{|`'s hash, resolved by type when
@@ -229,6 +232,7 @@ pub fn detect_slot(
                     receiver_type: ctx.receiver_type,
                     receiver_text: None,
                     op_fix: ctx.op_fix,
+                    scoped: ctx.scoped,
                 },
                 op: ctx.op,
             },
@@ -291,6 +295,7 @@ fn slot_from_cursor_context(ctx: CursorContext) -> DetectedSlot {
                     receiver_type: invocant_type,
                     receiver_text: Some(invocant_text),
                     op_fix: None,
+                    scoped: false,
                 },
                 op: MemberOp::Arrow, // Perl method dispatch is always `->`
             },
