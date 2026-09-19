@@ -843,6 +843,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut handler_name_by_match: HashMap<usize, String> = HashMap::new();
     // `@key.elem` — the array element a `@def.handler.key` string heads.
     let mut key_elem_by_match: HashMap<usize, Span> = HashMap::new();
+    // `@receiver.self` — the match whose receiver NAMES the enclosing class
+    // (php `self::` / `static::`). The class is in hand at the mint (the
+    // class-body scope's package), so the invocant carries it and no
+    // consumer re-derives a receiver token's meaning.
+    let mut self_recv_matches: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // `@param.receiver` — the receiver PARAMETER's name span (python
     // `self`/`cls`): the symbol carries `RECEIVER`, and outline / member
     // completion ask the symbol instead of matching its name.
@@ -898,6 +903,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "key.elem" {
             key_elem_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+        }
+        if e.cap == "receiver.self" {
+            self_recv_matches.insert(e.match_id);
         }
         if e.cap == "param.receiver" {
             receiver_name_spans.insert((e.start, e.end));
@@ -1350,6 +1358,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         let cur_scope = scope_stack.last().unwrap().1;
         let package: Option<String> = context_stack.last().map(|(_, p, _)| p.clone());
+        // The innermost CLASS context, spelled the way THIS file spells it —
+        // what a receiver that names "the class I am written in" desugars
+        // to. Distinct from `package`, which is whatever context is open (a
+        // namespace body has one too). A use-map language writes the
+        // declaration's own leaf, which its use-map resolves back to the
+        // identity; an identity language writes the identity. Either way a
+        // consumer that re-resolves the spelling lands on the same class.
+        let enclosing_class: Option<String> = context_stack
+            .iter()
+            .rev()
+            .find(|(_, _, is_class)| *is_class)
+            .map(|(_, p, _)| match pack.names.use_map_sep() {
+                Some(sep) => p.rsplit(sep).next().unwrap_or(p).to_string(),
+                None => p.clone(),
+            });
         let import_binds = binds_by_match.get(&e.match_id).copied().unwrap_or_default();
         match strip_import_binds(&e.cap) {
             // `@scope` = a plain lexical Block; `@scope.sub` = sub-body
@@ -1684,9 +1707,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 ));
             }
             "member.recv" => {
+                // A receiver the document tags `@receiver.self` names the
+                // class it is written in, so the invocant IS that class —
+                // minted here, where the class-body scope has it, rather
+                // than left as a token every consumer would have to know.
+                // Late static binding over-approximates to the writing
+                // class (accepted).
+                let text = match (self_recv_matches.contains(&e.match_id), &enclosing_class) {
+                    (true, Some(cls)) => cls.clone(),
+                    _ => (pack.shape_name)("member.recv", &e.text),
+                };
                 member_recv.insert(
                     e.match_id,
-                    (crate::model::file_analysis::Span { start: e.start, end: e.end }, e.text.clone()),
+                    (crate::model::file_analysis::Span { start: e.start, end: e.end }, text),
                 );
             }
             "member.op" => {
