@@ -1016,6 +1016,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut cmd_names: std::collections::BTreeMap<usize, (String, Span, crate::model::file_analysis::ScopeId)> =
         Default::default();
     let mut cmd_args: std::collections::BTreeMap<usize, Vec<(String, Span)>> = Default::default();
+    // `@cmd.def.<kind>` — the entity kind a command declares, with the
+    // command's own start (the def spans from the command to the name) and the
+    // scope it sits in, joined to this match's `@cmd.def.name`.
+    let mut cmd_defs: HashMap<usize, (String, Point, ScopeId)> = HashMap::new();
     // import-call halves, joined per match (BTreeMap: match ids are
     // source-ordered, so imports come out deterministic)
     let mut import_fns: std::collections::BTreeMap<usize, String> = Default::default();
@@ -1713,6 +1717,63 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     .or_default()
                     .push((e.text.clone(), Span { start: e.start, end: e.end }));
             }
+            // The command's effect, as the document names it: a def of the
+            // capture's kind at the captured argument, a reference per captured
+            // argument, an import of the captured file.
+            cap if cap.starts_with("cmd.def.") && cap != "cmd.def.name" => {
+                cmd_defs.insert(
+                    e.match_id,
+                    (cap["cmd.def.".len()..].to_string(), e.start, cur_scope),
+                );
+            }
+            "cmd.def.name" => {
+                if let Some((kind, cmd_start, scope)) = cmd_defs.get(&e.match_id) {
+                    out.symbols.push(SkelSymbol {
+                        flags: Default::default(),
+                        return_annotation: None,
+                        kind: kind.clone(),
+                        name: e.text.clone(),
+                        start: *cmd_start,
+                        end: e.end,
+                        name_start: e.start,
+                        name_end: e.end,
+                        package: None,
+                        scope: *scope,
+                        declared_return: None,
+                        deref_stack: Vec::new(),
+                        attributes: Vec::new(),
+                        arity: None,
+                        qualifier_owned: false,
+                    });
+                }
+            }
+            "cmd.refargs" => {
+                // ALL-CAPS keyword arguments (PRIVATE/STATIC) are CMake's
+                // keyword convention, and an interpolation names no one
+                // symbol — neither is a reference.
+                let is_keyword =
+                    !e.text.is_empty() && e.text.chars().all(|c| c.is_ascii_uppercase() || c == '_');
+                if !is_keyword && !e.text.contains("${") {
+                    out.refs.push(SkelRef {
+                        via: None,
+                        kind: "call".into(),
+                        name: e.text.clone(),
+                        start: e.start,
+                        end: e.end,
+                        scope: cur_scope,
+                        invocant: None,
+                        member_op: None,
+                        arg_count: None,
+                        value_read: false,
+                        flags: Default::default(),
+                    });
+                }
+            }
+            "cmd.import" => {
+                if !out.imports.contains(&e.text) {
+                    out.imports.push(e.text.clone());
+                }
+            }
             // `@import.call.<kind>` — the document says what kind of import
             // this call is; the pack maps its argument to a module.
             cap if cap.starts_with("import.call.") => {
@@ -1886,59 +1947,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             value_read: false,
             flags: Default::default(),
         });
-        for effect in (pack.cmd_effects)(cmd) {
-            match effect {
-                CmdEffect::Def { kind, name_arg } => {
-                    if let Some((name, span)) = args.get(name_arg) {
-                        out.symbols.push(SkelSymbol {
-                            kind: kind.to_string(),
-                            name: name.clone(),
-                            start: cmd_span.start,
-                            end: span.end,
-                            name_start: span.start,
-                            name_end: span.end,
-                            package: None,
-                            scope: *scope,
-                            declared_return: None,
-                            return_annotation: None,
-                            deref_stack: Vec::new(),
-                            attributes: Vec::new(),
-                            arity: None,
-                            qualifier_owned: false,
-                            flags: Default::default(),
-                        });
-                    }
-                }
-                CmdEffect::RefArgsFrom { from } => {
-                    for (name, span) in args.iter().skip(from) {
-                        let is_keyword =
-                            !name.is_empty() && name.chars().all(|c| c.is_ascii_uppercase() || c == '_');
-                        if !is_keyword && !name.contains("${") {
-                            out.refs.push(SkelRef {
-                                via: None,
-                                kind: "call".into(),
-                                name: name.clone(),
-                                start: span.start,
-                                end: span.end,
-                                scope: *scope,
-                                invocant: None,
-                                member_op: None,
-                                arg_count: None,
-                                value_read: false,
-                                flags: Default::default(),
-                            });
-                        }
-                    }
-                }
-                CmdEffect::Import { arg } => {
-                    if let Some((name, _)) = args.get(arg) {
-                        if !out.imports.contains(name) {
-                            out.imports.push(name.clone());
-                        }
-                    }
-                }
-            }
-        }
     }
 
     // ---- typedef / using aliases → TypeName witnesses (the alias graph) ----

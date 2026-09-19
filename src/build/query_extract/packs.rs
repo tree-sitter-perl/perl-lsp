@@ -73,10 +73,6 @@ pub struct LangPack {
     /// names. The KIND is the capture's suffix — which callees import is the
     /// document's — and this maps the argument text the kind carries.
     pub import_module: fn(kind: &str, arg: &str) -> Option<String>,
-    /// Command-dispatched languages (CMake): what a command DOES with
-    /// its positional arguments. The @cmd/@cmd.arg captures deliver
-    /// (name, ordered args); this predicate classifies.
-    pub cmd_effects: fn(cmd: &str) -> Vec<CmdEffect>,
     /// Guard narrowing: given the guard token (`@narrow.guard` — a
     /// function/operator like `isinstance`, `has_value`; `None` for the
     /// token-less `if (opt)` truthiness form) and the type text, the
@@ -187,25 +183,6 @@ pub struct PeelSpec {
     pub leaf_to_def: &'static [(&'static str, &'static str)],
     /// Accumulate the per-level `DerefStep` stack (pointer depth) vs descend only.
     pub record_stack: bool,
-}
-
-
-/// One effect of a command-dispatched statement.
-// Variants are constructed only by `cmake_pack` (command languages) and read by
-// the generic cmd-effect match; both absent in a build without that feature.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy)]
-pub enum CmdEffect {
-    /// Argument `name_arg` declares an entity of `kind` ("var",
-    /// "sub", ...).
-    Def { kind: &'static str, name_arg: usize },
-    /// Arguments from `from` onward are name references (all-caps
-    /// keyword arguments like PRIVATE/STATIC are skipped — CMake's
-    /// keyword convention; a finer filter is a later predicate).
-    RefArgsFrom { from: usize },
-    /// Argument `arg` names an imported module (joins import_call's
-    /// role for command languages).
-    Import { arg: usize },
 }
 
 

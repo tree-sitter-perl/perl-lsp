@@ -38,7 +38,6 @@ pub fn python_pack() -> LangPack {
             vec![format!("{base}.py"), format!("{base}/__init__.py")]
         },
         import_module: |_, _| None,
-        cmd_effects: |_| vec![],
         // `isinstance(x, Foo)` narrows x to Foo inside the guard.
         narrow_guard: |guard, ty| (guard == Some("isinstance")).then(|| InferredType::ClassName(ty.to_string())),
         rebind_method: |_| false,
