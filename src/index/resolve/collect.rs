@@ -1097,8 +1097,8 @@ pub(super) fn collect_from_analysis(
         // A qualified call (`Foo::baz()` / `$o->Foo::Bar::baz()`) keeps its
         // whole path in `target_name`; match it on the bare callable tail (the
         // dispatch-class checks in the call arms below still pin the right
-        // package/class). Every other ref kind matches by exact name.
-        let name_matches = if matches!(r.kind, RefKind::FunctionCall { .. } | RefKind::MethodCall { .. }) {
+        // package/class). A member value read matches on the same tail.
+        let name_matches = if matches!(r.kind, RefKind::FunctionCall { .. }) || r.member_site().is_some() {
             r.unqualified_target_name(analysis.names()) == target.name
         } else {
             r.target_name == target.name
@@ -1191,7 +1191,9 @@ pub(super) fn collect_from_analysis(
                 }
             }
             (TargetKind::Sub { .. } | TargetKind::Method { .. },
-             RefKind::MethodCall { .. }) => {
+             RefKind::MethodCall { .. } | RefKind::FieldAccess { .. }) => {
+                // A value read (`obj->field`) resolves its receiver exactly as
+                // a call does; the member's kind is the target's business.
                 // Prefer the build-time-frozen dispatch edge (the `Method`
                 // binding) so a call that resolved at build
                 // time stays matched regardless of query-time inference. An
@@ -1409,14 +1411,10 @@ pub(super) fn collect_from_analysis(
             _ => false,
         };
         if matches_kind {
-            // MethodCall r.span covers the whole call expression; callers
-            // (rename, highlight) want just the method-name token so they
+            // A member access's r.span covers the whole expression; callers
+            // (rename, highlight) want just the member-name token so they
             // can replace or underline exactly the right characters.
-            let span = if let RefKind::MethodCall { method_name_span, .. } = &r.kind {
-                *method_name_span
-            } else {
-                r.span
-            };
+            let span = r.member_site().map_or(r.span, |m| m.name_span);
             out.push(RefLocation {
                 key: key.clone(),
                 span,

@@ -99,6 +99,23 @@ impl<'a> CandidateSet<'a> {
                     self.origin
                         .inferred_type_via_bag_ctx(&r.target_name, self.point, self.idx())
                 }
+                // A member token: the receiver's type, then the member's
+                // value on it — a method's return first, a field's declared
+                // type as the fallback (the ladder hover reads); the bare
+                // span's own witnesses when the receiver does not type.
+                RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => r
+                    .member_site()
+                    .and_then(|m| m.invocant_span)
+                    .and_then(|inv| self.origin.expr_type_at_span(inv, self.idx()))
+                    .and_then(|t| {
+                        let member = r.unqualified_target_name(self.origin.names());
+                        if matches!(r.kind, RefKind::FieldAccess { .. }) {
+                            self.origin.field_value_type(&t, member, self.idx())
+                        } else {
+                            self.origin.member_value_type(&t, member, self.idx(), r.arg_count)
+                        }
+                    })
+                    .or_else(|| self.origin.expr_type_at_span(r.span, self.idx())),
                 _ => self.origin.expr_type_at_span(r.span, self.idx()),
             };
         }
@@ -421,6 +438,9 @@ impl<'a> CandidateSet<'a> {
             // resolution anchors.
             let (token, site) = match &r.kind {
                 RefKind::FunctionCall => (r.span.start, r.span),
+                // A member read (`$this->handlers`, `self::LIMIT`) reaches a
+                // value, not a callee — the ref's own kind says so.
+                RefKind::FieldAccess { .. } => continue,
                 RefKind::MethodCall { method_name_span, .. } => {
                     (method_name_span.start, *method_name_span)
                 }
