@@ -64,6 +64,7 @@ these hold (checked most-specific first):
 |---|---|
 | `exported` | name is in the file's export surface — an external consumer may import it |
 | `constructor` | conventional constructor (`new`) — frameworks instantiate it |
+| `class-referenced` | a pack constructor whose CLASS is referenced somewhere (a type hint, `Foo::class`, a `use` row) while nothing `new`s it — a DI container or a factory instantiates it. The class's own `references()` projection answers, minted at its declaration like every other count here |
 | `framework-synthesized` | symbol is plugin-minted (Moo accessors, routes, DBIC rels), not user-written; the framework calls it through machinery the static graph doesn't model |
 | `package-implicit-use` | packages/classes/modules — reachable via `require`, app entrypoints, dynamic class strings; too many invisible vectors to flag |
 | `dynamic-dispatch` | a **method-shaped** sub (declared in a non-`main` package) when the workspace contains **any** `$obj->$method` dispatch — see below |
@@ -97,6 +98,13 @@ graph cannot see:
 - **External callers** — anything outside the indexed workspace (and, without
   `--include-deps`, outside open+workspace files). Exported symbols are guarded
   for exactly this reason.
+- **Container / factory instantiation** — a class built by a DI container, a
+  service locator, or a `new $class` from configuration has no `new` site the
+  graph can see. The `class-referenced` guard covers the common case (the class
+  is at least NAMED — a constructor type hint, a `Foo::class`, a `use` row), and
+  it over-shields: a class named only by a stale import shields its constructor
+  too. A class named nowhere at all is still listed, and a container wired
+  purely from a string in a config file is exactly that case.
 - **Entrypoint-script free-subs** — a top-level `sub` in package `main` of an
   executable script is flagged when nothing calls it within the static graph,
   but a script is itself an entrypoint: its subs may be exercised by the runtime
