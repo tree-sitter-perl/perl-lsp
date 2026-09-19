@@ -675,6 +675,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // span; joined to `@ref.member` so op-DX rides the minted ref.
     let mut member_op_raw: HashMap<usize, (crate::model::file_analysis::MemberOp, crate::model::file_analysis::Span)> =
         HashMap::new();
+    // `@dispatch.via` — the dispatching function's name token (`do_action`),
+    // joined to the same match's `@ref.dispatch.named` string as the minted
+    // DispatchCall's `dispatcher` label.
+    let mut dispatch_via_by_match: HashMap<usize, String> = HashMap::new();
+    // `@handler.name` — the token whose TEXT names a `@def.handler.by.<rail>`
+    // handler in the same match (a listener's `handle(X $e)` is a handler
+    // named `X` sitting on the method's name token).
+    let mut handler_name_by_match: HashMap<usize, String> = HashMap::new();
+    // `@key.elem` — the array element a `@def.handler.key` string heads.
+    let mut key_elem_by_match: HashMap<usize, Span> = HashMap::new();
     // `@ref.var.implicit` — reads the runtime binds without a declaration.
     let mut runtime_bound_reads: Vec<Span> = Vec::new();
     // What an import row BINDS, per match (`@import.function` / `@import
@@ -716,6 +726,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "sym.attr" {
             attrs_by_match.entry(e.match_id).or_default().push(e.text.clone());
+        }
+        if e.cap == "dispatch.via" {
+            dispatch_via_by_match.insert(e.match_id, e.text.clone());
+        }
+        if e.cap == "handler.name" {
+            handler_name_by_match.insert(e.match_id, e.text.clone());
+        }
+        if e.cap == "key.elem" {
+            key_elem_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
         }
         if e.cap == "ref.var.implicit" {
             runtime_bound_reads.push(Span { start: e.start, end: e.end });
@@ -972,6 +991,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     }
     out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
     out.spellings = Some(pack.spellings);
+    {
+        let conv = crate::build::query_extract::rail_conventions_for(pack);
+        out.rail_name_seps = conv.name_seps.clone();
+        out.class_named_rails = conv.class_named_rails.clone();
+    }
     out.runtime_bound_reads = std::mem::take(&mut runtime_bound_reads);
     out.member_writes = std::mem::take(&mut member_writes);
     out.names = pack.names.clone();
@@ -1291,6 +1315,58 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     }
                 }
             }
+            // A registration string (`add_action('init', …)` arg 1)
+            // DECLARES a name on its rail — a Handler symbol whose name and
+            // span are the string content, stacking like every same-named
+            // Handler. A firing string (`do_action('init')`) mints the
+            // DispatchCall ref that matches it. The capture's suffix names
+            // the rail and is REQUIRED: an unnamed namespace would claim
+            // the whole program for one framework's hook space, so an
+            // unsuffixed capture mints nothing and the overlay lint says so.
+            c if super::rail_of(c).is_some_and(|(k, _)| k.is_handler()) => {
+                let Some((kind, rail)) = super::rail_of(c) else { continue };
+                let span = Span { start: e.start, end: e.end };
+                let mut attributes = Vec::new();
+                let mut name = e.text.clone();
+                if kind == super::RailCapture::ClassHandlerNamedByMatch {
+                    // named by another token of the match; no name → no handler
+                    let Some(n) = handler_name_by_match.get(&e.match_id) else { continue };
+                    name = n.clone();
+                }
+                if kind.is_class_named() {
+                    out.class_rails.push((span, rail.to_string()));
+                    attributes.push("class_rail".to_string());
+                } else {
+                    out.rails.push((span, rail.to_string()));
+                }
+                out.symbols.push(SkelSymbol {
+                    return_annotation: None,
+                    name,
+                    kind: "handler".to_string(),
+                    start: e.start,
+                    end: e.end,
+                    name_start: e.start,
+                    name_end: e.end,
+                    package: None,
+                    scope: cur_scope,
+                    declared_return: None,
+                    deref_stack: Vec::new(),
+                    attributes,
+                    arity: None,
+                    qualifier_owned: false,
+                });
+            }
+            "handler.name" => {}
+            "key.elem" => {}
+            "def.handler.key" => {
+                if let Some(elem) = key_elem_by_match.get(&e.match_id) {
+                    out.key_defs.push(crate::build::query_extract::KeyDef {
+                        key: e.text.clone(),
+                        key_span: Span { start: e.start, end: e.end },
+                        elem_span: *elem,
+                    });
+                }
+            }
             cap if cap.starts_with("def.") && !cap.ends_with(".name") => {
                 let kind = cap.strip_prefix("def.").unwrap().to_string();
                 let (name, name_start, name_end, defaulted) = names_by_match
@@ -1401,6 +1477,29 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     );
                 }
             }
+            c if super::rail_of(c).is_some_and(|(k, _)| !k.is_handler()) => {
+                let Some((kind, rail)) = super::rail_of(c) else { continue };
+                let span = Span { start: e.start, end: e.end };
+                if kind.is_class_named() {
+                    out.class_rails.push((span, rail.to_string()));
+                } else {
+                    out.rails.push((span, rail.to_string()));
+                }
+                out.refs.push(SkelRef {
+                    via: dispatch_via_by_match.get(&e.match_id).cloned(),
+                    kind: "dispatch".to_string(),
+                    name: e.text.clone(),
+                    start: e.start,
+                    end: e.end,
+                    scope: cur_scope,
+                    invocant: None,
+                    member_op: None,
+                    arg_count: None,
+                    flags: Default::default(),
+                });
+            }
+            // consumed by the prepass join above; nothing to mint here
+            "dispatch.via" => {}
             cap if cap.starts_with("ref.") => {
                 // Generic suppression: a "reference" inside a def's own
                 // header is the declaration, not a use. `ref.type` is exempt:
@@ -1443,6 +1542,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         }
                     }
                     out.refs.push(SkelRef {
+                        via: None,
                         kind: e.cap.strip_prefix("ref.").unwrap().to_string(),
                         name: (pack.shape_name)(&e.cap, &e.text),
                         start: e.start,
@@ -1756,10 +1856,25 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // a trailing-return function matches both its leading-`auto` pattern
     // and the trailing sibling (keep the rettype-bearing copy) ----
     {
-        let mut best: HashMap<(usize, usize), usize> = HashMap::new();
+        // Keyed per name site AND per kind family: a framework overlay
+        // legitimately declares a PROPERTY at a method's own name token
+        // (Eloquent relations — `pages()` the method, `->pages` the
+        // accessor) or a HANDLER there (a listener's `handle(X $e)` is the
+        // event rail's handler named X), and those pairs must survive while
+        // the same-kind duplicates (var vs sub, rettype twins) still collapse.
+        // Handlers key by NAME too: one token can carry several rails'
+        // handlers (a listener's `handle(X $e)` is X's handler AND its own
+        // class's job handler).
+        let family = |kind: &str| match kind {
+            "field" => 1u8,
+            "handler" => 2u8,
+            _ => 0u8,
+        };
+        let mut best: HashMap<(usize, usize, u8, String), usize> = HashMap::new();
         let mut keep = vec![true; out.symbols.len()];
         for (i, sym) in out.symbols.iter().enumerate() {
-            let key = (sym.name_start.row, sym.name_start.column);
+            let tag = if sym.kind == "handler" { sym.name.clone() } else { String::new() };
+            let key = (sym.name_start.row, sym.name_start.column, family(&sym.kind), tag);
             match best.get(&key) {
                 None => {
                     best.insert(key, i);
@@ -1789,6 +1904,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         // every invocation identifier is a call ref (user functions
         // rename through it; builtin names match no defs, harmlessly)
         out.refs.push(SkelRef {
+            via: None,
             kind: "call".into(),
             name: cmd.clone(),
             start: cmd_span.start,
@@ -1827,6 +1943,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             !name.is_empty() && name.chars().all(|c| c.is_ascii_uppercase() || c == '_');
                         if !is_keyword && !name.contains("${") {
                             out.refs.push(SkelRef {
+                                via: None,
                                 kind: "call".into(),
                                 name: name.clone(),
                                 start: span.start,

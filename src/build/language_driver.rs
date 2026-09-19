@@ -1214,6 +1214,8 @@ fn remap_spans(
         member_writes,
         import_rows,
         spellings: _,
+        rail_name_seps: _,
+        class_named_rails: _,
         preamble_end: _,
         flow_edges,
         moved_from,
@@ -1221,6 +1223,9 @@ fn remap_spans(
         param_regions,
         probe_regions,
         fold_regions,
+        rails,
+        class_rails,
+        key_defs,
         domain_sites,
         macro_returns: _,
         // Populated in enrich_skeleton (post-remap) already in original coords.
@@ -1267,6 +1272,7 @@ fn remap_spans(
     }
     for rf in refs.iter_mut() {
         let crate::build::query_extract::SkelRef {
+            via: _,
             kind: _,
             name: _,
             start,
@@ -1373,6 +1379,16 @@ fn remap_spans(
     }
     for (span, _) in fold_regions.iter_mut() {
         *span = rspan(*span);
+    }
+    for (span, _) in rails.iter_mut() {
+        *span = rspan(*span);
+    }
+    for (span, _) in class_rails.iter_mut() {
+        *span = rspan(*span);
+    }
+    for k in key_defs.iter_mut() {
+        k.key_span = rspan(k.key_span);
+        k.elem_span = rspan(k.elem_span);
     }
     for ds in domain_sites.iter_mut() {
         let crate::model::file_analysis::DomainSite { slot: _, value: _, slot_span } = ds;
