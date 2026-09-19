@@ -1553,6 +1553,96 @@ fn a_fourth_capture_on_one_step_is_reported() {
     assert!(over[0].contains("@d"), "the finding names the capture that vanishes: {over:?}");
 }
 
+/// Rule #15: the query document owns a language's syntax. A node kind or a
+/// field name in a Rust table on the `LangPack` is the document's job done
+/// a second time, by a consumer that cannot see the capture — so it drifts
+/// from the patterns the extractor actually matched, silently.
+///
+/// Checked against the grammar itself, so the test cannot lag a rename:
+/// every string a pack declares is compared to that language's node kinds
+/// and field names. The allowlist is what is still to move; each entry
+/// names the slice that moves it, and it only shrinks.
+#[test]
+fn pack_fields_name_no_grammar_shapes() {
+    let seen =
+        pack_string_sites(&|value, kinds, fields| kinds.contains(value) || fields.contains(value));
+    const TRIGGERS: &str =
+        "kept: the LSP client's trigger characters, which collide with the grammar's anonymous \
+         tokens by coincidence — a protocol vocabulary, not the language's syntax";
+    let allow: &[(&str, &str, usize, &str)] = &[
+        ("cmake", "trigger_chars", 2, TRIGGERS),
+        ("cpp", "trigger_chars", 3, TRIGGERS),
+        ("python", "trigger_chars", 1, TRIGGERS),
+        ("r", "trigger_chars", 3, TRIGGERS),
+    ];
+    let drift = pack_allowlist_drift("rule #15 (grammar shapes on the pack)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// One pack's declared strings, keyed `<lang>:<field>`, counting only the
+/// values `keep` admits.
+fn pack_string_sites(
+    keep: &dyn Fn(&str, &std::collections::HashSet<String>, &std::collections::HashSet<&str>) -> bool,
+) -> HashMap<String, usize> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for (pack, language) in packs_with_grammars() {
+        let kinds = grammar_kinds(&language);
+        let fields: std::collections::HashSet<&str> = (1..=language.field_count() as u16)
+            .filter_map(|id| language.field_name_for_id(id))
+            .collect();
+        for (field, value) in pack.declared_strings() {
+            if keep(value, &kinds, &fields) {
+                *seen.entry(format!("{}:{}", pack.lang_id, field)).or_default() += 1;
+            }
+        }
+    }
+    seen
+}
+
+/// `allowlist_drift` over a per-(language, field) allowlist, restricted to
+/// the languages this build serves. A pack behind a feature flag is absent
+/// rather than a missing entry, so one allowlist reads correctly whichever
+/// languages are compiled in — and stays count-exact for the ones that are.
+fn pack_allowlist_drift(
+    what: &str,
+    seen: &HashMap<String, usize>,
+    allow: &[(&'static str, &'static str, usize, &'static str)],
+) -> Vec<String> {
+    let present: std::collections::HashSet<&str> =
+        packs_with_grammars().iter().map(|(p, _)| p.lang_id).collect();
+    let rows: Vec<(String, usize, &'static str)> = allow
+        .iter()
+        .filter(|(lang, ..)| present.contains(lang))
+        .map(|(lang, field, n, why)| (format!("{lang}:{field}"), *n, *why))
+        .collect();
+    let borrowed: Vec<(&str, usize, &str)> =
+        rows.iter().map(|(k, n, why)| (k.as_str(), *n, *why)).collect();
+    allowlist_drift(what, seen, &borrowed)
+}
+
+/// Rule #15's other half: a language's VOCABULARY — the token texts,
+/// callee names and runtime-provided names a pattern must fire on — belongs
+/// in the query document as an `#eq?` / `#any-of?` predicate, or in a data
+/// document a plugin dir extends. A Rust table of them is an enumeration a
+/// consumer maintains and a document cannot extend.
+///
+/// The grammar cannot check these (`"__construct"` names no node kind), so
+/// they are ratcheted by count instead, each entry naming the slice that
+/// moves it. `trigger_chars` is not here: the LSP protocol's trigger
+/// characters are the client's vocabulary, not the language's.
+#[test]
+fn pack_string_tables_are_ratcheted() {
+    let seen = pack_string_sites(&|value, kinds, fields| {
+        !kinds.contains(value) && !fields.contains(value)
+    });
+    let seen: HashMap<String, usize> =
+        seen.into_iter().filter(|(k, _)| !k.ends_with(":trigger_chars")).collect();
+    let allow: &[(&str, &str, usize, &str)] = &[
+    ];
+    let drift = pack_allowlist_drift("rule #15 (vocabulary tables on the pack)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 /// Rule #14: `PackFacts` is per-FILE facts. A per-language constant (the
 /// same value for every file of a language) does not belong on it, and a
 /// per-site fact a query joins back to a symbol is a witness or a ref
