@@ -843,6 +843,24 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut handler_name_by_match: HashMap<usize, String> = HashMap::new();
     // `@key.elem` — the array element a `@def.handler.key` string heads.
     let mut key_elem_by_match: HashMap<usize, Span> = HashMap::new();
+    // `@nonpublic.target` — def NAME spans whose member carries an access
+    // modifier meaning non-public (the vocabulary lives in the query's
+    // #any-of?). Joined to symbols by name span in a post-pass, stamping
+    // the same `non_public` attribute cpp access regions stamp.
+    // `@static.target` — def NAME spans of `static` members (the "static"
+    // attribute a scoped completion reads).
+    let mut static_name_spans: std::collections::HashSet<(Point, Point)> = std::collections::HashSet::new();
+    // `@alias.target` — a variable declared by reference assignment
+    // (`$h = &$opts['h']`): the `alias` attribute, a write through which is
+    // a use of the storage it names. Keyed by the name token's END: the
+    // capture sits on the sigil-less inner name the def's `$name` wraps.
+    let mut alias_name_ends: std::collections::HashSet<Point> = std::collections::HashSet::new();
+    // `@contract.target` — def NAME spans of contract callables (an
+    // interface's methods, an abstract method): a `contract` attribute, the
+    // requires of the role the declaring container is.
+    let mut contract_name_spans: std::collections::HashSet<(Point, Point)> = std::collections::HashSet::new();
+    let mut nonpublic_name_spans: std::collections::HashSet<(Point, Point)> =
+        std::collections::HashSet::new();
     // `@receiver.self` — the match whose receiver NAMES the enclosing class
     // (php `self::` / `static::`). The class is in hand at the mint (the
     // class-body scope's package), so the invocant carries it and no
@@ -853,8 +871,22 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // completion ask the symbol instead of matching its name.
     let mut receiver_name_spans: std::collections::HashSet<(Point, Point)> =
         std::collections::HashSet::new();
+    // `@def.method.ctor` — the constructor declaration's name span; the
+    // symbol carries `CONSTRUCTOR`, which is what rename policy, the dead-code
+    // shield and the annotation lane ask.
+    let mut ctor_name_spans: std::collections::HashSet<(Point, Point)> =
+        std::collections::HashSet::new();
+    // `@def.var.throwaway` — a binding written to be discarded; the symbol
+    // carries `THROWAWAY`, which is what the unused-variable lane asks.
+    let mut throwaway_name_spans: std::collections::HashSet<(Point, Point)> =
+        std::collections::HashSet::new();
     // `@ref.var.implicit` — reads the runtime binds without a declaration.
     let mut runtime_bound_reads: Vec<Span> = Vec::new();
+    // `@classattr.<flavor>` — container-def name spans stamped with a
+    // flavor attribute ("interface"/"trait"): the model's SymKind::Class
+    // covers all three php container kinds, and SUPER/reference walks
+    // need to ask the value which one it is.
+    let mut classattr_by_name_span: HashMap<(Point, Point), String> = HashMap::new();
     // What an import row BINDS, per match (`@import.function` / `@import
     // .const`, on the row capture or on its name token). Read once here so
     // every capture in the `import` family accepts the suffix and the flat
@@ -904,14 +936,35 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         if e.cap == "key.elem" {
             key_elem_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
         }
+        if e.cap == "static.target" {
+            static_name_spans.insert((e.start, e.end));
+        }
+        if e.cap == "alias.target" {
+            alias_name_ends.insert(e.end);
+        }
+        if e.cap == "contract.target" {
+            contract_name_spans.insert((e.start, e.end));
+        }
+        if e.cap == "nonpublic.target" {
+            nonpublic_name_spans.insert((e.start, e.end));
+        }
         if e.cap == "receiver.self" {
             self_recv_matches.insert(e.match_id);
         }
         if e.cap == "param.receiver" {
             receiver_name_spans.insert((e.start, e.end));
         }
+        if e.cap == "def.method.ctor" {
+            ctor_name_spans.insert((e.start, e.end));
+        }
+        if e.cap == "def.var.throwaway" {
+            throwaway_name_spans.insert((e.start, e.end));
+        }
         if e.cap == "ref.var.implicit" {
             runtime_bound_reads.push(Span { start: e.start, end: e.end });
+        }
+        if let Some(flavor) = e.cap.strip_prefix("classattr.") {
+            classattr_by_name_span.insert((e.start, e.end), flavor.to_string());
         }
     }
     // The spellings this file writes for the object the enclosing method runs
@@ -3209,6 +3262,29 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     for sym in &mut out.symbols {
         if receiver_name_spans.contains(&(sym.name_start, sym.name_end)) {
             sym.flags |= crate::model::file_analysis::SymbolFlags::RECEIVER;
+        }
+        if ctor_name_spans.contains(&(sym.name_start, sym.name_end)) {
+            sym.flags |= crate::model::file_analysis::SymbolFlags::CONSTRUCTOR;
+        }
+        if throwaway_name_spans.contains(&(sym.name_start, sym.name_end)) {
+            sym.flags |= crate::model::file_analysis::SymbolFlags::THROWAWAY;
+        }
+        if sym.kind == "var" && alias_name_ends.contains(&sym.name_end) {
+            sym.flags |= crate::model::file_analysis::SymbolFlags::ALIAS;
+        }
+        if contract_name_spans.contains(&(sym.name_start, sym.name_end)) {
+            sym.flags |= crate::model::file_analysis::SymbolFlags::CONTRACT;
+        }
+        if nonpublic_name_spans.contains(&(sym.name_start, sym.name_end)) {
+            sym.flags |= crate::model::file_analysis::SymbolFlags::NON_PUBLIC;
+        }
+        if static_name_spans.contains(&(sym.name_start, sym.name_end)) {
+            sym.flags |= crate::model::file_analysis::SymbolFlags::STATIC;
+        }
+        if let Some(flavor) = classattr_by_name_span.get(&(sym.name_start, sym.name_end)) {
+            if sym.kind == "class" && !sym.attributes.iter().any(|a| a == flavor) {
+                sym.attributes.push(flavor.clone());
+            }
         }
     }
     out.param_sigs = param_sigs;
