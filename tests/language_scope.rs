@@ -1118,3 +1118,106 @@ fn php_callable_variable_call_does_not_take_its_arguments_type() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The member walk's wrong-family fallback belongs to the WALK, not to one
+/// class: `class B extends A` with `public $handler` on B and
+/// `function handler()` on A answers `$b->handler()` with A's method and
+/// `$b->handler` with B's property. Held per class, B's property ended the
+/// walk before A was ever reached (`docs/adr/member-kinds.md`).
+#[cfg(feature = "php")]
+#[test]
+fn php_member_walk_reaches_a_parents_same_family_declaration() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-mro-family-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("M.php"),
+        "<?php\n\
+         namespace App;\n\
+         class A\n\
+         {\n\
+             public function handler(): int { return 1; }\n\
+         }\n\
+         class B extends A\n\
+         {\n\
+             public $handler = 2;\n\
+         }\n\
+         class C\n\
+         {\n\
+             public function run(B $b): void\n\
+             {\n\
+                 $b->handler();\n\
+                 $x = $b->handler;\n\
+             }\n\
+         }\n",
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    let call = run(&["--definition", root, "M.php", "14", "4"]);
+    assert!(call.contains("M.php:4:"), "the call reaches the parent's method: {call}");
+    let read = run(&["--definition", root, "M.php", "15", "9"]);
+    assert!(read.contains("M.php:8:"), "the value read stays on the property: {read}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `'A\\F::cb'` string callable is a Callable
+/// member reference on `F` (references from the method reach it); `new
+/// self(...)` names the enclosing class (its ctor's references and
+/// hover see it); a middle segment of a `use` row is a namespace and
+/// answers nothing rather than a same-named class elsewhere.
+#[cfg(feature = "php")]
+#[test]
+fn php_string_callables_new_self_and_import_row_segments() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-r6c-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("A/Sub")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("A/F.php", "<?php\nnamespace A;\nclass F\n{\n    public static function mk(): self { return new self(1); }\n    public function __construct(int $n) {}\n    public static function cb(): void {}\n}\n");
+    w("A/Use.php", "<?php\nnamespace A;\nuse A\\Sub\\Thing;\ncall_user_func('A\\F::cb');\n$f = F::mk();\n");
+    w("A/Sub/Thing.php", "<?php\nnamespace A\\Sub;\nclass Thing {}\n");
+    w("A/Sub.php", "<?php\nnamespace A;\nclass Sub {}\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    let lines = |out: &str| -> Vec<u64> {
+        let v: serde_json::Value = serde_json::from_str(out).expect("json");
+        let mut l: Vec<u64> = v.as_array().unwrap().iter().map(|e| e["line"].as_u64().unwrap()).collect();
+        l.sort();
+        l
+    };
+    let ctor = lines(&run(&["--references", root, "A/F.php", "5", "20"]));
+    assert_eq!(ctor, vec![4, 5], "`new self(1)` (row 4) is a construction site of F");
+    let hover = run(&["--hover", root, "A/F.php", "4", "53"]);
+    assert!(hover.contains("__construct"), "`self` in `new self` is the constructor call: {hover}");
+    let gd = run(&["--definition", root, "A/F.php", "4", "53"]);
+    assert!(gd.contains("F.php:5:"), "goto-def on `self` lands on the constructor: {gd}");
+    let rename = run(&["--rename", root, "A/F.php", "5", "20", "build"]);
+    assert!(!rename.contains("\"line\": 4"), "a constructor-convention name is not renameable: {rename}");
+    let cb = run(&["--references", root, "A/F.php", "6", "28"]);
+    assert!(cb.contains("Use.php"), "the string callable site references `cb`: {cb}");
+    // Renaming `cb` rewrites exactly the method tail inside the string
+    // (`'A\\F::cb'` → `'A\\F::run'`), never the class qualifier.
+    let rename: serde_json::Value = serde_json::from_str(&run(&["--rename", root, "A/F.php", "6", "28", "run"])).expect("json");
+    let use_edits = rename.as_object().unwrap().iter().find(|(k, _)| k.ends_with("Use.php")).map(|(_, v)| v.clone()).expect("Use.php edited");
+    let e = &use_edits.as_array().unwrap()[0];
+    let src_line = "call_user_func('A\\F::cb');";
+    let cb_col = src_line.find("cb'").unwrap() as u64;
+    assert_eq!((e["line"].as_u64(), e["col"].as_u64(), e["end_col"].as_u64()), (Some(3), Some(cb_col), Some(cb_col + 2)), "{use_edits}");
+    let mid = run(&["--definition", root, "A/Use.php", "2", "8"]);
+    assert!(!mid.contains("Sub.php"), "a `use` row's middle segment is a namespace, not class `A\\Sub`: {mid}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
