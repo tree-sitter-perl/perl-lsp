@@ -38,7 +38,6 @@ pub fn perl_pack() -> LangPack {
         bundled_builtin_types: &[],
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
         receiver_names: &[],
-        nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
         recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
         op_map: &[],
         simple_var_kinds: &[],
