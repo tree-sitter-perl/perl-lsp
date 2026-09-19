@@ -359,15 +359,7 @@ fn from_rename_kind_returns_none_for_kinds_with_no_target() {
 #[test]
 fn collect_from_analysis_still_finds_sub_refs_after_scope_hardening() {
     let fa = parse("package Foo;\nsub greet { 1 }\ngreet();\n1;\n");
-    let target = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "greet".to_string(),
-        kind: TargetKind::Sub { package: Some("Foo".to_string()) },
-        method_classes: Vec::new(),
-        scope: OverrideScope::Dispatch,
-        def_paths: Vec::new(),
-        bare_constant: false,
-    };
+    let target = TargetRef::for_test("greet", TargetKind::Sub { package: Some("Foo".to_string()) });
     let store = FileStore::new();
     let path = PathBuf::from("/tmp/resolve_test_scope_hardening.pm");
     store.insert_workspace(path.clone(), fa);
@@ -486,4 +478,29 @@ fn goto_def_agrees_with_references_on_template_method() {
             && d.span.start.column == decl_col),
         "goto-def must land on the same child decl references already names: {defs:?}",
     );
+}
+
+// ---- member family: whether a call admits a value declaration is the
+// language's answer, not a default ----
+
+/// Perl's `$o->name` IS a call, so a callable ask reaches a stored slot;
+/// php spells the call, so `$obj->name()` and the property `$name` are two
+/// different members and the callable ask must not answer with the property.
+/// The value side is strict for both.
+#[test]
+fn a_call_admits_a_stored_member_only_where_a_member_read_is_a_call() {
+    use crate::build::language_driver::LanguageRegistry;
+    use crate::model::file_analysis::{MemberKind, SymKind, SymbolFlags};
+
+    let none = SymbolFlags::empty();
+    let perl = LanguageRegistry::spellings("perl");
+    assert!(
+        MemberKind::Callable.admits_decl(SymKind::Field, none, perl),
+        "a Perl accessor call lands on the slot it reads",
+    );
+    assert!(
+        !MemberKind::Value.admits_decl(SymKind::Method, none, perl),
+        "a value read never answers with a callable",
+    );
+
 }

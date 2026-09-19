@@ -10,6 +10,8 @@ const SPELLINGS: PackSpellings = PackSpellings {
     variadic_marker: "...",
     default_sep: " = ",
     members_are_package_bound: true,
+    // a member read and a member call are different syntax here
+    member_reads_are_calls: false,
     ..PackSpellings::NONE
 };
 

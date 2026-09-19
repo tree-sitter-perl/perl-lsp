@@ -70,6 +70,7 @@ impl ClosednessStore {
         }
     }
 
+    #[cfg(test)]
     pub fn resident_bytes(&self) -> usize {
         self.bytes.load(Ordering::Relaxed)
     }

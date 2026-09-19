@@ -179,6 +179,9 @@ pub const PERL_PACK_SPELLINGS: crate::model::file_analysis::PackSpellings =
         // Typeglobs install a sub into another package, so a member
         // declaration does NOT belong to the container that encloses it.
         members_are_package_bound: false,
+        // `$o->name` invokes the accessor — a call legitimately lands on a
+        // stored slot, so a callable ask admits a value declaration.
+        member_reads_are_calls: true,
         // An `AUTOLOAD` answers a role's required method at runtime.
         catch_all_satisfies_contracts: true,
     };

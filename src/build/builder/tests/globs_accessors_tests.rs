@@ -692,14 +692,10 @@ sub retry {
     let results = refs_to(
         &store,
         None,
-        &TargetRef {
-            names: crate::model::conventions::PERL_SPELLINGS,
-            name: "MAX_RETRIES".to_string(),
-            kind: TargetKind::Sub {
-                package: Some("QA::C".to_string()),
-            },
-            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-        },
+        &TargetRef::for_test(
+            "MAX_RETRIES",
+            TargetKind::Sub { package: Some("QA::C".to_string()) },
+        ),
         RoleMask::EDITABLE,
     );
     // def + 2 usages = 3 hits.
@@ -811,14 +807,7 @@ sub opt_b { 'b' }
     let results = refs_to(
         &store,
         None,
-        &TargetRef {
-            names: crate::model::conventions::PERL_SPELLINGS,
-            name: "opt_a".to_string(),
-            kind: TargetKind::Sub {
-                package: Some("QA::E".to_string()),
-            },
-            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-        },
+        &TargetRef::for_test("opt_a", TargetKind::Sub { package: Some("QA::E".to_string()) }),
         RoleMask::EDITABLE,
     );
     // def + 1 export-list mention = 2.

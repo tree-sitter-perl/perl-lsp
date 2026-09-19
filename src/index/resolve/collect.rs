@@ -309,7 +309,7 @@ pub(super) fn pack_symbol_def_location(
                 key: origin_key.clone(),
                 span: sym.selection_span,
                 access: AccessKind::Declaration,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None,
             },
         ));
@@ -335,7 +335,7 @@ pub(super) fn pack_symbol_def_location(
                     key: FileKey::Path(cached.path.clone()),
                     span: sym.selection_span,
                     access: AccessKind::Declaration,
-                    rewritable: true,
+                    rewritable: Rewritable::Yes,
                     label: None,
                 },
             ));
@@ -368,12 +368,16 @@ pub(super) fn method_classes_for(
     origin: &FileAnalysis,
     class: &str,
     name: &str,
+    member_kind: Option<MemberKind>,
     module_index: Option<&dyn CrossFileLookup>,
     scope: OverrideScope,
 ) -> Vec<String> {
+    // A target with no family stated is a callable ask, which is what every
+    // caller of these walks meant before the family axis existed.
+    let want = member_kind.unwrap_or(MemberKind::Callable);
     match scope {
-        OverrideScope::Hierarchy => origin.method_override_family(class, name, module_index),
-        OverrideScope::Dispatch => origin.method_rename_chain(class, name, module_index),
+        OverrideScope::Hierarchy => origin.member_override_family(class, name, want, module_index),
+        OverrideScope::Dispatch => origin.member_rename_chain(class, name, want, module_index),
     }
 }
 
@@ -495,9 +499,12 @@ pub(super) fn pack_class_def_paths(
     out
 }
 
-/// A dispatch name that is actually spelled by *another* identifier, so the
+/// The OTHER identifier a dispatch name is actually spelled by, when the
 /// token at `span` is not the literal name and rename must not rewrite it
-/// (references still resolve through the fold). A variable fold
+/// (references still resolve through the fold). The name is what tells the
+/// caller WHICH reason the site carries — a variable or constant it folded
+/// out of, or a delegating macro whose body no edit set reaches. A variable
+/// fold
 /// (`$obj->on($evt)`, `$self->$m()` — a `Variable`/`ContainerAccess` ref covers
 /// the span) always counts. A const fold (`$obj->on(EVT)` — a `FunctionCall`
 /// ref to the constant covers it) counts only when `include_calls` — for a
@@ -510,18 +517,33 @@ pub(super) fn pack_class_def_paths(
 /// the literal name — that's the collected use, not a fold, and it must stay
 /// rewritable. (Perl variable names carry their sigil, so they can never
 /// coincide with a callable name.)
-pub(super) fn span_is_folded_name(
-    analysis: &FileAnalysis,
+pub(super) fn folded_name_at<'a>(
+    analysis: &'a FileAnalysis,
     span: Span,
     include_calls: bool,
     literal_name: &str,
+) -> Option<&'a str> {
+    analysis
+        .refs()
+        .iter()
+        .find(|r| {
+            (matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess)
+                || (include_calls && matches!(r.kind, RefKind::FunctionCall { .. })))
+                && r.span == span
+                && r.target_name != literal_name
+        })
+        .map(|r| r.target_name.as_str())
+}
+
+/// Member-family declaration match: a target with no member family admits
+/// either kind; the families' own rule (`MemberKind::admits_decl`), read
+/// under the declaring file's spellings, decides the rest.
+fn kind_admits(
+    family: Option<MemberKind>,
+    sym: &crate::model::file_analysis::Symbol,
+    analysis: &FileAnalysis,
 ) -> bool {
-    analysis.refs().iter().any(|r| {
-        (matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess)
-            || (include_calls && matches!(r.kind, RefKind::FunctionCall { .. })))
-            && r.span == span
-            && r.target_name != literal_name
-    })
+    family.is_none_or(|f| f.admits_decl(sym.kind, sym.flags, analysis.spellings()))
 }
 
 /// True when `sym` is a declaration of `target` (decl-span match).
@@ -570,7 +592,9 @@ pub(super) fn symbol_defines_target(
                         .method_classes
                         .iter()
                         .any(|c| Some(c.as_str()) == sym_pkg));
-            matches!(sym.kind, SymKind::Sub | SymKind::Method) && in_scope
+            matches!(sym.kind, SymKind::Sub | SymKind::Method)
+                && in_scope
+                && kind_admits(target.member_kind, sym, analysis)
         }
         TargetKind::Method { class } => {
             // A `sub NAME` declaration belongs to this target if it lives in
@@ -594,6 +618,7 @@ pub(super) fn symbol_defines_target(
             (matches!(sym.kind, SymKind::Sub | SymKind::Method)
                 || analysis.symbol_is_class_content(sym))
                 && on_chain
+                && kind_admits(target.member_kind, sym, analysis)
         }
         TargetKind::Package => matches!(
             sym.kind,
@@ -614,7 +639,7 @@ pub(super) fn symbol_defines_target(
         // already collect it) — internal-key members contribute access
         // sites only, no decl matching here.
         TargetKind::InternalHashKey { .. } => false,
-        TargetKind::Handler { owner, name: hname } => {
+        TargetKind::Handler { owner, name: hname, .. } => {
             sym.name == *hname
                 && matches!(
                     &sym.detail,
@@ -795,7 +820,7 @@ pub(super) fn collect_package_var(
                 key: key.clone(),
                 span: tail(sym.selection_span),
                 access: AccessKind::Declaration,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None
             });
         }
@@ -812,7 +837,7 @@ pub(super) fn collect_package_var(
                     key: key.clone(),
                     span: tail(r.span),
                     access: r.access,
-                    rewritable: true,
+                    rewritable: Rewritable::Yes,
                     label: None
                 });
             }
@@ -822,7 +847,7 @@ pub(super) fn collect_package_var(
                 key: key.clone(),
                 span: tail(r.span),
                 access: r.access,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None
             });
         }
@@ -915,28 +940,40 @@ pub(super) fn collect_from_analysis(
         })
         .collect();
 
-    // Pack languages: name lookups during matching (invocant typing, the
-    // typedef chase) must resolve against THIS file's include closure — the
-    // same visibility goto-def uses at this file's cursors — or a scanned
-    // file's `o->op_type` types against a globally-arbitrary same-named
-    // candidate and the site silently drops out. Transparent for Perl
-    // (empty closure = the plain index).
+    // Name lookups during matching (invocant typing, the typedef chase)
+    // resolve against THIS file's own visibility — the same rule goto-def
+    // uses at this file's cursors — or a scanned file's `o->op_type` types
+    // against a globally-arbitrary same-named candidate and the site
+    // silently drops out. `for_origin` owns the derivation for every
+    // language: an include-closure pack scopes by its closure, a name-keyed
+    // pack (php) by its OWN use-map (`$c->pick()` in a file that `use`s
+    // `B\Collection` types against B's class, never the same-leaf stranger
+    // the plain index would hand back first), Perl by its search path.
     let scoped_storage: Option<crate::model::file_analysis::ScopedLookup>;
     let module_index: Option<&dyn CrossFileLookup> = match module_index {
-        Some(idx) if !analysis.pack.include_closure.is_empty() => {
+        Some(idx) => {
             let path = key_for_sort(key);
-            // Guarded by a non-empty include closure — a pack-only shape.
+            let axis = crate::util::ghost_stats::timed("refs.visibility_axis", || {
+                crate::model::file_analysis::VisibilityAxis::for_origin(
+                    analysis,
+                    Some(path.as_path()),
+                    idx,
+                    crate::build::language_driver::LanguageRegistry::pack_visibility(
+                        &analysis.language,
+                    ),
+                )
+            });
             scoped_storage = Some(crate::model::file_analysis::ScopedLookup::new(
                 idx,
                 &analysis.pack.include_closure,
                 Some(path.as_path()),
-                crate::model::file_analysis::VisibilityAxis::IncludeClosure,
+                axis,
             ));
             // SAFETY: scoped_storage was just set to Some(..) on the line above,
             // in this same match arm — a lifetime-extension idiom, not a fallible read.
             Some(scoped_storage.as_ref().unwrap() as &dyn CrossFileLookup)
         }
-        other => other,
+        None => None,
     };
 
     // Package globals match by package + (qualified) name, not the callable
@@ -991,15 +1028,50 @@ pub(super) fn collect_from_analysis(
         TargetKind::Sub { .. } | TargetKind::Method { .. } => (true, false),
         _ => (false, false),
     };
-    let rewritable_at = |span: Span| {
-        !(foldable && span_is_folded_name(analysis, span, folds_through_calls, &target.name))
+    // Whether this target's spans hold its own name at all is the target's
+    // policy (`sites_are_rewritable`); the fold is per-site.
+    let sites_rewritable = target.sites_are_rewritable();
+    let rewritable_at = |span: Span| -> Rewritable {
+        if !sites_rewritable {
+            return Rewritable::No(NotRewritable::RailEmission);
+        }
+        if let Some(other) =
+            foldable.then(|| folded_name_at(analysis, span, folds_through_calls, &target.name)).flatten()
+        {
+            // A token that names a MACRO is not a fold: the expansion
+            // re-mints the use under the target's name while the source keeps
+            // the macro's, and the macro's body is not a span any edit set
+            // reaches — so the site says so, and rename refuses rather than
+            // skipping it the way it skips a fold, whose own literal is
+            // collected separately and carries the edit.
+            return Rewritable::No(if names_visible_macro(other, analysis, module_index) {
+                NotRewritable::MacroDelegated
+            } else {
+                NotRewritable::ConstFolded
+            });
+        }
+        Rewritable::Yes
     };
 
     // Include declaration spans when this file defines the target. Name
     // equality is `symbol_defines_target`'s first gate, so only the
     // same-named symbols can pass (in symbol order, as the vec would).
+    // A callable target reaches a stored member only as a FALLBACK — a
+    // language whose member read IS a call declares accessors as storage
+    // (a C callback field), but where the owner declares a callable of
+    // the name, that callable IS the target and a same-named slot is a
+    // different member of the same class.
+    let callable_declared = target.member_kind == Some(MemberKind::Callable)
+        && analysis.symbols_named(&target.name).iter().any(|&sid| {
+            let sym = analysis.symbol(sid);
+            MemberKind::of_sym(sym.kind) == MemberKind::Callable
+                && symbol_defines_target(sym, target, analysis)
+        });
     for &sid in analysis.symbols_named(&target.name) {
         let sym = analysis.symbol(sid);
+        if callable_declared && MemberKind::of_sym(sym.kind) != MemberKind::Callable {
+            continue;
+        }
         if symbol_defines_target(sym, target, analysis) {
             out.push(RefLocation {
                 key: key.clone(),
@@ -1037,9 +1109,18 @@ pub(super) fn collect_from_analysis(
         // A qualified call (`Foo::baz()` / `$o->Foo::Bar::baz()`) keeps its
         // whole path in `target_name`; match it on the bare callable tail (the
         // dispatch-class checks in the call arms below still pin the right
-        // package/class). Every other ref kind matches by exact name.
-        let name_matches = if matches!(r.kind, RefKind::FunctionCall { .. } | RefKind::MethodCall { .. }) {
+        // package/class). A member value read matches on the same tail.
+        // A class token (a `PackageRef`) references the target iff the
+        // spelling NAMES the target's identity — the file's use-map resolves
+        // it, so `use B\Collection; new Collection()` reaches `B\Collection`
+        // and never the same-leaf stranger. A language whose spellings are
+        // identities compares them verbatim. Every other ref kind matches by
+        // exact name.
+        let spelled_identity = || analysis.spelled_identity(r);
+        let name_matches = if matches!(r.kind, RefKind::FunctionCall { .. }) || r.member_site().is_some() {
             r.unqualified_target_name(analysis.names()) == target.name
+        } else if matches!(r.kind, RefKind::PackageRef) {
+            r.target_name == target.name || spelled_identity() == target.name
         } else {
             r.target_name == target.name
         };
@@ -1131,7 +1212,9 @@ pub(super) fn collect_from_analysis(
                 }
             }
             (TargetKind::Sub { .. } | TargetKind::Method { .. },
-             RefKind::MethodCall { .. }) => {
+             RefKind::MethodCall { .. } | RefKind::FieldAccess { .. }) => {
+                // A value read (`obj->field`) resolves its receiver exactly as
+                // a call does; the member's kind is the target's business.
                 // Prefer the build-time-frozen dispatch edge (the `Method`
                 // binding) so a call that resolved at build
                 // time stays matched regardless of query-time inference. An
@@ -1139,7 +1222,7 @@ pub(super) fn collect_from_analysis(
                 // into a cross-file parent; enrichment re-stamps OPEN docs
                 // only) — re-resolve lazily here, where the index is in hand,
                 // rather than silently excluding the site. Either way the
-                // class then fans out over `method_rename_chain` so
+                // class then fans out over `member_rename_chain` so
                 // `$child->m` matches an ancestor-defined target while
                 // unrelated same-named methods stay out.
                 // Same derived-from-the-same-match invariant as the FunctionCall
@@ -1147,6 +1230,15 @@ pub(super) fn collect_from_analysis(
                 let Some(scope) = callable_scope_for_refs.as_ref() else {
                     continue;
                 };
+                // The ref's member family must agree with the target's:
+                // `$this->recorded` never references the method `recorded()`
+                // of a class that also stores `$recorded`, nor vice versa.
+                if !target
+                    .member_kind
+                    .is_none_or(|k| k.admits_ref(MemberKind::of_ref(&r.kind)))
+                {
+                    continue;
+                }
                 let method = r.unqualified_target_name(analysis.names());
                 {
                     let resolved_class = match r.method_target() {
@@ -1184,7 +1276,12 @@ pub(super) fn collect_from_analysis(
                                     || rename_chain_cache
                                         .entry(cn.clone())
                                         .or_insert_with(|| {
-                                            analysis.method_rename_chain(&cn, method, module_index)
+                                            analysis.member_rename_chain(
+                                                &cn,
+                                                method,
+                                                target.member_kind.unwrap_or(MemberKind::Callable),
+                                                module_index,
+                                            )
                                         })
                                         .iter()
                                         .any(|c| target.method_classes.iter().any(|f| f == c))
@@ -1196,7 +1293,12 @@ pub(super) fn collect_from_analysis(
                                 cn == *pkg || rename_chain_cache
                                     .entry(cn.clone())
                                     .or_insert_with(|| {
-                                        analysis.method_rename_chain(&cn, method, module_index)
+                                        analysis.member_rename_chain(
+                                                &cn,
+                                                method,
+                                                target.member_kind.unwrap_or(MemberKind::Callable),
+                                                module_index,
+                                            )
                                     })
                                     .iter()
                                     .any(|c| c == pkg)
@@ -1322,7 +1424,7 @@ pub(super) fn collect_from_analysis(
                         if c == class || analysis.class_isa(c, class, module_index)
                 )
             }
-            (TargetKind::Handler { owner, name: hname },
+            (TargetKind::Handler { owner, name: hname, .. },
              RefKind::DispatchCall { .. }) => {
                 r.target_name == *hname
                     && matches!(r.handler_owner(), Some(o) if o == owner)
@@ -1330,19 +1432,19 @@ pub(super) fn collect_from_analysis(
             _ => false,
         };
         if matches_kind {
-            // MethodCall r.span covers the whole call expression; callers
-            // (rename, highlight) want just the method-name token so they
+            // A member access's r.span covers the whole expression; callers
+            // (rename, highlight) want just the member-name token so they
             // can replace or underline exactly the right characters.
-            let span = if let RefKind::MethodCall { method_name_span, .. } = &r.kind {
-                *method_name_span
-            } else {
-                r.span
-            };
+            let span = r.member_site().map_or(r.span, |m| m.name_span);
             out.push(RefLocation {
                 key: key.clone(),
                 span,
                 access: r.access,
-                rewritable: !alias_matched && rewritable_at(span),
+                rewritable: if alias_matched {
+                    Rewritable::No(NotRewritable::MacroDelegated)
+                } else {
+                    rewritable_at(span)
+                },
                 label: None
             });
             // A call folded from a variable (`my $m = 'process'; $self->$m()`)
@@ -1367,7 +1469,7 @@ pub(super) fn collect_from_analysis(
     // any file that's never enriched. `applicable_dispatches` skips sites the
     // emit-hook path already materialized above, so no double-count.
     // See `docs/adr/receiver-gated-dispatch.md`.
-    if let TargetKind::Handler { owner, name: hname } = &target.kind {
+    if let TargetKind::Handler { owner, name: hname, .. } = &target.kind {
         for applied in analysis.applicable_dispatches(module_index) {
             if &applied.name == hname && &applied.owner == owner {
                 out.push(RefLocation {

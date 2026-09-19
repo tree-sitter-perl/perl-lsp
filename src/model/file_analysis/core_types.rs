@@ -1007,16 +1007,23 @@ impl MemberKind {
         }
     }
 
-    /// May a declaration of `kind` define a target of this family? The
-    /// value side is strict: the syntax said the token reads a stored
-    /// value, so a callable never answers it. The callable side admits
-    /// every member — a call is the only spelling a data member gets where
-    /// a member read is a call (Perl's `$o->m`, a `has` accessor) — and the
-    /// walk prefers the same-family declaration when both exist.
-    pub fn admits_decl(self, kind: SymKind) -> bool {
+    /// May a declaration of `kind` carrying `flags` define a target of this
+    /// family? The value side is strict. The callable side asks the LANGUAGE
+    /// (`PackSpellings::member_reads_are_calls`): where a member read is an
+    /// accessor call, a call legitimately lands on a stored slot; where the
+    /// call is spelled, `$obj->name()` and the property `name` are two
+    /// members and admitting the property is how a missing `()` resolves to
+    /// the wrong one. A slot the declaration marks `CALLABLE_VALUE` is the
+    /// exception the declaration itself states: `ops->read(buf)` on a
+    /// function-pointer member IS a call on that member.
+    pub fn admits_decl(self, kind: SymKind, flags: SymbolFlags, spellings: &PackSpellings) -> bool {
         match self {
             MemberKind::Value => MemberKind::of_sym(kind) == MemberKind::Value,
-            MemberKind::Callable => true,
+            MemberKind::Callable => {
+                spellings.member_reads_are_calls
+                    || flags.contains(SymbolFlags::CALLABLE_VALUE)
+                    || MemberKind::of_sym(kind) == MemberKind::Callable
+            }
         }
     }
 
@@ -1681,11 +1688,13 @@ pub enum RenameKind {
     /// walks don't rename same-named subs in unrelated packages.
     Function { name: String, package: Option<String> },
     Package(String),
-    /// A method with its owning class. Cross-file walks use `class`
-    /// to avoid unioning unrelated classes that share a method name
+    /// A member with its owning class. Cross-file walks use `class`
+    /// to avoid unioning unrelated classes that share a member name
     /// (e.g. `Foo::run` vs `Bar::run`, mojo-helper leaves vs route
-    /// targets).
-    Method { name: String, class: String },
+    /// targets), and `member` is the FAMILY the cursor's own syntax
+    /// named — minted here, where the ref that states it is in hand, so
+    /// no consumer re-derives it from the cursor a second time.
+    Method { name: String, class: String, member: Option<MemberKind> },
     HashKey(String),
     /// Rename a `Handler` by (owner, name) — touches the handler symbol's
     /// name + every `DispatchCall` ref targeting it.

@@ -363,12 +363,10 @@ $schema->resultset('Schema::Result::Users')->search({ name => 'X' });
     store.insert_workspace(producer_path.clone(), parse(producer_src));
     store.insert_workspace(consumer_path.clone(), consumer_fa);
 
-    let target = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "name".to_string(),
-        kind: TargetKind::HashKeyOfBridged("Schema::Result::Users".to_string()),
-        method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-    };
+    let target = TargetRef::for_test(
+        "name",
+        TargetKind::HashKeyOfBridged("Schema::Result::Users".to_string()),
+    );
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
     let consumer_hit = refs
         .iter()
@@ -486,14 +484,10 @@ my $name = $schema->resultset('Schema::Result::Users')->find(1)->name;
     let refs = refs_to(
         &store,
         None,
-        &TargetRef {
-            names: crate::model::conventions::PERL_SPELLINGS,
-            name: "name".to_string(),
-            kind: TargetKind::Method {
-                class: "Schema::Result::Users".to_string(),
-            },
-            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-        },
+        &TargetRef::for_test(
+            "name",
+            TargetKind::Method { class: "Schema::Result::Users".to_string() },
+        ),
         RoleMask::EDITABLE,
     );
     let call_row = point_at(&src, "->name").row;
@@ -806,12 +800,10 @@ sub action {
     store.insert_workspace(producer_path.clone(), parse(producer_src));
     store.insert_workspace(consumer_path.clone(), consumer_fa);
 
-    let target = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "name".to_string(),
-        kind: TargetKind::HashKeyOfBridged("Schema::Result::Sner".to_string()),
-        method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-    };
+    let target = TargetRef::for_test(
+        "name",
+        TargetKind::HashKeyOfBridged("Schema::Result::Sner".to_string()),
+    );
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
     let consumer_hit = refs
         .iter()
@@ -877,12 +869,10 @@ sub action {
     store.insert_workspace(producer_path.clone(), parse(producer_src));
     store.insert_workspace(consumer_path.clone(), consumer_fa);
 
-    let target = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "name".to_string(),
-        kind: TargetKind::HashKeyOfBridged("Schema::Result::Sner".to_string()),
-        method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-    };
+    let target = TargetRef::for_test(
+        "name",
+        TargetKind::HashKeyOfBridged("Schema::Result::Sner".to_string()),
+    );
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
     let consumer_hit = refs
         .iter()
