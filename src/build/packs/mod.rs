@@ -23,6 +23,7 @@ pub use cpp::cpp_pack;
 #[allow(unused_imports)]
 pub use perl::perl_pack;
 #[allow(unused_imports)]
+pub use php::php_pack;
 #[allow(unused_imports)]
 pub use python::python_pack;
 #[allow(unused_imports)]
