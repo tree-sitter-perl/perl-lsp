@@ -808,6 +808,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // ---- join def name-captures to their def event ----
     use std::collections::HashMap;
     let mut names_by_match: HashMap<(usize, String), (String, Point, Point)> = HashMap::new();
+    // `@def.<kind>.anchor` — a name-less def's anchor token (php's `class`
+    // keyword): the pack synthesizes the name from the position, and the
+    // match joins it like a `.name` capture so the def, its `@context`
+    // and its `@parent` edges all read ONE identity.
+    let mut defaulted_matches: HashMap<usize, String> = HashMap::new();
     // `@member.write` — a member on the LEFT of an assignment (php's
     // dynamic property declaration site).
     let mut member_writes: Vec<Span> = Vec::new();
@@ -951,6 +956,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "member.write" {
             member_writes.push(Span { start: e.start, end: e.end });
+        }
+        if let Some(prefix) = e.cap.strip_suffix(".anchor") {
+            let kind = prefix.strip_prefix("def.").unwrap_or(prefix);
+            if let Some(n) = (pack.default_name)(kind, e.start.row, e.start.column) {
+                names_by_match.insert((e.match_id, prefix.to_string()), (n.clone(), e.start, e.end));
+                defaulted_matches.insert(e.match_id, n);
+            }
         }
         if e.cap == "qualifier" {
             qualifier_by_match.insert(e.match_id, e.text.clone());
@@ -1643,10 +1655,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // Shape the context like a def name (cpp canonicalizes a
                 // spec's template spelling) so members' `package` matches
                 // the container Symbol's identity exactly.
+                // A name-less def's context is its synthesized identity,
+                // never the anchor token's text.
                 let raw = names_by_match
                     .get(&(e.match_id, "def.class".to_string()))
                     .filter(|_| pack.names.use_map_sep().is_some())
                     .map(|(n, _, _)| n.clone())
+                    .or_else(|| defaulted_matches.get(&e.match_id).cloned())
                     .unwrap_or_else(|| e.text.clone());
                 let text = (pack.shape_name)(&e.cap, &raw);
                 // If this match's `@scope` starts AFTER this context, the
@@ -1760,15 +1775,18 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     });
                 }
             }
-            cap if cap.starts_with("def.") && !cap.ends_with(".name") => {
+            cap if cap.starts_with("def.") && !cap.ends_with(".name") && !cap.ends_with(".anchor") => {
                 let kind = cap.strip_prefix("def.").unwrap().to_string();
                 let (name, name_start, name_end, defaulted) = names_by_match
                     .get(&(e.match_id, e.cap.clone()))
                     .cloned()
-                    .map(|(n, s, en)| (n, s, en, false))
+                    .map(|(n, s, en)| {
+                        let d = defaulted_matches.contains_key(&e.match_id);
+                        (n, s, en, d)
+                    })
                     .or_else(|| {
-                        (pack.default_name)(&kind)
-                            .map(|n| (n.to_string(), e.start, e.start, true))
+                        (pack.default_name)(&kind, e.start.row, e.start.column)
+                            .map(|n| (n, e.start, e.start, true))
                     })
                     .unwrap_or((e.text.clone(), e.start, e.end, false));
                 // A class declaration's identity is its FQN — the leaf

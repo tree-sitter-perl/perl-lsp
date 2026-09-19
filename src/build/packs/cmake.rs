@@ -23,7 +23,7 @@ pub fn cmake_pack() -> LangPack {
         bundled_rail_docs: &[],
         names: NameSpellings::NONE,
         shape_name: |_, raw| raw.to_string(),
-        default_name: |_| None,
+        default_name: |_, _, _| None,
         annot_type: |_| None,
         declared_return: |_| None,
         doc_types: |_, _| vec![],
