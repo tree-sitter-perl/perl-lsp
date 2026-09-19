@@ -241,6 +241,35 @@ pub(crate) fn peel_receiver<'a>(
     node
 }
 
+/// A parameter's NAME token inside its declaration node: the one the
+/// document named (`@arity.param.name`), else the first simple-variable
+/// descendant — a C++ declarator nests the `identifier` under however many
+/// pointer/array/reference declarators the type wrote, which no fixed-depth
+/// pattern reaches. `None` for an unnamed parameter (`void f(int)`, a bare
+/// `...`), which binds nothing. The by-reference lane and the parameter lane
+/// locate the same token, so they ask the same function.
+fn param_name_node<'t>(
+    ch: tree_sitter::Node<'t>,
+    captured: Option<tree_sitter::Node<'t>>,
+    simple_var_kinds: &std::collections::HashSet<&'static str>,
+) -> Option<tree_sitter::Node<'t>> {
+    if captured.is_some() {
+        return captured;
+    }
+    // The descent's stopping kinds are the document's own too: the nodes its
+    // read patterns root at ARE this language's simple variables.
+    let mut stack = vec![ch];
+    while let Some(n) = stack.pop() {
+        if n != ch && simple_var_kinds.contains(n.kind()) {
+            return Some(n);
+        }
+        let mut w = n.walk();
+        let kids: Vec<_> = n.named_children(&mut w).collect();
+        stack.extend(kids.into_iter().rev());
+    }
+    None
+}
+
 /// The namespace segments a WRITTEN qualifier spells, in order. Source
 /// text, split on the language's own separator — the parts the
 /// `QualifiedSpelling` keeps so that nothing downstream has to.
@@ -321,10 +350,27 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // the nearest enclosing list, which is what nests `f(g($x))` correctly.
     let mut arity_lists: Vec<(usize, tree_sitter::Node)> = Vec::new();
     let mut arg_caps: Vec<(&str, tree_sitter::Node)> = Vec::new();
-    // A callable's declared parameter arity, keyed by the parameter_list span.
-    // Associated to its def symbol by span containment in `into_file_analysis`
-    // (`@arity.sig` fires a separate match from the def name).
-    let mut param_sigs: Vec<(crate::model::file_analysis::Span, crate::model::file_analysis::ParamArity)> =
+    // The `@arity.sig` signatures and every `@arity.param*` capture in the
+    // file. Joined below: a parameter belongs to the signature it is a child
+    // of, a part (`name` / `default` / `type`) to the parameter that contains
+    // it — so a signature nested inside a parameter (a function-pointer
+    // parameter) counts its own.
+    let mut arity_sigs: Vec<tree_sitter::Node> = Vec::new();
+    let mut param_caps: Vec<(&str, tree_sitter::Node)> = Vec::new();
+    // A callable's declared parameter arity AND the parameters themselves,
+    // keyed by the parameter_list span. Associated to its def symbol by span
+    // containment in `into_file_analysis` (`@arity.sig` fires a separate match
+    // from the def name). The parameters ride with the counts because the walk
+    // that counts them is the one that holds their name tokens (rule #11) — a
+    // consumer that wants names must never re-scan the source for them.
+    let mut param_sigs: Vec<(
+        crate::model::file_analysis::Span,
+        crate::model::file_analysis::ParamArity,
+        Vec<crate::model::file_analysis::ParamInfo>,
+    )> = Vec::new();
+    // A callable's by-reference parameter positions with their names, keyed
+    // by the parameter list's span (joined to the def symbol like the arity).
+    let mut by_ref_params: Vec<(crate::model::file_analysis::Span, u32, String, crate::model::file_analysis::Span)> =
         Vec::new();
     // The out-of-line-definition vocabulary, by byte range: the declarator
     // wrappers, the function declarators, the qualified names, and a templated
@@ -428,31 +474,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 arg_caps.push((cap, node));
                 continue;
             }
-            // `@arity.sig`: a callable's parameter_list — count declared params
-            // structurally. `optional_parameter_declaration` carries a default
-            // (counts toward `total`, not `required`); a template pack
-            // (`variadic_parameter_declaration`) or a C `...` token makes the
-            // signature variadic.
+            // `@arity.sig`: a callable's parameter list. WHICH children of
+            // it are parameters, and what each one carries, the document
+            // states capture by capture (`@arity.param*`) — joined to the
+            // signature after the walk, because a part's capture and its
+            // parameter's can sit in different matches.
             if cap == "arity.sig" {
-                let mut total = 0usize;
-                let mut required = 0usize;
-                let mut variadic = false;
-                let mut c = node.walk();
-                for ch in node.children(&mut c) {
-                    match ch.kind() {
-                        "parameter_declaration" => { total += 1; required += 1; }
-                        "optional_parameter_declaration" => { total += 1; }
-                        "variadic_parameter_declaration" | "..." => variadic = true,
-                        _ => {}
-                    }
-                }
-                param_sigs.push((
-                    crate::model::file_analysis::Span {
-                        start: node.start_position(),
-                        end: node.end_position(),
-                    },
-                    crate::model::file_analysis::ParamArity { total, required, variadic },
-                ));
+                arity_sigs.push(node);
+                continue;
+            }
+            if cap.starts_with("arity.param") {
+                param_caps.push((cap, node));
                 continue;
             }
             let text = node.utf8_text(source).unwrap_or("").to_string();
@@ -465,6 +497,123 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 text,
                 match_id: match_counter,
             });
+        }
+    }
+    // ---- declared parameters: the arity counts and the parameters
+    // themselves. Each `@arity.param*` capture states what its parameter
+    // does to the count — one that must be written, one carrying a default,
+    // one that absorbs the rest — so a language that grows a parameter
+    // spelling grows a pattern, and an overlay can teach the lane one.
+    {
+        let param_ids: std::collections::HashSet<usize> = param_caps
+            .iter()
+            .filter(|(c, _)| !matches!(*c, "arity.param.name" | "arity.param.default" | "arity.param.type"))
+            .map(|(_, n)| n.id())
+            .collect();
+        // parameters by the signature they sit in, parts by the parameter
+        // that encloses them, and the by-reference mark as a set: it lands
+        // on the parameter node its own pattern already captured.
+        let mut params_of: HashMap<usize, Vec<(&str, tree_sitter::Node)>> = HashMap::new();
+        let mut parts_of: HashMap<usize, Vec<(&str, tree_sitter::Node)>> = HashMap::new();
+        let mut by_ref_ids: std::collections::HashSet<usize> = Default::default();
+        for (cap, node) in &param_caps {
+            match *cap {
+                "arity.param" | "arity.param.optional" | "arity.param.variadic" => {
+                    if let Some(sig) = node.parent() {
+                        params_of.entry(sig.id()).or_default().push((cap, *node));
+                    }
+                }
+                "arity.param.byref" => {
+                    by_ref_ids.insert(node.id());
+                }
+                _ => {
+                    let mut owner = node.parent();
+                    while let Some(n) = owner {
+                        if param_ids.contains(&n.id()) {
+                            parts_of.entry(n.id()).or_default().push((cap, *node));
+                            break;
+                        }
+                        owner = n.parent();
+                    }
+                }
+            }
+        }
+        let mut seen_sigs: std::collections::HashSet<usize> = Default::default();
+        for sig in &arity_sigs {
+            if !seen_sigs.insert(sig.id()) {
+                continue;
+            }
+            let sig_span = crate::model::file_analysis::Span {
+                start: sig.start_position(),
+                end: sig.end_position(),
+            };
+            let mut declared = params_of.remove(&sig.id()).unwrap_or_default();
+            declared.sort_by_key(|(_, n)| n.start_byte());
+            let mut total = 0usize;
+            let mut required = 0usize;
+            let mut variadic = false;
+            let mut params: Vec<crate::model::file_analysis::ParamInfo> = Vec::new();
+            for (cap, ch) in declared {
+                let is_slurpy = cap == "arity.param.variadic";
+                let parts = parts_of.get(&ch.id());
+                let part = |want: &str| {
+                    parts
+                        .and_then(|ps| ps.iter().find(|(c, _)| *c == want))
+                        .map(|(_, n)| *n)
+                };
+                let name_node = param_name_node(ch, part("arity.param.name"), simple_var_kinds);
+                // A by-reference position (php `&$out`, C++ `T& x`): the
+                // parameter's variable name, so the def mints the aliasing
+                // edge the call sites bind through. A slurpy parameter takes
+                // no position, so it claims none.
+                if by_ref_ids.contains(&ch.id()) && !is_slurpy {
+                    if let Some(name_node) = name_node {
+                        by_ref_params.push((
+                            sig_span,
+                            total as u32,
+                            (pack.shape_name)("def.var", name_node.utf8_text(source).unwrap_or("")),
+                            crate::model::file_analysis::Span {
+                                start: name_node.start_position(),
+                                end: name_node.end_position(),
+                            },
+                        ));
+                    }
+                }
+                // The parameter itself, in source order, with the default as
+                // SOURCE TEXT (rule #13 — a rendering would have to be parsed
+                // back). A parameter with no name token (C's bare `...`, an
+                // unnamed `void f(int)`) binds nothing and mints nothing.
+                if let Some(name_node) = name_node {
+                    params.push(crate::model::file_analysis::ParamInfo {
+                        name: (pack.shape_name)(
+                            "def.var",
+                            name_node.utf8_text(source).unwrap_or(""),
+                        ),
+                        default: part("arity.param.default")
+                            .and_then(|d| d.utf8_text(source).ok())
+                            .map(str::to_string),
+                        is_slurpy,
+                        is_invocant: false,
+                        binding_site: Some(name_node.start_position()),
+                        declared_type: part("arity.param.type")
+                            .and_then(|t| t.utf8_text(source).ok())
+                            .map(str::to_string),
+                    });
+                }
+                match cap {
+                    "arity.param" => {
+                        total += 1;
+                        required += 1;
+                    }
+                    "arity.param.optional" => total += 1,
+                    _ => variadic = true,
+                }
+            }
+            param_sigs.push((
+                sig_span,
+                crate::model::file_analysis::ParamArity { total, required, variadic },
+                params,
+            ));
         }
     }
     // ---- `@nested.target`: a declarator CHAIN of any depth. Peel it to the
@@ -1099,6 +1248,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         .filter(|e| e.cap == "probe.region")
         .map(|e| Span { start: e.start, end: e.end })
         .collect();
+    out.by_ref_params = by_ref_params;
     // Fold-only regions (`@fold` / `@fold.comment`): blocks and comment
     // runs that fold in an editor without being scopes (php has no block
     // scoping, so an `if` body must not mint one).
@@ -1314,6 +1464,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     deref_stack: Vec::new(),
                     attributes,
                     arity: None,
+                    params: Vec::new(),
                     qualifier_owned: false,
                     flags: Default::default(),
                 });
@@ -1412,6 +1563,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // Filled by span association in `into_file_analysis` — the
                     // `@arity.sig` match fires separately from this def name.
                     arity: None,
+                    params: Vec::new(),
                     qualifier_owned: qualifier_by_match.contains_key(&e.match_id),
                     flags: Default::default(),
                 });
@@ -1732,6 +1884,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         deref_stack: Vec::new(),
                         attributes: Vec::new(),
                         arity: None,
+                        params: Vec::new(),
                         qualifier_owned: false,
                     });
                 }

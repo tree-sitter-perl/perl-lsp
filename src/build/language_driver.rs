@@ -891,6 +891,7 @@ fn inject_member_blocks(
                 deref_stack: m.deref_stack.clone(),
                 attributes: Vec::new(),
                 arity: None,
+                params: Vec::new(),
                 qualifier_owned: false,
                 flags: Default::default(),
             });
@@ -1222,6 +1223,7 @@ fn remap_spans(
         control_regions,
         param_regions,
         probe_regions,
+        by_ref_params,
         fold_regions,
         rails,
         class_rails,
@@ -1257,6 +1259,10 @@ fn remap_spans(
             deref_stack: _,
             attributes: _,
             arity: _,
+            // Joined from `param_sigs` in `into_file_analysis`, which runs
+            // after this remap — still empty here, and its binding sites are
+            // remapped on the `param_sigs` rows below.
+            params: _,
             qualifier_owned: _,
             flags: _,
         } = s;
@@ -1268,8 +1274,16 @@ fn remap_spans(
     // Parameter-list spans feed the def-arity association (`into_file_analysis`,
     // which runs after this remap) — they must speak original coords like the
     // symbol spans they're matched against.
-    for (span, _) in param_sigs.iter_mut() {
+    for (span, _, params) in param_sigs.iter_mut() {
         *span = rspan(*span);
+        // A parameter's binding site is a real navigable point (goto-def on a
+        // parameter read, the inlay-hint anchor) — it dies on a spliced line
+        // in transformed coords exactly like the list span around it.
+        for p in params.iter_mut() {
+            if let Some(site) = p.binding_site {
+                p.binding_site = Some(r(site));
+            }
+        }
     }
     for rf in refs.iter_mut() {
         let crate::build::query_extract::SkelRef {
@@ -1377,6 +1391,10 @@ fn remap_spans(
     }
     for span in runtime_bound_reads.iter_mut() {
         *span = rspan(*span);
+    }
+    for (sig, _, _, name_span) in by_ref_params.iter_mut() {
+        *sig = rspan(*sig);
+        *name_span = rspan(*name_span);
     }
     for (span, _) in fold_regions.iter_mut() {
         *span = rspan(*span);
