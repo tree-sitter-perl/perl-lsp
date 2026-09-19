@@ -1779,15 +1779,6 @@ impl LanguageRegistry {
             .any(|l| *l == id)
     }
 
-    /// The visibility routing fact for `id`'s language
-    /// (`VisibilityAxis::for_origin`): include-path packs scope by their
-    /// include closure, name-keyed packs have no closure to scope by, the
-    /// host derives its search path. Read from the pack's own
-    /// `include_path_tokens` declaration — never a language-name branch.
-    /// Memoized like `is_pack_language`.
-    /// The classes a language provides in its global namespace — its
-    /// `builtins.txt` documents (bundled + plugin dirs), read through
-    /// `builtin_types_for`. Empty for a language without a pack.
     /// The rail conventions in force for `id`'s language — how the
     /// undefined-name lane phrases a miss per rail, and which rails answer
     /// with a hint. Display constants of the LANGUAGE's documents, so they
@@ -1800,6 +1791,9 @@ impl LanguageRegistry {
             .unwrap_or_default()
     }
 
+    /// The classes a language provides in its global namespace — its
+    /// `builtins.txt` documents (bundled + plugin dirs), read through
+    /// `builtin_types_for`. Empty for a language without a pack.
     pub fn builtin_types(id: &str) -> std::sync::Arc<Vec<String>> {
         LanguageRegistry::with_enabled()
             .for_id(id)
@@ -1878,6 +1872,12 @@ impl LanguageRegistry {
             .collect()
     }
 
+    /// The visibility routing fact for `id`'s language
+    /// (`VisibilityAxis::for_origin`): include-path packs scope by their
+    /// include closure, name-keyed packs have no closure to scope by, the
+    /// host derives its search path. Read off the compiled query
+    /// (`query_mints(id, "include.path")`) — never a language-name branch.
+    /// Memoized like `is_pack_language`.
     pub fn pack_visibility(id: &str) -> crate::model::file_analysis::PackVisibility {
         use crate::model::file_analysis::PackVisibility;
         match LanguageRegistry::with_enabled().for_id(id).and_then(|d| d.lang_pack()) {

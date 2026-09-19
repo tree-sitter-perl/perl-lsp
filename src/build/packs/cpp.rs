@@ -68,7 +68,6 @@ pub fn cpp_pack() -> LangPack {
         bundled_builtin_types: &[],
         enum_members: &[],
         trigger_chars: &[".", ">", ":"],
-        // DerefKind placeholder — record_stack false, so it's never read.
     }
 }
 

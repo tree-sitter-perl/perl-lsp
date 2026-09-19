@@ -798,8 +798,6 @@ pub fn call_at(tree: &Tree, cfg: &crate::build::query_extract::LangPack, src: &s
     }
 }
 
-/// The token a callee node names: itself when it is a leaf, else its last
-/// named leaf (`A\B\f` → `f`, `$this->m` → `m`).
 /// One argument of a pack call site: its span and text, and the shapes
 /// that end positional matching (a named argument, a spread, a callable
 /// placeholder).
