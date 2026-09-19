@@ -1451,6 +1451,7 @@ fn language_spellings_have_one_home() {
     let allow: &[(&str, usize, &str)] = &[
         ("build/cpp_reparse/defs.rs", 5, "the C++ keyword table — grammar vocabulary in the pack's own tier"),
         ("build/language_driver.rs", 2, "the driver STAMPS two pack attributes (`include_guard`, `non_public`), flag included — the minting side"),
+        ("build/packs/php/doc.rs", 2, "php's own doc-tag spellings — the pack IS their home"),
         ("build/plugin/rhai_host.rs", 3, "a manifest signal name in an inline test fixture"),
         ("build/query_extract/extract.rs", 11, "the generic extractor minting the canonical tokens a pack's captures declare"),
         ("build/query_extract/skeleton.rs", 15, "skeleton→model conversion: the kind/attribute vocabulary becomes flags here"),
