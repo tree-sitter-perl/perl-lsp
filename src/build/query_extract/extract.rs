@@ -2522,6 +2522,30 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     });
                 }
             }
+            // `@expr.annot`: an expression whose VALUE is the class the same
+            // match's `@type.annot` names (`app(Foo::class)` is a Foo — a
+            // container resolves what the argument spells). Declared by an
+            // overlay, so it rides the plugin priority: the expression's own
+            // evidence outranks the callee-return derivation.
+            "expr.annot" => {
+                if let Some(annot) = annot_by_match.get(&e.match_id) {
+                    if let Some(InferredType::ClassName(cn)) = annot_ident(annot, e.start) {
+                        let span = Span { start: e.start, end: e.end };
+                        lit_spans.push((e.start_byte, e.end_byte, span));
+                        out.annot_expr_spans.push(span);
+                        out.witnesses.push(crate::model::witnesses::Witness {
+                            attachment: crate::model::witnesses::WitnessAttachment::Expr(span),
+                            source: crate::model::witnesses::WitnessSource::Plugin(
+                                "overlay-annot".into(),
+                            ),
+                            payload: crate::model::witnesses::WitnessPayload::Edge(
+                                crate::model::witnesses::WitnessAttachment::TypeName(cn),
+                            ),
+                            span,
+                        });
+                    }
+                }
+            }
             "expr.call" => {
                 // A call's VALUE is the callee's own resolution — deferred to
                 // `into_file_analysis`, where the symbol table is known: a
