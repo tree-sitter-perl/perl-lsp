@@ -1745,6 +1745,9 @@ impl SkeletonAnalysis {
             })
             .collect();
         let pack = crate::model::file_analysis::PackFacts {
+            // Pack-declared receiver names ride the FA so core's member /
+            // outline filters can exclude them generically (lang semantics in
+            // the pack, generic logic in core).
             import_rows: std::mem::take(&mut self.import_rows),
             spellings: self.spellings,
             preamble_end: self.preamble_end,
