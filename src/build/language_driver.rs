@@ -45,6 +45,11 @@ pub struct DriverCaps {
     pub hover_info: bool,
     /// The signatureHelp verb is served (the cursor-context handler).
     pub signature_help: bool,
+    /// Pack-family signature help: the call site from the document's own
+    /// tree (`cursor_sentinel::call_at`, on the argument-list patterns the
+    /// document declares), the signature from the defining file's text. Disjoint from the hub's
+    /// `signature_help` (Perl's cursor-context path).
+    pub pack_signature_help: bool,
     /// The selectionRange verb is served (the tree-shape handler).
     pub selection_range: bool,
     /// A didChange rebuild is cheap enough to run synchronously on the
@@ -413,6 +418,12 @@ impl LanguageDriver for PackDriver {
             context_gather: self.gather_macros.is_some() || self.include_closure.is_some(),
             pack_invalidation: true,
             cross_file_words: true,
+            // declared by what the document mints: a pack that captures an
+            // argument list has calls to help with.
+            pack_signature_help: (self.make_parser().language())
+                .is_some_and(|l| crate::build::query_extract::pack_declares_capture(&l, &pack, "arity.args")),
+            // The verb walks tree ancestors — no language in it.
+            selection_range: true,
             ..Default::default()
         }
     }
