@@ -716,7 +716,7 @@ pub fn signature_help(
                     .inferred_type_via_bag(&p.name, sig_info.body_end)
                     .filter(InferredType::is_known)
                 {
-                    format!("{}: {}", base, format_inferred_type(&ty))
+                    format!("{}: {}", base, analysis.render_type(&ty))
                 } else {
                     base
                 }

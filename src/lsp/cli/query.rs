@@ -161,14 +161,14 @@ pub(crate) fn cli_type_at(file: &str, line_str: &str, col_str: &str) {
     // so framework / branch / arity rules refine the answer.
     if let Some(r) = analysis.ref_at(point) {
         if let Some(ty) = analysis.inferred_type_via_bag(&r.target_name, point) {
-            println!("{}", file_analysis::format_inferred_type(&ty));
+            println!("{}", analysis.render_type(&ty));
             return;
         }
     }
     // Check symbols
     if let Some(sym) = analysis.symbol_at(point) {
         if let Some(ty) = analysis.inferred_type_via_bag(&sym.name, point) {
-            println!("{}", file_analysis::format_inferred_type(&ty));
+            println!("{}", analysis.render_type(&ty));
             return;
         }
     }
@@ -707,12 +707,12 @@ fn run_one(
             resolve_imports_blocking(idx, &analysis);
             if let Some(r) = analysis.ref_at(point) {
                 if let Some(ty) = analysis.inferred_type_via_bag(&r.target_name, point) {
-                    return Ok(file_analysis::format_inferred_type(&ty));
+                    return Ok(analysis.render_type(&ty));
                 }
             }
             if let Some(sym) = analysis.symbol_at(point) {
                 if let Some(ty) = analysis.inferred_type_via_bag(&sym.name, point) {
-                    return Ok(file_analysis::format_inferred_type(&ty));
+                    return Ok(analysis.render_type(&ty));
                 }
             }
             Err(format!("No type info at {}:{}", req.line, req.col))
