@@ -5443,6 +5443,234 @@ $m = [Sql\\ColumnController::class => 1];
     );
 }
 
+/// The routes rail: `Route::get(…)->name('home')` declares the name on
+/// `Rail("route")`; `route('home')` / `redirect()->route('home')` use it;
+/// a group prefix (`->name('admin.')`) declares nothing; and a WordPress
+/// hook spelled `home` (the `hook` rail) does not connect — rails are
+/// namespaces, not one flat hook space.
+#[cfg(feature = "php")]
+#[test]
+fn php_laravel_route_names_connect_on_their_own_rail() {
+    let src = "\
+<?php
+use Illuminate\\Support\\Facades\\Route;
+Route::get('/', [HomeController::class, 'index'])->name('home');
+Route::prefix('/admin')->name('admin.')->group(function () {});
+function go() { return redirect()->route('home'); }
+function url() { return route('home', ['x' => 1]); }
+add_action('home', 'cb');
+do_action('home');
+";
+    let (fa, _) = php_fa(src);
+    assert!(
+        !fa.symbols().iter().any(|s| s.name == "admin."),
+        "a group prefix is not a route name"
+    );
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 5, column: 32 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("route('home') must mint the rail target: {other:?}"),
+    };
+    assert!(
+        matches!(
+            &target.kind,
+            crate::index::resolve::TargetKind::Handler {
+                owner: crate::model::file_analysis::HandlerOwner::Rail(rail),
+                name,
+                names: crate::model::file_analysis::RailNames::Strings,
+            } if name == "home" && rail == "route"
+        ),
+        "route rail identity: {target:?}"
+    );
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/app/routes/web.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let mut rows: Vec<usize> = locs.iter().map(|l| l.span.start.row).collect();
+    rows.sort();
+    assert_eq!(rows, vec![2, 4, 5], "declaration + both uses, never the hook: {locs:?}");
+    assert!(locs.iter().all(|l| l.is_rewritable()), "rename rewrites inside quotes: {locs:?}");
+}
+
+/// Middleware aliases, abilities and container bindings are string rails:
+/// a kernel alias map / `Gate::define` / `->singleton('key')` define, and
+/// `->middleware('throttle:60,1')` names `throttle` — the head before the
+/// rail's parameter separator, span included — while `->authorize` /
+/// `->can` and `app('key')` use theirs.
+#[cfg(feature = "php")]
+#[test]
+fn php_laravel_middleware_ability_binding_rails() {
+    let src = "\
+<?php
+namespace App;
+use Illuminate\\Support\\Facades\\Route;
+use Illuminate\\Support\\Facades\\Gate;
+class Kernel { protected $middlewareAliases = ['auth' => Authenticate::class, 'throttle' => Throttle::class]; }
+class Provider {
+    public function boot() {
+        Gate::define('edit-post', fn ($u) => true);
+        $this->app->singleton('users.default', fn () => 1);
+    }
+}
+Route::get('/x', 'C@a')->middleware('throttle:60,1');
+Route::middleware(['auth', 'guest'])->group(fn () => 1);
+class C {
+    public function a($u, $p) { $this->authorize('edit-post', $p); $u->can('edit-post'); return app('users.default'); }
+}
+";
+    let (fa, _) = php_fa(src);
+    let lines: Vec<&str> = src.lines().collect();
+    let at = |row: usize, needle: &str| tree_sitter::Point { row, column: lines[row].find(needle).unwrap() + 1 };
+    let rail_rows = |row: usize, needle: &str, rail: &str, name: &str| -> Vec<usize> {
+        let resolved = crate::index::resolve::resolve_symbol(&fa, at(row, needle), None);
+        let target = match resolved {
+            Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+            other => panic!("{needle} must mint the {rail} rail target: {other:?}"),
+        };
+        assert!(
+            matches!(
+                &target.kind,
+                crate::index::resolve::TargetKind::Handler {
+                    owner: crate::model::file_analysis::HandlerOwner::Rail(r),
+                    name: n,
+                    names: crate::model::file_analysis::RailNames::Strings,
+                } if n == name && r == rail
+            ),
+            "{rail} rail identity for {needle}: {target:?}"
+        );
+        let locs = crate::index::resolve::refs_to_in_file(
+            &crate::index::file_store::FileStore::new(),
+            None,
+            &target,
+            &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/app/x.php")),
+            &fa,
+            crate::index::resolve::RoleMask::VISIBLE,
+        );
+        let mut rows: Vec<usize> = locs.iter().map(|l| l.span.start.row).collect();
+        rows.sort();
+        rows
+    };
+    // the use names the head; its span ends at the separator
+    let throttle = fa.ref_at(at(11, "'throttle:")).expect("throttle use ref");
+    assert_eq!(throttle.target_name, "throttle");
+    assert_eq!(throttle.span.end.column, throttle.span.start.column + "throttle".len(), "{throttle:?}");
+    assert_eq!(rail_rows(11, "'throttle:", "middleware", "throttle"), vec![4, 11]);
+    assert_eq!(rail_rows(12, "'auth'", "middleware", "auth"), vec![4, 12]);
+    assert!(!fa.symbols().iter().any(|s| s.name == "guest"), "an alias nothing declares has no symbol");
+    assert_eq!(rail_rows(14, "'edit-post'", "ability", "edit-post"), vec![7, 14, 14]);
+    assert_eq!(rail_rows(14, "'users.default'", "binding", "users.default"), vec![8, 14]);
+}
+
+/// `app(Foo::class)` / `resolve(Foo::class)` / `->make(Foo::class)` IS a
+/// Foo: the overlay declares the call's value, so a chain off it
+/// dispatches on Foo and the callee's own (untypable) return never wins.
+#[cfg(feature = "php")]
+#[test]
+fn php_laravel_container_resolution_types_the_expression() {
+    let src = "\
+<?php
+namespace App;
+class Repo { public function find() { return 1; } }
+class Svc {
+    public function go() { return app(Repo::class)->find(); }
+    public function go2() { return $this->app->make(Repo::class)->find(); }
+    public function go3() { return resolve(Repo::class)->find(); }
+}
+";
+    let (fa, _) = php_fa(src);
+    let lines: Vec<&str> = src.lines().collect();
+    for (row, head) in [(4, "app(Repo::class)"), (5, "$this->app->make(Repo::class)"), (6, "resolve(Repo::class)")] {
+        let start = lines[row].find(head).unwrap();
+        let span = crate::model::file_analysis::Span {
+            start: tree_sitter::Point { row, column: start },
+            end: tree_sitter::Point { row, column: start + head.len() },
+        };
+        let t = fa.expr_type_at_span(span, None);
+        assert!(
+            matches!(&t, Some(crate::model::file_analysis::InferredType::ClassName(c)) if c.ends_with("Repo")),
+            "{head} is a Repo: {t:?}"
+        );
+    }
+}
+
+/// The event bus is a class-keyed rail: `event(new X)` / `X::dispatch()`
+/// emit, a listener's `handle(X $e)`, a `$listen` key and `Event::listen`
+/// register — references from either side list all of them; the rail is
+/// never renameable (the class rename owns `X`); a job's `handle` is the
+/// handler of `dispatch(new Job)`; an injected dependency's type is not
+/// an emission's target; and `X::dispatch( )` emits exactly as
+/// `X::dispatch()` does (the empty list is a shape, not a spelling).
+#[cfg(feature = "php")]
+#[test]
+fn php_laravel_event_bus_connects_emissions_and_handlers() {
+    let src = "\
+<?php
+namespace App;
+class Provider { protected $listen = [ Liked::class => [ LoveIt::class ] ]; }
+class LoveIt { public function handle(Liked $event): void {} }
+class SendMail { public function handle(Mailer $mailer): void {} }
+function emit($x) { event(new Liked($x)); Liked::dispatch($x); dispatch(new SendMail()); }
+function reg() { Event::listen(Liked::class, fn (Liked $e) => 1); }
+function spaced() { Liked::dispatch( ); }
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{HandlerOwner, RailNames, SymbolDetail};
+    assert!(
+        fa.pack.class_named_rails.iter().any(|r| r == "event"),
+        "the rail document declares the rail class-keyed: {:?}",
+        fa.pack.class_named_rails
+    );
+    let handlers: Vec<(String, usize)> = fa
+        .symbols()
+        .iter()
+        .filter(|s| matches!(&s.detail, SymbolDetail::Handler { owner: owner @ HandlerOwner::Rail(r), .. }
+            if r == "event" && owner.names_are(&fa.pack) == RailNames::Classes))
+        .map(|s| (s.name.clone(), s.selection_span.start.row))
+        .collect();
+    assert!(handlers.contains(&("Liked".to_string(), 2)), "$listen key: {handlers:?}");
+    assert!(handlers.contains(&("Liked".to_string(), 3)), "listener handle: {handlers:?}");
+    assert!(handlers.contains(&("Liked".to_string(), 6)), "Event::listen: {handlers:?}");
+    assert!(handlers.contains(&("SendMail".to_string(), 4)), "a job's own handle: {handlers:?}");
+    assert!(handlers.contains(&("Mailer".to_string(), 4)), "typed first param (noise, hidden): {handlers:?}");
+    assert!(
+        fa.symbols().iter().filter(|s| s.name == "Mailer").all(|s| s.hidden_in_outline()),
+        "class-rail handlers stay out of the outline"
+    );
+    let target = crate::index::resolve::TargetRef::new(
+        "Liked".to_string(),
+        crate::index::resolve::TargetKind::Handler {
+            owner: HandlerOwner::Rail("event".to_string()),
+            name: "Liked".to_string(),
+            names: RailNames::Classes,
+        },
+        &fa,
+    );
+    assert!(!target.supports_cross_file_rename(), "a class-keyed rail is never renamed");
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/app/bus.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let mut rows: Vec<usize> = locs.iter().map(|l| l.span.start.row).collect();
+    rows.sort();
+    rows.dedup();
+    // Row 7 is the argument-less form spelled with a space: the empty
+    // argument list is a fact of the TREE, never of the source text.
+    assert_eq!(rows, vec![2, 3, 5, 6, 7], "registrations + every emission: {locs:?}");
+    assert!(locs.iter().all(|l| !l.is_rewritable()), "never rewritable: {locs:?}");
+}
+
 /// A row says what it binds through its capture suffix, and an unsuffixed
 /// capture binds a type — the default every include/`use` row without the
 /// `function` / `const` keyword means.
