@@ -131,6 +131,13 @@ pub struct ModuleEdgeIndexes {
     /// (re-feeds are exactly when it's needed); `remove_path_record` drops
     /// it when the file itself goes.
     name_records: DashMap<std::path::PathBuf, FedNames>,
+    /// Path → the handler names it fed (rail / hook definitions). The whole
+    /// handler axis: a rail file is reached by this record, never through a
+    /// name-keyed edge bucket, so no map mixes module names with paths and
+    /// no reader tells them apart by looking at the string. Kept across
+    /// `clear` — the name-keyed cache never held it, so a rebuild has
+    /// nothing to re-derive it from.
+    handler_records: DashMap<std::path::PathBuf, Vec<(String, crate::model::file_analysis::HandlerOwner)>>,
     /// Every module name `feed` has published edges under, and — the point
     /// — WHICH bucket keys it was published under in each map, so
     /// `purge_module` touches only its own edges.
@@ -199,6 +206,7 @@ impl ModuleEdgeIndexes {
             specs: DashMap::new(),
             providers: DashMap::new(),
             name_records: DashMap::new(),
+            handler_records: DashMap::new(),
             fed_modules: DashMap::new(),
         }
     }
@@ -255,6 +263,32 @@ impl ModuleEdgeIndexes {
         // earlier siblings' keys unrecorded and their edges unpurgeable.
         let mut rec = self.fed_modules.entry(module_name.to_string()).or_default();
         rec.merge(&fed);
+    }
+
+    /// Record the handler names a FILE declares (rail / hook definitions).
+    /// The pack tier's registration has no name key for a classless file —
+    /// a Laravel routes file declares no class — so the handler axis is
+    /// keyed by the file itself and read back through `handler_paths`. The
+    /// feed REPLACES the file's record, so a re-registration that dropped a
+    /// handler drops its entry.
+    pub fn feed_handlers(&self, path: &std::path::Path, names: &[(String, crate::model::file_analysis::HandlerOwner)]) {
+        if names.is_empty() {
+            self.handler_records.remove(path);
+            return;
+        }
+        self.handler_records.insert(path.to_path_buf(), names.to_vec());
+    }
+
+    /// Every file whose recorded feed declares handler `name`.
+    pub fn handler_paths(&self, name: &str) -> Vec<std::path::PathBuf> {
+        let mut out: Vec<std::path::PathBuf> = self
+            .handler_records
+            .iter()
+            .filter(|e| e.value().iter().any(|(n, _)| n == name))
+            .map(|e| e.key().clone())
+            .collect();
+        out.sort();
+        out
     }
 
     /// Publish ONE specialization edge (primary → spec). The pack path
@@ -383,14 +417,18 @@ impl ModuleEdgeIndexes {
         }
     }
 
-    /// Drop `path`'s recorded name list (the file itself is gone).
+    /// Drop `path`'s recorded name and handler lists (the file itself is gone).
     pub fn remove_path_record(&self, path: &std::path::Path) {
         self.name_records.remove(path);
+        self.handler_records.remove(path);
     }
 
     /// Wipe the edge maps for a rebuild. Deliberately KEEPS `name_records`
     /// — the rebuild re-feeds from cache copies that may be symbol-evicted,
-    /// and the records are their only complete name source.
+    /// and the records are their only complete name source. The handler
+    /// records stay for the same reason, and need no replay: nothing here
+    /// is derived from them, so a reader in the rebuild window never sees a
+    /// rail go blank.
     pub fn clear(&self) {
         self.names.clear();
         self.bridges.clear();
@@ -483,6 +521,11 @@ pub(crate) struct PackRegistrationParts {
     pub(super) arc: Arc<FileAnalysis>,
     pub(super) feed: Vec<(String, bool)>,
     pub(super) specs: Vec<(String, String)>,
+    /// Handler names (rail / hook definitions) — fed to the reverse index
+    /// under the file's PATH key, never to the def-candidate tables: a
+    /// route name is reachable by name, never offered as an identifier
+    /// nor a class-slot winner.
+    pub(super) handlers: Vec<(String, crate::model::file_analysis::HandlerOwner)>,
     pub(super) surface: Option<crate::model::surface::Surface>,
 }
 
@@ -497,6 +540,9 @@ impl PackRegistrationParts {
     }
     pub(crate) fn specs(&self) -> &[(String, String)] {
         &self.specs
+    }
+    pub(crate) fn handlers(&self) -> &[(String, crate::model::file_analysis::HandlerOwner)] {
+        &self.handlers
     }
     /// The projected surface — valid only BEFORE `record_surface` takes it.
     /// Panics after, rather than handing back an empty one: the caller that
@@ -515,8 +561,9 @@ impl PackRegistrationParts {
     /// tripwire-counted at its call sites.
     pub(crate) fn whole(arc: Arc<FileAnalysis>) -> Self {
         let (feed, specs) = ModuleIndex::prepare_pack_feed(&arc);
+        let handlers = ModuleIndex::handler_names(&arc);
         let surface = crate::model::surface::Surface::project(&arc);
-        PackRegistrationParts { arc, feed, specs, surface: Some(surface) }
+        PackRegistrationParts { arc, feed, specs, handlers, surface: Some(surface) }
     }
 
     /// Rehydrate a token from a warm stub — the persisted form of a prior
@@ -528,6 +575,7 @@ impl PackRegistrationParts {
             arc: Arc::new(stub.skeleton),
             feed: stub.feed,
             specs: stub.specs,
+            handlers: stub.handlers,
             surface: Some(stub.surface),
         }
     }
