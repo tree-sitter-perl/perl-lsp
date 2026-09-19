@@ -201,6 +201,7 @@ pub struct EnumMember {
     /// of the same name can never answer for each other.
     pub callable: bool,
 }
+
 /// One type fact parsed from a documentation comment (`LangPack::doc_types`).
 /// The type is a raw spelling the pack has already normalized to what its
 /// `annot_type` accepts (generics stripped, `X|null` collapsed to `X`).
@@ -292,7 +293,6 @@ pub(super) fn param_return_expr(
     }
 }
 
-
 /// `member.op.<which>` suffix → the operator it names. ENGINE-side
 /// vocabulary like `lit_type`: the suffix set names the model's `MemberOp`,
 /// and a pack chooses which token carries each.
@@ -318,3 +318,4 @@ pub(super) fn lit_type(suffix: &str) -> Option<InferredType> {
         _ => None,
     }
 }
+

@@ -278,6 +278,7 @@ fn segments_of(raw: &str, sep: &str) -> Vec<String> {
     }
     raw.split(sep).filter(|s| !s.is_empty()).map(str::to_string).collect()
 }
+
 /// The `ImportBinds` a capture-name suffix declares, or `None` when the
 /// suffix is not one. `use function` / `use const` rows bind a callable or a
 /// constant; an unsuffixed row binds a type, so the pack spells only the two
@@ -1112,6 +1113,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             );
         }
     }
+    // `@ns.inline` — an inline namespace's NAME token, fired by a name-only
+    // sibling pattern (its def/scope/context come from the base namespace
+    // pattern, a different match). Joined to the Package symbol by name span
+    // in a post-pass below, tagging it "inline" so the qualified-completion
+    // gather can lift its members into the enclosing namespace.
     // The spellings this file writes for the object the enclosing method runs
     // on (`$this`, `this`, a `self`/`cls` parameter). The class body witnesses
     // each as an instance of its class, which is how a receiver with no
@@ -1126,11 +1132,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         v.dedup();
         v
     };
-    // `@ns.inline` — an inline namespace's NAME token, fired by a name-only
-    // sibling pattern (its def/scope/context come from the base namespace
-    // pattern, a different match). Joined to the Package symbol by name span
-    // in a post-pass below, tagging it "inline" so the qualified-completion
-    // gather can lift its members into the enclosing namespace.
     let inline_ns_spans: Vec<(Point, Point)> = events
         .iter()
         .filter(|e| e.cap == "ns.inline")
@@ -1282,6 +1283,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             use_map.insert(key, (ns, leaf.clone()));
         }
     }
+
     // ---- class identities ----
     // With a namespace separator every class spelling resolves ONCE, here,
     // to the identity it names: `UseMap::resolve` — the same ladder the
@@ -1497,8 +1499,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // command's own start (the def spans from the command to the name) and the
     // scope it sits in, joined to this match's `@cmd.def.name`.
     let mut cmd_defs: HashMap<usize, (String, Point, ScopeId)> = HashMap::new();
-    // import-call halves, joined per match (BTreeMap: match ids are
-    // source-ordered, so imports come out deterministic)
+    // import-call halves — the import KIND the capture named and the argument
+    // it carries — joined per match (BTreeMap: match ids are source-ordered, so
+    // imports come out deterministic)
     let mut import_fns: std::collections::BTreeMap<usize, String> = Default::default();
     let mut import_args: std::collections::BTreeMap<usize, String> = Default::default();
     // expr-literal spans, for narrowing an Edge target onto the actual
@@ -4403,6 +4406,7 @@ fn slot_key(list_text: &str, slot_offset: usize, arrow: &str) -> Option<String> 
             || (key.starts_with('"') && key.ends_with('"')));
     quoted.then(|| key[1..key.len() - 1].to_string())
 }
+
 /// The `@classattr.<flavor>` suffix a container-def carries when the query
 /// calls it an enumeration — the capture's own word, not the attribute
 /// string a consumer would otherwise compare.
@@ -4588,6 +4592,7 @@ fn doc_witness(
         span,
     }
 }
+
 /// The `TypeName(alias) → …` payload for an underlying type spelling, resolving
 /// it through the pack's `annot_type`: a class-shaped leaf edges into the alias
 /// graph (`Edge(TypeName(cn))`), a primitive is a terminal `InferredType`, an
@@ -4757,6 +4762,7 @@ fn mark_deprecated(sym: &mut crate::build::query_extract::SkelSymbol, text: Opti
         sym.deprecation = text;
     }
 }
+
 fn register_class_body(
     out: &mut SkeletonAnalysis,
     receivers: &[String],
