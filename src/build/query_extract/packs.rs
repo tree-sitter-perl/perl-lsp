@@ -73,17 +73,6 @@ pub struct LangPack {
     /// names. The KIND is the capture's suffix — which callees import is the
     /// document's — and this maps the argument text the kind carries.
     pub import_module: fn(kind: &str, arg: &str) -> Option<String>,
-    /// Guard narrowing: given the guard token (`@narrow.guard` — a
-    /// function/operator like `isinstance`, `has_value`; `None` for the
-    /// token-less `if (opt)` truthiness form) and the type text, the
-    /// refined type that holds inside the guarded block, or `None` if this
-    /// guard doesn't narrow. The type text is the `@narrow.type` capture
-    /// when the guard names one (`dynamic_cast<Derived*>`), else the
-    /// subject's DECLARED type (the optional-engagement form reads
-    /// `std::optional<T>` off the declaration and peels `T`). The pack owns
-    /// "which guard means which refinement" (rule #10); core just scopes
-    /// the witness to the block.
-    pub narrow_guard: fn(guard: Option<&str>, type_text: &str) -> Option<InferredType>,
     /// Can a bare, receiver-less identifier resolve through an implicit
     /// `this->` — both a field read (`return inner_;` = `this->inner_`) AND a
     /// sibling method call (`foo()` = `this->foo()`)? True for C/C++ (the
@@ -93,6 +82,13 @@ pub struct LangPack {
     /// `language_driver::emit_return_fuel` — asked of the pack, never a
     /// language-name branch.
     pub implicit_this_members: bool,
+    /// The refinement a narrowed subject's type TEXT denotes: the
+    /// `@narrow.type` capture where the guard names one
+    /// (`dynamic_cast<Derived*>`), else the subject's DECLARED type, which
+    /// an engagement guard peels (`std::optional<T>` → `T`). Text in,
+    /// structure out — which guards narrow is the document's `#eq?`.
+    /// `None` = this spelling refines nothing.
+    pub narrow_type: fn(type_text: &str) -> Option<InferredType>,
     /// Container membership (class/struct/union/namespace) is delimited by
     /// literal `{`/`}` in the source, so a member that lost its enclosing
     /// container to a tree-sitter misparse can be re-anchored by matching the
