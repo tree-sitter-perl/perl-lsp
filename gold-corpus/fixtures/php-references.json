@@ -40,6 +40,25 @@
         "none": []
       },
       "status": "gold"
+    },
+    {
+      "id": "php-refs-hook-method-from-its-callable-tuple",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "comment": "The `[$this, 'onInit']` tuple in `add_action` is a reference to the method.",
+      "file": "src/Wp/Plugin.php",
+      "line": 11,
+      "col": 20,
+      "expect": {
+        "all": [
+          "\"col\":\"37\",\"file\":\"Plugin.php\",\"line\":\"8\"",
+          "\"col\":\"21\",\"file\":\"Plugin.php\",\"line\":\"12\""
+        ],
+        "none": []
+      },
+      "status": "gold"
     }
   ]
 }
