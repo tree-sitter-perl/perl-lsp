@@ -480,3 +480,36 @@ fn goto_def_agrees_with_references_on_template_method() {
     );
 }
 
+// ---- member family: the ask's family is the syntax, and the declaration
+// is the only thing that widens it ----
+
+/// The extractor already read the syntax — `FieldAccess` is a read,
+/// `MethodCall` is a call — so both sides are strict and no language has a
+/// say. The one widening is the declaration's own word: a slot flagged
+/// `CALLABLE_VALUE` (a function-pointer member) answers a call.
+#[test]
+fn a_call_admits_a_stored_member_only_where_the_declaration_says_it_is_invoked() {
+    use crate::model::file_analysis::{MemberKind, SymKind, SymbolFlags};
+
+    let none = SymbolFlags::empty();
+    assert!(
+        !MemberKind::Callable.admits_decl(SymKind::Field, none),
+        "a property is not a method",
+    );
+    assert!(
+        !MemberKind::Value.admits_decl(SymKind::Method, none),
+        "a value read never answers with a callable",
+    );
+    assert!(
+        MemberKind::Callable.admits_decl(SymKind::Method, none),
+        "the method itself answers",
+    );
+    assert!(
+        MemberKind::Value.admits_decl(SymKind::Field, none),
+        "the field itself answers",
+    );
+    assert!(
+        MemberKind::Callable.admits_decl(SymKind::Field, SymbolFlags::CALLABLE_VALUE),
+        "a slot the declaration says is invoked answers a call",
+    );
+}

@@ -535,6 +535,13 @@ pub(super) fn folded_name_at<'a>(
         .map(|r| r.target_name.as_str())
 }
 
+/// Member-family declaration match: a target with no member family admits
+/// either kind; the families' own rule (`MemberKind::admits_decl`) decides
+/// the rest.
+fn kind_admits(family: Option<MemberKind>, sym: &crate::model::file_analysis::Symbol) -> bool {
+    family.is_none_or(|f| f.admits_decl(sym.kind, sym.flags))
+}
+
 /// True when `sym` is a declaration of `target` (decl-span match).
 /// Shared by `collect_from_analysis` (to emit decl locations) and
 /// `mask_for_target` (to decide whether the def lives in editable space).
@@ -581,7 +588,9 @@ pub(super) fn symbol_defines_target(
                         .method_classes
                         .iter()
                         .any(|c| Some(c.as_str()) == sym_pkg));
-            matches!(sym.kind, SymKind::Sub | SymKind::Method) && in_scope
+            matches!(sym.kind, SymKind::Sub | SymKind::Method)
+                && in_scope
+                && kind_admits(target.member_kind, sym)
         }
         TargetKind::Method { class } => {
             // A `sub NAME` declaration belongs to this target if it lives in
@@ -605,6 +614,7 @@ pub(super) fn symbol_defines_target(
             (matches!(sym.kind, SymKind::Sub | SymKind::Method)
                 || analysis.symbol_is_class_content(sym))
                 && on_chain
+                && kind_admits(target.member_kind, sym)
         }
         TargetKind::Package => matches!(
             sym.kind,
@@ -1030,8 +1040,22 @@ pub(super) fn collect_from_analysis(
     // Include declaration spans when this file defines the target. Name
     // equality is `symbol_defines_target`'s first gate, so only the
     // same-named symbols can pass (in symbol order, as the vec would).
+    // A callable target reaches a stored member only as a FALLBACK — a
+    // language whose member read IS a call declares accessors as storage
+    // (a C callback field), but where the owner declares a callable of
+    // the name, that callable IS the target and a same-named slot is a
+    // different member of the same class.
+    let callable_declared = target.member_kind == Some(MemberKind::Callable)
+        && analysis.symbols_named(&target.name).iter().any(|&sid| {
+            let sym = analysis.symbol(sid);
+            MemberKind::of_sym(sym.kind) == MemberKind::Callable
+                && symbol_defines_target(sym, target, analysis)
+        });
     for &sid in analysis.symbols_named(&target.name) {
         let sym = analysis.symbol(sid);
+        if callable_declared && MemberKind::of_sym(sym.kind) != MemberKind::Callable {
+            continue;
+        }
         if symbol_defines_target(sym, target, analysis) {
             out.push(RefLocation {
                 key: key.clone(),
@@ -1179,6 +1203,15 @@ pub(super) fn collect_from_analysis(
                 let Some(scope) = callable_scope_for_refs.as_ref() else {
                     continue;
                 };
+                // The ref's member family must agree with the target's:
+                // `$this->recorded` never references the method `recorded()`
+                // of a class that also stores `$recorded`, nor vice versa.
+                if !target
+                    .member_kind
+                    .is_none_or(|k| k.admits_ref(MemberKind::of_ref(&r.kind)))
+                {
+                    continue;
+                }
                 let method = r.unqualified_target_name(analysis.names());
                 {
                     let resolved_class = match r.method_target() {
