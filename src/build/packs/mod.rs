@@ -10,6 +10,7 @@
 pub mod cmake;
 pub mod cpp;
 pub mod perl;
+pub mod php;
 pub mod python;
 pub mod r;
 
