@@ -36,6 +36,8 @@ pub fn cpp_pack() -> LangPack {
             _ => None,
         },
         annot_type: cpp_annot_type,
+        // A C++ return spelling is always concrete — no late-bound receiver
+        // spelling exists in the language.
         declared_return: |t| cpp_annot_type(t).map(crate::model::witnesses::ReturnExpr::Concrete),
         doc_types: |_, _| vec![],
         doc_uses_method_tags: &[],

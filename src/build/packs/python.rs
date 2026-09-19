@@ -28,6 +28,8 @@ pub fn python_pack() -> LangPack {
         shape_name: |_, raw| raw.to_string(),
         default_name: |_, _, _| None,
         annot_type: python_annot_type,
+        // Python return annotations are concrete spellings; the late-bound
+        // receiver spelling has no equivalent here.
         declared_return: |t| {
             python_annot_type(t).map(crate::model::witnesses::ReturnExpr::Concrete)
         },
