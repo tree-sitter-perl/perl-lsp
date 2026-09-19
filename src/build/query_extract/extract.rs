@@ -160,7 +160,6 @@ pub struct PeeledChain<'a> {
     pub callable: bool,
 }
 
-
 /// Peel declarator wrappers (`@ool.wrap`, ANY depth) to the inner function
 /// declarator (`@ool.declarator`) — the arbitrary nesting S-queries can't
 /// express (`Foo**& Class::m()`). THE out-of-line unwrap, spelled once so no
@@ -334,6 +333,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut events: Vec<Event> = Vec::new();
     // match_id → the pointer/reference declarator stack a `@nested.target`
     // capture unravelled to. Read by the `def.*` handler to stamp the symbol.
+    // Matches whose peeled chain said the declared value is CALLED.
+    let mut nested_callable: std::collections::HashSet<usize> = Default::default();
     let mut nested_stacks: std::collections::HashMap<usize, Vec<crate::model::file_analysis::DerefStep>> =
         std::collections::HashMap::new();
     // match_id → was the IMMEDIATE member-access receiver a simple variable?
@@ -654,6 +655,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     for (node, match_id) in &nested_targets {
         let Some(chain) = deref_caps.peel(*node, source) else { continue };
         nested_stacks.insert(*match_id, chain.stack);
+        if chain.callable {
+            nested_callable.insert(*match_id);
+        }
         let leaf = chain.leaf;
         let ltext = leaf.utf8_text(source).unwrap_or("").to_string();
         for syn in ["flow.target", &chain.def_cap] {
@@ -1888,8 +1892,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     params: Vec::new(),
                     doc: None,
                     deprecation: None,
+                    // A member whose declarator says its value is invoked
+                    // (`int (*read)(char *)`): the declaration carries the
+                    // fact, so a call landing on it needs no name list.
+                    flags: if nested_callable.contains(&e.match_id) {
+                        crate::model::file_analysis::SymbolFlags::CALLABLE_VALUE
+                    } else {
+                        Default::default()
+                    },
                     qualifier_owned: qualifier_by_match.contains_key(&e.match_id),
-                    flags: Default::default(),
                 });
             }
             "ref.label" => {
