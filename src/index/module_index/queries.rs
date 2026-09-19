@@ -206,6 +206,22 @@ impl ModuleIndex {
         self.get_cached(module_name)
     }
 
+    /// Every definition candidate whose registered name starts with
+    /// `prefix`, each name with ALL its providers — the universe a
+    /// name-keyed pack completes from (its imports name classes, not paths,
+    /// so every namespace declaring the leaf is a distinct offer).
+    pub fn defs_with_prefix(&self, prefix: &str) -> Vec<(String, Vec<Arc<CachedModule>>)> {
+        let mut out: Vec<(String, Vec<Arc<CachedModule>>)> = self
+            .core
+            .all_defs
+            .iter()
+            .filter(|e| e.key().starts_with(prefix))
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     /// Completion-GATHERING mirror of `get_cached_scoped`: enumerate every
     /// registered name starting with `prefix` that has a definition candidate
     /// inside `visible` (canonical paths — the querying file's `#include`
