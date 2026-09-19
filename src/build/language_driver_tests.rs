@@ -961,6 +961,51 @@ fn exactly_one_fallback_driver() {
     assert!(reg.fallback().claims_unclaimed());
 }
 
+
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_callable_carries_its_parameters_as_facts() {
+    use crate::model::file_analysis::SymbolDetail;
+    // The parameter list is walked once, by the arity walk; names, defaults
+    // and binding sites come off that walk (rule #11) rather than a second
+    // scan of the source by whoever needs to render a signature.
+    let src = "template <class... A>\nvoid dispatch(int first, int limit = 10, A... rest) {}\n";
+    let fa = cpp_driver().analyze(src);
+    let sym = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "dispatch")
+        .unwrap_or_else(|| panic!("dispatch: {:?}", fa.symbols().iter().map(|s| &s.name).collect::<Vec<_>>()));
+    let SymbolDetail::Sub { params, .. } = &sym.detail else {
+        panic!("callable carries a Sub detail, got {:?}", sym.detail)
+    };
+    assert_eq!(
+        params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+        vec!["first", "limit", "rest"],
+        "every parameter, in source order"
+    );
+    assert_eq!(params[0].default, None);
+    assert_eq!(params[1].default.as_deref(), Some("10"), "the default is source text");
+    assert_eq!(params[0].declared_type.as_deref(), Some("int"), "the declared type is source text");
+    assert_eq!(params[2].declared_type.as_deref(), Some("A"), "a pack expansion keeps its element type");
+    assert!(!params[1].is_slurpy);
+    assert!(params[2].is_slurpy, "a pack expansion is slurpy");
+    // Each binding site is the parameter's own name token.
+    for p in params {
+        let site = p.binding_site.expect("a written parameter binds at its name token");
+        let line = src.lines().nth(site.row).unwrap();
+        assert!(
+            line[site.column..].starts_with(&p.name),
+            "binding site of {} points at its name token, got {:?}",
+            p.name,
+            &line[site.column..]
+        );
+    }
+    // The counts stay on `arity`, which `param_arity()` still prefers.
+    let arity = sym.param_arity().expect("a callable has an arity");
+    assert_eq!((arity.total, arity.required, arity.variadic), (2, 1, true));
+}
+
 /// An OVERLAY declaring two ordinary function names as dynamic-surface
 /// markers. No bundled pack declares any (cpp has no such surface), so the
 /// marker → flag path needs a declarer to have a subject at all — and a
