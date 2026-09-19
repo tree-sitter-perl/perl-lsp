@@ -58,6 +58,7 @@ pub fn php_pack() -> LangPack {
         // vocabulary — see each overlay's header for the doctrine note).
         query_source: include_str!("../../../../queries/php/skeleton.scm"),
         bundled_overlays: &[
+            ("frameworks/wordpress.scm", include_str!("../../../../queries/php/frameworks/wordpress.scm")),
             ("stdlib.scm", include_str!("../../../../queries/php/stdlib.scm")),
         ],
         spellings: &SPELLINGS,
@@ -69,6 +70,7 @@ pub fn php_pack() -> LangPack {
             include_str!("../../../../queries/php/php.entry.json"),
         ],
         bundled_rail_docs: &[
+            include_str!("../../../../queries/php/frameworks/wordpress.rails.json"),
         ],
         // `\\` qualifies, `$` leads every variable, and a written class
         // spelling resolves through the file's `use` rows and namespace
