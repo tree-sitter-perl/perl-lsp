@@ -773,7 +773,7 @@ pub fn pack_symbol_diagnostics(
     analysis: &FileAnalysis,
     idx: Option<&dyn CrossFileLookup>,
 ) -> Vec<Diagnostic> {
-    use crate::model::file_analysis::IndexState;
+    use crate::model::file_analysis::{HandlerOwner, IndexState, RailNames};
     // Whether absence is meaningful is the INDEX's answer about THIS
     // language, never a caller's claim: a store that swept nothing is
     // warming, and the lanes that report a name missing stay silent until
@@ -801,9 +801,97 @@ pub fn pack_symbol_diagnostics(
         .chain(analysis.call_arity_findings())
         .map(render_finding)
         .collect();
+    let pack = &analysis.pack;
     out.extend(analysis.deprecated_use_findings(&facts).into_iter().map(render_finding));
     out.extend(analysis.liveness_findings(&facts).into_iter().map(render_finding));
     out.extend(analysis.unused_import_findings(&facts).into_iter().map(render_finding));
+
+    // ---- undefined rail name: a use on a named rail (`route('home')`)
+    // that no definition on that rail answers, here or in the settled
+    // index. Names a framework synthesizes (`Route::resource`) have no
+    // definition token, so the lane warns rather than errors.
+    if index_settled {
+        if let Some(idx) = idx {
+            // How the lane phrases a miss, and which rails answer with a
+            // hint: the rail documents' own declarations, reached by
+            // language id because they are the same for every file of it.
+            let rails = crate::build::language_driver::LanguageRegistry::rails(&analysis.language);
+            for r in analysis.refs() {
+                if !matches!(r.kind, RefKind::DispatchCall { .. }) {
+                    continue;
+                }
+                let Some(owner @ HandlerOwner::Rail(rail)) = r.handler_owner() else { continue };
+                // what this rail's names denote: the document's declaration
+                // (`docs/adr/laravel-rails.md` §Identity)
+                let names = owner.names_are(pack);
+                let class_named = names == RailNames::Classes;
+                let name = r.target_name.as_str();
+                // Silence: a name the lane cannot answer for. A name ending
+                // in one of the rail's OWN separators is a prefix the caller
+                // concatenates onto (`view('auth.parts.' . $kind)`), and
+                // which separators a rail's names use is the document's word
+                // — a plugin dir that adds a rail says it there; a `::` names
+                // a package-namespaced rail (`errors::minimal`) whose
+                // provider file lives outside the path rails; a class-keyed
+                // emission with no dispatcher (`Theme::dispatch(X::CONST)`)
+                // is an event the overlay could not name; a `*` is a
+                // wildcard (`->can('*')`), never one name.
+                let member_qualified = analysis
+                    .names()
+                    .member_sep()
+                    .is_some_and(|sep| name.contains(sep));
+                let prefix_of_a_name = rails
+                    .seps
+                    .iter()
+                    .any(|(r, sep)| r == rail && !sep.is_empty() && name.ends_with(sep.as_str()));
+                if prefix_of_a_name || member_qualified || name.contains('*') {
+                    continue;
+                }
+                if let (true, RefKind::DispatchCall { dispatcher }) = (class_named, &r.kind) {
+                    if dispatcher.is_empty() {
+                        continue;
+                    }
+                }
+                if analysis.rail_names(rail).any(|n| n == name) {
+                    continue;
+                }
+                if !crate::index::resolve::handler_definitions(owner, names, name, idx).is_empty() {
+                    continue;
+                }
+                // a class-keyed rail's miss is a dead emission — a hint
+                let severity = if class_named || rails.hints.iter().any(|h| h == rail) {
+                    DiagnosticSeverity::HINT
+                } else {
+                    DiagnosticSeverity::WARNING
+                };
+                let label = rails
+                    .labels
+                    .iter()
+                    .find(|(r, _)| r == rail)
+                    .map(|(_, l)| l.clone())
+                    .unwrap_or_else(|| format!("Undefined {rail}"));
+                // The code the rail's own document declares; a rail that
+                // declares none reports under the one generic code, so the
+                // set a client can filter on stays closed.
+                let code = rails
+                    .codes
+                    .iter()
+                    .find(|(r, _)| r == rail)
+                    .map(|(_, c)| c.as_str())
+                    .unwrap_or(codes::UNDEFINED_RAIL_NAME);
+                out.push(Diagnostic {
+                    range: span_to_range(r.span),
+                    severity: Some(severity),
+                    code: Some(NumberOrString::String(code.to_string())),
+                    source: Some("perl-lsp".to_string()),
+                    message: format!("{label} '{name}'."),
+                    data: Some(serde_json::json!({ "rail": rail })),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
     out.extend(analysis.undefined_type_findings(&facts).into_iter().map(render_finding));
     // The contract's own declarator rides the diagnostic so the quick-fix
     // needs no resolution: a closed declaring file is read from disk HERE,
