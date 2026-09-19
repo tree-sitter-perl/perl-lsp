@@ -41,6 +41,28 @@
         ]
       },
       "status": "gold"
+    },
+    {
+      "id": "php-lar-compl-route-names-empty-prefix",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`route('|nowhere')` — the cursor at the string's start, an empty PREFIX — offers every route name.",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 30,
+      "col": 22,
+      "expect": {
+        "all": [
+          "home",
+          "posts.show",
+          "posts.update"
+        ],
+        "none": [
+          "posts.index"
+        ]
+      },
+      "status": "gold"
     }
   ]
 }

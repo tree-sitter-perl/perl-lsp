@@ -181,6 +181,24 @@
         "none": []
       },
       "status": "gold"
+    },
+    {
+      "id": "php-lar-def-route-name",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`redirect()->route('posts.show')` lands on the `->name('posts.show')` string in routes/web.php.",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 23,
+      "col": 34,
+      "expect": {
+        "all": [
+          "web.php:7:69"
+        ],
+        "none": []
+      },
+      "status": "gold"
     }
   ]
 }
