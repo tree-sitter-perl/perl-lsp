@@ -434,7 +434,7 @@ pub(super) fn matcher_view(
     let needs_whole = match &target.kind {
         TargetKind::Handler { .. } => !view.provisional_dispatches.is_empty(),
         TargetKind::Sub { .. } | TargetKind::Method { .. } => refs_keyed(&view, &target.name).any(|r| {
-            matches!(r.kind, RefKind::MethodCall { .. })
+            r.member_site().is_some()
                 && r.unqualified_target_name(view.names()) == target.name
                 && !r.match_verdict_baked()
         }),
