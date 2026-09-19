@@ -1,6 +1,6 @@
 //! C/C++'s pack.
 
-use crate::build::query_extract::{LangPack, PeelSpec};
+use crate::build::query_extract::LangPack;
 use crate::model::file_analysis::{canonical_template_spelling, InferredType, NameSpellings, PackSpellings};
 
 /// C/C++ writes and displays nothing of its own: the engine's type tags are
@@ -60,32 +60,10 @@ pub fn cpp_pack() -> LangPack {
                 _ => None,
             }
         },
-        // C/C++ methods read members with an implicit `this->`.
-        implicit_this_members: true,
         brace_scoped_members: true,
         bundled_builtin_types: &[],
         trigger_chars: &[".", ">", ":"],
-        // `field_identifier` only ever names a struct/class member (the
-        // grammar's own distinction from a plain `identifier` local), so
-        // "def.field" matches the plain (non-pointer) field pattern above.
-        // Shared with the member-block synth lane (rule #10).
         // DerefKind placeholder — record_stack false, so it's never read.
-        recv_peel: PeelSpec {
-            wrappers: &[
-                ("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer),
-                ("pointer_expression", crate::model::file_analysis::DerefKind::Pointer),
-            ],
-            annot_kinds: &[],
-            leaf_to_def: &[],
-            record_stack: false,
-        },
-        simple_var_kinds: &["identifier"],
-        // a templated qualifier (`Buf<T>::grow`) owns by its BASE class name
-        member_kinds: &["field_expression"],
-        skip_kinds: &["string_literal", "char_literal", "raw_string_literal", "comment"],
-        call_kinds: &["call_expression"],
-        domain_compare_kinds: &["binary_expression"],
-        domain_compare_ops: &["==", "!="],
     }
 }
 

@@ -1,6 +1,6 @@
 //! Python's pack.
 
-use crate::build::query_extract::{LangPack, PeelSpec};
+use crate::build::query_extract::LangPack;
 use crate::model::file_analysis::{InferredType, NameSpellings, PackSpellings};
 
 /// Python writes and displays nothing of its own: the engine's type tags are
@@ -40,22 +40,9 @@ pub fn python_pack() -> LangPack {
         import_module: |_, _| None,
         // A guard's type token is a class name verbatim (`isinstance(x, Foo)`).
         narrow_type: |ty| Some(InferredType::ClassName(ty.to_string())),
-        implicit_this_members: false,
         brace_scoped_members: false,
         bundled_builtin_types: &[],
         trigger_chars: &["."],
-        recv_peel: PeelSpec {
-            wrappers: &[("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer)],
-            annot_kinds: &[],
-            leaf_to_def: &[],
-            record_stack: false,
-        },
-        simple_var_kinds: &["identifier"],
-        member_kinds: &["attribute"],
-        skip_kinds: &["string", "string_content", "comment", "concatenated_string"],
-        call_kinds: &["call"],
-        domain_compare_kinds: &[],
-        domain_compare_ops: &[],
     }
 }
 
