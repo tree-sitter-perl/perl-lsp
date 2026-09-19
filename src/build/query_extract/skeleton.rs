@@ -271,6 +271,12 @@ pub struct SkeletonAnalysis {
     /// fuel) is cpp-specific and lives in `language_driver.rs`'s post-
     /// extraction pipeline (`emit_return_fuel`).
     pub return_sites: Vec<(crate::model::file_analysis::ScopeId, Span)>,
+    /// Scopes in which a call to one of the pack's dynamic-argument /
+    /// dynamic-variable marker names appeared, with the flag that call
+    /// declares. The arity join walks each scope up to its owning callable
+    /// (`Scope::owner`) and stamps the flag there, so the callable STATES the
+    /// property and no consumer joins call spans to callable spans.
+    pub dynamic_markers: Vec<(crate::model::file_analysis::ScopeId, SymbolFlags)>,
     /// Callable parameter arities and the parameters themselves, keyed by
     /// parameter_list span (`@arity.sig`). Associated to def symbols by span
     /// containment in `into_file_analysis`, which lands the parameters on the
@@ -778,6 +784,24 @@ impl SkeletonAnalysis {
                 arity: s.arity,
             })
             .collect();
+        // A callable that reads its arguments or materializes its variables
+        // dynamically says so on its own symbol. The marker call recorded a
+        // SCOPE; the first scope up its chain that owns a callable is the one
+        // the property belongs to (`Scope::owner`, filled in the arity join
+        // above) — a call at file level owns nothing and stamps nothing.
+        for (scope, flag) in std::mem::take(&mut self.dynamic_markers) {
+            let mut at = Some(scope);
+            while let Some(id) = at {
+                let Some(sc) = self.scopes.get(id.0 as usize) else { break };
+                if let Some(owner) = sc.owner {
+                    if let Some(sym) = symbols.get_mut(owner.0 as usize) {
+                        sym.flags.insert(flag);
+                    }
+                    break;
+                }
+                at = sc.parent;
+            }
+        }
         // Tag a typedef-struct's members with its name. `typedef struct
         // {...} T;` names the type AFTER its body, so @context.class can't
         // reach the members (already walked). For each class, members

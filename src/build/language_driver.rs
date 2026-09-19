@@ -1319,6 +1319,8 @@ fn remap_spans(
         // name-keyed, ordered by byte position pre-remap — no spans to fix.
         template_params: _,
         return_sites,
+        // Scope-keyed, no spans to remap.
+        dynamic_markers: _,
         runtime_bound_reads,
         param_sigs,
         // Populated later (enrich_skeleton) already in original coords — no remap.

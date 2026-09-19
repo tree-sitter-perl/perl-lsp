@@ -950,3 +950,55 @@ fn exactly_one_fallback_driver() {
     assert_eq!(n, 1, "exactly one driver claims unclaimed files");
     assert!(reg.fallback().claims_unclaimed());
 }
+
+/// An OVERLAY declaring two ordinary function names as dynamic-surface
+/// markers. No bundled pack declares any (cpp has no such surface), so the
+/// marker → flag path needs a declarer to have a subject at all — and a
+/// document is how a third party declares one.
+#[cfg(feature = "cpp")]
+const MARKER_OVERLAY: &str = "((call_expression function: (identifier) @call.dynamic_args)
+ (#eq? @call.dynamic_args \"read_args\"))
+((call_expression function: (identifier) @call.dynamic_vars)
+ (#eq? @call.dynamic_vars \"make_vars\"))
+";
+
+#[cfg(feature = "cpp")]
+fn marker_pack() -> crate::build::query_extract::LangPack {
+    crate::build::query_extract::LangPack {
+        bundled_overlays: &[("dynamic-markers.scm", MARKER_OVERLAY)],
+        ..crate::build::query_extract::cpp_pack()
+    }
+}
+
+#[cfg(feature = "cpp")]
+#[test]
+fn dynamic_markers_land_on_the_enclosing_callable() {
+    use crate::model::file_analysis::SymbolFlags;
+    let driver = PackDriver { pack: marker_pack, ..cpp_driver() };
+    let src = "int read_args();\nint make_vars();\nint g = read_args();\n\
+               void wide() { read_args(); }\nvoid narrow() { if (1) { make_vars(); } }\n\
+               void plain() { }\n";
+    let fa = driver.analyze(src);
+    let flags = |name: &str| {
+        fa.symbols()
+            .iter()
+            .find(|s| s.name == name && s.span.start.row >= 3)
+            .unwrap_or_else(|| panic!("{name}: {:?}", fa.symbols().iter().map(|s| &s.name).collect::<Vec<_>>()))
+            .flags
+    };
+    assert!(flags("wide").contains(SymbolFlags::DYNAMIC_ARGS));
+    assert!(!flags("wide").contains(SymbolFlags::DYNAMIC_VARS));
+    // Through a nested block: the scope chain, not the immediate scope.
+    assert!(flags("narrow").contains(SymbolFlags::DYNAMIC_VARS));
+    assert!(!flags("narrow").contains(SymbolFlags::DYNAMIC_ARGS));
+    assert!(!flags("plain").intersects(SymbolFlags::DYNAMIC_ARGS | SymbolFlags::DYNAMIC_VARS));
+    // The file-scope initializer's call owns no callable and stamps nothing.
+    let stamped: Vec<&str> = fa
+        .symbols()
+        .iter()
+        .filter(|s| s.flags.intersects(SymbolFlags::DYNAMIC_ARGS | SymbolFlags::DYNAMIC_VARS))
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(stamped, vec!["wide", "narrow"], "only the two containing callables");
+}
+
