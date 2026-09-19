@@ -3318,6 +3318,53 @@ function get_things(): int {
 }
 
 #[test]
+fn php_reassignment_rebinds_one_variable_identity() {
+    // The rename hazard: PHP vars are FUNCTION-scoped —
+    // an assignment in an `if` block declares for the whole function
+    // and re-assignment REBINDS. One declaration per (name, function),
+    // re-anchored to the sub scope; later assignments are write refs.
+    let src = "\
+<?php
+function orderBooks(bool $flip): string {
+    $order = 'name';
+    if ($flip) {
+        $order = 'desc';
+    } else {
+        $order = 'asc';
+    }
+    echo $order;
+    return $order;
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::{RefKind, SymKind};
+    let decls: Vec<_> = fa
+        .symbols()
+        .iter()
+        .filter(|s| matches!(s.kind, SymKind::Variable) && s.name == "$order")
+        .collect();
+    assert_eq!(decls.len(), 1, "one identity per function: {decls:?}");
+    let writes = fa
+        .refs()
+        .iter()
+        .filter(|r| {
+            matches!(r.kind, RefKind::Variable)
+                && r.target_name == "$order"
+                && matches!(r.access, crate::model::file_analysis::AccessKind::Write)
+        })
+        .count();
+    assert_eq!(writes, 2, "each re-assignment is a write ref");
+    // and a use in a DIFFERENT block resolves to the one declaration
+    let reads_bound = fa.refs().iter().any(|r| {
+        matches!(r.kind, RefKind::Variable)
+            && r.target_name == "$order"
+            && r.span.start.row == 8
+            && r.resolved_symbol().is_some()
+    });
+    assert!(reads_bound, "the echo use binds the function-scoped decl");
+}
+
+#[test]
 fn php_method_docblock_synthesizes_class_methods() {
     // `@method` rows on a CLASS docblock are Laravel's facade surface
     // (and Eloquent's `__call` documentation): each becomes a real
