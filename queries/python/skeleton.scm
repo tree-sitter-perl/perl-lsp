@@ -88,3 +88,12 @@
     function: (identifier) @narrow.guard
     arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
   consequence: (block) @scope)
+
+; ---- cursor-time shapes ----
+; Where a cursor may not splice: a string or a comment is not code.
+(string) @skip
+(string_content) @skip
+(concatenated_string) @skip
+(comment) @skip
+; A transparent receiver wrapper denotes the same value as its operand.
+(parenthesized_expression) @recv.peel
