@@ -877,6 +877,8 @@ fn inject_member_blocks(
                 arity: None,
                 params: Vec::new(),
                 qualifier_owned: false,
+                doc: None,
+                deprecation: None,
                 flags: Default::default(),
             });
             // The role member emits the SAME `TypeName` edge an expanded field
@@ -1027,8 +1029,10 @@ fn remap_spans(
         rail_name_seps: _,
         class_named_rails: _,
         preamble_end: _,
+        doc_mentions: _,
         flow_edges,
         moved_from,
+        doc_disagreements,
         control_regions,
         param_regions,
         probe_regions,
@@ -1073,6 +1077,8 @@ fn remap_spans(
             // remapped on the `param_sigs` rows below.
             params: _,
             qualifier_owned: _,
+            doc: _,
+            deprecation: _,
             flags: _,
             // a symbol id, not a position
             declared_with: _,
@@ -1191,6 +1197,9 @@ fn remap_spans(
     }
     for (_, span, _) in moved_from.iter_mut() {
         *span = rspan(*span);
+    }
+    for d in doc_disagreements.iter_mut() {
+        d.span = rspan(d.span);
     }
     for span in control_regions.iter_mut() {
         *span = rspan(*span);

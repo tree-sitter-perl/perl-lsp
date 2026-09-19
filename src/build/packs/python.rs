@@ -31,6 +31,8 @@ pub fn python_pack() -> LangPack {
         declared_return: |t| {
             python_annot_type(t).map(crate::model::witnesses::ReturnExpr::Concrete)
         },
+        doc_types: |_, _| vec![],
+        doc_uses_method_tags: &[],
         module_paths: |m| {
             let base = m.replace('.', "/");
             vec![format!("{base}.py"), format!("{base}/__init__.py")]
