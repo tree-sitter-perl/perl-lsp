@@ -636,6 +636,72 @@ pub fn overlay_capture_findings(captures: &[&str]) -> Vec<String> {
     out
 }
 
+/// Captures a compiled query will SILENTLY drop: tree-sitter stores at
+/// most three per query step (`MAX_STEP_CAPTURE_COUNT`), and
+/// `query_step__add_capture` no-ops past the third — the document
+/// compiles, `capture_names()` still lists the name, and the capture
+/// never fires. Counted over the document SOURCE because the compiled
+/// query exposes no per-step capture list.
+///
+/// A run of four or more `@name` tokens in a row is one node's capture
+/// list; anchor the extra on the pattern root or a sibling node instead.
+pub fn dropped_step_capture_findings(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut run: Vec<&str> = Vec::new();
+    let bytes = source.as_bytes();
+    let mut i = 0usize;
+    let mut flush = |run: &mut Vec<&str>| {
+        if run.len() > 3 {
+            out.push(format!(
+                "a query step holds at most three captures; @{} and the rest of \
+                 [{}] are dropped silently (the document still compiles and the \
+                 capture never fires) — anchor the extra capture on the pattern \
+                 root or a sibling node",
+                run[3],
+                run.join(" @")
+            ));
+        }
+        run.clear();
+    };
+    while i < bytes.len() {
+        match bytes[i] {
+            b';' => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                flush(&mut run);
+            }
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+                flush(&mut run);
+            }
+            b'@' => {
+                let start = i + 1;
+                let mut end = start;
+                while end < bytes.len()
+                    && (bytes[end].is_ascii_alphanumeric()
+                        || matches!(bytes[end], b'.' | b'_' | b'-'))
+                {
+                    end += 1;
+                }
+                run.push(&source[start..end]);
+                i = end;
+            }
+            c if c.is_ascii_whitespace() => i += 1,
+            _ => {
+                flush(&mut run);
+                i += 1;
+            }
+        }
+    }
+    flush(&mut run);
+    out
+}
+
 /// The pack's effective query source: the bundled query plus every
 /// surviving discovered overlay, assembled once per distinct overlay set
 /// and leaked (`cached_query` then compiles it once by content).
