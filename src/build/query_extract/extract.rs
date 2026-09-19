@@ -1384,6 +1384,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
 
     // ---- the state machine: scope stack + sticky contexts ----
     let mut out = SkeletonAnalysis::default();
+    // One constructor call per anonymous-class keyword: the def pattern
+    // and each parent pattern share the token.
+    let mut anon_ctor_sites: std::collections::HashSet<(usize, usize)> =
+        std::collections::HashSet::new();
     out.use_aliases = out_use_aliases;
     // Group rows land ahead of the flat rows the main loop pushes in
     // document order; every reader of these lanes is span- or map-keyed,
@@ -1855,6 +1859,34 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         key_span: Span { start: e.start, end: e.end },
                         elem_span: *elem,
                     });
+                }
+            }
+            cap if cap.ends_with(".anchor") => {
+                // The anchor of an anonymous class is its construction site:
+                // `new class(...)` invokes the synthesized identity's
+                // constructor, so the ctor gets the MethodCall a `new
+                // self()` mints — fan-in, goto-def and references on
+                // `__construct` see it like any `new Foo()`.
+                if let (Some(ctor), Some(name)) =
+                    (ctor_name, defaulted_matches.get(&e.match_id))
+                {
+                    if anon_ctor_sites.insert((e.start_byte, e.end_byte)) {
+                        let span = Span { start: e.start, end: e.end };
+                        out.refs.push(SkelRef {
+                            via: None,
+                            kind: "member".to_string(),
+                            name: ctor.to_string(),
+                            start: e.start,
+                            end: e.end,
+                            scope: cur_scope,
+                            invocant: Some((span, name.clone())),
+                            member_op: None,
+                            arg_count: None,
+                            value_read: false,
+                            named_by_string: false,
+                            flags: crate::model::file_analysis::RefFlags::CONSTRUCTS,
+                        });
+                    }
                 }
             }
             cap if cap.starts_with("def.") && !cap.ends_with(".name") && !cap.ends_with(".anchor") => {
