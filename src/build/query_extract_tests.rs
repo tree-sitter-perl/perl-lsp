@@ -3703,6 +3703,61 @@ fn php_data_provider_docblock_mints_member_ref_on_name_token() {
     assert_eq!(r.invocant.as_ref().map(|(_, t)| t.as_str()), Some("App\\Tests\\T"));
 }
 
+#[test]
+fn php_destructuring_slots_bind_positionally() {
+    use crate::model::file_analysis::Extraction;
+    // `[$a, $b] = …` / `list(...)` / `[, $b]` bind each scalar slot to its
+    // POSITION (top-level commas before it); a keyed list declares its
+    // vars but binds none of them positionally; foreach list slots index
+    // off the collection's element (the list span carries the Element hop).
+    let src = "<?php\n[$a, $b] = f();\nlist($c, $d) = g();\n[, $e] = h();\n['k' => $v] = k();\nforeach ($rows as [$x, $y]) {}\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let pos = |name: &str| -> Option<Extraction> {
+        skel.flow_edges
+            .iter()
+            .find(|f| f.target_name == name)
+            .map(|f| f.extraction.clone())
+    };
+    assert_eq!(pos("$a"), Some(Extraction::Positional(0)));
+    assert_eq!(pos("$b"), Some(Extraction::Positional(1)));
+    assert_eq!(pos("$c"), Some(Extraction::Positional(0)));
+    assert_eq!(pos("$d"), Some(Extraction::Positional(1)));
+    assert_eq!(pos("$e"), Some(Extraction::Positional(1)), "skipped slot counts");
+    assert_eq!(pos("$v"), Some(Extraction::KeyOf("k".into())), "keyed list binds by key, never by position");
+    assert!(skel.symbols.iter().any(|s| s.kind == "var" && s.name == "$v"), "…but still declares");
+    assert_eq!(pos("$y"), Some(Extraction::Positional(1)), "foreach list slot");
+    let (_, y_src) = skel
+        .flow_edges
+        .iter()
+        .find(|f| f.target_name == "$y")
+        .map(|f| (f.target_name.clone(), f.source))
+        .unwrap();
+    assert!(
+        skel.witnesses.iter().any(|w| matches!(
+            (&w.attachment, &w.payload),
+            (crate::model::witnesses::WitnessAttachment::Expr(sp),
+             crate::model::witnesses::WitnessPayload::Projected { step: crate::model::witnesses::ProjectionStep::Element, .. })
+            if *sp == y_src
+        )),
+        "the list span peels the collection's Element"
+    );
+}
+
+#[test]
+fn php_keyed_destructuring_binds_through_hash_keys() {
+    use crate::model::file_analysis::Extraction;
+    let src = "<?php\n['advisories' => $adv, \"count\" => $n] = f();\nforeach ($rows as ['k' => $v]) {}\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let ext = |name: &str| skel.flow_edges.iter().find(|f| f.target_name == name).map(|f| f.extraction.clone());
+    assert_eq!(ext("$adv"), Some(Extraction::KeyOf("advisories".into())));
+    assert_eq!(ext("$n"), Some(Extraction::KeyOf("count".into())));
+    assert_eq!(ext("$v"), Some(Extraction::KeyOf("k".into())), "foreach keyed list");
+}
+
 /// A union spelling is `Unknown` — the value this lattice cannot hold — at
 /// the top level only: `A|null` is its one arm, a `|` nested inside a
 /// generic is the element's business (and must not re-read the same
