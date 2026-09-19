@@ -201,7 +201,11 @@ fn heatmap_symbol_row(
         // for every language — a constructor whose class nothing names is a
         // candidate whatever spells it.
         Some("class-referenced")
-    } else if !native {
+    } else if !native || sym.flags.contains(file_analysis::SymbolFlags::SYNTHESIZED) {
+        // Not user-written: a plugin minted it (Moo accessors, routes, DBIC
+        // rels) or the LANGUAGE gives it (an enum's `->value`). Either way
+        // the caller is machinery the static graph does not model, and no
+        // source edit could reference it into existence.
         Some("framework-synthesized")
     } else if matches!(sym.kind, SymKind::Sub | SymKind::Method)
         && framework_entry_claims(analysis, sym, routing_idx)
@@ -214,6 +218,13 @@ fn heatmap_symbol_row(
         // `handle`. The rules are DATA; the evaluator never compares names
         // or families itself.
         Some("framework-entry")
+    } else if analysis.rail_handler_twin(sym).is_some() {
+        // A path rail's handler stands ON this declaration (a policy method
+        // IS an ability, `docs/adr/laravel-rails.md`), and the rail's
+        // dispatch sites name the handler, never the method — so no call
+        // site is the expected state. The relation is the fact the mint
+        // recorded; nothing here asks which rail.
+        Some("rail-handler")
     } else if matches!(sym.kind, SymKind::Package | SymKind::Class | SymKind::Module) {
         Some("package-implicit-use")
     } else if has_dynamic_dispatch
