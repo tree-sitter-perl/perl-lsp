@@ -18,13 +18,9 @@ pub fn perl_pack() -> LangPack {
         bundled_entry_markers: &[],
         bundled_rail_docs: &[],
         names: crate::model::conventions::PERL_SPELLINGS,
-        shape_name: |kind, raw| match kind {
-            // The builder stores variable symbols WITH sigil; varname
-            // captures are sigil-less. Predicate re-attaches nothing —
-            // def.var captures the whole `(scalar)` node so raw text
-            // already carries the sigil.
-            _ => raw.to_string(),
-        },
+        // `def.var` captures the whole `(scalar)` node, so raw text already
+        // carries the sigil the builder stores: no shaping to do.
+        shape_name: |_, raw| raw.to_string(),
         default_name: |kind, _, _| match kind {
             "anon" => Some("(anon)".to_string()),
             _ => None,
@@ -38,7 +34,11 @@ pub fn perl_pack() -> LangPack {
         narrow_type: |_| None,
         brace_scoped_members: false,
         bundled_builtin_types: &[],
-        trigger_chars: &["$", "@", "%", ">", ":", "{"],
         enum_members: &[],
+        // Empty because nothing reads them: this pack is not registered, so
+        // Perl's real trigger characters come from `PerlDriver::caps`. A
+        // value here would be a second answer no consumer asks for — and it
+        // would spend a rule #15 allowlist entry to say so.
+        trigger_chars: &[],
     }
 }
