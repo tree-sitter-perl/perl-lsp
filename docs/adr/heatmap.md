@@ -66,6 +66,7 @@ these hold (checked most-specific first):
 | `constructor` | conventional constructor (`new`) — frameworks instantiate it |
 | `class-referenced` | a pack constructor whose CLASS is referenced somewhere (a type hint, `Foo::class`, a `use` row) while nothing `new`s it — a DI container or a factory instantiates it. The class's own `references()` projection answers, minted at its declaration like every other count here |
 | `framework-synthesized` | symbol is plugin-minted (Moo accessors, routes, DBIC rels), not user-written; the framework calls it through machinery the static graph doesn't model |
+| `framework-entry` | a declared entry rule claims the symbol — an annotation name, a method name or prefix, and an optional leaf-keyed `when_isa` ancestry gate, ANDed across the rule's present conditions and ORed across the rules. ONE lane for every flavour of "something outside the source graph invokes this": the C ABI entering `main` (`cpp/cpp.entry.json`), the php engine calling `__toString` or an SPL contract method (`php/php.entry.json`), a runner calling `test*` in a TestCase descendant, a queued job's `handle`. The rules are DATA (`<lang>/*.entry.json` and `<lang>/frameworks/*.entry.json` bundled per pack, plus `<plugin-dir>/<name>/entry.json`); the evaluator compares nothing but the symbol's own attributes, name and ancestry |
 | `package-implicit-use` | packages/classes/modules — reachable via `require`, app entrypoints, dynamic class strings; too many invisible vectors to flag |
 | `dynamic-dispatch` | a **method-shaped** sub (declared in a non-`main` package) when the workspace contains **any** `$obj->$method` dispatch — see below |
 
@@ -98,6 +99,14 @@ graph cannot see:
 - **External callers** — anything outside the indexed workspace (and, without
   `--include-deps`, outside open+workspace files). Exported symbols are guarded
   for exactly this reason.
+- **Declared framework entries over-shield by name** — an entry rule's
+  `attributes` condition carries no ancestry gate, so ANY symbol bearing an
+  annotation *named* `Test` or `Route` is shielded, whichever library minted
+  that attribute; and the `when_isa` gate is keyed on the base's LEAF, so a
+  project's own `TestCase` in an unrelated namespace answers it. Both widen
+  toward reachable, which is the direction a shield must err — an entry
+  document is a claim that a runner calls these, and the cost of believing
+  it is a dead helper left in the queue's shadow, not a live method flagged.
 - **Container / factory instantiation** — a class built by a DI container, a
   service locator, or a `new $class` from configuration has no `new` site the
   graph can see. The `class-referenced` guard covers the common case (the class
@@ -133,7 +142,7 @@ C/C++ dead-code is more over-approximate than Perl's — a zero-fan-in symbol ha
 more invisible reachability vectors. Two are cheaply shielded:
 
 - **`main`** — the runtime enters through it over the ABI, never a source call
-  site (guard `entry-point`).
+  site (guard `framework-entry`, from `cpp/cpp.entry.json`).
 - **Address-taken / used-as-value functions** — `&fn` or a bare function-pointer
   decay is a *reference* (not a call), so it lands in `fan_in` and the symbol is
   never a candidate. No special guard: the reference graph already carries it.
@@ -200,6 +209,16 @@ projections), never a parallel walk over raw refs.
 The dynamic-dispatch signal rides `FileAnalysis.dynamic_dispatch_sites` (`u32`,
 `#[serde(default)]` on the bincode blob), populated in
 `Builder::visit_method_call` when the method name is a scalar.
+
+**The framework-entry isa gate is leaf-keyed.** `framework_entry_claims`
+resolves an entry document's `when_isa` through `class_isa_leaf`, so
+`"when_isa": "TestCase"` claims a `TestCase` in any namespace — an
+over-approximation against the project's own rule that a class's identity is
+its fully-qualified name. It stands because this gate's only effect is to keep
+a symbol OFF the dead-code queue: a claim that is too wide loses a candidate,
+a claim that is too narrow accuses live code. A document can write the FQN and
+the leaf match still holds; there is no spelling that narrows the gate to one
+namespace, and a rule that needs one is the reason to add it.
 
 **Known references-side asymmetry**: a Moo `rwp`/`writer` synthesized method
 shares the attr's declaration token, and the decl-side group answer does not
