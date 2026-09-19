@@ -3326,6 +3326,98 @@ class Logger {
     assert_eq!(r, Some(InferredType::Numeric), "static factory chain: {r:?}");
 }
 
+#[cfg(feature = "php")]
+#[test]
+fn php_new_sites_are_constructor_references_but_never_rename_targets() {
+    // A construction site is two facts on one token: the token names the
+    // CLASS, and the site calls that class's constructor. References on
+    // `__construct` therefore see every `new Client(` — without them a
+    // constructor answered 1 (itself) against 304 call sites and landed in
+    // the heatmap's dead queue — while the ctor's name is the LANGUAGE's,
+    // so no rename rewrites it.
+    let src = "\
+<?php
+class Client {
+    public function __construct(string $base) {
+    }
+}
+$a = new Client('x');
+$b = new Client('y');
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::RefKind;
+    // the class token of `new Client('x')` (row 5, col 9)
+    let at = tree_sitter::Point { row: 5, column: 9 };
+    let class_ref = fa.ref_at(at).expect("the token answers as a class");
+    assert_eq!(class_ref.target_name, "Client");
+    assert!(matches!(class_ref.kind, RefKind::PackageRef), "{:?}", class_ref.kind);
+    let call = fa.call_ref_at_start(at).expect("and as a constructor call");
+    assert_eq!(call.target_name, "__construct");
+    assert!(matches!(call.kind, RefKind::MethodCall { .. }), "{:?}", call.kind);
+    assert_eq!(call.arg_count, Some(1), "the written argument list is the ctor's");
+
+    // cursor on the __construct decl (row 2, col 21)
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 2, column: 21 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("__construct decl must mint a target: {other:?}"),
+    };
+    assert_eq!(target.ctor_of.as_deref(), Some("Client"), "ctor marker");
+    assert!(target.rename_is_language_owned(), "nothing renames `__construct`");
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/ctor/t.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let new_sites: Vec<_> = locs.iter().filter(|l| l.span.start.row >= 5).collect();
+    assert_eq!(new_sites.len(), 2, "both new-sites are references: {locs:?}");
+}
+
+/// A class that declares no constructor still constructs: the class token
+/// answers as the class, the member arm answers the construction sites when
+/// references start from the class, and the arity lane — which has no
+/// declaration to compare against — stays silent whatever the call passes.
+#[test]
+fn php_default_constructor_sites_reference_the_class_and_never_mismatch_arity() {
+    let src = "\
+<?php
+class Bare {
+    public function go(): int { return 1; }
+}
+$a = new Bare();
+$b = new Bare('x', 2);
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::RefKind;
+    for row in [4usize, 5] {
+        let at = tree_sitter::Point { row, column: 9 };
+        let class_ref = fa.ref_at(at).unwrap_or_else(|| panic!("row {row} names the class"));
+        assert_eq!(class_ref.target_name, "Bare");
+        assert!(matches!(class_ref.kind, RefKind::PackageRef), "{:?}", class_ref.kind);
+        let call = fa
+            .call_ref_at_start(at)
+            .unwrap_or_else(|| panic!("row {row} calls the constructor"));
+        assert_eq!(call.target_name, "__construct");
+    }
+    // no `__construct` symbol exists, so no declared arity to mismatch
+    assert!(
+        !fa.symbols().iter().any(|s| s.name == "__construct"),
+        "the default constructor is declared by nothing"
+    );
+    let diags = crate::lsp::symbols::pack_symbol_diagnostics(&fa, None);
+    assert!(
+        !diags.iter().any(|d| matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(c)) if c == "arity-mismatch")),
+        "the arity lane stays silent for a default constructor: {diags:?}"
+    );
+}
+
 #[test]
 fn php_global_docblock_types_the_binding() {
     // WordPress's typing convention: `@global wpdb $wpdb` above the
