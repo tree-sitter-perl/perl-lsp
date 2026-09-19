@@ -173,3 +173,166 @@
 (enum_case
   name: (name) @def.enumerator.name) @def.enumerator
 
+; ---- callables ----
+; @rettype carries the declared return type → method-return chaining
+; through PackageSymbol, same chase Perl and C++ use.
+(function_definition
+  attributes: (attribute_list
+    (attribute_group
+      (attribute [(name) (qualified_name (name))] @sym.attr)+)+)?
+  name: (name) @def.sub.name
+  return_type: (_)? @rettype) @def.sub
+(method_declaration
+  attributes: (attribute_list
+    (attribute_group
+      (attribute [(name) (qualified_name (name))] @sym.attr)+)+)?
+  name: (name) @def.method.name
+  return_type: (_)? @rettype) @def.method
+
+; sub-body content is shielded from outline + class-content (a method
+; local carries the sticky class package; the Sub boundary marks it local).
+(function_definition) @scope.sub
+(method_declaration) @scope.sub
+(anonymous_function) @def.anon @scope.sub
+(arrow_function) @def.anon @scope.sub
+
+; declared-parameter arity: overload-family ranking fuel (a call's written
+; arg count floats the fitting signature above a same-named stub). WHICH
+; children are parameters, and what each does to the count, the document
+; states: @arity.param must be written, @arity.param.optional carries a
+; default, @arity.param.variadic absorbs the rest and makes the signature
+; variadic. The parts a parameter carries ride their own captures —
+; @arity.param.name is the token a by-reference argument binds through,
+; @arity.param.byref marks the parameter that aliases its caller's variable,
+; @arity.param.default and @arity.param.type travel as source text.
+(formal_parameters) @arity.sig
+(formal_parameters (simple_parameter !default_value) @arity.param)
+(formal_parameters (simple_parameter default_value: (_)) @arity.param.optional)
+(formal_parameters (property_promotion_parameter !default_value) @arity.param)
+(formal_parameters (property_promotion_parameter default_value: (_)) @arity.param.optional)
+(formal_parameters (variadic_parameter) @arity.param.variadic)
+(formal_parameters (simple_parameter reference_modifier: (_)) @arity.param.byref)
+(formal_parameters (property_promotion_parameter name: (by_ref)) @arity.param.byref)
+(formal_parameters (_ name: (variable_name) @arity.param.name))
+(formal_parameters (_ name: (by_ref (variable_name) @arity.param.name)))
+(formal_parameters (_ default_value: (_) @arity.param.default))
+(formal_parameters (_ type: (_) @arity.param.type))
+
+; docblocks: the pack's `doc_types` parses `@return`/`@param`/`@var` out of
+; the comment. The bare capture feeds the mention scan (a name spelled only
+; in a docblock is a used import); the JOIN is the anchored patterns below.
+; Declared types win — the doc lane fills only what the syntax left untyped.
+(comment) @doc.comment
+
+; the def a docblock documents is its NEXT SIBLING, stated as one match so
+; the pair meets in the query instead of by row arithmetic — an attribute
+; line between the two (`/** */ #[Attr] protected array $x;`) joins like any
+; other. @doc.subject lands on exactly the node its `@def.*` twin does, so
+; the two meet at one point and nothing downstream measures a distance.
+((comment) @doc.comment . (function_definition) @doc.subject
+  (#match? @doc.comment "^/\\*\\*"))
+((comment) @doc.comment . (method_declaration) @doc.subject
+  (#match? @doc.comment "^/\\*\\*"))
+((comment) @doc.comment . (class_declaration) @doc.subject
+  (#match? @doc.comment "^/\\*\\*"))
+((comment) @doc.comment . (interface_declaration) @doc.subject
+  (#match? @doc.comment "^/\\*\\*"))
+((comment) @doc.comment . (trait_declaration) @doc.subject
+  (#match? @doc.comment "^/\\*\\*"))
+((comment) @doc.comment . (enum_declaration) @doc.subject
+  (#match? @doc.comment "^/\\*\\*"))
+((comment) @doc.comment
+  . (property_declaration
+      (property_element name: (variable_name (name) @doc.subject)))
+  (#match? @doc.comment "^/\\*\\*"))
+((comment) @doc.comment
+  . (const_declaration (const_element) @doc.subject)
+  (#match? @doc.comment "^/\\*\\*"))
+; `/** @var Concrete $x */ $x = Factory::make();` — the subject is the
+; assignment's target, whether it declares the variable or rebinds it.
+((comment) @doc.comment
+  . (expression_statement
+      (assignment_expression left: (variable_name) @doc.subject))
+  (#match? @doc.comment "^/\\*\\*"))
+((comment) @doc.comment
+  . (global_declaration (variable_name) @doc.subject)
+  (#match? @doc.comment "^/\\*\\*"))
+
+; ---- properties: class data members, typed ----
+; The field keys SIGIL-LESS (the inner name token): declared `$name`,
+; accessed `$this->name` — the access site drops the `$`, so a sigil-ful
+; symbol would never join its own uses (and the class-content gate
+; rightly reads sigils as Perl shapes). kind "field" → class-wide type
+; extent (member lookup is not sequential).
+(property_declaration
+  type: (_) @type.annot
+  (property_element name: (variable_name (name) @def.field.name @def.field @flow.target)))
+(property_declaration
+  (property_element name: (variable_name (name) @def.field.name @def.field)))
+; PHP 8 constructor promotion: `__construct(private string $name)` declares
+; BOTH the property (sigil-less member) and the ctor-body local (`$name`)
+; from ONE token — captured in ONE match so the two are minted as a
+; co-declared pair and nothing downstream re-derives the relation. The type
+; is optional (`protected $stream`) and the name may be by-reference
+; (`protected &$container`).
+(property_promotion_parameter
+  type: (_)? @type.annot
+  name: (variable_name (name) @def.field.name @def.field.declared_with @flow.target)
+        @def.var.name @def.var.declared_with)
+(property_promotion_parameter
+  type: (_)? @type.annot
+  name: (by_ref
+          (variable_name (name) @def.field.name @def.field.declared_with @flow.target)
+          @def.var.name @def.var.declared_with))
+
+; class constants: `const VERSION = '1.0';` — compile-time constants,
+; outlined as enum members (not callables: Perl's `use constant` shape
+; would render them as methods inside a class).
+(const_declaration
+  (const_element (name) @def.const.name) @def.const)
+
+; ---- parameters (typed → a direct annot witness) ----
+(simple_parameter
+  type: (_) @type.annot
+  name: (variable_name) @def.var.name @def.var @flow.target)
+(simple_parameter
+  name: (variable_name) @def.var.name @def.var)
+; `...$args` declares the variadic parameter (its type is the element's,
+; never the parameter's).
+(variadic_parameter
+  name: (variable_name) @def.var.name @def.var)
+; closure captures: `function () use ($y)` re-declares $y in the closure;
+; `use (&$y)` binds by reference — the same declaration.
+(anonymous_function_use_clause
+  (variable_name) @def.var.name @def.var)
+; by reference, php creates the variable in the ENCLOSING scope when it
+; does not exist — the declaration hoists there (`@hoist`).
+(anonymous_function_use_clause
+  (by_ref (variable_name) @def.var.name @def.var @hoist))
+; `static $map = [...]` declares a function-static local; `$rows[] = $x`
+; auto-vivifies `$rows` — both declare.
+(static_variable_declaration
+  name: (variable_name) @def.var.name @def.var)
+(assignment_expression
+  left: (subscript_expression . (variable_name) @def.var.name @def.var))
+; `catch (E $e)` binds the exception variable.
+(catch_clause
+  name: (variable_name) @def.var.name @def.var)
+
+; A parameter list is a region, not a body: a parameter is the caller's
+; contract, never an unused local.
+(formal_parameters) @param.region
+; `isset($x->p)` / `empty($x->p)`: the read IS the existence question, so
+; the undefined-member lanes stay silent inside the probe's argument list.
+((function_call_expression
+   function: (name) @_probe
+   arguments: (arguments) @probe.region)
+ (#any-of? @_probe "isset" "empty"))
+; `unset($x)` asks the same question of a variable (and answers it).
+(unset_statement) @probe.region
+
+; The file preamble an import may not precede: the open tag and
+; `declare(...)` rows (php requires `declare(strict_types=1)` first).
+(php_tag) @preamble
+(declare_statement) @preamble
+
