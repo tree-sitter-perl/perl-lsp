@@ -754,6 +754,22 @@ fn cmake_outline_targets_vars_and_interpolated_refs() {
     assert!(!skel.refs.iter().any(|r| r.name == "PRIVATE"));
 }
 
+/// CMake is case-insensitive in its command names, so the family patterns
+/// match that way: `SET`/`Add_Library` declare exactly what their lower-case
+/// spellings do.
+#[test]
+fn cmake_command_families_match_however_the_command_is_cased() {
+    let skel = cmake_skel("SET(MY_FLAG ON)\nAdd_Library(widgets STATIC a.c)\nINCLUDE(util.cmake)\n");
+    let defs: Vec<(String, String)> = skel
+        .symbols
+        .iter()
+        .map(|s| (s.kind.clone(), s.name.clone()))
+        .collect();
+    assert!(defs.contains(&("var".into(), "MY_FLAG".into())), "{defs:?}");
+    assert!(defs.contains(&("sub".into(), "widgets".into())), "{defs:?}");
+    assert_eq!(skel.imports, vec!["util.cmake"]);
+}
+
 // ---- C++ obstacle course: measure macro-induced parse damage ----
 
 #[path = "cpp_obstacle_test_corpus.rs"]
