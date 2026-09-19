@@ -38,8 +38,8 @@ pub fn cmake_pack() -> LangPack {
             }
         },
         import_module: |_, _| None,
-        narrow_guard: |_, _| None,
         implicit_this_members: false,
+        narrow_type: |_| None,
         brace_scoped_members: false,
         bundled_builtin_types: &[],
         trigger_chars: &["{", "("],
