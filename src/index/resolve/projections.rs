@@ -284,6 +284,7 @@ impl<'a> CandidateSet<'a> {
     /// gesture pays anyway.
     pub fn renameable(&self) -> bool {
         match self.resolution() {
+            Some(ResolvedTarget::Target(t)) if t.rename_is_language_owned() => false,
             Some(ResolvedTarget::Target(t)) if t.supports_cross_file_rename() => {
                 self.rename_edits("x").is_ok_and(|e| !e.is_empty())
             }
@@ -317,6 +318,7 @@ impl<'a> CandidateSet<'a> {
                 .unwrap_or(RoleMask::EDITABLE)
         };
         Ok(match self.resolution() {
+            Some(ResolvedTarget::Target(t)) if t.rename_is_language_owned() => Vec::new(),
             Some(ResolvedTarget::Target(t)) if t.supports_cross_file_rename() => {
                 let locations = refs_to(self.files, self.module_index, t, editable);
                 if let Some(why) = locations
