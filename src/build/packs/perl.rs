@@ -39,5 +39,6 @@ pub fn perl_pack() -> LangPack {
         brace_scoped_members: false,
         bundled_builtin_types: &[],
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
+        enum_members: &[],
     }
 }

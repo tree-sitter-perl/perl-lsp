@@ -44,6 +44,7 @@ pub fn python_pack() -> LangPack {
         narrow_type: |ty| Some(InferredType::ClassName(ty.to_string())),
         brace_scoped_members: false,
         bundled_builtin_types: &[],
+        enum_members: &[],
         trigger_chars: &["."],
     }
 }
