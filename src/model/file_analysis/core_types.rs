@@ -1007,16 +1007,23 @@ impl MemberKind {
         }
     }
 
-    /// May a declaration of `kind` define a target of this family? The
-    /// value side is strict: the syntax said the token reads a stored
-    /// value, so a callable never answers it. The callable side admits
-    /// every member — a call is the only spelling a data member gets where
-    /// a member read is a call (Perl's `$o->m`, a `has` accessor) — and the
-    /// walk prefers the same-family declaration when both exist.
-    pub fn admits_decl(self, kind: SymKind) -> bool {
+    /// May a declaration of `kind` carrying `flags` define a target of this
+    /// family? The value side is strict. The callable side asks the LANGUAGE
+    /// (`PackSpellings::member_reads_are_calls`): where a member read is an
+    /// accessor call, a call legitimately lands on a stored slot; where the
+    /// call is spelled, `$obj->name()` and the property `name` are two
+    /// members and admitting the property is how a missing `()` resolves to
+    /// the wrong one. A slot the declaration marks `CALLABLE_VALUE` is the
+    /// exception the declaration itself states: `ops->read(buf)` on a
+    /// function-pointer member IS a call on that member.
+    pub fn admits_decl(self, kind: SymKind, flags: SymbolFlags, spellings: &PackSpellings) -> bool {
         match self {
             MemberKind::Value => MemberKind::of_sym(kind) == MemberKind::Value,
-            MemberKind::Callable => true,
+            MemberKind::Callable => {
+                spellings.member_reads_are_calls
+                    || flags.contains(SymbolFlags::CALLABLE_VALUE)
+                    || MemberKind::of_sym(kind) == MemberKind::Callable
+            }
         }
     }
 

@@ -237,9 +237,10 @@ pub struct DocDisagreement {
 /// The spellings are the first nine fields: the type vocabularies, the
 /// class-name literal, the import / contract-stub / return-annotation
 /// templates, the static-property sigil and the two signature separators.
-/// The last two are per-language SEMANTICS the engine's rules gate on:
+/// The last three are per-language SEMANTICS the engine's rules gate on:
 /// whether a member belongs to its enclosing container and nothing else
-/// (`members_are_package_bound`) and whether a runtime catch-all discharges a
+/// (`members_are_package_bound`), whether reading a member is calling it
+/// (`member_reads_are_calls`), and whether a runtime catch-all discharges a
 /// compile-time obligation (`catch_all_satisfies_contracts`). Each says so
 /// on its own doc.
 ///
@@ -284,6 +285,13 @@ pub struct PackSpellings {
     /// nothing else — no cross-package installs (Perl's typeglobs), so
     /// contract provision is package-attributed.
     pub members_are_package_bound: bool,
+    /// Reading a member IS calling it: Perl's `$o->name` invokes the
+    /// accessor, so a call may legitimately land on a stored slot and a
+    /// callable ask admits a value declaration. A language that spells the
+    /// call (`$obj->name()` vs `$obj->name`) says `false` — there the two
+    /// syntaxes name two different members, and admitting the value one is
+    /// how a missing `()` resolves to a property instead of being reported.
+    pub member_reads_are_calls: bool,
     /// Does a catch-all member SATISFY a declared obligation? Perl's
     /// `AUTOLOAD` answers a required method at runtime and role composition
     /// cannot see past it, so a class carrying one is silent on unfulfilled
@@ -306,6 +314,14 @@ impl PackSpellings {
         variadic_marker: "",
         default_sep: "",
         members_are_package_bound: false,
+        // The SAFE answer, not the lenient one: a language that has not
+        // said its member read is a call gets the strict rule, where
+        // `$obj->name()` does not resolve to a property `name`. Leniency
+        // is what hides a missing `()`, so it is opted INTO — Perl opts in
+        // (`conventions::PERL_PACK_SPELLINGS`), and a new pack that forgets
+        // to declare inherits the answer that reports rather than the one
+        // that goes quiet.
+        member_reads_are_calls: false,
         // Same rule: a catch-all (`__call`, `AUTOLOAD`) satisfying a contract
         // obligation is the quiet answer, so it is opted into per language.
         catch_all_satisfies_contracts: false,
