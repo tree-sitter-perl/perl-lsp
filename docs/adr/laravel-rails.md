@@ -104,6 +104,32 @@ Foo — `@expr.annot` declares the call's value from the same match's
 `@type.annot`, minted as a plugin-priority `Expr → TypeName` witness that
 outranks the callee's own return in `expr_type_at_span`.
 
+## Relations are properties
+
+The same overlay carries a second lane, and it is not a rail: an Eloquent
+relation method declares a PROPERTY of its own name, because Eloquent's
+`__get` serves `$book->cover` from `cover()`. The overlay mints the field
+at the method's own name token (`@def.field` on
+`name: (name)`), so `$book->cover` navigates, completes and hovers.
+
+- A **to-one** relation (`belongsTo` / `hasOne` / `morphOne` /
+  `hasOneThrough`) carries the related class as the property's type
+  (`@type.annot` off the `X::class` argument), so `$page->book->name`
+  chains. One chained modifier
+  (`$this->belongsTo(Book::class)->withTrashed()`) is the same relation —
+  the modifier returns it — and types the same way.
+- A **to-many** relation (`hasMany` / `belongsToMany` / `morph*` /
+  `hasManyThrough`) is a Collection, and no token in the declaration
+  spells that class, so the property stays untyped: the element type is
+  the generics residual. The field is still minted, which is what
+  goto-def and completion need.
+- The `#any-of?` method lists ARE the framework's vocabulary — the one
+  place a relation-builder name is written. Nothing checks that the
+  declaring class is a `Model`: a class with a `belongsTo` method behaves
+  like one whether or not the ancestry is readable, and an `isa` gate
+  would be a shape branch that silently drops every model whose base
+  lives in an absent vendor tree (rule #10).
+
 ## Cross-file
 
 A handler feed rides the reverse index under the file's PATH key
