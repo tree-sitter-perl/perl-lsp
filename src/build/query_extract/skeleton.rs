@@ -56,6 +56,12 @@ pub struct SkelSymbol {
     /// (a header), so `reanchor_truncated_containers` must not re-attribute it to
     /// the enclosing namespace. Not serialized — a driver-internal marker.
     pub qualifier_owned: bool,
+    /// Documentation text joined from the comment directly above the def
+    /// (`DocFact::Description`); flows to `Presentation.doc`.
+    pub doc: Option<String>,
+    /// `@deprecated` text (or `Some(None)`-less: the attribute form has
+    /// no text) — present iff the symbol carries the `deprecated` attribute.
+    pub deprecation: Option<String>,
     /// Declaration facts the extractor minted from a CAPTURE rather than
     /// from a written attribute token — a receiver parameter, a
     /// constructor. Or-ed onto the flags the kind and the attributes give,
@@ -175,6 +181,9 @@ pub struct SkeletonAnalysis {
     /// The last row of the file preamble (open tag, `declare` rows): an
     /// inserted import goes after it when no import or namespace anchors.
     pub preamble_end: Option<usize>,
+    /// Imported names a doc comment mentions (`@var Foo`, `@throws Foo`,
+    /// `@see Foo`): a use the tree never shows.
+    pub doc_mentions: Vec<String>,
     /// The language's name spellings (`LangPack::names`), baked onto
     /// `PackFacts::names`.
     pub names: crate::model::file_analysis::NameSpellings,
@@ -182,6 +191,9 @@ pub struct SkeletonAnalysis {
     /// extraction). Lowered to type witnesses here; carried onto the FA as the
     /// provenance tier.
     pub flow_edges: Vec<crate::model::file_analysis::FlowEdge>,
+    /// Declarations whose docblock type contradicts the declared one; the
+    /// declaration won, and the pair rides to the `doc-type-mismatch` hint.
+    pub doc_disagreements: Vec<crate::model::file_analysis::DocDisagreement>,
     /// `std::move(x)` sites: (moved var name, move-call span, enclosing scope).
     /// A read of the var after the call and before its next rebind is a
     /// use-after-move bug (`FileAnalysis::use_after_move_reads`).
@@ -728,8 +740,8 @@ impl SkeletonAnalysis {
                     hide_in_outline: twin_hidden.contains(&i)
                         || symbol_flags_of(&s.kind, &s.attributes)
                             .intersects(SymbolFlags::INCLUDE_GUARD | SymbolFlags::CLASS_RAIL),
-                    deprecation: None,
-                    doc: None,
+                    doc: s.doc.clone(),
+                    deprecation: s.deprecation.clone(),
                     display: None,
                     label: None,
                 },
@@ -1534,6 +1546,7 @@ impl SkeletonAnalysis {
             import_rows: std::mem::take(&mut self.import_rows),
             spellings: self.spellings,
             preamble_end: self.preamble_end,
+            doc_mentions: std::mem::take(&mut self.doc_mentions),
             names: std::mem::take(&mut self.names),
             // Specialization family edges (spec → primary). NOT an inheritance
             // edge: a spec inherits nothing from its primary (it replaces
@@ -1553,6 +1566,7 @@ impl SkeletonAnalysis {
             qualified_spellings: std::mem::take(&mut self.qualified_spellings),
             domain_sites: std::mem::take(&mut self.domain_sites),
             moved_from: std::mem::take(&mut self.moved_from),
+            doc_disagreements: std::mem::take(&mut self.doc_disagreements),
             control_regions: std::mem::take(&mut self.control_regions),
             param_regions: std::mem::take(&mut self.param_regions),
             probe_regions: std::mem::take(&mut self.probe_regions),

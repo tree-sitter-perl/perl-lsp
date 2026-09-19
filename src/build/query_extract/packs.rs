@@ -61,6 +61,25 @@ pub struct LangPack {
     /// structure out — the engine never branches on the spelling itself
     /// (rule #10), and the writeback publishes what comes back.
     pub declared_return: fn(text: &str) -> Option<crate::model::witnesses::ReturnExpr>,
+    /// Documentation-comment type facts (phpdoc `@return`/`@param`/`@var`):
+    /// the pack parses ITS OWN doc vocabulary out of a `@doc.comment`
+    /// capture's text, returning type spellings `annot_type` speaks.
+    /// The engine joins each comment to the def directly below it and
+    /// fills ONLY where the syntax declared nothing — declared types win
+    /// (docblocks drift). Empty = no doc lane.
+    pub doc_types: fn(text: &str, uses_method_tags: &[&str]) -> Vec<DocFact>,
+    /// Docblock tags whose argument NAMES a sibling method a framework
+    /// runner will invoke (`@dataProvider providerRows`). Data, not a
+    /// literal in the reader: the tag is one framework's word, exactly
+    /// like the attribute spellings the entry documents carry, and the
+    /// reader is the engine's. Empty = no such tag.
+    ///
+    /// TODO: one framework's vocabulary, and that framework already has a
+    /// bundled entry document (`queries/php/frameworks/phpunit.entry.json`)
+    /// which is where framework vocabulary lives. The tag belongs in it, as
+    /// a field the entry loader hands to `doc_types` — then a plugin dir can
+    /// teach the doc lane a runner tag without a recompile.
+    pub doc_uses_method_tags: &'static [&'static str],
     /// Module-name → workspace-relative candidate paths — the entire
     /// per-language cross-file resolution strategy ("the one executable
     /// line"). Python: `pkg.mod` → pkg/mod.py | pkg/mod/__init__.py.
@@ -166,6 +185,52 @@ pub struct PeelSpec {
     pub record_stack: bool,
 }
 
+/// One type fact parsed from a documentation comment (`LangPack::doc_types`).
+/// The type is a raw spelling the pack has already normalized to what its
+/// `annot_type` accepts (generics stripped, `X|null` collapsed to `X`).
+#[derive(Debug, Clone)]
+pub enum DocFact {
+    /// `@return T` — the documented return of the def below the comment.
+    Return(String),
+    /// `@param T $name` — a documented parameter type; `name` carries the
+    /// language's own spelling (php keeps the `$`).
+    Param { name: String, ty: String },
+    /// `@var T [$name]` — the documented type of the property/variable
+    /// below (or, with a `$name`, of that specific local — the inline
+    /// `/** @var Type[] $rows */` idiom above an assignment).
+    Var { ty: String, name: Option<String> },
+    /// A `LangPack::doc_uses_method_tags` row naming a sibling METHOD a
+    /// framework runner will invoke (`@dataProvider providerRows`). The
+    /// join mints a real method reference (invocant = the enclosing class)
+    /// on the fact's own line, so the named method gains fan-in and rename
+    /// reaches the row.
+    UsesMethod { name: String, line: usize, col: usize },
+    /// `@method [static] T name(...)` on a CLASS docblock — a documented
+    /// virtual method (Laravel facades, Eloquent's `__call` surface). The
+    /// join synthesizes a real method symbol on the class below, spanning
+    /// the fact's own `@method` line (`line` = 0-based offset within the
+    /// comment) so each row is a distinct, honest gd target.
+    Method { name: String, ret: Option<String>, line: usize, col: usize },
+    /// `@deprecated [text]` — the declaration is deprecated; the text is
+    /// what the diagnostic shows.
+    Deprecated(Option<String>),
+    /// `@template T [of X]` on a CLASS docblock — a declared generic
+    /// parameter, in row order (`line` is the ordering key). Feeds the
+    /// SAME per-class `template_params` axis cpp templates use, so a
+    /// method whose `@return` names the param publishes `ParamOf(i)`
+    /// through the existing writeback (Eloquent's `Builder<TModel>`).
+    Template { name: String, line: usize },
+    /// `@return Base<static|self|$this>` — the return is an instance of
+    /// `base` PARAMETRIZED BY THE RECEIVER (`Model::query()` returns
+    /// `Builder<static>`): the join publishes
+    /// `Operator(InstanceOf{base, [Receiver]})`, so `Book::query()`
+    /// carries `Builder<Book>` and a later `->first()` (`@return
+    /// TModel`) projects `Book` back out.
+    ReturnRecvInstance { base: String },
+    /// The comment's summary paragraph — every line before the first
+    /// `@tag`, joined; the text hover shows under the signature.
+    Description(String),
+}
 
 /// Translate a member's declared return type into the deferred
 /// receiver-substituting `ReturnExpr` when it MENTIONS one of the owning
