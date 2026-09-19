@@ -44,7 +44,6 @@ pub fn python_pack() -> LangPack {
         brace_scoped_members: false,
         bundled_builtin_types: &[],
         trigger_chars: &["."],
-        receiver_names: &["self", "cls"],
         recv_peel: PeelSpec {
             wrappers: &[("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer)],
             annot_kinds: &[],

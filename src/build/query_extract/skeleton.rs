@@ -47,6 +47,11 @@ pub struct SkelSymbol {
     /// (a header), so `reanchor_truncated_containers` must not re-attribute it to
     /// the enclosing namespace. Not serialized — a driver-internal marker.
     pub qualifier_owned: bool,
+    /// Declaration facts the extractor minted from a CAPTURE rather than
+    /// from a written attribute token — a receiver parameter, a
+    /// constructor. Or-ed onto the flags the kind and the attributes give,
+    /// so the two mints never race for one bit.
+    pub flags: SymbolFlags,
 }
 
 #[derive(Debug, Clone)]
@@ -158,10 +163,6 @@ pub struct SkeletonAnalysis {
     /// The last row of the file preamble (open tag, `declare` rows): an
     /// inserted import goes after it when no import or namespace anchors.
     pub preamble_end: Option<usize>,
-    /// The pack's receiver param names (Python `self`/`cls`). A Variable so
-    /// named is the method receiver, not a class member — its (wrongly
-    /// sticky-tagged) class package is cleared in `into_file_analysis`.
-    pub receiver_names: Vec<String>,
     /// The language's name spellings (`LangPack::names`), baked onto
     /// `PackFacts::names`.
     pub names: crate::model::file_analysis::NameSpellings,
@@ -643,7 +644,7 @@ impl SkeletonAnalysis {
                     }
                     a
                 },
-                flags: symbol_flags_of(&s.kind, &s.attributes),
+                flags: symbol_flags_of(&s.kind, &s.attributes) | s.flags,
                 declared_with: None,
                 deref_stack: s.deref_stack.clone(),
                 arity: s.arity,
@@ -1271,10 +1272,6 @@ impl SkeletonAnalysis {
             packages.entry(child.clone()).or_default().parents.push(parent.clone());
         }
         let pack = crate::model::file_analysis::PackFacts {
-            // Pack-declared receiver names ride the FA so core's member /
-            // outline filters can exclude them generically (lang semantics in
-            // the pack, generic logic in core).
-            receiver_names: std::mem::take(&mut self.receiver_names),
             import_rows: std::mem::take(&mut self.import_rows),
             spellings: self.spellings,
             preamble_end: self.preamble_end,

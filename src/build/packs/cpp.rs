@@ -1,6 +1,6 @@
 //! C/C++'s pack.
 
-use crate::build::query_extract::{LangPack, PeelSpec, C_FIELD_DECL_PEEL};
+use crate::build::query_extract::{LangPack, PeelSpec};
 use crate::model::file_analysis::{canonical_template_spelling, InferredType, NameSpellings, PackSpellings};
 
 /// C/C++ writes and displays nothing of its own: the engine's type tags are
@@ -73,7 +73,6 @@ pub fn cpp_pack() -> LangPack {
         brace_scoped_members: true,
         bundled_builtin_types: &[],
         trigger_chars: &[".", ">", ":"],
-        receiver_names: &["this"],
         // `field_identifier` only ever names a struct/class member (the
         // grammar's own distinction from a plain `identifier` local), so
         // "def.field" matches the plain (non-pointer) field pattern above.
