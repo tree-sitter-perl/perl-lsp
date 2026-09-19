@@ -5088,7 +5088,6 @@ $m = [Sql\\ColumnController::class => 1];
     );
 }
 
-
 /// A row says what it binds through its capture suffix, and an unsuffixed
 /// capture binds a type — the default every include/`use` row without the
 /// `function` / `const` keyword means.
@@ -5105,6 +5104,7 @@ fn import_capture_suffix_declares_what_the_row_binds() {
     // Only the import family; a `.const` elsewhere is somebody else's capture.
     assert_eq!(strip_import_binds("def.const"), "def.const");
 }
+
 /// php's three row flavours each say what they bind, so no lane has to
 /// read a leaf's capitalization to guess — in the GROUP spelling too,
 /// where the keyword sits on the clause rather than the row.

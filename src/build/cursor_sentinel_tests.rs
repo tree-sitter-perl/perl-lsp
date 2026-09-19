@@ -79,6 +79,18 @@ fn python_dot_receiver() {
 }
 
 #[test]
+fn php_arrow_receiver() {
+    // The `<?php` tag is load-bearing: without it the grammar reads the
+    // fragment as inert HTML text and no member node exists to splice into.
+    let mut p = Parser::new();
+    p.set_language(&tree_sitter_php::LANGUAGE_PHP.into()).unwrap();
+    let src = "<?php\n$u-> ";
+    let cursor = after(src, "$u->");
+    let r = receiver_at(&mut p, &crate::build::query_extract::php_pack(), src, cursor).unwrap();
+    assert_eq!(r.text, "$u");
+}
+
+#[test]
 fn cpp_chained_receiver_is_the_full_prefix() {
     // The receiver of `a.b.` is the whole `a.b`, not just `b` — the
     // sentinel completes the OUTER access, and step (c) types `a.b`.
@@ -202,15 +214,33 @@ fn no_receiver_on_plain_identifier() {
 /// failure silent in the other direction — a pattern that roots at an
 /// ANCESTOR still feeds the extractor while the cursor never reaches it —
 /// which is what this pins.
-#[cfg(any(feature = "cpp"))]
+#[cfg(any(feature = "cpp", feature = "php"))]
 #[test]
 fn every_receiver_shape_the_document_names_completes() {
     // (language, pack, source with the cursor just past the operator,
     //  the receiver text expected back)
+    #[cfg(feature = "php")]
+    let php_pack = crate::build::query_extract::php_pack();
     #[cfg(feature = "cpp")]
     let cpp_pack = crate::build::query_extract::cpp_pack();
     let mut cases: Vec<(fn() -> Parser, &crate::build::query_extract::LangPack, &str, &str, &str)> =
         Vec::new();
+    #[cfg(feature = "php")]
+    {
+        fn php() -> Parser {
+            let mut p = Parser::new();
+            p.set_language(&tree_sitter_php::LANGUAGE_PHP.into()).unwrap();
+            p
+        }
+        cases.extend([
+            (php as fn() -> Parser, &php_pack, "<?php\nclass C { function m($u) { $u-> } }", "$u->", "$u"),
+            (php, &php_pack, "<?php\nclass C { function m() { $this-> } }", "$this->", "$this"),
+            (php, &php_pack, "<?php\nclass C { function m() { self:: } }", "self::", "self"),
+            (php, &php_pack, "<?php\nclass C { function m() { parent:: } }", "parent::", "parent"),
+            (php, &php_pack, "<?php\nclass C { function m() { Foo:: } }", "Foo::", "Foo"),
+            (php, &php_pack, "<?php\nclass C { function m() { f()-> } }", "f()->", "f()"),
+        ]);
+    }
     #[cfg(feature = "cpp")]
     {
         cases.extend([
@@ -240,6 +270,8 @@ fn every_receiver_shape_the_document_names_completes() {
 #[test]
 fn packs_with_member_completion_name_their_member_kinds() {
     for (pack, language) in [
+        #[cfg(feature = "php")]
+        (crate::build::query_extract::php_pack(), tree_sitter_php::LANGUAGE_PHP.into()),
         #[cfg(feature = "cpp")]
         (crate::build::query_extract::cpp_pack(), tree_sitter_cpp::LANGUAGE.into()),
     ] {
