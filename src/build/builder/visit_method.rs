@@ -465,6 +465,7 @@ impl<'a> Builder<'a> {
                     opaque_return: false,
                     is_constant: false,
                     lexical: false,
+                    declared_return: None,
                 },
             );
         }

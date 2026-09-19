@@ -199,6 +199,7 @@ impl<'a> Builder<'a> {
                     opaque_return,
                     is_constant: false,
                     lexical: false,
+                    declared_return: None,
                 };
                 let target_pkg = on_class.clone().or_else(|| self.current_package.clone());
                 // Projection-group enrollment: the plugin declared which

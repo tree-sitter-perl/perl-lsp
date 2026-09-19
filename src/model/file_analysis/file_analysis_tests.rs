@@ -154,6 +154,7 @@ fn test_resolve_sub_return_type() {
                 opaque_return: false,
                 is_constant: false,
                 lexical: false,
+                declared_return: None,
             },
             namespace: Namespace::Language,
             presentation: Default::default(),
