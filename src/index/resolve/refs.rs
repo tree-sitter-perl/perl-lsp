@@ -941,7 +941,6 @@ pub fn implementations_of(
         },
     );
     implementers.retain(|p| !contract_line.contains(p));
-
     let mut out: Vec<RefLocation> = Vec::new();
     for pkg in &implementers {
         // class → home module(s): exact cache key for the common

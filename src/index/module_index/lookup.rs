@@ -702,7 +702,6 @@ impl CrossFileLookup for ModuleIndex {
             .map(|g| Arc::clone(&g))
             .unwrap_or_default()
     }
-
     fn index_state(&self, language: &str) -> crate::model::file_analysis::IndexState {
         self.language_index_state(language)
     }
