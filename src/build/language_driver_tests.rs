@@ -610,36 +610,46 @@ int lam() { auto f = [&]{ return inner_; }; return f(); } };\n";
     );
 }
 
-// The by-id capability askers on the registry are THE include-token /
-// preprocessor gates for both serving surfaces (LSP handlers and their
-// CLI/--batch mirrors) — pin their answers so the shared gate can't
-// silently regress to a language-name probe on either side.
+// The complement: php spells the receiver, so its document leaves every
+// sub scope plain and a bare name inside a method binds to nothing —
+// whatever the class declares.
+// A C callback member (`int (*read)(char *)`) is a stored slot the source
+// CALLS. The declarator says so — the peel's `@deref.callable` level mints
+// `SymbolFlags::CALLABLE_VALUE` — while a plain `int count` states nothing
+// of the kind. The rule is on the declaration, never on a list of callback
+// names.
 #[cfg(feature = "cpp")]
 #[test]
-fn capability_askers_answer_by_language_id() {
-    use crate::build::language_driver::LanguageRegistry;
-    assert!(LanguageRegistry::has_include_tokens("cpp"),
-        "cpp declares include path tokens — CLI + server both gate on this");
-    assert!(LanguageRegistry::has_preprocessor_macros("cpp"));
-    assert!(!LanguageRegistry::has_include_tokens("perl"),
-        "perl has no LangPack: the asker answers false, no name branch");
-    assert!(!LanguageRegistry::has_preprocessor_macros("perl"));
-    assert!(!LanguageRegistry::has_include_tokens("no-such-language"));
-    #[cfg(feature = "python")]
-    {
-        assert!(!LanguageRegistry::has_include_tokens("python"),
-            "python imports are name-keyed, no path tokens");
-        assert!(!LanguageRegistry::has_preprocessor_macros("python"));
-    }
+fn a_callback_member_declares_its_slot_invoked() {
+    use crate::model::file_analysis::{SymKind, SymbolFlags};
+    let src = "\
+struct Ops {\n\
+  int (*read)(char *buf);\n\
+  int count;\n\
+};\n";
+    let fa = cpp_driver().analyze(src);
+    let field = |name: &str| {
+        fa.symbols()
+            .iter()
+            .find(|s| s.name == name && s.kind == SymKind::Field)
+            .unwrap_or_else(|| panic!("{name} is a Field"))
+    };
+    assert!(
+        field("read").flags.contains(SymbolFlags::CALLABLE_VALUE),
+        "the function-pointer declarator states the slot is invoked"
+    );
+    assert!(
+        !field("count").flags.contains(SymbolFlags::CALLABLE_VALUE),
+        "a plain int member states nothing of the kind"
+    );
 }
 
-// Implicit-`this` sibling method CALLs — the call half of the same
-// capability. A bare `foo(...)` inside a method body pins its enclosing
+// Implicit-`this` sibling method CALLs — the call half of the same fact. A
+// bare `foo(...)` inside a body that elides the receiver pins its enclosing
 // class onto the `FunctionCall`'s `resolved_package` (in-class AND
-// out-of-line/template bodies — the class comes off the peeled method
+// out-of-line/template bodies — the class comes off the scope's OWNER
 // symbol, not the body scope which is package-less out of line), so
-// goto-def lands on the sibling. A free-function-only name stays unpinned;
-// the capability gate governs the whole pass.
+// goto-def lands on the sibling. A free-function-only name stays unpinned.
 #[cfg(feature = "cpp")]
 #[test]
 fn sibling_method_call_pins_enclosing_class() {
