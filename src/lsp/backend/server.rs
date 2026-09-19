@@ -1350,7 +1350,24 @@ impl LanguageServer for Backend {
             Some(doc) => doc,
             None => return self.not_ready_or_null(uri),
         };
-        if !crate::build::language_driver::LanguageRegistry::caps(doc.language).signature_help {
+        let caps = crate::build::language_driver::LanguageRegistry::caps(doc.language);
+        if caps.pack_signature_help {
+            // A pack document: the call site comes from the pack's own tree
+            // and the callee from the member ladder through the routed pack
+            // index (the blocking hop, like every cross-file verb).
+            let analysis = Arc::clone(&doc.analysis);
+            let tree = doc.tree.clone();
+            let text = doc.text.clone();
+            let language = doc.language;
+            drop(doc);
+            return self
+                .run_query(move |cx| {
+                    let routed = cx.routed(language);
+                    symbols::pack_signature_help(&analysis, &tree, &text, pos, language, routed.as_lookup())
+                })
+                .await;
+        }
+        if !caps.signature_help {
             return Ok(None); // the verb is declared per language
         }
         Ok(symbols::signature_help(&doc.analysis, &doc.tree, &doc.text, pos, &self.module_index))
