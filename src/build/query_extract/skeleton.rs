@@ -1476,8 +1476,8 @@ impl SkeletonAnalysis {
         // minted — an ambiguous field (same name on two structs) or a
         // cross-file-only field stays silent (documented residual), keeping the
         // over-approximation honest. The frozen `MethodTarget` is exactly what
-        // `refs_to`'s `(Method, MethodCall)` arm reads, so references on the
-        // field include the in-body use without needing the invocant to type.
+        // `refs_to`'s member arm reads, so references on the field include the
+        // in-body use without needing the invocant to type.
         if !self.macro_body_member_reads.is_empty() {
             // field name → every (declaring class, decl SymbolId). The receiver
             // in a macro body is an untypeable macro parameter, so the class is
@@ -1512,13 +1512,15 @@ impl SkeletonAnalysis {
                 }
                 let Some(owners) = field_owners.get(field.as_str()) else { continue };
                 for (class, sym_id) in owners {
+                    // The drill reads a stored member, so the ref is the value
+                    // access (`docs/adr/member-kinds.md`): a field target admits
+                    // it and a call target never claims it.
                     refs.push(crate::model::file_analysis::Ref {
-                        kind: crate::model::file_analysis::RefKind::MethodCall {
+                        kind: crate::model::file_analysis::RefKind::FieldAccess {
                             invocant: crate::model::conventions::Invocant::assume_canonical(String::new()),
                             invocant_span: None,
-                            method_name_span: *span,
+                            member_name_span: *span,
                             member_op: None,
-                            named_by_string: false,
                         },
                         span: *span,
                         scope: crate::model::file_analysis::ScopeId(0),
