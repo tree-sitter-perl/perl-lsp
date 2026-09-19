@@ -65,7 +65,12 @@ here." The CandidateSet owns, computed once at the set level:
   the file it was minted from; goto-def projects it rather than re-deriving
   where an inherited attr was declared,
 - **per-site policy** — `RefLocation.rewritable`, `MemberRename` texts:
-  policy rides the candidates, handlers never re-derive it.
+  policy rides the candidates, handlers never re-derive it. `rewritable`
+  carries the REASON a span may not be rewritten (`Rewritable::No(..)`),
+  minted by the producer that saw the site, and the reason decides what
+  rename does: a reason whose site would be left silently wrong refuses the
+  whole edit set (`NotRewritable::refuses_rename`), every other drops the
+  site. No projection asks what language it is serving.
 
 Every feature is a **projection** of the same CandidateSet:
 
