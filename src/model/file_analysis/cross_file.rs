@@ -1201,9 +1201,10 @@ impl DependencyTier {
 }
 
 /// How an origin's language scopes cross-file visibility — the routing
-/// fact `for_origin` consumes. Derived by the registry from the pack's
-/// own linkage declaration (`include_path_tokens`), never a
-/// language-name branch here or at a call site.
+/// fact `for_origin` consumes. Derived by the registry from the pack's own
+/// query document — a language whose import tokens are PATHS says so by
+/// minting `@include.path` — never a language-name branch here or at a call
+/// site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackVisibility {
     /// Not a pack: the host's search-path derivation (`use lib` ∪ @INC).
