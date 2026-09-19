@@ -219,6 +219,7 @@ sub run {
             TargetKind::Handler {
                 owner: HandlerOwner::Class("Producer".to_string()),
                 name: "ready".to_string(),
+                names: crate::model::file_analysis::RailNames::Strings,
             },
         ),
         RoleMask::EDITABLE,

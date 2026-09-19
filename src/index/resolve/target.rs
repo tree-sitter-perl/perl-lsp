@@ -3,6 +3,7 @@
 //! the per-feature policy those types carry (rename scope/options, group
 //! member rename rules).
 use super::*;
+use crate::model::file_analysis::RailNames;
 
 /// How a method that participates in an inheritance hierarchy is scoped for
 /// references + rename — `initializationOptions.rename.overrideScope`.
@@ -171,6 +172,15 @@ impl TargetRef {
         }
     }
 
+    /// Do this target's reference spans hold tokens of its OWN name? A
+    /// class-keyed rail's sites spell the CLASS the rail is keyed on, so an
+    /// edit writing the target's new name over them corrupts a class
+    /// reference. The collector marks the sites it emits with this and the
+    /// rename policy above composes it — one answer, both readers.
+    pub fn sites_are_rewritable(&self) -> bool {
+        !matches!(&self.kind, TargetKind::Handler { names: RailNames::Classes, .. })
+    }
+
     /// Whether this target renames cross-file through `refs_to` (matched by
     /// owner/scope structure across the workspace) vs. the single-file
     /// `rename_at` fallback. Per-feature policy lives on the target (rule #10),
@@ -238,7 +248,8 @@ impl TargetRef {
             }
             RenameKind::Package(name) => TargetRef::new(name, TargetKind::Package, origin),
             RenameKind::Handler { owner, name } => {
-                TargetRef::new(name.clone(), TargetKind::Handler { owner, name }, origin)
+                let names = owner.names_are(&origin.pack);
+                TargetRef::new(name.clone(), TargetKind::Handler { owner, name, names }, origin)
             }
             RenameKind::HashKey(_) | RenameKind::Variable => return None,
         })
@@ -348,6 +359,11 @@ pub enum TargetKind {
     Handler {
         owner: HandlerOwner,
         name: String,
+        /// What the rail's names denote, minted from the origin's rail
+        /// declarations (`HandlerOwner::names_are`): a class-keyed rail's
+        /// spans are emission/handler tokens of the CLASS, so its target is
+        /// navigable but never rewritten.
+        names: RailNames,
     },
     /// A pack-language file-scope value reachable by BARE NAME from any file
     /// that can see it (C's flat linkage): an object- or function-like

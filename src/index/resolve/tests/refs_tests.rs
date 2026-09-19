@@ -1944,6 +1944,7 @@ sub fire ($minion) {\n  $minion->enqueue('send_email' => ['a@b']);\n}\n1;\n",
             TargetKind::Handler {
                 owner: crate::model::file_analysis::HandlerOwner::Class("Minion".to_string()),
                 name: "send_email".to_string(),
+                names: crate::model::file_analysis::RailNames::Strings,
             },
         ),
         RoleMask::EDITABLE,
@@ -2021,6 +2022,7 @@ sub fire {\n  my $self = shift;\n  my $minion = My::Minion->new;\n  $minion->enq
             TargetKind::Handler {
                 owner: crate::model::file_analysis::HandlerOwner::Class("Minion".to_string()),
                 name: "send_email".to_string(),
+                names: crate::model::file_analysis::RailNames::Strings,
             },
         ),
         RoleMask::EDITABLE,
