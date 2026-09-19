@@ -13,6 +13,8 @@ pub fn perl_pack() -> LangPack {
         query_source: include_str!("../../../queries/perl/skeleton.scm"),
         bundled_overlays: &[],
         lang_id: "perl",
+        bundled_entry_markers: &[],
+        bundled_rail_docs: &[],
         names: crate::model::conventions::PERL_SPELLINGS,
         shape_name: |kind, raw| match kind {
             // The builder stores variable symbols WITH sigil; varname
