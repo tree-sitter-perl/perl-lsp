@@ -25,57 +25,27 @@ pub struct QualifiedSpelling {
 /// is what a Perl analysis carries.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PackFacts {
-    /// Variables the runtime binds without a declaration (php `$this`,
-    /// superglobals) — the undefined-variable lane's silence list.
-    #[serde(default)]
-    pub implicit_variables: Vec<String>,
-    /// The language's throwaway binding names (php `$_`) — written to be
-    /// discarded, so the unused-variable lane never reports them.
-    #[serde(default)]
-    pub throwaway_names: Vec<String>,
-    /// Methods whose presence makes a class answer any member name (php
-    /// `__call`/`__get`) — the undefined-member lanes stay silent on it.
-    #[serde(default)]
-    pub catch_all_methods: Vec<String>,
-    /// Members every enum carries by language rule.
-    #[serde(default)]
-    pub enum_members: Vec<String>,
     /// Whole import-statement spans, in file order.
     #[serde(default)]
     pub import_rows: Vec<Span>,
-    /// rail → how the undefined-name lane phrases a miss on it (`"event"`
-    /// → `No listener for event`); default `Undefined <rail>`.
-    #[serde(default)]
-    pub rail_labels: Vec<(String, String)>,
-    /// Rails whose miss is a hint: their definitions are partly
-    /// runtime-only, so an unmatched name is a lead, not an error.
-    #[serde(default)]
-    pub rail_hints: Vec<String>,
     /// Rails whose names are CLASS identities (the rail document's
-    /// `names_are: class` — Laravel's event bus). Per-overlay data the
-    /// file carries, like `rail_labels`: which overlays load is a property
-    /// of the workspace, not of the language, so it is not a language
-    /// convention reached by id. Read through `HandlerOwner::names_are`.
+    /// `names_are: class` — Laravel's event bus). Per-overlay data the file
+    /// carries: which overlays load is a property of the workspace, not of
+    /// the language, so it is not a language convention reached by id. Unlike
+    /// the lane's labels and hint rails it changes what a MINT means, so
+    /// every span-free minting path has to agree with it. Baked from the
+    /// DECLARATION for every file of the pack,
+    /// so the span-free minting paths (`scan_text_rails`, `adopt_path_rails`)
+    /// carry it by construction and a rail cannot answer differently in two
+    /// files. Read through `HandlerOwner::names_are`.
     #[serde(default)]
     pub class_named_rails: Vec<String>,
     /// The last row of the file preamble (open tag, `declare` rows).
     #[serde(default)]
     pub preamble_end: Option<usize>,
-    /// Import rows bind names the file spells (php), so a row nothing
-    /// spells is unused; false for text-splicing includes.
-    #[serde(default)]
-    pub imports_bind_names: bool,
     /// Imported names a doc comment mentions.
     #[serde(default)]
     pub doc_mentions: Vec<String>,
-
-    /// The language's constructor-method names (php `__construct`), from
-    /// the LangPack — the identity lane marks a Method target with one of
-    /// these names as `ctor_of` its class, admitting construction sites
-    /// into its references. Empty for Perl (`new` is a convention, not a
-    /// keyword — `is_constructor_name` serves the ranking lanes instead).
-    #[serde(default)]
-    pub constructor_names: Vec<String>,
 
     /// Template-specialization family edges: canonical spec spelling
     /// (`formatter<int, char>`) → primary base name (`formatter`). NOT an
@@ -244,16 +214,9 @@ impl PackFacts {
 
         h.misc += map_str_vec(&self.template_params)
             + mcap(&self.specializes)
-            + vcap(&self.implicit_variables)
-            + vcap(&self.throwaway_names)
-            + vcap(&self.catch_all_methods)
-            + vcap(&self.enum_members)
             + vcap(&self.import_rows)
-            + self.rail_labels.iter().map(|(a, b)| a.capacity() + b.capacity()).sum::<usize>()
-            + self.rail_hints.iter().map(|a| a.capacity()).sum::<usize>()
             + self.class_named_rails.iter().map(|a| a.capacity()).sum::<usize>()
-            + vcap(&self.doc_mentions)
-            + vcap(&self.constructor_names);
+            + vcap(&self.doc_mentions);
     }
 }
 
@@ -266,6 +229,7 @@ pub struct DocDisagreement {
     pub declared: InferredType,
     pub documented: InferredType,
 }
+
 /// What is true of a language for EVERY file of it: its write and display
 /// spellings — what a quick-fix inserts and what a human surface renders —
 /// and the handful of semantics a name or a syntax cannot state.

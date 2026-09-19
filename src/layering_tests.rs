@@ -1477,6 +1477,12 @@ fn source_tags_are_provenance_only() {
 /// per-site fact a query joins back to a symbol is a witness or a ref
 /// binding, not a new `Vec` here. The count is a ratchet: adding a field
 /// means bumping it AND saying in the owning ADR why the fact is neither.
+///
+/// What is counted is what the BLOB carries — the rule's own words are "not
+/// serialized into every blob" — so a `#[serde(skip)]` field is exempt.
+/// There is exactly one, the `PackSpellings` pointer, and it is the shape
+/// this rule asks for: the constants live on the language, reached by id,
+/// and the analysis holds a pointer to them.
 #[test]
 fn pack_facts_fields_are_ratcheted() {
     let text = fs::read_to_string(
@@ -1486,8 +1492,19 @@ fn pack_facts_fields_are_ratcheted() {
     let start = text.find("pub struct PackFacts {").expect("PackFacts struct");
     let body = &text[start..];
     let end = body.find("\n}\n").expect("struct end");
-    let fields = body[..end].lines().filter(|l| l.starts_with("    pub ")).count();
-    const RATCHET: usize = 35;
+    let mut skipped = false;
+    let mut fields = 0usize;
+    for line in body[..end].lines() {
+        if line.trim() == "#[serde(skip)]" {
+            skipped = true;
+        } else if line.starts_with("    pub ") {
+            if !skipped {
+                fields += 1;
+            }
+            skipped = false;
+        }
+    }
+    const RATCHET: usize = 18;
     assert!(
         fields <= RATCHET,
         "PackFacts grew to {fields} fields (ratchet {RATCHET}). A per-language constant goes on \
