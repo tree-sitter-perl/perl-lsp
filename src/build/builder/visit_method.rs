@@ -453,7 +453,7 @@ impl<'a> Builder<'a> {
                 node_to_span(def_node),
                 *sel_span,
                 SymbolDetail::Sub {
-                    params: vec![ParamInfo {
+                    params: vec![ParamInfo { declared_type: None,
                         name: "$val".into(),
                         default: None,
                         is_slurpy: false,
