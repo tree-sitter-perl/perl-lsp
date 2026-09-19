@@ -1504,6 +1504,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     invocant: None,
                     member_op: None,
                     arg_count: None,
+                    value_read: false,
                     flags: Default::default(),
                 });
             }
@@ -1570,6 +1571,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                     .copied()
                             })
                             .flatten(),
+                        // A member token whose match carries an argument list
+                        // names a callable; without one it reads a value and
+                        // mints a `FieldAccess`. Only member tokens carry the
+                        // fact (a plain call is a callable by construction, a
+                        // type ref neither).
+                        value_read: e.cap == "ref.member"
+                            && !(arg_counts_by_match.contains_key(&e.match_id)
+                                || placeholder_by_match.contains(&e.match_id)
+                                || arg_counts_by_start.contains_key(&(e.end.row, e.end.column))
+                                || placeholder_call_at.contains(&(e.end.row, e.end.column))),
                         flags: Default::default(),
                     });
                     if let Some(q) = qualified_by_match.get(&e.match_id) {
@@ -1922,6 +1933,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             invocant: None,
             member_op: None,
             arg_count: Some(args.len()),
+            value_read: false,
             flags: Default::default(),
         });
         for effect in (pack.cmd_effects)(cmd) {
@@ -1962,6 +1974,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 invocant: None,
                                 member_op: None,
                                 arg_count: None,
+                                value_read: false,
                                 flags: Default::default(),
                             });
                         }
