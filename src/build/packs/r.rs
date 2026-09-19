@@ -1,6 +1,6 @@
 //! R's pack.
 
-use crate::build::query_extract::{LangPack, OutOfLineSpec, PeelSpec};
+use crate::build::query_extract::{LangPack, PeelSpec};
 use crate::model::file_analysis::NameSpellings;
 
 // Live only under `feature = "r"` (or the pack tests); see `python_pack`.
@@ -36,12 +36,10 @@ pub fn r_pack() -> LangPack {
         recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
         op_map: &[],
         simple_var_kinds: &[],
-        qualifier_peel: &[],
         member_kinds: &[],
         skip_kinds: &[],
         call_kinds: &[],
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
-        oolfn: OutOfLineSpec::OFF,
     }
 }

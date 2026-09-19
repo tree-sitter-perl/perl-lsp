@@ -1,6 +1,6 @@
 //! Python's pack.
 
-use crate::build::query_extract::{LangPack, OutOfLineSpec, PeelSpec};
+use crate::build::query_extract::{LangPack, PeelSpec};
 use crate::model::file_analysis::{InferredType, NameSpellings};
 
 // Registered by `python_driver` only under `feature = "python"` (and driven by
@@ -49,12 +49,10 @@ pub fn python_pack() -> LangPack {
         // Python has one member operator (`.`), so no op-DX (op_map empty).
         op_map: &[],
         simple_var_kinds: &["identifier"],
-        qualifier_peel: &[],
         member_kinds: &["attribute"],
         skip_kinds: &["string", "string_content", "comment", "concatenated_string"],
         call_kinds: &["call"],
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
-        oolfn: OutOfLineSpec::OFF,
     }
 }
