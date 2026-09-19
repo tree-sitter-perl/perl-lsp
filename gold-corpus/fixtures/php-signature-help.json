@@ -1,0 +1,25 @@
+{
+  "capability": "signature-help",
+  "rows": [
+    {
+      "id": "php-sighelp-member-call-arg1",
+      "difficulty": "simple",
+      "semantic_area": "php-multilang",
+      "lang": "php",
+      "root": "gold-corpus/php-fixture",
+      "comment": "Inside the first argument of `$this->greeter->hi($who)`.",
+      "file": "src/Web/Home.php",
+      "line": 16,
+      "col": 34,
+      "expect": {
+        "all": [
+          "* hi(string $name, string $suffix = '!')",
+          ": string",
+          "active param: 0 (string $name)"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    }
+  ]
+}
