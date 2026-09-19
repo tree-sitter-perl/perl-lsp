@@ -674,6 +674,7 @@
 ; one capture per written argument (the arity count and signature help's
 ; active slot), and the bare-variable ones a by-reference parameter binds.
 (argument_list (_) @arity.arg)
+(argument_list (identifier) @arity.arg.var)
 (function_declarator parameters: (parameter_list) @arity.sig)
 ; WHICH children of a signature are parameters, and what each does to the
 ; count, the document states: @arity.param must be written,
