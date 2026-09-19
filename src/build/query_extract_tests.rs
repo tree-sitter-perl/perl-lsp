@@ -2951,6 +2951,24 @@ $cfg = ['timeout' => 30, 'retries' => 3];
 }
 
 #[test]
+fn php_concat_observation_types_untyped_var() {
+    // The Perl edge alive in PHP: `.` is string-only, so an untyped
+    // parameter types from HOW IT'S USED — no initializer needed.
+    let src = "\
+<?php
+function g($s) {
+    $t = $s . \"!\";
+}
+";
+    let (fa, _) = php_fa(src);
+    let inside = tree_sitter::Point { row: 3, column: 0 };
+    assert_eq!(
+        fa.inferred_type_via_bag("$s", inside),
+        Some(crate::model::file_analysis::InferredType::String),
+    );
+}
+
+#[test]
 fn php_cross_file_function_refs_through_refs_to() {
     // Declaration in a.php, call in b.php, the production refs_to
     // walks both — Perl parity for the references verb.
