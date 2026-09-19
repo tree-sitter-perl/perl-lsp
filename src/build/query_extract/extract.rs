@@ -833,6 +833,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // neither names.
     let mut member_op_by_span: HashMap<(Point, Point), crate::model::file_analysis::MemberOp> =
         HashMap::new();
+    // `@hop.call` → the WHOLE member-call expression's span, joined to its
+    // `@ref.member` so the chain-hop witness (`Projected{base, MethodHop}`)
+    // attaches where an OUTER call's receiver span will look for it.
+    let mut hop_call_by_match: HashMap<usize, crate::model::file_analysis::Span> = HashMap::new();
     // `@dispatch.via` — the dispatching function's name token (`do_action`),
     // joined to the same match's `@ref.dispatch.named` string as the minted
     // DispatchCall's `dispatcher` label.
@@ -956,6 +960,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "sym.attr" {
             attrs_by_match.entry(e.match_id).or_default().push(e.text.clone());
+        }
+        if e.cap == "hop.call" {
+            hop_call_by_match.insert(
+                e.match_id,
+                crate::model::file_analysis::Span { start: e.start, end: e.end },
+            );
         }
         if e.cap == "dispatch.via" {
             dispatch_via_by_match.insert(e.match_id, e.text.clone());
@@ -2153,6 +2163,61 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             out.qualified_spellings.push(spelling);
                         }
                     }
+                    // The chain-hop witness: the whole call's value is
+                    // "dispatch `member` on the receiver's class" — deferred
+                    // to query time via `MethodHop`, so a receiver that is
+                    // itself a call (`$a->b()->c()`) chains through its own
+                    // hop witness at exactly the receiver span. (cpp mints
+                    // via the dedicated `@hop.member` arm below — its ref
+                    // pattern is call-blind, so the called form re-matches.)
+                    if e.cap == "ref.member" && !super_recv {
+                        if let (Some(call_span), Some((recv_span, recv_text))) = (
+                            hop_call_by_match.get(&e.match_id),
+                            member_recv.get(&e.match_id),
+                        ) {
+                            push_hop_witness(
+                                &mut out.witnesses,
+                                pack,
+                                &e.text,
+                                *call_span,
+                                *recv_span,
+                                recv_text,
+                                member_simple.get(&e.match_id).copied().unwrap_or(false),
+                                self_recv_matches.contains(&e.match_id),
+                                cur_scope,
+                                arg_counts_by_start
+                                    .get(&(e.end.row, e.end.column))
+                                    .map(|n| *n as u32),
+                                package.as_deref(),
+                                &|c| ident(c, e.start),
+                            );
+                        }
+                    }
+                }
+            }
+            // cpp's called-member pattern: the ref was already minted by the
+            // call-blind field pattern, so this arm mints ONLY the hop.
+            "hop.member" => {
+                if let (Some(call_span), Some((recv_span, recv_text))) = (
+                    hop_call_by_match.get(&e.match_id),
+                    member_recv.get(&e.match_id),
+                ) {
+                    push_hop_witness(
+                        &mut out.witnesses,
+                        pack,
+                        &e.text,
+                        *call_span,
+                        *recv_span,
+                        recv_text,
+                        member_simple.get(&e.match_id).copied().unwrap_or(false),
+                        self_recv_matches.contains(&e.match_id),
+                        cur_scope,
+                        arg_counts_by_start
+                            .get(&(e.end.row, e.end.column))
+                            .map(|n| *n as u32),
+                        package.as_deref(),
+                        &|c| ident(c, e.start),
+                    );
                 }
             }
             // One import row either way; the two spellings differ in what the
@@ -3678,6 +3743,91 @@ fn split_ns_leaf(fq: &str, sep: &str) -> (String, String) {
         None => (t.to_string(), String::new()),
     }
 }
+
+/// The chain-hop witness for one member-call site: the whole call's value
+/// is `Projected{base, MethodHop{member, arity}}` — dispatch deferred to
+/// query time, when the base's class and the index are in hand. A
+/// simple-var receiver bases on the `Variable` (its witnesses live on the
+/// scope chain, not on the read's span); a current-class receiver (php
+/// `$this->`/`self::` via the pack's `hop.recv` shaping) bases on the
+/// receiver span with a companion `ClassName(enclosing class)` witness —
+/// extraction is the only place that class is in hand; anything else
+/// bases on the receiver's `Expr` span, where a nested call carries its
+/// OWN hop.
+#[allow(clippy::too_many_arguments)]
+fn push_hop_witness(
+    witnesses: &mut Vec<crate::model::witnesses::Witness>,
+    pack: &super::packs::LangPack,
+    member_text: &str,
+    call_span: crate::model::file_analysis::Span,
+    recv_span: crate::model::file_analysis::Span,
+    recv_text: &str,
+    recv_simple: bool,
+    // The document tagged this receiver `@receiver.self` — it names the
+    // class it is written in, so the hop bases on that class. A receiver
+    // TOKEN (`$this`, `self`, `this`) is not this: it is a value the class
+    // body already witnesses, and it bases as the variable it is.
+    recv_names_enclosing_class: bool,
+    scope: crate::model::file_analysis::ScopeId,
+    arity: Option<u32>,
+    enclosing_class: Option<&str>,
+    class_ident: &dyn Fn(&str) -> String,
+) {
+    use crate::model::witnesses as wit;
+    let base = if recv_names_enclosing_class {
+        let Some(cls) = enclosing_class else { return };
+        witnesses.push(wit::Witness {
+            attachment: wit::WitnessAttachment::Expr(recv_span),
+            source: wit::WitnessSource::Builder("skeleton".into()),
+            payload: wit::WitnessPayload::InferredType(
+                crate::model::file_analysis::InferredType::ClassName(cls.to_string()),
+            ),
+            span: recv_span,
+        });
+        wit::WitnessAttachment::Expr(recv_span)
+    } else if recv_simple {
+        wit::WitnessAttachment::Variable {
+            name: (pack.shape_name)("def.var", recv_text),
+            scope,
+        }
+    } else if is_identifier_text(recv_text) {
+        // A bareword receiver dispatches as the class (Perl's
+        // `User->make` rule; php `Level::Debug` / `Foo::create()`): the
+        // span carries no expression witness of its own, so seed it.
+        witnesses.push(wit::Witness {
+            attachment: wit::WitnessAttachment::Expr(recv_span),
+            source: wit::WitnessSource::Builder("skeleton".into()),
+            payload: wit::WitnessPayload::InferredType(
+                crate::model::file_analysis::InferredType::ClassName(class_ident(recv_text)),
+            ),
+            span: recv_span,
+        });
+        wit::WitnessAttachment::Expr(recv_span)
+    } else {
+        wit::WitnessAttachment::Expr(recv_span)
+    };
+    witnesses.push(wit::Witness {
+        attachment: wit::WitnessAttachment::Expr(call_span),
+        source: wit::WitnessSource::Builder("skeleton".into()),
+        payload: wit::WitnessPayload::Projected {
+            base,
+            // Arity-less = a value read (`$this->prop`): the hop asks the
+            // class for the member's VALUE edge, so a same-named method's
+            // return can't answer for the property.
+            step: match arity {
+                Some(arity) => wit::ProjectionStep::MethodHop {
+                    member: (pack.shape_name)("ref.member", member_text),
+                    arity,
+                },
+                None => wit::ProjectionStep::ValueHop {
+                    member: (pack.shape_name)("ref.member", member_text),
+                },
+            },
+        },
+        span: call_span,
+    });
+}
+
 /// A bare identifier lexeme — the only shape that can name an enumerator.
 /// Pure string test (no node-kind probe) so every language's capture text
 /// routes through the same rule.
