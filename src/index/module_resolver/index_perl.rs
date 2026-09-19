@@ -704,5 +704,12 @@ pub fn index_workspace_with_index(
         }
     }
 
+    // The sweep is over: the hub holds everything it will hold for the
+    // workspace's Perl files, so absence in it is meaningful.
+    if let Some(idx) = module_index {
+        idx.mark_language_indexed(
+            crate::build::language_driver::LanguageRegistry::with_enabled().reference_language(),
+        );
+    }
     count.load(Ordering::Relaxed)
 }

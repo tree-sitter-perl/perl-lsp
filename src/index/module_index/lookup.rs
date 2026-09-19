@@ -699,6 +699,9 @@ impl CrossFileLookup for ModuleIndex {
             .unwrap_or_default()
     }
 
+    fn index_state(&self, language: &str) -> crate::model::file_analysis::IndexState {
+        self.language_index_state(language)
+    }
     fn dependency_tier(&self) -> crate::model::file_analysis::DependencyTier {
         use crate::model::file_analysis::DependencyTier;
         // Hub semantics (and a poisoned lock): everything cached here came
