@@ -395,7 +395,10 @@
 ; sub-body content — `scope_within_sub_body` shields them from the outline
 ; and keeps them out of the class-content lane a sticky class package
 ; would otherwise drag them into.
-(function_definition) @scope.sub
+; `.implicit_receiver`: a body in this language elides the member receiver
+; for reads AND for sibling calls (`return inner_;`, `grow()`) — C++ name
+; lookup finds the member before any free function of that name.
+(function_definition) @scope.sub.implicit_receiver
 
 ; ---- top-level / namespaced function prototypes (the bulk of any
 ; header file) — a `declaration`, not a `function_definition`. A
