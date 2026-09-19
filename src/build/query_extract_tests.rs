@@ -2820,6 +2820,87 @@ int f(Widget w) {
     );
 }
 
+// ==== PHP pack: the fifth language on the same driver ====
+
+fn php_parser() -> tree_sitter::Parser {
+    let mut p = tree_sitter::Parser::new();
+    p.set_language(&tree_sitter_php::LANGUAGE_PHP.into()).unwrap();
+    p
+}
+
+fn php_fa(src: &str) -> (crate::model::file_analysis::FileAnalysis, Vec<String>) {
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let imports = skel.imports.clone();
+    (skel.into_file_analysis(), imports)
+}
+
+#[test]
+fn php_pack_same_driver_same_engine() {
+    // Same shape as `python_pack_same_driver_same_engine`: a different
+    // grammar, one query pack, the production engine end to end.
+    let src = "\
+<?php
+namespace App;
+
+use App\\Support\\Str;
+
+class Greeter {
+    public string $prefix;
+    public function greet(string $name): string {
+        $msg = \"hi\";
+        return $msg;
+    }
+}
+
+$x = \"hello\";
+$n = 42;
+$y = $x;
+";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+
+    let names: Vec<(String, String)> = skel
+        .symbols
+        .iter()
+        .map(|s| (s.kind.clone(), s.name.clone()))
+        .collect();
+    assert!(names.contains(&("package".into(), "App".into())), "{names:?}");
+    assert!(names.contains(&("class".into(), "App\\Greeter".into())), "{names:?}");
+    assert!(names.contains(&("method".into(), "greet".into())), "{names:?}");
+    assert!(names.contains(&("field".into(), "prefix".into())), "{names:?}");
+    assert!(names.contains(&("var".into(), "$x".into())), "{names:?}");
+    assert!(skel.imports.contains(&"App\\Support\\Str".to_string()), "{:?}", skel.imports);
+    // the method tags with its class, not the namespace
+    let greet = skel.symbols.iter().find(|s| s.name == "greet").unwrap();
+    assert_eq!(greet.package.as_deref(), Some("App\\Greeter"));
+
+    let fa = skel.into_file_analysis();
+    let end = tree_sitter::Point { row: 16, column: 0 };
+    use crate::model::file_analysis::InferredType;
+    assert_eq!(fa.inferred_type_via_bag("$x", end), Some(InferredType::String));
+    assert_eq!(fa.inferred_type_via_bag("$n", end), Some(InferredType::Numeric));
+    // edge chase across variables
+    assert_eq!(fa.inferred_type_via_bag("$y", end), Some(InferredType::String));
+    // typed parameter + string literal, inside the method body
+    let inside = tree_sitter::Point { row: 9, column: 8 };
+    assert_eq!(fa.inferred_type_via_bag("$name", inside), Some(InferredType::String));
+    assert_eq!(fa.inferred_type_via_bag("$msg", inside), Some(InferredType::String));
+}
+
+#[test]
+fn php_type_display_speaks_php_not_perl() {
+    let (fa, _) = php_fa("<?php\n$x = 1;\n");
+    use crate::model::file_analysis::InferredType;
+    assert_eq!(fa.render_type(&InferredType::HashRef), "array");
+    assert_eq!(fa.render_type(&InferredType::Numeric), "int|float");
+    assert_eq!(fa.render_type(&InferredType::String), "string");
+    // unmapped output passes through
+    assert_eq!(fa.render_type(&InferredType::ClassName("User".into())), "User");
+}
+
 /// The overlay lint's findings: a rail family with no rail names a
 /// namespace nobody declared, and a `@classattr.` spelling outside the
 /// flag table stamps a string no consumer reads. Both mint nothing, so
