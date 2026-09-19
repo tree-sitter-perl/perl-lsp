@@ -81,12 +81,7 @@ $d->ping;
     store.insert_workspace(decoy_path.clone(), parse(decoy_src));
 
     // Targeting Base::ping (where rename cursor would sit at the `sub ping` declaration).
-    let target = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "ping".to_string(),
-        kind: TargetKind::Method { class: "Base".to_string() },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-    };
+    let target = TargetRef::for_test("ping", TargetKind::Method { class: "Base".to_string() });
 
     // Rename uses EDITABLE — workspace-only, no dep scan.
     let locs = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
@@ -150,12 +145,7 @@ $b->ping;
     let store = FileStore::new();
     store.insert_workspace(consumer_path.clone(), parse(consumer_src));
 
-    let target = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "ping".to_string(),
-        kind: TargetKind::Method { class: "Base".to_string() },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-    };
+    let target = TargetRef::for_test("ping", TargetKind::Method { class: "Base".to_string() });
 
     // EDITABLE mask — rename never scans deps.
     let editable_locs = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
@@ -222,12 +212,7 @@ $g->hello;
     store.insert_workspace(child_path.clone(), parse(child_src));
     store.insert_workspace(consumer_path.clone(), consumer_fa);
 
-    let target = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "hello".to_string(),
-        kind: TargetKind::Method { class: "Greeter".to_string() },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-    };
+    let target = TargetRef::for_test("hello", TargetKind::Method { class: "Greeter".to_string() });
 
     // references uses references_mask_for (EDITABLE when def in workspace).
     let ref_mask = references_mask_for(&store, Some(&idx), &target);

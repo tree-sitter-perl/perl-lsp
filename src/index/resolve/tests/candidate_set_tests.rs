@@ -359,15 +359,7 @@ fn from_rename_kind_returns_none_for_kinds_with_no_target() {
 #[test]
 fn collect_from_analysis_still_finds_sub_refs_after_scope_hardening() {
     let fa = parse("package Foo;\nsub greet { 1 }\ngreet();\n1;\n");
-    let target = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "greet".to_string(),
-        kind: TargetKind::Sub { package: Some("Foo".to_string()) },
-        method_classes: Vec::new(),
-        scope: OverrideScope::Dispatch,
-        def_paths: Vec::new(),
-        bare_constant: false,
-    };
+    let target = TargetRef::for_test("greet", TargetKind::Sub { package: Some("Foo".to_string()) });
     let store = FileStore::new();
     let path = PathBuf::from("/tmp/resolve_test_scope_hardening.pm");
     store.insert_workspace(path.clone(), fa);
@@ -487,3 +479,4 @@ fn goto_def_agrees_with_references_on_template_method() {
         "goto-def must land on the same child decl references already names: {defs:?}",
     );
 }
+
