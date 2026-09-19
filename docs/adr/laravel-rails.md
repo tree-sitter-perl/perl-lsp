@@ -68,6 +68,10 @@ declares, or a declared class rail no capture family mints, is a finding
     nested keys dotted, each a Handler on the key token; `lang/en/auth.php`
     skips the locale segment, every locale a stacked definition); with
     `methods`, every method of the file is a name (a policy's abilities),
+    the Handler linked to the declaration it stands on
+    (`rail_handler_twin`) so a consumer asks the relation instead of
+    rediscovering it from a span — that link is what keeps a policy method
+    off the heatmap's dead queue (`docs/adr/heatmap.md`, `rail-handler`).
     Applied by the driver at `analyze_with_path` — the query does not
     know the path.
   - `text_rails`: a file the grammar reads as text (a Blade template)
