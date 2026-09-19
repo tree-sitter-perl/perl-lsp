@@ -47,7 +47,14 @@ pub fn cli_plugin_check(args: &[String]) {
         check_pack_overlay(Path::new(path), json_mode);
         return;
     }
+    // A pack ships two JSON document families and they lint differently;
+    // the bundled names carry the suffix (`wordpress.rails.json`) and a
+    // plugin dir's own documents ARE the bare names.
     let name = Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or("");
+    if name.ends_with("rails.json") {
+        check_rail_declarations(Path::new(path), json_mode);
+        return;
+    }
     if name.ends_with(".json") {
         check_entry_declarations(Path::new(path), json_mode);
         return;
@@ -81,6 +88,200 @@ struct EntryRuleLint {
     methods: Vec<String>,
     #[serde(default, deserialize_with = "crate::build::query_extract::de_string_or_list")]
     when_isa: Vec<String>,
+}
+
+/// The lint's STRICT view of a rail document — the same remote-derive
+/// discipline as [`EntryRuleLint`]: the field list is the loader's, checked
+/// by the compiler, and `deny_unknown_fields` names a stray key that the
+/// lenient loader would ignore. The strictness reaches INSIDE each rail
+/// too: a typo'd `stip`/`skp` in a path rail is the same silent loss as a
+/// stray top-level key, and neither the loader nor a top-level-only lint
+/// would say a word about it.
+#[derive(serde::Deserialize)]
+#[serde(remote = "crate::build::query_extract::RailsDoc", deny_unknown_fields)]
+struct RailDocLint {
+    language: String,
+    #[serde(default, deserialize_with = "de_text_rails")]
+    text_rails: Vec<crate::build::query_extract::TextRail>,
+    #[serde(default, deserialize_with = "de_path_rails")]
+    path_rails: Vec<crate::build::query_extract::PathRail>,
+    #[serde(default)]
+    labels: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    codes: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    hints: Vec<String>,
+    #[serde(default)]
+    name_seps: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    names_are: std::collections::HashMap<String, String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(remote = "crate::build::query_extract::TextRail", deny_unknown_fields)]
+struct TextRailLint {
+    rail: String,
+    calls: Vec<String>,
+    files: Vec<String>,
+    #[serde(default)]
+    requires: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(remote = "crate::build::query_extract::PathRail", deny_unknown_fields)]
+struct PathRailLint {
+    rail: String,
+    under: String,
+    #[serde(default)]
+    skip: usize,
+    #[serde(default)]
+    strip: String,
+    #[serde(default = "lint_default_sep")]
+    sep: String,
+    #[serde(default)]
+    keys: bool,
+    #[serde(default)]
+    methods: bool,
+}
+fn lint_default_sep() -> String {
+    ".".to_string()
+}
+
+fn de_text_rails<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<crate::build::query_extract::TextRail>, D::Error> {
+    #[derive(serde::Deserialize)]
+    struct W(#[serde(with = "TextRailLint")] crate::build::query_extract::TextRail);
+    Ok(<Vec<W> as serde::Deserialize>::deserialize(d)?.into_iter().map(|w| w.0).collect())
+}
+
+fn de_path_rails<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<crate::build::query_extract::PathRail>, D::Error> {
+    #[derive(serde::Deserialize)]
+    struct W(#[serde(with = "PathRailLint")] crate::build::query_extract::PathRail);
+    Ok(<Vec<W> as serde::Deserialize>::deserialize(d)?.into_iter().map(|w| w.0).collect())
+}
+
+/// The rail-declarations arm of `--plugin-check`: validates a
+/// `rails.json` document — parse errors and stray keys (the loader drops
+/// or ignores them), a `language` no enabled pack serves, and a document
+/// that declares no rail at all. A rail NAME is an overlay's own word, so
+/// nothing here checks it against a set; what is checkable is that each
+/// declaration carries the parts its lane reads.
+fn check_rail_declarations(path: &Path, json_mode: bool) {
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cannot read {}: {e}", path.display());
+            crate::lsp::cli::exit_with(2, "exit");
+        }
+    };
+    // Two passes, as the entry arm does: the LENIENT shape decides whether
+    // the loader keeps the document at all, the strict view turns what the
+    // loader would silently ignore into a warning.
+    let doc = match serde_json::from_str::<serde_json::Value>(&source)
+        .and_then(|v| serde_json::from_value::<crate::build::query_extract::RailsDoc>(v))
+    {
+        Ok(d) => d,
+        Err(e) => {
+            if json_mode {
+                println!(
+                    "{}",
+                    json!({ "rails": path.display().to_string(), "ok": false, "error": e.to_string() })
+                );
+            } else {
+                println!("FAIL: {e} (the loader would drop this document)");
+            }
+            crate::lsp::cli::exit_with(1, "exit");
+        }
+    };
+    let mut warnings: Vec<String> = Vec::new();
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&source) {
+        if let Err(e) = RailDocLint::deserialize(&v) {
+            warnings.push(format!("{e} (ignored by the loader — usually a typo)"));
+        }
+    }
+    if doc.language.is_empty() {
+        warnings.push("no `language` field — the loader matches none".to_string());
+    } else if crate::build::language_driver::LanguageRegistry::with_enabled()
+        .for_id(&doc.language)
+        .is_none()
+    {
+        warnings.push(format!(
+            "language '{}' is not served by this build (rails load only under its cargo feature)",
+            doc.language
+        ));
+    }
+    let declared = doc.text_rails.len()
+        + doc.path_rails.len()
+        + doc.labels.len()
+        + doc.hints.len()
+        + doc.codes.len()
+        + doc.name_seps.len();
+    if declared == 0 {
+        warnings.push("the document declares no rail (no rails, labels, hints or separators)".to_string());
+    }
+    // A rail's diagnostic code is client-facing wire text: an editor filters
+    // on it and a user configures against it. A rail that declares none
+    // reports under the generic code, which is a worse answer than saying so.
+    for (rail, code) in &doc.codes {
+        if code.is_empty() || code.split_whitespace().count() != 1 {
+            warnings.push(format!(
+                "rail '{rail}': `code` is a single wire token, not '{code}'"
+            ));
+        }
+    }
+    let rail_names: std::collections::BTreeSet<&str> = doc
+        .text_rails
+        .iter()
+        .map(|r| r.rail.as_str())
+        .chain(doc.path_rails.iter().map(|r| r.rail.as_str()))
+        .chain(doc.labels.keys().map(String::as_str))
+        .collect();
+    for rail in rail_names {
+        if !doc.codes.contains_key(rail) {
+            warnings.push(format!(
+                "rail '{rail}': no `code` — its findings report under the generic                  undefined-rail-name code, with the rail in the diagnostic's data"
+            ));
+        }
+    }
+    for (i, r) in doc.text_rails.iter().enumerate() {
+        if r.calls.is_empty() || r.files.is_empty() {
+            warnings.push(format!(
+                "text rail #{i} ('{}'): a scan needs both `calls` and `files` — it matches nothing",
+                r.rail
+            ));
+        }
+    }
+    for (i, r) in doc.path_rails.iter().enumerate() {
+        if r.under.is_empty() {
+            warnings.push(format!(
+                "path rail #{i} ('{}'): no `under` — it would claim every file",
+                r.rail
+            ));
+        }
+    }
+    if json_mode {
+        println!(
+            "{}",
+            json!({
+                "rails": path.display().to_string(),
+                "ok": true,
+                "language": doc.language,
+                "text_rails": doc.text_rails.len(),
+                "path_rails": doc.path_rails.len(),
+                "labels": doc.labels.len(),
+                "hints": doc.hints.len(),
+                "warnings": warnings,
+            })
+        );
+    } else {
+        println!("OK: {declared} rail declaration(s) for '{}'", doc.language);
+        for w in &warnings {
+            println!("warning: {w}");
+        }
+    }
 }
 
 /// The entry-declarations arm of `--plugin-check`: validates an
@@ -1245,5 +1446,28 @@ mod tests {
 
         let _ = std::fs::remove_file(&plugin);
         let _ = std::fs::remove_file(&fixture);
+    }
+
+    /// The rail lint is strict INSIDE a rail, not only at the top level:
+    /// the loader ignores a typo'd key in a path rail exactly as it ignores
+    /// a stray top-level one, and both read as a feature that quietly does
+    /// nothing.
+    #[test]
+    fn rail_lint_names_a_typo_inside_a_rail() {
+        let typo = serde_json::json!({
+            "language": "php",
+            "path_rails": [ { "rail": "view", "under": "/views/", "stip": ".blade.php" } ],
+        });
+        assert!(
+            RailDocLint::deserialize(&typo).is_err(),
+            "a stray key inside a path rail is a finding"
+        );
+        let clean = serde_json::json!({
+            "language": "php",
+            "path_rails": [ { "rail": "view", "under": "/views/", "strip": ".blade.php" } ],
+            "text_rails": [ { "rail": "view", "calls": ["view"], "files": [".blade.php"] } ],
+            "names_are": { "event": "class" },
+        });
+        assert!(RailDocLint::deserialize(&clean).is_ok(), "the loader's own field list lints clean");
     }
 }
