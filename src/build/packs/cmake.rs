@@ -1,6 +1,6 @@
 //! CMake's pack — the command-dispatched language.
 
-use crate::build::query_extract::{LangPack, PeelSpec};
+use crate::build::query_extract::LangPack;
 use crate::model::file_analysis::{NameSpellings, PackSpellings};
 
 /// CMake writes and displays nothing of its own: the engine's type tags are
@@ -40,17 +40,9 @@ pub fn cmake_pack() -> LangPack {
             }
         },
         import_module: |_, _| None,
-        implicit_this_members: false,
         narrow_type: |_| None,
         brace_scoped_members: false,
         bundled_builtin_types: &[],
         trigger_chars: &["{", "("],
-        recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
-        simple_var_kinds: &[],
-        member_kinds: &[],
-        skip_kinds: &[],
-        call_kinds: &[],
-        domain_compare_kinds: &[],
-        domain_compare_ops: &[],
     }
 }

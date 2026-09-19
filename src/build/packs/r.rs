@@ -1,6 +1,6 @@
 //! R's pack.
 
-use crate::build::query_extract::{LangPack, PeelSpec};
+use crate::build::query_extract::LangPack;
 use crate::model::file_analysis::{NameSpellings, PackSpellings};
 
 /// R writes and displays nothing of its own: the engine's type tags are
@@ -39,17 +39,9 @@ pub fn r_pack() -> LangPack {
         // Whichever call imports, R names the module in the ARGUMENT: a
         // sourced path verbatim, a library name into the installed tree.
         import_module: |_, arg| Some(arg.to_string()),
-        implicit_this_members: false,
         narrow_type: |_| None,
         brace_scoped_members: false,
         bundled_builtin_types: &[],
         trigger_chars: &["$", "@", ":"],
-        recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
-        simple_var_kinds: &[],
-        member_kinds: &[],
-        skip_kinds: &[],
-        call_kinds: &[],
-        domain_compare_kinds: &[],
-        domain_compare_ops: &[],
     }
 }

@@ -97,15 +97,6 @@ pub struct LangPack {
     /// names. The KIND is the capture's suffix — which callees import is the
     /// document's — and this maps the argument text the kind carries.
     pub import_module: fn(kind: &str, arg: &str) -> Option<String>,
-    /// Can a bare, receiver-less identifier resolve through an implicit
-    /// `this->` — both a field read (`return inner_;` = `this->inner_`) AND a
-    /// sibling method call (`foo()` = `this->foo()`)? True for C/C++ (the
-    /// receiver is elided for both members and methods); false for Python/R
-    /// (the receiver is mandatory for both). One language fact, not two: no
-    /// language elides fields but not methods. Gates the member-access half of
-    /// `language_driver::emit_return_fuel` — asked of the pack, never a
-    /// language-name branch.
-    pub implicit_this_members: bool,
     /// The refinement a narrowed subject's type TEXT denotes: the
     /// `@narrow.type` capture where the guard names one
     /// (`dynamic_cast<Derived*>`), else the subject's DECLARED type, which
@@ -133,61 +124,6 @@ pub struct LangPack {
     /// completion (and reports the char in `CompletionContext`) when one is
     /// typed. C++ `. > :` cover `.`/`->`/`::`; the member path keys off them.
     pub trigger_chars: &'static [&'static str],
-    /// The pointer/reference DECLARATOR peel: a `@nested.target` chain
-    /// flattened to its leaf + per-level deref stack — `Box**`, `char****`,
-    /// `Box* const&`. THE recursion S-queries can't express (unbounded depth);
-    /// the pack declares the grammar, the generic `peel` walks it.
-    /// The member-access RECEIVER peel: transparent expression wrappers
-    /// (`(*p)`, `(&o)`, `(p)` → `p`) dropped so the invocant types via the
-    /// inner. The SAME `peel`, no stack, any leaf.
-    pub recv_peel: PeelSpec,
-    /// Simple-variable node kinds (`identifier`). op-DX fires ONLY when the
-    /// IMMEDIATE member-access receiver is one — the receiver whose
-    /// `deref_stack` resolves by name to decide the expected operator. Also the
-    /// cursor-completion "is this receiver a bare variable" test.
-    pub simple_var_kinds: &'static [&'static str],
-    /// Member-access node kinds (`field_expression` / `attribute`): a `recv.m`
-    /// the cursor-completion path climbs to + types the receiver of. Empty =
-    /// no member-access completion (Perl uses `cursor_context`).
-    pub member_kinds: &'static [&'static str],
-    /// Node kinds the sentinel must NOT splice into (string/char/comment).
-    pub skip_kinds: &'static [&'static str],
-    /// Call-expression node kinds (`call_expression`/`call`) — a chained
-    /// receiver `f().attr` types through the call's inner member.
-    pub call_kinds: &'static [&'static str],
-    /// Equality-comparison node kinds (`binary_expression`) whose operand
-    /// may be a domain-typed field — the type-constrained-completion slot
-    /// (`o->op_type == |` ranks the field's DOMAIN members first,
-    /// `docs/adr/cursor-slots.md`). The operand order is either side; the
-    /// slot is the member-access operand, the value the other. Paired with
-    /// `domain_compare_ops` so a `<`/`+` binary never opens the slot. Empty
-    /// = no domain-comparison completion.
-    pub domain_compare_kinds: &'static [&'static str],
-    /// The operator tokens (`==`, `!=`) that make a `domain_compare_kinds`
-    /// node a domain comparison — the pack owns which operators mean
-    /// "equality against a domain value" (rule #10). Empty = feature off.
-    pub domain_compare_ops: &'static [&'static str],
-}
-
-/// A declarative peel: descend a wrapper chain tree-sitter's fixed-depth
-/// S-expression queries cannot express, to the leaf, optionally accumulating a
-/// per-level deref stack. ONE combinator the pack parameterizes — `nested_peel`
-/// (declarators, stack, leaf→def) and `recv_peel` (expr wrappers, no stack, any
-/// leaf) are both instances of it. Empty `wrappers` = the capture is absent.
-#[derive(Clone, Copy)]
-pub struct PeelSpec {
-    /// Wrapper node kinds → the `DerefKind` each contributes (only consulted
-    /// when `record_stack`; a placeholder otherwise).
-    pub wrappers: &'static [(&'static str, crate::model::file_analysis::DerefKind)],
-    /// Per-level annotation node kinds (cv-qualifiers) collected onto a step.
-    pub annot_kinds: &'static [&'static str],
-    /// Leaf node kind → the `def.*` capture the synthetic leaf event mints
-    /// (`identifier`→`def.local`, `field_identifier`→`def.var`). EMPTY = accept
-    /// ANY leaf and mint no def (the receiver-peel case — the leaf is an
-    /// invocant, not a declaration).
-    pub leaf_to_def: &'static [(&'static str, &'static str)],
-    /// Accumulate the per-level `DerefStep` stack (pointer depth) vs descend only.
-    pub record_stack: bool,
 }
 
 /// One type fact parsed from a documentation comment (`LangPack::doc_types`).

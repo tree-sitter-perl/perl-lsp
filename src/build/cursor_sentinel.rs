@@ -85,6 +85,10 @@ pub fn patch(src: &str, cursor: usize) -> String {
 /// True when `cursor` lands inside a string/char/comment in the ORIGINAL
 /// parse — splicing there would be a no-op at best, corruption at worst.
 fn cursor_in_skip(orig: &Tree, src: &str, cursor: usize, cfg: &crate::build::query_extract::LangPack) -> bool {
+    let skip = kinds(orig.root_node(), cfg, "skip");
+    if skip.is_empty() {
+        return false;
+    }
     // Probe one byte back: at `box.` the cursor is past the `.`, but a
     // cursor that is literally inside `"foo`| sits within the string.
     let probe = cursor.saturating_sub(1).min(src.len().saturating_sub(1));
@@ -96,12 +100,39 @@ fn cursor_in_skip(orig: &Tree, src: &str, cursor: usize, cfg: &crate::build::que
     };
     let mut n = Some(node);
     while let Some(x) = n {
-        if cfg.skip_kinds.contains(&x.kind()) {
+        if skip.contains(x.kind()) {
             return true;
         }
         n = x.parent();
     }
     false
+}
+
+/// The pack's compiled query, reached through a node of its own tree —
+/// the language is what the tree was parsed with, so no caller threads one.
+fn query_at(at: Node, cfg: &crate::build::query_extract::LangPack) -> Option<&'static tree_sitter::Query> {
+    crate::build::query_extract::query_for(&at.language(), cfg)
+}
+
+/// The node kinds `cfg`'s document roots `capture`'s patterns at — the one
+/// way this module answers "which nodes are a member access / a call / a
+/// place not to splice".
+fn kinds(
+    at: Node,
+    cfg: &crate::build::query_extract::LangPack,
+    capture: &str,
+) -> &'static std::collections::HashSet<&'static str> {
+    static EMPTY: std::sync::OnceLock<std::collections::HashSet<&'static str>> =
+        std::sync::OnceLock::new();
+    query_at(at, cfg)
+        .map(|q| crate::build::query_extract::pattern_root_kinds(q, capture))
+        .unwrap_or_else(|| EMPTY.get_or_init(Default::default))
+}
+
+/// Is `at`'s kind one of the shapes the document calls a CALL — a call
+/// expression, a chain hop, or a construction?
+fn is_call_kind(at: Node, cfg: &crate::build::query_extract::LangPack) -> bool {
+    ["expr.call", "hop.call", "expr.ctor"].iter().any(|c| kinds(at, cfg, c).contains(at.kind()))
 }
 
 /// Patch a sentinel at `cursor`, re-parse, and return the receiver of the
@@ -161,7 +192,7 @@ fn climb_to_member<'a>(node: Node<'a>, cfg: &crate::build::query_extract::LangPa
     let mut n = node;
     for _ in 0..6 {
         let parent = n.parent()?;
-        if cfg.member_kinds.contains(&parent.kind()) {
+        if kinds(parent, cfg, "member.recv").contains(parent.kind()) {
             return Some(parent);
         }
         n = parent;
@@ -315,7 +346,7 @@ pub fn domain_compare_ctx_incremental(
     analysis: &FileAnalysis,
     module_index: Option<&dyn CrossFileLookup>,
 ) -> Option<InferredType> {
-    if cfg.domain_compare_kinds.is_empty() || cfg.domain_compare_ops.is_empty() {
+    if kinds(old.root_node(), cfg, "domain.compare.op").is_empty() {
         return None;
     }
     if cursor_in_skip(old, src, cursor, cfg) {
@@ -359,7 +390,7 @@ fn climb_to_domain_compare<'a>(
     let mut n = node;
     for _ in 0..6 {
         let parent = n.parent()?;
-        if cfg.domain_compare_kinds.contains(&parent.kind())
+        if kinds(parent, cfg, "domain.compare.op").contains(parent.kind())
             && comparison_uses_domain_op(parent, cfg, patched)
         {
             return Some(parent);
@@ -376,12 +407,11 @@ fn comparison_uses_domain_op(
     cfg: &crate::build::query_extract::LangPack,
     patched: &str,
 ) -> bool {
+    let Some(query) = query_at(cmp, cfg) else { return false };
+    let ops = crate::build::query_extract::capture_literals(query, "domain.compare.op");
     (0..cmp.child_count()).filter_map(|i| cmp.child(i)).any(|ch| {
         !ch.is_named()
-            && ch
-                .utf8_text(patched.as_bytes())
-                .map(|t| cfg.domain_compare_ops.contains(&t))
-                .unwrap_or(false)
+            && ch.utf8_text(patched.as_bytes()).map(|t| ops.contains(t)).unwrap_or(false)
     })
 }
 
@@ -397,7 +427,7 @@ fn domain_slot_operand<'a>(
     (0..cmp.named_child_count())
         .filter_map(|i| cmp.named_child(i))
         .find(|n| {
-            cfg.member_kinds.contains(&n.kind())
+            kinds(*n, cfg, "member.recv").contains(n.kind())
                 && !(n.start_byte() <= cursor && cursor < n.end_byte())
         })
 }
@@ -422,7 +452,7 @@ fn operator_fix(
     analysis: &FileAnalysis,
     cfg: &crate::build::query_extract::LangPack,
 ) -> Option<(Span, String)> {
-    if !cfg.simple_var_kinds.contains(&receiver.kind()) {
+    if !simple_var_kinds(receiver, cfg).contains(receiver.kind()) {
         return None; // only simple-variable receivers carry a resolvable stack
     }
     let name = receiver.utf8_text(patched.as_bytes()).ok()?;
@@ -438,6 +468,30 @@ fn operator_fix(
     Some((span, expected.as_str().to_string()))
 }
 
+/// The node kinds this language reads as a BARE variable — the patterns
+/// that capture a plain variable read say which, so the cursor path and the
+/// extractor's by-reference lane mean the same shape.
+fn simple_var_kinds(
+    at: Node,
+    cfg: &crate::build::query_extract::LangPack,
+) -> &'static std::collections::HashSet<&'static str> {
+    kinds(at, cfg, "expr.read.var")
+}
+
+/// Does `node` itself carry the document's bare-variable-read capture? The
+/// pattern roots at the token, so the bounded cursor answers for this node
+/// and no descendant — which is the question, and not one a kind list can
+/// answer for a language whose reads are a shape rather than a node kind.
+fn is_bare_var_read(
+    node: Node,
+    cfg: &crate::build::query_extract::LangPack,
+    src: &str,
+) -> bool {
+    let Some(query) = query_at(node, cfg) else { return false };
+    crate::build::query_extract::captures_at(query, node, src.as_bytes())
+        .iter()
+        .any(|(cap, n)| *cap == "expr.read.var" && n.id() == node.id())
+}
 /// Type a receiver node. A member-access node (`field_expression` /
 /// `attribute`) is field-on-class — recurse the base, look the field up on
 /// its class; anything else (an identifier, a call) resolves by its exact
@@ -453,7 +507,7 @@ fn resolve_node_type(
     // (`member_value_type`: dispatch ladder + receiver-threaded method
     // return, falling back to the field's declared type with template
     // params substituted).
-    if cfg.member_kinds.contains(&node.kind()) {
+    if kinds(node, cfg, "member.recv").contains(node.kind()) {
         let base = node.named_child(0)?;
         let field = node.named_child(node.named_child_count() - 1)?;
         let base_ty = resolve_node_type(base, cfg, src, analysis, module_index)?;
@@ -465,9 +519,9 @@ fn resolve_node_type(
     // cross-file flow through the same chase, no special-casing). The
     // receiver's full value threads through so a param-shaped return
     // (`T get()`) substitutes the instance's args.
-    if cfg.call_kinds.contains(&node.kind()) {
-        let func = node.child_by_field_name("function")?;
-        if cfg.member_kinds.contains(&func.kind()) {
+    if is_call_kind(node, cfg) {
+        let Some(func) = node.child_by_field_name("function") else { return None };
+        if kinds(func, cfg, "member.recv").contains(func.kind()) {
             let recv = func.named_child(0)?;
             let method = func.named_child(func.named_child_count() - 1)?;
             let recv_ty = resolve_node_type(recv, cfg, src, analysis, module_index)?;
@@ -482,12 +536,14 @@ fn resolve_node_type(
     // Transparent wrappers — `(expr)`, `*p`, `&obj` — denote the same class
     // as their operand (pointer-/reference-ness dropped). Peel and recurse so
     // `(*p).m` / `(&o)->m` reach the members `p->m` does.
-    if cfg.recv_peel.wrappers.iter().any(|(k, _)| *k == node.kind()) {
-        return resolve_node_type(node.named_child(0)?, cfg, src, analysis, module_index);
+    if let Some(query) = query_at(node, cfg) {
+        if crate::build::query_extract::recv_peel_kinds(query).contains(node.kind()) {
+            return resolve_node_type(node.named_child(0)?, cfg, src, analysis, module_index);
+        }
     }
-    // Implicit-`this` member receiver: a bare identifier (`iter_->`, `mem_->`,
-    // `options_.`) with NO local declaration IS `this->name` where the pack
-    // elides the receiver (`implicit_this_members`). Resolve it on the
+    // Implicit receiver: a bare variable read (`iter_->`, `mem_->`,
+    // `options_.`) with NO local declaration IS `this->name` inside a scope
+    // whose document says the receiver may be elided. Resolve it on the
     // enclosing class — `member_value_type` runs the SAME dispatch ladder +
     // cross-file field lookup member access uses, so a field declared in the
     // class's header (an out-of-line method body reads it cross-file) resolves
@@ -496,9 +552,9 @@ fn resolve_node_type(
     // "local" flow witnesses on the name (here typing it `Numeric` off a buried
     // literal) that would otherwise shadow the true member type. A genuine
     // local/param keeps its flow-narrowed value (it has a Variable symbol, so
-    // this branch is skipped). Gated on the pack capability so Python/R
-    // (mandatory receiver) never treat a bare name as a member.
-    if cfg.implicit_this_members && cfg.simple_var_kinds.contains(&node.kind()) {
+    // this branch is skipped). Both halves are the document's word: the scope
+    // says the language elides, the capture says this token is a bare read.
+    if is_bare_var_read(node, cfg, src) {
         if let Ok(name) = node.utf8_text(src.as_bytes()) {
             if !analysis.has_local_variable_at(name, node.start_position()) {
                 if let Some(t) =
