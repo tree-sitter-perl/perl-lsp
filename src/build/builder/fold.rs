@@ -925,6 +925,7 @@ impl<'a> Builder<'a> {
                 }),
                 folded_from: None,
                 arg_count: None,
+                flags: Default::default(),
             });
         }
     }

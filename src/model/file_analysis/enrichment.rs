@@ -202,6 +202,7 @@ impl FileAnalysis {
                     binding: gr.binding.clone(),
                     folded_from: None,
                     arg_count: None,
+                    flags: Default::default(),
                 });
             }
         }
