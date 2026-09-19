@@ -220,7 +220,10 @@ fn render_candidate_hover(
         return (!line.is_empty()).then(|| format!("```{}\n{}\n```", language, line));
     }
     let path = crate::index::resolve::key_for_sort(&loc.key);
-    let text = std::fs::read_to_string(&path).ok()?;
+    let text = crate::util::timings::phase("lsp::hover_candidate_read", || {
+        std::fs::read_to_string(&path)
+    })
+    .ok()?;
     let fname = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
     // The candidate's own analysis: the scoped index caches every pack file
     // a projection can answer from.
