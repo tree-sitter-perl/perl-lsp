@@ -78,6 +78,7 @@ pub fn php_pack() -> LangPack {
         ],
         bundled_rail_docs: &[
             include_str!("../../../../queries/php/frameworks/wordpress.rails.json"),
+            include_str!("../../../../queries/php/frameworks/laravel.rails.json"),
         ],
         // `\\` qualifies, `$` leads every variable, and a written class
         // spelling resolves through the file's `use` rows and namespace
