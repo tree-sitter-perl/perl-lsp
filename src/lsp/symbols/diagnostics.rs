@@ -764,6 +764,48 @@ fn receiver_class(analysis: &FileAnalysis, r: &crate::model::file_analysis::Ref)
 }
 
 
+/// The pack-language symbol lanes, rendered. Each lane is a `FileAnalysis`
+/// query answering `Vec<Finding>` (`model/file_analysis/diagnostics*.rs`);
+/// this is where the findings become `Diagnostic`s, where the language
+/// documents' declared name sets are read for them, and where the one lane
+/// that needs the resolver — the rail names — still runs.
+pub fn pack_symbol_diagnostics(
+    analysis: &FileAnalysis,
+    idx: Option<&dyn CrossFileLookup>,
+) -> Vec<Diagnostic> {
+    use crate::model::file_analysis::IndexState;
+    // Whether absence is meaningful is the INDEX's answer about THIS
+    // language, never a caller's claim: a store that swept nothing is
+    // warming, and the lanes that report a name missing stay silent until
+    // it says otherwise.
+    let index_settled = idx
+        .map(|i| i.index_state(&analysis.language))
+        .unwrap_or(IndexState::Warming)
+        .is_settled();
+    // The document-declared sets with no per-site fact to mint, read once
+    // here — the tier that can see the documents, handing them to the lanes
+    // that reason on them.
+    use crate::build::language_driver::LanguageRegistry as Reg;
+    let lang = analysis.language.as_str();
+    let builtins = Reg::builtin_types(lang);
+    let facts = LaneFacts {
+        idx,
+        index_settled,
+        builtin_types: &builtins,
+        imports_bind_names: Reg::imports_bind_names(lang),
+    };
+
+    let mut out: Vec<Diagnostic> = analysis
+        .member_findings(&facts)
+        .into_iter()
+        .chain(analysis.call_arity_findings())
+        .map(render_finding)
+        .collect();
+
+    out
+}
+
+
 /// One lane finding as the wire sees it. THE place a `Finding` becomes
 /// text: severity, phrasing, tags and the quick-fix payload all live here,
 /// so a lane can be asked its answer without the protocol's vocabulary and
