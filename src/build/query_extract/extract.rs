@@ -880,8 +880,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // carries `THROWAWAY`, which is what the unused-variable lane asks.
     let mut throwaway_name_spans: std::collections::HashSet<(Point, Point)> =
         std::collections::HashSet::new();
+    // `@sym.attr.deprecated` — the ATTRIBUTE spelling of `@deprecated`,
+    // per match, so the def it annotates carries the same fact the docblock
+    // tag gives.
+    let mut deprecated_matches: std::collections::HashSet<usize> = Default::default();
     // `@ref.var.implicit` — reads the runtime binds without a declaration.
     let mut runtime_bound_reads: Vec<Span> = Vec::new();
+    // The attribute TOKENS the document names deprecated. A def's own
+    // pattern captures its attributes as `@sym.attr` and must stay
+    // predicate-free (a `#eq?` there would gate the whole def), so the
+    // marking pattern is separate and the two meet at the token's span.
+    let deprecated_attr_spans: std::collections::HashSet<(Point, Point)> = events
+        .iter()
+        .filter(|e| e.cap == "sym.attr.deprecated")
+        .map(|e| (e.start, e.end))
+        .collect();
     // `@classattr.<flavor>` — container-def name spans stamped with a
     // flavor attribute ("interface"/"trait"): the model's SymKind::Class
     // covers all three php container kinds, and SUPER/reference walks
@@ -959,6 +972,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "def.var.throwaway" {
             throwaway_name_spans.insert((e.start, e.end));
+        }
+        if e.cap == "sym.attr" && deprecated_attr_spans.contains(&(e.start, e.end)) {
+            deprecated_matches.insert(e.match_id);
         }
         if e.cap == "ref.var.implicit" {
             runtime_bound_reads.push(Span { start: e.start, end: e.end });
@@ -1778,6 +1794,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     attributes: {
                         let mut a =
                             attrs_by_match.get(&e.match_id).cloned().unwrap_or_default();
+                        // `#[Deprecated]` is the attribute spelling of `@deprecated`
+                        if deprecated_matches.contains(&e.match_id)
+                            && !a.iter().any(|x| x == "deprecated")
+                        {
+                            a.push("deprecated".to_string());
+                        }
                         // a default-named symbol is structure, not an
                         // addressable name — completion skips it.
                         if defaulted {
