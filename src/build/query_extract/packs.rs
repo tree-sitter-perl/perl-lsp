@@ -138,6 +138,59 @@ pub struct LangPack {
     pub trigger_chars: &'static [&'static str],
 }
 
+impl LangPack {
+    /// Every `&'static str` this pack DECLARES, tagged with the field it
+    /// came from — the reflection the rule #15 tripwires walk.
+    ///
+    /// Hand-written and exhaustive on purpose: the destructure below makes
+    /// a new `LangPack` field a compile error here until its strings are
+    /// declared, which is what stops a fresh table of node kinds from
+    /// arriving unwatched. The DOCUMENT fields (`query_source`, the bundled
+    /// overlays, the entry markers, the rail docs, the builtin-type lists)
+    /// are the documents themselves, `names` is the language's own spelling seam,
+    /// and `lang_id` is a registration — none is a vocabulary this rule
+    /// governs, so none is yielded.
+    #[allow(dead_code)] // the rule #15 tripwires are its only caller
+    pub(crate) fn declared_strings(&self) -> Vec<(&'static str, &'static str)> {
+        let LangPack {
+            query_source: _,
+            bundled_overlays: _,
+            lang_id: _,
+            bundled_entry_markers: _,
+            bundled_rail_docs: _,
+            spellings: _,
+            names: _,
+            shape_name: _,
+            default_name: _,
+            annot_type: _,
+            declared_return: _,
+            doc_types: _,
+            doc_uses_method_tags,
+            module_paths: _,
+            import_module: _,
+            narrow_type: _,
+            brace_scoped_members: _,
+            bundled_builtin_types: _,
+            enum_members,
+            trigger_chars,
+        } = self;
+        let mut out: Vec<(&'static str, &'static str)> = Vec::new();
+        fn list(
+            out: &mut Vec<(&'static str, &'static str)>,
+            field: &'static str,
+            values: &'static [&'static str],
+        ) {
+            out.extend(values.iter().map(|v| (field, *v)));
+        }
+        list(&mut out, "doc_uses_method_tags", doc_uses_method_tags);
+        out.extend(enum_members.iter().map(|m| ("enum_members", m.name)));
+        list(&mut out, "trigger_chars", trigger_chars);
+        out.retain(|(_, v)| !v.is_empty());
+        out
+    }
+}
+
+
 /// One member the LANGUAGE gives every enum of a language. Read at
 /// extraction and nowhere else — the mint turns it into a real member.
 #[derive(Debug, Clone, Copy)]
