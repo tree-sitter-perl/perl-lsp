@@ -335,3 +335,17 @@ fn make_add_to_qw_action(
         ..Default::default()
     }))
 }
+
+/// A callable's declarator as written — from its name token to the end of
+/// its declaration, minus the terminator, whitespace collapsed.
+pub fn declarator_text(src: &str, sym: &crate::model::file_analysis::Symbol) -> Option<String> {
+    let start = crate::build::cursor_sentinel::point_to_byte(src, sym.selection_span.start);
+    let end = crate::build::cursor_sentinel::point_to_byte(src, sym.span.end);
+    let raw = src.get(start..end)?;
+    let t = raw.trim_end().trim_end_matches(';').trim_end();
+    if t.is_empty() {
+        return None;
+    }
+    Some(t.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+

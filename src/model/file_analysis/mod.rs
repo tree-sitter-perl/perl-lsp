@@ -53,6 +53,7 @@ mod diagnostics;
 pub use diagnostics::*;
 mod diagnostics_members;
 mod diagnostics_liveness;
+mod diagnostics_names;
 
 // ---- FileAnalysis ----
 
