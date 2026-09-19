@@ -561,3 +561,227 @@
 (array_creation_expression
   (array_element_initializer (_) (_) @tuple.keyed)) @tuple.arr
 
+; ---- call arguments ----
+; What the arity lane counts and what signature help points at: one
+; capture per written argument, in source order, plus the three shapes
+; that END positional matching. A named argument is matched by name, a
+; spread makes the count unknowable, and `f(...)` passes nothing at all —
+; each says so on its own argument, so no consumer re-reads the list.
+(arguments (_) @arity.arg)
+(arguments (argument name: (name)) @arity.arg.named)
+(arguments (argument (variadic_unpacking)) @arity.arg.spread)
+(arguments (variadic_placeholder) @arity.placeholder)
+; A BARE variable argument: the token a by-reference parameter binds
+; (docs/adr/by-ref-binding.md). Anchored both ends, so `f(name: $x)` — a
+; named argument that also holds one — is not one.
+(arguments (argument . (variable_name) @arity.arg.var .))
+
+; Calls that make the ENCLOSING callable read arguments it never declared,
+; or materialize variables no declaration names: the arity and
+; undefined-variable lanes ask the callable, which carries the fact.
+((function_call_expression function: (name) @call.dynamic_args)
+ (#any-of? @call.dynamic_args "func_get_args" "func_num_args" "func_get_arg"))
+((function_call_expression function: (name) @call.dynamic_vars)
+ (#any-of? @call.dynamic_vars "extract" "get_defined_vars" "eval" "parse_str" "compact"))
+
+; ---- references ----
+(function_call_expression
+  function: (name) @ref.call
+  arguments: (arguments) @arity.args) @expr.call
+(function_call_expression
+  function: (qualified_name (name) @ref.call) @ref.qualified
+  arguments: (arguments) @arity.args) @expr.call
+
+; `$obj->method()` / `$obj?->method()` / `$obj->prop` / `User::method()`:
+; all one MethodCall lane — the receiver types query-time via its own Expr
+; witness; a bareword receiver dispatches as the class (Perl `User->make`).
+; `@hop.call` = the WHOLE call expression: the chain-hop witness attaches
+; to its span, so an outer call's receiver (`object:` = this node) chains
+; through it — `$a->b()->c()` types with no intermediate variable.
+(member_call_expression
+  object: (_) @member.recv
+  name: (name) @ref.member
+  arguments: (arguments) @arity.args) @hop.call
+(nullsafe_member_call_expression
+  object: (_) @member.recv
+  name: (name) @ref.member
+  arguments: (arguments) @arity.args) @hop.call
+; A plain property ACCESS is a value too (`$this->query->where(...)`
+; chains through it): the hop dispatches the field on the receiver's
+; class and answers its declared type — arity-less, same lane.
+(member_access_expression
+  object: (_) @member.recv
+  name: (name) @ref.member) @hop.call
+(scoped_call_expression
+  scope: (name) @member.recv @ref.type @receiver.class
+  name: (name) @ref.member
+  arguments: (arguments) @arity.args) @hop.call
+;; `Str::$method()` — a variable method name on a class receiver: the
+;; class is still spelled (no member to resolve).
+(scoped_call_expression
+  scope: (name) @member.recv @ref.type @receiver.class
+  name: (variable_name))
+;; `Psr7\Utils::make()` — a namespace-qualified bareword receiver: the leaf
+;; is the class, the prefix a qualified spelling (the use-map's prefix use).
+(scoped_call_expression
+  scope: (qualified_name (name) @member.recv @ref.type) @ref.qualified @receiver.class
+  name: (name) @ref.member
+  arguments: (arguments) @arity.args) @hop.call
+; `self::` / `static::` / `parent::` — the call token still gets a ref
+; (rule #7). Which relative scope was written is the receiver's own
+; capture: @receiver.self names the ENCLOSING class (no typeable value
+; node — the class comes off the cursor's scope chain), @receiver.super
+; means "dispatch above the writing class", which the mint spells as the
+; model's SUPER method token. One arm each, so the ref and its receiver
+; kind arrive in ONE match.
+((scoped_call_expression
+  scope: (relative_scope) @member.recv @receiver.self
+  name: (name) @ref.member
+  arguments: (arguments) @arity.args) @hop.call
+ (#any-of? @receiver.self "self" "static"))
+((scoped_call_expression
+  scope: (relative_scope) @member.recv @receiver.super
+  name: (name) @ref.member
+  arguments: (arguments) @arity.args) @hop.call
+ (#eq? @receiver.super "parent"))
+; `$this->helper::make()` / `$cls::make()` / `static::$inst::run()` — a
+; scoped call on an EXPRESSION receiver: the receiver types like any member
+; access (its property type, its class-string value) and the call
+; dispatches on that class.
+(scoped_call_expression
+  scope: [(variable_name) (member_access_expression) (scoped_property_access_expression)] @member.recv
+  name: (name) @ref.member
+  arguments: (arguments) @arity.args) @hop.call
+; `Helper::class` — the class-string literal IS the class: the value a
+; later `$cls::make()` dispatches on. Bareword class receivers
+; (`Helper::make()`, `Helper::VERSION`, `Helper::$inst`, `Helper::class`)
+; also spell the class (@ref.type) — the class's references and rename
+; reach them, and the use-map counts the leaf as spelled.
+((class_constant_access_expression
+  . (name) @classref.name
+  (name) @_clsk .) @expr.classref
+  (#eq? @_clsk "class"))
+((class_constant_access_expression
+  . (qualified_name (name) @classref.name)
+  (name) @_clskq .) @expr.classref
+  (#eq? @_clskq "class"))
+
+; `User::VERSION` / `self::LIMIT` / `Level::Debug` — class-constant and
+; enum-case ACCESS rides the same member lane as a scoped call (the
+; receiver dispatches as the class), arg-less. Anchored on both ends so
+; the receiver `(name)` can never re-match as the constant of a second
+; combination (the use-map poison, same lesson).
+(class_constant_access_expression
+  . (name) @member.recv @ref.type @receiver.class
+  (name) @ref.member .) @hop.call
+((class_constant_access_expression
+  . (relative_scope) @member.recv @receiver.self
+  (name) @ref.member .) @hop.call
+ (#any-of? @receiver.self "self" "static"))
+((class_constant_access_expression
+  . (relative_scope) @member.recv @receiver.super
+  (name) @ref.member .) @hop.call
+ (#eq? @receiver.super "parent"))
+
+; A receiver whose member is named by a STRING, not by a member access:
+; `@member.recv.named` so the member-access node kinds stay exactly the
+; shapes the cursor climbs to (an array literal is not one).
+; `[UserController::class, 'index']` / `array(Listener::class, 'handle')`:
+; php's class-array callable — the exactly-two-element pair NAMES a
+; dispatchable method (Laravel routes, event maps, callable args). The
+; class token rides @member.recv (the bareword-dispatches-as-class rule)
+; and the string content mints the method ref — the array($this, 'm')
+; shape with a class receiver. Language convention, not framework
+; vocabulary, so it lives in the base skeleton.
+; Each element must be BARE (`. (x) .` inside the initializer): a keyed
+; pair `'book' => $chapter->book` also contains a string and a receiver,
+; and a two-pair view-data array read as a callable — its key token
+; became a method reference a rename would rewrite.
+(array_creation_expression
+  . (array_element_initializer
+      . (class_constant_access_expression
+        . (name) @member.recv.named
+        (name) @_ccls .) .)
+  . (array_element_initializer . (string (string_content) @ref.method.named) .) .
+  (#eq? @_ccls "class"))
+(array_creation_expression
+  . (array_element_initializer
+      . (class_constant_access_expression
+        . (qualified_name (name) @member.recv.named)
+        (name) @_cclsq .) .)
+  . (array_element_initializer . (string (string_content) @ref.method.named) .) .
+  (#eq? @_cclsq "class"))
+
+; `[$this, 'method']` / `[$listener, 'method']` — the instance-array
+; callable: the variable is the receiver (typed like any member access),
+; the string names the method. Event listeners and PHPUnit callbacks live
+; here; a rename that misses them breaks the dispatch at runtime.
+(array_creation_expression
+  . (array_element_initializer . (variable_name) @member.recv.named .)
+  . (array_element_initializer . (string (string_content) @ref.method.named) .) .)
+
+; `static::$records` / `self::$records` / `Foo::$prop` — scoped STATIC
+; property access rides the same member lane (`static::$prop`
+; lost the property's own @var doc because no hop existed here; the
+; `$this->prop` twin always had one). The field name is the inner
+; (name), sigil-stripped like instance access; relative scopes
+; canonicalize via member.recv shaping.
+((scoped_property_access_expression
+  scope: (relative_scope) @member.recv @receiver.self
+  name: (variable_name (name) @ref.member) @var.member) @hop.call
+ (#any-of? @receiver.self "self" "static"))
+((scoped_property_access_expression
+  scope: (relative_scope) @member.recv @receiver.super
+  name: (variable_name (name) @ref.member) @var.member) @hop.call
+ (#eq? @receiver.super "parent"))
+(scoped_property_access_expression
+  scope: (name) @member.recv @ref.type @receiver.class
+  name: (variable_name (name) @ref.member) @var.member) @hop.call
+;; `\Vendor\Init::$files` — the qualified spelling of the same access.
+(scoped_property_access_expression
+  scope: (qualified_name (name) @member.recv @ref.type) @ref.qualified @receiver.class
+  name: (variable_name (name) @ref.member) @var.member) @hop.call
+; `$cls::$prop` / `$this->resource::$wrap` / `getBuilder()::$precision` — the
+; scope is an EXPRESSION whose value is the class (a `Foo::class` string, a
+; typed receiver): the same member lane; `@var.member` keeps the property
+; token from reading as a local variable.
+(scoped_property_access_expression
+  scope: [(variable_name) (member_access_expression) (scoped_property_access_expression)
+          (function_call_expression) (member_call_expression) (scoped_call_expression)] @member.recv
+  name: (variable_name (name) @ref.member) @var.member) @hop.call
+
+; `new User(...)`: the value is an instance of User by SYNTAX — the ctor
+; edge rides the alias graph (TypeName → the defining file, or the bare
+; ClassName terminal), so a class declared in another file still types
+; the variable. The name stays a call ref so references-on-User count
+; instantiation sites.
+; The written argument list is the CONSTRUCTOR call's, so the arity lane
+; compares it against `__construct`; `new Foo;` writes none.
+(object_creation_expression
+  (name) @ref.call
+  (arguments)? @arity.args) @expr.ctor
+(object_creation_expression
+  (qualified_name (name) @ref.call) @ref.qualified
+  (arguments)? @arity.args) @expr.ctor
+
+; `$this` is the object the enclosing method runs on: it names the class
+; off the scope chain rather than out of a namespace, it is bound by the
+; runtime (never an undefined variable), and a member access through it
+; dispatches on the runtime class. One capture says all three.
+((variable_name) @receiver.this
+ (#eq? @receiver.this "$this"))
+
+; Variables the RUNTIME binds, with no declaration anywhere in the file:
+; a read of one is bound, never undefined.
+((variable_name) @ref.var.implicit
+ (#any-of? @ref.var.implicit
+   "$this" "$GLOBALS" "$_SERVER" "$_GET" "$_POST" "$_FILES" "$_COOKIE"
+   "$_SESSION" "$_REQUEST" "$_ENV" "$argv" "$argc" "$http_response_header"))
+
+; The THROWAWAY binding: `foreach ($a as $k => $_)` writes it to discard
+; it, so it is never unused.
+((variable_name) @def.var.throwaway
+ (#eq? @def.var.throwaway "$_"))
+
+(variable_name) @expr.read.var
+
