@@ -31,6 +31,13 @@ function-pointer member, `int (*read)(char *)`), minted from the
 asks it, so `ops->read(buf)` resolves to the slot a call would otherwise
 miss — without a list of callback names anywhere.
 
+A declaration the source never wrote carries `SYNTHESIZED`: the LANGUAGE
+gives every enum its `->value` and `::cases()`, and those members are
+minted at the enum's own name token, resolvable and completable like any
+other. The flag is what the dead-code guard asks — nothing in the source
+could reference such a member into existence — so no consumer has to know
+which names a runtime provides.
+
 ## Why closed
 
 Every flag added so far has turned out to have a language-generic
