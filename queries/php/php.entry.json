@@ -1,0 +1,44 @@
+{
+  "language": "php",
+  "entries": [
+    {
+      "methods": [
+        "__toString",
+        "__invoke",
+        "__get",
+        "__set",
+        "__isset",
+        "__unset",
+        "__call",
+        "__callStatic",
+        "__clone",
+        "__destruct",
+        "__wakeup",
+        "__sleep",
+        "__serialize",
+        "__unserialize",
+        "__debugInfo",
+        "__set_state",
+        "__toBool"
+      ]
+    },
+    {
+      "methods": [
+        "count",
+        "getIterator",
+        "current",
+        "key",
+        "next",
+        "rewind",
+        "valid",
+        "offsetExists",
+        "offsetGet",
+        "offsetSet",
+        "offsetUnset",
+        "jsonSerialize",
+        "serialize",
+        "unserialize"
+      ]
+    }
+  ]
+}
