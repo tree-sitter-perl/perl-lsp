@@ -1268,8 +1268,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // extent). The condition's captures precede the block in source, so
     // by the time the `@scope` event fires these are populated.
     let mut narrow_var: HashMap<usize, String> = HashMap::new();
-    let mut narrow_type: HashMap<usize, String> = HashMap::new();
-    let mut narrow_guard: HashMap<usize, String> = HashMap::new();
+    let mut narrow_type_txt: HashMap<usize, String> = HashMap::new();
     // Recognized narrowings deferred to after flow-edge minting, so the region
     // cutoff can read the edges (`apply` below) — (subject, refined type, FULL
     // guarded-block region, block scope).
@@ -1278,6 +1277,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // Class-body scopes (`register_class_body`), for the member-targeted
     // flow (`@flow.target.member`): the witness lands where field readers look.
     let mut class_body_scopes: std::collections::HashSet<ScopeId> = std::collections::HashSet::new();
+    // Region-shaped narrowings, resolved after the loop (the guard's own
+    // captures may follow the region node in event order): `@narrow.after`
+    // holds from the node's END to the enclosing scope's end, `@narrow.within`
+    // over the node itself — each in the scope open at the node.
+    let mut narrow_after: Vec<(usize, Point, ScopeId)> = Vec::new();
+    let mut narrow_within: Vec<(usize, Span, ScopeId)> = Vec::new();
     // `std::move(x)` halves, joined per match: the qualifier (`std`) + name
     // (`move`) verify the call IS std::move (no query predicates), the var is
     // the moved subject, the call span the region start + enclosing scope.
@@ -1439,19 +1444,29 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     let subject = (pack.shape_name)("ref.var", &var);
                     // Type text: the guard's own `@narrow.type` when it names one
                     // (`dynamic_cast<Derived*>`), else the subject's declared type
-                    // (the optional-engagement form peels `T` from it). The guard
-                    // token is absent for the bare `if (opt)` truthiness form.
-                    // Resolve the subject's declared type up the guard's scope
-                    // chain (innermost first), so a same-named var in a sibling
-                    // function never supplies the inner type — the nearest
-                    // enclosing declaration of `subject` wins.
-                    let ty = narrow_type.get(&nmid).cloned().or_else(|| {
-                        scope_stack.iter().rev().find_map(|&(_, sid)| {
+                    // (the engagement forms peel `T` from it). The declared type
+                    // resolves up the guard's scope chain (innermost first), so a
+                    // same-named var in a sibling function never supplies the
+                    // inner type — the nearest enclosing declaration wins.
+                    let captured = narrow_type_txt.get(&nmid).cloned();
+                    let declared = match captured {
+                        Some(_) => None,
+                        None => scope_stack.iter().rev().find_map(|&(_, sid)| {
                             annot_text_by_var.get(&(subject.clone(), sid)).cloned()
-                        })
-                    });
-                    let guard = narrow_guard.get(&nmid).map(String::as_str);
-                    if let Some(refined) = ty.and_then(|t| (pack.narrow_guard)(guard, &t)) {
+                        }),
+                    };
+                    // A refinement that lands back on the subject's own
+                    // declaration refines nothing, and the witness would shadow
+                    // a stronger refinement already in force at that point.
+                    let refines_nothing = |r: &crate::model::file_analysis::InferredType| {
+                        declared.as_deref().and_then(pack.annot_type).as_ref() == Some(r)
+                    };
+                    if let Some(refined) = captured
+                        .or_else(|| declared.clone())
+                        .and_then(|t| (pack.narrow_type)(&t))
+                        .filter(|r| !refines_nothing(r))
+                        .map(|r| ident_type(r, e.start))
+                    {
                         // Defer: the region cutoff (first rebind edge) needs the
                         // FlowEdges, minted after this loop. Carry the FULL
                         // guarded-block region [start, end]; the post-pass
@@ -1469,10 +1484,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 narrow_var.insert(e.match_id, e.text.clone());
             }
             "narrow.type" => {
-                narrow_type.insert(e.match_id, e.text.clone());
+                narrow_type_txt.insert(e.match_id, e.text.clone());
             }
-            "narrow.guard" => {
-                narrow_guard.insert(e.match_id, e.text.clone());
+            "narrow.after" => {
+                if let Some(&(_, sid)) = scope_stack.last() {
+                    narrow_after.push((e.match_id, e.end, sid));
+                }
+            }
+            "narrow.within" => {
+                if let Some(&(_, sid)) = scope_stack.last() {
+                    narrow_within.push((e.match_id, Span { start: e.start, end: e.end }, sid));
+                }
             }
             "move.scope" => {
                 move_scope_txt.insert(e.match_id, e.text.clone());
@@ -2544,6 +2566,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // point-containment ends the narrowing at the rebind — the soundness Perl
     // got from its cutoff, now generic. Every LangPack that narrows (python
     // isinstance, cpp dynamic_cast + optional engagement) gets it free.
+    // The region shapes join here, once every guard capture is in.
+    let regions = narrow_after
+        .into_iter()
+        .map(|(mid, at, sid)| (mid, Span { start: at, end: out.scopes[sid.0 as usize].span.end }, sid))
+        .chain(narrow_within);
+    for (mid, region, sid) in regions {
+        let (Some(var), Some(ty)) = (narrow_var.get(&mid), narrow_type_txt.get(&mid)) else {
+            continue;
+        };
+        if let Some(refined) = (pack.narrow_type)(ty).map(|r| ident_type(r, region.start)) {
+            pending_narrow.push(((pack.shape_name)("ref.var", var), refined, region, sid));
+        }
+    }
     for (name, refined, region, scope) in pending_narrow {
         let end = crate::model::file_analysis::earliest_rebind_in(&out.flow_edges, &name, region)
             .unwrap_or(region.end);

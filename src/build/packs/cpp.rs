@@ -45,20 +45,18 @@ pub fn cpp_pack() -> LangPack {
             vec![p.to_string()]
         },
         import_module: |_, _| None,
-        // Two narrowings, both keyed on what the value IS, not a name allowlist:
-        //   `if (dynamic_cast<Derived*>(b))` — b is a Derived inside (ty is the
-        //     template arg; pointer-ness dropped for navigation, like locals).
-        //   `if (opt)` / `if (opt.has_value())` — an engaged std::optional<T>
-        //     holds a T inside (ty is opt's DECLARED type; peel the inner T).
-        //     The bare form carries no guard token; `.has_value()` gates the
-        //     method so `opt.value_or(x)` (not an engagement test) won't narrow.
-        narrow_guard: |guard, ty| {
-            let class = match guard {
-                Some("dynamic_cast") => ty.to_string(),
-                None | Some("has_value") => optional_inner(ty)?,
-                _ => return None,
-            };
-            Some(InferredType::ClassName(class))
+        // An engaged `std::optional<T>` holds a T, so an optional spelling
+        // refines to its inner class; anything else denotes the class it
+        // spells (`dynamic_cast<Derived*>` → Derived), which is `annot_type`'s
+        // job — a primitive or template spelling refines nothing.
+        narrow_type: |ty| {
+            if let Some(inner) = optional_inner(ty) {
+                return Some(InferredType::ClassName(inner));
+            }
+            match cpp_annot_type(ty) {
+                Some(InferredType::ClassName(c)) => Some(InferredType::ClassName(c)),
+                _ => None,
+            }
         },
         // C/C++ methods read members with an implicit `this->`.
         implicit_this_members: true,
@@ -89,8 +87,10 @@ pub fn cpp_pack() -> LangPack {
     }
 }
 
+
+
 /// Peel `T` out of a `std::optional<T>` declared-type text, unqualified
-/// (matching how `annot_type` keys classes by their last `::` segment). `None`
+/// (matching how `cpp_annot_type` keys classes by their last `::` segment). `None`
 /// when the text isn't an optional — the type-side gate that keeps the
 /// token-less `if (opt)` narrowing from firing on non-optional subjects.
 fn optional_inner(ty: &str) -> Option<String> {
