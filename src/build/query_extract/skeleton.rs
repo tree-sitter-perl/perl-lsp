@@ -79,8 +79,8 @@ pub struct SkelRef {
     /// function's name (`do_action`, `apply_filters`) — the `RefKind::
     /// DispatchCall::dispatcher` label. `None` for every other kind.
     pub via: Option<String>,
-    /// The written member operator (`.`/`->`) + its span, mapped from the
-    /// `@member.op` token's kind via the pack `op_map`, `Some` only when the
+    /// The written member operator (`.`/`->`) + its span, named by the
+    /// document's own `@member.op.<which>` capture, `Some` only when the
     /// IMMEDIATE receiver is a simple variable. Rides onto the MethodCall ref
     /// so operator-correctness is a ref query, not a separate walk.
     pub member_op: Option<(crate::model::file_analysis::MemberOp, crate::model::file_analysis::Span)>,
