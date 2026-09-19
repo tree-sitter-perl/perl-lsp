@@ -72,6 +72,7 @@ pub fn php_pack() -> LangPack {
             // in-repo call sites is the expected state.
             include_str!("../../../../queries/php/php.entry.json"),
             include_str!("../../../../queries/php/frameworks/phpunit.entry.json"),
+            include_str!("../../../../queries/php/frameworks/laravel.entry.json"),
             include_str!("../../../../queries/php/frameworks/symfony.entry.json"),
         ],
         bundled_rail_docs: &[
