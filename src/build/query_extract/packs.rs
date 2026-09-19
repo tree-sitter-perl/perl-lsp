@@ -4,7 +4,6 @@
 
 use super::*;
 use crate::model::file_analysis::NameSpellings;
-use crate::model::file_analysis::PackSpellings;
 
 // The per-language declarations, re-exported so `query_extract::packs` stays
 // the one path every caller spells. A build with no pack language compiled
@@ -124,13 +123,6 @@ pub struct LangPack {
     /// completion (and reports the char in `CompletionContext`) when one is
     /// typed. C++ `. > :` cover `.`/`->`/`::`; the member path keys off them.
     pub trigger_chars: &'static [&'static str],
-    /// The language's method-RECEIVER parameter names (Python `self`/`cls`,
-    /// C++ `this`). A receiver param is lexically inside the class body, so
-    /// the sticky class context tags it — but it is NOT a member. Extraction
-    /// clears its package so it reads as a plain local. Lang-specific
-    /// semantics → the pack owns it (NOT core `conventions.rs`, which is
-    /// Perl's `$self`/`$class`).
-    pub receiver_names: &'static [&'static str],
     /// The pointer/reference DECLARATOR peel: a `@nested.target` chain
     /// flattened to its leaf + per-level deref stack — `Box**`, `char****`,
     /// `Box* const&`. THE recursion S-queries can't express (unbounded depth);

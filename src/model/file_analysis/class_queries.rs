@@ -401,7 +401,7 @@ impl FileAnalysis {
                             self.scope_chain(sym.scope).contains(&cb)
                                 && !self.scope_within_sub_body(sym.scope)
                         })))
-                && !self.pack.receiver_names.contains(&sym.name)
+                && !sym.flags.contains(SymbolFlags::RECEIVER)
                 // an anonymous container (`(union)`) is structure, not an
                 // addressable member
                 && !sym.flags.contains(SymbolFlags::ANONYMOUS)

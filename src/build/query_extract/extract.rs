@@ -685,6 +685,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut handler_name_by_match: HashMap<usize, String> = HashMap::new();
     // `@key.elem` — the array element a `@def.handler.key` string heads.
     let mut key_elem_by_match: HashMap<usize, Span> = HashMap::new();
+    // `@param.receiver` — the receiver PARAMETER's name span (python
+    // `self`/`cls`): the symbol carries `RECEIVER`, and outline / member
+    // completion ask the symbol instead of matching its name.
+    let mut receiver_name_spans: std::collections::HashSet<(Point, Point)> =
+        std::collections::HashSet::new();
     // `@ref.var.implicit` — reads the runtime binds without a declaration.
     let mut runtime_bound_reads: Vec<Span> = Vec::new();
     // What an import row BINDS, per match (`@import.function` / `@import
@@ -735,6 +740,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "key.elem" {
             key_elem_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+        }
+        if e.cap == "param.receiver" {
+            receiver_name_spans.insert((e.start, e.end));
         }
         if e.cap == "ref.var.implicit" {
             runtime_bound_reads.push(Span { start: e.start, end: e.end });
@@ -989,7 +997,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         out.import_sites
             .push(crate::model::file_analysis::ImportRow { span, raw, binds, bound });
     }
-    out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
     out.spellings = Some(pack.spellings);
     {
         let conv = crate::build::query_extract::rail_conventions_for(pack);
@@ -1354,6 +1361,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     attributes,
                     arity: None,
                     qualifier_owned: false,
+                    flags: Default::default(),
                 });
             }
             "handler.name" => {}
@@ -1451,6 +1459,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // `@arity.sig` match fires separately from this def name.
                     arity: None,
                     qualifier_owned: qualifier_by_match.contains_key(&e.match_id),
+                    flags: Default::default(),
                 });
             }
             "ref.label" => {
@@ -1934,6 +1943,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             attributes: Vec::new(),
                             arity: None,
                             qualifier_owned: false,
+                            flags: Default::default(),
                         });
                     }
                 }
@@ -2203,6 +2213,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             if let Some(v) = move_var_txt.get(mid) {
                 out.moved_from.push(((pack.shape_name)("ref.var", v), *span, *scope));
             }
+        }
+    }
+    // What a `@<fact>.target` capture said about a DECLARATION, stamped as
+    // flags — one carriage for the whole family, so a fact minted here and
+    // the same fact written as an attribute token arrive as the same bit.
+    // (`sym.attributes` stays what a human reads, never what the model asks.)
+    for sym in &mut out.symbols {
+        if receiver_name_spans.contains(&(sym.name_start, sym.name_end)) {
+            sym.flags |= crate::model::file_analysis::SymbolFlags::RECEIVER;
         }
     }
     out.param_sigs = param_sigs;
