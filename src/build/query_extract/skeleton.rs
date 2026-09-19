@@ -554,9 +554,13 @@ impl SkeletonAnalysis {
         {
             use std::collections::HashMap;
             let dedup_kinds = ["sub", "method"];
+            // A synthesized member has no node of its own — several share
+            // the container's name token by construction, so the "one node,
+            // two patterns" rule below would keep exactly one of them.
+            let from_a_node = |s: &SkelSymbol| !s.attributes.iter().any(|a| a == "synthesized");
             let mut best: HashMap<(&str, usize, usize, usize, usize), bool> = HashMap::new();
             for s in &self.symbols {
-                if dedup_kinds.contains(&s.kind.as_str()) {
+                if dedup_kinds.contains(&s.kind.as_str()) && from_a_node(s) {
                     let key = (s.kind.as_str(), s.name_start.row, s.name_start.column, s.name_end.row, s.name_end.column);
                     let has = s.declared_return.is_some();
                     best.entry(key).and_modify(|v| *v |= has).or_insert(has);
@@ -569,7 +573,7 @@ impl SkeletonAnalysis {
             let mut kept: std::collections::HashSet<(String, usize, usize, usize, usize)> =
                 Default::default();
             self.symbols.retain(|s| {
-                if !dedup_kinds.contains(&s.kind.as_str()) {
+                if !dedup_kinds.contains(&s.kind.as_str()) || !from_a_node(s) {
                     return true;
                 }
                 let key = (s.kind.clone(), s.name_start.row, s.name_start.column, s.name_end.row, s.name_end.column);
