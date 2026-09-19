@@ -808,7 +808,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     });
                 }
             }
-            "import.name" => {
+            // One import row either way; the two spellings differ in what the
+            // DOCUMENT claims about the token — `include.path` is a path the
+            // preprocessor splices, `import.name` a name the file then spells.
+            "import.name" | "include.path" => {
                 out.import_sites
                     .push((e.text.clone(), Span { start: e.start, end: e.end }));
                 out.imports.push(e.text.clone());

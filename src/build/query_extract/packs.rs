@@ -93,21 +93,6 @@ pub struct LangPack {
     /// `language_driver::emit_return_fuel` — asked of the pack, never a
     /// language-name branch.
     pub implicit_this_members: bool,
-    /// Does this language have `#include`-style path tokens — a source-path
-    /// reference (the header IS the module, `#include` = `use`) that goto-def
-    /// resolves to a file and references reverses ("who includes this
-    /// header")? True for C/C++; false for languages whose imports are
-    /// name-keyed (Perl `use`, Python `import`). Gates the include-token lanes
-    /// in goto-def / references — asked of the pack, never a language-name
-    /// branch (the token is path-shaped, not name-shaped, so it stays ahead of
-    /// the name-keyed CandidateSet).
-    pub include_path_tokens: bool,
-    /// Does this language have a C-style preprocessor — `#define` macros
-    /// reachable through `#include`s that identifier-context completion offers
-    /// as an API surface? True for C/C++; false for languages with no
-    /// preprocessor (Perl, Python, R, CMake). Gates `macro_completion` — asked
-    /// of the pack, never a language-name branch (rule #10).
-    pub preprocessor_macros: bool,
     /// Symbols the runtime enters from OUTSIDE the source graph (C/C++
     /// `main`: reached through the ABI, never a source call site) — a
     /// zero-fan-in callable with one of these names is alive by contract.
