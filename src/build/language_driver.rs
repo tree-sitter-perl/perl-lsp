@@ -1820,6 +1820,7 @@ impl LanguageRegistry {
             .copied()
             .collect()
     }
+
     pub fn pack_visibility(id: &str) -> crate::model::file_analysis::PackVisibility {
         use crate::model::file_analysis::PackVisibility;
         match LanguageRegistry::with_enabled().for_id(id).and_then(|d| d.lang_pack()) {
@@ -1886,6 +1887,14 @@ impl LanguageRegistry {
         Self::query_mints(id, "def.macro")
     }
 
+    /// Do this language's import rows bind a NAME the file then spells
+    /// (php `use A\B;`, `from x import y`) rather than splicing text
+    /// (`#include`)? The document answers by minting `@import.binds`, so a
+    /// language cannot claim the binding without stating which token carries
+    /// it — only a bound name can go unused.
+    pub fn imports_bind_names(id: &str) -> bool {
+        Self::query_mints(id, "import.binds")
+    }
     /// The driver that serves files no driver claims — found by asking each
     /// driver (`claims_unclaimed`), never by registry position. Exactly one
     /// registered driver declares it (the reference driver), enforced by
