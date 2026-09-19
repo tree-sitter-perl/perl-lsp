@@ -31,8 +31,8 @@ pub fn cpp_pack() -> LangPack {
         // an anonymous inline union has no name token of its own; the
         // synthetic container is outline structure, not an addressable
         // member (the "anonymous" attribute keeps it out of completion).
-        default_name: |kind| match kind {
-            "unionfield" => Some("(union)"),
+        default_name: |kind, _, _| match kind {
+            "unionfield" => Some("(union)".to_string()),
             _ => None,
         },
         annot_type: cpp_annot_type,

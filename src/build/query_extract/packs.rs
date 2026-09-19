@@ -50,8 +50,13 @@ pub struct LangPack {
     /// Perl variable). `capture_kind` is the vocabulary name
     /// (`def.var`, `ref.method`, ...) so one pack hook serves all.
     pub shape_name: fn(capture_kind: &str, raw: &str) -> String,
-    /// Name for defs with no name token (anonymous subs).
-    pub default_name: fn(kind: &str) -> Option<&'static str>,
+    /// Name for defs with no name token (anonymous subs, anonymous
+    /// classes), given the def's 0-based start position: a kind whose
+    /// instances must stay distinct (php's anonymous classes — two per test
+    /// file is normal) spells the position in; structure-only defaults
+    /// (`(anon)`, `(union)`) ignore it. The spelling must be
+    /// identifier-shaped: the name rides the bareword-class lanes.
+    pub default_name: fn(kind: &str, row: usize, col: usize) -> Option<String>,
     /// Map a `@type.annot` token's text to a type — the pack predicate
     /// for languages whose ring 3 is partly in the tree (`x: int`).
     pub annot_type: fn(text: &str) -> Option<InferredType>,

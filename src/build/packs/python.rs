@@ -26,7 +26,7 @@ pub fn python_pack() -> LangPack {
         bundled_rail_docs: &[],
         names: NameSpellings::NONE,
         shape_name: |_, raw| raw.to_string(),
-        default_name: |_| None,
+        default_name: |_, _, _| None,
         annot_type: python_annot_type,
         declared_return: |t| {
             python_annot_type(t).map(crate::model::witnesses::ReturnExpr::Concrete)

@@ -25,8 +25,8 @@ pub fn perl_pack() -> LangPack {
             // already carries the sigil.
             _ => raw.to_string(),
         },
-        default_name: |kind| match kind {
-            "anon" => Some("(anon)"),
+        default_name: |kind, _, _| match kind {
+            "anon" => Some("(anon)".to_string()),
             _ => None,
         },
         annot_type: |_| None,
