@@ -2114,7 +2114,7 @@ fn a_purge_retracts_every_sibling_feed_under_one_name() {
 /// own packages and must NOT enter the candidate set.
 #[test]
 fn typeglob_install_is_found_through_the_class_keyed_provider_index() {
-    use crate::model::file_analysis::{CrossFileLookup, MethodResolution};
+    use crate::model::file_analysis::{MethodResolution};
     let idx = ModuleIndex::new_for_test();
 
     let reg = |name: &str, src: &str| {
@@ -2181,7 +2181,7 @@ fn typeglob_install_is_found_through_the_class_keyed_provider_index() {
 /// the overlap buys nothing.
 #[test]
 fn typeglob_fallback_still_answers_from_a_candidate_the_ancestor_walk_rejected() {
-    use crate::model::file_analysis::{CrossFileLookup, MethodResolution, SymKind};
+    use crate::model::file_analysis::{MethodResolution, SymKind};
     let idx = ModuleIndex::new_for_test();
 
     let reg = |name: &str, fa: crate::model::file_analysis::FileAnalysis| {
@@ -2240,7 +2240,7 @@ fn typeglob_fallback_still_answers_from_a_candidate_the_ancestor_walk_rejected()
 /// loop would return `cls` here instead.
 #[test]
 fn typeglob_fallback_keeps_its_provider_ordering_across_the_overlap() {
-    use crate::model::file_analysis::{CrossFileLookup, MethodResolution, SymKind};
+    use crate::model::file_analysis::{MethodResolution, SymKind};
     let idx = ModuleIndex::new_for_test();
 
     let reg = |name: &str, fa: crate::model::file_analysis::FileAnalysis| {
