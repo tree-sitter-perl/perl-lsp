@@ -41,8 +41,19 @@ impl<'a> CandidateSet<'a> {
         };
         // Class-keyed cached module — the fast path when `class` names a
         // struct/class/enum that is itself a cache key. Every candidate
-        // file declaring the class may hold the member.
+        // file declaring the class may hold the member — and an INHERITED
+        // member lives on an ancestor (`View::query()` finds Eloquent
+        // Model's `query`), so the lookup walks the leaf-keyed parent
+        // edges child-first (the instance-receiver path gets this from
+        // the invocant ladder's ancestor walk; a bareword-scoped call
+        // resolves here and needs its own).
         {
+            // One lazy walk over the visibility edges — the model's, not a
+            // second one here: `GraphView` derives a class's parents from
+            // this file AND the index, so an ancestor a candidate declares
+            // is reached like any other edge, and the seen-set and bounds
+            // are the graph verbs' own.
+            let probe = crate::model::graph::GraphView::new(self.origin, Some(idx));
             let member_of_class = |cls: &str| -> Option<RefLocation> {
                 // The origin's use-map pins the leaf to ONE namespace
                 // (`use Support\Facades\Cache;` — without this, gd on
@@ -71,6 +82,32 @@ impl<'a> CandidateSet<'a> {
             };
             if let Some(loc) = member_of_class(class) {
                 return Some(loc);
+            }
+            // An INHERITED member lives on an ancestor (`View::query()`
+            // finds Eloquent Model's `query`): walk the parent edges
+            // child-first, in MRO order, and take the first class that
+            // declares it. (The instance-receiver path gets this from the
+            // invocant ladder's ancestor walk; a bareword-scoped call
+            // resolves here and needs its own.)
+            let mut found: Option<RefLocation> = None;
+            probe.walk(
+                crate::model::graph::Node::Class(class.to_string()),
+                crate::model::graph::EdgeKindMask::INHERITS,
+                &mut |n| {
+                    let crate::model::graph::Node::Class(cls) = n else {
+                        return crate::model::graph::WalkControl::Continue;
+                    };
+                    match member_of_class(cls) {
+                        Some(loc) => {
+                            found = Some(loc);
+                            crate::model::graph::WalkControl::Stop
+                        }
+                        None => crate::model::graph::WalkControl::Continue,
+                    }
+                },
+            );
+            if found.is_some() {
+                return found;
             }
         }
         let Some((self_path, visible)) = idx.visibility_scope() else {
