@@ -310,13 +310,14 @@ impl<'a> CandidateSet<'a> {
     /// message names that reason, every other non-rewritable site drops out
     /// and the remaining edits stand.
     pub fn rename_edits(&self, new_name: &str) -> Result<Vec<(RefLocation, String)>, String> {
-        let editable = if self.pack {
-            RoleMask::VISIBLE
-        } else {
-            self.visibility_override
-                .map(|m| m & RoleMask::EDITABLE)
-                .unwrap_or(RoleMask::EDITABLE)
-        };
+        // One mask for every language: the backward walk attributes a pack
+        // sub-index's files per path (`dependency_tier`), so a pack
+        // workspace file IS WORKSPACE-tier and a declared dependency root
+        // (composer's vendor) stays read-only.
+        let editable = self
+            .visibility_override
+            .map(|m| m & RoleMask::EDITABLE)
+            .unwrap_or(RoleMask::EDITABLE);
         Ok(match self.resolution() {
             Some(ResolvedTarget::Target(t)) if t.rename_is_language_owned() => Vec::new(),
             Some(ResolvedTarget::Target(t)) if t.supports_cross_file_rename() => {
