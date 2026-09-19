@@ -613,6 +613,32 @@ int lam() { auto f = [&]{ return inner_; }; return f(); } };\n";
 // The complement: php spells the receiver, so its document leaves every
 // sub scope plain and a bare name inside a method binds to nothing —
 // whatever the class declares.
+#[cfg(feature = "php")]
+#[test]
+fn a_spelled_receiver_language_declares_no_implicit_scope() {
+    use crate::model::file_analysis::{RefKind, SymKind};
+    let src = "<?php\nclass C { private int $inner; function get() { return $inner; } }\n";
+    let fa = crate::build::language_driver::LanguageRegistry::with_enabled()
+        .for_id("php")
+        .expect("php driver")
+        .analyze(src);
+    assert!(
+        fa.scopes.iter().all(|sc| !sc.implicit_receiver),
+        "php's document states the fact nowhere"
+    );
+    // Not vacuous: the property IS declared and the bare name IS read.
+    assert!(
+        fa.symbols().iter().any(|s| s.name == "inner" && s.kind == SymKind::Field),
+        "the property is a Field symbol"
+    );
+    let read = fa
+        .refs()
+        .iter()
+        .find(|r| r.target_name == "$inner" && matches!(r.kind, RefKind::Variable))
+        .expect("the bare read is a Variable ref");
+    assert_eq!(read.resolved_symbol(), None, "php: a bare name is never the property");
+}
+
 // A C callback member (`int (*read)(char *)`) is a stored slot the source
 // CALLS. The declarator says so — the peel's `@deref.callable` level mints
 // `SymbolFlags::CALLABLE_VALUE` — so `ops->read(buf)` resolves to the slot
