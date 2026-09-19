@@ -1950,6 +1950,30 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         });
                     }
                 }
+                if kind == "field" {
+                    if let Some(cls) = &pkg {
+                        use crate::model::witnesses as wit;
+                        // The field's VALUE edge on its own attachment
+                        // (`docs/adr/member-kinds.md`): a `ValueHop` chases
+                        // `Field`, a `MethodHop` chases `PackageSymbol`, so
+                        // no tag partitions one attachment by kind. Minted for
+                        // every language — the hop substitutes the class's
+                        // template params against the receiver, so a
+                        // parametric field answers `int`, not `T`.
+                        out.witnesses.push(wit::Witness {
+                            attachment: wit::WitnessAttachment::Field {
+                                owner: cls.clone(),
+                                name: shaped.clone(),
+                            },
+                            source: wit::WitnessSource::Builder("field_decl".into()),
+                            payload: wit::WitnessPayload::Edge(wit::WitnessAttachment::Variable {
+                                name: shaped.clone(),
+                                scope: cur_scope,
+                            }),
+                            span: Span { start: e.start, end: e.end },
+                        });
+                    }
+                }
                 defs_by_match.entry(e.match_id).or_default().push(out.symbols.len() as u32);
                 out.symbols.push(SkelSymbol {
                     declared_with: None,
