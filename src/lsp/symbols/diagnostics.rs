@@ -1,22 +1,9 @@
 //! Diagnostics: unresolved names, the narrowing family, `DiagnosticOptions`.
 
 use super::*;
+use crate::model::file_analysis::{Finding, FindingData, LaneFacts};
 
-/// Every diagnostic code this adapter mints, spelled ONCE. Metrics key on
-/// these strings (per-file yield counts in the ghost lane), so a literal at a
-/// mint site is a typo away from a silently separate metric bucket — the
-/// wide-table drift failure in string form.
-pub mod codes {
-    pub const UNRESOLVED_FUNCTION: &str = "unresolved-function";
-    pub const UNRESOLVED_METHOD: &str = "unresolved-method";
-    pub const UNDEF_DEREF: &str = "undef-deref";
-    pub const OPTIONAL_DEREF: &str = "optional-deref";
-    pub const DEREF_SHAPE_MISMATCH: &str = "deref-shape-mismatch";
-    pub const ROLE_REQUIRES_UNFULFILLED: &str = "role-requires-unfulfilled";
-    pub const HELPER_NOT_LOADED: &str = "helper-not-loaded";
-    pub const UNRESOLVED_DISPATCH: &str = "unresolved-dispatch";
-    pub const UNKNOWN_HASH_KEY: &str = "unknown-hash-key";
-}
+pub use crate::model::file_analysis::codes;
 
 // ---- Diagnostics ----
 
@@ -730,3 +717,120 @@ fn render_guard_message(g: &crate::model::file_analysis::GuardRedundancy) -> Str
         }
     }
 }
+
+
+/// One lane finding as the wire sees it. THE place a `Finding` becomes
+/// text: severity, phrasing, tags and the quick-fix payload all live here,
+/// so a lane can be asked its answer without the protocol's vocabulary and
+/// the message for a code is written once.
+fn render_finding(f: Finding) -> Diagnostic {
+    use crate::model::file_analysis::{FindingData, MemberKind};
+    let (severity, message, tags, data) = match &f.data {
+        FindingData::UndefinedMember { kind, name } => {
+            let what = match kind {
+                MemberKind::Value => "property",
+                _ => "method",
+            };
+            (DiagnosticSeverity::ERROR, format!("Undefined {what} '{name}'."), None, None)
+        }
+        FindingData::NonPublicAccess { name, owner, from } => (
+            DiagnosticSeverity::ERROR,
+            format!(
+                "Cannot access non-public member '{name}' of {owner} from {} scope.",
+                from.as_deref().unwrap_or("global")
+            ),
+            None,
+            None,
+        ),
+        FindingData::TooFewArguments { expected, found } => (
+            DiagnosticSeverity::ERROR,
+            format!("Not enough arguments. Expected {expected}. Found {found}."),
+            None,
+            None,
+        ),
+        FindingData::TooManyArguments { expected, found } => (
+            DiagnosticSeverity::WARNING,
+            format!("Too many arguments. Expected {expected}. Found {found}."),
+            None,
+            None,
+        ),
+        FindingData::ResolvedByWidening { name, on, wanted } => (
+            DiagnosticSeverity::WARNING,
+            format!(
+                "'{name}' resolved on '{on}': the class this file names, '{wanted}', is not \
+                 indexed, so a same-named class in another namespace answered."
+            ),
+            None,
+            None,
+        ),
+        FindingData::Deprecated { name, note } => (
+            DiagnosticSeverity::HINT,
+            match note {
+                Some(t) => format!("'{name}' is deprecated: {t}"),
+                None => format!("'{name}' is deprecated."),
+            },
+            Some(vec![DiagnosticTag::DEPRECATED]),
+            None,
+        ),
+        FindingData::UndefinedVariable { name } => {
+            (DiagnosticSeverity::ERROR, format!("Undefined variable '{name}'."), None, None)
+        }
+        FindingData::UnusedVariable { name } => (
+            DiagnosticSeverity::HINT,
+            format!("'{name}' is assigned but never used."),
+            Some(vec![DiagnosticTag::UNNECESSARY]),
+            None,
+        ),
+        FindingData::UnusedImport { bound, sole_row } => (
+            DiagnosticSeverity::HINT,
+            format!("'{bound}' is imported but never used."),
+            Some(vec![DiagnosticTag::UNNECESSARY]),
+            sole_row.map(|(a, b)| serde_json::json!({ "row": [a, b] })),
+        ),
+        FindingData::UndefinedType { identity, candidates } => (
+            DiagnosticSeverity::ERROR,
+            format!("Undefined type '{identity}'."),
+            None,
+            (!candidates.is_empty()).then(|| serde_json::json!({ "candidates": candidates })),
+        ),
+        FindingData::UnimplementedContracts { class, missing } => {
+            let list = missing
+                .iter()
+                .map(|u| format!("`{}::{}()`", u.role, u.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (
+                DiagnosticSeverity::ERROR,
+                format!(
+                    "'{class}' does not implement {list}; declare {} or make the class abstract.",
+                    if missing.len() == 1 { "it" } else { "them" }
+                ),
+                None,
+                None,
+            )
+        }
+        FindingData::MissingReturnType { name, spelling } => (
+            DiagnosticSeverity::HINT,
+            format!("'{name}' has no declared return type; it returns `{spelling}`."),
+            None,
+            Some(serde_json::json!({ "spelling": spelling })),
+        ),
+    };
+    Diagnostic {
+        range: span_to_range(f.span),
+        severity: Some(severity),
+        code: Some(NumberOrString::String(f.code().to_string())),
+        source: Some("perl-lsp".to_string()),
+        message,
+        tags,
+        data,
+        ..Default::default()
+    }
+}
+
+
+
+
+
+
+
