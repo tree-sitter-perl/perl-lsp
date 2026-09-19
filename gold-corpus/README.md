@@ -33,6 +33,16 @@ The suite runs **twice**: once cold, then again against the cache the cold pass 
 
 Both passes run under a **private, throwaway `XDG_CACHE_HOME`**, so the cold pass is cold by construction and the run never touches the cache of any project on the machine. This is deliberately *not* done by clearing the real cache: bare `perl-lsp --clear-cache` wipes every project's cache dir, and clearing only *some* roots is worse than clearing none — an uncleared root makes the cold pass silently warm and nothing reports which roots were reused. The header line names the cache dir and the number of roots (26, not the 17 fixture directories — the substrate and per-row roots count too), so "every root started cold" is checkable rather than assumed.
 
+**Gold owns the rendered assertion; `tests/` owns the structure.** A row here
+pins the CLI's normalized OUTPUT — the exact hover markdown, the exact
+reference list — and `--emit` re-authors it when the rendering moves, which is
+what makes an exact-output net maintainable. A cargo test that shells the CLI
+and matches a rendered line with `starts_with` has no such re-authoring path:
+it pins the rendering with none of gold's machinery, so a display change
+breaks a test about resolution. A test in `tests/` asserts the structured
+answer (the JSON verbs' decoded fields, the analysis the binary exposes); if
+what it wants is the rendered line, the row belongs here.
+
 A process abort (the scanner-overflow class) is always a hard **CRASH** fail. Output is normalized before matching — absolute paths reduced to basenames; JSON outputs (references / workspace-symbol / outline / rename / diagnostics) decoded and re-encoded canonically (sorted keys, compact) so one substring ties file+line+kind. The **same** `normalize()` backs `--emit`, so fixtures authored against `--emit` output match the runner by construction.
 
 ## Capabilities
