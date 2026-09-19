@@ -1894,6 +1894,7 @@ impl LanguageRegistry {
     pub fn imports_bind_names(id: &str) -> bool {
         Self::query_mints(id, "import.binds")
     }
+
     /// The driver that serves files no driver claims — found by asking each
     /// driver (`claims_unclaimed`), never by registry position. Exactly one
     /// registered driver declares it (the reference driver), enforced by
@@ -1923,6 +1924,7 @@ impl LanguageRegistry {
 
     /// Every id this build can serve — the feature-dependent set, so a caller
     /// enumerating languages never carries its own list to drift.
+    #[cfg(test)]
     pub fn ids(&self) -> Vec<&'static str> {
         self.drivers.iter().map(|d| d.id()).collect()
     }
@@ -1936,6 +1938,7 @@ impl LanguageRegistry {
         match id {
             "cpp" => "C/C++",
             "python" => "Python",
+            "php" => "PHP",
             "r" => "R",
             "cmake" => "CMake",
             _ => id,
