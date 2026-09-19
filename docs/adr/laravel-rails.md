@@ -35,6 +35,17 @@ every file of the pack as `PackFacts::class_named_rails`, and
   rather than picking — and never renameable, because the class rename
   owns the name.
 
+The class-keyed capture family (`@def.handler.class.<rail>`,
+`@def.handler.by.<rail>`, `@ref.dispatch.class.<rail>`) is how the
+overlay MINTS those handlers; it is not where the fact lives. Baking the
+declaration per pack is what covers the span-free minting paths
+(`scan_text_rails`, `adopt_path_rails`), which no query reaches, and what
+keeps one rail from answering differently in two files. The two halves
+are pinned to each other: a `.class.` capture on a rail no document
+declares, or a declared class rail no capture family mints, is a finding
+(`class_rail_capture_findings` / `class_rail_declaration_findings` —
+`--plugin-check`'s overlay arm and the bundled-documents test).
+
 ## Where a name comes from
 
 - **The overlay** (`queries/php/frameworks/laravel.scm`) declares rails in
