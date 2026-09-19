@@ -45,6 +45,17 @@ marked otherwise; the drain re-derived each rationale against current code.
   antipattern. [recorded 2026-09-17; the string became a flag 2026-09-18,
   the relation is still unmodelled]
 
+- **A keyed destructuring slot's key is read from the list's text.**
+  `query_extract::slot_key` / `slot_position` scan the destructuring
+  list's source text for the pack's pair arrow to find the key a slot
+  binds under (`['k' => $v] = f()`), where the tree already holds the
+  pair node with its key child. The producer could say it directly: a
+  `@destructure.key` capture on the pair's key, joined to the slot the
+  way `@key.elem` joins `@def.handler.key`. Rule #11 debt, confined to
+  the extractor; the arrow is at least the document's own capture
+  (`@pair.arrow`), not a literal. Lands with the php query,
+  which is the only one that writes keyed lists. [recorded 2026-09-16]
+
 - **`PackFacts` is one lane for every pack language** (recorded
   2026-09-15, for after the php release). Thirty-four fields, of which a
   Perl analysis carries none and a php analysis carries the cpp ones
