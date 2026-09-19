@@ -1323,6 +1323,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             .push(crate::model::file_analysis::ImportRow { span, raw, binds, bound });
     }
     out.spellings = Some(pack.spellings);
+    out.lang_id = pack.lang_id;
     {
         let conv = crate::build::query_extract::rail_conventions_for(pack);
         out.rail_name_seps = conv.name_seps.clone();
