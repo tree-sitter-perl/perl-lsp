@@ -861,6 +861,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut contract_name_spans: std::collections::HashSet<(Point, Point)> = std::collections::HashSet::new();
     let mut nonpublic_name_spans: std::collections::HashSet<(Point, Point)> =
         std::collections::HashSet::new();
+    // `@receiver.super` — the match whose receiver dispatches ABOVE the
+    // writing class (php `parent::`): its `@ref.member` mints on the model's
+    // SUPER lane. A per-match fact, because the ref and its receiver kind
+    // arrive in the same match by construction.
+    let mut super_recv_matches: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // `@receiver.self` — the match whose receiver NAMES the enclosing class
     // (php `self::` / `static::`). The class is in hand at the mint (the
     // class-body scope's package), so the invocant carries it and no
@@ -960,6 +965,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "nonpublic.target" {
             nonpublic_name_spans.insert((e.start, e.end));
+        }
+        if e.cap == "receiver.super" {
+            super_recv_matches.insert(e.match_id);
         }
         if e.cap == "receiver.self" {
             self_recv_matches.insert(e.match_id);
@@ -2018,14 +2026,33 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         .unwrap_or(false)
                         .then(|| member_op_raw.get(&e.match_id).copied())
                         .flatten();
+                    // A SUPER receiver (php `parent::`) spells the model's
+                    // SUPER method token: dispatch starts above the writing
+                    // class, and gd/references/rename ride the existing
+                    // SUPER lane. The invocant becomes the enclosing class
+                    // (the receiver is still this object); the ref span
+                    // stays the bare name token, so rename rewrites only
+                    // the name.
+                    let super_recv = e.cap == "ref.member" && super_recv_matches.contains(&e.match_id);
                     out.refs.push(SkelRef {
                         via: None,
                         kind: e.cap.strip_prefix("ref.").unwrap().to_string(),
-                        name: (pack.shape_name)(&e.cap, &e.text),
+                        name: if super_recv {
+                            crate::model::conventions::MethodToken::Super(&(pack.shape_name)(&e.cap, &e.text))
+                                .render()
+                        } else {
+                            (pack.shape_name)(&e.cap, &e.text)
+                        },
                         start: e.start,
                         end: e.end,
                         scope: cur_scope,
-                        invocant: member_recv.get(&e.match_id).cloned(),
+                        invocant: if super_recv {
+                            member_recv.get(&e.match_id).and_then(|(sp, _)| {
+                                enclosing_class.clone().map(|cls| (*sp, cls))
+                            })
+                        } else {
+                            member_recv.get(&e.match_id).cloned()
+                        },
                         member_op,
                         // A call ref's arg list opens right where its callee /
                         // method token ends; plain (uncalled) member/type refs
