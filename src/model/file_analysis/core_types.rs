@@ -856,6 +856,14 @@ pub fn earliest_rebind_in(flow_edges: &[FlowEdge], var: &str, region: Span) -> O
 }
 
 impl Symbol {
+    /// Does this callable construct the class that declares it? Every
+    /// language mints the flag where it knows — a pack's document names its
+    /// own constructor, Perl's builder reads its `new` convention at the
+    /// symbol's mint — so this asks the flag and never a name.
+    pub fn is_constructor(&self) -> bool {
+        self.flags.contains(SymbolFlags::CONSTRUCTOR)
+    }
+
     /// A member RE-EXPORT (`using Base::insert;` in a class body): part of
     /// the class's API surface (outline/completion) but not a definition —
     /// member resolution sees through it to the origin ancestor.
