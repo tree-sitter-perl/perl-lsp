@@ -189,21 +189,6 @@ pub struct PeelSpec {
     pub record_stack: bool,
 }
 
-/// The declarator peel for C/C++ struct fields and locals: pointer/reference
-/// wrappers, `field_identifier`/`identifier` leaves, recording the deref stack.
-/// The cpp pack's `nested_peel` AND the member-block synth lane
-/// (`cpp_reparse::synth_base`) both peel through this, so a pointer field's
-/// `*`s are extracted by ONE walker whether the field was written plainly or
-/// pasted from a `#define BASEOP` body (rule #10 — no second deref walker).
-pub(crate) const C_FIELD_DECL_PEEL: PeelSpec = PeelSpec {
-    wrappers: &[
-        ("pointer_declarator", crate::model::file_analysis::DerefKind::Pointer),
-        ("reference_declarator", crate::model::file_analysis::DerefKind::Reference),
-    ],
-    annot_kinds: &["type_qualifier"],
-    leaf_to_def: &[("identifier", "def.local"), ("field_identifier", "def.field")],
-    record_stack: true,
-};
 
 /// One effect of a command-dispatched statement.
 // Variants are constructed only by `cmake_pack` (command languages) and read by
