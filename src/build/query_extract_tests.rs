@@ -3321,6 +3321,198 @@ class Logging extends Quiet
 }
 
 #[test]
+fn php_implementations_disambiguate_same_leaf_interfaces() {
+    // Two unrelated `Repository` interfaces in different namespaces, one
+    // implementer each. From a file that imports the CACHE one,
+    // implementations must list the cache implementer and NOT the log one
+    // (Laravel's three Repositories polluted the family walks).
+    let contract_cache =
+        "<?php\nnamespace Contracts\\Cache;\n\ninterface Repository\n{\n    public function pull(): string;\n}\n";
+    let contract_log =
+        "<?php\nnamespace Contracts\\Log;\n\ninterface Repository\n{\n    public function pull(): string;\n}\n";
+    let impl_cache = "\
+<?php
+namespace Cache;
+
+use Contracts\\Cache\\Repository;
+
+class CacheRepo implements Repository
+{
+    public function pull(): string { return \"c\"; }
+}
+";
+    let impl_log = "\
+<?php
+namespace Log;
+
+use Contracts\\Log\\Repository;
+
+class LogRepo implements Repository
+{
+    public function pull(): string { return \"l\"; }
+}
+";
+    let (fa_cc, _) = php_fa(contract_cache);
+    let (fa_cl, _) = php_fa(contract_log);
+    let (fa_ic, _) = php_fa(impl_cache);
+    let (fa_il, _) = php_fa(impl_log);
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let mk = |path: &str, fa: crate::model::file_analysis::FileAnalysis| {
+        std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+            std::path::PathBuf::from(path),
+            std::sync::Arc::new(fa),
+        ))
+    };
+    let cc = mk("/fq/contracts/cache/Repository.php", fa_cc.clone());
+    let cl = mk("/fq/contracts/log/Repository.php", fa_cl);
+    let ic = mk("/fq/cache/CacheRepo.php", fa_ic);
+    let il = mk("/fq/log/LogRepo.php", fa_il);
+    idx.insert_cache_providers("Repository", Some(vec![cc.clone(), cl.clone()]));
+    idx.insert_cache("Contracts\\Cache\\Repository", Some(cc));
+    idx.insert_cache("Contracts\\Log\\Repository", Some(cl));
+    idx.insert_cache("CacheRepo", Some(ic.clone()));
+    idx.insert_cache("Cache\\CacheRepo", Some(ic));
+    idx.insert_cache("LogRepo", Some(il.clone()));
+    idx.insert_cache("Log\\LogRepo", Some(il));
+
+    // Origin = the cache contract's own file; cursor identity = the class.
+    let target = crate::index::resolve::TargetRef::new(
+        "Contracts\\Cache\\Repository".into(),
+        crate::index::resolve::TargetKind::Package,
+        &fa_cc,
+    );
+    let locs = crate::index::resolve::implementations_of(&fa_cc, Some(&idx), &target);
+    let files: Vec<String> = locs
+        .iter()
+        .map(|l| match &l.key {
+            crate::index::file_store::FileKey::Path(p) => p.to_string_lossy().into_owned(),
+            crate::index::file_store::FileKey::Url(u) => u.to_string(),
+        })
+        .collect();
+    assert!(
+        files.iter().any(|f| f.contains("CacheRepo")),
+        "the agreeing family's implementer must be listed: {files:?}"
+    );
+    assert!(
+        !files.iter().any(|f| f.contains("LogRepo")),
+        "a same-leaf stranger's implementer must NOT be listed: {files:?}"
+    );
+}
+
+#[test]
+fn php_implementations_reach_same_leaf_direct_implementer() {
+    // Laravel's aliased-contract idiom: `class Repository implements
+    // CacheContract` where the alias resolves to `Contracts\Cache\
+    // Repository` — a SELF-LOOP in leaf space. The contract-line
+    // exclusion used to eat the direct implementer; the namespace rows
+    // re-admit it, and a third same-leaf family (config) stays out.
+    let contract_cache =
+        "<?php\nnamespace Contracts\\Cache;\n\ninterface Repository\n{\n    public function pull(): string;\n}\n";
+    let contract_config =
+        "<?php\nnamespace Contracts\\Config;\n\ninterface Repository\n{\n    public function pull(): string;\n}\n";
+    let impl_cache = "\
+<?php
+namespace Cache;
+
+use Contracts\\Cache\\Repository as CacheContract;
+
+class Repository implements CacheContract
+{
+    public function pull(): string { return \"c\"; }
+}
+";
+    let impl_config = "\
+<?php
+namespace Config;
+
+use Contracts\\Config\\Repository as ConfigContract;
+
+class Repository implements ConfigContract
+{
+    public function pull(): string { return \"k\"; }
+}
+";
+    let (fa_cc, _) = php_fa(contract_cache);
+    let (fa_kc, _) = php_fa(contract_config);
+    let (fa_ic, _) = php_fa(impl_cache);
+    let (fa_ik, _) = php_fa(impl_config);
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let mk = |path: &str, fa: crate::model::file_analysis::FileAnalysis| {
+        std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+            std::path::PathBuf::from(path),
+            std::sync::Arc::new(fa),
+        ))
+    };
+    let cc = mk("/fq2/contracts/cache/Repository.php", fa_cc.clone());
+    let kc = mk("/fq2/contracts/config/Repository.php", fa_kc);
+    let ic = mk("/fq2/cache/Repository.php", fa_ic);
+    let ik = mk("/fq2/config/Repository.php", fa_ik);
+    idx.insert_cache_providers(
+        "Repository",
+        Some(vec![cc.clone(), kc.clone(), ic.clone(), ik.clone()]),
+    );
+    idx.insert_cache("Contracts\\Cache\\Repository", Some(cc));
+    idx.insert_cache("Contracts\\Config\\Repository", Some(kc));
+    idx.insert_cache("Cache\\Repository", Some(ic));
+    idx.insert_cache("Config\\Repository", Some(ik));
+
+    // Cursor on `pull` in the CACHE contract.
+    let target = crate::index::resolve::TargetRef::method(
+        "pull".into(),
+        "Contracts\\Cache\\Repository".into(),
+        Some(crate::model::file_analysis::MemberKind::Callable),
+        &fa_cc,
+        Some(&idx),
+        crate::index::resolve::OverrideScope::Hierarchy,
+    );
+    let locs = crate::index::resolve::implementations_of(&fa_cc, Some(&idx), &target);
+    let files: Vec<String> = locs
+        .iter()
+        .map(|l| match &l.key {
+            crate::index::file_store::FileKey::Path(p) => p.to_string_lossy().into_owned(),
+            crate::index::file_store::FileKey::Url(u) => u.to_string(),
+        })
+        .collect();
+    assert!(
+        files.iter().any(|f| f.contains("/fq2/cache/")),
+        "the same-leaf direct implementer's pull must be listed: {files:?}"
+    );
+    assert!(
+        !files.iter().any(|f| f.contains("/fq2/config/")),
+        "a third same-leaf family must NOT be listed: {files:?}"
+    );
+    assert!(
+        !files.iter().any(|f| f.contains("/fq2/contracts/")),
+        "the contracts themselves are not implementations: {files:?}"
+    );
+
+    // Package arm (cursor on the interface NAME): same self-loop, same rows.
+    let target = crate::index::resolve::TargetRef::new(
+        "Contracts\\Cache\\Repository".into(),
+        crate::index::resolve::TargetKind::Package,
+        &fa_cc,
+    );
+    let locs = crate::index::resolve::implementations_of(&fa_cc, Some(&idx), &target);
+    let files: Vec<String> = locs
+        .iter()
+        .map(|l| match &l.key {
+            crate::index::file_store::FileKey::Path(p) => p.to_string_lossy().into_owned(),
+            crate::index::file_store::FileKey::Url(u) => u.to_string(),
+        })
+        .collect();
+    assert!(
+        files.iter().any(|f| f.contains("/fq2/cache/")),
+        "the same-leaf direct implementer's class must be listed: {files:?}"
+    );
+    assert!(
+        !files.iter().any(|f| f.contains("/fq2/config/")),
+        "a third same-leaf family must NOT be listed: {files:?}"
+    );
+}
+
+#[test]
 fn php_member_chain_types_through_method_hops() {
     // The registry member-chain lane: `$x = $a->b()->c()` has no variable
     // for the outer hop's receiver, so no MethodCallBinding bridges it —
