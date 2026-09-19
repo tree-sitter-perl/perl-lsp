@@ -1571,6 +1571,17 @@ impl LanguageRegistry {
             .any(|l| *l == id)
     }
 
+    /// The classes a language provides in its global namespace — its
+    /// `builtins.txt` documents (bundled + plugin dirs), read through
+    /// `builtin_types_for`. Empty for a language without a pack.
+    pub fn builtin_types(id: &str) -> std::sync::Arc<Vec<String>> {
+        LanguageRegistry::with_enabled()
+            .for_id(id)
+            .and_then(|d| d.lang_pack())
+            .map(|p| crate::build::query_extract::builtin_types_for(&p))
+            .unwrap_or_default()
+    }
+
     /// The declared capabilities of `id`'s driver — THE generic capability
     /// asker (the collapse the two-boolean ceiling in docs/PARKED.md
     /// called for). An id no driver claims answers `DriverCaps::default()`

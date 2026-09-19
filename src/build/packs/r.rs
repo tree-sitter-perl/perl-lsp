@@ -35,6 +35,7 @@ pub fn r_pack() -> LangPack {
         preprocessor_macros: false,
         entrypoint_symbols: &[],
         brace_scoped_members: false,
+        bundled_builtin_types: &[],
         trigger_chars: &["$", "@", ":"],
         receiver_names: &[],
         nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },

@@ -103,6 +103,7 @@ pub fn cpp_pack() -> LangPack {
         preprocessor_macros: true,
         entrypoint_symbols: &["main"],
         brace_scoped_members: true,
+        bundled_builtin_types: &[],
         trigger_chars: &[".", ">", ":"],
         receiver_names: &["this"],
         // `field_identifier` only ever names a struct/class member (the
