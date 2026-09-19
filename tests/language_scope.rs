@@ -482,3 +482,35 @@ fn php_cross_file_method_hover_renders_the_signature() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The signature label carries the declaration's return annotation as the
+/// language writes it — the fact the extractor minted beside the
+/// parameters, not a re-scan of the declaration's source line.
+#[cfg(feature = "php")]
+#[test]
+fn php_signature_label_carries_the_declared_return() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-sigret-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("Greeter.php"),
+        "<?php\nnamespace App;\nclass Greeter\n{\n    public function hi(string $name, string $suffix = '!'): string\n    {\n        return $name . $suffix;\n    }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Home.php"),
+        "<?php\nnamespace App;\nfunction home(Greeter $g)\n{\n    return $g->hi(\"x\");\n}\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--signature-help", dir.to_str().unwrap(), "Home.php", "4", "19"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run signature-help");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("hi(string $name, string $suffix = '!') : string"),
+        "the label ends in the written return annotation: {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
