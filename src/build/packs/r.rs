@@ -28,6 +28,8 @@ pub fn r_pack() -> LangPack {
         default_name: |_| None,
         annot_type: |_| None,
         declared_return: |_| None,
+        doc_types: |_, _| vec![],
+        doc_uses_method_tags: &[],
         // No reliable lexical ctor convention in R (S4/R5 exist but
         // rare); class typing arrives via shapes and S3 later.
         // source("util.R") hands us the path verbatim; library(pkg)

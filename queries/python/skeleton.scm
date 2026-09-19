@@ -14,6 +14,14 @@
 (function_definition
   name: (identifier) @def.sub.name) @def.sub
 
+; docstrings: the first statement of a body IS the doc for the def that
+; owns it, so the pair rides one match — the same join php's `/** */`
+; siblings make, written for a language whose docs live INSIDE the def.
+((function_definition
+  body: (block . (expression_statement (string) @doc.comment))) @doc.subject)
+((class_definition
+  body: (block . (expression_statement (string) @doc.comment))) @doc.subject)
+
 ; `@scope.sub`: params/locals are sub-body content — shielded from the
 ; outline and the class-content lane (a method local carries the sticky
 ; class package; the Sub boundary is what marks it a local, not a member).

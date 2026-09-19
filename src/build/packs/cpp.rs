@@ -39,6 +39,8 @@ pub fn cpp_pack() -> LangPack {
         },
         annot_type: cpp_annot_type,
         declared_return: |t| cpp_annot_type(t).map(crate::model::witnesses::ReturnExpr::Concrete),
+        doc_types: |_, _| vec![],
+        doc_uses_method_tags: &[],
         // #include "a/b.h" / <vector>: strip the delimiters; a quoted
         // path is workspace-relative verbatim, a system header resolves
         // through include dirs (library_roots, later). Tier 1: identity.

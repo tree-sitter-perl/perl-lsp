@@ -1121,6 +1121,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             .find(|(p, _)| (p.row, p.column) <= (at.row, at.column))
             .map(|(_, n)| n.as_str())
     };
+    // A template parameter is a name in its own axis (`ParamOf` keys on
+    // the bare spelling), never a class spelling to resolve.
+    let template_names: std::collections::HashSet<String> = events
+        .iter()
+        .filter(|e| e.cap == "doc.comment")
+        .flat_map(|e| (pack.doc_types)(&e.text, pack.doc_uses_method_tags))
+        .filter_map(|f| match f {
+            super::packs::DocFact::Template { name, .. } => Some(name),
+            _ => None,
+        })
+        .collect();
     // The spellings that name the WRITING class rather than a namespaced
     // one (`self`, `static`): the document says which, on the receiver
     // capture that fires on them, and every reader asks the document.
@@ -1130,6 +1141,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         // resolves them to the enclosing class
         if self_class_tokens.contains(written)
             || crate::model::conventions::is_current_package_token(written)
+            || template_names.contains(written)
         {
             return written.to_string();
         }
@@ -1622,6 +1634,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     arity: None,
                     params: Vec::new(),
                     qualifier_owned: false,
+                    doc: None,
+                    deprecation: None,
                     flags: Default::default(),
                 });
             }
@@ -1722,6 +1736,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // `@arity.sig` match fires separately from this def name.
                     arity: None,
                     params: Vec::new(),
+                    doc: None,
+                    deprecation: None,
                     qualifier_owned: qualifier_by_match.contains_key(&e.match_id),
                     flags: Default::default(),
                 });
@@ -2232,6 +2248,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         arity: None,
                         params: Vec::new(),
                         qualifier_owned: false,
+                        doc: None,
+                        deprecation: None,
                     });
                 }
             }
@@ -2740,6 +2758,468 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
         }
     }
+    // ---- documentation-comment types: pack vocabulary, query join ----
+    // The query pairs a doc comment with the def it documents (`@doc.comment`
+    // and `@doc.subject` in ONE match), and `@doc.subject` sits on the very
+    // node the def's own capture sits on — so the two meet at one point and
+    // nothing here measures a distance. DECLARED types always win: a doc fact
+    // fills only where the syntax carried nothing, because docblocks drift and
+    // the tree doesn't. Perl/C++ packs return no facts, so the pass is a no-op
+    // there.
+    {
+        use crate::build::query_extract::DocFact;
+        // Keyed by the SUBJECT's start point; the comment's start row rides
+        // along so a `@method` fact can span its own line inside the comment.
+        let mut by_subject: HashMap<(usize, usize), (usize, Vec<DocFact>)> = HashMap::new();
+        // The bound names imports bring in, for the doc-mention scan below:
+        // an import used only in a docblock (`@var Foo $x`) is used.
+        let bound: std::collections::HashSet<String> = out
+            .import_sites
+            .iter()
+            .map(|r| match pack.names.sep() {
+                Some(sep) => r.raw.rsplit(sep).next().unwrap_or(&r.raw).to_string(),
+                None => r.raw.clone(),
+            })
+            .chain(out.use_aliases.iter().map(|(alias, _, _)| alias.clone()))
+            .collect();
+        // The subject each match names, so the comment of that same match
+        // knows what it documents. A bare `@doc.comment` with no subject is
+        // the mention scan's input only.
+        let mut subject_by_match: HashMap<usize, Point> = HashMap::new();
+        for e in &events {
+            if e.cap == "doc.subject" {
+                subject_by_match.insert(e.match_id, e.start);
+            }
+        }
+        for e in &events {
+            if e.cap == "doc.comment" {
+                if !bound.is_empty() {
+                    for word in e.text.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+                        if bound.contains(word) && !out.doc_mentions.iter().any(|m| m == word) {
+                            out.doc_mentions.push(word.to_string());
+                        }
+                    }
+                }
+                let Some(subject) = subject_by_match.get(&e.match_id) else { continue };
+                let facts = (pack.doc_types)(&e.text, pack.doc_uses_method_tags);
+                if !facts.is_empty() {
+                    let entry = by_subject
+                        .entry((subject.row, subject.column))
+                        .or_insert_with(|| (e.start.row, Vec::new()));
+                    entry.1.extend(facts);
+                }
+            }
+        }
+        if !by_subject.is_empty() {
+            let scope_spans: Vec<Span> = out.scopes.iter().map(|s| s.span).collect();
+            let param_syms: Vec<(String, crate::model::file_analysis::ScopeId, Point, Point)> =
+                out.symbols
+                    .iter()
+                    .filter(|s| s.kind == "var")
+                    .map(|s| (s.name.clone(), s.scope, s.start, s.end))
+                    .collect();
+            let mut doc_witnesses: Vec<crate::model::witnesses::Witness> = Vec::new();
+            let mut disagreements: Vec<crate::model::file_analysis::DocDisagreement> = Vec::new();
+            // The declared type of a slot, for the hint that reports the pair.
+            let declared_of = |slot: (&str, crate::model::file_analysis::ScopeId)| {
+                annot_text_by_var
+                    .get(&(slot.0.to_string(), slot.1))
+                    .and_then(|d| (pack.annot_type)(d))
+            };
+            let mut doc_refs: Vec<SkelRef> = Vec::new();
+            let mut doc_methods: Vec<SkelSymbol> = Vec::new();
+            for sym in out.symbols.iter_mut() {
+                // `@method` rows join to the CLASS docblock (Laravel facades,
+                // Eloquent's `__call` surface): each synthesizes a real
+                // method symbol on the class, spanning the class name token
+                // so gd lands somewhere honest. The other fact kinds join to
+                // callables/fields as before.
+                if matches!(sym.kind.as_str(), "class" | "interface") {
+                    let Some((cstart, facts)) =
+                        by_subject.get(&(sym.start.row, sym.start.column))
+                    else {
+                        continue;
+                    };
+                    for f in facts {
+                        // `@template T` rows: the class's generic params, in
+                        // row order — the same per-class axis cpp templates
+                        // feed, so `@return TModel` methods publish
+                        // `ParamOf(i)` through the existing writeback.
+                        if let DocFact::Template { name, line } = f {
+                            out.template_params.push((sym.name.clone(), name.clone(), *line));
+                            continue;
+                        }
+                        if let DocFact::Description(d) = f {
+                            sym.doc = Some(d.clone());
+                            continue;
+                        }
+                        if let DocFact::Deprecated(t) = f {
+                            mark_deprecated(sym, t.clone());
+                            continue;
+                        }
+                        if let DocFact::Method { name, ret, line, col } = f {
+                            // Span = the method NAME TOKEN in the fact's own
+                            // `@method` line: a distinct gd/cursor target per
+                            // row (every row on the class name span would
+                            // collapse to one symbol), and the row's ONE
+                            // declaration site — references from the token
+                            // resolve the Method target, rename rewrites it.
+                            let at = Point { row: cstart + line, column: *col };
+                            let at_end = Point { row: at.row, column: col + name.len() };
+                            doc_methods.push(SkelSymbol {
+                                declared_with: None,
+                                return_annotation: None,
+                                kind: "method".to_string(),
+                                name: name.clone(),
+                                start: at,
+                                end: at_end,
+                                name_start: at,
+                                name_end: at_end,
+                                package: Some(sym.name.clone()),
+                                scope: sym.scope,
+                                declared_return: ret
+                                    .as_deref()
+                                    .and_then(|t| declared_ret(t, at)),
+                                deref_stack: Vec::new(),
+                                // documentation, not a declaration: no body, no annotation to add
+                                attributes: vec!["documented".to_string()],
+                                arity: None,
+                                params: Vec::new(),
+                                qualifier_owned: false,
+                                doc: None,
+                                deprecation: None,
+                                flags: Default::default(),
+                            });
+                        }
+                    }
+                    continue;
+                }
+                if !matches!(sym.kind.as_str(), "sub" | "method" | "field" | "anon" | "var") {
+                    continue;
+                }
+                let Some((cstart, facts)) = by_subject.get(&(sym.start.row, sym.start.column))
+                else {
+                    continue;
+                };
+                let cstart = *cstart;
+                for f in facts {
+                    match f {
+                        // class-docblock facts; no callable/field join
+                        DocFact::Method { .. } | DocFact::Template { .. } => {}
+                        DocFact::Description(d) => {
+                            if !matches!(sym.kind.as_str(), "var" | "anon") {
+                                sym.doc = Some(d.clone());
+                            }
+                        }
+                        DocFact::Deprecated(t) => mark_deprecated(sym, t.clone()),
+                        DocFact::ReturnRecvInstance { base } => {
+                            // `@return Base<static>`: an instance of `base`
+                            // parametrized by the receiver — `Book::query()`
+                            // carries `Builder<Book>`, and a later
+                            // `@return TModel` hop projects `Book` out via
+                            // the same `ParamOf` axis cpp instantiations use.
+                            if sym.declared_return.is_none() {
+                                use crate::model::witnesses::{ParametricOp, ReturnExpr};
+                                sym.declared_return =
+                                    Some(ReturnExpr::Operator(ParametricOp::InstanceOf {
+                                        base: ident(base, sym.start),
+                                        args: vec![ReturnExpr::Receiver],
+                                    }));
+                            }
+                        }
+                        DocFact::Return(t) => {
+                            use crate::model::witnesses::ReturnExpr;
+                            // A doc row fills an undeclared return and NARROWS
+                            // a declared one — the same rule `doc_admits`
+                            // applies to params and properties. It never
+                            // widens, and a contradiction leaves the
+                            // declaration standing and states itself.
+                            let Some(doc) = declared_ret(t, sym.start) else { continue };
+                            match (&sym.declared_return, &doc) {
+                                (None, _) => sym.declared_return = Some(doc),
+                                (
+                                    Some(ReturnExpr::Concrete(declared)),
+                                    ReturnExpr::Concrete(documented),
+                                ) => match doc_verdict(declared, documented, &out.parents) {
+                                    DocVerdict::Narrows => sym.declared_return = Some(doc.clone()),
+                                    DocVerdict::Contradicts => {
+                                        disagreements.push(
+                                            crate::model::file_analysis::DocDisagreement {
+                                                span: Span {
+                                                    start: sym.name_start,
+                                                    end: sym.name_end,
+                                                },
+                                                declared: declared.clone(),
+                                                documented: documented.clone(),
+                                            },
+                                        );
+                                    }
+                                    DocVerdict::Unknown => {}
+                                },
+                                // A receiver-shaped return on either side is a
+                                // late binding, not a value shape: neither
+                                // narrows the other, and the declaration
+                                // stands.
+                                (Some(_), _) => {}
+                            }
+                        }
+                        DocFact::UsesMethod { name, line, col } => {
+                            // A method REF on the enclosing class, spanning
+                            // the NAME TOKEN in the docblock — the named
+                            // method gains real fan-in, and rename rewrites
+                            // the token in place. Only meaningful on class
+                            // members (the invocant is the class).
+                            if let (true, Some(cls)) = (
+                                matches!(sym.kind.as_str(), "sub" | "method"),
+                                sym.package.as_deref(),
+                            ) {
+                                let start = Point { row: cstart + line, column: *col };
+                                let end = Point {
+                                    row: start.row,
+                                    column: col + name.len(),
+                                };
+                                // Invocant is the CLASS NAME, not
+                                // `__PACKAGE__`: the doc row sits in the
+                                // class-body scope, whose package is the
+                                // NAMESPACE, so the current-package walk
+                                // would resolve the wrong owner — the join
+                                // already knows the class.
+                                doc_refs.push(SkelRef {
+                                    via: None,
+                                    kind: "member".to_string(),
+                                    name: name.clone(),
+                                    start,
+                                    end,
+                                    scope: sym.scope,
+                                    invocant: Some((
+                                        Span { start, end },
+                                        cls.to_string(),
+                                    )),
+                                    member_op: None,
+                                    arg_count: None,
+                                    value_read: false,
+                                    named_by_string: false,
+                                    flags: Default::default(),
+                                });
+                            }
+                        }
+                        DocFact::Var { ty: t, name: var_name } => {
+                            // The NAMED inline form (`/** @var Type[] $rows */`
+                            // above an assignment) types that specific local.
+                            if let Some(vn) = var_name {
+                                if sym.kind == "var" && &sym.name == vn {
+                                    if let Some(ty) = annot_ident(t, sym.start) {
+                                        doc_witnesses.push(doc_cast_witness(
+                                            &sym.name,
+                                            sym.scope,
+                                            ty,
+                                            Span { start: sym.start, end: sym.start },
+                                        ));
+                                    }
+                                    continue;
+                                }
+                                // `@var T $prop` above a PROPERTY (WordPress
+                                // spells every field doc with its name) is
+                                // that field's doc, not a local cast.
+                                if !(sym.kind == "field"
+                                    && vn.trim_start_matches(|c| pack.names.is_sigil(c)) == sym.name)
+                                {
+                                    continue;
+                                }
+                            }
+                            if sym.kind == "var" {
+                                continue;
+                            }
+                            // A documented property types class-wide (member
+                            // lookup is not sequential), exactly like a
+                            // declared field type. Syntax-typed fields skip
+                            // (declared wins — docblocks drift) EXCEPT when
+                            // the doc STRICTLY REFINES a bare container:
+                            // `protected array $h` + `@var list<X>` is the
+                            // canonical refinement — the syntax cannot spell
+                            // the element, the doc exists to add it.
+                            if sym.kind == "field" {
+                                let Some(ty) = annot_ident(t, sym.start) else { continue };
+                                let slot = (sym.name.as_str(), sym.scope);
+                                let verdict =
+                                    doc_admits(pack, &annot_text_by_var, slot, &ty, &out.parents);
+                                if verdict == DocVerdict::Contradicts {
+                                    if let Some(declared) = declared_of(slot) {
+                                        disagreements.push(
+                                            crate::model::file_analysis::DocDisagreement {
+                                                span: Span { start: sym.start, end: sym.end },
+                                                declared,
+                                                documented: ty.clone(),
+                                            },
+                                        );
+                                    }
+                                }
+                                if verdict == DocVerdict::Narrows {
+                                    let span = scope_spans
+                                        .get(sym.scope.0 as usize)
+                                        .copied()
+                                        .unwrap_or(Span { start: sym.start, end: sym.start });
+                                    // An ANNOTATION, like the declared field
+                                    // type it stands in for: it outranks what
+                                    // a constructor happens to write to the
+                                    // field (`@var A|B $skin` + `$this->skin =
+                                    // new B` reads as the documented union).
+                                    let mut w = doc_witness(&sym.name, sym.scope, ty, span);
+                                    w.source = crate::model::witnesses::WitnessSource::Annotation(
+                                        crate::model::witnesses::AnnotationKind::Declared,
+                                    );
+                                    doc_witnesses.push(w);
+                                }
+                            }
+                        }
+                        DocFact::Param { name, ty } => {
+                            // The def's own parameter — untyped, or a bare
+                            // container the doc refines (same rule as Var).
+                            let Some(ty) = annot_ident(ty, sym.start) else { continue };
+                            let in_def = |p: Point| {
+                                (p.row, p.column) >= (sym.start.row, sym.start.column)
+                                    && (p.row, p.column) <= (sym.end.row, sym.end.column)
+                            };
+                            let mine = param_syms
+                                .iter()
+                                .find(|(n, _, at, _)| n == name && in_def(*at));
+                            if let Some((n, sc, at, end)) = mine {
+                                match doc_admits(
+                                    pack,
+                                    &annot_text_by_var,
+                                    (n, *sc),
+                                    &ty,
+                                    &out.parents,
+                                ) {
+                                    DocVerdict::Contradicts => {
+                                        if let Some(declared) = declared_of((n, *sc)) {
+                                            disagreements.push(
+                                                crate::model::file_analysis::DocDisagreement {
+                                                    span: Span { start: *at, end: *end },
+                                                    declared,
+                                                    documented: ty.clone(),
+                                                },
+                                            );
+                                        }
+                                        continue;
+                                    }
+                                    DocVerdict::Unknown => continue,
+                                    DocVerdict::Narrows => {}
+                                }
+                                // Publish the row CLASS-KEYED too
+                                // (`method#p#$name`): an @inheritDoc override
+                                // in another file reaches it through the
+                                // registry's PackageSymbol inheritance walk
+                                // (every monolog `handleBatch` override was
+                                // blind without this).
+                                if let Some(cls) = sym.package.as_deref() {
+                                    if matches!(sym.kind.as_str(), "sub" | "method") {
+                                        doc_witnesses.push(crate::model::witnesses::Witness {
+                                            attachment:
+                                                crate::model::witnesses::WitnessAttachment::PackageSymbol {
+                                                    package: cls.to_string(),
+                                                    name: format!("{}#p#{}", sym.name, n),
+                                                },
+                                            source: crate::model::witnesses::WitnessSource::Builder(
+                                                "skeleton-doc".into(),
+                                            ),
+                                            payload:
+                                                crate::model::witnesses::WitnessPayload::InferredType(
+                                                    ty.clone(),
+                                                ),
+                                            span: Span { start: *at, end: *at },
+                                        });
+                                    }
+                                }
+                                doc_witnesses.push(doc_witness(
+                                    n,
+                                    *sc,
+                                    ty,
+                                    Span { start: *at, end: *at },
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            // A refining doc row REPLACES the redundant bare-container annot
+            // witness on its slot (the fold is not latest-wins; leaving the
+            // `array` witness in place would keep beating the refinement).
+            let refined: std::collections::HashSet<(std::string::String, crate::model::file_analysis::ScopeId)> =
+                doc_witnesses
+                    .iter()
+                    .filter(|w| {
+                        matches!(
+                            &w.payload,
+                            crate::model::witnesses::WitnessPayload::InferredType(
+                                InferredType::Sequence(_) | InferredType::Parametric(_)
+                            )
+                        )
+                    })
+                    .filter_map(|w| match &w.attachment {
+                        crate::model::witnesses::WitnessAttachment::Variable { name, scope } => {
+                            Some((name.clone(), *scope))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+            if !refined.is_empty() {
+                out.witnesses.retain(|w| {
+                    let is_container_annot = matches!(
+                        &w.source,
+                        crate::model::witnesses::WitnessSource::Annotation(
+                            crate::model::witnesses::AnnotationKind::Declared
+                        )
+                    ) && matches!(
+                        &w.payload,
+                        crate::model::witnesses::WitnessPayload::InferredType(
+                            InferredType::HashRef | InferredType::ArrayRef
+                        )
+                    );
+                    !(is_container_annot
+                        && matches!(
+                            &w.attachment,
+                            crate::model::witnesses::WitnessAttachment::Variable { name, scope }
+                                if refined.contains(&(name.clone(), *scope))
+                        ))
+                });
+            }
+            // A named `@var T $x` above a RE-assignment (php's function-
+            // scoped locals: the def is the FIRST assignment, a later one is
+            // a rebind FlowEdge, not a symbol) casts the variable from that
+            // site on — the `$x = Factory::make(); /** @var Concrete $x */`
+            // idiom that narrows a base-typed factory return. The subject IS
+            // the assignment target, so the rebind is found at its own point.
+            for ((row, column), (_, facts)) in &by_subject {
+                let at = Point { row: *row, column: *column };
+                for f in facts {
+                    let DocFact::Var { ty, name: Some(vn) } = f else { continue };
+                    let Some(t) = annot_ident(ty, at) else { continue };
+                    let has_def =
+                        out.symbols.iter().any(|s| s.kind == "var" && &s.name == vn && s.start == at);
+                    if has_def {
+                        continue;
+                    }
+                    if let Some(fe) = out
+                        .flow_edges
+                        .iter()
+                        .find(|fe| &fe.target_name == vn && fe.target_at == at)
+                    {
+                        out.witnesses.push(doc_cast_witness(
+                            vn,
+                            fe.target_scope,
+                            t,
+                            Span { start: fe.target_at, end: fe.target_at },
+                        ));
+                    }
+                }
+            }
+            out.witnesses.extend(doc_witnesses);
+            out.symbols.extend(doc_methods);
+            out.refs.extend(doc_refs);
+            out.doc_disagreements.extend(disagreements);
+        }
+    }
     // What a `@<fact>.target` capture said about a DECLARATION, stamped as
     // flags — one carriage for the whole family, so a fact minted here and
     // the same fact written as an attribute token arrive as the same bit.
@@ -2817,6 +3297,152 @@ fn ret_expr_ident(
         }),
     }
 }
+
+/// What a documented type says about the declared one on the same slot.
+/// A docblock exists to say what the syntax could not spell, so it may only
+/// NARROW — never widen, never contradict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DocVerdict {
+    /// The declaration already admits the documented type: the doc is the
+    /// finer statement and wins the slot.
+    Narrows,
+    /// No value satisfies both. The declaration wins (the tree does not
+    /// drift); the pair is minted so a hint can say the two disagree.
+    Contradicts,
+    /// Neither provable here — a class whose ancestry lives in another file,
+    /// a union this lattice cannot hold. The declaration wins in silence.
+    Unknown,
+}
+
+/// `doc_ty` against `declared`. Every unprovable relation is `Unknown`:
+/// calling one a contradiction would report a declaration for being right.
+pub(crate) fn doc_verdict(
+    declared: &InferredType,
+    doc_ty: &InferredType,
+    parents: &[(std::string::String, std::string::String)],
+) -> DocVerdict {
+    use InferredType::*;
+    if declared == doc_ty {
+        return DocVerdict::Narrows;
+    }
+    match (declared, doc_ty) {
+        // A union this lattice cannot hold admits each of its arms, and the
+        // doc is the only place the arms are written.
+        (Unknown, _) | (_, Unknown) => DocVerdict::Unknown,
+        // A bare container says "a container"; the doc says of what.
+        (
+            HashRef | ArrayRef,
+            Sequence(_) | Parametric(_) | HashWithKeys { .. } | HashRef | ArrayRef,
+        ) => DocVerdict::Narrows,
+        // A class admits its descendants. Local ancestry is what this side
+        // can walk; a chain that leaves the file is Unknown, not a clash.
+        (ClassName(base), ClassName(doc)) => {
+            if local_ancestors(doc, parents).iter().any(|a| a == base) {
+                DocVerdict::Narrows
+            } else {
+                DocVerdict::Unknown
+            }
+        }
+        // Definite disagreements: two settled shapes no value shares.
+        (
+            String | Numeric | Bool,
+            String | Numeric | Bool | HashRef | ArrayRef | Sequence(_) | HashWithKeys { .. }
+            | ClassName(_),
+        )
+        | (
+            HashRef | ArrayRef | Sequence(_) | HashWithKeys { .. },
+            String | Numeric | Bool | ClassName(_),
+        )
+        | (ClassName(_), String | Numeric | Bool | HashRef | ArrayRef) => DocVerdict::Contradicts,
+        // Everything else — an optional, a constraint object, a coderef, a
+        // shape one side refines structurally — is a relation this side
+        // cannot settle. Silence, and the declaration stands.
+        _ => DocVerdict::Unknown,
+    }
+}
+
+/// `class`'s ancestors along the edges THIS FILE declares, transitively.
+/// Bounded by the edge count; a cycle visits each class once.
+fn local_ancestors(
+    class: &str,
+    parents: &[(std::string::String, std::string::String)],
+) -> Vec<std::string::String> {
+    let mut seen: Vec<std::string::String> = Vec::new();
+    let mut queue = vec![class.to_string()];
+    while let Some(c) = queue.pop() {
+        for (child, parent) in parents {
+            if child == &c && !seen.iter().any(|s| s == parent) {
+                seen.push(parent.clone());
+                queue.push(parent.clone());
+            }
+        }
+    }
+    seen
+}
+
+/// Does a doc row's type get to stand beside the declared type of this
+/// (name, scope) slot? A doc NARROWS a declaration (a subclass of the declared
+/// class, a parametric over the declared container, a union arm) and never
+/// widens or contradicts it; the verdict is `DocVerdict`, and a contradiction
+/// is minted as a `DocDisagreement` for the mismatch lane instead of a witness.
+fn doc_admits(
+    pack: &LangPack,
+    annot_text_by_var: &std::collections::HashMap<
+        (std::string::String, crate::model::file_analysis::ScopeId),
+        std::string::String,
+    >,
+    slot: (&str, crate::model::file_analysis::ScopeId),
+    doc_ty: &InferredType,
+    parents: &[(std::string::String, std::string::String)],
+) -> DocVerdict {
+    match annot_text_by_var.get(&(slot.0.to_string(), slot.1)) {
+        None => DocVerdict::Narrows,
+        Some(declared) => match (pack.annot_type)(declared) {
+            // A spelling the pack does not read carries no claim to
+            // contradict — the slot is untyped as far as this side knows.
+            None => DocVerdict::Narrows,
+            Some(declared) => doc_verdict(&declared, doc_ty, parents),
+        },
+    }
+}
+
+/// A documentation-sourced type witness on a Variable slot — its own source
+/// tag (not `Annotation(Declared)`): a doc type is real typing fuel, but the inlay
+/// suppression that hides hints for syntax-annotated declarations should
+/// still show one here (the docblock can sit far from the use).
+/// A NAMED `@var T $x` is a cast the author wrote at that site: it rides
+/// at annotation priority (`Annotation(Refinement)`) so the flow / call-binding
+/// edges the same assignment mints — pushed later, equal priority, and
+/// latest-wins — cannot override it with the factory's declared base.
+fn doc_cast_witness(
+    name: &str,
+    scope: crate::model::file_analysis::ScopeId,
+    ty: InferredType,
+    span: Span,
+) -> crate::model::witnesses::Witness {
+    let mut w = doc_witness(name, scope, ty, span);
+    w.source = crate::model::witnesses::WitnessSource::Annotation(
+        crate::model::witnesses::AnnotationKind::Refinement,
+    );
+    w
+}
+
+fn doc_witness(
+    name: &str,
+    scope: crate::model::file_analysis::ScopeId,
+    ty: InferredType,
+    span: Span,
+) -> crate::model::witnesses::Witness {
+    crate::model::witnesses::Witness {
+        attachment: crate::model::witnesses::WitnessAttachment::Variable {
+            name: name.to_string(),
+            scope,
+        },
+        source: crate::model::witnesses::WitnessSource::Builder("skeleton-doc".into()),
+        payload: crate::model::witnesses::WitnessPayload::InferredType(ty),
+        span,
+    }
+}
 /// The `TypeName(alias) → …` payload for an underlying type spelling, resolving
 /// it through the pack's `annot_type`: a class-shaped leaf edges into the alias
 /// graph (`Edge(TypeName(cn))`), a primitive is a terminal `InferredType`, an
@@ -2888,6 +3514,16 @@ fn byte_range_of(events: &[Event], match_id: usize, cap: &str) -> Option<(usize,
 /// enclosing class as this, not the namespace), and the receiver name
 /// (`$this`) is witnessed as an instance of it, so every chain based on
 /// the receiver resolves through the registry like any typed variable.
+/// The one spelling of "this declaration is deprecated": the attribute the
+/// lane reads, plus the notice hover and the diagnostic show.
+fn mark_deprecated(sym: &mut crate::build::query_extract::SkelSymbol, text: Option<String>) {
+    if !sym.attributes.iter().any(|a| a == "deprecated") {
+        sym.attributes.push("deprecated".to_string());
+    }
+    if text.is_some() || sym.deprecation.is_none() {
+        sym.deprecation = text;
+    }
+}
 fn register_class_body(
     out: &mut SkeletonAnalysis,
     receivers: &[String],

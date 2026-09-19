@@ -181,6 +181,14 @@ pub struct PackFacts {
     /// defaults for a language that declares none.
     #[serde(skip)]
     pub spellings: Option<&'static PackSpellings>,
+    /// Slots whose docblock type no value can share with the declared one
+    /// (`: int` + `@return string`). Per-FILE by nature — it is a property
+    /// of the two spellings the author wrote at one site, not of the
+    /// language — and minted at the merge that chose the declaration, so
+    /// the hint lane never re-reads a comment to find out.
+    #[serde(default)]
+    pub doc_disagreements: Vec<DocDisagreement>,
+
     /// Existence-probe argument spans (`@probe.region`: php `isset(…)` /
     /// `empty(…)`). A member read inside one IS the question of whether
     /// the member exists; the undefined-member lanes stay silent there.
@@ -231,7 +239,8 @@ impl PackFacts {
             + vcap(&self.moved_from)
             + vcap(&self.control_regions)
             + vcap(&self.param_regions)
-            + vcap(&self.probe_regions);
+            + vcap(&self.probe_regions)
+            + vcap(&self.doc_disagreements);
 
         h.misc += map_str_vec(&self.template_params)
             + mcap(&self.specializes)
@@ -248,6 +257,15 @@ impl PackFacts {
     }
 }
 
+/// A documented type and the declared type it contradicts, at the declaration
+/// whose declared type won. The `doc-type-mismatch` hint renders both.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DocDisagreement {
+    /// The declaration site — where the two spellings meet.
+    pub span: Span,
+    pub declared: InferredType,
+    pub documented: InferredType,
+}
 /// What is true of a language for EVERY file of it: its write and display
 /// spellings — what a quick-fix inserts and what a human surface renders —
 /// and the handful of semantics a name or a syntax cannot state.

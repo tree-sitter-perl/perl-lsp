@@ -917,6 +917,8 @@ fn sksym(src: &str, kind: &str, name: &str, occ: usize, package: Option<&str>) -
         arity: None,
         params: Vec::new(),
         qualifier_owned: false,
+        doc: None,
+        deprecation: None,
         flags: Default::default(),
     }
 }

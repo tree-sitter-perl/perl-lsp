@@ -89,6 +89,7 @@ impl FileAnalysis {
                     control_regions: _control_regions, // own-file straight-line gate spans
                     param_regions: _param_regions,   // own-file parameter-region spans
                     probe_regions: _probe_regions,   // own-file existence-probe spans
+                    doc_disagreements: _doc_disagreements, // own-file hint input, two spellings at one site
                     spellings: _spellings, // the language's own constants, attached by id
                 },
             plugin:
