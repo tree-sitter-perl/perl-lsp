@@ -18,9 +18,17 @@ pub struct SkelSymbol {
     /// Sticky `@context.package` value in force at the def site.
     pub package: Option<String>,
     pub scope: crate::model::file_analysis::ScopeId,
-    /// Declared return type (`@rettype`), for methods/functions — drives
-    /// method-return resolution + chaining through PackageSymbol.
-    pub return_type: Option<InferredType>,
+    /// The declared return as ONE deferred shape (`@rettype` through the
+    /// pack's `declared_return`, or a docblock row where the syntax carried
+    /// nothing): a concrete type, the receiver placeholder for php's
+    /// `static`/`$this`/`self`, or `InstanceOf{base, [Receiver]}` for
+    /// `@return Base<static>`. The writeback publishes it.
+    pub declared_return: Option<crate::model::witnesses::ReturnExpr>,
+    /// The return annotation as the language writes it (`: string`), minted
+    /// from the same `@rettype` capture through the pack's own
+    /// `return_annotation_template`. `None` where the pack writes no return
+    /// annotations, so a prefix-typed language (C) mints nothing to append.
+    pub return_annotation: Option<String>,
     /// Pointer/reference declarator stack, unravelled by `peel_nested` from
     /// a `@nested.target` capture (empty otherwise). Flows to `Symbol.deref_stack`.
     pub deref_stack: Vec<crate::model::file_analysis::DerefStep>,
@@ -462,7 +470,7 @@ impl SkeletonAnalysis {
             for s in &self.symbols {
                 if dedup_kinds.contains(&s.kind.as_str()) {
                     let key = (s.kind.as_str(), s.name_start.row, s.name_start.column, s.name_end.row, s.name_end.column);
-                    let has = s.return_type.is_some();
+                    let has = s.declared_return.is_some();
                     best.entry(key).and_modify(|v| *v |= has).or_insert(has);
                 }
             }
@@ -478,7 +486,7 @@ impl SkeletonAnalysis {
                 }
                 let key = (s.kind.clone(), s.name_start.row, s.name_start.column, s.name_end.row, s.name_end.column);
                 // Keep the rettype-bearing copy; if none has one, keep the first.
-                if resolved.get(&key) == Some(&true) && s.return_type.is_none() {
+                if resolved.get(&key) == Some(&true) && s.declared_return.is_none() {
                     return false;
                 }
                 kept.insert(key)
@@ -705,26 +713,40 @@ impl SkeletonAnalysis {
                 if !matches!(sym.kind, SymKind::Method | SymKind::Sub) {
                     continue;
                 }
-                if let Some(ret) = &self.symbols[i].return_type {
-                    // A return that MENTIONS the owning class's template
-                    // params publishes the deferred receiver-substituting
-                    // shape (`ParamOf` — lazy, like `RowOf`); a concrete
-                    // class-shaped return edges into the alias graph (it may
-                    // be a typedef) instead of committing the spelling;
-                    // primitives are leaves. `TypeName` resolves the typedef
-                    // or falls back to the same `ClassName`, so struct
-                    // returns are unchanged and aliased returns chase.
+                // The declared return goes out as the pack minted it. A
+                // receiver-shaped one (`: static`, `@return Base<static>`)
+                // substitutes at the call site, so the member-chain arm
+                // threads the real receiver and the class-keyed lookup's
+                // default receiver (`ClassName(class)`) covers the MCB path
+                // — both fluent. (`self` strictly means the DEFINING class;
+                // substituting the receiver over-approximates only where a
+                // subclass inherits the method — accepted residual.)
+                if let Some(declared) = &self.symbols[i].declared_return {
+                    // A CONCRETE return is refined against the owning class's
+                    // template params, which only this pass knows: a return
+                    // that MENTIONS one publishes the deferred
+                    // receiver-substituting shape (`ParamOf` — lazy, like
+                    // `RowOf`); a concrete class-shaped return edges into the
+                    // alias graph (it may be a typedef) instead of committing
+                    // the spelling; primitives are leaves. `TypeName` resolves
+                    // the typedef or falls back to the same `ClassName`, so
+                    // struct returns are unchanged and aliased returns chase.
                     // (edges-not-values)
-                    let class_params = sym
-                        .package
-                        .as_deref()
-                        .and_then(|p| template_params.get(p));
-                    let pay = match class_params.and_then(|ps| param_return_expr(ret, ps)) {
-                        Some(re) => WP::ReturnExpr(re),
-                        None => match ret {
-                            InferredType::ClassName(cn) => WP::Edge(WA::TypeName(cn.clone())),
-                            other => WP::InferredType(other.clone()),
-                        },
+                    let pay = match declared {
+                        crate::model::witnesses::ReturnExpr::Concrete(ret) => {
+                            let class_params =
+                                sym.package.as_deref().and_then(|p| template_params.get(p));
+                            match class_params.and_then(|ps| param_return_expr(ret, ps)) {
+                                Some(re) => WP::ReturnExpr(re),
+                                None => match ret {
+                                    InferredType::ClassName(cn) => {
+                                        WP::Edge(WA::TypeName(cn.clone()))
+                                    }
+                                    other => WP::InferredType(other.clone()),
+                                },
+                            }
+                        }
+                        other => WP::ReturnExpr(other.clone()),
                     };
                     bag.push(mk(WA::Symbol(sym.id), pay, sym.span));
                 }

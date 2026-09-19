@@ -56,6 +56,12 @@ pub struct LangPack {
     /// Map a `@type.annot` token's text to a type — the pack predicate
     /// for languages whose ring 3 is partly in the tree (`x: int`).
     pub annot_type: fn(text: &str) -> Option<InferredType>,
+    /// A `@rettype` spelling as ONE deferred return shape: a concrete type,
+    /// or the RECEIVER placeholder for the late-bound spellings (php
+    /// `static`/`$this`/`self`) that make fluent builders chain. Text in,
+    /// structure out — the engine never branches on the spelling itself
+    /// (rule #10), and the writeback publishes what comes back.
+    pub declared_return: fn(text: &str) -> Option<crate::model::witnesses::ReturnExpr>,
     /// Module-name → workspace-relative candidate paths — the entire
     /// per-language cross-file resolution strategy ("the one executable
     /// line"). Python: `pkg.mod` → pkg/mod.py | pkg/mod/__init__.py.
