@@ -124,6 +124,18 @@ already had. Put the sentence in the brief; check for it at the merge gate.
   stale main. Prefer self-worktreeing in the brief: `git fetch origin <branch>
   && git worktree add <path> -b <slice> origin/<branch>` as step 0, and have
   the agent VERIFY the tip commit subject before working.
+- **Sibling worktrees sharing a target dir are served each other's
+  artifacts.** Cargo hashes a path package WITHOUT its path, so two
+  worktrees of this crate on one `CARGO_TARGET_DIR` collide on every
+  artifact hash and freshness falls back to source mtimes: a fresh
+  checkout whose files are older than the other tree's last build is
+  "fresh", and its net runs the other tree's binary and test harnesses
+  (a branch-6 net ran branch 5's binary, failed three gold rows the
+  branch-6 overlay answers, and never ran the branch-6 tests at all).
+  One target dir per worktree, or `touch` every source under `src/`,
+  `queries/`, `tests/` before the net, and record the tip sha the net
+  built. Never symlink a target dir either — the same stale-binary trap
+  through a different door.
 
 Architectural forks mid-slice: pick the loosely-coupled/reversible option,
 log in `docs/open-forks.md` (options / picked / undo cost / question),
