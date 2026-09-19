@@ -69,3 +69,18 @@ An unknown spelling is an error at the producer (`UnknownAttribute`),
 never a silent `continue`. Query-declared attribute spellings are
 validated when the overlay compiles; source-token attributes are checked
 at mint.
+
+`layering_tests::language_spellings_have_one_home` probes both halves of
+the round trip. It derives the spellings it looks for from this table, by
+reading `core_types.rs` and splitting the `TryFrom` arms — which means a
+reformat of those arms silently empties the probe's list, and the
+`out.len() >= 20` floor is the only thing standing between that and a
+green run over an unprobed tier. **The non-fragile shape is a macro that
+generates the `TryFrom` arms and the spelling list from one literal**; it
+is debt, recorded here because the scrape looks deliberate and is not.
+
+The probe can only see spellings that already HAVE a flag, so an
+attribute with no twin is invisible to it. That gap is closed by a second
+half: every attribute literal the adapter compares must be a twinned one
+or appear in the count-exact, shrink-only `UNTWINNED_ATTRIBUTES` list,
+which is currently empty.
