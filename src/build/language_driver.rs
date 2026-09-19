@@ -464,8 +464,12 @@ impl PackDriver {
                     skel.reanchor_truncated_containers(source);
                 }
                 let macro_defs = self.enrich_skeleton(&mut skel, &mut parser, source, &src, &map, &ctx);
+                let key_defs = std::mem::take(&mut skel.key_defs);
                 let mut fa = skel.into_file_analysis();
-                self.register_post_build(&mut fa, &mut parser, source, path, &ctx, &recovered, macro_defs);
+                self.register_post_build(&mut fa, &mut parser, source, path, &ctx, &recovered, macro_defs, &pack);
+                if let Some(p) = path {
+                    adopt_path_rails(&mut fa, p, &key_defs, &pack);
+                }
                 fa
             }
             Err(e) => {
@@ -632,9 +636,24 @@ impl PackDriver {
         ctx: &PackContext,
         recovered: &[(String, String)],
         macro_defs: Vec<crate::model::file_analysis::MacroDef>,
+        pack: &crate::build::query_extract::LangPack,
     ) {
         fa.pack.macro_defs = macro_defs;
         apply_attribute_macros(fa, recovered);
+        // Text rails: a file the grammar reads as text (a Blade template)
+        // still USES rail names — scanned as text, minted as the same
+        // DispatchCall refs a parsed `route('x')` gets, so references,
+        // rename and the undefined-name lane reach templates.
+        if let Some(p) = path {
+            let rails = crate::build::query_extract::text_rails_for(pack);
+            let p_str = p.to_string_lossy();
+            let applicable: Vec<&crate::build::query_extract::TextRail> =
+                rails.iter().filter(|r| r.files.iter().any(|suffix| p_str.ends_with(suffix.as_str()))).collect();
+            if !applicable.is_empty() {
+                let refs = scan_text_rails(fa, source, &applicable);
+                fa.adopt_text_refs(refs);
+            }
+        }
         // Access-specifier regions: a fresh parse of the ORIGINAL source
         // (spans already in original coords, no remap needed) tags each
         // member symbol non-public when its declaration falls under
@@ -663,6 +682,221 @@ impl PackDriver {
         // a complete gather next session re-derives the row.
         fa.degraded = ctx.external.degraded || closure_incomplete;
     }
+}
+
+/// Path rails: a file under a rail's directory DEFINES a name derived
+/// from its path (`resources/views/a/b.blade.php` → `a.b` on the view
+/// rail, a Handler at the file's first position so goto-def lands at the
+/// top), or — with `keys` — the prefix its returned array's string keys
+/// extend (`config/app.php` → `app.name`, nested keys dotted, each a
+/// Handler on the key token). Same Handler identity as every rail, so
+/// references, rename (string rails only) and the undefined-name lane
+/// come by construction.
+#[cfg(feature = "pack-langs")]
+fn adopt_path_rails(
+    fa: &mut FileAnalysis,
+    path: &Path,
+    key_defs: &[crate::build::query_extract::KeyDef],
+    pack: &crate::build::query_extract::LangPack,
+) {
+    use crate::model::file_analysis::{HandlerOwner, Span};
+    use tree_sitter::Point;
+    let p = path.to_string_lossy().replace('\\', "/");
+    let rails = crate::build::query_extract::path_rails_for(pack);
+    // (rail, name, span, the declaration the handler STANDS ON)
+    let mut minted: Vec<(String, String, Span, Option<crate::model::file_analysis::SymbolId>)> =
+        Vec::new();
+
+    for rail in rails.iter() {
+        let Some(idx) = p.rfind(rail.under.as_str()) else { continue };
+        if rail.methods {
+            // the file's methods ARE the names (a policy's abilities); the
+            // Handler sits on the method's name token, and that it does is
+            // a relation (rule #11) — a consumer asks `rail_handler_twin`
+            // instead of rediscovering the pair from a span
+            for s in fa.symbols() {
+                if matches!(s.kind, crate::model::file_analysis::SymKind::Method) {
+                    minted.push((
+                        rail.rail.clone(),
+                        s.name.clone(),
+                        s.selection_span,
+                        Some(s.id),
+                    ));
+                }
+            }
+            continue;
+        }
+        let rest = &p[idx + rail.under.len()..];
+        let mut segs: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+        if segs.len() <= rail.skip {
+            continue;
+        }
+        segs.drain(..rail.skip);
+        let Some(last) = segs.last_mut() else { continue };
+        let Some(stem) = last.strip_suffix(rail.strip.as_str()) else { continue };
+        *last = stem;
+        let name = segs.join(rail.sep.as_str());
+        if name.is_empty() {
+            continue;
+        }
+        if !rail.keys {
+            let at = Span { start: Point { row: 0, column: 0 }, end: Point { row: 0, column: 0 } };
+            minted.push((rail.rail.clone(), name, at, None));
+            continue;
+        }
+        // keys: the dotted chain of enclosing elements' keys, then this key
+        for k in key_defs {
+            // outermost first: wider containers start earlier and end later
+            let mut ancestors: Vec<&crate::build::query_extract::KeyDef> = key_defs
+                .iter()
+                .filter(|o| o.elem_span != k.elem_span && o.elem_span.contains(&k.elem_span))
+                .collect();
+            ancestors.sort_by(|a, b| {
+                (a.elem_span.start.row, a.elem_span.start.column)
+                    .cmp(&(b.elem_span.start.row, b.elem_span.start.column))
+                    .then((b.elem_span.end.row, b.elem_span.end.column).cmp(&(a.elem_span.end.row, a.elem_span.end.column)))
+            });
+            let mut full = name.clone();
+            for a in ancestors {
+                full.push_str(rail.sep.as_str());
+                full.push_str(&a.key);
+            }
+            full.push_str(rail.sep.as_str());
+            full.push_str(&k.key);
+            minted.push((rail.rail.clone(), full, k.key_span, None));
+        }
+    }
+    if minted.is_empty() {
+        return;
+    }
+    let base = fa.symbols().len() as u32;
+    let symbols: Vec<crate::model::file_analysis::Symbol> = minted
+        .into_iter()
+        .map(|(rail, name, span, twin)| crate::model::file_analysis::Symbol {
+            id: crate::model::file_analysis::SymbolId(0),
+            name,
+            kind: crate::model::file_analysis::SymKind::Handler,
+            span,
+            selection_span: span,
+            scope: crate::model::file_analysis::ScopeId(0),
+            package: None,
+            flags: crate::model::file_analysis::SymbolFlags::empty(),
+            declared_with: twin,
+            detail: crate::model::file_analysis::SymbolDetail::Handler {
+                owner: HandlerOwner::Rail(rail),
+                dispatchers: Vec::new(),
+                params: Vec::new(),
+            },
+            namespace: crate::model::file_analysis::Namespace::Language,
+            presentation: crate::model::file_analysis::Presentation { hide_in_outline: true, ..Default::default() },
+            attributes: Vec::new(),
+            deref_stack: Vec::new(),
+            arity: None,
+        })
+        .collect();
+    // The other direction of the same relation, which only the adopting
+    // side can spell: the handler's id is its position after adoption.
+    let links: Vec<(crate::model::file_analysis::SymbolId, crate::model::file_analysis::SymbolId)> =
+        symbols
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                s.declared_with
+                    .map(|m| (m, crate::model::file_analysis::SymbolId(base + i as u32)))
+            })
+            .collect();
+    fa.adopt_path_symbols(symbols);
+    for (member, handler) in links {
+        if let Some(s) = fa.symbols_mut().get_mut(member.0 as usize) {
+            if s.declared_with.is_none() {
+                s.declared_with = Some(handler);
+            }
+        }
+    }
+}
+
+/// `name('literal'` occurrences of a text rail's calls, as DispatchCall refs
+/// on the rail. A parsed region (`<?php echo route('x') ?>` inside a
+/// template) already minted its ref — a text hit at the same start yields
+/// to it. Only the single-quoted, escape-free literal spelling is a name.
+pub(crate) fn scan_text_rails(
+    fa: &FileAnalysis,
+    source: &str,
+    rails: &[&crate::build::query_extract::TextRail],
+) -> Vec<crate::model::file_analysis::Ref> {
+    use crate::model::file_analysis::{AccessKind, HandlerOwner, Ref, RefBinding, RefKind, ScopeId, Span};
+    let taken: std::collections::HashSet<(usize, usize)> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::DispatchCall { .. }))
+        .map(|r| (r.span.start.row, r.span.start.column))
+        .collect();
+    let bytes = source.as_bytes();
+    // An identifier byte in this language: its sigils and its namespace
+    // separator continue a name (`$route`, `App\route`) — a hit inside one
+    // is not the call.
+    let names = fa.names();
+    let ident = |b: u8| {
+        b.is_ascii_alphanumeric()
+            || b == b'_'
+            || names.sigils.iter().any(|&c| c.is_ascii() && c as u8 == b)
+            || names.sep().is_some_and(|sep| sep.as_bytes().contains(&b))
+    };
+    let mut out = Vec::new();
+    for rail in rails {
+        for call in &rail.calls {
+            let mut from = 0;
+            while let Some(pos) = source[from..].find(call.as_str()).map(|i| i + from) {
+                from = pos + call.len();
+                if pos > 0 && ident(bytes[pos - 1]) {
+                    continue;
+                }
+                let mut i = pos + call.len();
+                while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                if i >= bytes.len() || bytes[i] != b'(' {
+                    continue;
+                }
+                i += 1;
+                while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                if i >= bytes.len() || bytes[i] != b'\'' {
+                    continue;
+                }
+                let start = i + 1;
+                let Some(len) = source[start..].find('\'') else { continue };
+                let name = &source[start..start + len];
+                if name.is_empty()
+                    || names.sep().is_some_and(|sep| name.contains(sep))
+                    || name.chars().any(char::is_whitespace)
+                {
+                    continue;
+                }
+                if rail.requires.as_deref().is_some_and(|sub| !name.contains(sub)) {
+                    continue;
+                }
+                let s = crate::build::cursor_sentinel::byte_to_point(source, start);
+                if taken.contains(&(s.row, s.column)) {
+                    continue;
+                }
+                let e = crate::build::cursor_sentinel::byte_to_point(source, start + len);
+                out.push(Ref {
+                    kind: RefKind::DispatchCall { dispatcher: call.clone() },
+                    span: Span { start: s, end: e },
+                    scope: ScopeId(0),
+                    target_name: name.to_string(),
+                    access: AccessKind::Read,
+                    binding: Some(RefBinding::Handler { owner: HandlerOwner::Rail(rail.rail.clone()), sym: None }),
+                    folded_from: None,
+                    arg_count: None,
+                    flags: Default::default(),
+                });
+            }
+        }
+    }
+    out
 }
 
 #[cfg(feature = "cpp")]
