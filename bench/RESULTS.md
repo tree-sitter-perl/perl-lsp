@@ -1068,3 +1068,162 @@ Against the 11:30 table only the `undefined-variable` column moved
 the by-reference binding, the reference-assignment and variadic
 declarations, and the probe silence. Every other cell is byte-identical.
 
+## Laravel parity arc
+
+### Round 1 — the routes rail (2026-09-03, 15:30, build under net r118)
+
+pterodactyl panel (981 php files, 104 `->name(…)` declarations across
+six routes files, 59 `route()` / `redirect()->route()` uses in PHP):
+
+| probe | result |
+|---|---|
+| `undefined-route` rows, cold | 80 before the reverse-index feed → 0 after (every name declared in a routes file) |
+| `undefined-route` rows, warm (stub path) | 0 |
+| goto-def `redirect()->route('admin.mounts.view')` (MountController) | `routes/admin.php:183` (the `->name` string) |
+| two-file app: goto-def from `route('home')` | the declaration |
+| two-file app: references from the declaration | declaration + every use, cold and warm, and after an edit adds a use (3) |
+| two-file app: rename at the declaration | rewrites inside the quotes at every site |
+| two-file app: `route('nowhere')` | `warning[undefined-route]` |
+| a group prefix `->name('admin.')` | declares nothing (unit test) |
+| a WordPress hook spelled like a route name | does not connect (unit test — rails are namespaces) |
+
+The 80 false rows were not the rail's: the pack tier never fed the
+reverse index, so a handler declared in a classless file (a routes
+file; a WordPress plugin's hook registrations) was unreachable by name
+across files — WordPress hook navigation across files was broken the
+same way. Blade templates (223 `route()` uses in 51 of panel's views) are text
+to the grammar; the text lane (`laravel.rails.json`) mints their uses as
+the same refs: all 223 resolve (0 `undefined-route` in templates),
+references from `admin.mounts.view`'s declaration list 8 sites, 3 of
+them templates (grep: 4 files spell the name).
+
+### Round 2 — the event bus (2026-09-03, 16:10, build under net r120)
+
+koel (9 events, 9 listeners, a `$listen` map, 16 emissions):
+
+| probe | result |
+|---|---|
+| `undefined-event` hints, cold | 8 before the structural emission rule (`Dispatcher::dispatch(new Job)` read the facade as the event) → 1 after: `event(new PasswordReset($user))`, a framework event no app listener answers |
+| goto-def on `event(new SongFavoriteToggled(…))`'s class token | the event class, `LoveTrackOnLastfm::handle`, the `$listen` row — three candidates, never a pick |
+| call hierarchy on `LoveTrackOnLastfm::handle` | incoming: `FavoriteService::toggleFavorite` (the emission) beside the two unit tests that call `handle` directly |
+| rename on the rail | refused by policy — the class rename owns the name |
+| unit + cross-file tests | `$listen` key, listener `handle(X $e)`, `Event::listen`, a job's own `handle`, both emission spellings connect; a typed injected dependency never becomes an emission target |
+
+Two defects the corpus found before the tests did: the def dedup kept
+one handler per token (a listener's `handle(Liked $e)` lost `Liked` to
+its own class's job handler), and the emission's companion ref won the
+cursor tie over the class token's own ref (goto-def lost the class).
+
+### Round 3 — path-defined rails (2026-09-03, 18:15, build under net r121)
+
+BookStack (3,530 files indexed, the real vendor tree; 1,088 `view()` /
+`config()` / `trans()` uses in PHP, 400 in templates), `--check` cold,
+two runs:
+
+| rail | misses | what they are |
+|---|---|---|
+| view | 0 | — |
+| event | 0 | — |
+| lang | 1 | `trans('entities.comment_deleted')` in `CommentController` — the key does not exist (`comment_deleted_success` does): a real BookStack defect the lane found |
+| route | 5 | four framework-default names the vendor tree uses and the app never declares (`login`, `password.reset`, `verification.verify`); two are `$this->route('id')` in a FormRequest — a route PARAMETER read, the member form's receiver unpinned (fixed in round 4's overlay) |
+| config | 213 | BookStack keeps its config under `app/Config/`, not `/config/`; the path rail is Laravel's layout, not a per-project setting yet (a workspace-config seam, parked) |
+
+Both runs agree row for row on the rails. Before the reverse-index
+replay fix the same probe gave view 13–35 and lang 39–96 across runs
+(single-threaded 11 / 39): `rebuild_reverse_index` cleared the edge maps
+and replayed only the module-keyed feeds, so a path-keyed handler feed
+(every classless routes / config / lang file) vanished whenever the
+rebuild raced the bulk index. The path feeds are now recorded and
+replayed with the rest.
+
+Silence rules the corpus wrote: a name ending in `.` / `_` / `-` is a
+prefix the caller concatenates onto (`view('auth.parts.login-form-' .
+$kind)`); a name containing `::` is a package-namespaced view
+(`errors::minimal`) whose provider is outside the path rails; a
+translation key without a dot is a JSON-file string (`__('to')`); an
+`X::dispatch(Consts::EVENT)` emission carries no dispatcher and the
+lane treats it as unnameable.
+
+### Round 4 — gates, middleware, container (2026-09-03, 19:00, build under net r122)
+
+`--check --severity hint`, cold, one run each (three on BookStack, identical):
+
+| app | middleware | ability | binding | what the misses are |
+|---|---|---|---|---|
+| koel (Laravel 11, no vendor tree) | 9 | 5 | 2 | `auth` / `throttle` / `web` / `api` are the framework's defaults, declared in the vendor tree koel does not carry; `*` was a wildcard (`->can('*')`, silenced since); `video` / `audio` / `invite-collaborators` are abilities a database grants; `cache` / `aws` are core container aliases from the same absent vendor tree |
+| panel (Laravel 10, no vendor tree) | 0 | 1 | 4 | `file.read` is a database permission; the bindings are core aliases (`hashids`, `view`, `blade.compiler`) |
+| BookStack (real vendor tree) | 0 | 0 | 5 | the five are vendor helpers reading config-shaped keys through the container (`app('app.debug')`) |
+
+All three rails are hints by declaration (`rails.json` `hints`): their
+definitions are partly runtime-only, so an unmatched name is a lead, not
+an error — the table is the evidence. `throttle:60,1` names `throttle`
+(the rail's `name_seps`), span included, so rename and references stay
+exact. `app(SongRepository::class)->countAccessibleByIds(…)` in koel
+navigates to the repository method (goto-def answered nothing before
+the `@expr.annot` witness). Rename at a policy method renames the method
+alone — the ability rail is reached from the strings, not from the
+declaration token. BookStack's `undefined-route` residual fell from 5 to
+3 (the `$this->route('id')` parameter reads no longer count as names; the
+three left are framework defaults in the vendor tree).
+
+The facade row stays parked: across the three apps, zero bare-alias
+spellings (`use DB;`, `\DB::`) and zero `class_alias()` calls — every
+facade use imports the FQ class, which `@method` already resolves. A
+global-alias class declaration is a seam the corpus does not ask for.
+
+The residual cross-file race is closed. Its window was the pack
+sub-index's own resolver thread: it wakes lazily, and its warm-start
+`rebuild_reverse_index` — a clear-then-refeed of every bucket — landed
+under the diagnostics sweep on a one-shot CLI, so a lookup in the window
+saw an empty rail (view 10–38, lang 12–33 across runs before; three
+identical runs after). Two changes: a core the warm load fed nothing
+into skips the rebuild (nothing to re-derive), and a rebuild's clear
+spares the path-keyed handler feeds, whose only source is the records
+that replay them anyway.
+
+### Round 5 — completion, the battery, gold (2026-09-03, 19:30, build under net r123)
+
+Rail-name completion in the string slot, on panel (104 named routes, 42
+views) cold:
+
+| probe | result |
+|---|---|
+| `view('admin.|` in `LocationController` | every `admin.*` view, nothing from another rail |
+| `route('admin.|` in a Blade partial | every `admin.*` route name through the text rails |
+| `route('|` (empty string) in the gold fixture | every route name (the sentinel path) |
+| `__('auth.|` | the locale file's keys; a first segment without a dot completes nothing (the overlay's regex is the lane's honesty gate) |
+
+The battery against Laravel Idea's feature list, as the arc leaves it:
+
+| Laravel Idea | ours |
+|---|---|
+| route names: completion, goto, usages, rename | all four, plus templates and `undefined-route` |
+| controller actions | class-array callables: goto + references |
+| route URIs / parameters, `Route::resource` names | parked (no identity to connect; name synthesis) |
+| views: goto file, usages, completion, undefined view | all, templates included (`@extends` / `@include` / `@each` / `@component`) |
+| config keys, translation keys | goto the key row, references, rename, completion, undefined-key; the locale segment skipped |
+| `env('KEY')` | parked (`.env` is not a php file) |
+| events ↔ listeners, jobs | emissions and handlers connect across files, call hierarchy walks the bus, `No listener for event` hints; Laravel Idea shows a list, we show a graph |
+| gates / policies | `Gate::define` and every policy method define; `authorize` / `can` / `@can` navigate; a miss is a hint |
+| middleware aliases | kernel maps, `->alias`, the framework defaults; `throttle:60,1` names `throttle`; a miss is a hint |
+| container bindings, `app(Foo::class)` typed | both |
+| facades → real class | the FQ spelling through `@method`; the bare alias parked with corpus evidence (zero uses in three apps) |
+| Eloquent fields from migrations, scopes, validation rules, Livewire, Inertia, generation | out of the box |
+
+Gold: `gold-corpus/laravel-fixture` (15 files) carries one row per rail
+axis — 9 definition, 2 references, 1 rename, 1 call hierarchy, 3
+completion, 1 diagnostics — all gold, cold and warm.
+
+### Arc close (2026-09-03, 19:45)
+
+Every row of the parity matrix is landed or parked with evidence
+(`docs/adr/laravel-rails.md`, "What is deliberately not here"). Seven
+rails (route, event, view, config, lang, middleware, ability, binding),
+one text lane for templates, one path lane for file-defined names,
+rail-name completion, 17 gold rows, three corpora characterized. Two
+defects outside the arc's scope found and fixed on the way: the pack
+tier never fed the reverse index for classless files (WordPress hook
+navigation across files was broken the same way), and a pack sub-index's
+lazily-woken resolver rebuilt the reverse index under the diagnostics
+sweep (nondeterministic cross-file misses on every one-shot CLI run).
+
