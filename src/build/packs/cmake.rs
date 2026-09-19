@@ -28,6 +28,7 @@ pub fn cmake_pack() -> LangPack {
         shape_name: |_, raw| raw.to_string(),
         default_name: |_| None,
         annot_type: |_| None,
+        declared_return: |_| None,
         // include(util.cmake) is a literal path; add_subdirectory(src)
         // means src/CMakeLists.txt. The whole resolution strategy.
         module_paths: |m| {

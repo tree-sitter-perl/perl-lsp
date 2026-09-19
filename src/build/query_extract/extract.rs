@@ -946,6 +946,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let annot_ident = |text: &str, at: Point| -> Option<InferredType> {
         (pack.annot_type)(text).map(|t| ident_type(t, at))
     };
+    // A declared return, use-map-resolved like any other written type: the
+    // pack turns the spelling into a shape, the file's imports decide what
+    // its class names mean.
+    let declared_ret = |text: &str, at: Point| -> Option<crate::model::witnesses::ReturnExpr> {
+        (pack.declared_return)(text).map(|re| ret_expr_ident(re, &|t| ident_type(t, at), &|c| ident(c, at)))
+    };
     let decl_ident = |leaf: &str, at: Point| -> String {
         match (pack.names.use_map_sep(), namespace_at(at)) {
             (Some(sep), Some(ns)) if !ns.is_empty() => format!("{ns}{sep}{leaf}"),
@@ -1343,9 +1349,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     name_end,
                     package: pkg,
                     scope: cur_scope,
-                    return_type: rettype_by_match
+                    declared_return: rettype_by_match
                         .get(&e.match_id)
-                        .and_then(|t| (pack.annot_type)(t)),
+                        .and_then(|t| declared_ret(t, e.start)),
+                    // The annotation AS WRITTEN, through the pack's own
+                    // spelling — the label a signature shows and the
+                    // "already typed" gate both read this fact rather than
+                    // re-scanning the declaration's source line.
+                    return_annotation: rettype_by_match
+                        .get(&e.match_id)
+                        .filter(|_| !pack.spellings.return_annotation_template.is_empty())
+                        .map(|t| pack.spellings.return_annotation_template.replace("{}", t)),
                     deref_stack: nested_stacks.get(&e.match_id).cloned().unwrap_or_default(),
                     attributes: {
                         let mut a =
@@ -1754,8 +1768,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     let (gen_i, gen_j) =
                         (out.symbols[i].kind == "var", out.symbols[j].kind == "var");
                     let upgrade_ret = out.symbols[i].kind == out.symbols[j].kind
-                        && out.symbols[i].return_type.is_some()
-                        && out.symbols[j].return_type.is_none();
+                        && out.symbols[i].declared_return.is_some()
+                        && out.symbols[j].declared_return.is_none();
                     if (gen_j && !gen_i) || upgrade_ret {
                         keep[j] = false;
                         best.insert(key, i);
@@ -1798,7 +1812,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             name_end: span.end,
                             package: None,
                             scope: *scope,
-                            return_type: None,
+                            declared_return: None,
+                            return_annotation: None,
                             deref_stack: Vec::new(),
                             attributes: Vec::new(),
                             arity: None,
@@ -2077,6 +2092,40 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     Ok(out)
 }
 
+/// Resolve every class name a declared return mentions through the file's
+/// use map. The shape is the pack's; what its names MEAN is the file's, and
+/// only this side knows the imports — so the walk is here, exhaustive, and
+/// no consumer re-reads the spelling.
+fn ret_expr_ident(
+    re: crate::model::witnesses::ReturnExpr,
+    ty: &dyn Fn(InferredType) -> InferredType,
+    class: &dyn Fn(&str) -> std::string::String,
+) -> crate::model::witnesses::ReturnExpr {
+    use crate::model::witnesses::{ParametricOp, ReturnExpr as RE};
+    let sub = |e: Box<RE>| Box::new(ret_expr_ident(*e, ty, class));
+    match re {
+        RE::Concrete(t) => RE::Concrete(ty(t)),
+        RE::ReceiverOr(t) => RE::ReceiverOr(ty(t)),
+        RE::Receiver => RE::Receiver,
+        RE::Arg(n) => RE::Arg(n),
+        RE::UnionOnArgs { branches } => RE::UnionOnArgs {
+            branches: branches
+                .into_iter()
+                .map(|(g, e)| (g, ret_expr_ident(e, ty, class)))
+                .collect(),
+        },
+        RE::Operator(op) => RE::Operator(match op {
+            ParametricOp::RowOf(e) => ParametricOp::RowOf(sub(e)),
+            ParametricOp::ParamOf { index, of } => {
+                ParametricOp::ParamOf { index, of: sub(of) }
+            }
+            ParametricOp::InstanceOf { base, args } => ParametricOp::InstanceOf {
+                base: class(&base),
+                args: args.into_iter().map(|e| ret_expr_ident(e, ty, class)).collect(),
+            },
+        }),
+    }
+}
 /// The `TypeName(alias) → …` payload for an underlying type spelling, resolving
 /// it through the pack's `annot_type`: a class-shaped leaf edges into the alias
 /// graph (`Edge(TypeName(cn))`), a primitive is a terminal `InferredType`, an

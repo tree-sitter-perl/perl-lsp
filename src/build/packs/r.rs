@@ -27,6 +27,7 @@ pub fn r_pack() -> LangPack {
         shape_name: |_, raw| raw.to_string(),
         default_name: |_| None,
         annot_type: |_| None,
+        declared_return: |_| None,
         // No reliable lexical ctor convention in R (S4/R5 exist but
         // rare); class typing arrives via shapes and S3 later.
         // source("util.R") hands us the path verbatim; library(pkg)
