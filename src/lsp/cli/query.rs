@@ -49,7 +49,7 @@ pub(crate) fn cli_check(args: &[String]) {
     if json_mode {
         println!("[");
     }
-    for_each_enriched_diagnostic(&ws, &module_index, options, &mut |file, d| {
+    let swept = for_each_enriched_diagnostic(&ws, &module_index, options, &mut |file, d| {
         let sev = match d.severity {
             Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::ERROR => "error",
             Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::WARNING => "warning",
@@ -98,7 +98,7 @@ pub(crate) fn cli_check(args: &[String]) {
         }
         println!("]");
     } else {
-        eprintln!("{} diagnostics in {} files", total, ws.workspace_len());
+        eprintln!("{} diagnostics in {} files", total, swept);
     }
 
     if total > 0 {
@@ -161,14 +161,14 @@ pub(crate) fn cli_type_at(file: &str, line_str: &str, col_str: &str) {
     // so framework / branch / arity rules refine the answer.
     if let Some(r) = analysis.ref_at(point) {
         if let Some(ty) = analysis.inferred_type_via_bag(&r.target_name, point) {
-            println!("{}", file_analysis::format_inferred_type(&ty));
+            println!("{}", analysis.render_type(&ty));
             return;
         }
     }
     // Check symbols
     if let Some(sym) = analysis.symbol_at(point) {
         if let Some(ty) = analysis.inferred_type_via_bag(&sym.name, point) {
-            println!("{}", file_analysis::format_inferred_type(&ty));
+            println!("{}", analysis.render_type(&ty));
             return;
         }
     }
@@ -613,7 +613,7 @@ fn run_one(
                 Some(routed.as_lookup()), resolve::OverrideScope::default(),
             );
             let mut sources = SourceCache::new(fmt);
-            let mut item_json = |sources: &mut SourceCache, it: &resolve::HierarchyItem| {
+            let item_json = |sources: &mut SourceCache, it: &resolve::HierarchyItem| {
                 let path = key_display(&it.location.key);
                 let (line, col) =
                     sources.display(&path, it.location.span.start.row, it.location.span.start.column);
@@ -633,7 +633,7 @@ fn run_one(
                     "subtypes": subtypes,
                 })
             } else {
-                let mut edge_json = |sources: &mut SourceCache,
+                let edge_json = |sources: &mut SourceCache,
                                      e: &resolve::CallEdge,
                                      sites_path: &str| {
                     let mut j = item_json(sources, &e.item);
@@ -703,16 +703,30 @@ fn run_one(
                 .ok_or_else(|| format!("No hover info at {}:{}", req.line, req.col))
         }
         "type-at" => {
-            let (_s, _t, analysis) = parse_file(file);
+            let (source, _t, analysis) = parse_file(file);
             resolve_imports_blocking(idx, &analysis);
+            // The rooted form HAS an index — thread it (routed to the file's
+            // own language, `lookup_for` being the one speller), so a chain
+            // hop or return type declared in another file resolves. The
+            // no-root single-file form stays index-less by design.
+            let reg = language_driver::LanguageRegistry::with_enabled();
+            let lang_id = reg
+                .driver_or_fallback(std::path::Path::new(file), &source)
+                .id();
+            let routed = idx.lookup_for(lang_id);
+            let base_idx = routed.as_lookup();
             if let Some(r) = analysis.ref_at(point) {
-                if let Some(ty) = analysis.inferred_type_via_bag(&r.target_name, point) {
-                    return Ok(file_analysis::format_inferred_type(&ty));
+                if let Some(ty) =
+                    analysis.inferred_type_via_bag_ctx(&r.target_name, point, Some(base_idx))
+                {
+                    return Ok(analysis.render_type(&ty));
                 }
             }
             if let Some(sym) = analysis.symbol_at(point) {
-                if let Some(ty) = analysis.inferred_type_via_bag(&sym.name, point) {
-                    return Ok(file_analysis::format_inferred_type(&ty));
+                if let Some(ty) =
+                    analysis.inferred_type_via_bag_ctx(&sym.name, point, Some(base_idx))
+                {
+                    return Ok(analysis.render_type(&ty));
                 }
             }
             Err(format!("No type info at {}:{}", req.line, req.col))
@@ -744,17 +758,32 @@ fn run_one(
             if is_incomplete {
                 // The server-mode response would carry `isIncomplete: true`;
                 // surface it as a trailing marker so CLI/gold can pin the
-                // payload cap AND the honesty flag in one assertion.
-                out.push_str(&format!(
-                    "# isIncomplete: capped at {} items\n",
-                    symbols::MAX_COMPLETION_ITEMS
-                ));
+                // payload cap AND the honesty flag in one assertion. The
+                // flag also rides an honest-EMPTY member slot (unresolvable
+                // receiver), where "capped" would be a lie — say which.
+                if items.len() >= symbols::MAX_COMPLETION_ITEMS {
+                    out.push_str(&format!(
+                        "# isIncomplete: capped at {} items\n",
+                        symbols::MAX_COMPLETION_ITEMS
+                    ));
+                } else {
+                    out.push_str("# isIncomplete\n");
+                }
             }
             Ok(out.trim_end_matches('\n').to_string())
         }
         "signature-help" => {
             let doc = cli_open_document(file, idx);
-            match symbols::signature_help(&doc.analysis, &doc.tree, &doc.text, pos, idx) {
+            // the same routing the server does: a pack document's call
+            // shapes and member ladder, a hub document's cursor context
+            let caps = crate::build::language_driver::LanguageRegistry::caps(doc.language);
+            let sh = if caps.pack_signature_help {
+                let routed = idx.lookup_for(doc.language);
+                symbols::pack_signature_help(&doc.analysis, &doc.tree, &doc.text, pos, doc.language, routed.as_lookup())
+            } else {
+                symbols::signature_help(&doc.analysis, &doc.tree, &doc.text, pos, idx)
+            };
+            match sh {
                 Some(sh) => {
                     let active = sh.active_signature.unwrap_or(0) as usize;
                     let mut out = String::new();
@@ -1136,7 +1165,7 @@ fn enriched_tree_diagnostics(
     options: symbols::DiagnosticOptions,
 ) -> Vec<(String, tower_lsp::lsp_types::Diagnostic)> {
     let mut all = Vec::new();
-    for_each_enriched_diagnostic(ws, idx, options, &mut |file, d| {
+    let _ = for_each_enriched_diagnostic(ws, idx, options, &mut |file, d| {
         all.push((file.to_string(), d));
     });
     all
@@ -1269,12 +1298,14 @@ fn sweep_one_file(
 /// print a timeout can discard whole (`docs/adr/instrument-blindness.md`
 /// — a 0-byte output file at hour two answers "has anything been
 /// PRINTED", not "has anything been found").
+/// Returns the number of files swept — the Perl workspace plus every
+/// registered pack file — which is what a summary line should count.
 fn for_each_enriched_diagnostic(
     ws: &file_store::FileStore,
     idx: &module_index::ModuleIndex,
     options: symbols::DiagnosticOptions,
     emit: &mut dyn FnMut(&str, tower_lsp::lsp_types::Diagnostic),
-) {
+) -> usize {
     // Snapshot before working: values are `Arc`s, so this is a pointer copy
     // per file, and it releases the DashMap shard guards an `iter()` would
     // otherwise hold closed to writers for the whole sweep.
@@ -1284,6 +1315,7 @@ fn for_each_enriched_diagnostic(
         .iter()
         .map(|e| (e.key().clone(), std::sync::Arc::clone(e.value())))
         .collect();
+    let perl_swept = entries.len();
     // Streaming survives the parallelism: workers send as each file finishes
     // and the calling thread drains, so `--check` still produces output
     // THROUGHOUT the run rather than buffering it into a final print a
@@ -1381,16 +1413,19 @@ fn for_each_enriched_diagnostic(
     // get `pack_diagnostics` (Mode B — member-op swap + peel), so `--batch
     // diagnostics` / `--check` / gold see the same Mode-B answers the LSP
     // publishes. No enrichment (pack files aren't cross-file-enriched).
+    let mut swept = perl_swept;
     idx.for_each_pack_index(|_lang, pack| {
         pack.for_each_registered_file(&mut |cm| {
+            swept += 1;
             let file = cm.path.display().to_string();
             // Same whole-view routing: pack index copies are evicted.
             let whole = file_analysis::CrossFileLookup::whole_present(pack.as_ref(), cm);
-            for d in symbols::pack_diagnostics(&whole, options) {
+            for d in symbols::pack_diagnostics(&whole, Some(pack.as_ref()), options) {
                 emit(&file, d);
             }
         });
     });
+    swept
 }
 
 /// Whole-tree diagnostics as the pretty-JSON array string (warning+; shared by

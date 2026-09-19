@@ -1460,7 +1460,7 @@ fn language_spellings_have_one_home() {
         ("model/file_analysis/outline.rs", 2, "outline detail text for a union container and a param decl kind"),
         ("model/witnesses/registry.rs", 1, "the `param` owner-keyed fallback key — a witness attachment name"),
         ("lsp/symbols/hover.rs", 1, "the hover LABEL for a macro-shaped Sub — display text (the fact itself is read as a flag)"),
-        ("lsp/cli/heatmap.rs", 1, "the `deprecated` diagnostic CODE — client-facing wire text, not the declaration fact"),
+        ("model/file_analysis/diagnostics.rs", 1, "the `deprecated` diagnostic CODE — client-facing wire text, not the declaration fact"),
         ("lsp/symbols/code_actions.rs", 1, "the `receiver` KEY of a diagnostic's `data` payload — the wire contract with the quick-fix, not a declaration fact"),
         ("lsp/symbols/diagnostics.rs", 1, "the `receiver` KEY of a finding's `data` payload — the wire contract with the quick-fix, not a declaration fact"),
     ];

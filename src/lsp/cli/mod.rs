@@ -4,7 +4,7 @@
 use crate::build::{language_driver, plugin};
 use crate::index::{document, file_store, module_cache, module_index, module_resolver, resolve};
 use crate::lsp::{backend, symbols};
-use crate::model::{conventions, file_analysis, witnesses};
+use crate::model::{file_analysis, witnesses};
 use crate::util::timings;
 
 /// Time one CLI query step — `tphase!("completion_items", expr)` prints a
@@ -141,7 +141,7 @@ pub(crate) fn print_usage() {
     eprintln!("                           [--timings]                    Per-module build-timing report (stderr, slowest-first)");
     eprintln!("  perl-lsp --outline <file>                              Document symbol outline");
     eprintln!("  perl-lsp --hover [<root>] <file> <line> <col>         Type info and docs (root = cross-file)");
-    eprintln!("  perl-lsp --type-at <file> <line> <col>                 Single type query");
+    eprintln!("  perl-lsp --type-at [<root>] <file> <line> <col>        Type query (cross-file with a root)");
     eprintln!("  perl-lsp --definition <root> <file> <line> <col>       Cross-file goto-def");
     eprintln!("  perl-lsp --type-definition <root> <file> <line> <col>  Def of the value's inferred class");
     eprintln!("  perl-lsp --implementations <root> <file> <line> <col>  Descendant defs (role composers, overrides)");
@@ -167,7 +167,7 @@ pub(crate) fn print_usage() {
     eprintln!("                                                         (JSON default; --csv / --html viewer)");
     eprintln!();
     eprintln!("PLUGIN AUTHORING:");
-    eprintln!("  perl-lsp --plugin-check <file.rhai>                    Lint a Rhai plugin");
+    eprintln!("  perl-lsp --plugin-check <.rhai|.scm|entry.json|rails.json>  Lint a plugin: Rhai script, pack query overlay, entry rules, or rail declarations");
     eprintln!("  perl-lsp --plugin-run <file.rhai> --on <fixture.pl>    Run plugin on one Perl file");
     eprintln!("  perl-lsp --plugin-test <plugin-dir> [--update]         Snapshot-test a plugin dir");
     eprintln!();

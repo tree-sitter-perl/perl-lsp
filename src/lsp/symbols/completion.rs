@@ -479,7 +479,12 @@ fn completion_items_native(
 
     candidates.extend::<Vec<CompletionCandidate>>(match slot {
         Slot::Member { ref receiver, .. } => {
-            if let Some(ref ty) = receiver.receiver_type {
+            // In-scope lexical methods ride every `->` completion with their
+            // mandatory `&` prefix — they're excluded from the class-keyed
+            // walks below, so this is their one entry (empty for pack
+            // languages, which mint no lexical subs).
+            let mut member_cands = analysis.complete_lexical_methods_at(point);
+            member_cands.extend(if let Some(ref ty) = receiver.receiver_type {
                 // `class_name_lenient` peels `Optional<Foo>` to `Foo` so an
                 // unguarded optional receiver still offers its methods — the
                 // same lenient receiver projection goto/hover/refs now use.
@@ -492,7 +497,8 @@ fn completion_items_native(
             } else {
                 let invocant_text = receiver.receiver_text.as_deref().unwrap_or("");
                 analysis.complete_methods(invocant_text, point, Some(module_index))
-            }
+            });
+            member_cands
         }
         Slot::Key { ref owner } => {
             // Keys already written in the enclosing hash literal —
@@ -555,7 +561,7 @@ fn completion_items_native(
             } else {
                 cs.complete_qualified_path(module_index, prefix)
             };
-            let mut items: Vec<CompletionItem> =
+            let items: Vec<CompletionItem> =
                 candidates.into_iter().map(candidate_to_completion_item).collect();
             // The candidate sources already narrowed by the qualifier
             // prefix, so the cap's own prefix pass has nothing to add.
@@ -618,7 +624,7 @@ fn completion_items_native(
         // Perl's slot detector never produces these — ArgPosition is
         // `detect_call_slot`'s question (sig-help's), TypePosition has no
         // Perl detector at all.
-        Slot::TypePosition { .. } | Slot::ArgPosition { .. } => Vec::new(),
+        Slot::TypePosition { .. } | Slot::ArgPosition { .. } | Slot::RailName { .. } => Vec::new(),
     });
 
     // Type-constrained ranking: when the cursor sits at a call arg whose
@@ -729,6 +735,7 @@ pub fn member_completion_for_class(
     module_index: &dyn crate::model::file_analysis::CrossFileLookup,
     op_fix: Option<(crate::model::file_analysis::Span, String)>,
     point: Point,
+    scoped: bool,
 ) -> Option<Vec<CompletionItem>> {
     // The access-specifier gate needs to know whether the
     // CURSOR itself is lexically inside `class`'s own body — self-access
@@ -736,8 +743,13 @@ pub fn member_completion_for_class(
     let requesting_class = analysis
         .scope_at(point)
         .and_then(|sc| analysis.enclosing_class_for_scope(sc));
+    let access = if scoped {
+        crate::model::file_analysis::MemberAccess::Scoped
+    } else {
+        crate::model::file_analysis::MemberAccess::Instance
+    };
     let candidates = analysis.complete_members_for_class(
-        class, Some(module_index), requesting_class.as_deref(),
+        class, Some(module_index), requesting_class.as_deref(), access,
     );
     if candidates.is_empty() {
         return None;

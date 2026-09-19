@@ -221,11 +221,6 @@ impl FileStore {
         self.workspace.remove(path);
     }
 
-    /// Count of workspace entries.
-    pub fn workspace_len(&self) -> usize {
-        self.workspace.len()
-    }
-
     /// Direct access to the workspace DashMap (for parallel indexing via Rayon
     /// and CLI tools that pre-populate then iterate). Values are `Arc<FileAnalysis>`.
     pub fn workspace_raw(&self) -> &DashMap<PathBuf, Arc<FileAnalysis>> {

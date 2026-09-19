@@ -19,6 +19,21 @@ code, no tree.
 
 It is the fallback whenever the cursor is not a member access.
 
+### The name-keyed pack's identifier universe
+
+A pack whose imports name classes rather than paths (its document mints
+`@import.binds`, `LanguageRegistry::imports_bind_names`) has no include
+closure to gate on; its identifier universe is every class
+the index declares under the typed prefix (`defs_with_prefix`, all
+providers per leaf — each namespace declaring the leaf is a distinct
+offer). What the file can already spell decides the edit: a leaf pinned to
+that namespace (an import, the file's own declaration) or bare in the
+file's own namespace completes as is; a leaf pinned to ANOTHER namespace
+is not offered — it names a different class here; everything else carries
+the import row as an additional edit (`FileAnalysis::import_edit_for`, the
+one rule the undefined-type quick-fix inserts with too). The candidate
+carries the FQ name as its detail so two same-leaf offers read apart.
+
 ## Half 2: member access — the crux is the erased operator
 
 At the instant a user triggers completion the buffer reads `box.` /
@@ -32,6 +47,12 @@ completion token, rust-analyzer's dummy-identifier insertion, pyright's
 recovery parser) — none read the broken tree.
 
 ### The seam: sentinel reparse (`cursor_sentinel.rs`)
+
+Which nodes ARE a member access, a call, or a token to skip is the query
+document's answer, read through the bounded cursor-time runner
+(`pack_query` / `captures_at` / `pattern_root_kinds`,
+`docs/adr/pack-vocabulary.md`) — never a node-kind table beside the
+document.
 
 A member of the reparse family (`cpp_reparse.rs`, `reparse.rs`): a source
 edit + reparse + span remap. The others fix a parse corrupted by a
@@ -59,12 +80,13 @@ Two properties make it cheap and exact:
   exact: tree-sitter reparses only the damaged region around the cursor,
   reusing the document tree `document.rs` already holds.
 
-Per-language config comes from `LangPack` — a single struct, not a
-branch. The member-access node kinds (`member_kinds`) and the "don't
-splice into strings/comments" set (`skip_kinds`) are the facts this seam
-reads, alongside the pack's other per-language config for the rest of
-completion. `LanguageDriver::lang_pack(language)` maps a driver id to its
-`LangPack`; `None` means the language gets in-scope completion only.
+Which nodes are a member access, and which are the tokens not to splice
+into, are the query document's own patterns — `@member.recv`'s roots and
+`@skip` — read through the bounded runner above. `LanguageDriver::
+lang_pack(language)` maps a driver id to its `LangPack`, which carries
+what is left: the language's write and display spellings, and its
+text→structure predicates. `None` means the language gets in-scope
+completion only.
 
 ### Receiver → members: tree-free, reusing the bag
 
@@ -84,6 +106,20 @@ sentinel receiver span
 symbols, and no `new` is synthesized — member access lists real members.
 Members resolve to a class because the cpp pack's `@context.class` tags
 class-body symbols with the class name (`symbol_in_class` reads `package`).
+
+The operator is a filter on the candidate, not a second walk. The
+`@member.recv` patterns name every member-access form, scoped ones
+included (php's `scoped_call_expression` /
+`scoped_property_access_expression` / `class_constant_access_expression`);
+the receiver of a scoped access is a class token — `@receiver.self`
+(`self` / `static`) names the enclosing class the way `@receiver.this`
+does, and a `@receiver.class` node names the class it spells. `MemberCompletionCtx::scoped`
+is "the operator has no instance form", and `member_completion_for_class`
+keeps constants (Enumerator symbols), members carrying the `static`
+attribute (stamped from the skeleton's `@static.target` name spans, read
+as `CompletionCandidate::is_static`) and the language's `class_literal_member` spelling
+for a scoped access, and everything but the constants for an instance one.
+No consumer asks what the operator was spelled as.
 
 ## The protocol gate
 
