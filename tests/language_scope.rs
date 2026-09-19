@@ -1118,6 +1118,55 @@ fn php_callable_variable_call_does_not_take_its_arguments_type() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Shapes BookStack and composer wrote: the build-time
+/// method-call stamp honors the written shape, so goto-def on a same-file
+/// `$this->hasAuth()` lands on the method while `$this->hasAuth` reads the
+/// property; a keyed two-pair array (`['chapter' => $c, 'book' => $c->book]`)
+/// is NOT the `[$obj, 'method']` callable shape, so its key is no method
+/// reference, and neither is the value read beside it — a class declaring
+/// only `book()` has no `book` property; an Eloquent relation behind a
+/// chained modifier
+/// (`->belongsTo(Book::class)->withTrashed()`) still types the property.
+#[cfg(feature = "php")]
+#[test]
+fn php_shape_stamp_keyed_arrays_and_chained_relations() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-shape-stamp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("Svn.php", "<?php\nnamespace App;\nclass Svn\n{\n    /** @var bool */\n    protected $hasAuth = false;\n\n    public function go(): bool\n    {\n        return $this->hasAuth();\n    }\n\n    protected function hasAuth(): bool\n    {\n        return $this->hasAuth;\n    }\n}\n");
+    w("Chapter.php", "<?php\nnamespace App;\nclass Chapter\n{\n    public function book(): int { return 1; }\n    public function show(Chapter $chapter): array\n    {\n        return view(\"x\", [\n            \"chapter\" => $chapter,\n            \"book\" => $chapter->book,\n        ]);\n    }\n}\nfunction view(string $n, array $d): array { return $d; }\n");
+    w("Models.php", "<?php\nnamespace App;\nclass BelongsTo { public function withTrashed(): BelongsTo { return $this; } }\nabstract class Model { public function belongsTo(string $c): BelongsTo { return new BelongsTo(); } }\nclass Book extends Model { public function getUrl(): string { return \"u\"; } }\nabstract class BookChild extends Model\n{\n    public function book(): BelongsTo\n    {\n        return $this->belongsTo(Book::class)->withTrashed();\n    }\n}\nclass Page extends BookChild {}\n");
+    w("Use.php", "<?php\nnamespace App;\nfunction f(Page $page): void\n{\n    $page->book->getUrl();\n}\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    // `$this->hasAuth()` (row 9) is the method (row 12); `$this->hasAuth` (row 14) the property (row 5).
+    let call = run(&["--definition", root, "Svn.php", "9", "22"]);
+    assert!(call.contains("Svn.php:12:"), "the call lands on the method: {call}");
+    let read = run(&["--definition", root, "Svn.php", "14", "22"]);
+    assert!(read.contains("Svn.php:5:"), "the read lands on the property: {read}");
+    // Neither the `"book"` key (row 9, col 13) nor the `$chapter->book`
+    // value read beside it is a reference of the callable `book()`: the key
+    // is not the `[$obj, 'method']` shape, and a value read never reaches a
+    // callable (`docs/adr/member-kinds.md`).
+    let key = run(&["--hover", root, "Chapter.php", "9", "13"]);
+    assert!(!key.contains("function book"), "an array key is not a method reference: {key}");
+    let refs: serde_json::Value = serde_json::from_str(&run(&["--references", root, "Chapter.php", "4", "20"])).unwrap();
+    let cols: Vec<(u64, u64)> = refs.as_array().unwrap().iter().map(|e| (e["line"].as_u64().unwrap(), e["col"].as_u64().unwrap())).collect();
+    assert_eq!(cols, vec![(4, 20)], "{cols:?}");
+    // The chained relation types the inherited property's chain.
+    let hover = run(&["--hover", root, "Use.php", "4", "17"]);
+    assert!(hover.contains("getUrl(): string"), "chain through a chained-modifier relation: {hover}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The member walk's wrong-family fallback belongs to the WALK, not to one
 /// class: `class B extends A` with `public $handler` on B and
 /// `function handler()` on A answers `$b->handler()` with A's method and
@@ -1164,6 +1213,51 @@ fn php_member_walk_reaches_a_parents_same_family_declaration() {
     assert!(call.contains("M.php:4:"), "the call reaches the parent's method: {call}");
     let read = run(&["--definition", root, "M.php", "15", "9"]);
     assert!(read.contains("M.php:8:"), "the value read stays on the property: {read}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An Eloquent relation is ONE member declared in two spellings on one
+/// token — `cover()` the method, `->cover` the property Eloquent's `__get`
+/// serves. The extractor mints the pair as a relation
+/// (`Symbol::declared_with`), so a rename at the declaration rewrites the
+/// calls AND the value reads, and the outline lists the member once.
+#[cfg(feature = "php")]
+#[test]
+fn php_eloquent_relation_renames_both_of_its_spellings() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-eloq-pair-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("Book.php", "<?php\nnamespace App;\nclass Book\n{\n    public function cover()\n    {\n        return $this->hasOne(Cover::class);\n    }\n}\n");
+    w("Cover.php", "<?php\nnamespace App;\nclass Cover { public function url(): string { return \"u\"; } }\n");
+    w("Shelf.php", "<?php\nnamespace App;\nclass Shelf\n{\n    public function show(Book $b): array\n    {\n        return [$b->cover(), $b->cover];\n    }\n}\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    // one declaration token, one outline entry
+    let outline: serde_json::Value =
+        serde_json::from_str(&run(&["--outline", &dir.join("Book.php").to_string_lossy()])).unwrap();
+    let covers: Vec<&str> = outline
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["name"].as_str() == Some("cover"))
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(covers, vec!["Method"], "the outline lists the relation once: {outline}");
+    // and a rename at that token reaches both spellings
+    let edits: serde_json::Value =
+        serde_json::from_str(&run(&["--rename", root, "Book.php", "4", "20", "jacket"])).unwrap();
+    let shelf = &edits[dir.join("Shelf.php").to_string_lossy().to_string()];
+    let cols: Vec<u64> =
+        shelf.as_array().unwrap().iter().map(|e| e["col"].as_u64().unwrap()).collect();
+    assert_eq!(cols, vec![20, 33], "call and value read both rewritten: {edits}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1794,5 +1888,213 @@ fn php_undefined_variable_lane_reads_by_reference_parameters() {
         .filter_map(|l| l.split('\'').nth(1))
         .collect();
     assert!(!unused.contains(&"$dm"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The routes rail reaches Blade templates through the text lane: a
+/// `{{ route('home') }}` in a template is a use (references from the
+/// declaration list it; rename rewrites it), and a name no routes file
+/// declares warns there too.
+#[cfg(feature = "php")]
+#[test]
+fn php_laravel_route_rail_reaches_blade_templates() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-lrblade-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("routes")).unwrap();
+    std::fs::create_dir_all(dir.join("app")).unwrap();
+    std::fs::create_dir_all(dir.join("resources/views")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\"}}}");
+    w("routes/web.php", "<?php\nuse Illuminate\\Support\\Facades\\Route;\nRoute::get('/', [App\\Home::class, 'index'])->name('home');\n");
+    w("app/Home.php", "<?php\nnamespace App;\nclass Home\n{\n    public function index() { return view('home'); }\n}\n");
+    w("resources/views/home.blade.php", "<div>\n  <a href=\"{{ route('home') }}\">home</a>\n  <a href=\"{{ route('nope') }}\">gone</a>\n</div>\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+    };
+    let check = run(&["--check", dir.to_str().unwrap(), "--severity", "hint"]);
+    let undefined: Vec<&str> = check.lines().filter(|l| l.contains("[undefined-route]")).collect();
+    assert_eq!(undefined.len(), 1, "{check}");
+    assert!(undefined[0].contains("home.blade.php") && undefined[0].contains("'nope'"), "{check}");
+    let refs = run(&["--references", dir.to_str().unwrap(), "--at", &format!("{}:3:53", dir.join("routes/web.php").display())]);
+    assert!(refs.contains("home.blade.php"), "the template use is a reference: {refs}");
+    assert!(refs.contains("routes/web.php"), "{refs}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The event bus across files: goto-def on the emission's class token
+/// lists the class AND the listener's `handle`; `--check` hints an
+/// emission no listener answers; call hierarchy on `handle` counts the
+/// emission as an incoming call.
+#[cfg(feature = "php")]
+#[test]
+fn php_laravel_event_bus_across_files() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-lrbus-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for d in ["app/Events", "app/Listeners", "app/Services", "app/Providers"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+    }
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\"}}}");
+    w("app/Events/Liked.php", "<?php\nnamespace App\\Events;\nclass Liked\n{\n    public function __construct(public int $id) {}\n}\n");
+    w("app/Events/Lonely.php", "<?php\nnamespace App\\Events;\nclass Lonely\n{\n}\n");
+    w("app/Listeners/LoveIt.php", "<?php\nnamespace App\\Listeners;\nuse App\\Events\\Liked;\nclass LoveIt\n{\n    public function handle(Liked $event): void\n    {\n        echo $event->id;\n    }\n}\n");
+    w("app/Services/Likes.php", "<?php\nnamespace App\\Services;\nuse App\\Events\\Liked;\nuse App\\Events\\Lonely;\nclass Likes\n{\n    public function like(int $id): void\n    {\n        event(new Liked($id));\n        event(new Lonely());\n    }\n}\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+    };
+    let check = run(&["--check", dir.to_str().unwrap(), "--severity", "hint"]);
+    let dead: Vec<&str> = check.lines().filter(|l| l.contains("[undefined-event]")).collect();
+    assert_eq!(dead.len(), 1, "{check}");
+    assert!(dead[0].contains("'Lonely'") && dead[0].contains("No listener for event"), "{check}");
+    // `event(new Liked($id))` — row 8; the class token starts at col 18 and
+    // the cursor sits inside it.
+    let likes = dir.join("app/Services/Likes.php");
+    let gd = run(&["--definition", dir.to_str().unwrap(), likes.to_str().unwrap(), "8", "19"]);
+    assert!(gd.contains("Events/Liked.php"), "the class: {gd}");
+    assert!(gd.contains("Listeners/LoveIt.php"), "the listener: {gd}");
+    let listener = dir.join("app/Listeners/LoveIt.php");
+    let ch = run(&["--call-hierarchy", dir.to_str().unwrap(), listener.to_str().unwrap(), "5", "21"]);
+    // The emitting METHOD is the incoming caller — named, not "the file's
+    // name appears somewhere in the output".
+    // `run` folds stderr in after stdout, so read the first JSON value.
+    let ch: serde_json::Value = serde_json::Deserializer::from_str(&ch)
+        .into_iter::<serde_json::Value>()
+        .next()
+        .expect("a report")
+        .expect("call-hierarchy JSON");
+    assert_eq!(ch["item"]["name"].as_str(), Some("handle"), "{ch}");
+    let callers: Vec<&str> =
+        ch["incoming"].as_array().expect("incoming").iter().filter_map(|c| c["name"].as_str()).collect();
+    assert_eq!(callers, vec!["like"], "the emission is an incoming call: {ch}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Policies, middleware aliases and container bindings across files: a
+/// policy method defines an ability through the `/app/Policies/` path
+/// rail (Blade `@can` and `->authorize` reach it), a kernel alias answers
+/// `->middleware('auth:web')`, a provider's `singleton('key')` answers
+/// `app('key')`, and `app(Repo::class)->find()` navigates to `find`;
+/// misses on the three rails are hints.
+#[cfg(feature = "php")]
+#[test]
+fn php_laravel_policies_middleware_bindings_across_files() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-lrgate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for d in ["app/Policies", "app/Http/Controllers", "app/Providers", "resources/views", "routes"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+    }
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\"}}}");
+    w("app/Policies/PostPolicy.php", "<?php\nnamespace App\\Policies;\nclass PostPolicy\n{\n    public function update($user, $post) { return true; }\n}\n");
+    w("app/Http/Kernel.php", "<?php\nnamespace App\\Http;\nclass Kernel\n{\n    protected $middlewareAliases = [\n        'auth' => \\App\\Http\\Middleware\\Authenticate::class,\n    ];\n}\n");
+    w("app/Providers/AppServiceProvider.php", "<?php\nnamespace App\\Providers;\nclass AppServiceProvider\n{\n    public function register() { $this->app->singleton('users.default', fn () => 1); }\n}\n");
+    w("app/Repo.php", "<?php\nnamespace App;\nclass Repo { public function find() { return 1; } }\n");
+    w("routes/web.php", "<?php\nuse Illuminate\\Support\\Facades\\Route;\nRoute::middleware(['auth', 'guest'])->group(function () {});\n");
+    w("resources/views/post.blade.php", "@can('update', $post)\n<p>ok</p>\n@endcan\n@can('nope')\n<p>no</p>\n@endcan\n");
+    let ctl = "<?php\nnamespace App\\Http\\Controllers;\nuse App\\Repo;\nclass PostController\n{\n    public function __construct() { $this->middleware('auth:web'); $this->middleware('nope'); }\n    public function edit($post) { $this->authorize('update', $post); $this->authorize('nope', $post); return app('users.default') . app('nope'); }\n    public function find() { return app(Repo::class)->find(); }\n}\n";
+    w("app/Http/Controllers/PostController.php", ctl);
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+    };
+    let root = dir.to_str().unwrap();
+    let check = run(&["--check", root, "--severity", "hint"]);
+    let count = |code: &str| check.lines().filter(|l| l.contains(code)).count();
+    assert_eq!(count("hint[undefined-middleware]"), 2, "'nope' and 'guest': {check}");
+    assert_eq!(count("hint[undefined-ability]"), 2, "'nope' in the controller and the template: {check}");
+    assert_eq!(count("hint[undefined-binding]"), 1, "{check}");
+    assert!(check.contains("Undefined middleware 'nope'") && check.contains("Undefined ability 'nope'") && check.contains("Undefined container binding 'nope'"), "{check}");
+    assert!(!check.contains("'auth'") && !check.contains("'update'") && !check.contains("'users.default'"), "{check}");
+    let lines: Vec<&str> = ctl.lines().collect();
+    let ctl_path = dir.join("app/Http/Controllers/PostController.php");
+    let col = lines[6].find("'update'").unwrap() + 1;
+    let gd = run(&["--definition", root, ctl_path.to_str().unwrap(), "6", &col.to_string()]);
+    assert!(gd.contains("app/Policies/PostPolicy.php:4:"), "ability → the policy method: {gd}");
+    let refs = run(&["--references", root, ctl_path.to_str().unwrap(), "6", &col.to_string()]);
+    assert!(refs.contains("resources/views/post.blade.php") && refs.contains("app/Policies/PostPolicy.php"), "the template's @can and the policy method: {refs}");
+    let col = lines[5].find("'auth:web'").unwrap() + 1;
+    let gd = run(&["--definition", root, ctl_path.to_str().unwrap(), "5", &col.to_string()]);
+    assert!(gd.contains("app/Http/Kernel.php:5:"), "middleware → the alias row: {gd}");
+    let col = lines[6].find("'users.default'").unwrap() + 1;
+    let gd = run(&["--definition", root, ctl_path.to_str().unwrap(), "6", &col.to_string()]);
+    assert!(gd.contains("app/Providers/AppServiceProvider.php:4:"), "binding → the singleton: {gd}");
+    let col = lines[7].find("find();").unwrap();
+    let gd = run(&["--definition", root, ctl_path.to_str().unwrap(), "7", &col.to_string()]);
+    assert!(gd.contains("app/Repo.php:2:"), "app(Repo::class)->find() → Repo::find: {gd}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Path-defined rails: a Blade file defines its view name, a config file's
+/// array keys define dotted config keys, a lang file's keys define
+/// translation keys — goto-def from `view('home')` lands on the template,
+/// from `config('app.name')` on the key, and a name no file defines is
+/// reported on its rail.
+#[cfg(feature = "php")]
+#[test]
+fn php_laravel_path_rails_views_config_lang() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-lrpath-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for d in ["app", "resources/views/pages", "config", "lang/en"] {
+        std::fs::create_dir_all(dir.join(d)).unwrap();
+    }
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"app/\"}}}");
+    w("resources/views/pages/home.blade.php", "<h1>{{ __('auth.failed') }}</h1>\n@include('pages.missing')\n");
+    w("config/app.php", "<?php\nreturn [\n    'name' => 'Koel',\n    'mail' => [\n        'from' => 'a@b',\n    ],\n];\n");
+    w("lang/en/auth.php", "<?php\nreturn [\n    'failed' => 'These credentials do not match.',\n];\n");
+    w("app/Home.php", "<?php\nnamespace App;\nclass Home\n{\n    public function index() { return view('pages.home', ['n' => config('app.mail.from')]); }\n    public function lost() { return view('pages.nope') . config('app.nope') . __('auth.nope') . __('Plain sentence here'); }\n}\n");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+    };
+    let check = run(&["--check", dir.to_str().unwrap(), "--severity", "hint"]);
+    let rows: Vec<&str> = check.lines().filter(|l| l.contains("[undefined-view]") || l.contains("[undefined-config]") || l.contains("[undefined-lang]")).collect();
+    assert_eq!(rows.len(), 4, "{check}");
+    assert!(check.contains("Undefined view 'pages.nope'") && check.contains("Undefined view 'pages.missing'"), "{check}");
+    assert!(check.contains("Undefined config key 'app.nope'") && check.contains("Undefined translation key 'auth.nope'"), "{check}");
+    assert!(!check.contains("Plain sentence"), "a JSON translation string is not a key: {check}");
+    let home = dir.join("app/Home.php");
+    let gd = run(&["--definition", dir.to_str().unwrap(), home.to_str().unwrap(), "4", "43"]);
+    assert!(gd.contains("resources/views/pages/home.blade.php"), "view → template: {gd}");
+    let gd = run(&["--definition", dir.to_str().unwrap(), home.to_str().unwrap(), "4", "75"]);
+    assert!(gd.contains("config/app.php:4:"), "config key → the nested key row: {gd}");
+    // rail-name completion in the string slot: a partial name answers from
+    // the document's own use, an empty string through the sentinel; a
+    // template's `@include('` through the text rails.
+    let lost = "    public function lost() { return view('pages.nope') . config('app.nope') . __('auth.nope') . __('Plain sentence here'); }";
+    let complete = |row: usize, col: usize, file: &std::path::Path| {
+        run(&["--completion", dir.to_str().unwrap(), file.to_str().unwrap(), &row.to_string(), &col.to_string()])
+    };
+    let col = lost.find("'pages.nope'").unwrap() + 1 + "pages.".len();
+    let c = complete(5, col, &home);
+    assert!(c.lines().any(|l| l.starts_with("pages.home\t")), "view names after `pages.`: {c}");
+    assert!(!c.contains("app.name"), "only the view rail: {c}");
+    let col = lost.find("'app.nope'").unwrap() + 1 + "app.".len();
+    let c = complete(5, col, &home);
+    assert!(c.contains("app.name") && c.contains("app.mail.from"), "config keys after `app.`: {c}");
+    let col = lost.find("'auth.nope'").unwrap() + 1;
+    let c = complete(5, col, &home);
+    assert!(c.contains("auth.failed"), "translation keys at the string start: {c}");
+    let blade = dir.join("resources/views/pages/home.blade.php");
+    let c = complete(1, "@include('".len(), &blade);
+    assert!(c.contains("pages.home"), "a template's @include completes view names: {c}");
     let _ = std::fs::remove_dir_all(&dir);
 }
