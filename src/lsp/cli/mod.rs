@@ -141,7 +141,7 @@ pub(crate) fn print_usage() {
     eprintln!("                           [--timings]                    Per-module build-timing report (stderr, slowest-first)");
     eprintln!("  perl-lsp --outline <file>                              Document symbol outline");
     eprintln!("  perl-lsp --hover [<root>] <file> <line> <col>         Type info and docs (root = cross-file)");
-    eprintln!("  perl-lsp --type-at <file> <line> <col>                 Single type query");
+    eprintln!("  perl-lsp --type-at [<root>] <file> <line> <col>        Type query (cross-file with a root)");
     eprintln!("  perl-lsp --definition <root> <file> <line> <col>       Cross-file goto-def");
     eprintln!("  perl-lsp --type-definition <root> <file> <line> <col>  Def of the value's inferred class");
     eprintln!("  perl-lsp --implementations <root> <file> <line> <col>  Descendant defs (role composers, overrides)");
