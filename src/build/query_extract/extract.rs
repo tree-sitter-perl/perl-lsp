@@ -946,6 +946,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // per match, so the def it annotates carries the same fact the docblock
     // tag gives.
     let mut deprecated_matches: std::collections::HashSet<usize> = Default::default();
+    // `@pair.arrow` — the key/value arrow a destructuring list writes. Its
+    // TEXT is the spelling the slot walk splits on; a file with no keyed
+    // list spells none and has no keyed slot to read.
+    let pair_arrow: String = events
+        .iter()
+        .find(|e| e.cap == "pair.arrow")
+        .map(|e| e.text.clone())
+        .unwrap_or_default();
     // `@ref.var.implicit` — reads the runtime binds without a declaration.
     let mut runtime_bound_reads: Vec<Span> = Vec::new();
     // The attribute TOKENS the document names deprecated. A def's own
@@ -1460,6 +1468,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
     // cutoff sees them, exactly like Perl's `foreach` var.
     let mut flow_rebinds: Vec<(String, ScopeId, Point)> = Vec::new();
+    // Destructuring slots (`@flow.slot` in a `@flow.slot.list`) and
+    // key-less array-literal tuples (`@tuple.*`) — joined per match after
+    // the loop (docs/adr/destructuring.md).
+    let mut flow_slots: Vec<(usize, String, ScopeId, Point, usize)> = Vec::new();
+    let mut slot_lists: HashMap<usize, (Span, usize, String)> = HashMap::new();
     // `@branch.expr` / `@branch.arm` (match / ternary) and `@subscript.*`,
     // joined per match after the loop.
     let mut branch_expr_by_match: HashMap<usize, Span> = HashMap::new();
@@ -2634,6 +2647,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 out.return_sites
                     .push((cur_scope, Span { start: e.start, end: e.end }));
             }
+            "flow.slot" => {
+                flow_slots.push((
+                    e.match_id,
+                    (pack.shape_name)("def.var", &e.text),
+                    cur_scope,
+                    e.start,
+                    e.start_byte,
+                ));
+            }
+            "flow.slot.list" => {
+                slot_lists.insert(
+                    e.match_id,
+                    (Span { start: e.start, end: e.end }, e.start_byte, e.text.clone()),
+                );
+            }
             "branch.expr" => {
                 branch_expr_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
             }
@@ -3394,6 +3422,52 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             reassigns: false,
         });
     }
+    // Destructuring slots bind POSITIONALLY off their source — the same
+    // FlowEdge lowering Perl's list assignment uses. A keyed list never
+    // binds (its positions are not positions); the defs still landed.
+    {
+        let mut element_hops: std::collections::HashSet<(Point, Point)> = Default::default();
+        for (mid, name, scope, at, byte) in &flow_slots {
+            let Some((list_span, list_byte, list_text)) = slot_lists.get(mid) else { continue };
+            let offset = byte.saturating_sub(*list_byte);
+            let extraction = match slot_position(list_text, offset, &pair_arrow) {
+                Some(pos) => crate::model::file_analysis::Extraction::Positional(pos),
+                None => match slot_key(list_text, offset, &pair_arrow) {
+                    Some(k) => crate::model::file_analysis::Extraction::KeyOf(k),
+                    None => continue,
+                },
+            };
+            let source = if let Some(src) = flow_sources.get(mid) {
+                *src
+            } else if let Some((seq_src, _)) = seq_source_by_match.get(mid) {
+                // foreach: the list IS the collection's element; the slots
+                // index into it — two projections chained through the
+                // list's own Expr span.
+                if element_hops.insert((list_span.start, list_span.end)) {
+                    out.witnesses.push(crate::model::witnesses::Witness {
+                        attachment: crate::model::witnesses::WitnessAttachment::Expr(*list_span),
+                        source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+                        payload: crate::model::witnesses::WitnessPayload::Projected {
+                            base: crate::model::witnesses::WitnessAttachment::Expr(*seq_src),
+                            step: crate::model::witnesses::ProjectionStep::Element,
+                        },
+                        span: *list_span,
+                    });
+                }
+                *list_span
+            } else {
+                continue;
+            };
+            out.flow_edges.push(crate::model::file_analysis::FlowEdge {
+                target_name: name.clone(),
+                target_scope: *scope,
+                target_at: *at,
+                source,
+                extraction,
+                reassigns: false,
+            });
+        }
+    }
     // Lower the value-flow edges to type-tier witnesses (the bag is canonical
     // for types; the edges are the provenance tier above it).
     for fe in &out.flow_edges {
@@ -4084,6 +4158,54 @@ fn bind_call_args(
     }
 }
 
+/// The positional index of a destructuring slot: the number of TOP-LEVEL
+/// commas in the list text before the slot's byte offset (`[, $b]` → 1).
+/// `None` for a keyed list (a top-level `=>`): its positions are not
+/// positions, so the slot never binds positionally.
+fn slot_position(list_text: &str, slot_offset: usize, arrow: &str) -> Option<usize> {
+    let bytes = list_text.as_bytes();
+    let (mut depth, mut commas) = (0i32, 0usize);
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 1 && i < slot_offset => commas += 1,
+            _ if depth == 1 && !arrow.is_empty() && list_text[i..].starts_with(arrow) => return None,
+            _ => {}
+        }
+        i += 1;
+    }
+    Some(commas)
+}
+
+/// The literal key of a KEYED destructuring slot (`['k' => $v]`): the
+/// quoted string before the `=>` that precedes the slot in its own
+/// top-level segment. `None` for a positional list or a non-literal key.
+fn slot_key(list_text: &str, slot_offset: usize, arrow: &str) -> Option<String> {
+    let bytes = list_text.as_bytes();
+    let (mut depth, mut seg_start) = (0i32, 0usize);
+    for (i, &c) in bytes.iter().enumerate().take(slot_offset.min(bytes.len())) {
+        match c {
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                if depth == 1 {
+                    seg_start = i + 1;
+                }
+            }
+            b')' | b']' | b'}' => depth -= 1,
+            b',' if depth == 1 => seg_start = i + 1,
+            _ => {}
+        }
+    }
+    let seg = &list_text[seg_start..slot_offset.min(list_text.len())];
+    let (key, _) = seg.split_once(arrow)?;
+    let key = key.trim();
+    let quoted = key.len() >= 2
+        && ((key.starts_with('\'') && key.ends_with('\''))
+            || (key.starts_with('"') && key.ends_with('"')));
+    quoted.then(|| key[1..key.len() - 1].to_string())
+}
 /// The `@classattr.<flavor>` suffix a container-def carries when the query
 /// calls it an enumeration — the capture's own word, not the attribute
 /// string a consumer would otherwise compare.
