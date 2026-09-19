@@ -68,6 +68,14 @@ pub(crate) struct IndexCore {
     /// shells out to `perl`, so no query path may re-derive it) and read by
     /// every origin's `VisibilityAxis::for_origin`.
     pub(crate) inc_roots: std::sync::RwLock<Arc<Vec<std::path::PathBuf>>>,
+    /// The read-only DEPENDENCY tier's root prefixes. `None` = the hub's
+    /// construction-time semantics (everything here came from `@INC`, so
+    /// every path is dependency); `Some(roots)` = a pack sub-index, whose
+    /// cache holds the workspace's own files PLUS declared dependency
+    /// roots (composer's vendor packages) — a path is dependency iff a
+    /// root prefixes it. Set once by the bulk indexer; canonical, like
+    /// `inc_roots`.
+    pub(crate) dependency_roots: std::sync::RwLock<Option<Arc<Vec<std::path::PathBuf>>>>,
     pub(crate) queue: ResolveQueue,
     pub(crate) resolved: ResolveNotify,
     pub(crate) workspace_root: WorkspaceRootChannel,
@@ -146,6 +154,7 @@ impl IndexCore {
             available_modules: DashMap::new(),
             all_defs: DashMap::new(),
             inc_roots: std::sync::RwLock::new(Arc::new(Vec::new())),
+            dependency_roots: std::sync::RwLock::new(None),
             queue: ResolveQueue {
                 priority: Mutex::new(Vec::new()),
                 pending: Mutex::new(Vec::new()),
@@ -176,6 +185,20 @@ impl IndexCore {
             .collect();
         if let Ok(mut g) = self.inc_roots.write() {
             *g = Arc::new(canon);
+        }
+    }
+
+    /// Declare this index a PACK sub-index with the given dependency-root
+    /// prefixes (canonicalized). Even an empty list flips the tier
+    /// semantics: the index's other files are the workspace's own
+    /// (rename-editable), not `@INC`-style read-only modules.
+    pub(crate) fn set_dependency_roots(&self, roots: Vec<std::path::PathBuf>) {
+        let canon: Vec<std::path::PathBuf> = roots
+            .iter()
+            .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+            .collect();
+        if let Ok(mut g) = self.dependency_roots.write() {
+            *g = Some(Arc::new(canon));
         }
     }
 
