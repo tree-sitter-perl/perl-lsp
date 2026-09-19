@@ -27,6 +27,24 @@ marked otherwise; the drain re-derived each rationale against current code.
   declared example until ts-parser-perl 2.0.0 landed it; the list is
   empty today.
 
+- **A reference-assignment alias is a per-symbol tag, not a relation.**
+  `$h = &$opts['h']` makes `$h` reach `$opts['h']`'s storage, so a write
+  through `$h` is a use of that storage and the unused-variable lane must
+  stay silent. The extractor states that as `SymbolFlags::ALIAS` on the
+  variable symbol — which is enough for the lane, and gets the attribute
+  string out of the adapter, but is still an ADJECTIVE on one storage
+  where the fact is a RELATION between two: nothing says which storage
+  `$h` reaches, so nothing else can use it. Target shape: the
+  aliasing edge the by-reference lane already speaks
+  (`docs/adr/by-ref-binding.md`) — a witness on the aliased variable
+  pointing at the storage the `@flow.source` capture already names — and
+  the lane asks whether the variable has an aliasing binding. What it
+  needs first: an attachment/payload that says "aliases" rather than
+  "flows from", since a plain `$h = $opts['h']` mints the same flow edge
+  and a `WitnessSource` tag read for meaning is rule #14's own
+  antipattern. [recorded 2026-09-17; the string became a flag 2026-09-18,
+  the relation is still unmodelled]
+
 - **`PackFacts` is one lane for every pack language** (recorded
   2026-09-15, for after the php release). Thirty-four fields, of which a
   Perl analysis carries none and a php analysis carries the cpp ones
