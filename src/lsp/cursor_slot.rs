@@ -104,6 +104,12 @@ pub enum Slot {
         index: usize,
         expected: Option<InferredType>,
     },
+    /// `route('ho|')` / `@include('|')` — a string that IS (or, with the
+    /// cursor's position spelled into it, would be) a use on the string
+    /// rail `rail`: the rail's declared names complete here. `content` is
+    /// the string content's span, the replace range an item's edit
+    /// targets (a client's word boundary never spans `.` / `-` / `/`).
+    RailName { rail: String, prefix: String, content: Span },
 }
 
 /// Which detector arm produced a `Slot` — the generic "which detector
@@ -125,6 +131,8 @@ pub enum DetectorArm {
     QualifiedPath,
     DomainCompare,
     CallArg,
+    /// A string on a rail (`route('|')`) — the pack sentinel's rail arm.
+    RailString,
     General,
 }
 
@@ -223,6 +231,16 @@ pub fn detect_slot(
         return bare_identifier();
     };
     let mut parser = driver.make_parser();
+    // A string on a rail first: inside a string no member / qualifier
+    // arm applies, and the rail's names are the only honest answer.
+    if let Some(ctx) = crate::build::cursor_sentinel::rail_string_ctx(
+        &mut parser, &lang_pack, source, tree, cursor, analysis,
+    ) {
+        return DetectedSlot {
+            slot: Slot::RailName { rail: ctx.rail, prefix: ctx.prefix, content: ctx.content },
+            arm: DetectorArm::RailString,
+        };
+    }
     if let Some(ctx) = crate::build::cursor_sentinel::member_completion_ctx_incremental(
         &mut parser, &lang_pack, source, tree, cursor, analysis, module_index,
     ) {
