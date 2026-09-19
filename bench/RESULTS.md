@@ -564,3 +564,179 @@ parallel decodes queued. Intelephense's first references answer on the
 same site was 110 ms in the round-1 ledger; the remaining gap is the
 rows→whole upgrades (10 double-decodes) and the matcher itself.
 
+### Scoreboard refresh with the day-2 final build (2026-09-03, 00:30)
+
+The day-2 battery (`spec2-*.json`) replayed against the final build
+(a289243); the other tools' rows are the day-2 runs. Answered / probed,
+with the median latency per verb.
+
+| corpus · verb | ours | Intelephense (free) | phpactor |
+|---|---|---|---|
+| guzzle · definition | 1/1 · 1 ms | 1/1 · 1 ms | 1/1 · 141 ms |
+| guzzle · hover | 2/2 · 2 ms | 2/2 · 13 ms | 2/2 · 96 ms |
+| guzzle · signatureHelp | 1/1 · 1 ms | 1/1 · 10 ms | 1/1 · 2,040 ms |
+| guzzle · typeDefinition | 1/1 · 1 ms | 0/1 | 1/1 · 15 ms |
+| guzzle · implementation | 1/1 · 6 ms | 0/1 | 1/1 · 75 ms |
+| guzzle · documentSymbol | 1/1 · 1 ms | 1/1 · 12 ms | 1/1 · 107 ms |
+| monolog · definition | 2/2 · 1 ms | 2/2 · 1 ms | 2/2 · 2 ms |
+| monolog · signatureHelp | 1/1 · 1 ms | 1/1 · 8 ms | 1/1 · 24 ms |
+| monolog · implementation | 2/2 · 16 ms | 0/2 | 2/2 · 133 ms |
+| monolog · documentSymbol | 1/1 · 1 ms | 1/1 · 11 ms | 1/1 · 38 ms |
+| demo · completion | 1/1 · 1 ms | 1/1 · 5 ms | 1/1 · 40 ms |
+| demo · typeDefinition | 1/1 · 1 ms | 0/1 | 1/1 · 3 ms |
+| demo · documentSymbol | 1/1 · 1 ms | 1/1 · 4 ms | 1/1 · 5 ms |
+
+demo's definition (0/2 for all three) and hover probes target vendor
+symbols the hand-vendored tree lacks; the diagnostics rows on demo are
+the same undefined-vendor-type findings for ours and Intelephense
+(phpactor reports none).
+
+| corpus | ours ready · RSS | Intelephense | phpactor |
+|---|---|---|---|
+| guzzle | 1.9 s · 355 MB | 1.5 s · 232 MB | 0.7 s · 126 MB |
+| monolog | 1.8 s · 85 MB | 1.1 s · 195 MB | 0.5 s · 119 MB |
+| demo | 1.5 s · 69 MB | 1.1 s · 187 MB | 1.6 s · 117 MB |
+
+guzzle's RSS (213 MB in the round-1 ledger) re-measured under identical
+flags (a 6 s settle after open, so the workspace index has finished):
+pre-day-2 build 355 MB, final 361 MB, final without the prefetch 363 MB.
+The day-2 work did not move it; the round-1 number was taken before the
+index (guzzle's hand-vendored tree included) had landed.
+
+Lanes the others carry that we do not (from the same runs): Intelephense's
+"declared but not used" variable hint and its documented-vs-declared
+type mismatch; both are the next diagnostics axis.
+
+### Lanes the others carry, judged (2026-09-03, 01:05)
+
+- **"Declared but not used" variables** (Intelephense): mirrored as
+  `unused-variable` (hint, unnecessary-tagged; parameters, captures and
+  dynamically-materialized scopes silent).
+- **"Documented type is not compatible with the declared type"**
+  (Intelephense, severity 3): every row it reported on monolog
+  (`Logger.php` 192/205/234, `LineFormatter.php` 55/69) is the
+  fluent-builder `@return $this` / `@return static` against `: self` —
+  an idiom, not a mismatch, and one the extractor already reduces to
+  the same receiver bucket. Not mirrored; noise.
+
+### Lane counts on the corpora, hint severity (2026-09-03, 01:15, build 17977ec)
+
+| corpus | unresolved-method | undefined-property | undefined-type | undefined-variable | unused-import | unused-variable | deprecated | arity |
+|---|---|---|---|---|---|---|---|---|
+| WordPress | 111 | 198 | 94 | 24 | 0 | 611 | 283 | 15 |
+| laravel/framework | 1,521 | 518 | 7,039 | 51 | 6 | 741 | 34 | 14 |
+| guzzle | 2 | 0 | 1,340 | 0 | 0 | 563 | 0 | 2 |
+| monolog | 11 | 13 | 263 | 0 | 2 | 36 | 4 | 0 |
+| symfony demo | 0 | 5 | 519 | 0 | 0 | 0 | 0 | 0 |
+
+Sampled: the `unused-variable` rows on guzzle were by-reference closure
+captures written inside the closure and read outside, a foreach key
+read only as a subscript index, and a variable captured by a nested
+closure; the `undefined-property` rows on laravel were a trait's
+`$this->app` (the composing class provides it) and `$this->load(...)`
+(a first-class callable read as a property); WordPress's `$user->ID`
+after `$user = wp_signon()` keeps an earlier branch's `WP_Error` — an
+untyped reassignment does not yet reset a variable's type. The first
+three are fixed in the next build; the recount follows.
+
+After the fixes (2026-09-03, 01:55, build eb320a4 — trait `$this`,
+by-reference captures, foreach key subscripts, nested-closure captures,
+`$this->load(...)` first-class callables):
+
+| corpus | unresolved-method | undefined-property | undefined-type | undefined-variable | unused-import | unused-variable | deprecated | arity |
+|---|---|---|---|---|---|---|---|---|
+| WordPress | 104 | 195 | 94 | 24 | 0 | 420 | 283 | 15 |
+| laravel/framework | 993 | 101 | 7,039 | 51 | 6 | 257 | 34 | 14 |
+| guzzle | 2 | 0 | 1,340 | 0 | 0 | 98 | 0 | 2 |
+| monolog | 11 | 9 | 263 | 0 | 2 | 24 | 4 | 0 |
+| symfony demo | 0 | 0 | 519 | 0 | 0 | 0 | 0 | 0 |
+
+`unused-variable` fell 563 → 98 on guzzle and 741 → 257 on laravel;
+`undefined-property` 518 → 101 on laravel (trait bodies) and
+`unresolved-method` 1,521 → 993 (trait `$this` calls). WordPress's
+`unused-variable` 611 → 420 and `undefined-property` 195 are the
+untyped-reassignment residual (`docs/adr/flow-narrowing.md`), measured
+next. `undefined-type` is unchanged by construction: those rows are
+vendor classes with no `vendor/` tree installed.
+
+With the untyped-reassignment reset (2026-09-03, 02:20 — a reassignment
+whose value cannot be typed makes the variable unknown, and a return arm
+reading it makes the arm fold a disagreement instead of collapsing to the
+arms that resolved): WordPress `undefined-property` 195 → 132 and
+`unresolved-method` 104 → 89 with no new rows (`get_term()`'s
+`WP_Term|WP_Error` shape); laravel/framework 101 → 94 and 993 → 984.
+The remaining WordPress `undefined-property` rows are mostly `ID` /
+`term_id` / `post_status` / `object_id` reads (17 / 11 / 9 / 7 of 132),
+not yet sampled for their receivers.
+
+Two more slices on the same rows (2026-09-03, 03:30): a documented union
+(`@return WP_Term|WP_Error`, `@var A|B $skin`, `@param A|B $x`, a declared
+`A|B`) is honoured as "cannot be typed" instead of letting the body's arms
+or one member speak for it, every reassignment (typed or not) ends the
+earlier class, a documented property outranks the constructor's write
+to it, and a method call spelled with a space before its parentheses is a
+call. WordPress `undefined-property` 132 → 40 → 32, `unresolved-method`
+89 → 77, `arity-mismatch` 15 → 11, no new rows; laravel 94 / 981.
+What remains on WordPress is `isset($tax->helps)`-style existence probes
+(the read IS the question), dynamic properties on `stdClass`/legacy
+classes (`$cache->ERROR` with the declaration commented out), and
+`is_wp_error()` exit guards whose `@phpstan-assert-if-true` the analyzer
+does not read.
+
+Two silence rules the rows then named (2026-09-03, 04:10): a `$this` call a
+DESCENDANT declares is the template-method idiom (WordPress `ftp_base`
+calling `$this->_exec()` that only `ftp_pure` / `ftp_sockets` implement),
+and a parent's namespace is what the `extends` clause wrote — a namespaced
+`class Exception extends \Exception`, or laravel's `use Carbon\Carbon as
+BaseCarbon; class Carbon extends BaseCarbon`, resolved its parent to
+ITSELF, so the vendor ancestor's members read as missing. WordPress
+`unresolved-method` 77 → 13; laravel 981 → 160 (457 `Carbon::now()`
+rows alone); no new rows anywhere.
+
+| corpus | unresolved-method | undefined-property | undefined-type | undefined-variable | unused-import | unused-variable | deprecated | arity |
+|---|---|---|---|---|---|---|---|---|
+| WordPress | 13 | 32 | 94 | 24 | 0 | 420 | 283 | 11 |
+| laravel/framework | 160 | 91 | 7,039 | 51 | 6 | 257 | 34 | 14 |
+
+### Scoreboard replay with the night's final build (2026-09-03, 04:35, build 11334c6)
+
+The day-2 battery (`spec2-*.json`) replayed once more against the build
+carrying the night's slices (the reassignment reset, unions as
+known-untypable, the template-method and self-parent rules, existence
+probes). Every answered/probed cell of the 00:30 table above is
+unchanged: the same definitions, hovers, signatures, implementations,
+typeDefinitions and outlines, at the same 0–16 ms; the other tools' rows
+are the day-2 runs. Startup and resident memory, this replay:
+
+| corpus | ours ready · RSS | Intelephense | phpactor |
+|---|---|---|---|
+| guzzle | 1.4 s · 365 MB | 1.5 s · 232 MB | 0.7 s · 126 MB |
+| monolog | 1.2 s · 84 MB | 1.1 s · 195 MB | 0.5 s · 119 MB |
+| demo | 1.1 s · 69 MB | 1.1 s · 187 MB | 1.6 s · 117 MB |
+
+One row the replay surfaced in our own diagnostics: guzzle's
+`foreach ($options['curl'] as $option => $_)` reports `$_` as assigned
+but never used — the conventional throwaway name, flagged twice.
+
+### Lane counts, the night's final build (2026-09-03, 04:55, build 8fdb042)
+
+The same five corpora, hint severity, fresh cache, against the build
+carrying every night slice. Read against the 01:15 table above (17977ec).
+
+| corpus | unresolved-method | undefined-property | undefined-type | undefined-variable | unused-import | unused-variable | deprecated | arity |
+|---|---|---|---|---|---|---|---|---|
+| WordPress | 13 | 26 | 94 | 24 | 0 | 420 | 283 | 11 |
+| laravel/framework | 160 | 91 | 7,039 | 51 | 6 | 257 | 34 | 14 |
+| guzzle | 1 | 0 | 1,340 | 0 | 0 | 89 | 0 | 2 |
+| monolog | 11 | 9 | 263 | 0 | 2 | 24 | 4 | 0 |
+| symfony demo | 0 | 0 | 519 | 0 | 0 | 0 | 0 | 0 |
+
+WordPress `unresolved-method` 111 → 13 and `undefined-property`
+198 → 26 over the night; laravel 1,521 → 160 and 518 → 91; guzzle's
+`unused-variable` 563 → 89. Every step was a diff against the previous
+build with zero new rows. What remains is named in the ADR's silence
+rules and the open forks: mock objects behind typed getters (122 of
+laravel's 160), `is_wp_error()` exit guards (nine WordPress rows), dynamic
+properties on legacy classes, and `undefined-type` rows that are vendor
+classes with no `vendor/` tree on disk.
+
