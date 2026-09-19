@@ -1022,6 +1022,20 @@ fn cpp_callable_carries_its_parameters_as_facts() {
     assert_eq!((arity.total, arity.required, arity.variadic), (2, 1, true));
 }
 
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_include_row_binds_a_type() {
+    use crate::model::file_analysis::ImportBinds;
+    // C has one kind of `#include`, so its rows carry the default binding —
+    // the value a consumer reads instead of guessing from the leaf's case.
+    let fa = cpp_driver().analyze("#include \"box.h\"\n#include <vector>\n");
+    let raws: Vec<&str> = fa.pack.include_directives.iter().map(|r| r.raw.as_str()).collect();
+    assert_eq!(raws, vec!["box.h", "<vector>"], "both rows: {raws:?}");
+    for r in &fa.pack.include_directives {
+        assert_eq!(r.binds, ImportBinds::Type, "unsuffixed capture binds a type");
+    }
+}
+
 /// An OVERLAY declaring two ordinary function names as dynamic-surface
 /// markers. No bundled pack declares any (cpp has no such surface), so the
 /// marker → flag path needs a declarer to have a subject at all — and a
