@@ -1234,6 +1234,7 @@ impl FileAnalysis {
                             return Some(RenameKind::Method {
                                 name: r.unqualified_target_name(self.names()).to_string(),
                                 class,
+                                member: MemberKind::of_ref(&r.kind),
                             });
                         }
                     }
@@ -1291,6 +1292,7 @@ impl FileAnalysis {
                     Some(RenameKind::Method {
                         name: sym.name.clone(),
                         class,
+                        member: Some(MemberKind::of_sym(sym.kind)),
                     })
                 }
                 SymKind::Package | SymKind::Class => Some(RenameKind::Package(sym.name.clone())),

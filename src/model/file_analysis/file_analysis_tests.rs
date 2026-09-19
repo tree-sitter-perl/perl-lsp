@@ -427,7 +427,7 @@ fn test_fq_method_call_nav_dispatches_from_named_class() {
 
     // rename resolves to the bare method on the qualifier class.
     match fa.rename_kind_at(Point::new(4, 22), None) {
-        Some(RenameKind::Method { name, class }) => {
+        Some(RenameKind::Method { name, class, .. }) => {
             assert_eq!(name, "build");
             assert_eq!(class, "Widget");
         }
@@ -491,7 +491,7 @@ fn test_super_method_nav_resolves_to_parent() {
     assert_eq!(def.start.row, 1, "SUPER::greet resolves to Base::greet, got {:?}", def);
     // Renaming targets the parent method on `Base` (so the SUPER call tracks).
     match fa.rename_kind_at(span.start, None) {
-        Some(RenameKind::Method { name, class }) => {
+        Some(RenameKind::Method { name, class, .. }) => {
             assert_eq!(name, "greet");
             assert_eq!(class, "Base");
         }
