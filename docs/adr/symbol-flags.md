@@ -18,6 +18,12 @@ canonical names while the facts do not: a Corinna `:reader` and a Moo
 declarer like any pack; nothing about the flag set knows which language
 minted it.
 
+A pack's queries may declare a flag as a capture-side attribute token
+where the fact is structural rather than written — `class_rail` on a
+handler def minted from a class-keyed rail capture (`@def.handler.class.
+<rail>`), whose token belongs to another symbol: `CLASS_RAIL` is what
+the listing verdict asks, never the attribute string.
+
 ## Why closed
 
 Every flag added so far has turned out to have a language-generic
