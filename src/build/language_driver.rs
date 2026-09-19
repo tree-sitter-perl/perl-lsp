@@ -1195,6 +1195,7 @@ fn remap_spans(
         var_reads,
         label_refs,
         receiver_names: _,
+        member_writes,
         import_rows,
         preamble_end: _,
         flow_edges,
@@ -1212,6 +1213,7 @@ fn remap_spans(
         // name-keyed, ordered by byte position pre-remap — no spans to fix.
         template_params: _,
         return_sites,
+        runtime_bound_reads,
         param_sigs,
         // Populated later (enrich_skeleton) already in original coords — no remap.
         macro_body_member_reads: _,
@@ -1269,6 +1271,11 @@ fn remap_spans(
         }
     }
     for (_, _, span) in var_reads.iter_mut() {
+        *span = rspan(*span);
+    }
+    // Member-write spans are matched against ref spans in
+    // `into_file_analysis` — original coords, like everything it joins.
+    for span in member_writes.iter_mut() {
         *span = rspan(*span);
     }
     for span in import_rows.iter_mut() {
@@ -1341,6 +1348,9 @@ fn remap_spans(
         *span = rspan(*span);
     }
     for span in probe_regions.iter_mut() {
+        *span = rspan(*span);
+    }
+    for span in runtime_bound_reads.iter_mut() {
         *span = rspan(*span);
     }
     for (span, _) in fold_regions.iter_mut() {
