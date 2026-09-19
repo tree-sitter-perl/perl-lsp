@@ -201,6 +201,60 @@
       "status": "gold"
     },
     {
+      "id": "php-lar-def-view-file",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`view('posts.index')` lands on the template file (the view rail is path-defined).",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 16,
+      "col": 21,
+      "expect": {
+        "all": [
+          "index.blade.php:1:1"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-lar-def-config-key",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`config('app.name')` lands on the `'name'` key row of config/app.php.",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 16,
+      "col": 55,
+      "expect": {
+        "all": [
+          "app.php:4:6"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
+      "id": "php-lar-def-lang-key",
+      "difficulty": "simple",
+      "semantic_area": "php-laravel",
+      "lang": "php",
+      "root": "gold-corpus/laravel-fixture",
+      "comment": "`__('auth.failed')` lands on the `'failed'` key row of lang/en/auth.php.",
+      "file": "app/Http/Controllers/PostController.php",
+      "line": 30,
+      "col": 38,
+      "expect": {
+        "all": [
+          "auth.php:4:6"
+        ],
+        "none": []
+      },
+      "status": "gold"
+    },
+    {
       "id": "php-lar-def-event-emission",
       "difficulty": "simple",
       "semantic_area": "php-laravel",
