@@ -1287,6 +1287,59 @@ fn php_unused_import_lane_counts_every_spelling() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Where the mock lane STOPS. The overlay enumerates the builder chain by
+/// shape — zero, one or two modifiers, and the property form only for the
+/// `createMock` family — so a three-modifier chain and a
+/// `$this->prop = $this->getMockBuilder(...)` fall through to `getMock()`'s
+/// own declared return, `MockObject`. Navigation then reaches the mock API
+/// and not the doubled class. The ceiling is recorded on the intersection
+/// fork (`docs/open-forks.md`); this is the row that says where it is.
+#[cfg(feature = "php")]
+#[test]
+fn php_phpunit_mock_chain_ceiling_is_the_mock_api() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2mockceil-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("vendor/phpunit/PHPUnit/Framework/MockObject")).unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\", \"App\\\\Tests\\\\\": \"tests/\"}}}");
+    w("vendor/phpunit/PHPUnit/Framework/MockObject/MockObject.php", "<?php\nnamespace PHPUnit\\Framework\\MockObject;\ninterface MockObject { public function expects($m); }\n");
+    w("vendor/phpunit/PHPUnit/Framework/TestCase.php", "<?php\nnamespace PHPUnit\\Framework;\nuse PHPUnit\\Framework\\MockObject\\MockObject;\nclass TestCase\n{\n    protected function getMockBuilder(string $c): MockBuilder { return new MockBuilder(); }\n}\nclass MockBuilder { public function disableOriginalConstructor(): self { return $this; } public function onlyMethods(array $m): self { return $this; } public function setConstructorArgs(array $a): self { return $this; } public function getMock(): MockObject { return null; } }\n");
+    w("src/Foo.php", "<?php\nnamespace App;\nclass Foo\n{\n    public function bar(): int { return 1; }\n}\n");
+    let test = "<?php\nnamespace App\\Tests;\nuse App\\Foo;\nuse PHPUnit\\Framework\\TestCase;\nclass FooTest extends TestCase\n{\n    private $foo;\n    protected function setUp(): void\n    {\n        $this->foo = $this->getMockBuilder(Foo::class)->disableOriginalConstructor()->getMock();\n    }\n    public function testIt(): void\n    {\n        $c = $this->getMockBuilder(Foo::class)->disableOriginalConstructor()->setConstructorArgs([])->onlyMethods([])->getMock();\n        $c->bar();\n        $this->foo->bar();\n    }\n}\n";
+    w("tests/FooTest.php", test);
+    let lines: Vec<&str> = test.lines().collect();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.join(".cache"))
+            .output()
+            .expect("run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let root = dir.to_str().unwrap();
+    // three builder modifiers: past the enumerated shapes
+    let col = lines[14].find("$c->bar").unwrap();
+    let hov = run(&["--hover", root, "tests/FooTest.php", "14", &col.to_string()]);
+    assert!(
+        hov.contains("$c: PHPUnit\\Framework\\MockObject\\MockObject"),
+        "a three-modifier chain types as the mock API, not App\\Foo: {hov}"
+    );
+    let col = lines[14].find("bar()").unwrap();
+    let def = run(&["--definition", root, "tests/FooTest.php", "14", &col.to_string()]);
+    assert!(!def.contains("src/Foo.php"), "and so does not reach the doubled class: {def}");
+    // the getMockBuilder property form: the property lane covers createMock only
+    let col = lines[15].find("foo->bar").unwrap();
+    let hov = run(&["--hover", root, "tests/FooTest.php", "15", &col.to_string()]);
+    assert!(
+        hov.contains("foo: PHPUnit\\Framework\\MockObject\\MockObject"),
+        "the builder property form types as the mock API: {hov}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
 /// The deprecation lane: `@deprecated` (with and without text) and the
 /// `#[Deprecated]` attribute on a method, a function and a class, used from
 /// another file — each use is a deprecated-tagged hint; nothing else is.
@@ -1351,4 +1404,106 @@ fn php_properties_are_typed_by_assignment() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+
+/// `$this->step()` in a base class that only a subclass implements is the
+/// template-method idiom: the runtime receiver is the subclass. A member
+/// no descendant declares still reports, and so does the same call on a
+/// foreign receiver typed as the base.
+#[cfg(feature = "php")]
+#[test]
+fn php_template_method_calls_on_this_stay_quiet() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2tmpl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Base.php", "<?php\nnamespace App;\nclass Base\n{\n    public function run(): int\n    {\n        return $this->step() + $this->nope();\n    }\n    public function drive(Base $b): int\n    {\n        return $b->step();\n    }\n}\n");
+    w("src/Impl.php", "<?php\nnamespace App;\nclass Impl extends Base\n{\n    public function step(): int\n    {\n        return 1;\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap()])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains(".php") && l.contains('[')).collect();
+    assert_eq!(rows.len(), 2, "{err}");
+    assert!(rows.iter().any(|l| l.contains("Base.php:7") && l.contains("'nope'")), "{rows:?}");
+    assert!(rows.iter().any(|l| l.contains("Base.php:11") && l.contains("'step'")), "{rows:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `class Exception extends \Exception` in a namespace: the parent is the
+/// GLOBAL one (no stubs carry it), never the child itself, so the builtin
+/// ancestor's members are unreadable and the lane stays silent. A parent
+/// the workspace does declare still checks its members.
+#[cfg(feature = "php")]
+#[test]
+fn php_same_leaf_global_parent_is_not_the_child() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2selfp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/Exception.php", "<?php\nnamespace App;\nclass Exception extends \\Exception\n{\n    public function errorMessage(): string\n    {\n        return htmlspecialchars($this->getMessage());\n    }\n}\n");
+    w("src/Sub.php", "<?php\nnamespace App;\nclass Base { public function ok(): int { return 1; } }\nclass Sub extends Base\n{\n    public function go(): int\n    {\n        return $this->ok() + $this->nope();\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap()])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains(".php") && l.contains('[')).collect();
+    assert_eq!(rows.len(), 1, "{err}");
+    assert!(rows[0].contains("Sub.php:8") && rows[0].contains("'nope'"), "{rows:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `isset($this->p)` / `empty($this->q)` ask whether the member exists;
+/// only the plain read (`$this->real`) reports.
+#[cfg(feature = "php")]
+#[test]
+fn php_existence_probes_stay_quiet() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2probe-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/P.php", "<?php\nnamespace App;\nclass P\n{\n    public int $x = 1;\n    public function f(): bool\n    {\n        return isset($this->nope) || empty($this->gone) || $this->real;\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap()])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains("P.php") && l.contains('[')).collect();
+    assert_eq!(rows.len(), 1, "{err}");
+    assert!(rows[0].contains("'real'"), "{rows:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Silence rules the corpora demanded: a trait's `$this` is the composing
+/// class (no undefined members), a first-class callable member
+/// (`$this->load(...)`) is a call, a subscript's index is a read, and a
+/// by-reference capture written inside the closure and read outside — or
+/// captured by a nested closure — is used.
+#[cfg(feature = "php")]
+#[test]
+fn php_lanes_stay_quiet_on_traits_captures_and_first_class_callables() {
+    let dir = std::env::temp_dir().join(format!("perl-lsp-d2fp2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let w = |rel: &str, src: &str| std::fs::write(dir.join(rel), src).unwrap();
+    w("composer.json", "{\"autoload\": {\"psr-4\": {\"App\\\\\": \"src/\"}}}");
+    w("src/A.php", "<?php\nnamespace App;\ntrait T\n{\n    public function go(): int\n    {\n        $this->startSession();\n        return $this->app['x'];\n    }\n}\nclass K\n{\n    public function load(string $c): void {}\n    public function reg(): void\n    {\n        spl_autoload_register($this->load(...), true, true);\n    }\n    public function keys(array $promises): array\n    {\n        $results = [];\n        foreach ($promises as $key => $promise) {\n            $results[$key] = $promise;\n        }\n        $called = [];\n        $p = function ($size) use (&$called) { $called[] = $size; return 1; };\n        $p(1);\n        $result = null;\n        $f = function ($v) use (&$result): void { $result = ['v' => $v]; };\n        $f(2);\n        $dead = 3;\n        foreach ($results as $_ => $v) { $called[] = $v; }\n        return [$results, $called, $result];\n    }\n}\n");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_perl-lsp"))
+        .args(["--check", dir.to_str().unwrap(), "--severity", "hint"])
+        .env("XDG_CACHE_HOME", dir.join(".cache"))
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&out.stderr);
+    let rows: Vec<&str> = err.lines().filter(|l| l.contains("A.php") && l.contains('[')).collect();
+    assert_eq!(rows.len(), 1, "{err}");
+    assert!(rows[0].contains("[unused-variable]") && rows[0].contains("'$dead'"), "{rows:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
 
