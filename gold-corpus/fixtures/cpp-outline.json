@@ -137,7 +137,7 @@
       "expect": {
         "all": [
           "\"kind\":\"Class\",\"line\":\"6\",\"name\":\"Buf<int>\"",
-          "{\"col\":\"26\",\"kind\":\"Method\",\"line\":\"7\",\"name\":\"grow\",\"package\":\"Buf\"}",
+          "{\"col\":\"26\",\"is_method\":\"1\",\"kind\":\"Method\",\"line\":\"7\",\"name\":\"grow\",\"package\":\"Buf\",\"params\":[\"n2\"]}",
           "\"kind\":\"Sub\",\"line\":\"9\",\"name\":\"sep_impl\""
         ],
         "none": [
@@ -160,7 +160,7 @@
       "col": 0,
       "expect": {
         "all": [
-          "{\"col\":\"35\",\"kind\":\"Method\",\"line\":\"5\",\"name\":\"grow\",\"package\":\"Buf\"}"
+          "{\"col\":\"35\",\"is_method\":\"1\",\"kind\":\"Method\",\"line\":\"5\",\"name\":\"grow\",\"package\":\"Buf\",\"params\":[\"n\"]}"
         ],
         "none": [
           "\"package\":\"Buf<T>\""

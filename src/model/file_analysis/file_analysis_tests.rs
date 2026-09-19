@@ -16,6 +16,7 @@ fn fa_with_constraints(constraints: Vec<TypeConstraint>) -> FileAnalysis {
             },
             package: None,
             owner: None,
+            implicit_receiver: false,
         }],
         ..Default::default()
     });
@@ -130,6 +131,7 @@ fn test_resolve_sub_return_type() {
             },
             package: None,
             owner: None,
+            implicit_receiver: false,
         }],
         symbols: vec![Symbol {
             id: SymbolId(0),
@@ -152,6 +154,7 @@ fn test_resolve_sub_return_type() {
                 opaque_return: false,
                 is_constant: false,
                 lexical: false,
+                declared_return: None,
             },
             namespace: Namespace::Language,
             presentation: Default::default(),
@@ -1822,7 +1825,7 @@ my $host = $cfg->{host};
 /// link and merges. Stops at the first defining ancestor so
 /// overrides in unrelated branches aren't lumped in.
 #[test]
-fn red_pin_method_rename_chain_walks_to_defining_ancestor() {
+fn red_pin_member_rename_chain_walks_to_defining_ancestor() {
     // Same-file inheritance — keeps the test free of the
     // module_index, which still gets exercised end-to-end via the
     // e2e suite.
@@ -1845,7 +1848,7 @@ $dog->speak();
 
     // Inherited (defined in Animal, not in Dog) — chain runs
     // child → defining ancestor and stops.
-    let chain = fa.method_rename_chain("Dog", "breathe", None);
+    let chain = fa.member_rename_chain("Dog", "breathe", MemberKind::Callable, None);
     assert_eq!(
         chain,
         vec!["Dog".to_string(), "Animal".to_string()],
@@ -1855,7 +1858,7 @@ $dog->speak();
     // Override (Dog defines `speak` itself) — chain stops at
     // child. Walking past the override into Animal would lump
     // two semantically distinct methods together in one rename.
-    let chain = fa.method_rename_chain("Dog", "speak", None);
+    let chain = fa.member_rename_chain("Dog", "speak", MemberKind::Callable, None);
     assert_eq!(
         chain,
         vec!["Dog".to_string()],
@@ -1865,7 +1868,7 @@ $dog->speak();
 
     // Unknown method: degrade to the original class so the
     // backend's per-class rename still runs (no edits, no harm).
-    let chain = fa.method_rename_chain("Dog", "nonexistent", None);
+    let chain = fa.member_rename_chain("Dog", "nonexistent", MemberKind::Callable, None);
     assert_eq!(chain, vec!["Dog".to_string()]);
 }
 
@@ -2536,6 +2539,7 @@ fn binding_owner_restamp_drops_stale_symbol_link() {
         binding: None,
         folded_from: None,
         arg_count: None,
+        flags: Default::default(),
     };
     // Linking without a resolved owner is a no-op — nothing to attach to.
     r.link_owned_symbol(SymbolId(7));

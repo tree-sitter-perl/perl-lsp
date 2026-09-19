@@ -146,15 +146,17 @@ fn heatmap_symbol_row(
         Some("constructor")
     } else if !native {
         Some("framework-synthesized")
-    } else if is_callable
-        && crate::build::language_driver::LanguageRegistry::caps(&analysis.language)
-            .entrypoint_symbols
-            .contains(&sym.name.as_str())
+    } else if matches!(sym.kind, SymKind::Sub | SymKind::Method)
+        && framework_entry_claims(analysis, sym, routing_idx)
     {
-        // Runtime entry (C/C++ `main`): entered over the ABI, never a source
-        // call site the static graph can see. The language declares which
-        // names are entry points; nothing here compares names or families.
-        Some("entry-point")
+        // A declared entry rule (`entry.json` — bundled per pack + plugin
+        // dirs) claims the symbol: something outside the source graph
+        // invokes it. One lane for every flavour of that — the C ABI
+        // entering `main`, the php engine calling `__toString`, PHPUnit
+        // running `test*` in a TestCase descendant, a queued job's
+        // `handle`. The rules are DATA; the evaluator never compares names
+        // or families itself.
+        Some("framework-entry")
     } else if matches!(sym.kind, SymKind::Package | SymKind::Class | SymKind::Module) {
         Some("package-implicit-use")
     } else if has_dynamic_dispatch
@@ -197,6 +199,56 @@ fn heatmap_symbol_row(
         "reachable_guard": guard,
     });
     (row, is_callable, dead, dead_export)
+}
+
+/// Does a declared framework-entry rule (`EntryMarker`) claim this symbol?
+/// A rule matches when EVERY present condition holds — annotation names
+/// against `Symbol.attributes`, method name/prefix, and the isa gate
+/// through the ancestry walk; rules OR across the set. A rule with no
+/// positive condition matches nothing.
+///
+/// The isa gate is keyed on the class LEAF, not on the identity a class
+/// carries everywhere else (`App\Models\User`, docs/prompt-class-identity.md).
+/// `"when_isa": "TestCase"` therefore claims a `TestCase` in ANY namespace.
+/// The widening is deliberate here and nowhere else: this gate only decides
+/// whether a symbol is kept OFF the dead-code queue, where a false claim
+/// costs a missed candidate and a missed claim costs a wrong accusation.
+/// A document that wants the identity writes the FQN and the leaf match
+/// still holds; there is no spelling that NARROWS to one namespace, which
+/// is what a rule needing that would have to say. See
+/// `docs/adr/heatmap.md` §Identity invariant.
+pub(crate) fn framework_entry_claims(
+    analysis: &file_analysis::FileAnalysis,
+    sym: &file_analysis::Symbol,
+    idx: &dyn file_analysis::CrossFileLookup,
+) -> bool {
+    let Some(pack) = crate::build::language_driver::LanguageRegistry::with_enabled()
+        .for_id(&analysis.language)
+        .and_then(|d| d.lang_pack())
+    else {
+        return false;
+    };
+    let markers = crate::build::query_extract::entry_markers_for(&pack);
+    markers.iter().any(|m| {
+        let has_positive =
+            !m.attributes.is_empty() || m.method_prefix.is_some() || !m.methods.is_empty();
+        if !has_positive {
+            return false;
+        }
+        let attr_ok = m.attributes.is_empty()
+            || m.attributes.iter().any(|a| sym.attributes.iter().any(|sa| sa == a));
+        let name_gated = m.method_prefix.is_some() || !m.methods.is_empty();
+        let name_ok = !name_gated
+            || m.method_prefix.as_deref().is_some_and(|p| sym.name.starts_with(p))
+            || m.methods.iter().any(|n| n == &sym.name);
+        let isa_ok = m.when_isa.is_empty()
+            || m.when_isa.iter().any(|base| {
+                sym.package
+                    .as_deref()
+                    .is_some_and(|cls| analysis.class_isa_leaf(cls, base, Some(idx)))
+            });
+        attr_ok && name_ok && isa_ok
+    })
 }
 
 /// --refs-parity <root> — the relational-ref-index migration net

@@ -8,106 +8,44 @@
 
 use super::*;
 
+/// A class spelling written with a qualifier, in the parts the producer
+/// had: the leaf, the namespace segments ahead of it, and whether the
+/// spelling reached the global namespace outright (php's leading `\`). The
+/// producer never joins them into a prefix, so no consumer takes one apart
+/// (rule #13) — `UseMap::resolve_split_parts` reads them as they are.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QualifiedSpelling {
+    pub leaf: String,
+    pub segments: Vec<String>,
+    pub absolute: bool,
+}
+
 /// Everything a pack driver records that Perl has no analog for. Stamped
 /// by the pack driver's extract/skeleton pipeline; `Default` (all empty)
 /// is what a Perl analysis carries.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PackFacts {
-    /// The language's method-RECEIVER param names (Python `self`/`cls`),
-    /// from the LangPack. A receiver is lexically inside the class so the
-    /// sticky context tags it, but it is NOT a member — member completion
-    /// and the outline exclude these names. Perl's receiver convention
-    /// lives in `conventions.rs`, so this stays empty there.
-    #[serde(default)]
-    pub receiver_names: Vec<String>,
-    /// Variables the runtime binds without a declaration (php `$this`,
-    /// superglobals) — the undefined-variable lane's silence list.
-    #[serde(default)]
-    pub implicit_variables: Vec<String>,
-    /// The language's throwaway binding names (php `$_`) — written to be
-    /// discarded, so the unused-variable lane never reports them.
-    #[serde(default)]
-    pub throwaway_names: Vec<String>,
-    /// Methods whose presence makes a class answer any member name (php
-    /// `__call`/`__get`) — the undefined-member lanes stay silent on it.
-    #[serde(default)]
-    pub catch_all_methods: Vec<String>,
-    /// The member name that is the class-name literal (php `Foo::class`).
-    #[serde(default)]
-    pub class_literal_member: String,
-    /// Type names are capitalized by convention (an import row with a
-    /// lowercase leaf names a function or constant).
-    #[serde(default)]
-    pub types_are_capitalized: bool,
-    /// Members every enum carries by language rule.
-    #[serde(default)]
-    pub enum_members: Vec<String>,
     /// Whole import-statement spans, in file order.
     #[serde(default)]
     pub import_rows: Vec<Span>,
-    /// The import statement template, `{}` standing for the qualified name;
-    /// empty when the language has no import quick-fix.
-    #[serde(default)]
-    pub import_template: String,
-    /// The pack's stub template for an unimplemented contract (`{}` = the
-    /// declarator); empty = no quick-fix.
-    #[serde(default)]
-    pub contract_stub: String,
-    /// The pack's native return-annotation template (`": {}"`); empty = none.
-    #[serde(default)]
-    pub return_annotation_template: String,
-    /// Engine type name → native spelling a declaration is written with.
-    #[serde(default)]
-    pub native_type_spellings: Vec<(String, String)>,
-    /// The sigil a static property is spelled with after the scope operator.
-    #[serde(default)]
-    pub static_property_sigil: String,
-    /// rail → how the undefined-name lane phrases a miss on it (`"event"`
-    /// → `No listener for event`); default `Undefined <rail>`.
-    #[serde(default)]
-    pub rail_labels: Vec<(String, String)>,
-    /// Rails whose miss is a hint: their definitions are partly
-    /// runtime-only, so an unmatched name is a lead, not an error.
-    #[serde(default)]
-    pub rail_hints: Vec<String>,
     /// Rails whose names are CLASS identities (the rail document's
-    /// `names_are: class` — Laravel's event bus). Per-overlay data the
-    /// file carries, like `rail_labels`: which overlays load is a property
-    /// of the workspace, not of the language, so it is not a language
-    /// convention reached by id. Read through `HandlerOwner::names_are`.
+    /// `names_are: class` — Laravel's event bus). Per-overlay data the file
+    /// carries: which overlays load is a property of the workspace, not of
+    /// the language, so it is not a language convention reached by id. Unlike
+    /// the lane's labels and hint rails it changes what a MINT means, so
+    /// every span-free minting path has to agree with it. Baked from the
+    /// DECLARATION for every file of the pack,
+    /// so the span-free minting paths (`scan_text_rails`, `adopt_path_rails`)
+    /// carry it by construction and a rail cannot answer differently in two
+    /// files. Read through `HandlerOwner::names_are`.
     #[serde(default)]
     pub class_named_rails: Vec<String>,
     /// The last row of the file preamble (open tag, `declare` rows).
     #[serde(default)]
     pub preamble_end: Option<usize>,
-    /// Import rows bind names the file spells (php), so a row nothing
-    /// spells is unused; false for text-splicing includes.
-    #[serde(default)]
-    pub imports_bind_names: bool,
-    /// A member declaration belongs only to its enclosing container (no
-    /// cross-package installs): contract provision is package-attributed.
-    #[serde(default)]
-    pub members_are_package_bound: bool,
     /// Imported names a doc comment mentions.
     #[serde(default)]
     pub doc_mentions: Vec<String>,
-
-    /// The language's display vocabulary for the engine's value lattice:
-    /// `format_inferred_type` tag → this language's spelling (php:
-    /// `"HashRef"` → `"array"`, `"Numeric"` → `"int|float"`). Applied by
-    /// `FileAnalysis::render_type` / `display_type_of` at every human
-    /// surface; a tag not in the map (class names, parametrics) passes
-    /// through. Empty for Perl — the engine's tags ARE its vocabulary.
-    #[serde(default)]
-    pub type_display: Vec<(String, String)>,
-
-    /// The language's constructor-method names (php `__construct`), from
-    /// the LangPack — the identity lane marks a Method target with one of
-    /// these names as `ctor_of` its class, admitting construction sites
-    /// into its references. Empty for Perl (`new` is a convention, not a
-    /// keyword — `is_constructor_name` serves the ranking lanes instead).
-    #[serde(default)]
-    pub constructor_names: Vec<String>,
 
     /// Template-specialization family edges: canonical spec spelling
     /// (`formatter<int, char>`) → primary base name (`formatter`). NOT an
@@ -135,11 +73,11 @@ pub struct PackFacts {
     #[serde(default)]
     pub macro_defs: Vec<MacroDef>,
 
-    /// `#include "x.h"` / `<x.h>` directives: (path-token span, raw path text).
-    /// Goto-def on the path token resolves the header like `use` resolves a
-    /// module.
+    /// `#include "x.h"` / `<x.h>` / `use A\B` rows. Goto-def on the path
+    /// token resolves the header like `use` resolves a module; the use-map
+    /// resolves class spellings through the same rows.
     #[serde(default)]
-    pub include_directives: Vec<(Span, String)>,
+    pub include_directives: Vec<ImportRow>,
 
     /// `use A\B as C` rows: (alias, namespace, real leaf). The use-map
     /// pins the ALIAS spelling to the namespace and leaves the real leaf
@@ -147,12 +85,10 @@ pub struct PackFacts {
     #[serde(default)]
     pub use_aliases: Vec<(String, String, String)>,
 
-    /// Class spellings written with a qualifier: (leaf, written prefix —
-    /// absolute when it starts with `\`, else relative to the file's
-    /// namespace). A qualified spelling pins the leaf to that namespace
-    /// rather than counting as a bare spelling.
+    /// Class spellings written with a qualifier. A qualified spelling pins
+    /// the leaf to that namespace rather than counting as a bare spelling.
     #[serde(default)]
-    pub qualified_spellings: Vec<(String, String)>,
+    pub qualified_spellings: Vec<QualifiedSpelling>,
 
     /// How this analysis's language spells names — its separator and its
     /// sigils — the data every key function reads (rule #12). Perl's
@@ -208,6 +144,21 @@ pub struct PackFacts {
     /// from a bug.
     #[serde(default)]
     pub param_regions: Vec<Span>,
+    /// This language's write and display spellings, attached by id rather
+    /// than serialized: the same value for every file of a language, so it
+    /// is not a per-file fact (rule #14). `None` until attached — read it
+    /// through `FileAnalysis::spellings()`, which answers the neutral
+    /// defaults for a language that declares none.
+    #[serde(skip)]
+    pub spellings: Option<&'static PackSpellings>,
+    /// Slots whose docblock type no value can share with the declared one
+    /// (`: int` + `@return string`). Per-FILE by nature — it is a property
+    /// of the two spellings the author wrote at one site, not of the
+    /// language — and minted at the merge that chose the declaration, so
+    /// the hint lane never re-reads a comment to find out.
+    #[serde(default)]
+    pub doc_disagreements: Vec<DocDisagreement>,
+
     /// Existence-probe argument spans (`@probe.region`: php `isset(…)` /
     /// `empty(…)`). A member read inside one IS the question of whether
     /// the member exists; the undefined-member lanes stay silent there.
@@ -220,10 +171,10 @@ impl PackFacts {
     /// `span`, if any. The one speller for "is this token inside an import
     /// row": the row's leaf carries its own ref; every other segment is a
     /// namespace no by-name lookup should answer for.
-    pub fn import_row_covering(&self, span: &Span) -> Option<&(Span, String)> {
-        self.include_directives.iter().find(|(row, _)| {
-            (row.start.row, row.start.column) <= (span.start.row, span.start.column)
-                && (span.end.row, span.end.column) <= (row.end.row, row.end.column)
+    pub fn import_row_covering(&self, span: &Span) -> Option<&ImportRow> {
+        self.include_directives.iter().find(|r| {
+            (r.span.start.row, r.span.start.column) <= (span.start.row, span.start.column)
+                && (span.end.row, span.end.column) <= (r.span.end.row, r.span.end.column)
         })
     }
 
@@ -248,7 +199,7 @@ impl PackFacts {
             + self
                 .include_directives
                 .iter()
-                .map(|(_, s)| s.capacity())
+                .map(|r| r.raw.capacity() + r.bound.as_ref().map_or(0, String::capacity))
                 .sum::<usize>();
 
         h.cpp_extras += vcap(&self.macro_defs)
@@ -258,27 +209,141 @@ impl PackFacts {
             + vcap(&self.moved_from)
             + vcap(&self.control_regions)
             + vcap(&self.param_regions)
-            + vcap(&self.probe_regions);
+            + vcap(&self.probe_regions)
+            + vcap(&self.doc_disagreements);
 
         h.misc += map_str_vec(&self.template_params)
             + mcap(&self.specializes)
-            + vcap(&self.receiver_names)
-            + vcap(&self.implicit_variables)
-            + vcap(&self.throwaway_names)
-            + vcap(&self.catch_all_methods)
-            + self.class_literal_member.capacity()
-            + vcap(&self.enum_members)
             + vcap(&self.import_rows)
-            + self.import_template.capacity()
-            + self.contract_stub.capacity()
-            + self.return_annotation_template.capacity()
-            + vcap(&self.native_type_spellings)
-            + self.static_property_sigil.capacity()
-            + self.rail_labels.iter().map(|(a, b)| a.capacity() + b.capacity()).sum::<usize>()
-            + self.rail_hints.iter().map(|a| a.capacity()).sum::<usize>()
             + self.class_named_rails.iter().map(|a| a.capacity()).sum::<usize>()
-            + vcap(&self.doc_mentions)
-            + vcap(&self.type_display)
-            + vcap(&self.constructor_names);
+            + vcap(&self.doc_mentions);
     }
+}
+
+/// A documented type and the declared type it contradicts, at the declaration
+/// whose declared type won. The `doc-type-mismatch` hint renders both.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DocDisagreement {
+    /// The declaration site — where the two spellings meet.
+    pub span: Span,
+    pub declared: InferredType,
+    pub documented: InferredType,
+}
+
+/// What is true of a language for EVERY file of it: its write and display
+/// spellings — what a quick-fix inserts and what a human surface renders —
+/// and the handful of semantics a name or a syntax cannot state.
+///
+/// The spellings are the first nine fields: the type vocabularies, the
+/// class-name literal, the import / contract-stub / return-annotation
+/// templates, the static-property sigil and the two signature separators.
+/// The last two are per-language SEMANTICS the engine's rules gate on:
+/// whether a member belongs to its enclosing container and nothing else
+/// (`members_are_package_bound`) and whether a runtime catch-all discharges a
+/// compile-time obligation (`catch_all_satisfies_contracts`). Each says so
+/// on its own doc.
+///
+/// Every field is the same for every file of the language, so these are
+/// reached by language id (`LanguageRegistry::spellings`) and attached to
+/// an analysis as a pointer; serializing them would put one language's
+/// constants in every blob (rule #14). A pack declares one `const`; `NONE`
+/// is what a language without a pack answers, and it is what the engine
+/// assumed before any pack declared spellings.
+#[derive(Debug, Clone, Copy)]
+pub struct PackSpellings {
+    /// Engine type tag → this language's spelling (php `"HashRef"` →
+    /// `"array"`). Applied by `render_type` / `display_type_of` at every
+    /// human surface; an unmapped tag passes through.
+    pub type_display: &'static [(&'static str, &'static str)],
+    /// Engine type tag → the spelling a DECLARATION is written with. Unlike
+    /// `type_display` this is what goes into the source, so a tag with no
+    /// unambiguous native spelling is absent rather than guessed.
+    pub native_type_spellings: &'static [(&'static str, &'static str)],
+    /// The member name that is the class-name literal (php `Foo::class`).
+    pub class_literal_member: &'static str,
+    /// The import statement that brings a qualified name into scope, `{}`
+    /// standing for the name; empty = no import quick-fix.
+    pub import_template: &'static str,
+    /// How a stub for one unimplemented contract declarator is spelled
+    /// (`{}` = the declarator); empty = no quick-fix.
+    pub contract_stub: &'static str,
+    /// How a native return annotation is spelled after the parameter list
+    /// (`{}` = the type); empty = the language writes none.
+    pub return_annotation_template: &'static str,
+    /// The sigil a static property carries after the scope operator (php
+    /// `self::$count`); empty = the bare name in both positions.
+    pub static_property_sigil: &'static str,
+    /// What a signature writes before a parameter that takes the rest of the
+    /// argument list (php/C++ `...`, python `*`); empty = the language marks
+    /// one on the parameter's own name, or has none.
+    pub variadic_marker: &'static str,
+    /// What a signature writes between a parameter and its default value;
+    /// empty = the language writes no defaults.
+    pub default_sep: &'static str,
+    /// A member declaration belongs to the container that encloses it and
+    /// nothing else — no cross-package installs (Perl's typeglobs), so
+    /// contract provision is package-attributed.
+    pub members_are_package_bound: bool,
+    /// Does a catch-all member SATISFY a declared obligation? Perl's
+    /// `AUTOLOAD` answers a required method at runtime and role composition
+    /// cannot see past it, so a class carrying one is silent on unfulfilled
+    /// requires. A language that checks its contracts where the class is
+    /// DECLARED (php's `implements`) says `false`: `__call` catches calls
+    /// that a compile error would never let happen.
+    pub catch_all_satisfies_contracts: bool,
+}
+
+impl PackSpellings {
+    /// What a language that declares no spellings answers.
+    pub const NONE: PackSpellings = PackSpellings {
+        type_display: &[],
+        native_type_spellings: &[],
+        class_literal_member: "",
+        import_template: "",
+        contract_stub: "",
+        return_annotation_template: "",
+        static_property_sigil: "",
+        variadic_marker: "",
+        default_sep: "",
+        members_are_package_bound: false,
+        // Same rule: a catch-all (`__call`, `AUTOLOAD`) satisfying a contract
+        // obligation is the quiet answer, so it is opted into per language.
+        catch_all_satisfies_contracts: false,
+    };
+}
+
+/// `PackSpellings::NONE` with a `'static` address, so `spellings()` can
+/// hand out a reference without the caller owning one.
+pub static NEUTRAL_SPELLINGS: PackSpellings = PackSpellings::NONE;
+
+/// One import row as the file wrote it: the path/name token's span, the raw
+/// text, and what the row BINDS. A use-map language spells the binding out
+/// (php `use function`, `use const`), so the producer states it rather than
+/// leaving a consumer to guess from the leaf's capitalization — a guess that
+/// is wrong for every lower-case class and every upper-case constant
+/// (rule #11).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportRow {
+    pub span: Span,
+    pub raw: String,
+    #[serde(default)]
+    pub binds: ImportBinds,
+    /// The NAME this row brings into the file's namespace — the alias when
+    /// the row writes one, the leaf otherwise — as the document's
+    /// `@import.binds` capture states it. `None` for a row that binds no
+    /// spellable name (a text-splicing `#include`, a `import a.b` whose
+    /// binding is the head package rather than the token).
+    #[serde(default)]
+    pub bound: Option<String>,
+}
+
+/// What an import row brings into the file's namespace. `Type` is the
+/// default because it is what an unqualified row means in every language
+/// that has one — a bare `use A\B`, a C `#include`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ImportBinds {
+    #[default]
+    Type,
+    Function,
+    Const,
 }

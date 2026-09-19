@@ -137,6 +137,7 @@ fn slot_type(fa: &FileAnalysis, class: &str, key: &str) -> Option<InferredType> 
         module_index: None,
         package_parents: &fa.packages,
         app_surface_consumers: &fa.plugin.app_surface_consumers,
+        class_params: &fa.pack.template_params,
     };
     let q = ReducerQuery {
         args: Vec::new(),        attachment: &att,

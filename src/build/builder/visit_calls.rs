@@ -892,6 +892,7 @@ impl<'a> Builder<'a> {
                 binding: pkg.map(|package| RefBinding::Function { package }),
                 folded_from: None,
                 arg_count: None,
+                flags: Default::default(),
             });
         }
     }
@@ -1015,6 +1016,7 @@ impl<'a> Builder<'a> {
                                     .map(|package| RefBinding::Function { package }),
                                 folded_from: None,
                                 arg_count: None,
+                                flags: Default::default(),
                             });
                         }
                     }
@@ -1053,6 +1055,7 @@ impl<'a> Builder<'a> {
                                     binding: None,
                                     folded_from: None,
                                     arg_count: None,
+                                    flags: Default::default(),
                                 });
                             }
                         }
@@ -1071,6 +1074,7 @@ impl<'a> Builder<'a> {
                                 binding: None,
                                 folded_from: None,
                                 arg_count: None,
+                                flags: Default::default(),
                             });
                         }
                     }
@@ -1432,6 +1436,7 @@ impl<'a> Builder<'a> {
                     opaque_return: false,
                     is_constant: false,
                     lexical: false,
+                    declared_return: None,
                 },
                 Namespace::Language,
                 target_pkg,

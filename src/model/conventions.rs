@@ -22,6 +22,7 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     namespace_sep: Some(std::borrow::Cow::Borrowed("::")),
     sigils: std::borrow::Cow::Borrowed(&['$', '@', '%']),
     class_spelling: ClassSpelling::Identity,
+    member_sep: Some(std::borrow::Cow::Borrowed("::")),
 };
 
 /// Split a possibly-qualified name into `(Option<package>, basename)`.
@@ -47,6 +48,18 @@ pub fn split_qualified<'a>(name: &'a str, names: &NameSpellings) -> (Option<&'a 
     match names.sep().and_then(|sep| name.rsplit_once(sep)) {
         Some((pkg, base)) => (Some(pkg), base),
         None => (None, name),
+    }
+}
+
+/// `split_qualified`'s inverse: the one spelling of a namespace and a leaf
+/// as a single qualified name. The global namespace — an empty `namespace`
+/// — yields the bare leaf, never a dangling separator, which is what makes
+/// this safe to call without first asking whether the name has one.
+pub fn join_qualified(namespace: &str, leaf: &str, sep: &str) -> String {
+    if namespace.is_empty() {
+        leaf.to_string()
+    } else {
+        format!("{namespace}{sep}{leaf}")
     }
 }
 
@@ -83,13 +96,10 @@ pub fn is_conventional_invocant_name(name: &str) -> bool {
     )
 }
 
-/// Strip Perl variable sigils from a typed name: the bare identity token
-/// a rename writes at every collected span (`$total` → `total`). This is
-/// the PERL instance of the per-language name-semantics hook on the
-/// resolution CandidateSet's identity keying (`CandidateSet::bare_new_name`)
-/// — pack languages canonicalize spellings at extraction instead (the
-/// LangPack `shape_name` hook; cpp's `canonical_template_spelling`), so
-/// their typed names pass through bare.
+/// Strip Perl variable sigils from a typed name (`$total` → `total`).
+/// Perl's instance of the rule every language states through its own
+/// spellings (`NameSpellings::bare_name`), for the Perl-only callers that
+/// hold no analysis to ask.
 pub fn strip_variable_sigils(name: &str) -> &str {
     name.trim_start_matches(['$', '@', '%'])
 }
@@ -142,9 +152,52 @@ pub fn field_attribute_flag(attr: &str) -> Option<crate::model::file_analysis::S
     })
 }
 
+/// Perl's WRITE and DISPLAY spellings — the same declaration every pack
+/// language makes, reached the same way (`LanguageRegistry::spellings`,
+/// `FileAnalysis::spellings()`). Perl has no pack driver of its own, so
+/// without this it would read whatever the neutral default happens to be,
+/// and a default nobody chose for Perl is a rule the next pack inherits
+/// by forgetting.
+///
+/// Almost everything is empty because Perl genuinely writes none of it:
+/// the engine's type tags ARE its vocabulary, there is no declared type to
+/// insert, no return annotation, no class-name literal member, no static
+/// sigil. The two that matter are the booleans.
+pub const PERL_PACK_SPELLINGS: crate::model::file_analysis::PackSpellings =
+    crate::model::file_analysis::PackSpellings {
+        type_display: &[],
+        native_type_spellings: &[],
+        class_literal_member: "",
+        import_template: "",
+        contract_stub: "",
+        return_annotation_template: "",
+        static_property_sigil: "",
+        // A Perl signature writes neither a variadic marker nor a default
+        // separator — `@_` is the whole convention.
+        variadic_marker: "",
+        default_sep: "",
+        // Typeglobs install a sub into another package, so a member
+        // declaration does NOT belong to the container that encloses it.
+        members_are_package_bound: false,
+        // An `AUTOLOAD` answers a role's required method at runtime.
+        catch_all_satisfies_contracts: true,
+    };
+
+/// A `'static` address for Perl's spellings, so the driver can hand out a
+/// reference.
+pub static PERL_SPELLINGS_PACK: crate::model::file_analysis::PackSpellings = PERL_PACK_SPELLINGS;
+
+/// `__PACKAGE__` — the compile-time token for the enclosing package. Perl's
+/// own word, written by Perl's builder and read back by
+/// `is_current_package_token`; a pack whose receiver names the class it is
+/// written in says so on its capture (`@receiver.self`) and the extractor
+/// mints the class, never this token
+/// (`layering_tests::packs_do_not_borrow_perls_current_package_token`).
+pub const CURRENT_PACKAGE_TOKEN: &str = "__PACKAGE__";
+
 /// `__PACKAGE__` — the compile-time token for the enclosing package.
 pub fn is_current_package_token(text: &str) -> bool {
-    text == "__PACKAGE__"
+    text == CURRENT_PACKAGE_TOKEN
 }
 
 /// A name that can be written as a method / sub call — a syntactically valid
@@ -411,6 +464,20 @@ impl<'a> MethodToken<'a> {
             Self::Bare(_) | Self::Super(_) => None,
         }
     }
+
+    /// The token as a method-call site writes it — `parse`'s inverse, and
+    /// the only place the qualifier separator is spelled on the minting
+    /// side. A pack that canonicalizes its own relative-dispatch spelling
+    /// (php `parent::m`) onto this vocabulary renders through here, so the
+    /// mint and the read can never drift apart.
+    pub fn render(&self) -> String {
+        match self {
+            Self::Bare(n) => (*n).to_string(),
+            Self::Super(n) => format!("SUPER::{n}"),
+            Self::Main(n) => format!("::{n}"),
+            Self::Qualified { package, name } => format!("{package}::{name}"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -438,6 +505,7 @@ mod tests {
             namespace_sep: Some(std::borrow::Cow::Borrowed("\\")),
             sigils: std::borrow::Cow::Borrowed(&['$']),
             class_spelling: ClassSpelling::UseMap,
+            member_sep: Some(std::borrow::Cow::Borrowed("::")),
         };
         assert_eq!(super::split_qualified("App\\Models\\User", &php), (Some("App\\Models"), "User"));
         assert_eq!(super::name_match_key("App\\Models\\User", &php), "User");

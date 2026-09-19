@@ -186,18 +186,13 @@ fn delegation_macro_types_as_the_wrapped_functions_return() {
 #[cfg(feature = "cpp")]
 #[test]
 fn ctor_convention_unresolvable_uppercase_call_no_phantom_class() {
-    use crate::model::file_analysis::{InferredType, RefKind};
+    use crate::model::file_analysis::InferredType;
     let src = "void g(char *pv) {\n  auto rcpv = RCPVx(pv);\n  rcpv->refcount++;\n}\n";
     let fa = cpp_driver().analyze(src);
     let inv = fa
         .refs()
         .iter()
-        .find_map(|r| match &r.kind {
-            RefKind::MethodCall { invocant_span: Some(sp), .. } if r.target_name == "refcount" => {
-                Some(*sp)
-            }
-            _ => None,
-        })
+        .find_map(|r| (r.target_name == "refcount").then(|| r.member_site()?.invocant_span).flatten())
         .expect("rcpv->refcount minted a member ref with an invocant span");
     let ty = fa.expr_type_at_span(inv, None);
     assert!(
@@ -390,7 +385,7 @@ fn expanded_macro_uses_still_carry_refs() {
 #[cfg(feature = "cpp")]
 #[test]
 fn cpp_brace_init_declaration_survives_declarator_strip() {
-    use crate::model::file_analysis::{RefKind, SymKind};
+    use crate::model::file_analysis::SymKind;
     let src = "struct Point { int x; int y; };\nint main() {\n  struct Point p {1, 2};\n  return p.x;\n}\n";
     let fa = cpp_driver().analyze(src);
     // No phantom Class minted from the declared variable.
@@ -409,10 +404,7 @@ fn cpp_brace_init_declaration_survives_declarator_strip() {
     let inv = fa
         .refs()
         .iter()
-        .find_map(|r| match &r.kind {
-            RefKind::MethodCall { invocant_span: Some(sp), .. } if r.target_name == "x" => Some(*sp),
-            _ => None,
-        })
+        .find_map(|r| (r.target_name == "x").then(|| r.member_site()?.invocant_span).flatten())
         .expect("p.x minted a member ref with an invocant span");
     let t = fa.expr_type_at_span(inv, None).expect("receiver types");
     assert_eq!(t.class_name(), Some("Point"), "p types as Point: {t:?}");
@@ -464,16 +456,12 @@ fn h4_fixture() -> crate::model::file_analysis::FileAnalysis {
 fn h4_member_ref(
     fa: &crate::model::file_analysis::FileAnalysis,
 ) -> (crate::model::file_analysis::Span, Option<(crate::model::file_analysis::MemberOp, crate::model::file_analysis::Span)>) {
-    use crate::model::file_analysis::RefKind;
     fa.refs()
         .iter()
-        .find_map(|r| match &r.kind {
-            RefKind::MethodCall { invocant_span: Some(sp), member_op, .. }
-                if r.target_name == "size" && r.span.start.row == 5 =>
-            {
-                Some((*sp, *member_op))
-            }
-            _ => None,
+        .find_map(|r| {
+            (r.target_name == "size" && r.span.start.row == 5)
+                .then(|| r.member_site().and_then(|m| Some((m.invocant_span?, m.member_op.copied()))))
+                .flatten()
         })
         .expect("w.size on the spliced line minted a member ref with an invocant span")
 }
@@ -542,9 +530,14 @@ fn cpp_splice_remaps_import_sites() {
         end: Point { row: 1, column: tcol + 4 },
     };
     let mut skel = crate::build::query_extract::SkeletonAnalysis::default();
-    skel.import_sites.push(("tail.h".to_string(), sp));
+    skel.import_sites.push(crate::model::file_analysis::ImportRow {
+        span: sp,
+        raw: "tail.h".to_string(),
+        binds: Default::default(),
+        bound: None,
+    });
     remap_spans(&mut skel, &rewritten, &src, &map);
-    let got = skel.import_sites[0].1;
+    let got = skel.import_sites[0].span;
     assert_eq!(
         ((got.start.row, got.start.column), (got.end.row, got.end.column)),
         ((1, 16), (1, 20)),
@@ -578,93 +571,85 @@ fn cpp_splice_remaps_domain_sites() {
     );
 }
 
-// The implicit-`this->field` read pass is a C/C++ semantic (a bare name can
-// mean `this->field`); the pack declares whether it applies. Only cpp mints
-// the `SymKind::Field` + unresolved-bare-ref shape the pass keys on, so we
-// drive it through cpp extraction and run `emit_return_fuel` with the flag
-// both ways on fresh copies — the flag is the ONLY difference.
+// A bare name that names a field of the enclosing class is an implicit
+// `this->field` read where the document says the body elides the receiver
+// (`@scope.sub.implicit_receiver`). The read binds to the field AND mints
+// the `Expr → Edge(Variable{field})` edge that types it; a lambda body
+// nested in the method elides too, because the scope CHAIN carries the
+// fact.
 #[cfg(feature = "cpp")]
 #[test]
-fn implicit_field_read_pass_gated_by_pack_capability() {
+fn implicit_field_read_binds_and_types_through_the_scope_chain() {
+    use crate::model::file_analysis::{RefKind, SymKind};
     use crate::model::witnesses::WitnessSource;
-    let src = "struct C { int inner_; int get() { return inner_; } };\n";
-    let build = || {
-        let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&tree_sitter_cpp::LANGUAGE.into()).unwrap();
-        let tree = parser.parse(src, None).unwrap();
-        let pack = crate::build::query_extract::cpp_pack();
-        let mut skel = crate::build::query_extract::extract(&tree, src.as_bytes(), &pack).unwrap();
-        let sites = std::mem::take(&mut skel.return_sites);
-        (skel.into_file_analysis(), sites)
-    };
-    let count = |fa: &FileAnalysis| {
-        fa.witnesses
-            .all()
-            .iter()
-            .filter(|w| matches!(&w.source, WitnessSource::Builder(s) if s == "cpp_implicit_field_read"))
-            .count()
-    };
-
-    let (mut fa_on, sites) = build();
-    emit_return_fuel(&mut fa_on, &sites, true);
-    assert_eq!(count(&fa_on), 1, "capability on → bare-member read minted");
-
-    let (mut fa_off, sites) = build();
-    emit_return_fuel(&mut fa_off, &sites, false);
-    assert_eq!(count(&fa_off), 0, "capability off → pass gated, nothing minted");
-
-    assert!(!crate::build::query_extract::python_pack().implicit_this_members,
-        "python: a bare name is never self.field");
-    assert!(crate::build::query_extract::cpp_pack().implicit_this_members,
-        "cpp: methods read members with implicit this->");
-
-    // Include-token capability: only C/C++ has `#include`-style path tokens;
-    // name-keyed-import languages answer false, so goto-def / references gate
-    // on the pack, never a language name.
-    assert!(crate::build::query_extract::cpp_pack().include_path_tokens,
-        "cpp: #include path tokens resolve to headers");
-    assert!(!crate::build::query_extract::python_pack().include_path_tokens,
-        "python: imports are name-keyed, no path tokens");
-
-    // Preprocessor capability: only C/C++ has `#define` macros; other packs
-    // answer false, so macro completion gates on the pack, never a language
-    // name.
-    assert!(crate::build::query_extract::cpp_pack().preprocessor_macros,
-        "cpp: #define macros are a completion surface");
-    assert!(!crate::build::query_extract::python_pack().preprocessor_macros,
-        "python: no C preprocessor");
+    let src = "struct C { int inner_; int get() { return inner_; } \
+int lam() { auto f = [&]{ return inner_; }; return f(); } };\n";
+    let fa = cpp_driver().analyze(src);
+    let edges = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter(|w| matches!(&w.source, WitnessSource::Builder(s) if s == "implicit_field_read"))
+        .count();
+    assert_eq!(edges, 2, "both bare reads type through the field's own attachment");
+    let field = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "inner_" && s.kind == SymKind::Field)
+        .expect("the field declaration");
+    let bound: Vec<_> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "inner_" && matches!(r.kind, RefKind::Variable))
+        .map(|r| r.resolved_symbol())
+        .collect();
+    assert_eq!(
+        bound,
+        vec![Some(field.id), Some(field.id)],
+        "the method body AND the lambda body inside it bind to the field"
+    );
 }
 
-// The by-id capability askers on the registry are THE include-token /
-// preprocessor gates for both serving surfaces (LSP handlers and their
-// CLI/--batch mirrors) — pin their answers so the shared gate can't
-// silently regress to a language-name probe on either side.
+// The complement: php spells the receiver, so its document leaves every
+// sub scope plain and a bare name inside a method binds to nothing —
+// whatever the class declares.
+// A C callback member (`int (*read)(char *)`) is a stored slot the source
+// CALLS. The declarator says so — the peel's `@deref.callable` level mints
+// `SymbolFlags::CALLABLE_VALUE` — while a plain `int count` states nothing
+// of the kind. The rule is on the declaration, never on a list of callback
+// names.
 #[cfg(feature = "cpp")]
 #[test]
-fn capability_askers_answer_by_language_id() {
-    use crate::build::language_driver::LanguageRegistry;
-    assert!(LanguageRegistry::has_include_tokens("cpp"),
-        "cpp declares include path tokens — CLI + server both gate on this");
-    assert!(LanguageRegistry::has_preprocessor_macros("cpp"));
-    assert!(!LanguageRegistry::has_include_tokens("perl"),
-        "perl has no LangPack: the asker answers false, no name branch");
-    assert!(!LanguageRegistry::has_preprocessor_macros("perl"));
-    assert!(!LanguageRegistry::has_include_tokens("no-such-language"));
-    #[cfg(feature = "python")]
-    {
-        assert!(!LanguageRegistry::has_include_tokens("python"),
-            "python imports are name-keyed, no path tokens");
-        assert!(!LanguageRegistry::has_preprocessor_macros("python"));
-    }
+fn a_callback_member_declares_its_slot_invoked() {
+    use crate::model::file_analysis::{SymKind, SymbolFlags};
+    let src = "\
+struct Ops {\n\
+  int (*read)(char *buf);\n\
+  int count;\n\
+};\n";
+    let fa = cpp_driver().analyze(src);
+    let field = |name: &str| {
+        fa.symbols()
+            .iter()
+            .find(|s| s.name == name && s.kind == SymKind::Field)
+            .unwrap_or_else(|| panic!("{name} is a Field"))
+    };
+    assert!(
+        field("read").flags.contains(SymbolFlags::CALLABLE_VALUE),
+        "the function-pointer declarator states the slot is invoked"
+    );
+    assert!(
+        !field("count").flags.contains(SymbolFlags::CALLABLE_VALUE),
+        "a plain int member states nothing of the kind"
+    );
 }
 
-// Implicit-`this` sibling method CALLs — the call half of the same
-// capability. A bare `foo(...)` inside a method body pins its enclosing
+// Implicit-`this` sibling method CALLs — the call half of the same fact. A
+// bare `foo(...)` inside a body that elides the receiver pins its enclosing
 // class onto the `FunctionCall`'s `resolved_package` (in-class AND
-// out-of-line/template bodies — the class comes off the peeled method
+// out-of-line/template bodies — the class comes off the scope's OWNER
 // symbol, not the body scope which is package-less out of line), so
-// goto-def lands on the sibling. A free-function-only name stays unpinned;
-// the capability gate governs the whole pass.
+// goto-def lands on the sibling. A free-function-only name stays unpinned.
 #[cfg(feature = "cpp")]
 #[test]
 fn sibling_method_call_pins_enclosing_class() {
@@ -678,15 +663,6 @@ template <class T> struct Buf { void grow(int n); void reserve(int n); };\n\
 template <class T> void Buf<T>::reserve(int n) { grow(n); }\n\
 int helper();\n\
 struct Gadget { void run() { helper(); } };\n";
-    let build = || {
-        let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&tree_sitter_cpp::LANGUAGE.into()).unwrap();
-        let tree = parser.parse(src, None).unwrap();
-        let pack = crate::build::query_extract::cpp_pack();
-        let mut skel = crate::build::query_extract::extract(&tree, src.as_bytes(), &pack).unwrap();
-        let sites = std::mem::take(&mut skel.return_sites);
-        (skel.into_file_analysis(), sites)
-    };
     let pin_of = |fa: &FileAnalysis, name: &str| -> Option<Option<String>> {
         fa.refs()
             .iter()
@@ -694,8 +670,7 @@ struct Gadget { void run() { helper(); } };\n";
             .map(|r| r.resolved_package().map(str::to_string))
     };
 
-    let (mut fa, sites) = build();
-    emit_return_fuel(&mut fa, &sites, true);
+    let fa = cpp_driver().analyze(src);
     assert_eq!(pin_of(&fa, "paint"), Some(Some("Widget".into())), "in-class sibling call pins its class");
     assert_eq!(pin_of(&fa, "grow"), Some(Some("Buf".into())), "out-of-line template sibling call pins the peeled class");
     assert_eq!(pin_of(&fa, "helper"), Some(None), "free-function-only call stays unpinned");
@@ -719,10 +694,6 @@ struct Gadget { void run() { helper(); } };\n";
             "{call}: sibling call resolves to the class method"
         );
     }
-
-    let (mut fa_off, sites2) = build();
-    emit_return_fuel(&mut fa_off, &sites2, false);
-    assert_eq!(pin_of(&fa_off, "paint"), Some(None), "capability off → no sibling-call pin");
 }
 
 // H7-13: a CLASS FIELD used as a member-access receiver must type to its
@@ -945,30 +916,28 @@ fn driver_caps_axes_are_reviewed_exhaustively() {
             cursor_context,
             hover_info,
             signature_help,
+            pack_signature_help,
             selection_range,
             synchronous_rebuild,
             context_gather,
             pack_invalidation,
             cross_file_words,
-            entrypoint_symbols,
-            include_path_tokens,
-            preprocessor_macros,
         } = d.caps();
         // The hub lanes (enrichment, native cursor/hover/rebuild verbs) and
         // the pack lanes (invalidator, gather, bare words) are disjoint
         // architectures today — one driver never straddles both.
+        // selectionRange is a tree-ancestor walk with no language in it —
+        // both architectures serve it, so it belongs to neither family.
+        let _ = selection_range;
         let hub_family = hub_enrichment
             || cursor_context
             || hover_info
             || signature_help
-            || selection_range
             || synchronous_rebuild;
         let pack_family = pack_invalidation
+            || pack_signature_help
             || context_gather
-            || cross_file_words
-            || include_path_tokens
-            || preprocessor_macros
-            || !entrypoint_symbols.is_empty();
+            || cross_file_words;
         assert!(
             !(hub_family && pack_family),
             "driver {} declares capabilities from both serving architectures",
@@ -990,4 +959,146 @@ fn exactly_one_fallback_driver() {
         .count();
     assert_eq!(n, 1, "exactly one driver claims unclaimed files");
     assert!(reg.fallback().claims_unclaimed());
+}
+
+
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_callable_carries_its_parameters_as_facts() {
+    use crate::model::file_analysis::SymbolDetail;
+    // The parameter list is walked once, by the arity walk; names, defaults
+    // and binding sites come off that walk (rule #11) rather than a second
+    // scan of the source by whoever needs to render a signature.
+    let src = "template <class... A>\nvoid dispatch(int first, int limit = 10, A... rest) {}\n";
+    let fa = cpp_driver().analyze(src);
+    let sym = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "dispatch")
+        .unwrap_or_else(|| panic!("dispatch: {:?}", fa.symbols().iter().map(|s| &s.name).collect::<Vec<_>>()));
+    let SymbolDetail::Sub { params, .. } = &sym.detail else {
+        panic!("callable carries a Sub detail, got {:?}", sym.detail)
+    };
+    assert_eq!(
+        params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+        vec!["first", "limit", "rest"],
+        "every parameter, in source order"
+    );
+    assert_eq!(params[0].default, None);
+    assert_eq!(params[1].default.as_deref(), Some("10"), "the default is source text");
+    assert_eq!(params[0].declared_type.as_deref(), Some("int"), "the declared type is source text");
+    assert_eq!(params[2].declared_type.as_deref(), Some("A"), "a pack expansion keeps its element type");
+    assert!(!params[1].is_slurpy);
+    assert!(params[2].is_slurpy, "a pack expansion is slurpy");
+    // Each binding site is the parameter's own name token.
+    for p in params {
+        let site = p.binding_site.expect("a written parameter binds at its name token");
+        let line = src.lines().nth(site.row).unwrap();
+        assert!(
+            line[site.column..].starts_with(&p.name),
+            "binding site of {} points at its name token, got {:?}",
+            p.name,
+            &line[site.column..]
+        );
+    }
+    // The counts stay on `arity`, which `param_arity()` still prefers.
+    let arity = sym.param_arity().expect("a callable has an arity");
+    assert_eq!((arity.total, arity.required, arity.variadic), (2, 1, true));
+}
+
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_include_row_binds_a_type() {
+    use crate::model::file_analysis::ImportBinds;
+    // C has one kind of `#include`, so its rows carry the default binding —
+    // the value a consumer reads instead of guessing from the leaf's case.
+    let fa = cpp_driver().analyze("#include \"box.h\"\n#include <vector>\n");
+    let raws: Vec<&str> = fa.pack.include_directives.iter().map(|r| r.raw.as_str()).collect();
+    assert_eq!(raws, vec!["box.h", "<vector>"], "both rows: {raws:?}");
+    for r in &fa.pack.include_directives {
+        assert_eq!(r.binds, ImportBinds::Type, "unsuffixed capture binds a type");
+    }
+}
+
+/// An OVERLAY declaring two ordinary function names as dynamic-surface
+/// markers. No bundled pack declares any (cpp has no such surface), so the
+/// marker → flag path needs a declarer to have a subject at all — and a
+/// document is how a third party declares one.
+#[cfg(feature = "cpp")]
+const MARKER_OVERLAY: &str = "((call_expression function: (identifier) @call.dynamic_args)
+ (#eq? @call.dynamic_args \"read_args\"))
+((call_expression function: (identifier) @call.dynamic_vars)
+ (#eq? @call.dynamic_vars \"make_vars\"))
+";
+
+#[cfg(feature = "cpp")]
+fn marker_pack() -> crate::build::query_extract::LangPack {
+    crate::build::query_extract::LangPack {
+        bundled_overlays: &[("dynamic-markers.scm", MARKER_OVERLAY)],
+        ..crate::build::query_extract::cpp_pack()
+    }
+}
+
+#[cfg(feature = "cpp")]
+#[test]
+fn dynamic_markers_land_on_the_enclosing_callable() {
+    use crate::model::file_analysis::SymbolFlags;
+    let driver = PackDriver { pack: marker_pack, ..cpp_driver() };
+    let src = "int read_args();\nint make_vars();\nint g = read_args();\n\
+               void wide() { read_args(); }\nvoid narrow() { if (1) { make_vars(); } }\n\
+               void plain() { }\n";
+    let fa = driver.analyze(src);
+    let flags = |name: &str| {
+        fa.symbols()
+            .iter()
+            .find(|s| s.name == name && s.span.start.row >= 3)
+            .unwrap_or_else(|| panic!("{name}: {:?}", fa.symbols().iter().map(|s| &s.name).collect::<Vec<_>>()))
+            .flags
+    };
+    assert!(flags("wide").contains(SymbolFlags::DYNAMIC_ARGS));
+    assert!(!flags("wide").contains(SymbolFlags::DYNAMIC_VARS));
+    // Through a nested block: the scope chain, not the immediate scope.
+    assert!(flags("narrow").contains(SymbolFlags::DYNAMIC_VARS));
+    assert!(!flags("narrow").contains(SymbolFlags::DYNAMIC_ARGS));
+    assert!(!flags("plain").intersects(SymbolFlags::DYNAMIC_ARGS | SymbolFlags::DYNAMIC_VARS));
+    // The file-scope initializer's call owns no callable and stamps nothing.
+    let stamped: Vec<&str> = fa
+        .symbols()
+        .iter()
+        .filter(|s| s.flags.intersects(SymbolFlags::DYNAMIC_ARGS | SymbolFlags::DYNAMIC_VARS))
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(stamped, vec!["wide", "narrow"], "only the two containing callables");
+}
+
+/// A body-typed return survives enrichment. The arm and chain witnesses are
+/// minted before `finalize_post_walk` seals the enrichment baseline, so the
+/// truncate-back-to-baseline that every enrich pass starts with cannot take
+/// them; pushed after it, a multi-return function lost its type the first
+/// time the file was enriched, and the CLI/`--batch` path enriches
+/// unconditionally.
+#[cfg(feature = "cpp")]
+#[test]
+fn a_body_typed_return_survives_repeated_enrichment() {
+    use crate::model::file_analysis::InferredType;
+    let mut fa = cpp_driver()
+        .analyze("auto pick(int c) {\n  if (c) { return 1; }\n  return 2;\n}\n");
+    let sid = fa.symbols().iter().find(|s| s.name == "pick").unwrap().id;
+    let arms = |fa: &crate::model::file_analysis::FileAnalysis| {
+        fa.witnesses
+            .for_attachment(&crate::model::witnesses::WitnessAttachment::SymbolReturnArm(sid))
+            .len()
+    };
+    assert_eq!(arms(&fa), 2, "both return sites are arms");
+    let typed = fa.sub_return_type_at_arity("pick", Some(1));
+    assert_eq!(typed, Some(InferredType::Numeric), "the body types the return");
+    for pass in 1..=2 {
+        fa.enrich_imported_types_with_keys(None);
+        assert_eq!(arms(&fa), 2, "arms survive enrichment pass {pass}");
+        assert_eq!(
+            fa.sub_return_type_at_arity("pick", Some(1)),
+            typed,
+            "the return still types after enrichment pass {pass}"
+        );
+    }
 }

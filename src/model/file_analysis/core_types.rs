@@ -108,6 +108,16 @@ pub struct Scope {
     /// question — so neither is a span scan. `None` for every other scope.
     #[serde(default)]
     pub owner: Option<SymbolId>,
+    /// A bare name in this scope may elide the member receiver — the
+    /// language's own rule, stated by the capture that mints the scope
+    /// (`@scope.sub.implicit_receiver`). The chain carries it: a block or
+    /// lambda body nested in such a scope elides too, so a consumer walks
+    /// to the nearest scope that declares it and reads its `owner`'s
+    /// package. Whether a class is in fact there is resolution, not syntax
+    /// — a free function's body carries the flag and no owning package, so
+    /// nothing binds.
+    #[serde(default)]
+    pub implicit_receiver: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,6 +237,12 @@ pub struct NameSpellings {
     pub sigils: std::borrow::Cow<'static, [char]>,
     /// What a written class spelling denotes.
     pub class_spelling: ClassSpelling,
+    /// The spelling between a class and a member it qualifies in a written
+    /// name (`Foo::bar`, a php `'A\\B::cb'` callable string): the namespace
+    /// separator where the language reuses it (Perl, C++), its own token
+    /// where it does not (php). `None` for a language that never writes a
+    /// class-qualified member as one name.
+    pub member_sep: Option<std::borrow::Cow<'static, str>>,
 }
 
 /// What a class spelling written in a file denotes — the capability the
@@ -250,6 +266,7 @@ impl NameSpellings {
         namespace_sep: None,
         sigils: std::borrow::Cow::Borrowed(&[]),
         class_spelling: ClassSpelling::Identity,
+        member_sep: None,
     };
 
     /// A language with a namespace separator, no sigils, and spellings
@@ -260,11 +277,20 @@ impl NameSpellings {
             namespace_sep: Some(std::borrow::Cow::Borrowed(sep)),
             sigils: std::borrow::Cow::Borrowed(&[]),
             class_spelling: ClassSpelling::Identity,
+            member_sep: Some(std::borrow::Cow::Borrowed(sep)),
         }
     }
 
     pub fn sep(&self) -> Option<&str> {
         self.namespace_sep.as_deref()
+    }
+
+    /// The bare identity token an edit writes, from a name as a human typed
+    /// it: this language's variable sigils are spelling, not identity
+    /// (`$total` is the variable `total` at every collected span). A
+    /// language declaring no sigils passes its names through.
+    pub fn bare_name<'n>(&self, typed: &'n str) -> &'n str {
+        typed.trim_start_matches(&*self.sigils)
     }
 
     /// The separator a use-map resolves with — `None` for a language whose
@@ -275,6 +301,11 @@ impl NameSpellings {
             ClassSpelling::UseMap => self.sep(),
             ClassSpelling::Identity => None,
         }
+    }
+
+    /// The class-to-member qualifier a written name uses (`Foo::bar`).
+    pub fn member_sep(&self) -> Option<&str> {
+        self.member_sep.as_deref()
     }
 
     pub fn is_sigil(&self, c: char) -> bool {
@@ -329,6 +360,73 @@ bitflags::bitflags! {
         /// A storage slot with a generated writer (Corinna `:writer` /
         /// `:mutator` / `:accessor`, Moo `is => 'rw'`).
         const WRITER = 1 << 14;
+        /// A handler registered on a class-named rail (`@def.handler.class.<rail>`
+        /// / `.by.<rail>`): it sits on another symbol's token (a listener's
+        /// `handle`), so listings show that symbol, not this one.
+        const CLASS_RAIL = 1 << 15;
+        /// This callable reads arguments it never declared (php
+        /// `func_get_args`): its written signature does not bound what a
+        /// caller may pass, so the arity lanes must not call an extra
+        /// argument an error.
+        const DYNAMIC_ARGS = 1 << 16;
+        /// This callable materializes variables no declaration names (php
+        /// `extract`, `eval`): a read of an undeclared name inside it is
+        /// not evidence of a typo, so the undefined-variable lane stays
+        /// silent.
+        const DYNAMIC_VARS = 1 << 17;
+        /// A `Class` symbol that is a trait (php) / mixin: its members are
+        /// composed into the using class, so it declares an API the model
+        /// resolves without the trait ever being an instance's class.
+        const TRAIT = 1 << 18;
+        /// A `Class` symbol that is an enumeration: its cases are its
+        /// members, and the language gives every enum the same extra ones.
+        const ENUM = 1 << 19;
+        /// A callable that DECLARES an obligation without meeting it — an
+        /// interface method, an abstract method, a Perl `requires` marker.
+        /// Not `ABSTRACT`: an interface's methods carry no `abstract`
+        /// token, and the container's own flag is a different fact.
+        const CONTRACT = 1 << 20;
+        /// The DECLARATION was synthesized from a documentation row (a php
+        /// docblock `@method`), so the source has no signature to read or
+        /// annotate. Provenance of the declaration, not of the doc text —
+        /// `Presentation::doc` answers a different question.
+        const DOC_DECLARED = 1 << 21;
+        /// The object the enclosing method runs on (`$this`, `this`, a
+        /// python `self`/`cls` parameter): lexically inside the class body
+        /// and tagged with its package, but the instance itself and never
+        /// one of its members. Minted from the receiver capture, so no
+        /// consumer matches a receiver's spelling.
+        const RECEIVER = 1 << 22;
+        /// The constructor of the class that declares it (php
+        /// `__construct`): a `new Foo(...)` invokes it, and its name belongs
+        /// to the language, so nothing renames it. Minted from the
+        /// constructor capture; Perl's `new` is a name convention and stays
+        /// in `conventions`.
+        const CONSTRUCTOR = 1 << 23;
+        /// A binding written to be DISCARDED (php `$_` in `foreach ($a as $k
+        /// => $_)`): declared, never read on purpose, so the unused-variable
+        /// lane stays silent on it.
+        const THROWAWAY = 1 << 24;
+        /// The declaration has no token of its own — the LANGUAGE provides
+        /// the member (php's `->value` / `::cases()` on every enum), so the
+        /// extractor mints it at the container's name. Resolvable,
+        /// completable and hoverable like any member; never a dead-code
+        /// candidate, because nothing in the source could reference it into
+        /// existence.
+        const SYNTHESIZED = 1 << 25;
+        /// A binding written to REACH another slot's storage (php `$h =
+        /// &$opts['h']`): the write IS the point of it, so the liveness lanes
+        /// never ask whether anything read it.
+        const ALIAS = 1 << 26;
+        /// This class answers ANY member name at runtime — a php `__call`,
+        /// a Perl `AUTOLOAD` — so its declared member set is not its
+        /// surface. Minted on the CLASS by whoever sees the catch-all
+        /// declaration; the lanes ask `class_answers_any_member`.
+        const DYNAMIC_MEMBERS = 1 << 27;
+        /// A stored slot whose VALUE is called (a C function-pointer member,
+        /// `int (*read)(char *)`). The declarator says so, so a call landing
+        /// on the slot asks the declaration instead of a callback-name list.
+        const CALLABLE_VALUE = 1 << 28;
     }
 }
 
@@ -379,6 +477,20 @@ impl TryFrom<&str> for SymbolFlags {
             "param" => SymbolFlags::PARAM,
             "reader" => SymbolFlags::READER,
             "writer" => SymbolFlags::WRITER,
+            "class_rail" => SymbolFlags::CLASS_RAIL,
+            "dynamic_args" => SymbolFlags::DYNAMIC_ARGS,
+            "dynamic_vars" => SymbolFlags::DYNAMIC_VARS,
+            "trait" => SymbolFlags::TRAIT,
+            "enum" => SymbolFlags::ENUM,
+            "contract" => SymbolFlags::CONTRACT,
+            "documented" => SymbolFlags::DOC_DECLARED,
+            "synthesized" => SymbolFlags::SYNTHESIZED,
+            "alias" => SymbolFlags::ALIAS,
+            "dynamic_members" => SymbolFlags::DYNAMIC_MEMBERS,
+            "receiver" => SymbolFlags::RECEIVER,
+            "constructor" => SymbolFlags::CONSTRUCTOR,
+            "throwaway" => SymbolFlags::THROWAWAY,
+            "callable_value" => SymbolFlags::CALLABLE_VALUE,
             other => return Err(UnknownAttribute(other.to_string())),
         })
     }
@@ -765,6 +877,14 @@ pub fn earliest_rebind_in(flow_edges: &[FlowEdge], var: &str, region: Span) -> O
 }
 
 impl Symbol {
+    /// Does this callable construct the class that declares it? Every
+    /// language mints the flag where it knows — a pack's document names its
+    /// own constructor, Perl's builder reads its `new` convention at the
+    /// symbol's mint — so this asks the flag and never a name.
+    pub fn is_constructor(&self) -> bool {
+        self.flags.contains(SymbolFlags::CONSTRUCTOR)
+    }
+
     /// A member RE-EXPORT (`using Base::insert;` in a class body): part of
     /// the class's API surface (outline/completion) but not a definition —
     /// member resolution sees through it to the origin ancestor.
@@ -833,6 +953,17 @@ impl Symbol {
         None
     }
 
+    /// The return annotation this declaration writes, as the language
+    /// spells it. A declaration that writes one is already typed, whatever
+    /// the type (`: void` names none), so the hover's inferred-return line
+    /// and the missing-return-type lane both ask this.
+    pub fn declared_return(&self) -> Option<&str> {
+        match &self.detail {
+            SymbolDetail::Sub { declared_return, .. } => declared_return.as_deref(),
+            _ => None,
+        }
+    }
+
     /// True when this symbol is a presentation duplicate that symbol-listing
     /// views should fold away — the getter/primary carries the listing; the
     /// hidden twin exists only so arity-discriminated type inference can
@@ -841,6 +972,59 @@ impl Symbol {
     /// this; the verdict is stamped on `presentation` at synthesis.
     pub fn hidden_in_outline(&self) -> bool {
         self.presentation.hide_in_outline
+    }
+}
+
+/// Which member family a name belongs to — the axis that keeps a value read
+/// and a call from answering each other (`docs/adr/member-kinds.md`). Minted
+/// from the fact that produced a name: the ref kind at a use, the symbol
+/// kind at a declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberKind {
+    /// A stored value: a field, class-content variable or enumerator.
+    Value,
+    /// A sub or method.
+    Callable,
+}
+
+impl MemberKind {
+    /// The family a ref's own kind states: a value read is `Value`, a call
+    /// `Callable`, anything else no member at all.
+    pub fn of_ref(kind: &RefKind) -> Option<Self> {
+        match kind {
+            RefKind::FieldAccess { .. } => Some(MemberKind::Value),
+            RefKind::MethodCall { .. } => Some(MemberKind::Callable),
+            _ => None,
+        }
+    }
+
+    /// The family a declaration's symbol kind states.
+    pub fn of_sym(kind: SymKind) -> Self {
+        if matches!(kind, SymKind::Sub | SymKind::Method) {
+            MemberKind::Callable
+        } else {
+            MemberKind::Value
+        }
+    }
+
+    /// May a declaration of `kind` define a target of this family? The
+    /// value side is strict: the syntax said the token reads a stored
+    /// value, so a callable never answers it. The callable side admits
+    /// every member — a call is the only spelling a data member gets where
+    /// a member read is a call (Perl's `$o->m`, a `has` accessor) — and the
+    /// walk prefers the same-family declaration when both exist.
+    pub fn admits_decl(self, kind: SymKind) -> bool {
+        match self {
+            MemberKind::Value => MemberKind::of_sym(kind) == MemberKind::Value,
+            MemberKind::Callable => true,
+        }
+    }
+
+    /// May a ref of family `other` reference a target of this family? A
+    /// value read never reaches a callable and a call never reaches a value
+    /// target: each side's syntax already said which it wanted.
+    pub fn admits_ref(self, other: Option<MemberKind>) -> bool {
+        other.is_none_or(|o| o == self)
     }
 }
 
@@ -907,6 +1091,15 @@ pub enum SymbolDetail {
         /// does not (it's not a workspace-addressable entity).
         #[serde(default)]
         lexical: bool,
+        /// The return annotation the declaration WRITES, spelled as the
+        /// language writes it (php `: string`). A structural fact a type
+        /// witness cannot carry — `: void` names no type — so the
+        /// signature label and the "this declaration is already typed"
+        /// consumers read it instead of re-scanning source or comparing
+        /// an attribute string. `None` for a declaration with no
+        /// annotation and for a language that writes none (Perl).
+        #[serde(default)]
+        declared_return: Option<String>,
     },
     Class {
         parent: Option<String>,
@@ -973,6 +1166,12 @@ pub struct ParamInfo {
     /// value, a plugin-declared signature) — nothing in the source binds it.
     #[serde(default, with = "point_opt_serde")]
     pub binding_site: Option<Point>,
+    /// The parameter's declared type as written (`int`, `?Foo`, `T&`), minted
+    /// from the declaration's type node; `None` for a language whose
+    /// parameters carry no type (Perl) or a parameter written without one.
+    /// Source text, never a rendering — the signature label shows it verbatim.
+    #[serde(default)]
+    pub declared_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -984,6 +1183,43 @@ pub struct FieldDetail {
 }
 
 // ---- Ref ----
+
+bitflags::bitflags! {
+    /// What the DOCUMENT said at a reference site, as a closed flag set.
+    /// A receiver's flavour and a construction are facts the grammar states
+    /// outright; the extractor mints them from the capture that said so, and
+    /// a consumer asks the reference instead of matching its token text back
+    /// against a set of spellings (rule #11).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct RefFlags: u8 {
+        /// The receiver is the language's own object token (`$this`, `this`):
+        /// its runtime class may be any DESCENDANT of the written one, so a
+        /// member absent from that class is not yet a missing member.
+        const RECEIVER_THIS = 1 << 0;
+        /// The written name is the enclosing class or its parent (`self::`,
+        /// `static::`, `parent::`, `new self()`, `: static`): it resolves off
+        /// the enclosing scope, never out of a namespace.
+        const RELATIVE_SCOPE = 1 << 1;
+        /// The site calls the receiver's CONSTRUCTOR — a class that declares
+        /// none still has the default one.
+        const CONSTRUCTS = 1 << 2;
+    }
+}
+
+/// The wire form is the bare bit set, like `SymbolFlags`: a flag added at
+/// the tail reads old blobs unchanged.
+impl Serialize for RefFlags {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.bits().serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for RefFlags {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        u8::deserialize(d).map(RefFlags::from_bits_retain)
+    }
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ref {
@@ -1020,11 +1256,40 @@ pub struct Ref {
     /// kinds).
     #[serde(default)]
     pub arg_count: Option<usize>,
+    /// The facts the document stated at this site (rule #11): which flavour
+    /// of receiver was written, and whether the call constructs.
+    #[serde(default)]
+    pub flags: RefFlags,
 }
 
 pub use crate::model::conventions::{name_match_key, split_qualified};
 
 impl Ref {
+    /// Is this a member site, and which member family does it name? The one
+    /// spelling of the pair — a consumer that has already asked
+    /// `member_site()` never has a second, unreachable way to fail.
+    pub fn member_kind(&self) -> Option<MemberKind> {
+        MemberKind::of_ref(&self.kind)
+    }
+
+    /// The receiver is the language's own object token (`$this`, `this`) —
+    /// so its runtime class may be any descendant of the written one.
+    pub fn receiver_is_own_object(&self) -> bool {
+        self.flags.contains(RefFlags::RECEIVER_THIS)
+    }
+
+    /// The written name is the enclosing class or its parent, which resolves
+    /// off the enclosing scope rather than out of a namespace.
+    pub fn names_relative_scope(&self) -> bool {
+        self.flags.contains(RefFlags::RELATIVE_SCOPE)
+    }
+
+    /// This site calls the receiver's constructor. A class declaring none
+    /// still has the default one, so an unresolved member here is no finding.
+    pub fn constructs(&self) -> bool {
+        self.flags.contains(RefFlags::CONSTRUCTS)
+    }
+
     /// The receiver view of a member access (`MethodCall` / `FieldAccess`);
     /// `None` for every other kind.
     pub fn member_site(&self) -> Option<MemberSite<'_>> {
@@ -1105,7 +1370,7 @@ impl Ref {
         match self.binding.as_ref()? {
             RefBinding::Symbol(sym) => Some(*sym),
             RefBinding::HashKey { sym, .. } | RefBinding::Handler { sym, .. } => *sym,
-            RefBinding::Function { .. } | RefBinding::Method(_) => None,
+            RefBinding::Function { .. } | RefBinding::Method(_) | RefBinding::Runtime => None,
         }
     }
 
@@ -1400,6 +1665,10 @@ pub enum RefBinding {
     /// against, plus the linked `Handler` symbol (first stacked def —
     /// `refs_to_symbol` walks all stacked defs separately).
     Handler { owner: HandlerOwner, sym: Option<SymbolId> },
+    /// Bound by the RUNTIME, with no declaration to point at (php's
+    /// `$this` and its superglobals). A read of one is resolved — nothing
+    /// to navigate to, and nothing undefined about it.
+    Runtime,
 }
 
 /// What kind of entity is being renamed — determines single-file vs cross-file scope.
