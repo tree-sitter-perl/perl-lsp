@@ -377,6 +377,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         crate::model::file_analysis::ParamArity,
         Vec<crate::model::file_analysis::ParamInfo>,
     )> = Vec::new();
+    // Bare variables written as call arguments, keyed by the argument
+    // list's start (the callee token's end — the same adjacency the arity
+    // join uses): (position, the variable's name, its token start). The
+    // callee ref's push mints one binding edge per entry
+    // (`docs/adr/by-ref-binding.md`); the callee's bag decides which
+    // positions alias.
+    let mut arg_vars_by_start: HashMap<(usize, usize), Vec<(u32, String, Point)>> = HashMap::new();
     // A callable's by-reference parameter positions with their names, keyed
     // by the parameter list's span (joined to the def symbol like the arity).
     // The def symbols each MATCH minted, in mint order — paired where the
@@ -719,6 +726,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             named: std::collections::HashSet<usize>,
             spread: bool,
             placeholder: bool,
+            vars: Vec<tree_sitter::Node<'t>>,
         }
         let mut by_list: HashMap<usize, ListArgs> = HashMap::new();
         for (cap, node) in arg_caps {
@@ -739,6 +747,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     slot.named.insert(node.id());
                 }
                 "arity.arg.spread" => slot.spread = true,
+                "arity.arg.var" => slot.vars.push(node),
                 "arity.placeholder" => slot.placeholder = true,
                 _ => {}
             }
@@ -761,6 +770,26 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
             arg_counts_by_start.insert(at, slot.args.len());
             arg_counts_by_match.insert(match_id, slot.args.len());
+            for (position, arg) in slot.args.iter().enumerate() {
+                // a named argument (`f(out: $x)`) is matched by name, not
+                // position — no site
+                if slot.named.contains(&arg.id()) {
+                    continue;
+                }
+                let Some(var) = slot
+                    .vars
+                    .iter()
+                    .find(|v| v.start_byte() >= arg.start_byte() && v.end_byte() <= arg.end_byte())
+                else {
+                    continue;
+                };
+                let text = var.utf8_text(source).unwrap_or("");
+                arg_vars_by_start.entry(at).or_default().push((
+                    position as u32,
+                    (pack.shape_name)("def.var", text),
+                    var.start_position(),
+                ));
+            }
         }
     }
 
@@ -1750,6 +1779,54 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                                 || placeholder_call_at.contains(&(e.end.row, e.end.column))),
                         flags: Default::default(),
                     });
+                    if matches!(e.cap.as_str(), "ref.call" | "ref.qcall" | "ref.member") {
+                        if let Some(vars) = arg_vars_by_start.get(&(e.end.row, e.end.column)) {
+                            use crate::model::witnesses as wit;
+                            let callee = (pack.shape_name)(&e.cap, &e.text);
+                            bind_call_args(&mut out.witnesses, vars, cur_scope, |index| {
+                                if e.cap == "ref.member" {
+                                    let (inv_span, inv_text) = member_recv.get(&e.match_id)?;
+                                    let base = if member_simple.get(&e.match_id).copied().unwrap_or(false) {
+                                        wit::WitnessAttachment::Variable {
+                                            name: (pack.shape_name)("def.var", inv_text),
+                                            scope: cur_scope,
+                                        }
+                                    } else {
+                                        wit::WitnessAttachment::Expr(*inv_span)
+                                    };
+                                    Some(wit::WitnessPayload::Projected {
+                                        base,
+                                        step: wit::ProjectionStep::ParamOf {
+                                            member: callee.clone(),
+                                            index,
+                                        },
+                                    })
+                                } else {
+                                    let (pkg, bare) =
+                                        crate::model::file_analysis::split_qualified(&callee, &pack.names);
+                                    Some(wit::WitnessPayload::Edge(wit::WitnessAttachment::Param {
+                                        package: pkg
+                                            .map(str::to_string)
+                                            // A bare call names a free function, and a
+                                            // free function belongs to the enclosing
+                                            // NAMESPACE — never to the class whose body
+                                            // the call sits in. The callee's own bag
+                                            // keys its parameters that way.
+                                            .or_else(|| {
+                                                context_stack
+                                                    .iter()
+                                                    .rev()
+                                                    .find(|(_, _, is_class)| !*is_class)
+                                                    .map(|(_, p, _)| p.clone())
+                                            })
+                                            .unwrap_or_default(),
+                                        name: bare.to_string(),
+                                        index,
+                                    }))
+                                }
+                            });
+                        }
+                    }
                     if let Some(q) = qualified_by_match.get(&e.match_id) {
                         let leaf = (pack.shape_name)(&e.cap, &e.text);
                         let raw = q.strip_suffix(leaf.as_str()).unwrap_or_default();
@@ -2464,6 +2541,36 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     out.param_sigs = param_sigs;
     Ok(out)
 }
+
+/// Bind every bare variable an argument list passes to the callee's
+/// parameter slot — `Variable(arg) → Edge(Param)` for a plain callee,
+/// `Projected{receiver, ParamOf}` through a dispatch. Only a position the
+/// callee declares by reference ever answers
+/// (`docs/adr/by-ref-binding.md`); the witness is zero-width at the
+/// argument token, a binding rather than a narrowing region.
+///
+/// `payload` is the only thing a call site varies — which callee the slot
+/// belongs to. A construction site knows its class statically and answers
+/// with the constructor's `Param`; nothing about the mint differs, so
+/// there is one body (rule #10).
+fn bind_call_args(
+    witnesses: &mut Vec<crate::model::witnesses::Witness>,
+    vars: &[(u32, String, Point)],
+    scope: crate::model::file_analysis::ScopeId,
+    mut payload: impl FnMut(u32) -> Option<crate::model::witnesses::WitnessPayload>,
+) {
+    use crate::model::witnesses as wit;
+    for (index, var, at) in vars {
+        let Some(payload) = payload(*index) else { continue };
+        witnesses.push(wit::Witness {
+            attachment: wit::WitnessAttachment::Variable { name: var.clone(), scope },
+            source: wit::WitnessSource::Builder("call_arg_binding".into()),
+            payload,
+            span: Span { start: *at, end: *at },
+        });
+    }
+}
+
 
 /// Resolve every class name a declared return mentions through the file's
 /// use map. The shape is the pack's; what its names MEAN is the file's, and
