@@ -28,7 +28,7 @@ pub struct SurfaceFeed<'a> {
     pub plugin_namespaces: &'a [PluginNamespace],
     pub app_surface_consumers: &'a [String],
     pub macro_defs: &'a [MacroDef],
-    pub include_directives: &'a [(Span, String)],
+    pub include_directives: &'a [ImportRow],
     pub dbic_source_name: &'a Option<String>,
     /// Derived-query handle — see the struct doc for its narrow license.
     pub analysis: &'a FileAnalysis,
@@ -77,7 +77,6 @@ impl FileAnalysis {
                     preamble_end: _preamble_end, // an editing aid
                     imports_bind_names: _imports_bind_names, // pack-wide convention
                     doc_mentions: _doc_mentions, // a file-local lint fact
-                    types_are_capitalized: _types_are_capitalized, // pack-wide convention
                     enum_members: _enum_members, // pack-wide convention
                     constructor_names: _constructor_names, // LangPack-wide convention, identical across the pack's files
                     specializes: _specializes,       // family edges; the file re-registers on its own rebuild even when Unchanged

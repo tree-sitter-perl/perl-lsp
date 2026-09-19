@@ -542,9 +542,14 @@ fn cpp_splice_remaps_import_sites() {
         end: Point { row: 1, column: tcol + 4 },
     };
     let mut skel = crate::build::query_extract::SkeletonAnalysis::default();
-    skel.import_sites.push(("tail.h".to_string(), sp));
+    skel.import_sites.push(crate::model::file_analysis::ImportRow {
+        span: sp,
+        raw: "tail.h".to_string(),
+        binds: Default::default(),
+        bound: None,
+    });
     remap_spans(&mut skel, &rewritten, &src, &map);
-    let got = skel.import_sites[0].1;
+    let got = skel.import_sites[0].span;
     assert_eq!(
         ((got.start.row, got.start.column), (got.end.row, got.end.column)),
         ((1, 16), (1, 20)),
