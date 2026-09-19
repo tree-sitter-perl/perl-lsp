@@ -792,6 +792,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // ---- the state machine: scope stack + sticky contexts ----
     let mut out = SkeletonAnalysis::default();
     out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
+    out.spellings = Some(pack.spellings);
     out.runtime_bound_reads = std::mem::take(&mut runtime_bound_reads);
     out.member_writes = std::mem::take(&mut member_writes);
     out.names = pack.names.clone();
