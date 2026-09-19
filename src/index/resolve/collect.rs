@@ -936,28 +936,40 @@ pub(super) fn collect_from_analysis(
         })
         .collect();
 
-    // Pack languages: name lookups during matching (invocant typing, the
-    // typedef chase) must resolve against THIS file's include closure — the
-    // same visibility goto-def uses at this file's cursors — or a scanned
-    // file's `o->op_type` types against a globally-arbitrary same-named
-    // candidate and the site silently drops out. Transparent for Perl
-    // (empty closure = the plain index).
+    // Name lookups during matching (invocant typing, the typedef chase)
+    // resolve against THIS file's own visibility — the same rule goto-def
+    // uses at this file's cursors — or a scanned file's `o->op_type` types
+    // against a globally-arbitrary same-named candidate and the site
+    // silently drops out. `for_origin` owns the derivation for every
+    // language: an include-closure pack scopes by its closure, a name-keyed
+    // pack (php) by its OWN use-map (`$c->pick()` in a file that `use`s
+    // `B\Collection` types against B's class, never the same-leaf stranger
+    // the plain index would hand back first), Perl by its search path.
     let scoped_storage: Option<crate::model::file_analysis::ScopedLookup>;
     let module_index: Option<&dyn CrossFileLookup> = match module_index {
-        Some(idx) if !analysis.pack.include_closure.is_empty() => {
+        Some(idx) => {
             let path = key_for_sort(key);
-            // Guarded by a non-empty include closure — a pack-only shape.
+            let axis = crate::util::ghost_stats::timed("refs.visibility_axis", || {
+                crate::model::file_analysis::VisibilityAxis::for_origin(
+                    analysis,
+                    Some(path.as_path()),
+                    idx,
+                    crate::build::language_driver::LanguageRegistry::pack_visibility(
+                        &analysis.language,
+                    ),
+                )
+            });
             scoped_storage = Some(crate::model::file_analysis::ScopedLookup::new(
                 idx,
                 &analysis.pack.include_closure,
                 Some(path.as_path()),
-                crate::model::file_analysis::VisibilityAxis::IncludeClosure,
+                axis,
             ));
             // SAFETY: scoped_storage was just set to Some(..) on the line above,
             // in this same match arm — a lifetime-extension idiom, not a fallible read.
             Some(scoped_storage.as_ref().unwrap() as &dyn CrossFileLookup)
         }
-        other => other,
+        None => None,
     };
 
     // Package globals match by package + (qualified) name, not the callable
