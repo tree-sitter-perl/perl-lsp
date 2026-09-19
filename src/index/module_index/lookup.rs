@@ -299,6 +299,10 @@ impl ModuleIndex {
 /// recursion); the generic inherent iterators accept the `&mut dyn FnMut`
 /// trampolines directly.
 impl CrossFileLookup for ModuleIndex {
+    fn rail_names(&self, rail: &str) -> Vec<String> {
+        ModuleIndex::rail_names(self, rail)
+    }
+
     fn resolution_epoch(&self) -> u64 {
         // The same additive counter the enrichment-key memo validates
         // against — one home for "has anything a cross-file read depends
