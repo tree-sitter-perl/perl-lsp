@@ -1110,8 +1110,17 @@ pub(super) fn collect_from_analysis(
         // whole path in `target_name`; match it on the bare callable tail (the
         // dispatch-class checks in the call arms below still pin the right
         // package/class). A member value read matches on the same tail.
+        // A class token (a `PackageRef`) references the target iff the
+        // spelling NAMES the target's identity — the file's use-map resolves
+        // it, so `use B\Collection; new Collection()` reaches `B\Collection`
+        // and never the same-leaf stranger. A language whose spellings are
+        // identities compares them verbatim. Every other ref kind matches by
+        // exact name.
+        let spelled_identity = || analysis.spelled_identity(r);
         let name_matches = if matches!(r.kind, RefKind::FunctionCall { .. }) || r.member_site().is_some() {
             r.unqualified_target_name(analysis.names()) == target.name
+        } else if matches!(r.kind, RefKind::PackageRef) {
+            r.target_name == target.name || spelled_identity() == target.name
         } else {
             r.target_name == target.name
         };
