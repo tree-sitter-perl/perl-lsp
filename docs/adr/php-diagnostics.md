@@ -49,6 +49,46 @@ target reaches a stored member only where the owner declares no callable
 of that name, which is what keeps an Eloquent `$chapter->book` pointing at
 `book()` while a class that declares both keeps them apart.
 
+## The code set
+
+Every code this adapter can mint is a `const` in
+`lsp/symbols/diagnostics.rs::codes`, spelled once. Clients filter and
+configure on these strings, and the per-file yield counters key on them,
+so a literal at a mint site is a typo away from both a code nobody can
+configure against and a silently separate metric bucket.
+
+| constant | code |
+|---|---|
+| `UNRESOLVED_FUNCTION` | `unresolved-function` |
+| `UNRESOLVED_METHOD` | `unresolved-method` |
+| `RESOLVED_BY_WIDENING` | `resolved-by-widening` |
+| `UNDEF_DEREF` | `undef-deref` |
+| `OPTIONAL_DEREF` | `optional-deref` |
+| `DEREF_SHAPE_MISMATCH` | `deref-shape-mismatch` |
+| `ROLE_REQUIRES_UNFULFILLED` | `role-requires-unfulfilled` |
+| `HELPER_NOT_LOADED` | `helper-not-loaded` |
+| `UNRESOLVED_DISPATCH` | `unresolved-dispatch` |
+| `UNKNOWN_HASH_KEY` | `unknown-hash-key` |
+| `UNDEFINED_PROPERTY` | `undefined-property` |
+| `NON_PUBLIC_ACCESS` | `non-public-access` |
+| `ARITY_MISMATCH` | `arity-mismatch` |
+| `UNDEFINED_VARIABLE` | `undefined-variable` |
+| `UNUSED_VARIABLE` | `unused-variable` |
+| `UNUSED_IMPORT` | `unused-import` |
+| `UNDEFINED_TYPE` | `undefined-type` |
+| `UNIMPLEMENTED_METHOD` | `unimplemented-method` |
+| `MISSING_RETURN_TYPE` | `missing-return-type` |
+| `DEPRECATED` | `deprecated` |
+| `USE_AFTER_MOVE` | `use-after-move` |
+| `UNDEFINED_RAIL_NAME` | `undefined-rail-name` |
+
+A rail's findings carry the code its own document declares — `"codes": {
+"view": "undefined-view" }` in `laravel.rails.json`, data beside the
+rail's label, validated by `--plugin-check`. A rail that declares none
+reports under `undefined-rail-name` with the rail in the diagnostic's
+`data`, so the set a client sees is closed either way: a declared string
+a human wrote and a linter checked, or the one generic constant.
+
 ## Silence rules (precision first)
 
 Every lane names the case it cannot see and stays silent there:
