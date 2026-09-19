@@ -619,11 +619,12 @@ impl FileAnalysis {
     /// typeglob installs, and plugin bridges from other files.
     /// `admitted` is the WALK's fallback slot, not this pass's: a
     /// declaration of the family the ask NAMES beats one the family merely
-    /// admits, and the ADR's contract is that the loser is held as the
-    /// fallback THE WALK returns only when nothing else does
-    /// (`docs/adr/member-kinds.md`). Keeping it per class ended the walk on
-    /// the first class with a wrong-family hit, so a parent's genuine
-    /// same-family declaration was never reached.
+    /// admits — with both sides strict, only a `CALLABLE_VALUE` slot — and
+    /// the ADR's contract is that the loser is held as the fallback THE
+    /// WALK returns only when nothing else does (`docs/adr/member-kinds.md`).
+    /// Keeping it per class ended the walk on the first class with a
+    /// wrong-family hit, so a parent's genuine same-family declaration was
+    /// never reached.
     fn method_resolution_on_class(
         &self,
         cls: &str,
@@ -661,7 +662,7 @@ impl FileAnalysis {
             };
             // A re-export (`using Base::m;`) is API surface, not a def —
             // fall through so the walk reaches the origin ancestor.
-            if member_kind && want.admits_decl(sym.kind) && !sym.is_reexport() && self.symbol_in_class(sid, cls) {
+            if member_kind && want.admits_decl(sym.kind, sym.flags) && !sym.is_reexport() && self.symbol_in_class(sid, cls) {
                 let hit = MethodResolution::Local { class: cls.to_string(), sym_id: sid };
                 if MemberKind::of_sym(sym.kind) == want {
                     return Some(hit);
@@ -677,7 +678,7 @@ impl FileAnalysis {
                 if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
                 // A synthesized entity is a callable; a value ask must not
                 // answer with one (the same family rule as the local arm).
-                if !want.admits_decl(sym.kind) { continue; }
+                if !want.admits_decl(sym.kind, sym.flags) { continue; }
                 if sym.name == method_name {
                     return Some(MethodResolution::Local { class: cls.to_string(), sym_id: *sym_id });
                 }
@@ -747,7 +748,7 @@ impl FileAnalysis {
                     s.name == method_name
                         && s.package.as_deref() == Some(cand_cls.as_str())
                         && !s.is_reexport()
-                        && want.admits_decl(s.kind)
+                        && want.admits_decl(s.kind, s.flags)
                         && (matches!(s.kind, SymKind::Sub | SymKind::Method)
                             || (matches!(
                                 s.kind,
@@ -799,7 +800,7 @@ impl FileAnalysis {
             }
             // Both remaining arms install a SUB — a typeglob assignment and
             // a plugin bridge — so a VALUE ask never answers from either.
-            if !want.admits_decl(SymKind::Sub) {
+            if !want.admits_decl(SymKind::Sub, SymbolFlags::empty()) {
                 return None;
             }
             // Cross-package typeglob install: the method is attributed to `cls`
@@ -948,8 +949,8 @@ impl FileAnalysis {
         let mut result: Option<MethodResolution> = None;
         let mut iface_fallback: Option<MethodResolution> = None;
         // The wrong-family fallback is the WALK's, beside the interface one:
-        // a `public $handler` on the cursor's class must not end the walk
-        // before a parent's `function handler()` answers a call.
+        // a function-pointer `read` on the cursor's class must not end the
+        // walk before a parent's real `read()` answers the call.
         let mut admitted: Option<MethodResolution> = None;
         self.for_each_ancestor_class(class_name, module_index, |cls| {
             match self.method_resolution_on_class(cls, method_name, module_index, want, &mut admitted) {

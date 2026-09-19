@@ -615,18 +615,20 @@ int lam() { auto f = [&]{ return inner_; }; return f(); } };\n";
 // whatever the class declares.
 // A C callback member (`int (*read)(char *)`) is a stored slot the source
 // CALLS. The declarator says so — the peel's `@deref.callable` level mints
-// `SymbolFlags::CALLABLE_VALUE` — while a plain `int count` states nothing
-// of the kind. The rule is on the declaration, never on a list of callback
-// names.
+// `SymbolFlags::CALLABLE_VALUE` — so `ops->read(buf)` resolves to the slot
+// while a call on a plain `int count` still resolves to nothing. The rule is
+// on the declaration, never on a list of callback names.
 #[cfg(feature = "cpp")]
 #[test]
-fn a_callback_member_declares_its_slot_invoked() {
+fn a_callback_member_answers_a_call_and_a_plain_one_does_not() {
     use crate::model::file_analysis::{SymKind, SymbolFlags};
     let src = "\
 struct Ops {\n\
   int (*read)(char *buf);\n\
   int count;\n\
-};\n";
+};\n\
+int a(struct Ops *o) { return o->read(\"x\"); }\n\
+int b(struct Ops *o) { return o->count(1); }\n";
     let fa = cpp_driver().analyze(src);
     let field = |name: &str| {
         fa.symbols()
@@ -641,6 +643,20 @@ struct Ops {\n\
     assert!(
         !field("count").flags.contains(SymbolFlags::CALLABLE_VALUE),
         "a plain int member states nothing of the kind"
+    );
+    let at = |row: usize, needle: &str| {
+        let line = src.lines().nth(row).unwrap();
+        tree_sitter::Point { row, column: line.find(needle).unwrap() }
+    };
+    assert_eq!(
+        fa.find_definition(at(4, "read("), None),
+        Some(field("read").selection_span),
+        "the call lands on the callback member"
+    );
+    assert_eq!(
+        fa.find_definition(at(5, "count("), None),
+        None,
+        "a call on a non-callable slot resolves to nothing"
     );
 }
 
