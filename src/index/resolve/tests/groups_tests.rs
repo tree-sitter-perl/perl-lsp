@@ -1193,6 +1193,7 @@ fn test_event_handler_refs_mark_folded_site_non_rewritable() {
         TargetKind::Handler {
             owner: crate::model::file_analysis::HandlerOwner::Class("App".to_string()),
             name: "connect".to_string(),
+            names: crate::model::file_analysis::RailNames::Strings,
         },
     );
     assert!(target.supports_cross_file_rename(), "Handler renames cross-file now");

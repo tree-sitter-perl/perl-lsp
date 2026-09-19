@@ -562,7 +562,7 @@ impl<'a> CandidateSet<'a> {
         // plain string literal. See `docs/adr/receiver-gated-dispatch.md`.
         if let Some(idx) = self.idx() {
             if let Some(applied) = analysis.dispatch_at(point, Some(idx)) {
-                let locs = dispatch_handler_locations(&applied.owner, &applied.name, idx);
+                let locs = dispatch_handler_locations(&applied.owner, applied.owner.names_are(&self.origin.pack), &applied.name, idx);
                 if !locs.is_empty() {
                     return locs;
                 }
@@ -903,7 +903,7 @@ impl<'a> CandidateSet<'a> {
             // one file jumps to `$producer->on('ready', sub)` in another.
             // Stacked registrations all surface (multi-location picker).
             if let (RefKind::DispatchCall { .. }, Some(owner)) = (&r.kind, r.handler_owner()) {
-                let locs = dispatch_handler_locations(owner, &r.target_name, idx);
+                let locs = dispatch_handler_locations(owner, owner.names_are(&analysis.pack), &r.target_name, idx);
                 if !locs.is_empty() {
                     return locs;
                 }

@@ -621,7 +621,7 @@ pub(super) fn symbol_defines_target(
         // already collect it) — internal-key members contribute access
         // sites only, no decl matching here.
         TargetKind::InternalHashKey { .. } => false,
-        TargetKind::Handler { owner, name: hname } => {
+        TargetKind::Handler { owner, name: hname, .. } => {
             sym.name == *hname
                 && matches!(
                     &sym.detail,
@@ -998,7 +998,13 @@ pub(super) fn collect_from_analysis(
         TargetKind::Sub { .. } | TargetKind::Method { .. } => (true, false),
         _ => (false, false),
     };
+    // Whether this target's spans hold its own name at all is the target's
+    // policy (`sites_are_rewritable`); the fold is per-site.
+    let sites_rewritable = target.sites_are_rewritable();
     let rewritable_at = |span: Span| -> Rewritable {
+        if !sites_rewritable {
+            return Rewritable::No(NotRewritable::RailEmission);
+        }
         if let Some(other) =
             foldable.then(|| folded_name_at(analysis, span, folds_through_calls, &target.name)).flatten()
         {
@@ -1344,7 +1350,7 @@ pub(super) fn collect_from_analysis(
                         if c == class || analysis.class_isa(c, class, module_index)
                 )
             }
-            (TargetKind::Handler { owner, name: hname },
+            (TargetKind::Handler { owner, name: hname, .. },
              RefKind::DispatchCall { .. }) => {
                 r.target_name == *hname
                     && matches!(r.handler_owner(), Some(o) if o == owner)
@@ -1393,7 +1399,7 @@ pub(super) fn collect_from_analysis(
     // any file that's never enriched. `applicable_dispatches` skips sites the
     // emit-hook path already materialized above, so no double-count.
     // See `docs/adr/receiver-gated-dispatch.md`.
-    if let TargetKind::Handler { owner, name: hname } = &target.kind {
+    if let TargetKind::Handler { owner, name: hname, .. } = &target.kind {
         for applied in analysis.applicable_dispatches(module_index) {
             if &applied.name == hname && &applied.owner == owner {
                 out.push(RefLocation {
