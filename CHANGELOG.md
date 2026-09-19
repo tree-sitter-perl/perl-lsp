@@ -326,6 +326,56 @@ templates). Market case and build-out plan in `docs/prompt-php-target.md`.
   member, never a local; `...$args` declares its parameter; a variable
   inside `isset` / `empty` / `unset` is the existence question. composer:
   35 undefined-variable rows → 0; WordPress 24 → 2.
+- **Laravel route names are a rail.** `Route::get(…)->name('home')`
+  declares the name, `route('home')`, `to_route`, `redirect()->route`,
+  `URL::route` and `Route::has` use it: goto-definition, references and
+  rename connect them across files, and `undefined-route` warns on a
+  name no routes file declares. A rail is a named flat handler namespace
+  (`HandlerOwner::Rail`, declared by the overlay capture's suffix), so a
+  route name and a same-spelled WordPress hook or view name never
+  connect. Handler names — a hook, a route — now reach the reverse
+  index from classless files (a routes file declares no class), which
+  also makes WordPress hook navigation work across files. Blade
+  templates are text to the grammar, so their `route('x')` uses are
+  scanned as a text rail (`laravel.rails.json`) into the same refs.
+- **The Laravel event bus is a graph.** `event(new X)`, `X::dispatch()`,
+  `Anything::dispatch(new Job)`, `broadcast(new X)` emit; a listener's
+  `handle(X $e)`, a `$listen` map row, `Event::listen(X::class, …)` and
+  a job's own `handle()` register — on a class-keyed rail whose names
+  are the event classes. Goto-definition on the emission's class token
+  lists the class and every handler; call hierarchy on a listener's
+  `handle` counts the emissions as incoming calls; `undefined-event`
+  hints "No listener for event 'X'" on an emission nothing answers.
+  The rail is never renamed — the class rename owns the name.
+- **Views, config keys and translation keys are rails defined by
+  files.** A Blade template defines its view name from its path
+  (`resources/views/a/b.blade.php` → `a.b`), a config file's array keys
+  define dotted keys (`config/app.php` → `app.mail.from`), a lang file's
+  keys define translation keys per locale; `view('a.b')`, `@extends`,
+  `@include`, `config('app.name')`, `Config::get`, `__('auth.failed')`,
+  `trans`, `@lang` use them — goto-definition lands on the template or
+  the key row, references list every use (templates included), and
+  `undefined-view` / `undefined-config` / `undefined-lang` name what no
+  file defines. A translation string with spaces is a JSON-file string,
+  never a key path.
+- **Gates, middleware aliases and container bindings are rails.** A
+  kernel's `$middlewareAliases` / `$middlewareGroups`, `$middleware->alias([…])`,
+  `Route::aliasMiddleware` and the framework's defaults define middleware
+  names; `->middleware('throttle:60,1')` names `throttle` (the parameter
+  separator ends the name). `Gate::define('x')` and every policy method
+  under `app/Policies/` define abilities; `->authorize`, `->can`,
+  `Gate::allows` and Blade `@can` use them. `->singleton('key')` / `->bind`
+  / `->instance` define container bindings; `app('key')`, `resolve`,
+  `App::make` use them. `app(Foo::class)` / `resolve(Foo::class)` /
+  `->make(Foo::class)` IS a Foo, so a chain off it navigates. Misses on
+  these rails are hints (`undefined-middleware` / `-ability` / `-binding`)
+  — their definitions are partly runtime-only.
+- **Rail names complete inside the string.** `route('|')`, `view('pa|')`,
+  `config('app.|')`, `__('auth.|')`, `->middleware('|')`, `->authorize('|')`,
+  `app('|')` and a template's `@extends('|')` / `@include('|')` offer the
+  rail's declared names across the project, each edit replacing the whole
+  string content. The contract for every Laravel rail is
+  `docs/adr/laravel-rails.md`.
 
 ### Storage engine — warm starts, bounded memory
 
