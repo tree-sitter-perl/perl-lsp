@@ -45,6 +45,11 @@ pub struct SkelSymbol {
     /// same `@arity.sig` list as `arity` and flowed to `SymbolDetail::Sub`.
     /// Empty for non-callables and for a signature the query didn't capture.
     pub params: Vec<crate::model::file_analysis::ParamInfo>,
+    /// The other symbol this ONE declaration token minted (php's promoted
+    /// constructor property and its parameter). Minted as a pair where the
+    /// query captures both, so no consumer re-derives the relation from
+    /// spans (`Symbol::declared_with`, rule #11).
+    pub declared_with: Option<crate::model::file_analysis::SymbolId>,
     /// The `package` came from an explicit `::` qualifier on an out-of-line def
     /// (`Ret Class::m(){}`), not from lexical/sticky context. The class the
     /// qualifier names is authoritative EVEN when its body lives in another file
@@ -626,6 +631,25 @@ impl SkeletonAnalysis {
                 }
             }
         }
+        // A co-declared pair on ONE token is ONE entry in a listing: an
+        // Eloquent relation's property stands on its method's own name
+        // token, so the outline shows the method — the rule `CLASS_RAIL`
+        // applies to a rail handler sitting on another symbol's token. The
+        // promoted-ctor pair is not this shape (neither half is callable).
+        let twin_hidden: std::collections::HashSet<usize> = self
+            .symbols
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !matches!(s.kind.as_str(), "method" | "sub"))
+            .filter(|(_, s)| {
+                s.declared_with.is_some_and(|t| {
+                    self.symbols.get(t.0 as usize).is_some_and(|o| {
+                        matches!(o.kind.as_str(), "method" | "sub") && o.name_start == s.name_start
+                    })
+                })
+            })
+            .map(|(i, _)| i)
+            .collect();
         let mut symbols: Vec<Symbol> = self
             .symbols
             .iter()
@@ -698,8 +722,9 @@ impl SkeletonAnalysis {
                     // stamped here so warm stub rebuilds mint it identically.
                     // A class-rail handler sits on another symbol's token (a
                     // listener's `handle`); the outline shows that one.
-                    hide_in_outline: symbol_flags_of(&s.kind, &s.attributes)
-                        .intersects(SymbolFlags::INCLUDE_GUARD | SymbolFlags::CLASS_RAIL),
+                    hide_in_outline: twin_hidden.contains(&i)
+                        || symbol_flags_of(&s.kind, &s.attributes)
+                            .intersects(SymbolFlags::INCLUDE_GUARD | SymbolFlags::CLASS_RAIL),
                     deprecation: None,
                     doc: None,
                     display: None,
@@ -722,7 +747,7 @@ impl SkeletonAnalysis {
                     a
                 },
                 flags: symbol_flags_of(&s.kind, &s.attributes) | s.flags,
-                declared_with: None,
+                declared_with: s.declared_with,
                 deref_stack: s.deref_stack.clone(),
                 arity: s.arity,
             })
