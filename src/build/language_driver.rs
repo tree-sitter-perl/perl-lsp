@@ -186,6 +186,9 @@ pub trait LanguageDriver: Send + Sync {
 /// asserts the verb surface and regressions are caught; `Beta` = broad gold
 /// coverage, known gaps documented; `Alpha` = it parses and answers, with
 /// little or no net watching it — expect wrong answers.
+// The pack drivers that construct `Beta`/`Alpha` are feature-gated, so a
+// default (Perl-only) build sees only `Stable`.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Maturity {
     Stable,
@@ -1031,15 +1034,6 @@ fn apply_attribute_macros(fa: &mut FileAnalysis, recovered: &[(String, String)])
     }
 }
 
-/// Inject the member-block synthetic bases + parent edges into the extracted
-/// skeleton (`docs/adr/macro-handling.md`, "Member-block macros = roles"). The
-/// macro's own `#define` symbol is reclassified Variable → Class (the navigable
-/// base), members are minted under it (package = the macro), and each member
-/// re-sources the SAME `TypeName` edge the expanded field would have. The
-/// existing ancestor walk (`resolve_method_in_ancestors` / `parents_of`) then
-/// delivers `o->op_type` resolution / hover / the references splat — no parallel
-/// field resolution. Spans are already in ORIGINAL coordinates.
-#[cfg(feature = "pack-langs")]
 /// Type each function-like macro from its body: delegation (`#define F(x)
 /// G(x)`) reuses the see-through target as a value edge, else a param-
 /// independent body type (`#define SQ(x) ((x)*(x))` → Numeric). First def wins
@@ -1079,6 +1073,14 @@ fn macro_return_hints(
     out
 }
 
+/// Inject the member-block synthetic bases + parent edges into the extracted
+/// skeleton (`docs/adr/macro-handling.md`, "Member-block macros = roles"). The
+/// macro's own `#define` symbol is reclassified Variable → Class (the navigable
+/// base), members are minted under it (package = the macro), and each member
+/// re-sources the SAME `TypeName` edge the expanded field would have. The
+/// existing ancestor walk (`resolve_method_in_ancestors` / `parents_of`) then
+/// delivers `o->op_type` resolution / hover / the references splat — no parallel
+/// field resolution. Spans are already in ORIGINAL coordinates.
 #[cfg_attr(not(feature = "cpp"), allow(dead_code))]
 fn inject_member_blocks(
     skel: &mut crate::build::query_extract::SkeletonAnalysis,
@@ -1127,6 +1129,7 @@ fn inject_member_blocks(
             // tell a macro-pasted member from a directly-declared one (rule #10).
             skel.symbols.push(SkelSymbol {
                 declared_with: None,
+                return_annotation: None,
                 kind: "field".to_string(),
                 name: m.name.clone(),
                 start: m.name_span.start,
@@ -1136,7 +1139,6 @@ fn inject_member_blocks(
                 package: Some(base.macro_name.clone()),
                 scope: scope_id,
                 declared_return: None,
-                return_annotation: None,
                 deref_stack: m.deref_stack.clone(),
                 attributes: Vec::new(),
                 arity: None,
