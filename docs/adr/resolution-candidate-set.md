@@ -1,7 +1,7 @@
 # ADR: The resolution CandidateSet — one semantic core, features as projections
 
-Status: accepted. The one resolution entry point is
-`resolve.rs::CandidateSet`; every feature is a projection of it.
+The one resolution entry point is `resolve.rs::CandidateSet`; every
+feature is a projection of it.
 
 ## Context: the recurring asymmetry disease
 
@@ -92,10 +92,10 @@ identifier candidates come from the same masked universe the navigation
 verbs walk. The audit's gold *pairs* remain as the verification net —
 pairs verify, the seam prevents.
 
-## Completion: what moved, and the honest boundary
+## Completion: sources on the set, and the honest boundary
 
-The migration moved the candidate **sources** — where names come from —
-not the slot logic. Sources now on the set: in-scope names
+The CandidateSet owns the candidate **sources** — where names come
+from — never the slot logic. Sources on the set: in-scope names
 (`complete_general`, OPEN), explicitly imported names (origin's `use`
 lists, OPEN — the dep cache only enriches detail), imported modules'
 remaining export surfaces and the unimported auto-import firehose
