@@ -1911,6 +1911,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     (crate::model::file_analysis::Span { start: e.start, end: e.end }, text),
                 );
             }
+            // A call whose callee makes its ENCLOSING callable read
+            // arguments it never declared, or materialize variables no
+            // declaration names. Recorded against the call's scope; the
+            // scope chain names the callable, so the fact lands on the
+            // callable's own symbol (rule #14).
+            "call.dynamic_args" => out.dynamic_markers.push((
+                cur_scope,
+                crate::model::file_analysis::SymbolFlags::DYNAMIC_ARGS,
+            )),
+            "call.dynamic_vars" => out.dynamic_markers.push((
+                cur_scope,
+                crate::model::file_analysis::SymbolFlags::DYNAMIC_VARS,
+            )),
             "member.op" => {
                 // The operator the document NAMED at this span
                 // (`@member.op.arrow` / `.dot`). An operator the document
@@ -2100,6 +2113,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // (the receiver is still this object); the ref span
                     // stays the bare name token, so rename rewrites only
                     // the name.
+                    // A call of a name the pack declares a dynamic-argument
+                    // or dynamic-variable marker makes its ENCLOSING callable
+                    // one. Recorded against the call's scope; the skeleton's
+                    // scope chain names the callable, so the fact lands on the
+                    // callable's own symbol instead of waiting for a consumer
+                    // to join spans (rule #14).
                     let super_recv = e.cap == "ref.member" && super_recv_matches.contains(&e.match_id);
                     out.refs.push(SkelRef {
                         via: None,
