@@ -1773,6 +1773,52 @@ impl LanguageRegistry {
             .unwrap_or(&crate::model::file_analysis::NEUTRAL_SPELLINGS)
     }
 
+    /// The literals `id`'s query document requires `capture` to equal — the
+    /// `#eq?` / `#any-of?` set beside it (`receiver.self`, `receiver.this`,
+    /// …). The document is the one home for a language's small closed
+    /// keyword sets (rule #15), so a consumer that needs the SET reads it
+    /// back off the compiled query rather than keeping a table. Empty for a
+    /// language with no pack, and before that pack has analysed one file —
+    /// which for a consumer holding one of its analyses cannot happen.
+    pub fn pack_capture_literals(
+        id: &str,
+        capture: &str,
+    ) -> &'static std::collections::HashSet<&'static str> {
+        static EMPTY: std::sync::OnceLock<std::collections::HashSet<&'static str>> =
+            std::sync::OnceLock::new();
+        static PACKS: std::sync::OnceLock<
+            Vec<(&'static str, crate::build::query_extract::LangPack)>,
+        > = std::sync::OnceLock::new();
+        let registry = LanguageRegistry::with_enabled();
+        PACKS
+            .get_or_init(|| {
+                registry.drivers.iter().filter_map(|d| d.lang_pack().map(|p| (d.id(), p))).collect()
+            })
+            .iter()
+            .find(|(l, _)| *l == id)
+            .and_then(|(_, pack)| {
+                // The extractor's own object once this language has analysed
+                // anything; otherwise compile it here, through the same memo,
+                // so the answer never depends on what ran first.
+                crate::build::query_extract::pack_query(pack).or_else(|| {
+                    let language = registry.for_id(id)?.make_parser().language()?.clone();
+                    crate::build::query_extract::query_for(&language, pack)
+                })
+            })
+            .map(|q| crate::build::query_extract::capture_literals(q, capture))
+            .unwrap_or_else(|| EMPTY.get_or_init(Default::default))
+    }
+
+    /// How `id` spells the object the enclosing method runs on (`$this`,
+    /// `this`, a `self`/`cls` parameter) — the receiver captures' own
+    /// literals.
+    pub fn receiver_tokens(id: &str) -> Vec<&'static str> {
+        Self::pack_capture_literals(id, "receiver.this")
+            .iter()
+            .chain(Self::pack_capture_literals(id, "param.receiver").iter())
+            .copied()
+            .collect()
+    }
     pub fn pack_visibility(id: &str) -> crate::model::file_analysis::PackVisibility {
         use crate::model::file_analysis::PackVisibility;
         match LanguageRegistry::with_enabled().for_id(id).and_then(|d| d.lang_pack()) {
