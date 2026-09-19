@@ -274,11 +274,11 @@ pub struct SkeletonAnalysis {
     /// name yields NO witness (no name-case guess — `docs/adr/macro-handling.md`).
     pub call_sites: Vec<(Span, String)>,
     /// `return EXPR;` sites (`@expr.return.value`): (enclosing scope, the
-    /// returned expression's span). Purely structural — this tier doesn't
-    /// know what a `return` MEANS for any given language; the interpretation
+    /// returned expression's span). Purely structural — the EXTRACTOR does
+    /// not know what a `return` means for any given language; the reading
     /// (join to an owning function, decide whether it needs implicit-return
-    /// fuel) is cpp-specific and lives in `language_driver.rs`'s post-
-    /// extraction pipeline (`emit_return_fuel`).
+    /// fuel) happens in `into_file_analysis`, where the symbol table and the
+    /// bag are both in hand and still ahead of the enrichment baseline.
     pub return_sites: Vec<(crate::model::file_analysis::ScopeId, Span)>,
     /// Scopes in which a call to one of the pack's dynamic-argument /
     /// dynamic-variable marker names appeared, with the flag that call
@@ -661,7 +661,7 @@ impl SkeletonAnalysis {
             });
         }
         let mut bag = crate::model::witnesses::WitnessBag::default();
-        for w in self.witnesses {
+        for w in std::mem::take(&mut self.witnesses) {
             bag.push(w);
         }
         // Associate each callable def with its parameter arity: the def's OWN

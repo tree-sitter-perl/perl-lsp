@@ -2666,9 +2666,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // The returned expression's own general-rule witness (literal
                 // / var-read / member / call — whichever matched this same
                 // node) already carries its type; this just records the site
-                // (scope + span) so `emit_return_fuel` (language_driver.rs,
-                // phase 7) can chain the enclosing function's `Symbol` onto it
-                // when undeclared.
+                // (scope + span) so assembly can chain the enclosing
+                // function's `Symbol` onto it when undeclared.
                 out.return_sites
                     .push((cur_scope, Span { start: e.start, end: e.end }));
             }
