@@ -2887,6 +2887,30 @@ $n = $u->name();
 }
 
 #[test]
+fn php_instanceof_narrows_within_the_guard() {
+    let src = "\
+<?php
+function f($x) {
+    if ($x instanceof User) {
+        $y = $x;
+    }
+    $z = $x;
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    // inside the guarded block: refined
+    let inside = tree_sitter::Point { row: 3, column: 8 };
+    assert_eq!(
+        fa.inferred_type_via_bag("$x", inside),
+        Some(InferredType::ClassName("User".into())),
+    );
+    // after the block: the refinement is gone
+    let after = tree_sitter::Point { row: 5, column: 4 };
+    assert_eq!(fa.inferred_type_via_bag("$x", after), None);
+}
+
+#[test]
 fn php_parent_edges_from_extends_implements_and_trait_use() {
     let src = "\
 <?php
@@ -4822,6 +4846,31 @@ fn php_destructuring_slots_bind_positionally() {
 }
 
 #[test]
+fn php_narrowing_guard_shapes() {
+    // instanceof narrows in every guard position a body can sit under: a
+    // namespace-qualified class token, an `elseif` arm, and either
+    // conjunct of `&&` — each mints a narrowing witness for the block.
+    use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+    let src = "<?php\nnamespace App;\nfunction f($a, $b, $c, $d): void {\n    if ($a instanceof Op\\Install) { $a->m(); }\n    if (is_null($b)) { return; } elseif ($b instanceof Install) { $b->m(); }\n    if ($c instanceof Install && $c->ok()) { $c->m(); }\n    if ($d->ok() && $d instanceof Install) { $d->m(); }\n}\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let narrowed = |v: &str, cls: &str| {
+        skel.witnesses.iter().any(|w| matches!(
+            (&w.attachment, &w.payload),
+            (WitnessAttachment::Variable { name, .. }, WitnessPayload::InferredType(InferredType::ClassName(c)))
+            if name == v && c == cls
+        ))
+    };
+    // the guard's class token resolves through the file's use-map: the
+    // relative qualifier hangs off the namespace, the bare leaf joins it
+    assert!(narrowed("$a", "App\\Op\\Install"), "$a narrowed to the qualified class");
+    for v in ["$b", "$c", "$d"] {
+        assert!(narrowed(v, "App\\Install"), "{v} narrowed to the class");
+    }
+}
+
+#[test]
 fn php_keyed_destructuring_binds_through_hash_keys() {
     use crate::model::file_analysis::Extraction;
     let src = "<?php\n['advisories' => $adv, \"count\" => $n] = f();\nforeach ($rows as ['k' => $v]) {}\n";
@@ -4936,6 +4985,29 @@ fn overlay_capture_findings_name_the_unhonourable_captures() {
     assert!(rail_of("ref.call.named").is_none());
     assert!(rail_of("def.handler.class.route").is_some_and(|(k, _)| k.is_handler()
         && k.is_class_named()));
+}
+
+/// A three-operand `&&` chain: the guard narrows every later operand, not
+/// only the second (`(A instanceof X && B) && C` nests left).
+#[cfg(feature = "php")]
+#[test]
+fn php_instanceof_narrows_later_operands_of_a_longer_and_chain() {
+    let src = "\
+<?php
+function f($p) {
+    if ($p instanceof User && !$p instanceof Alias && $p->getFunding()) {
+        return 1;
+    }
+}
+";
+    let (fa, _) = php_fa(src);
+    use crate::model::file_analysis::InferredType;
+    let third = tree_sitter::Point { row: 2, column: 55 };
+    assert_eq!(
+        fa.inferred_type_via_bag("$p", third),
+        Some(InferredType::ClassName("User".into())),
+        "the third operand holds under the guard",
+    );
 }
 
 
