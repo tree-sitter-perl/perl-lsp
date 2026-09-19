@@ -81,10 +81,6 @@ pub fn cpp_pack() -> LangPack {
             leaf_to_def: &[],
             record_stack: false,
         },
-        op_map: &[
-            ("->", crate::model::file_analysis::MemberOp::Arrow),
-            (".", crate::model::file_analysis::MemberOp::Dot),
-        ],
         simple_var_kinds: &["identifier"],
         // a templated qualifier (`Buf<T>::grow`) owns by its BASE class name
         member_kinds: &["field_expression"],
