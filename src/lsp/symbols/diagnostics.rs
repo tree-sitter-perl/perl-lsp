@@ -60,6 +60,13 @@ pub struct DiagnosticOptions {
     /// guaranteed runtime die. Guard-narrowed reps only; objects are never a
     /// mismatch. Off by default.
     pub deref_shape: bool,
+    /// Silence `doc-type-mismatch` (HINT): a docblock whose type no value can
+    /// share with the declared one on the same slot. On by default — the pair
+    /// is minted at the merge that already chose the declaration, so the lane
+    /// costs a list walk and reports only what the extractor could prove. The
+    /// inverse polarity of the other keys because a hint that needs opting in
+    /// is a hint nobody reads.
+    pub no_doc_type_mismatch: bool,
 }
 
 impl DiagnosticOptions {
@@ -76,6 +83,7 @@ impl DiagnosticOptions {
             optional_deref: has("--optional-deref"),
             redundant_guard: has("--redundant-guard"),
             deref_shape: has("--deref-shape"),
+            no_doc_type_mismatch: has("--no-doc-type-mismatch"),
         }
     }
 }
@@ -105,6 +113,26 @@ pub fn collect_diagnostics(
             message: pd.message.clone(),
             ..Default::default()
         });
+    }
+
+    // A docblock that contradicts the declaration it sits on: the merge kept
+    // the declaration and recorded the pair, so this renders two spellings it
+    // does not have to go looking for.
+    if !options.no_doc_type_mismatch {
+        for d in &analysis.pack.doc_disagreements {
+            diagnostics.push(Diagnostic {
+                range: span_to_range(d.span),
+                severity: Some(DiagnosticSeverity::HINT),
+                code: Some(NumberOrString::String("doc-type-mismatch".to_string())),
+                source: Some("perl-lsp".to_string()),
+                message: format!(
+                    "The docblock says '{}' where the declaration says '{}'; the declaration wins.",
+                    analysis.render_type(&d.documented),
+                    analysis.render_type(&d.declared),
+                ),
+                ..Default::default()
+            });
+        }
     }
 
     // Snapshot each `use` once: its bound set (local→remote) and, when the
