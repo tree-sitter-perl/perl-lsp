@@ -164,6 +164,10 @@ pub struct SkeletonAnalysis {
     /// is a macro parameter with no type, hence the class is frozen from the
     /// field decl rather than inferred from the (untypeable) invocant.
     pub macro_body_member_reads: Vec<(String, crate::model::file_analysis::Span)>,
+    /// The pack that produced this skeleton. Set on the analysis so a
+    /// consumer reaching a language's spellings by id (rule #14) finds them
+    /// on an analysis the driver has not stamped yet.
+    pub lang_id: &'static str,
     /// `@ref.var.implicit` — spans whose variable read the RUNTIME binds
     /// (php `$this`, the superglobals). The minted ref carries
     /// `RefBinding::Runtime`, so the undefined-variable lane never sees an
@@ -1630,6 +1634,10 @@ impl SkeletonAnalysis {
             flow_edges: std::mem::take(&mut self.flow_edges),
             ..Default::default()
         });
+        // The pack that built it. The driver stamps the same id; setting it
+        // here means an analysis produced without one still answers the
+        // by-language-id lookups (spellings, the document's own literals).
+        fa.language = self.lang_id.to_string();
         // Seal base_*_count so a later enrich pass (the CLI/--batch path
         // runs it unconditionally) truncates to the FULL analysis, not to
         // zero — otherwise enrichment wipes every pack-language symbol.

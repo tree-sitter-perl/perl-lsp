@@ -1290,6 +1290,7 @@ fn remap_spans(
         qualified_spellings: _,
         var_reads,
         label_refs,
+        lang_id: _,
         member_writes,
         import_rows,
         spellings: _,
