@@ -35,47 +35,8 @@ pub fn cpp_pack() -> LangPack {
             "unionfield" => Some("(union)"),
             _ => None,
         },
-        // C++ declared types ARE the witness source. Primitives → the
-        // value lattice; `auto`/`void` defer (None → edge carries);
-        // anything else identifier-shaped is a class instance.
-        annot_type: |text| {
-            use InferredType::*;
-            match text.trim() {
-                "int" | "long" | "short" | "unsigned" | "size_t" | "int32_t" | "int64_t"
-                | "uint32_t" | "uint64_t" | "double" | "float" | "char" => Some(Numeric),
-                "bool" => Some(Bool),
-                "std::string" | "string" | "std::string_view" => Some(String),
-                "auto" | "void" => None,
-                t => {
-                    // Elaborated type specifier `struct op` / `union u` /
-                    // `enum e` — the dominant C spelling (`struct op* o`).
-                    // The tag names the type; strip the keyword so it resolves
-                    // the same as the bare/typedef'd name.
-                    let tag = t
-                        .strip_prefix("struct ")
-                        .or_else(|| t.strip_prefix("union "))
-                        .or_else(|| t.strip_prefix("enum "))
-                        .unwrap_or(t)
-                        .trim();
-                    // A template spelling (`Box<Widget>`, `vector<int>`)
-                    // peels into the Instance flavor: dispatch keys the
-                    // BASE so members resolve through the plain-class
-                    // machinery; the args ride along for substitution.
-                    if let Some(p) =
-                        crate::model::file_analysis::ParametricType::instance_from_spelling(tag)
-                    {
-                        return Some(Parametric(p));
-                    }
-                    let typeish = !tag.is_empty()
-                        && !tag.contains(' ')
-                        && tag.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_');
-                    // Strip the namespace qualifier — classes/members are
-                    // keyed by the unqualified name (@context.class), so
-                    // `geo::Circle` must type as `Circle` to resolve.
-                    typeish.then(|| ClassName(tag.rsplit("::").next().unwrap_or(tag).to_string()))
-                }
-            }
-        },
+        annot_type: cpp_annot_type,
+        declared_return: |t| cpp_annot_type(t).map(crate::model::witnesses::ReturnExpr::Concrete),
         // #include "a/b.h" / <vector>: strip the delimiters; a quoted
         // path is workspace-relative verbatim, a system header resolves
         // through include dirs (library_roots, later). Tier 1: identity.
@@ -157,4 +118,46 @@ fn optional_inner(ty: &str) -> Option<String> {
         && !leaf.contains(' ')
         && leaf.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_'))
     .then(|| leaf.to_string())
+}
+
+/// C++ declared types ARE the witness source. Primitives → the value
+/// lattice; `auto`/`void` defer (None → the edge carries); anything else
+/// identifier-shaped is a class instance.
+fn cpp_annot_type(text: &str) -> Option<InferredType> {
+    use InferredType::*;
+    match text.trim() {
+        "int" | "long" | "short" | "unsigned" | "size_t" | "int32_t" | "int64_t"
+        | "uint32_t" | "uint64_t" | "double" | "float" | "char" => Some(Numeric),
+        "bool" => Some(Bool),
+        "std::string" | "string" | "std::string_view" => Some(String),
+        "auto" | "void" => None,
+        t => {
+            // Elaborated type specifier `struct op` / `union u` /
+            // `enum e` — the dominant C spelling (`struct op* o`).
+            // The tag names the type; strip the keyword so it resolves
+            // the same as the bare/typedef'd name.
+            let tag = t
+                .strip_prefix("struct ")
+                .or_else(|| t.strip_prefix("union "))
+                .or_else(|| t.strip_prefix("enum "))
+                .unwrap_or(t)
+                .trim();
+            // A template spelling (`Box<Widget>`, `vector<int>`)
+            // peels into the Instance flavor: dispatch keys the
+            // BASE so members resolve through the plain-class
+            // machinery; the args ride along for substitution.
+            if let Some(p) =
+                crate::model::file_analysis::ParametricType::instance_from_spelling(tag)
+            {
+                return Some(Parametric(p));
+            }
+            let typeish = !tag.is_empty()
+                && !tag.contains(' ')
+                && tag.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_');
+            // Strip the namespace qualifier — classes/members are
+            // keyed by the unqualified name (@context.class), so
+            // `geo::Circle` must type as `Circle` to resolve.
+            typeish.then(|| ClassName(tag.rsplit("::").next().unwrap_or(tag).to_string()))
+        }
+    }
 }
