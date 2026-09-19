@@ -1713,4 +1713,3 @@ fn php_undefined_variable_lane_reads_by_reference_parameters() {
     assert!(!unused.contains(&"$dm"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
-
