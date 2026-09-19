@@ -53,6 +53,29 @@ pub fn pack_completion(
     // projects it onto LSP items.
     let crate::lsp::cursor_slot::DetectedSlot { slot, .. } =
         crate::lsp::cursor_slot::detect_slot(analysis, tree, source, point, language, Some(xidx));
+    // A string on a rail: the rail's declared names — this file's own and
+    // every registered file's (the owner-tagged handler records) — filtered
+    // by the typed prefix, each item's edit replacing the whole string
+    // content (a client's word boundary never spans `.` / `-` / `/`).
+    if let crate::lsp::cursor_slot::Slot::RailName { rail, prefix, content } = &slot {
+        let cs = crate::index::resolve::resolve(
+            files,
+            analysis,
+            crate::index::file_store::FileKey::Path(
+                path.map(|p| p.to_path_buf()).unwrap_or_default(),
+            ),
+            point,
+            Some(base_idx),
+            crate::index::resolve::OverrideScope::default(),
+        );
+        let mut items: Vec<CompletionItem> = cs
+            .complete_rail_names(rail, prefix)
+            .into_iter()
+            .map(symbols::candidate_to_completion_item)
+            .collect();
+        symbols::retarget_items_to_span(&mut items, *content);
+        return (items, false);
+    }
     if let crate::lsp::cursor_slot::Slot::Member { receiver, .. } = &slot {
         if let Some(class) =
             receiver.receiver_type.as_ref().and_then(|ty| ty.class_name().map(|s| s.to_string()))
