@@ -200,7 +200,6 @@ pub struct SkeletonAnalysis {
     /// `@def.var.fn`; it drives the var unification pass in
     /// `into_file_analysis`.
     pub function_scoped_vars: bool,
-    /// The pack's constructor-method names, riding to `PackFacts`.
     /// The language's name spellings (`LangPack::names`), baked onto
     /// `PackFacts::names`.
     pub names: crate::model::file_analysis::NameSpellings,

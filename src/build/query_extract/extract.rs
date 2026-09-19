@@ -4407,11 +4407,6 @@ fn slot_key(list_text: &str, slot_offset: usize, arrow: &str) -> Option<String> 
     quoted.then(|| key[1..key.len() - 1].to_string())
 }
 
-/// Does a doc row get to type this (name, scope) slot? Yes when the syntax
-/// declared nothing (declared wins — docblocks drift), and ALSO when the doc
-/// is a `Sequence` refining a bare declared container (`array`/`iterable` —
-/// the spelling that cannot carry an element). The doc witness lands AFTER
-/// the declared one, so latest-wins reduction serves the refinement.
 /// The `@classattr.<flavor>` suffix a container-def carries when the query
 /// calls it an enumeration — the capture's own word, not the attribute
 /// string a consumer would otherwise compare.
@@ -4534,6 +4529,11 @@ fn local_ancestors(
     seen
 }
 
+/// Does a doc row's type get to stand beside the declared type of this
+/// (name, scope) slot? A doc NARROWS a declaration (a subclass of the declared
+/// class, a parametric over the declared container, a union arm) and never
+/// widens or contradicts it; the verdict is `DocVerdict`, and a contradiction
+/// is minted as a `DocDisagreement` for the mismatch lane instead of a witness.
 fn doc_admits(
     pack: &LangPack,
     annot_text_by_var: &std::collections::HashMap<
