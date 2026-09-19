@@ -286,6 +286,55 @@ pub struct MemberCompletionCtx {
     /// `op_fix` corrects it. `Slot::Member.op`'s pack-side answer
     /// (`docs/adr/cursor-slots.md`).
     pub op: crate::model::file_analysis::MemberOp,
+    /// A SCOPED access (`::` — no `.`/`->` token on the member node): the
+    /// class's constants and static members are what completes there.
+    pub scoped: bool,
+}
+
+
+/// What the pack's own document calls the receiver at a member access.
+/// The `@receiver.*` captures ARE the classification — a spelling that
+/// names the writing class, a bare class token, or an ordinary value — so
+/// the cursor path and the extractor answer from one source.
+enum PackReceiver {
+    /// `$this` / `this` / `self::` / `static::` — the class the cursor is in.
+    OwnClass,
+    /// A bare class token (`Foo::`, `App\Foo::`): its own spelling.
+    Class(String),
+    /// A value whose type the bag answers.
+    Value,
+}
+
+fn receiver_shape(
+    cfg: &crate::build::query_extract::LangPack,
+    member: Node,
+    receiver: Node,
+    patched: &str,
+) -> PackReceiver {
+    let Some(query) = query_at(receiver, cfg) else {
+        return PackReceiver::Value;
+    };
+    let src = patched.as_bytes();
+    // The receiver keyword is its OWN pattern (it is one node), so it
+    // answers rooted at the receiver; a class token rides the scoped-access
+    // pattern, which roots at the member node.
+    for (cap, node) in crate::build::query_extract::captures_at(query, receiver, src) {
+        if matches!(cap, "receiver.this" | "receiver.self") && node.id() == receiver.id() {
+            return PackReceiver::OwnClass;
+        }
+    }
+    for (cap, node) in crate::build::query_extract::captures_at(query, member, src) {
+        match cap {
+            "receiver.this" | "receiver.self" => return PackReceiver::OwnClass,
+            "receiver.class" => {
+                if let Ok(t) = node.utf8_text(src) {
+                    return PackReceiver::Class(t.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    PackReceiver::Value
 }
 
 pub fn member_completion_ctx_incremental(
@@ -318,11 +367,39 @@ pub fn member_completion_ctx_incremental(
     // Downstream projects `class_name()` without an index, so the
     // exact-spelling-vs-primary dispatch call (a spec class exists for
     // `formatter<int>`) is made HERE, while the index is in hand.
+    // A receiver spelled as the language's receiver keyword (`this`,
+    // `$this`) has no typeable value node — it IS the enclosing class,
+    // read off the cursor's scope chain: self-access member completion
+    // (privates included, inheritance-aware) instead of a scope dump.
+    let shape = receiver_shape(cfg, member, receiver, &patched);
     let receiver_type = resolve_node_type(receiver, cfg, &patched, analysis, module_index)
+        .or_else(|| {
+            // `$this->` / `this->` / `self::` / `static::` name the enclosing
+            // class: no typeable value node, the class comes off the cursor's
+            // scope chain.
+            if !matches!(shape, PackReceiver::OwnClass) {
+                return None;
+            }
+            let sc = analysis.scope_at(byte_to_point(src, cursor))?;
+            analysis
+                .enclosing_class_for_scope(sc)
+                .map(crate::model::file_analysis::InferredType::ClassName)
+        })
+        .or_else(|| {
+            // A bare class token (`Foo::`, `App\Foo::`) IS the class it
+            // spells, leaf-keyed like every class identity.
+            let PackReceiver::Class(txt) = &shape else { return None };
+            let leaf = match analysis.names().sep() {
+                Some(sep) => txt.rsplit(sep).next().unwrap_or(txt),
+                None => txt.as_str(),
+            };
+            (!leaf.is_empty()).then(|| crate::model::file_analysis::InferredType::ClassName(leaf.to_string()))
+        })
         .map(|t| analysis.refine_instance_dispatch(t, module_index));
     let op_fix = operator_fix(member, receiver, &patched, analysis, cfg);
     let op = typed_member_op(member, &patched);
-    Some(MemberCompletionCtx { receiver_type, op_fix, op })
+    let scoped = operator_token(member, &patched).is_none();
+    Some(MemberCompletionCtx { receiver_type, op_fix, op, scoped })
 }
 
 /// The domain-comparison completion context: the cursor sits after an
