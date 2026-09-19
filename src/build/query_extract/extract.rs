@@ -838,6 +838,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // any declaration's own name token (a property `$chunks`, a parameter).
     let mut not_a_read: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
     let mut def_name_ends: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // `@hoist` — the same match's def belongs to the PARENT of the scope
+    // the capture sits in (php's by-reference closure capture creates
+    // the variable in the enclosing scope).
+    let mut hoisted: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // `@member.write` — a member on the LEFT of an assignment (php's
     // dynamic property declaration site).
     let mut member_writes: Vec<Span> = Vec::new();
@@ -987,6 +991,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         if e.cap == "member.write" {
             member_writes.push(Span { start: e.start, end: e.end });
+        }
+        if e.cap == "hoist" {
+            hoisted.insert(e.match_id);
         }
         if let Some(prefix) = e.cap.strip_suffix(".anchor") {
             let kind = prefix.strip_prefix("def.").unwrap_or(prefix);
@@ -1860,6 +1867,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     pkg
                 };
                 let shaped = (pack.shape_name)(&format!("def.{kind}"), &name);
+                let def_scope = if hoisted.contains(&e.match_id) {
+                    out.scopes.get(cur_scope.0 as usize).and_then(|s| s.parent).unwrap_or(cur_scope)
+                } else {
+                    cur_scope
+                };
                 // A class-spec def carries its primary's name — the
                 // (spec, primary) family edge `Specializes` derives from.
                 if let Some(primary) = spec_primary_by_match.get(&e.match_id) {
@@ -1876,7 +1888,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     name_start,
                     name_end,
                     package: pkg,
-                    scope: cur_scope,
+                    scope: def_scope,
                     declared_return: rettype_by_match
                         .get(&e.match_id)
                         .and_then(|t| declared_ret(t, e.start)),
