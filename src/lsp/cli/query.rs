@@ -744,11 +744,17 @@ fn run_one(
             if is_incomplete {
                 // The server-mode response would carry `isIncomplete: true`;
                 // surface it as a trailing marker so CLI/gold can pin the
-                // payload cap AND the honesty flag in one assertion.
-                out.push_str(&format!(
-                    "# isIncomplete: capped at {} items\n",
-                    symbols::MAX_COMPLETION_ITEMS
-                ));
+                // payload cap AND the honesty flag in one assertion. The
+                // flag also rides an honest-EMPTY member slot (unresolvable
+                // receiver), where "capped" would be a lie — say which.
+                if items.len() >= symbols::MAX_COMPLETION_ITEMS {
+                    out.push_str(&format!(
+                        "# isIncomplete: capped at {} items\n",
+                        symbols::MAX_COMPLETION_ITEMS
+                    ));
+                } else {
+                    out.push_str("# isIncomplete\n");
+                }
             }
             Ok(out.trim_end_matches('\n').to_string())
         }
