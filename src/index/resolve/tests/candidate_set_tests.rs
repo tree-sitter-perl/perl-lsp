@@ -480,3 +480,27 @@ fn goto_def_agrees_with_references_on_template_method() {
     );
 }
 
+// ---- member family: whether a call admits a value declaration is the
+// language's answer, not a default ----
+
+/// Perl's `$o->name` IS a call, so a callable ask reaches a stored slot;
+/// php spells the call, so `$obj->name()` and the property `$name` are two
+/// different members and the callable ask must not answer with the property.
+/// The value side is strict for both.
+#[test]
+fn a_call_admits_a_stored_member_only_where_a_member_read_is_a_call() {
+    use crate::build::language_driver::LanguageRegistry;
+    use crate::model::file_analysis::{MemberKind, SymKind, SymbolFlags};
+
+    let none = SymbolFlags::empty();
+    let perl = LanguageRegistry::spellings("perl");
+    assert!(
+        MemberKind::Callable.admits_decl(SymKind::Field, none, perl),
+        "a Perl accessor call lands on the slot it reads",
+    );
+    assert!(
+        !MemberKind::Value.admits_decl(SymKind::Method, none, perl),
+        "a value read never answers with a callable",
+    );
+
+}
