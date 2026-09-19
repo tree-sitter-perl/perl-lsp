@@ -337,6 +337,21 @@ impl FileAnalysis {
     /// `candidates`, deduped by `seen`. Called per-class in the ancestor
     /// walk: on `self` for local classes, on a cached module's analysis
     /// for cross-file ones.
+    /// How a member is WRITTEN wherever it is offered: php spells a static
+    /// property `Foo::$bar`, and that sigil belongs to the name its producer
+    /// mints, never to a rewrite of the label further down (rule #11). A
+    /// language that declares no sigil writes the bare name.
+    pub(crate) fn written_label(&self, sym: &Symbol) -> String {
+        let sigil = self.spellings().static_property_sigil;
+        if sigil.is_empty()
+            || !sym.flags.contains(SymbolFlags::STATIC)
+            || MemberKind::of_sym(sym.kind) != MemberKind::Value
+        {
+            return sym.name.clone();
+        }
+        format!("{sigil}{}", sym.name)
+    }
+
     fn collect_class_fields(
         &self,
         cls: &str,
@@ -398,7 +413,7 @@ impl FileAnalysis {
                 && seen.insert(sym.name.clone())
             {
                 candidates.push(CompletionCandidate {
-                    label: sym.name.clone(),
+                    label: self.written_label(sym),
                     kind: sym.kind,
                     is_static: sym.flags.contains(SymbolFlags::STATIC),
                     detail: None,
@@ -421,7 +436,7 @@ impl FileAnalysis {
                 && seen.insert(sym.name.clone())
             {
                 candidates.push(CompletionCandidate {
-                    label: sym.name.clone(),
+                    label: self.written_label(sym),
                     kind: sym.kind,
                     is_static: sym.flags.contains(SymbolFlags::STATIC),
                     detail: None,
