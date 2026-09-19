@@ -70,6 +70,15 @@ pub struct TargetRef {
     /// (`class_content_is_bare_constant`); the matcher may also re-derive it
     /// per scanned file when the index is in hand.
     pub bare_constant: bool,
+    /// Which member family this target names, minted from the fact that
+    /// produced it: a `FieldAccess` cursor or a stored-member declaration is
+    /// `Value`, a `MethodCall` cursor or a sub declaration `Callable`, and a
+    /// target that is not a member (or one built where no cursor told) is
+    /// `None`. `docs/adr/member-kinds.md`: the value side is strict — a
+    /// value target is declared by stored members and referenced by value
+    /// reads — while a callable keeps the call walk's value-kind fallback
+    /// for declarations and never claims a value read.
+    pub member_kind: Option<MemberKind>,
     /// Pack-language visibility identity: the canonical paths of the files
     /// that define this target AS THE ORIGIN FILE SEES IT (the origin itself,
     /// candidates in its include closure, and candidates whose closure reaches
@@ -93,11 +102,13 @@ impl TargetRef {
     pub fn method(
         name: String,
         class: String,
+        member_kind: Option<MemberKind>,
         origin: &FileAnalysis,
         module_index: Option<&dyn CrossFileLookup>,
         scope: OverrideScope,
     ) -> Self {
-        let method_classes = method_classes_for(origin, &class, &name, module_index, scope);
+        let method_classes =
+            method_classes_for(origin, &class, &name, member_kind, module_index, scope);
         TargetRef {
             name,
             names: origin.names().clone(),
@@ -106,6 +117,7 @@ impl TargetRef {
             scope,
             def_paths: Vec::new(),
             bare_constant: false,
+            member_kind,
         }
     }
 
@@ -133,6 +145,7 @@ impl TargetRef {
             scope: OverrideScope::Hierarchy,
             def_paths: Vec::new(),
             bare_constant: false,
+            member_kind: None,
         }
     }
 
@@ -150,6 +163,7 @@ impl TargetRef {
             scope: OverrideScope::Dispatch,
             def_paths: Vec::new(),
             bare_constant: false,
+            member_kind: None,
         }
     }
 
@@ -169,6 +183,7 @@ impl TargetRef {
             scope: OverrideScope::default(),
             def_paths: Vec::new(),
             bare_constant: false,
+            member_kind: None,
         }
     }
 
@@ -222,7 +237,14 @@ impl TargetRef {
                 // dispatch sites. A package-less script sub has no class, hence
                 // no family.
                 let method_classes = match &package {
-                    Some(class) => method_classes_for(origin, class, &name, module_index, scope),
+                    Some(class) => method_classes_for(
+                        origin,
+                        class,
+                        &name,
+                        Some(MemberKind::Callable),
+                        module_index,
+                        scope,
+                    ),
                     None => Vec::new(),
                 };
                 // Function targets keep empty def_paths HERE: a Sub cursor
@@ -241,10 +263,11 @@ impl TargetRef {
                     scope,
                     def_paths: Vec::new(),
                     bare_constant: false,
+                    member_kind: Some(MemberKind::Callable),
                 }
             }
-            RenameKind::Method { name, class } => {
-                TargetRef::method(name, class, origin, module_index, scope)
+            RenameKind::Method { name, class, member } => {
+                TargetRef::method(name, class, member, origin, module_index, scope)
             }
             RenameKind::Package(name) => TargetRef::new(name, TargetKind::Package, origin),
             RenameKind::Handler { owner, name } => {

@@ -2248,7 +2248,7 @@ fn references_cross_file_sub_fans_out_and_stays_package_scoped() {
 /// This is the crm role case (`GenericCo::Role::REST::success` called as
 /// `$c->success` in every controller that `with`s the role) and the
 /// `todays_rate`/`add_data` shape generally. The matcher uses
-/// `method_rename_chain`, so the parent is on the invocant's
+/// `member_rename_chain`, so the parent is on the invocant's
 /// resolution chain; an unrelated class sharing the method name is
 /// not, and stays out.
 #[test]

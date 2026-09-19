@@ -237,6 +237,7 @@ pub fn resolve_symbol_scoped(
                 let mut t = TargetRef::method(
                     sym.name.clone(),
                     class,
+                    Some(MemberKind::of_sym(sym.kind)),
                     analysis,
                     module_index,
                     scope,
@@ -338,6 +339,7 @@ pub fn resolve_symbol_scoped(
                     let mut t = TargetRef::method(
                         r.target_name.clone(),
                         class,
+                        r.resolved_symbol().map(|id| MemberKind::of_sym(analysis.symbol(id).kind)),
                         analysis,
                         module_index,
                         scope,

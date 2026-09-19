@@ -493,7 +493,7 @@ fn override_scope_hierarchy_unions_dispatch_is_precise() {
     // Hierarchy (default): Base::shared's family includes the Child override,
     // so a rename reaches Child's file.
     let h = TargetRef::method(
-        "shared".to_string(), "Base".to_string(), &base_fa, Some(&idx), OverrideScope::Hierarchy,
+        "shared".to_string(), "Base".to_string(), Some(MemberKind::Callable), &base_fa, Some(&idx), OverrideScope::Hierarchy,
     );
     assert!(
         h.method_classes.iter().any(|c| c == "Child"),
@@ -510,7 +510,7 @@ fn override_scope_hierarchy_unions_dispatch_is_precise() {
     // Dispatch: precise — the chain stops at the defining class, so the Child
     // override is NOT pulled into Base::shared's family.
     let d = TargetRef::method(
-        "shared".to_string(), "Base".to_string(), &base_fa, Some(&idx), OverrideScope::Dispatch,
+        "shared".to_string(), "Base".to_string(), Some(MemberKind::Callable), &base_fa, Some(&idx), OverrideScope::Dispatch,
     );
     assert!(
         !d.method_classes.iter().any(|c| c == "Child"),
