@@ -1,7 +1,7 @@
 //! Perl's pack — the query-engine seam for the language the native
 //! builder owns.
 
-use crate::build::query_extract::{LangPack, PeelSpec};
+use crate::build::query_extract::LangPack;
 
 /// The Perl-on-query-engine seam (go-live map ARC 3, the builder.rs shrink):
 /// not registered as a driver — the native builder still owns Perl — but the
@@ -35,17 +35,9 @@ pub fn perl_pack() -> LangPack {
         doc_uses_method_tags: &[],
         module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
         import_module: |_, _| None,
-        implicit_this_members: false,
         narrow_type: |_| None,
         brace_scoped_members: false,
         bundled_builtin_types: &[],
         trigger_chars: &["$", "@", "%", ">", ":", "{"],
-        recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
-        simple_var_kinds: &[],
-        member_kinds: &[],
-        skip_kinds: &[],
-        call_kinds: &[],
-        domain_compare_kinds: &[],
-        domain_compare_ops: &[],
     }
 }

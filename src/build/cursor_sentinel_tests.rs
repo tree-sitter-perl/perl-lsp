@@ -193,3 +193,59 @@ fn no_receiver_on_plain_identifier() {
     let cursor = after(src, "box");
     assert!(receiver_at(&mut cpp(), &crate::build::query_extract::cpp_pack(), src, cursor).is_none());
 }
+
+// ---- the two readers of a member shape stay one reader ----
+
+/// Rule #15's cursor half: `@member.recv`'s patterns ARE the member-access
+/// kinds, so every shape the document calls a member receiver is a shape
+/// member completion climbs to. `set_max_start_depth(Some(0))` makes the
+/// failure silent in the other direction — a pattern that roots at an
+/// ANCESTOR still feeds the extractor while the cursor never reaches it —
+/// which is what this pins.
+#[cfg(any(feature = "cpp"))]
+#[test]
+fn every_receiver_shape_the_document_names_completes() {
+    // (language, pack, source with the cursor just past the operator,
+    //  the receiver text expected back)
+    #[cfg(feature = "cpp")]
+    let cpp_pack = crate::build::query_extract::cpp_pack();
+    let mut cases: Vec<(fn() -> Parser, &crate::build::query_extract::LangPack, &str, &str, &str)> =
+        Vec::new();
+    #[cfg(feature = "cpp")]
+    {
+        cases.extend([
+            (cpp as fn() -> Parser, &cpp_pack, "void g() { b. }", "b.", "b"),
+            (cpp, &cpp_pack, "void g() { b-> }", "b->", "b"),
+            (cpp, &cpp_pack, "struct A { void m() { this-> } };", "this->", "this"),
+            (cpp, &cpp_pack, "void g() { f(). }", "f().", "f()"),
+        ]);
+    }
+    assert!(!cases.is_empty(), "no pack language in this build");
+    for (mk, pack, src, marker, want) in cases {
+        let cursor = after(src, marker);
+        let got = receiver_at(&mut mk(), pack, src, cursor);
+        assert_eq!(
+            got.as_ref().map(|r| r.text.as_str()),
+            Some(want),
+            "{}: `{marker}` must complete with a receiver — a @member.recv pattern that roots \
+             above the member access feeds the extractor and nothing else",
+            pack.lang_id
+        );
+    }
+}
+
+/// The set the cursor climbs to is non-empty for every pack that has
+/// member completion at all — an empty set is the silent form of the same
+/// failure (every climb declines).
+#[test]
+fn packs_with_member_completion_name_their_member_kinds() {
+    for (pack, language) in [
+        #[cfg(feature = "cpp")]
+        (crate::build::query_extract::cpp_pack(), tree_sitter_cpp::LANGUAGE.into()),
+    ] {
+        let language: tree_sitter::Language = language;
+        let query = crate::build::query_extract::query_for(&language, &pack).expect("query");
+        let kinds = crate::build::query_extract::pattern_root_kinds(query, "member.recv");
+        assert!(!kinds.is_empty(), "{}: @member.recv names no node kind", pack.lang_id);
+    }
+}
