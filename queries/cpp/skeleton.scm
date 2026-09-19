@@ -715,6 +715,19 @@
 ; so every consumer (member completion, the class witness) reads it here.
 ((this) @receiver.this (#eq? @receiver.this "this"))
 
+; The CALLED form additionally mints a chain-hop witness on the whole call's
+; span (`@hop.call` + `@hop.member` — deliberately NOT `@ref.member`, the
+; pattern above already minted the ref): `w.get().spin()` types through the
+; receiver span's own hop with no intermediate variable.
+; The receiver rides `@hop.recv` here, not `@member.recv`: this pattern
+; roots at the CALL, and the member-access kinds the cursor climbs to are
+; exactly what `@member.recv`'s patterns root at.
+(call_expression
+  function: (field_expression
+    argument: (_) @hop.recv
+    field: (field_identifier) @hop.member)
+  arguments: (argument_list) @arity.args) @hop.call
+
 ; ---- cursor-time shapes ----
 ; Where a cursor may not splice: a literal or a comment is not code.
 (string_literal) @skip
