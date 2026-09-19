@@ -40,7 +40,6 @@ pub fn python_pack() -> LangPack {
         import_module: |_, _| None,
         // `isinstance(x, Foo)` narrows x to Foo inside the guard.
         narrow_guard: |guard, ty| (guard == Some("isinstance")).then(|| InferredType::ClassName(ty.to_string())),
-        rebind_method: |_| false,
         implicit_this_members: false,
         brace_scoped_members: false,
         bundled_builtin_types: &[],
