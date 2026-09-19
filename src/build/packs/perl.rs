@@ -34,7 +34,6 @@ pub fn perl_pack() -> LangPack {
         module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
         import_module: |_, _| None,
         narrow_guard: |_, _| None,
-        rebind_method: |_| false,
         implicit_this_members: false,
         brace_scoped_members: false,
         bundled_builtin_types: &[],

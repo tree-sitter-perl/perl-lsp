@@ -84,12 +84,6 @@ pub struct LangPack {
     /// "which guard means which refinement" (rule #10); core just scopes
     /// the witness to the block.
     pub narrow_guard: fn(guard: Option<&str>, type_text: &str) -> Option<InferredType>,
-    /// Does calling `method` on a variable REBIND it — putting a moved-from
-    /// object back into a known state (`clear`/`reset`/`assign`/…)? Used to end
-    /// a moved-from region (and any narrowing) at the reset call, so a use after
-    /// it is clean. Pack-owned language vocab (like `op_map`): core asks the
-    /// value, never enumerates names itself.
-    pub rebind_method: fn(method: &str) -> bool,
     /// Can a bare, receiver-less identifier resolve through an implicit
     /// `this->` — both a field read (`return inner_;` = `this->inner_`) AND a
     /// sibling method call (`foo()` = `this->foo()`)? True for C/C++ (the

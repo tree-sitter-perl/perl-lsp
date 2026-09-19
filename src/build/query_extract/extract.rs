@@ -1664,25 +1664,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         .unwrap_or(false)
                         .then(|| member_op_raw.get(&e.match_id).copied())
                         .flatten();
-                    // Reset-via-method: a rebinding method call on a simple-var
-                    // receiver (`x.clear()`/`.reset()`/`.assign()`) puts a
-                    // moved-from object back into a known state — a rebind. Mint
-                    // a Rebind FlowEdge at the RECEIVER position so the moved-from
-                    // window (and the narrowing cutoff) end there, sparing the
-                    // receiver read itself. The pack owns which method names
-                    // rebind (cpp vocab, like its op_map).
-                    if e.cap == "ref.member"
-                        && (pack.rebind_method)(&e.text)
-                        && member_simple.get(&e.match_id).copied().unwrap_or(false)
-                    {
-                        if let Some((recv_span, recv_text)) = member_recv.get(&e.match_id) {
-                            flow_rebinds.push((
-                                (pack.shape_name)("def.var", recv_text),
-                                cur_scope,
-                                recv_span.start,
-                            ));
-                        }
-                    }
                     out.refs.push(SkelRef {
                         via: None,
                         kind: e.cap.strip_prefix("ref.").unwrap().to_string(),
