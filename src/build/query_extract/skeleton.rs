@@ -77,6 +77,12 @@ pub struct SkeletonAnalysis {
     /// the binding are what the bare `imports` list drops. Carried onto
     /// `FileAnalysis.pack.include_directives` unchanged.
     pub import_sites: Vec<crate::model::file_analysis::ImportRow>,
+    /// `use A\B as C` rows: (alias, namespace, real leaf). Carried onto
+    /// `FileAnalysis.pack.use_aliases`.
+    pub use_aliases: Vec<(String, String, String)>,
+    /// Class spellings written WITH a qualifier: (leaf, written prefix).
+    /// Carried onto `FileAnalysis.pack.qualified_spellings`.
+    pub qualified_spellings: Vec<crate::model::file_analysis::QualifiedSpelling>,
     pub scope_count: usize,
     pub scopes: Vec<crate::model::file_analysis::Scope>,
     pub witnesses: Vec<crate::model::witnesses::Witness>,
@@ -1177,6 +1183,8 @@ impl SkeletonAnalysis {
             // an absolute path happens where the file path is in hand (the
             // driver), which also fills `macro_defs` / `include_closure`.
             include_directives: self.import_sites.drain(..).collect(),
+            use_aliases: std::mem::take(&mut self.use_aliases),
+            qualified_spellings: std::mem::take(&mut self.qualified_spellings),
             domain_sites: std::mem::take(&mut self.domain_sites),
             moved_from: std::mem::take(&mut self.moved_from),
             control_regions: std::mem::take(&mut self.control_regions),
