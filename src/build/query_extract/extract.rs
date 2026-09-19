@@ -1331,6 +1331,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     }
     out.runtime_bound_reads = std::mem::take(&mut runtime_bound_reads);
     out.member_writes = std::mem::take(&mut member_writes);
+    // Assignment-declares-for-the-function is what the document SAYS on the
+    // pattern that mints such a def: a capability is what the query mints,
+    // never a pack flag beside it.
+    out.function_scoped_vars = cap_names.iter().any(|c| c == "def.var.fn");
     out.names = pack.names.clone();
     // Template params joined to their owner class — the owner shaped like a
     // def name (a partial spec's spelling canonicalizes) so the key matches
