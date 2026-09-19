@@ -1832,6 +1832,45 @@ void f(Widget* p, std::optional<Widget> opt) {
     );
 }
 
+/// The declarator peel, spelling by spelling: the per-level stack a pointer /
+/// reference chain flattens to, each level carrying its own cv-qualifiers, and
+/// the same chain reading the same whether it declares a member or a local.
+#[test]
+fn cpp_declarator_peel_stacks_every_spelling() {
+    use crate::model::file_analysis::DerefKind::{Pointer, Reference};
+    let src = "\
+struct S {
+  Box** a;
+  char* const& b;
+  Box* const& c;
+  Node*** d;
+};
+void f() {
+  Box** x;
+  char* const& y = q;
+}
+";
+    let skel = cpp_skel(src);
+    let stack = |name: &str| -> Vec<(crate::model::file_analysis::DerefKind, Vec<String>)> {
+        skel.symbols
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} is extracted"))
+            .deref_stack
+            .iter()
+            .map(|st| (st.kind, st.annotations.clone()))
+            .collect()
+    };
+    let plain = |k| (k, Vec::<String>::new());
+    let cnst = |k| (k, vec!["const".to_string()]);
+    assert_eq!(stack("a"), vec![plain(Pointer), plain(Pointer)], "Box**");
+    assert_eq!(stack("b"), vec![cnst(Pointer), plain(Reference)], "char* const&");
+    assert_eq!(stack("c"), vec![cnst(Pointer), plain(Reference)], "Box* const&");
+    assert_eq!(stack("d"), vec![plain(Pointer); 3], "Node***");
+    assert_eq!(stack("x"), vec![plain(Pointer), plain(Pointer)], "a local reads the same");
+    assert_eq!(stack("y"), vec![cnst(Pointer), plain(Reference)], "an initialized local too");
+}
+
 #[test]
 fn cpp_pointer_declared_vars_get_their_pointee_type() {
     // `T* p;` and the dynamic_cast condition-form both type the var to
