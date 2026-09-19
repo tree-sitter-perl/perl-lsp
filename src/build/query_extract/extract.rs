@@ -877,6 +877,20 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             runtime_bound_reads.push(Span { start: e.start, end: e.end });
         }
     }
+    // The spellings this file writes for the object the enclosing method runs
+    // on (`$this`, `this`, a `self`/`cls` parameter). The class body witnesses
+    // each as an instance of its class, which is how a receiver with no
+    // declaration types.
+    let receiver_tokens: Vec<String> = {
+        let mut v: Vec<String> = events
+            .iter()
+            .filter(|e| matches!(e.cap.as_str(), "receiver.this" | "param.receiver"))
+            .map(|e| e.text.clone())
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    };
     // `@ns.inline` — an inline namespace's NAME token, fired by a name-only
     // sibling pattern (its def/scope/context come from the base namespace
     // pattern, a different match). Joined to the Package symbol by name span
@@ -1156,7 +1170,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // (registered_at_depth, value) — a context set inside a scope pops
     // with it (Python class blocks); one set at file depth is sticky
     // (Perl's flat `package Foo;`).
-    let mut context_stack: Vec<(usize, String)> = Vec::new();
+    // (depth, identity, is_class): the class flag is what tells an
+    // enclosing NAMESPACE from an enclosing class body, so a bare call's
+    // callee is keyed where a free function would be declared.
+    let mut context_stack: Vec<(usize, String, bool)> = Vec::new();
     let mut def_name_spans: Vec<(usize, usize)> = Vec::new();
 
     use crate::model::file_analysis::{Scope, ScopeId, ScopeKind};
@@ -1298,12 +1315,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             && scope_stack.last().is_some_and(|&(end, _)| e.start_byte >= end)
         {
             scope_stack.pop();
-            while context_stack.last().is_some_and(|&(d, _)| d > scope_stack.len()) {
+            while context_stack.last().is_some_and(|(d, _, _)| *d > scope_stack.len()) {
                 context_stack.pop();
             }
         }
         let cur_scope = scope_stack.last().unwrap().1;
-        let package: Option<String> = context_stack.last().map(|(_, p)| p.clone());
+        let package: Option<String> = context_stack.last().map(|(_, p, _)| p.clone());
         let import_binds = binds_by_match.get(&e.match_id).copied().unwrap_or_default();
         match strip_import_binds(&e.cap) {
             // `@scope` = a plain lexical Block; `@scope.sub` = sub-body
@@ -1334,10 +1351,20 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // a context deferred to THIS scope (C++ namespace) →
                 // register at the body depth so it pops with the block.
                 if let Some(text) = pending_context.remove(&e.match_id) {
-                    while context_stack.last().is_some_and(|&(d, _)| d >= scope_stack.len()) {
+                    while context_stack.last().is_some_and(|(d, _, _)| *d >= scope_stack.len()) {
                         context_stack.pop();
                     }
-                    context_stack.push((scope_stack.len(), text));
+                    // The receiver name (`$this`) IS this class inside its
+                    // body — a witness at the body scope, so a chain based on
+                    // it (`$this->mailer->send()`) resolves through the same
+                    // registry chase as any typed variable. Class bodies
+                    // only: a namespace body carries a context too.
+                    let is_class =
+                        names_by_match.contains_key(&(e.match_id, "def.class".to_string()));
+                    if is_class {
+                        register_class_body(&mut out, &receiver_tokens, id, &text, e.start);
+                    }
+                    context_stack.push((scope_stack.len(), text, is_class));
                 }
                 // a guard narrowing whose block is THIS scope → the refined type
                 // holds within `id` (invisible outside it). Two join shapes:
@@ -1416,7 +1443,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // Shape the context like a def name (cpp canonicalizes a
                 // spec's template spelling) so members' `package` matches
                 // the container Symbol's identity exactly.
-                let text = (pack.shape_name)(&e.cap, &e.text);
+                let raw = names_by_match
+                    .get(&(e.match_id, "def.class".to_string()))
+                    .filter(|_| pack.names.use_map_sep().is_some())
+                    .map(|(n, _, _)| n.clone())
+                    .unwrap_or_else(|| e.text.clone());
+                let text = (pack.shape_name)(&e.cap, &raw);
                 // If this match's `@scope` starts AFTER this context, the
                 // context belongs to that (not-yet-pushed) body — defer it
                 // so it registers at the body depth and pops with the block.
@@ -1427,11 +1459,20 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // were already popped with their scopes.
                     while context_stack
                         .last()
-                        .is_some_and(|&(d, _)| d >= scope_stack.len())
+                        .is_some_and(|(d, _, _)| *d >= scope_stack.len())
                     {
                         context_stack.pop();
                     }
-                    context_stack.push((scope_stack.len(), e.text.clone()));
+                    // php puts the class scope on the whole declaration, so
+                    // the body scope is ALREADY open here: it carries the
+                    // class as its package and the receiver witness.
+                    let is_class =
+                        names_by_match.contains_key(&(e.match_id, "def.class".to_string()));
+                    if is_class {
+                        let id = scope_stack.last().unwrap().1;
+                        register_class_body(&mut out, &receiver_tokens, id, &raw, e.start);
+                    }
+                    context_stack.push((scope_stack.len(), raw, is_class));
                 }
             }
             "parent" => {
@@ -2509,4 +2550,34 @@ fn byte_range_of(events: &[Event], match_id: usize, cap: &str) -> Option<(usize,
         .iter()
         .find(|e| e.match_id == match_id && e.cap == cap)
         .map(|e| (e.start_byte, e.end_byte))
+}
+
+/// A class body scope: its package is the class (a member declared
+/// directly in the body — a constant, a property default — resolves its
+/// enclosing class as this, not the namespace), and the receiver name
+/// (`$this`) is witnessed as an instance of it, so every chain based on
+/// the receiver resolves through the registry like any typed variable.
+fn register_class_body(
+    out: &mut SkeletonAnalysis,
+    receivers: &[String],
+    scope: crate::model::file_analysis::ScopeId,
+    class: &str,
+    at: Point,
+) {
+    if let Some(sc) = out.scopes.iter_mut().find(|s| s.id == scope) {
+        sc.package = Some(class.to_string());
+    }
+    for recv in receivers {
+        out.witnesses.push(crate::model::witnesses::Witness {
+            attachment: crate::model::witnesses::WitnessAttachment::Variable {
+                name: recv.clone(),
+                scope,
+            },
+            source: crate::model::witnesses::WitnessSource::Builder("skeleton-receiver".into()),
+            payload: crate::model::witnesses::WitnessPayload::InferredType(
+                crate::model::file_analysis::InferredType::ClassName(class.to_string()),
+            ),
+            span: Span { start: at, end: at },
+        });
+    }
 }

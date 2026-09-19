@@ -709,6 +709,11 @@
 (field_expression operator: "->" @member.op.arrow)
 (field_expression operator: "." @member.op.dot)
 
+; `this` is the object the enclosing method runs on — no typeable value
+; node, the class comes off the scope chain. The receiver's own capture,
+; so every consumer (member completion, the class witness) reads it here.
+((this) @receiver.this (#eq? @receiver.this "this"))
+
 ; ---- cursor-time shapes ----
 ; Where a cursor may not splice: a literal or a comment is not code.
 (string_literal) @skip
