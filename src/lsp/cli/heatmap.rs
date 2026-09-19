@@ -22,14 +22,65 @@ fn heatmap_symbol_eligible(sym: &file_analysis::Symbol) -> bool {
         )
 }
 
+/// Is this declaration a pack constructor whose CLASS is referenced
+/// somewhere — a type hint, a `Foo::class`, a `use` row — while nothing
+/// `new`s it? A container or a factory instantiates it, so the constructor
+/// is reachable.
+///
+/// The answer is the CLASS's own `references()` projection, minted at its
+/// declaration exactly like every other count in this report (the ADR's
+/// identity invariant). An earlier row-store oracle read the same question
+/// off `PruneIndex`, which is absent under `PERL_LSP_REF_ROWS=0`, under
+/// `--include-deps`, and on a cold cache — so the shield vanished in the
+/// runs that most want it, and the pre-prune stopped being answer-preserving.
+/// Reached only from the guard chain, i.e. only for a zero-fan-in symbol.
+fn class_is_referenced(
+    ws: &file_store::FileStore,
+    routing_idx: &dyn file_analysis::CrossFileLookup,
+    path: &std::path::Path,
+    analysis: &file_analysis::FileAnalysis,
+    sym: &file_analysis::Symbol,
+    visibility: Option<resolve::RoleMask>,
+    scope: resolve::OverrideScope,
+) -> bool {
+    use file_analysis::{AccessKind, SymKind};
+    if !sym.is_constructor() {
+        return false;
+    }
+    let Some(class) = sym.package.as_deref() else { return false };
+    let key = file_analysis::name_match_key(class, analysis.names());
+    let Some(decl) = analysis.symbols().iter().find(|s| {
+        matches!(s.kind, SymKind::Class | SymKind::Package | SymKind::Module)
+            && file_analysis::name_match_key(&s.name, analysis.names()) == key
+    }) else {
+        return false;
+    };
+    let mut cs = resolve::resolve(
+        ws,
+        analysis,
+        file_store::FileKey::Path(path.to_path_buf()),
+        decl.selection_span.start,
+        Some(routing_idx),
+        scope,
+    );
+    if let Some(mask) = visibility {
+        cs = cs.with_visibility(mask);
+    }
+    cs.references().iter().any(|l| {
+        l.access != AccessKind::Declaration
+            && !(l.span == decl.selection_span
+                && matches!(&l.key, file_store::FileKey::Path(p) if p == path))
+    })
+}
+
 /// One heatmap row for one symbol — the shared body every gather loop
 /// calls, so fan-in counts come from the SAME `references()` projection by
 /// construction (no second ref walk). Tier-specific behavior arrives as
 /// data, never a family flag: `visibility` is the mask override to apply
 /// (`None` when the set's construction-derived routing already widens to
 /// VISIBLE — pack workspace files ride the DEPENDENCY role, a storage
-/// artifact of the per-language cache), and the entry-point guard reads the
-/// analysis language's declared `entrypoint_symbols`.
+/// artifact of the per-language cache), and the entry guard reads the
+/// analysis language's declared entry documents.
 /// Returns `(row, is_callable, dead, dead_export)`.
 ///
 /// `forced_fan_in` is the relational pre-prune verdict: `Some(0)` means the
@@ -142,8 +193,14 @@ fn heatmap_symbol_row(
         None
     } else if exported {
         Some("exported")
-    } else if conventions::is_constructor_name(&sym.name) {
-        Some("constructor")
+    } else if class_is_referenced(ws, routing_idx, path, analysis, sym, visibility, scope) {
+        // A constructor whose CLASS is named somewhere (a type hint,
+        // `Foo::class`, a `use` row) with no construction site of its own: a
+        // container or a factory instantiates it. Over-approximates
+        // reachability on the sound side, like every guard here. One rule
+        // for every language — a constructor whose class nothing names is a
+        // candidate whatever spells it.
+        Some("class-referenced")
     } else if !native {
         Some("framework-synthesized")
     } else if matches!(sym.kind, SymKind::Sub | SymKind::Method)
