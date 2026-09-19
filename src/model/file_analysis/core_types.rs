@@ -237,6 +237,12 @@ pub struct NameSpellings {
     pub sigils: std::borrow::Cow<'static, [char]>,
     /// What a written class spelling denotes.
     pub class_spelling: ClassSpelling,
+    /// The spelling between a class and a member it qualifies in a written
+    /// name (`Foo::bar`, a php `'A\\B::cb'` callable string): the namespace
+    /// separator where the language reuses it (Perl, C++), its own token
+    /// where it does not (php). `None` for a language that never writes a
+    /// class-qualified member as one name.
+    pub member_sep: Option<std::borrow::Cow<'static, str>>,
 }
 
 /// What a class spelling written in a file denotes — the capability the
@@ -260,6 +266,7 @@ impl NameSpellings {
         namespace_sep: None,
         sigils: std::borrow::Cow::Borrowed(&[]),
         class_spelling: ClassSpelling::Identity,
+        member_sep: None,
     };
 
     /// A language with a namespace separator, no sigils, and spellings
@@ -270,6 +277,7 @@ impl NameSpellings {
             namespace_sep: Some(std::borrow::Cow::Borrowed(sep)),
             sigils: std::borrow::Cow::Borrowed(&[]),
             class_spelling: ClassSpelling::Identity,
+            member_sep: Some(std::borrow::Cow::Borrowed(sep)),
         }
     }
 
@@ -285,6 +293,11 @@ impl NameSpellings {
             ClassSpelling::UseMap => self.sep(),
             ClassSpelling::Identity => None,
         }
+    }
+
+    /// The class-to-member qualifier a written name uses (`Foo::bar`).
+    pub fn member_sep(&self) -> Option<&str> {
+        self.member_sep.as_deref()
     }
 
     pub fn is_sigil(&self, c: char) -> bool {
