@@ -1015,6 +1015,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         if e.cap == "nonpublic.target" {
             nonpublic_name_spans.insert((e.start, e.end));
         }
+        if let Some(which) = e.cap.strip_prefix("member.op.") {
+            if let Some(op) = member_op_suffix(which) {
+                member_op_by_span.insert((e.start, e.end), op);
+            }
+        }
         if e.cap == "receiver.super" {
             super_recv_matches.insert(e.match_id);
             relative_scope_spans.insert((e.start, e.end));
@@ -1464,11 +1469,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     for e in &events {
         if e.cap == "narrow.block" {
             narrow_block_start.entry(e.start_byte).or_insert(e.match_id);
-        }
-        if let Some(which) = e.cap.strip_prefix("member.op.") {
-            if let Some(op) = member_op_suffix(which) {
-                member_op_by_span.insert((e.start, e.end), op);
-            }
         }
     }
     // Unevaluated-operand regions (`noexcept(...)`/`sizeof(...)`/`decltype(...)`):
