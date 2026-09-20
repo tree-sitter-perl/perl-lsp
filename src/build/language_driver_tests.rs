@@ -613,6 +613,32 @@ int lam() { auto f = [&]{ return inner_; }; return f(); } };\n";
 // The complement: php spells the receiver, so its document leaves every
 // sub scope plain and a bare name inside a method binds to nothing —
 // whatever the class declares.
+#[cfg(feature = "php")]
+#[test]
+fn a_spelled_receiver_language_declares_no_implicit_scope() {
+    use crate::model::file_analysis::{RefKind, SymKind};
+    let src = "<?php\nclass C { private int $inner; function get() { return $inner; } }\n";
+    let fa = crate::build::language_driver::LanguageRegistry::with_enabled()
+        .for_id("php")
+        .expect("php driver")
+        .analyze(src);
+    assert!(
+        fa.scopes.iter().all(|sc| !sc.implicit_receiver),
+        "php's document states the fact nowhere"
+    );
+    // Not vacuous: the property IS declared and the bare name IS read.
+    assert!(
+        fa.symbols().iter().any(|s| s.name == "inner" && s.kind == SymKind::Field),
+        "the property is a Field symbol"
+    );
+    let read = fa
+        .refs()
+        .iter()
+        .find(|r| r.target_name == "$inner" && matches!(r.kind, RefKind::Variable))
+        .expect("the bare read is a Variable ref");
+    assert_eq!(read.resolved_symbol(), None, "php: a bare name is never the property");
+}
+
 // A C callback member (`int (*read)(char *)`) is a stored slot the source
 // CALLS. The declarator says so — the peel's `@deref.callable` level mints
 // `SymbolFlags::CALLABLE_VALUE` — so `ops->read(buf)` resolves to the slot
@@ -977,6 +1003,75 @@ fn exactly_one_fallback_driver() {
     assert!(reg.fallback().claims_unclaimed());
 }
 
+/// A key-less array literal returned from a php function is a positional
+/// TUPLE (docs/adr/destructuring.md): its `Tuple` witness of element edges
+/// materializes to `Sequence([Queue, Agent])` through the return-fuel
+/// chain — both for an undeclared return and for a bare `: array`, which
+/// the tuple REFINES (the chain rides at annot priority so it beats the
+/// `HashRef` annot). A keyed literal never becomes a tuple.
+#[cfg(feature = "php")]
+#[test]
+fn php_tuple_literal_returns_type_as_sequence() {
+    use crate::model::file_analysis::InferredType;
+    let src = "<?php\nnamespace App;\nclass Queue {}\nclass Agent {}\nclass T {\n    private function lit(): array { $q = new Queue(); $a = new Agent(); return [$q, $a]; }\n    private function undecl() { $q = new Queue(); $a = new Agent(); return [$q, $a]; }\n    private function keyed(): array { $q = new Queue(); return ['q' => $q]; }\n}\n";
+    let reg = LanguageRegistry::with_enabled();
+    let fa = reg.for_path(std::path::Path::new("T.php")).unwrap().analyze(src);
+    let tuple = Some(InferredType::Sequence(vec![
+        InferredType::ClassName("App\\Queue".into()),
+        InferredType::ClassName("App\\Agent".into()),
+    ]));
+    assert_eq!(fa.sub_return_type_at_arity("lit", Some(0)), tuple, "bare `: array` refined");
+    assert_eq!(fa.sub_return_type_at_arity("undecl", Some(0)), tuple, "undeclared return");
+    assert!(
+        !matches!(fa.sub_return_type_at_arity("keyed", Some(0)), Some(InferredType::Sequence(_))),
+        "a keyed literal is not a tuple"
+    );
+}
+
+/// Every return site of a function contributes an arm — the gate that
+/// decides "declared vs. body-typed" is snapshotted per function, never
+/// re-read from the witnesses the loop itself just pushed (which typed a
+/// two-return function by its FIRST return only). Agreeing arms type the
+/// function; disagreeing arms honestly refuse.
+#[cfg(feature = "php")]
+#[test]
+fn php_every_return_site_contributes_an_arm() {
+    use crate::model::file_analysis::InferredType;
+    let src = "<?php\nnamespace App;\nclass Queue {}\nclass Agent {}\nfunction agree($c) { if ($c) { return new Queue(); } return new Queue(); }\nfunction disagree($c) { if ($c) { return new Queue(); } return new Agent(); }\n";
+    let reg = LanguageRegistry::with_enabled();
+    let fa = reg.for_path(std::path::Path::new("T.php")).unwrap().analyze(src);
+    assert_eq!(
+        fa.sub_return_type_at_arity("agree", Some(1)),
+        Some(InferredType::ClassName("App\\Queue".into()))
+    );
+    // Both arms land (the fold's own agreement policy decides the answer;
+    // the pin is that the SECOND site is no longer dropped).
+    let sid = fa.symbols().iter().find(|s| s.name == "disagree").unwrap().id;
+    let arms = fa
+        .witnesses
+        .for_attachment(&crate::model::witnesses::WitnessAttachment::SymbolReturnArm(sid))
+        .len();
+    assert_eq!(arms, 2, "every return site contributes an arm");
+}
+
+/// A named `/** @var Sub $p */` above a RE-assignment casts the local from
+/// that site on — the factory-narrowing idiom. The cast rides at annot
+/// priority: the call-binding edge the same assignment mints lands later
+/// in the bag and would otherwise override it with the declared base.
+#[cfg(feature = "php")]
+#[test]
+fn php_named_var_doc_casts_a_rebound_local() {
+    use crate::model::file_analysis::InferredType;
+    let src = "<?php\nnamespace App;\nclass Base { public static function make(string $n): Base { return new Base(); } }\nclass Sub extends Base {}\nfunction go(): void {\n    $p = Base::make('x');\n    /** @var Sub $p */\n    $p = Base::make('y');\n    $p->x();\n}\n";
+    let reg = LanguageRegistry::with_enabled();
+    let fa = reg.for_path(std::path::Path::new("T.php")).unwrap().analyze(src);
+    assert_eq!(
+        fa.inferred_type_via_bag("$p", tree_sitter::Point { row: 8, column: 4 }),
+        Some(InferredType::ClassName("App\\Sub".into())),
+        "cast applies from the rebind on"
+    );
+}
+
 
 #[cfg(feature = "cpp")]
 #[test]
@@ -1135,6 +1230,39 @@ fn assert_undefined_variable_silence(
         })
         .collect();
     assert!(hits.is_empty(), "{lang} must report no undefined variables: {hits:?}");
+}
+
+/// The name an import row binds is what the DOCUMENT captured
+/// (`@import.binds`), not a leaf the lane re-derives: an alias binds the
+/// alias, a group clause binds its own leaf or alias, and every php row
+/// carries one.
+#[cfg(feature = "php")]
+#[test]
+fn php_import_rows_carry_the_name_they_bind() {
+    let fa = php_driver().analyze(
+        "<?php\nnamespace App;\nuse A\\B\\C;\nuse A\\B\\D as E;\nuse F;\nuse G as H;\nuse function A\\slug;\nuse const A\\MAX;\nuse A\\{P, Q as R};\n",
+    );
+    let mut rows: Vec<(&str, Option<&str>)> = fa
+        .pack
+        .include_directives
+        .iter()
+        .map(|r| (r.raw.as_str(), r.bound.as_deref()))
+        .collect();
+    rows.sort();
+    assert_eq!(
+        rows,
+        vec![
+            ("A\\B\\C", Some("C")),
+            ("A\\B\\D", Some("E")),
+            ("A\\MAX", Some("MAX")),
+            ("A\\P", Some("P")),
+            ("A\\Q", Some("R")),
+            ("A\\slug", Some("slug")),
+            ("F", Some("F")),
+            ("G", Some("H")),
+        ],
+        "every php row binds exactly one name, and `as` wins"
+    );
 }
 
 /// `from x import y` binds `y` — so the never-spelled lane reports `y` and

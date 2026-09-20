@@ -912,6 +912,7 @@ fn kind_comparisons_name_real_grammar_kinds() {
     let perl = grammar_kinds(&ts_parser_perl::LANGUAGE.into());
     let pod = grammar_kinds(&ts_parser_pod::LANGUAGE.into());
     let cpp = grammar_kinds(&tree_sitter_cpp::LANGUAGE.into());
+    let php = grammar_kinds(&tree_sitter_php::LANGUAGE_PHP.into());
     assert!(perl.len() > 100 && cpp.len() > 100, "grammars failed to enumerate");
 
     let builtin: std::collections::HashSet<&str> = TREE_SITTER_BUILTIN_KINDS.iter().copied().collect();
@@ -928,7 +929,7 @@ fn kind_comparisons_name_real_grammar_kinds() {
                 (pod.iter().map(String::as_str).collect(), "pod")
             } else if rel.contains("query_extract") {
                 // The generic extraction driver serves every pack language.
-                (perl.iter().chain(pod.iter()).chain(cpp.iter()).map(String::as_str).collect(), "any")
+                (perl.iter().chain(pod.iter()).chain(cpp.iter()).chain(php.iter()).map(String::as_str).collect(), "any")
             } else if name.starts_with("cpp_") || rel.contains("cpp_reparse") {
                 (cpp.iter().map(String::as_str).collect(), "cpp")
             } else {
@@ -1451,6 +1452,8 @@ fn language_spellings_have_one_home() {
     let allow: &[(&str, usize, &str)] = &[
         ("build/cpp_reparse/defs.rs", 5, "the C++ keyword table — grammar vocabulary in the pack's own tier"),
         ("build/language_driver.rs", 2, "the driver STAMPS two pack attributes (`include_guard`, `non_public`), flag included — the minting side"),
+        ("build/packs/php/doc.rs", 2, "php's own doc-tag spellings — the pack IS their home"),
+        ("build/packs/php/mod.rs", 1, "php's late-bound RETURN spellings (`static`/`self`/`$this` in `declared_return`) — the `LangPack` IS their home"),
         ("build/plugin/rhai_host.rs", 3, "a manifest signal name in an inline test fixture"),
         ("build/query_extract/extract.rs", 11, "the generic extractor minting the canonical tokens a pack's captures declare"),
         ("build/query_extract/skeleton.rs", 15, "skeleton→model conversion: the kind/attribute vocabulary becomes flags here"),
@@ -1704,6 +1707,8 @@ fn pack_fields_name_no_grammar_shapes() {
     let allow: &[(&str, &str, usize, &str)] = &[
         ("cmake", "trigger_chars", 2, TRIGGERS),
         ("cpp", "trigger_chars", 3, TRIGGERS),
+        ("php", "enum_members", 2, "kept: producer-only — the extractor mints each as a SYNTHESIZED member at every enum, and no consumer reads the list"),
+        ("php", "trigger_chars", 3, TRIGGERS),
         ("python", "trigger_chars", 1, TRIGGERS),
         ("r", "trigger_chars", 3, TRIGGERS),
     ];
@@ -1770,6 +1775,8 @@ fn pack_string_tables_are_ratcheted() {
     let seen: HashMap<String, usize> =
         seen.into_iter().filter(|(k, _)| !k.ends_with(":trigger_chars")).collect();
     let allow: &[(&str, &str, usize, &str)] = &[
+        ("php", "doc_uses_method_tags", 1, "kept: one framework's docblock tag, data handed to the engine's own reader — the entry-document posture"),
+        ("php", "enum_members", 3, "kept: producer-only — the extractor mints each as a SYNTHESIZED member at every enum, and no consumer reads the list"),
     ];
     let drift = pack_allowlist_drift("rule #15 (vocabulary tables on the pack)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
@@ -1817,6 +1824,14 @@ fn decoded_pack_analyses_carry_spellings() {
     }
     // A pack that declares nothing would make every assertion above hold
     // vacuously, so pin one that declares plenty.
+    #[cfg(feature = "php")]
+    {
+        assert!(checked.contains(&"php"), "php was not exercised: {checked:?}");
+        assert!(
+            !LanguageRegistry::spellings("php").import_template.is_empty(),
+            "php declares an import template — otherwise this test proves nothing"
+        );
+    }
     #[cfg(feature = "cpp")]
     assert!(checked.contains(&"cpp"), "cpp was not exercised: {checked:?}");
     assert!(checked.contains(&"perl"), "perl was not exercised: {checked:?}");
