@@ -3,6 +3,7 @@
 //! the per-feature policy those types carry (rename scope/options, group
 //! member rename rules).
 use super::*;
+use crate::model::file_analysis::RailNames;
 
 /// How a method that participates in an inheritance hierarchy is scoped for
 /// references + rename — `initializationOptions.rename.overrideScope`.
@@ -42,6 +43,18 @@ pub struct RenameOptions {
     pub override_scope: OverrideScope,
 }
 
+/// Is `name` the constructor SPELLING of `origin`'s language? The document
+/// says so on its own constructor capture; a language whose constructor is
+/// a name convention rather than a spelling (Perl's `new`) declares none,
+/// which is what keeps `new` renameable.
+fn is_ctor_name(origin: &FileAnalysis, name: &str) -> bool {
+    crate::build::language_driver::LanguageRegistry::pack_capture_literals(
+        &origin.language,
+        "def.method.ctor",
+    )
+    .contains(name)
+}
+
 /// Identifies what we're collecting references to.
 #[derive(Debug, Clone)]
 pub struct TargetRef {
@@ -69,6 +82,23 @@ pub struct TargetRef {
     /// (`class_content_is_bare_constant`); the matcher may also re-derive it
     /// per scanned file when the index is in hand.
     pub bare_constant: bool,
+    /// `Some(class)` when this Method target IS the class's constructor by
+    /// the pack's convention (php `__construct`). Read by the rename policy
+    /// alone — the name belongs to the language, so nothing renames it. Its
+    /// references need no marker: a construction site mints the constructor
+    /// call itself, which the ordinary member arm matches. Set in the
+    /// identity lane from the pack document's own constructor capture;
+    /// `None` everywhere else.
+    pub ctor_of: Option<String>,
+    /// Which member family this target names, minted from the fact that
+    /// produced it: a `FieldAccess` cursor or a stored-member declaration is
+    /// `Value`, a `MethodCall` cursor or a sub declaration `Callable`, and a
+    /// target that is not a member (or one built where no cursor told) is
+    /// `None`. `docs/adr/member-kinds.md`: the value side is strict — a
+    /// value target is declared by stored members and referenced by value
+    /// reads — while a callable keeps the call walk's value-kind fallback
+    /// for declarations and never claims a value read.
+    pub member_kind: Option<MemberKind>,
     /// Pack-language visibility identity: the canonical paths of the files
     /// that define this target AS THE ORIGIN FILE SEES IT (the origin itself,
     /// candidates in its include closure, and candidates whose closure reaches
@@ -92,11 +122,19 @@ impl TargetRef {
     pub fn method(
         name: String,
         class: String,
+        member_kind: Option<MemberKind>,
         origin: &FileAnalysis,
         module_index: Option<&dyn CrossFileLookup>,
         scope: OverrideScope,
     ) -> Self {
-        let method_classes = method_classes_for(origin, &class, &name, module_index, scope);
+        let method_classes =
+            method_classes_for(origin, &class, &name, member_kind, module_index, scope);
+        // The pack's constructor convention (php `__construct`) is a fact of
+        // the METHOD TARGET itself: every builder of a Method target — the
+        // rename-kind mapping, the identity lanes, implementations — gets
+        // the ctor marker from this one speller, so the rename policy reads
+        // it wherever the cursor landed.
+        let ctor_of = is_ctor_name(origin, &name).then(|| class.clone());
         TargetRef {
             name,
             names: origin.names().clone(),
@@ -105,6 +143,8 @@ impl TargetRef {
             scope,
             def_paths: Vec::new(),
             bare_constant: false,
+            ctor_of,
+            member_kind,
         }
     }
 
@@ -132,6 +172,27 @@ impl TargetRef {
             scope: OverrideScope::Hierarchy,
             def_paths: Vec::new(),
             bare_constant: false,
+            ctor_of: None,
+            member_kind: None,
+        }
+    }
+
+    /// A bare target for tests: the name and kind under test, every policy
+    /// field at the value the suites all wrote by hand. ONE constructor, so
+    /// a new field lands here instead of in thirty test literals — and a
+    /// test that cares about a policy field says so by setting it.
+    #[cfg(test)]
+    pub fn for_test(name: impl Into<String>, kind: TargetKind) -> Self {
+        TargetRef {
+            name: name.into(),
+            names: crate::model::conventions::PERL_SPELLINGS,
+            kind,
+            method_classes: Vec::new(),
+            scope: OverrideScope::Dispatch,
+            def_paths: Vec::new(),
+            bare_constant: false,
+            ctor_of: None,
+            member_kind: None,
         }
     }
 
@@ -151,7 +212,30 @@ impl TargetRef {
             scope: OverrideScope::default(),
             def_paths: Vec::new(),
             bare_constant: false,
+            ctor_of: None,
+            member_kind: None,
         }
+    }
+
+    /// Does this target's name belong to the LANGUAGE rather than the
+    /// author? A pack's constructor convention (`__construct`) is spelled by
+    /// nothing a rename could rewrite — its `new self(...)` sites carry no
+    /// token naming it — and a class-keyed rail's spans are emission tokens
+    /// whose names belong to the class rename. Nothing renames either one,
+    /// cross-file OR locally, so the one policy method answers for
+    /// `rename_edits` and for the prepareRename gate alike: an offer the
+    /// rename would refuse is worse than no offer.
+    pub fn rename_is_language_owned(&self) -> bool {
+        self.ctor_of.is_some() || !self.sites_are_rewritable()
+    }
+
+    /// Do this target's reference spans hold tokens of its OWN name? A
+    /// class-keyed rail's sites spell the CLASS the rail is keyed on, so an
+    /// edit writing the target's new name over them corrupts a class
+    /// reference. The collector marks the sites it emits with this and the
+    /// rename policy above composes it — one answer, both readers.
+    pub fn sites_are_rewritable(&self) -> bool {
+        !matches!(&self.kind, TargetKind::Handler { names: RailNames::Classes, .. })
     }
 
     /// Whether this target renames cross-file through `refs_to` (matched by
@@ -163,6 +247,9 @@ impl TargetRef {
     /// owner-less hash key can't be matched by name alone elsewhere and stays
     /// single-file. References ignores this — it walks every kind cross-file.
     pub fn supports_cross_file_rename(&self) -> bool {
+        if self.rename_is_language_owned() {
+            return false;
+        }
         matches!(
             self.kind,
             TargetKind::Sub { .. }
@@ -195,7 +282,14 @@ impl TargetRef {
                 // dispatch sites. A package-less script sub has no class, hence
                 // no family.
                 let method_classes = match &package {
-                    Some(class) => method_classes_for(origin, class, &name, module_index, scope),
+                    Some(class) => method_classes_for(
+                        origin,
+                        class,
+                        &name,
+                        Some(MemberKind::Callable),
+                        module_index,
+                        scope,
+                    ),
                     None => Vec::new(),
                 };
                 // Function targets keep empty def_paths HERE: a Sub cursor
@@ -206,6 +300,12 @@ impl TargetRef {
                 // routing fact. Macro-named cursors never reach this arm
                 // (the canonical FileScopeValue lanes claim them first,
                 // WITH def_paths).
+                // The pack's constructor convention is a fact of the target
+                // whichever cursor minted it: a decl-side cursor on
+                // `__construct` arrives here as a Sub, and the rename policy
+                // must refuse it exactly as it does the call-side Method
+                // target.
+                let ctor_of = package.as_ref().filter(|_| is_ctor_name(origin, &name)).cloned();
                 TargetRef {
                     name,
                     names: origin.names().clone(),
@@ -214,14 +314,22 @@ impl TargetRef {
                     scope,
                     def_paths: Vec::new(),
                     bare_constant: false,
+                    ctor_of,
+                    member_kind: Some(MemberKind::Callable),
                 }
             }
-            RenameKind::Method { name, class } => {
-                TargetRef::method(name, class, origin, module_index, scope)
+            RenameKind::Method { name, class, member } => {
+                TargetRef::method(name, class, member, origin, module_index, scope)
             }
-            RenameKind::Package(name) => TargetRef::new(name, TargetKind::Package, origin),
+            RenameKind::Package(name) => {
+                // A class-name cursor names an identity; the matcher
+                // resolves every scanned file's spelling to one too, so
+                // three same-leaf `Collection`s never share a target.
+                TargetRef::new(name, TargetKind::Package, origin)
+            }
             RenameKind::Handler { owner, name } => {
-                TargetRef::new(name.clone(), TargetKind::Handler { owner, name }, origin)
+                let names = owner.names_are(&origin.pack);
+                TargetRef::new(name.clone(), TargetKind::Handler { owner, name, names }, origin)
             }
             RenameKind::HashKey(_) | RenameKind::Variable => return None,
         })
@@ -331,6 +439,11 @@ pub enum TargetKind {
     Handler {
         owner: HandlerOwner,
         name: String,
+        /// What the rail's names denote, minted from the origin's rail
+        /// declarations (`HandlerOwner::names_are`): a class-keyed rail's
+        /// spans are emission/handler tokens of the CLASS, so its target is
+        /// navigable but never rewritten.
+        names: RailNames,
     },
     /// A pack-language file-scope value reachable by BARE NAME from any file
     /// that can see it (C's flat linkage): an object- or function-like
@@ -354,12 +467,11 @@ pub struct RefLocation {
     /// at the site. `highlights()` renders it as the LSP highlight kind;
     /// other projections carry it for symmetry (a reference IS its access).
     pub access: AccessKind,
-    /// Whether rename may rewrite this span. `false` for a site whose name has
-    /// no literal token to replace — a const-folded event name
-    /// (`my $e = 'ready'; $obj->on($e)`) whose dispatch span IS the variable.
-    /// References lists it (it's a real use); rename skips it (rewriting the
-    /// variable would corrupt it). True for every literal occurrence.
-    pub rewritable: bool,
+    /// Whether rename may rewrite this span, and — when it may not — WHY.
+    /// The producer that saw the site knows the reason (it saw the macro,
+    /// the fold, the rail emission), so no consumer re-derives it from the
+    /// span, and rename's policy reads the reason rather than the language.
+    pub rewritable: Rewritable,
     /// A per-candidate fact worth surfacing beside the location — a macro
     /// variant's reachability verdict, a delegation see-through note. LSP
     /// `Location` has no label slot so the editor adapter drops it (ordering
@@ -367,7 +479,99 @@ pub struct RefLocation {
     pub label: Option<String>,
 }
 
+/// May rename rewrite a located reference's span?
+///
+/// A site that is not rewritable is still a reference — references lists it —
+/// and the reason decides what rename does with it: most reasons SKIP (the
+/// token that does spell the target is collected elsewhere, so the remaining
+/// edits are complete on their own), while a reason whose site would be left
+/// silently wrong REFUSES the whole edit set. `NotRewritable::refuses_rename`
+/// is that split, stated once for every language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rewritable {
+    /// The span holds the target's own name token.
+    Yes,
+    No(NotRewritable),
+}
+
+/// Why a span may not be rewritten. Closed: a producer that cannot name its
+/// reason is emitting a site it has not understood.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotRewritable {
+    /// The name reached this site FOLDED out of a variable or constant
+    /// (`my $e = 'ready'; $obj->on($e)`) — the span is the variable.
+    /// Skipped: the literal the fold came from is collected on its own and
+    /// carries the edit.
+    ConstFolded,
+    /// The token spells a delegating macro (`#define IncRef(sv)
+    /// Perl_Inc(sv)`), not the target. REFUSES: the macro body is not a
+    /// collected span, so an edit set that merely skipped this site would
+    /// leave the delegation chain pointing at the old name — code that still
+    /// compiles and does the wrong thing.
+    MacroDelegated,
+    /// A class-keyed rail's emission site: the token spells the CLASS the
+    /// rail is keyed on. Skipped — that token renames with the class.
+    RailEmission,
+    /// The span declares or spells a DIFFERENT name: a template
+    /// specialization's whole `X<args>` spelling, a descendant class's own
+    /// declaration, a call-hierarchy item's anchor on its caller. Skipped;
+    /// the target's own token is collected separately.
+    OtherNameToken,
+    /// No name token at all — the file-top anchor a module resolves to when
+    /// its package symbol was never scanned. Skipped.
+    NoNameToken,
+}
+
+impl NotRewritable {
+    /// Would leaving this site unedited silently break the code? Then rename
+    /// refuses the whole set rather than emitting a partial edit. Exhaustive
+    /// on purpose: a reason added without an answer would default to "skip",
+    /// which is the verdict that emits the partial edit.
+    pub fn refuses_rename(self) -> bool {
+        match self {
+            NotRewritable::MacroDelegated => true,
+            NotRewritable::ConstFolded
+            | NotRewritable::RailEmission
+            | NotRewritable::OtherNameToken
+            | NotRewritable::NoNameToken => false,
+        }
+    }
+
+    /// What a refusal tells the user — the real reason, never a stand-in for
+    /// another language's.
+    pub fn describe(self) -> &'static str {
+        match self {
+            NotRewritable::ConstFolded => "sites reached through a folded name",
+            NotRewritable::MacroDelegated => {
+                "sites spelled through a delegating macro (the macro body is not rewritten)"
+            }
+            NotRewritable::RailEmission => "sites emitted on a class-keyed rail",
+            NotRewritable::OtherNameToken => "sites whose token spells another name",
+            NotRewritable::NoNameToken => "sites that carry no name token",
+        }
+    }
+}
+
+impl Rewritable {
+    pub fn is_yes(self) -> bool {
+        matches!(self, Rewritable::Yes)
+    }
+
+    /// The reason, when there is one.
+    pub fn reason(self) -> Option<NotRewritable> {
+        match self {
+            Rewritable::Yes => None,
+            Rewritable::No(r) => Some(r),
+        }
+    }
+}
+
 impl RefLocation {
+    /// May rename write over this span?
+    pub fn is_rewritable(&self) -> bool {
+        self.rewritable.is_yes()
+    }
+
     pub fn to_url(&self) -> Option<Url> {
         match &self.key {
             FileKey::Url(u) => Some(u.clone()),

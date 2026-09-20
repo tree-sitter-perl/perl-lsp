@@ -493,7 +493,7 @@ fn override_scope_hierarchy_unions_dispatch_is_precise() {
     // Hierarchy (default): Base::shared's family includes the Child override,
     // so a rename reaches Child's file.
     let h = TargetRef::method(
-        "shared".to_string(), "Base".to_string(), &base_fa, Some(&idx), OverrideScope::Hierarchy,
+        "shared".to_string(), "Base".to_string(), Some(MemberKind::Callable), &base_fa, Some(&idx), OverrideScope::Hierarchy,
     );
     assert!(
         h.method_classes.iter().any(|c| c == "Child"),
@@ -510,7 +510,7 @@ fn override_scope_hierarchy_unions_dispatch_is_precise() {
     // Dispatch: precise — the chain stops at the defining class, so the Child
     // override is NOT pulled into Base::shared's family.
     let d = TargetRef::method(
-        "shared".to_string(), "Base".to_string(), &base_fa, Some(&idx), OverrideScope::Dispatch,
+        "shared".to_string(), "Base".to_string(), Some(MemberKind::Callable), &base_fa, Some(&idx), OverrideScope::Dispatch,
     );
     assert!(
         !d.method_classes.iter().any(|c| c == "Child"),
@@ -545,23 +545,16 @@ fn test_renaming_import_remote_joins_source_alias_stays_local() {
     };
 
     // Source rename reaches the consumer's REMOTE `beta` token.
-    let src = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "beta".to_string(),
-        kind: TargetKind::Sub { package: Some("Exp".to_string()) },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-    };
+    let src = TargetRef::for_test("beta", TargetKind::Sub { package: Some("Exp".to_string()) });
     let src_refs = refs_to(&store, Some(&idx), &src, RoleMask::EDITABLE);
     assert!(hit(&src_refs, &exp), "source def missing: {:?}", src_refs);
     assert!(hit(&src_refs, &cons), "remote `beta` token must join the source: {:?}", src_refs);
 
     // Alias rename is local to the consuming package — never the exporter.
-    let alias = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "rb".to_string(),
-        kind: TargetKind::Sub { package: Some("Consumer".to_string()) },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-    };
+    let alias = TargetRef::for_test(
+        "rb",
+        TargetKind::Sub { package: Some("Consumer".to_string()) },
+    );
     let alias_refs = refs_to(&store, Some(&idx), &alias, RoleMask::EDITABLE);
     assert!(hit(&alias_refs, &cons), "alias `-as` value + call missing: {:?}", alias_refs);
     assert!(
@@ -964,9 +957,9 @@ fn folded_method_dispatch_site_is_non_rewritable() {
         lines[r.span.start.row][r.span.start.column..r.span.end.column].starts_with("$m")
     });
     let folded = folded.expect("the folded $m dispatch site is a reference");
-    assert!(!folded.rewritable, "the folded dispatch site must NOT be rewritten: {folded:?}");
+    assert!(!folded.is_rewritable(), "the folded dispatch site must NOT be rewritten: {folded:?}");
     assert!(
-        refs.iter().any(|r| r.rewritable),
+        refs.iter().any(|r| r.is_rewritable()),
         "the `sub poke` decl must still be rewritable: {refs:?}",
     );
 }
@@ -993,7 +986,7 @@ fn folded_method_dispatch_rewrites_source_literal() {
     // The source literal `'poke'` (row 2) must be a rewritable edit covering
     // exactly the inside-the-quotes name, distinct from the `$m` call token.
     let source_edit = refs.iter().find(|r| {
-        r.span.start.row == 2 && r.rewritable && span_text(r) == "poke"
+        r.span.start.row == 2 && r.is_rewritable() && span_text(r) == "poke"
     });
     assert!(
         source_edit.is_some(),
@@ -1002,7 +995,7 @@ fn folded_method_dispatch_rewrites_source_literal() {
     // The folded `$self->$m()` site stays frozen (renaming it corrupts `$m`).
     let folded = refs.iter().find(|r| span_text(r).starts_with("$m"));
     assert!(
-        folded.is_some_and(|r| !r.rewritable),
+        folded.is_some_and(|r| !r.is_rewritable()),
         "the folded `$m` dispatch site must NOT be rewritten: {refs:?}",
     );
 }
@@ -1195,15 +1188,14 @@ fn test_event_handler_refs_mark_folded_site_non_rewritable() {
          }\n1;\n";
     store.insert_workspace(path.clone(), parse(src));
 
-    let target = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "connect".to_string(),
-        kind: TargetKind::Handler {
+    let target = TargetRef::for_test(
+        "connect",
+        TargetKind::Handler {
             owner: crate::model::file_analysis::HandlerOwner::Class("App".to_string()),
             name: "connect".to_string(),
+            names: crate::model::file_analysis::RailNames::Strings,
         },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-    };
+    );
     assert!(target.supports_cross_file_rename(), "Handler renames cross-file now");
 
     let refs = refs_to(&store, None, &target, RoleMask::EDITABLE);
@@ -1212,7 +1204,7 @@ fn test_event_handler_refs_mark_folded_site_non_rewritable() {
     let mut frozen = std::collections::BTreeSet::new();
     for r in &refs {
         let slice = &lines[r.span.start.row][r.span.start.column..r.span.end.column];
-        if r.rewritable {
+        if r.is_rewritable() {
             // Quote-preservation: the rewrite is the bare name, never `'connect'`.
             assert_eq!(slice, "connect", "rewritable site must be the inner name: {r:?}");
             rewritable += 1;
@@ -1431,12 +1423,7 @@ fn test_implementations_of_role_requires_fans_out_to_composers() {
     );
     insert("My::Deep", "package My::Deep;\nuse Moo;\nwith 'My::SubRole';\nsub fetch { 7 }\n1;\n");
 
-    let target = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "fetch".to_string(),
-        kind: TargetKind::Method { class: "My::Role".to_string() },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-    };
+    let target = TargetRef::for_test("fetch", TargetKind::Method { class: "My::Role".to_string() });
     let origin = parse("package Probe;\n1;\n");
     let results = implementations_of(&origin, Some(&idx), &target);
     let files: Vec<String> = results
@@ -1485,12 +1472,7 @@ fn test_implementations_finds_mixin_sibling_override() {
     insert("Mixin", "package Mixin;\nsub save { 2 }\n1;\n");
     insert("Child", "package Child;\nuse base qw(Mixin Base);\n1;\n");
 
-    let target = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "save".to_string(),
-        kind: TargetKind::Method { class: "Base".to_string() },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-    };
+    let target = TargetRef::for_test("save", TargetKind::Method { class: "Base".to_string() });
     let origin = parse("package Probe;\n1;\n");
     let files: Vec<String> = implementations_of(&origin, Some(&idx), &target)
         .iter()
@@ -1595,12 +1577,7 @@ fn test_implementations_on_sub_decl_target_finds_overrides() {
     insert("Base", "package Base;\nsub save { 1 }\n1;\n");
     insert("Sub1", "package Sub1;\nuse base qw(Base);\nsub save { 2 }\n1;\n");
 
-    let target = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "save".to_string(),
-        kind: TargetKind::Sub { package: Some("Base".to_string()) },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-    };
+    let target = TargetRef::for_test("save", TargetKind::Sub { package: Some("Base".to_string()) });
     let origin = parse("package Probe;\n1;\n");
     let files: Vec<String> = implementations_of(&origin, Some(&idx), &target)
         .iter()
@@ -2125,7 +2102,7 @@ mod pack_symmetry {
             .iter()
             .find(|r| r.span.start == tree_sitter::Point::new(2, 11))
             .unwrap_or_else(|| panic!("WRAP call site is a reference to `real`: {results:?}"));
-        assert!(!wrap_call.rewritable, "an alias site never renames");
+        assert!(!wrap_call.is_rewritable(), "an alias site never renames");
     }
 
     #[test]
@@ -2190,7 +2167,7 @@ fn test_implementations_on_primary_enumerates_specialization_family() {
         "both specs' def sites, from the OTHER file: {results:?}"
     );
     // never rewritable — the spec's selection span is the whole spelling
-    assert!(results.iter().all(|r| !r.rewritable));
+    assert!(results.iter().all(|r| !r.is_rewritable()));
 }
 
 /// `initializationOptions.rename` deserializes via the `RenameOptions` serde

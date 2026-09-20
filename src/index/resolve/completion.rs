@@ -10,30 +10,64 @@ impl<'a> CandidateSet<'a> {
     pub(super) fn type_def_location(&self, type_name: &str, idx: &dyn CrossFileLookup) -> Option<RefLocation> {
         let wanted =
             |k: &SymKind| matches!(k, SymKind::Class | SymKind::Package | SymKind::Module);
+        // A written spelling names an identity (the file's use-map answer);
+        // the symbol is filed under it, or under the spelling itself where
+        // the two coincide.
+        let ident = self.origin.class_spelling_identity(type_name);
+        let names = |s: &crate::model::file_analysis::Symbol| s.name == ident || s.name == type_name;
         if let Some(sym) = self
             .origin
             .symbols()
             .iter()
-            .find(|s| s.name == type_name && wanted(&s.kind))
+            .find(|s| names(s) && wanted(&s.kind))
         {
             return Some(self.origin_decl(sym.selection_span));
         }
         // Whichever candidate file declares the type symbol — not the
         // name-slot winner.
-        idx.visible_def_candidates(type_name).iter().find_map(|cached| {
+        idx.visible_def_candidates(&ident).iter().find_map(|cached| {
             let whole = idx.whole_present(cached);
             let sym = whole
                 .symbols()
                 .iter()
-                .find(|s| s.name == type_name && wanted(&s.kind))?;
+                .find(|s| names(s) && wanted(&s.kind))?;
             Some(RefLocation {
                 key: FileKey::Path(cached.path.clone()),
                 span: sym.selection_span,
                 access: AccessKind::Declaration,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None
             })
         })
+    }
+
+    /// The rail-name candidates for a string rail: every name declared on
+    /// it, here and across the index, narrowed by the typed prefix. A
+    /// candidate SOURCE like `complete` and `complete_modules` — the slot
+    /// detection that decides a cursor sits on a rail, and the edit that
+    /// replaces the string's content, stay in the adapter.
+    pub fn complete_rail_names(&self, rail: &str, prefix: &str) -> Vec<CompletionCandidate> {
+        let mut names: Vec<String> = self.origin.rail_names(rail).map(str::to_string).collect();
+        if let Some(idx) = self.module_index {
+            names.extend(idx.rail_names(rail));
+        }
+        names.sort();
+        names.dedup();
+        names
+            .into_iter()
+            .filter(|n| n.starts_with(prefix))
+            .map(|n| CompletionCandidate {
+                label: n,
+                kind: SymKind::Handler,
+                is_static: false,
+                detail: Some(rail.to_string()),
+                insert_text: None,
+                sort_priority: crate::model::file_analysis::PRIORITY_LOCAL,
+                additional_edits: vec![],
+                import_fact: None,
+                display_override: None,
+            })
+            .collect()
     }
 
     /// Completion visibility: unlike the navigation projections there is no
@@ -85,6 +119,70 @@ impl<'a> CandidateSet<'a> {
         // models differ, not the seam.
         if self.pack {
             let mut out = Vec::new();
+            // A name-keyed pack (php): every class the index declares under
+            // the prefix that this file cannot already spell bare — not its
+            // own namespace's, not a pinned import — offered with the import
+            // row as the edit that makes it spellable (`import_edit_for`).
+            if crate::build::language_driver::LanguageRegistry::imports_bind_names(
+                &self.origin.language,
+            ) && mask.intersects(RoleMask::WORKSPACE | RoleMask::DEPENDENCY)
+            {
+                if let Some(idx) = self.module_index {
+                    let own = self.origin.use_map_pins().own_namespace.clone();
+                    let mut seen: std::collections::HashSet<(String, String)> = Default::default();
+                    // A namespaced class registers under its identity AND
+                    // its leaf, so the key is either; the LEAF row is the one
+                    // that carries a candidate (the label is a leaf, and the
+                    // identity row names the same class twice).
+                    for (key, cands) in idx.defs_with_prefix(prefix) {
+                        // what the leaf means HERE: pinned to a namespace
+                        // (an import, the file's own declaration) or bare
+                        let pinned = self.origin.leaf_namespace(&key);
+                        for cached in cands {
+                            let whole = idx.symbols_present(&cached);
+                            // The declaring symbol carries the identity the
+                            // extractor minted — never joined back out of a
+                            // namespace and a leaf.
+                            let Some(sym) = whole.symbols().iter().find(|s| {
+                                matches!(s.kind, SymKind::Class)
+                                    && crate::model::file_analysis::name_match_key(
+                                        &s.name,
+                                        whole.names(),
+                                    ) == key
+                            }) else {
+                                continue;
+                            };
+                            let leaf = key.clone();
+                            let ns = sym.package.clone().unwrap_or_default();
+                            let fq = sym.name.clone();
+                            if !seen.insert((leaf.clone(), ns.clone())) {
+                                continue;
+                            }
+                            let spellable = pinned.as_deref() == Some(ns.as_str())
+                                || (pinned.is_none() && own.as_deref() == Some(ns.as_str()));
+                            let (edits, priority) = if spellable {
+                                (vec![], crate::model::file_analysis::PRIORITY_EXPLICIT_IMPORT)
+                            } else if pinned.is_some() {
+                                continue; // the leaf already names another class here
+                            } else {
+                                let Some((at, text)) = self.origin.import_edit_for(&fq, self.point.row) else { continue };
+                                (vec![(Span { start: at, end: at }, text)], crate::model::file_analysis::PRIORITY_UNIMPORTED)
+                            };
+                            out.push(CompletionCandidate {
+                                label: leaf.clone(),
+                                kind: SymKind::Class,
+                                is_static: false,
+                                detail: Some(fq),
+                                insert_text: None,
+                                sort_priority: priority,
+                                additional_edits: edits,
+                                import_fact: None,
+                                display_override: None,
+                            });
+                        }
+                    }
+                }
+            }
             if mask.contains(RoleMask::DEPENDENCY) && !self.origin.pack.include_closure.is_empty() {
                 if let Some(idx) = self.module_index {
                     let visible: std::collections::HashSet<String> =
@@ -128,8 +226,8 @@ impl<'a> CandidateSet<'a> {
                         };
                         out.push(CompletionCandidate {
                             label: name.clone(),
-                            is_static: false,
                             kind: sym.kind.clone(),
+                            is_static: false,
                             detail: Some(detail),
                             insert_text: None,
                             sort_priority: crate::model::file_analysis::PRIORITY_CLOSURE,
@@ -155,8 +253,8 @@ impl<'a> CandidateSet<'a> {
             out.extend(crate::model::builtins::builtin_functions().map(|name| {
                 CompletionCandidate {
                     label: name.to_string(),
-                    is_static: false,
                     kind: SymKind::Sub,
+                    is_static: false,
                     detail: Some("perl builtin".to_string()),
                     insert_text: None,
                     sort_priority: crate::model::file_analysis::PRIORITY_BUILTIN,
@@ -212,8 +310,8 @@ impl<'a> CandidateSet<'a> {
                 };
                 CompletionCandidate {
                     label: name,
-                    is_static: false,
                     kind: SymKind::Module,
+                    is_static: false,
                     detail,
                     insert_text: None,
                     sort_priority,
@@ -252,8 +350,8 @@ impl<'a> CandidateSet<'a> {
             }
             out.push(CompletionCandidate {
                 label: c.label.clone(),
-                is_static: false,
                 kind: SymKind::Sub,
+                is_static: false,
                 detail: c.detail.or_else(|| Some(format!("from {}", package))),
                 insert_text: Some(c.label),
                 sort_priority: 10,
@@ -284,8 +382,8 @@ impl<'a> CandidateSet<'a> {
             }
             out.push(CompletionCandidate {
                 label: suffix.clone(),
-                is_static: false,
                 kind: SymKind::Module,
+                is_static: false,
                 detail: Some(hint.to_string()),
                 insert_text: Some(suffix),
                 sort_priority: 20,
@@ -342,8 +440,8 @@ impl<'a> CandidateSet<'a> {
                 };
                 out.push(CompletionCandidate {
                     label: s.name.clone(),
-                    is_static: false,
                     kind: s.kind.clone(),
+                    is_static: false,
                     detail,
                     insert_text: None,
                     sort_priority: if nested_container { 20 } else { 10 },

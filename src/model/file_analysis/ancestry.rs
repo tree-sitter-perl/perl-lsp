@@ -370,89 +370,6 @@ impl FileAnalysis {
     /// edges only (`@ISA`/`use parent`/Moo via `GraphView`), NEVER name matches
     /// — two unrelated classes both defining `sub render {}` with no edge
     /// between them are not a family.
-    pub fn method_override_family(
-        &self,
-        class_name: &str,
-        method_name: &str,
-        module_index: Option<&dyn CrossFileLookup>,
-    ) -> Vec<String> {
-        let defines = |cls: &str| {
-            matches!(
-                self.resolve_method_in_ancestors(cls, method_name, module_index),
-                Some(MethodResolution::Local { class: ref c, .. })
-                    | Some(MethodResolution::CrossFile { class: ref c, .. })
-                    if c == cls
-            )
-        };
-        // Contract root: the topmost ancestor (incl. the cursor class) that
-        // defines the method — an override roots at the base it overrides.
-        let mut root = class_name.to_string();
-        self.for_each_ancestor_class(class_name, module_index, |cls| {
-            if defines(cls) {
-                root = cls.to_string();
-            }
-            std::ops::ControlFlow::Continue(())
-        });
-        // Root + every class participating in its dispatch. Descendants
-        // alone would miss a sibling that composes into a shared consumer,
-        // which is where a role's caller lives — and `collect`'s membership
-        // test is what turns that miss into an empty references answer.
-        let mut family = self.descendant_family(root.clone(), module_index);
-        for p in self.dispatch_participants(&root, module_index) {
-            if !family.iter().any(|f| f == &p) {
-                family.push(p);
-            }
-        }
-        family
-    }
-
-    pub fn method_rename_chain(
-        &self,
-        class_name: &str,
-        method_name: &str,
-        module_index: Option<&dyn CrossFileLookup>,
-    ) -> Vec<String> {
-        let defining = match self.resolve_method_in_ancestors(class_name, method_name, module_index) {
-            Some(MethodResolution::Local { class, .. })
-            | Some(MethodResolution::CrossFile { class, .. }) => class,
-            None => return vec![class_name.to_string()],
-        };
-        let mut chain = Vec::new();
-        self.for_each_ancestor_class(class_name, module_index, |cls| {
-            chain.push(cls.to_string());
-            if cls == defining {
-                std::ops::ControlFlow::Break(())
-            } else {
-                std::ops::ControlFlow::Continue(())
-            }
-        });
-        if chain.is_empty() { chain.push(class_name.to_string()); }
-        chain
-    }
-
-    /// Inheritance chain for a method rename: `[class, ..., defining_class]`.
-    ///
-    /// Cross-class method rename has to touch two distinct things:
-    ///   * the `sub M` definition in whichever ancestor actually
-    ///     defines the method, and
-    ///   * every `$obj->M(...)` call site whose static `invocant_class`
-    ///     is the rename target *or* an intermediate ancestor that
-    ///     inherited (didn't override) the method.
-    ///
-    /// `rename_method_in_class` is per-class — so callers iterate this
-    /// chain. Stops at the first ancestor that defines the method
-    /// (inclusive); intermediate ancestors that *override* are
-    /// skipped because they're a different method from the
-    /// inheritance perspective.
-    /// The full **override family** of `(class, method)` — the contract root
-    /// (topmost ancestor defining the method) plus every class that inherits or
-    /// overrides it. The membership set for `OverrideScope::Hierarchy` rename:
-    /// renaming any member rewrites them all, so an override never silently
-    /// desyncs from its base (the standard IDE refactor). Gathered over PROVEN
-    /// inheritance
-    /// edges only (`@ISA`/`use parent`/Moo via `GraphView`), NEVER name matches
-    /// — two unrelated classes both defining `sub render {}` with no edge
-    /// between them are not a family.
     pub fn member_override_family(
         &self,
         class_name: &str,
@@ -619,11 +536,12 @@ impl FileAnalysis {
     /// typeglob installs, and plugin bridges from other files.
     /// `admitted` is the WALK's fallback slot, not this pass's: a
     /// declaration of the family the ask NAMES beats one the family merely
-    /// admits, and the ADR's contract is that the loser is held as the
-    /// fallback THE WALK returns only when nothing else does
-    /// (`docs/adr/member-kinds.md`). Keeping it per class ended the walk on
-    /// the first class with a wrong-family hit, so a parent's genuine
-    /// same-family declaration was never reached.
+    /// admits — with both sides strict, only a `CALLABLE_VALUE` slot — and
+    /// the ADR's contract is that the loser is held as the fallback THE
+    /// WALK returns only when nothing else does (`docs/adr/member-kinds.md`).
+    /// Keeping it per class ended the walk on the first class with a
+    /// wrong-family hit, so a parent's genuine same-family declaration was
+    /// never reached.
     fn method_resolution_on_class(
         &self,
         cls: &str,
@@ -661,7 +579,7 @@ impl FileAnalysis {
             };
             // A re-export (`using Base::m;`) is API surface, not a def —
             // fall through so the walk reaches the origin ancestor.
-            if member_kind && want.admits_decl(sym.kind) && !sym.is_reexport() && self.symbol_in_class(sid, cls) {
+            if member_kind && want.admits_decl(sym.kind, sym.flags) && !sym.is_reexport() && self.symbol_in_class(sid, cls) {
                 let hit = MethodResolution::Local { class: cls.to_string(), sym_id: sid };
                 if MemberKind::of_sym(sym.kind) == want {
                     return Some(hit);
@@ -677,7 +595,7 @@ impl FileAnalysis {
                 if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
                 // A synthesized entity is a callable; a value ask must not
                 // answer with one (the same family rule as the local arm).
-                if !want.admits_decl(sym.kind) { continue; }
+                if !want.admits_decl(sym.kind, sym.flags) { continue; }
                 if sym.name == method_name {
                     return Some(MethodResolution::Local { class: cls.to_string(), sym_id: *sym_id });
                 }
@@ -747,7 +665,7 @@ impl FileAnalysis {
                     s.name == method_name
                         && s.package.as_deref() == Some(cand_cls.as_str())
                         && !s.is_reexport()
-                        && want.admits_decl(s.kind)
+                        && want.admits_decl(s.kind, s.flags)
                         && (matches!(s.kind, SymKind::Sub | SymKind::Method)
                             || (matches!(
                                 s.kind,
@@ -799,7 +717,7 @@ impl FileAnalysis {
             }
             // Both remaining arms install a SUB — a typeglob assignment and
             // a plugin bridge — so a VALUE ask never answers from either.
-            if !want.admits_decl(SymKind::Sub) {
+            if !want.admits_decl(SymKind::Sub, SymbolFlags::empty()) {
                 return None;
             }
             // Cross-package typeglob install: the method is attributed to `cls`
@@ -948,8 +866,8 @@ impl FileAnalysis {
         let mut result: Option<MethodResolution> = None;
         let mut iface_fallback: Option<MethodResolution> = None;
         // The wrong-family fallback is the WALK's, beside the interface one:
-        // a `public $handler` on the cursor's class must not end the walk
-        // before a parent's `function handler()` answers a call.
+        // a function-pointer `read` on the cursor's class must not end the
+        // walk before a parent's real `read()` answers the call.
         let mut admitted: Option<MethodResolution> = None;
         self.for_each_ancestor_class(class_name, module_index, |cls| {
             match self.method_resolution_on_class(cls, method_name, module_index, want, &mut admitted) {

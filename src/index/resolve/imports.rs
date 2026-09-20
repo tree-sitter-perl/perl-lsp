@@ -47,8 +47,8 @@ pub(super) fn import_candidates(
                 completion_detail_for_import(is.remote(), whole.as_deref(), &import.module_name);
             out.push(CompletionCandidate {
                 label: local.clone(),
-                is_static: false,
                 kind: FaSymKind::Sub,
+                is_static: false,
                 detail: Some(detail),
                 insert_text: None,
                 sort_priority: PRIORITY_EXPLICIT_IMPORT,
@@ -114,8 +114,8 @@ pub(super) fn import_candidates(
 
                 out.push(CompletionCandidate {
                     label: name.clone(),
-                    is_static: false,
                     kind: FaSymKind::Sub,
+                    is_static: false,
                     detail: Some(detail),
                     insert_text: None,
                     sort_priority: priority,
@@ -161,8 +161,8 @@ pub(super) fn unimported_export_candidates(
             }
             candidates.push(CompletionCandidate {
                 label: name.clone(),
-                is_static: false,
                 kind: FaSymKind::Sub,
+                is_static: false,
                 detail: Some(format!("{} (auto-import)", module_name)),
                 insert_text: None,
                 sort_priority: PRIORITY_UNIMPORTED,
@@ -206,29 +206,35 @@ pub(super) fn completion_detail_for_import(
 /// so both resolve handlers identically.
 pub(super) fn dispatch_handler_locations(
     owner: &HandlerOwner,
+    names: crate::model::file_analysis::RailNames,
     name: &str,
     module_index: &dyn CrossFileLookup,
 ) -> Vec<RefLocation> {
     use crate::model::file_analysis::SymbolDetail;
     let mut locs: Vec<RefLocation> = Vec::new();
-    for module_name in module_index.modules_with_symbol(name) {
-        // Every file registered under the name — stacked registrations
-        // may live in a losing candidate.
-        for cached in module_index.visible_def_candidates(&module_name) {
-            let whole = module_index.whole_present(&cached);
-            for sym in whole.symbols() {
-                if sym.name != name {
-                    continue;
-                }
-                if let SymbolDetail::Handler { owner: o, .. } = &sym.detail {
-                    if o == owner {
-                        locs.push(RefLocation {
-                            key: FileKey::Path(cached.path.clone()),
-                            span: sym.selection_span,
-                            access: AccessKind::Declaration,
-                            rewritable: true,
-                            label: None
-                        });
+    for cached in module_index.handler_candidate_files(name) {
+        let whole = module_index.whole_present(&cached);
+        for sym in whole.symbols() {
+            if sym.name != name {
+                continue;
+            }
+            if let SymbolDetail::Handler { owner: o, .. } = &sym.detail {
+                if o == owner {
+                    let loc = RefLocation {
+                        key: FileKey::Path(cached.path.clone()),
+                        span: sym.selection_span,
+                        access: AccessKind::Declaration,
+                        // a class-keyed rail's handler token spells the
+                        // class, never the rail name
+                        rewritable: if names == crate::model::file_analysis::RailNames::Classes {
+                            Rewritable::No(NotRewritable::RailEmission)
+                        } else {
+                            Rewritable::Yes
+                        },
+                        label: None,
+                    };
+                    if !locs.iter().any(|l| l.key == loc.key && l.span == loc.span) {
+                        locs.push(loc);
                     }
                 }
             }

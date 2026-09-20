@@ -434,14 +434,7 @@ fn sub_exporter_member_goto_def_and_references() {
     let results = refs_to(
         &store,
         None,
-        &TargetRef {
-            names: crate::model::conventions::PERL_SPELLINGS,
-            name: "foo".to_string(),
-            kind: TargetKind::Sub {
-                package: Some("My::Exp".to_string()),
-            },
-            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-        },
+        &TargetRef::for_test("foo", TargetKind::Sub { package: Some("My::Exp".to_string()) }),
         RoleMask::EDITABLE,
     );
     // def + 1 exports-list mention = 2.
@@ -1085,12 +1078,10 @@ sub go {
         let results = refs_to(
             &store,
             None,
-            &TargetRef {
-                names: crate::model::conventions::PERL_SPELLINGS,
-                name: name.to_string(),
-                kind: TargetKind::Sub { package: Some("Foo".to_string()) },
-                method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-            },
+            &TargetRef::for_test(
+                name.to_string(),
+                TargetKind::Sub { package: Some("Foo".to_string()) },
+            ),
             RoleMask::EDITABLE,
         );
         assert_eq!(
@@ -1202,12 +1193,10 @@ sub go {
         let results = refs_to(
             &store,
             None,
-            &TargetRef {
-                names: crate::model::conventions::PERL_SPELLINGS,
-                name: name.to_string(),
-                kind: TargetKind::Sub { package: Some("Foo".to_string()) },
-                method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
-            },
+            &TargetRef::for_test(
+                name.to_string(),
+                TargetKind::Sub { package: Some("Foo".to_string()) },
+            ),
             RoleMask::EDITABLE,
         );
         assert_eq!(

@@ -27,6 +27,8 @@ pub(super) fn group_from_projections(
             TargetRef::method(
                 p.bare.clone(),
                 p.class.clone(),
+                // a reader is called, whatever backs it
+                Some(MemberKind::Callable),
                 class_analysis,
                 module_index,
                 OverrideScope::Dispatch,
@@ -144,7 +146,7 @@ pub fn group_refs(
             key: origin.clone(),
             span: *span,
             access: AccessKind::Read,
-            rewritable: true,
+            rewritable: Rewritable::Yes,
             label: None
         })
         .collect();
@@ -152,7 +154,7 @@ pub fn group_refs(
         key: FileKey::Path(path.clone()),
         span: *span,
         access: AccessKind::Read,
-        rewritable: true,
+        rewritable: Rewritable::Yes,
         label: None
     }));
     for m in members {
@@ -198,7 +200,7 @@ pub(super) enum WalkScope<'a> {
 /// `refs_to` narrowed to ONE file — the origin scope of the same driver,
 /// so the highlights image is the in-file slice of `references()` without
 /// paying the workspace walk per cursor move.
-pub(super) fn refs_to_in_file(
+pub(crate) fn refs_to_in_file(
     files: &FileStore,
     module_index: Option<&dyn CrossFileLookup>,
     target: &TargetRef,
@@ -238,7 +240,7 @@ pub fn group_rename_edits(
         .iter()
         .map(|span| {
             (
-                RefLocation { key: origin.clone(), span: *span, access: AccessKind::Read, rewritable: true, label: None},
+                RefLocation { key: origin.clone(), span: *span, access: AccessKind::Read, rewritable: Rewritable::Yes, label: None},
                 bare_new.to_string(),
             )
         })
@@ -249,7 +251,7 @@ pub fn group_rename_edits(
                 key: FileKey::Path(path.clone()),
                 span: *span,
                 access: AccessKind::Read,
-                rewritable: true,
+                rewritable: Rewritable::Yes,
                 label: None
             },
             bare_new.to_string(),
@@ -432,7 +434,7 @@ pub(super) fn matcher_view(
     let needs_whole = match &target.kind {
         TargetKind::Handler { .. } => !view.provisional_dispatches.is_empty(),
         TargetKind::Sub { .. } | TargetKind::Method { .. } => refs_keyed(&view, &target.name).any(|r| {
-            matches!(r.kind, RefKind::MethodCall { .. })
+            r.member_site().is_some()
                 && r.unqualified_target_name(view.names()) == target.name
                 && !r.match_verdict_baked()
         }),
@@ -625,6 +627,9 @@ fn walk_refs(
     // or not resident refs were evicted.
     if rows_active {
         if let Some(idx) = module_index {
+            // The tier is constant for the whole walk: one lock read here,
+            // then a prefix test per candidate.
+            let dep_tier = idx.dependency_tier();
             let keys = retrieval_keys(target, &aliases);
             let candidate_paths = crate::util::ghost_stats::timed("refs.retrieval.candidates", || retrieve_candidates(idx, &keys));
             crate::util::ghost_stats::count("refs.walks");
@@ -641,16 +646,30 @@ fn walk_refs(
                 rows_indexed = crate::util::ghost_stats::timed("refs.retrieval.indexed_paths", || retrieve_indexed(idx));
                 candidate_set = candidate_paths.iter().cloned().collect();
             }
+            // Decode the candidate set in parallel before the sequential
+            // match: cold, decode was ~60% of the first answer. Workspace
+            // FileStore entries answer resident and are skipped; the
+            // prefetch's own cap means a candidate set past it decodes its
+            // tail serially, as before.
+            let to_warm: Vec<std::path::PathBuf> = candidate_paths
+                .iter()
+                .filter(|p| !covered_paths.contains(*p) && !files.workspace_raw().contains_key(*p))
+                .cloned()
+                .collect();
+            idx.prefetch_refs(&to_warm);
             for path in candidate_paths.iter() {
                 if covered_paths.contains(path) {
                     continue;
                 }
                 // Tier attribution: a FileStore workspace entry rides the
                 // WORKSPACE role (Perl project files); everything else the
-                // rows name lives in a module-index tier (DEPENDENCY —
-                // @INC and the pack caches). The mask must admit the
-                // candidate's OWN tier, or an EDITABLE rename would walk
-                // read-only deps (and vice versa).
+                // rows name lives in a module-index tier, whose role the
+                // INDEX answers per path (`dependency_tier`): the hub is
+                // all-`@INC` (DEPENDENCY), a pack sub-index holds the
+                // workspace's own files (WORKSPACE) plus declared dependency
+                // roots — composer's vendor (DEPENDENCY). The mask must
+                // admit the candidate's OWN tier, or an EDITABLE rename
+                // would walk read-only deps (and vice versa).
                 let ws_arc = files
                     .workspace_raw()
                     .get(path)
@@ -666,7 +685,12 @@ fn walk_refs(
                         ))
                     }
                     None => {
-                        if !mask.contains(RoleMask::DEPENDENCY) {
+                        let role = if dep_tier.contains(path) {
+                            RoleMask::DEPENDENCY
+                        } else {
+                            RoleMask::WORKSPACE
+                        };
+                        if !mask.contains(role) {
                             continue;
                         }
                         match idx.cached_by_path(path) {
@@ -730,14 +754,35 @@ fn walk_refs(
         }
     }
 
-    // Dependencies (read-only modules from @INC / the pack-language cache).
-    // Per-FILE sweep (`for_each_cached_file`): the name-keyed view both
-    // repeats files and HIDES a file that lost every name tie. Skip paths an
-    // open/workspace copy already covered — those are fresher.
-    if mask.contains(RoleMask::DEPENDENCY) {
+    // The module-index tiers: `@INC` dependencies AND — in a pack
+    // sub-index — the workspace's own files, attributed per path
+    // (`dependency_tier`; declared dependency roots like composer's
+    // vendor are the read-only part). Per-FILE sweep
+    // (`for_each_cached_file`): the name-keyed view both repeats files and
+    // HIDES a file that lost every name tie. Skip paths an open/workspace
+    // copy already covered — those are fresher.
+    //
+    // An editable (workspace-only) query asks the index first whether it
+    // HAS a workspace tier: the hub's every file is `@INC`, so without the
+    // question a rename would sweep the whole dependency cache to reject
+    // it file by file.
+    let deps_tier_wanted = mask.contains(RoleMask::DEPENDENCY)
+        || (mask.contains(RoleMask::WORKSPACE)
+            && module_index.is_some_and(|i| i.has_workspace_tier()));
+    if deps_tier_wanted {
         let _t = crate::util::ghost_stats::ScopedNs::start("refs.sweep.deps");
         if let Some(idx) = module_index {
+            // Constant for the sweep — snapshot, then prefix-test per file.
+            let dep_tier = idx.dependency_tier();
             idx.for_each_cached_file(&mut |cached| {
+                let role = if dep_tier.contains(&cached.path) {
+                    RoleMask::DEPENDENCY
+                } else {
+                    RoleMask::WORKSPACE
+                };
+                if !mask.contains(role) {
+                    return;
+                }
                 if !covered_paths.insert(cached.path.clone()) {
                     return;
                 }
@@ -755,8 +800,10 @@ fn walk_refs(
                 // Rows-off fallback sweep: copies here may still be
                 // row-axes-evicted (rows exist, retrieval switched off) —
                 // the matcher needs refs + symbols, so take the rows view.
-                let full = matcher_view(idx, cached, target);
-                collect_from_analysis(&key, &full, target, &aliases, module_index, &file_str, &memo, &mut out);
+                let full = crate::util::ghost_stats::timed("refs.cand.view", || matcher_view(idx, cached, target));
+                crate::util::ghost_stats::timed("refs.cand.collect", || {
+                    collect_from_analysis(&key, &full, target, &aliases, module_index, &file_str, &memo, &mut out)
+                });
             });
         }
     }
@@ -833,7 +880,7 @@ pub fn implementations_of(
                                 key: FileKey::Path(cached.path.clone()),
                                 span: s.selection_span,
                                 access: AccessKind::Declaration,
-                                rewritable: false,
+                                rewritable: Rewritable::No(NotRewritable::OtherNameToken),
                                 label: None,
                             });
                         }
@@ -872,7 +919,7 @@ pub fn implementations_of(
     // PARENT of a shared descendant (DBIC's `Ordered` sits alongside `Row` in
     // `Track`'s MRO, not beneath it), which an INHERITS_INV sweep alone never
     // reaches. `dispatch_participants` is that gather, shared with
-    // `method_override_family` — while each had its own walk, this verb found
+    // `member_override_family` — while each had its own walk, this verb found
     // the sibling and `references` did not, from the same cursor.
     let mut implementers = origin.dispatch_participants(class, Some(idx));
     // The target and its own ancestry are the CONTRACT side, not an
@@ -894,7 +941,6 @@ pub fn implementations_of(
         },
     );
     implementers.retain(|p| !contract_line.contains(p));
-
     let mut out: Vec<RefLocation> = Vec::new();
     for pkg in &implementers {
         // class → home module(s): exact cache key for the common
@@ -938,7 +984,7 @@ pub fn implementations_of(
                         key: FileKey::Path(cached.path.clone()),
                         span: s.selection_span,
                         access: AccessKind::Declaration,
-                        rewritable: true,
+                        rewritable: Rewritable::Yes,
                         label: None
                     });
                 }
@@ -997,7 +1043,7 @@ pub(super) fn specialization_family(
                         key: FileKey::Path(cached.path.clone()),
                         span: s.selection_span,
                         access: AccessKind::Declaration,
-                        rewritable: false,
+                        rewritable: Rewritable::No(NotRewritable::OtherNameToken),
                         label: None
                     });
                 }

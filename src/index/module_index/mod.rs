@@ -56,7 +56,10 @@ pub fn rehydration_miss_count() -> usize {
 /// (name, declares-a-Class) per visible symbol. Collected before any strip
 /// so the feeds and tie-breaks never read an emptied `symbols`.
 fn collect_linkage_feed(analysis: &FileAnalysis) -> Vec<(String, bool)> {
-    let mut index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    // Keys borrow for the identity half — the one every symbol of every
+    // language has; only a leaf that differs from its identity owns.
+    let mut index: std::collections::HashMap<std::borrow::Cow<'_, str>, usize> =
+        std::collections::HashMap::new();
     let mut feed: Vec<(String, bool)> = Vec::new();
     for sym in analysis.symbols() {
         // The C-linkage surface (`FileAnalysis::is_linkage_visible`) —
@@ -66,13 +69,26 @@ fn collect_linkage_feed(analysis: &FileAnalysis) -> Vec<(String, bool)> {
             continue;
         }
         let is_class = matches!(sym.kind, SymKind::Class);
-        match index.get(sym.name.as_str()) {
-            // A file declaring both a value AND a Class under one name
-            // ranks as a Class.
-            Some(&i) => feed[i].1 |= is_class,
-            None => {
-                index.insert(sym.name.as_str(), feed.len());
-                feed.push((sym.name.clone(), is_class));
+        // A namespaced identity registers under itself AND the leaf it
+        // binds: the identity is the exact key, the leaf the widening one
+        // (`ScopedLookup::use_map_candidates`).
+        // `name_match_key` hands the name itself back when the language
+        // qualifies nothing, so the inequality IS the gate — no separator
+        // question to ask here.
+        let leaf = crate::model::file_analysis::name_match_key(&sym.name, analysis.names());
+        let keys: [Option<std::borrow::Cow<'_, str>>; 2] = [
+            Some(std::borrow::Cow::Borrowed(sym.name.as_str())),
+            (leaf != sym.name).then(|| std::borrow::Cow::Owned(leaf)),
+        ];
+        for key in keys.into_iter().flatten() {
+            match index.get(&key) {
+                // A file declaring both a value AND a Class under one name
+                // ranks as a Class.
+                Some(&i) => feed[i].1 |= is_class,
+                None => {
+                    feed.push((key.to_string(), is_class));
+                    index.insert(key, feed.len() - 1);
+                }
             }
         }
     }

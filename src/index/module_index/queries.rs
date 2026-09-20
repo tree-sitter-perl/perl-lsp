@@ -206,6 +206,22 @@ impl ModuleIndex {
         self.get_cached(module_name)
     }
 
+    /// Every definition candidate whose registered name starts with
+    /// `prefix`, each name with ALL its providers — the universe a
+    /// name-keyed pack completes from (its imports name classes, not paths,
+    /// so every namespace declaring the leaf is a distinct offer).
+    pub fn defs_with_prefix(&self, prefix: &str) -> Vec<(String, Vec<Arc<CachedModule>>)> {
+        let mut out: Vec<(String, Vec<Arc<CachedModule>>)> = self
+            .core
+            .all_defs
+            .iter()
+            .filter(|e| e.key().starts_with(prefix))
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     /// Completion-GATHERING mirror of `get_cached_scoped`: enumerate every
     /// registered name starting with `prefix` that has a definition candidate
     /// inside `visible` (canonical paths — the querying file's `#include`
@@ -386,6 +402,12 @@ impl ModuleIndex {
         result
     }
 
+    /// Every handler name on the string rail `rail` this index holds
+    /// (rail-name completion's cross-file source).
+    pub fn rail_names(&self, rail: &str) -> Vec<String> {
+        self.core.edges.rail_names(rail)
+    }
+
     /// Generic "find modules with a symbol named N" primitive —
     /// O(1) hash + O(matches) scan for name-keyed predicates (never
     /// `for_each_cached` over the whole store). Callers apply their
@@ -423,6 +445,7 @@ impl ModuleIndex {
         name: &str,
         class: &str,
     ) -> Option<String> {
+        let _t = crate::util::ghost_stats::ScopedNs::start("mdmp.total");
         use crate::model::file_analysis::CrossFileLookup;
         crate::util::ghost_stats::count("mdmp.call");
         let mods = self.modules_providing_package(class);

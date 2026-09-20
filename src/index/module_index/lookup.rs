@@ -299,6 +299,10 @@ impl ModuleIndex {
 /// recursion); the generic inherent iterators accept the `&mut dyn FnMut`
 /// trampolines directly.
 impl CrossFileLookup for ModuleIndex {
+    fn rail_names(&self, rail: &str) -> Vec<String> {
+        ModuleIndex::rail_names(self, rail)
+    }
+
     fn resolution_epoch(&self) -> u64 {
         // The same additive counter the enrichment-key memo validates
         // against — one home for "has anything a cross-file read depends
@@ -371,6 +375,27 @@ impl CrossFileLookup for ModuleIndex {
         self.rehydrate_rows_or_resident(cached)
     }
 
+    fn prefetch_refs(&self, paths: &[std::path::PathBuf]) {
+        use rayon::prelude::*;
+        if paths.len() < 2 || std::env::var_os("PERL_LSP_REFS_NO_PREFETCH").is_some() {
+            return;
+        }
+        /// How many candidates the parallel warm decodes ahead of the walk.
+        /// The rehydration LRU is byte-capped, so a candidate set larger than
+        /// it evicts its own head before the sequential match reaches it —
+        /// the warm would then pay for decodes the walk cannot use. A cap
+        /// keeps the prefetched set at a size the LRU can hold for typical
+        /// analyses; past it the tail decodes lazily, as it did unwarmed.
+        const PREFETCH_CAP: usize = 4096;
+        let take = paths.len().min(PREFETCH_CAP);
+        crate::util::ghost_stats::timed("refs.prefetch", || {
+            paths[..take].par_iter().for_each(|p| {
+                if let Some(cm) = self.cached_by_path(p) {
+                    let _ = self.refs_present(&cm);
+                }
+            });
+        });
+    }
     fn refs_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
         // Backward-walk view: refs AND symbols usable (the matcher reads
         // usage rows + declaration rows). The @INC strip is bag-only, so
@@ -677,6 +702,28 @@ impl CrossFileLookup for ModuleIndex {
             .map(|g| Arc::clone(&g))
             .unwrap_or_default()
     }
+    fn index_state(&self, language: &str) -> crate::model::file_analysis::IndexState {
+        self.language_index_state(language)
+    }
+    fn dependency_tier(&self) -> crate::model::file_analysis::DependencyTier {
+        use crate::model::file_analysis::DependencyTier;
+        // Hub semantics (and a poisoned lock): everything cached here came
+        // from `@INC`.
+        match self.core.dependency_roots.read() {
+            Ok(g) => match g.as_ref() {
+                None => DependencyTier::Everything,
+                Some(roots) => DependencyTier::Roots(std::sync::Arc::clone(roots)),
+            },
+            Err(_) => DependencyTier::Everything,
+        }
+    }
+
+    fn has_workspace_tier(&self) -> bool {
+        // The roots are set exactly when a pack sub-index is told which of
+        // its files are read-only dependencies; until then every path reads
+        // as `@INC`.
+        self.core.dependency_roots.read().is_ok_and(|g| g.is_some())
+    }
 
     fn workspace_root_path(&self) -> Option<std::path::PathBuf> {
         self.workspace_root()
@@ -686,6 +733,15 @@ impl CrossFileLookup for ModuleIndex {
 
     fn modules_with_symbol(&self, name: &str) -> Vec<String> {
         self.modules_with_symbol(name)
+    }
+
+    fn handler_def_files(&self, name: &str) -> Vec<Arc<CachedModule>> {
+        self.core
+            .edges
+            .handler_paths(name)
+            .into_iter()
+            .filter_map(|p| self.all_files.get(&p).map(|e| e.value().clone()))
+            .collect()
     }
 
     fn find_exporters(&self, func_name: &str) -> Vec<String> {
@@ -839,6 +895,9 @@ impl CrossFileLookup for ModuleIndex {
         visible: &std::collections::HashSet<String>,
     ) -> Vec<(String, Arc<CachedModule>)> {
         self.visible_defs_with_prefix(prefix, visible)
+    }
+    fn defs_with_prefix(&self, prefix: &str) -> Vec<(String, Vec<Arc<CachedModule>>)> {
+        self.defs_with_prefix(prefix)
     }
 }
 

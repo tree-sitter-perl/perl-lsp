@@ -229,6 +229,10 @@ pub fn resolve_symbol_scoped(
         // class-content gate keeps a lexical local out — a pack local inside
         // an inline method carries the class as sticky `package` too, so the
         // package tag alone would over-claim.
+        // A promoted-ctor-param cursor lands on the `$level` Variable (emitted
+        // first); the member identity lives on its Field twin one sigil-column
+        // in — resolve THAT, so decl-side references/rename see the accesses.
+        let sym = analysis.promoted_field_twin(sym).unwrap_or(sym);
         if analysis.symbol_is_class_content(sym) {
             // The class tag normally rides class-content symbols by construction;
             // a malformed/adversarial FileAnalysis without it has no target to
@@ -237,13 +241,14 @@ pub fn resolve_symbol_scoped(
                 let mut t = TargetRef::method(
                     sym.name.clone(),
                     class,
+                    Some(MemberKind::of_sym(sym.kind)),
                     analysis,
                     module_index,
                     scope,
                 );
                 t.def_paths = pack_class_def_paths(&t, analysis, module_index);
                 t.bare_constant = analysis.class_content_is_bare_constant(sym);
-                return Some(ResolvedTarget::Target(t));
+                return Some(member_group_or_target(t, analysis, module_index));
             }
         }
         // A file-scope global / anonymous-enum constant: bare-name-keyed,
@@ -338,6 +343,7 @@ pub fn resolve_symbol_scoped(
                     let mut t = TargetRef::method(
                         r.target_name.clone(),
                         class,
+                        r.resolved_symbol().map(|id| MemberKind::of_sym(analysis.symbol(id).kind)),
                         analysis,
                         module_index,
                         scope,
@@ -393,11 +399,91 @@ pub fn resolve_symbol_scoped(
                 if let Some(bare) = class_member_bare_constant(&t.name, class, analysis, module_index, None) {
                     t.def_paths = pack_class_def_paths(&t, analysis, module_index);
                     t.bare_constant = bare;
+                    return Some(member_group_or_target(t, analysis, module_index));
                 }
             }
             ResolvedTarget::Target(t)
         }
     })
+}
+
+/// Wrap a pack Method-kind member target in the group its ONE declaration
+/// token spells several ways.
+///
+/// Two shapes, both minted as relations by the producer, never rediscovered
+/// from spans here. A php promoted constructor property
+/// (`__construct(public readonly Level $level)`) declares the field AND the
+/// ctor param at one token, so the identity must carry the param's body-use
+/// spans — a rename that rewrites the decl and the accesses but leaves
+/// `$level` body reads behind breaks the code. Origin-declared members fold
+/// as `local_spans`; a class living in another file pins them to that file.
+/// A co-declared member PAIR (an Eloquent relation: the method and the
+/// property it declares through `__get`) is one member in two families, so
+/// the group's members differ only in the family each matches and a rename
+/// from either spelling reaches both. Neither shape → the plain target.
+pub(super) fn member_group_or_target(
+    t: TargetRef,
+    analysis: &FileAnalysis,
+    module_index: Option<&dyn CrossFileLookup>,
+) -> ResolvedTarget {
+    let TargetKind::Method { class } = &t.kind else {
+        return ResolvedTarget::Target(t);
+    };
+    // Both family members of one declaration, differing only in what they
+    // match — the target's own policy fields are already right for both.
+    let both_families = |t: &TargetRef| -> Vec<GroupMember> {
+        [MemberKind::Callable, MemberKind::Value]
+            .into_iter()
+            .map(|k| {
+                let mut m = t.clone();
+                m.member_kind = Some(k);
+                GroupMember { target: m, rename: MemberRename::Bare }
+            })
+            .collect()
+    };
+    if let Some((decl, spans)) = analysis.promoted_param_use_spans(&t.name, class) {
+        return ResolvedTarget::Group {
+            local_spans: spans,
+            pinned_spans: Vec::new(),
+            decl_spans: vec![(None, decl)],
+            members: vec![GroupMember { target: t, rename: MemberRename::Bare }],
+        };
+    }
+    if analysis.member_is_codeclared_pair(&t.name, class) {
+        let members = both_families(&t);
+        return ResolvedTarget::Group {
+            local_spans: Vec::new(),
+            pinned_spans: Vec::new(),
+            decl_spans: Vec::new(),
+            members,
+        };
+    }
+    if let Some(idx) = module_index {
+        for cached in idx.visible_def_candidates(class) {
+            let whole = idx.whole_present(&cached);
+            if let Some((decl, spans)) = whole.promoted_param_use_spans(&t.name, class) {
+                return ResolvedTarget::Group {
+                    local_spans: Vec::new(),
+                    pinned_spans: spans
+                        .into_iter()
+                        .map(|s| (cached.path.clone(), s))
+                        .collect(),
+                    decl_spans: vec![(Some(cached.path.clone()), decl)],
+                    members: vec![GroupMember { target: t, rename: MemberRename::Bare }],
+                };
+            }
+            if whole.member_is_codeclared_pair(&t.name, class) {
+                let members = both_families(&t);
+                return ResolvedTarget::Group {
+                    local_spans: Vec::new(),
+                    pinned_spans: Vec::new(),
+                    decl_spans: Vec::new(),
+                    members,
+                };
+            }
+        }
+    }
+    ResolvedTarget::Target(t)
 }
 
 /// The bare-constant verdict for class member `class::name`, as the origin

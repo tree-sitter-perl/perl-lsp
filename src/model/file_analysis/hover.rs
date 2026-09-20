@@ -343,13 +343,16 @@ impl FileAnalysis {
     /// cross-file class. Drives goto-def on `obj->field`. Same cross-file
     /// ancestor walk as member completion.
     /// `field: type` for hover on `obj->field`, resolved through the SAME
-    /// `resolve_method_in_ancestors` walk goto-def uses — no parallel walk.
+    /// `resolve_member` walk goto-def uses — no parallel walk, and `want`
+    /// is the family the cursor's own syntax named, so a language that
+    /// spells its calls never answers a read with a method of that name.
     /// Type read from the field's OWNING analysis; rendered via the one
     /// `display_type` projection.
     pub fn member_hover(
         &self,
         class: &str,
         field: &str,
+        want: MemberKind,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<String> {
         let render = |analysis: &FileAnalysis, sym: &Symbol| {
@@ -367,7 +370,7 @@ impl FileAnalysis {
                 _ => base,
             }
         };
-        match self.resolve_method_in_ancestors(class, field, module_index)? {
+        match self.resolve_member(class, field, want, module_index)? {
             MethodResolution::Local { sym_id, .. } => Some(render(self, self.symbol(sym_id))),
             MethodResolution::CrossFile { class, .. } => {
                 let idx = module_index?;

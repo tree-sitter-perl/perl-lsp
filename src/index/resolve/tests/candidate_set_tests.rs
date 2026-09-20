@@ -359,15 +359,7 @@ fn from_rename_kind_returns_none_for_kinds_with_no_target() {
 #[test]
 fn collect_from_analysis_still_finds_sub_refs_after_scope_hardening() {
     let fa = parse("package Foo;\nsub greet { 1 }\ngreet();\n1;\n");
-    let target = TargetRef {
-        names: crate::model::conventions::PERL_SPELLINGS,
-        name: "greet".to_string(),
-        kind: TargetKind::Sub { package: Some("Foo".to_string()) },
-        method_classes: Vec::new(),
-        scope: OverrideScope::Dispatch,
-        def_paths: Vec::new(),
-        bare_constant: false,
-    };
+    let target = TargetRef::for_test("greet", TargetKind::Sub { package: Some("Foo".to_string()) });
     let store = FileStore::new();
     let path = PathBuf::from("/tmp/resolve_test_scope_hardening.pm");
     store.insert_workspace(path.clone(), fa);
@@ -485,5 +477,39 @@ fn goto_def_agrees_with_references_on_template_method() {
             && d.span.start.row == 2
             && d.span.start.column == decl_col),
         "goto-def must land on the same child decl references already names: {defs:?}",
+    );
+}
+
+// ---- member family: the ask's family is the syntax, and the declaration
+// is the only thing that widens it ----
+
+/// The extractor already read the syntax — `FieldAccess` is a read,
+/// `MethodCall` is a call — so both sides are strict and no language has a
+/// say. The one widening is the declaration's own word: a slot flagged
+/// `CALLABLE_VALUE` (a function-pointer member) answers a call.
+#[test]
+fn a_call_admits_a_stored_member_only_where_the_declaration_says_it_is_invoked() {
+    use crate::model::file_analysis::{MemberKind, SymKind, SymbolFlags};
+
+    let none = SymbolFlags::empty();
+    assert!(
+        !MemberKind::Callable.admits_decl(SymKind::Field, none),
+        "a property is not a method",
+    );
+    assert!(
+        !MemberKind::Value.admits_decl(SymKind::Method, none),
+        "a value read never answers with a callable",
+    );
+    assert!(
+        MemberKind::Callable.admits_decl(SymKind::Method, none),
+        "the method itself answers",
+    );
+    assert!(
+        MemberKind::Value.admits_decl(SymKind::Field, none),
+        "the field itself answers",
+    );
+    assert!(
+        MemberKind::Callable.admits_decl(SymKind::Field, SymbolFlags::CALLABLE_VALUE),
+        "a slot the declaration says is invoked answers a call",
     );
 }

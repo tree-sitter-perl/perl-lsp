@@ -2114,7 +2114,7 @@ fn a_purge_retracts_every_sibling_feed_under_one_name() {
 /// own packages and must NOT enter the candidate set.
 #[test]
 fn typeglob_install_is_found_through_the_class_keyed_provider_index() {
-    use crate::model::file_analysis::{CrossFileLookup, MethodResolution};
+    use crate::model::file_analysis::{MethodResolution};
     let idx = ModuleIndex::new_for_test();
 
     let reg = |name: &str, src: &str| {
@@ -2181,7 +2181,7 @@ fn typeglob_install_is_found_through_the_class_keyed_provider_index() {
 /// the overlap buys nothing.
 #[test]
 fn typeglob_fallback_still_answers_from_a_candidate_the_ancestor_walk_rejected() {
-    use crate::model::file_analysis::{CrossFileLookup, MethodResolution, SymKind};
+    use crate::model::file_analysis::{MethodResolution, SymKind};
     let idx = ModuleIndex::new_for_test();
 
     let reg = |name: &str, fa: crate::model::file_analysis::FileAnalysis| {
@@ -2240,7 +2240,7 @@ fn typeglob_fallback_still_answers_from_a_candidate_the_ancestor_walk_rejected()
 /// loop would return `cls` here instead.
 #[test]
 fn typeglob_fallback_keeps_its_provider_ordering_across_the_overlap() {
-    use crate::model::file_analysis::{CrossFileLookup, MethodResolution, SymKind};
+    use crate::model::file_analysis::{MethodResolution, SymKind};
     let idx = ModuleIndex::new_for_test();
 
     let reg = |name: &str, fa: crate::model::file_analysis::FileAnalysis| {
@@ -2817,5 +2817,38 @@ fn a_background_write_lands_until_the_open_doc_lane_has_recorded() {
         SurfaceVerdict::Unchanged,
         "a Background write must yield once the open-doc lane owns the record \
          — consumers read the buffer, and the disk state is not what they see"
+    );
+}
+
+/// The bulk-pass verdict is per LANGUAGE and per STORE, and it is the sweep
+/// that publishes it: nothing an index never swept reads as settled, and a
+/// hub routes the question to the sub-index serving the language exactly as
+/// it routes the queries.
+#[test]
+fn index_state_is_published_by_the_sweep_and_answered_per_language() {
+    use crate::model::file_analysis::{CrossFileLookup, IndexState};
+
+    let hub = ModuleIndex::new_for_test();
+    assert_eq!(
+        hub.index_state("cpp"),
+        IndexState::Warming,
+        "an index that swept nothing claims nothing",
+    );
+
+    let sub = Arc::new(ModuleIndex::new_for_test());
+    hub.attach_pack_index("cpp", Arc::clone(&sub));
+    assert_eq!(
+        hub.index_state("cpp"),
+        IndexState::Warming,
+        "attaching a sub-index is not sweeping it",
+    );
+
+    sub.mark_language_indexed("cpp");
+    assert_eq!(hub.index_state("cpp"), IndexState::Settled, "the hub routes");
+    assert_eq!(sub.index_state("cpp"), IndexState::Settled);
+    assert_eq!(
+        sub.index_state("php"),
+        IndexState::Warming,
+        "a store settled for one language claims nothing about another",
     );
 }

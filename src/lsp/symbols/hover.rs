@@ -1,6 +1,7 @@
 //! Hover rendering for Perl and pack languages.
 
 use super::*;
+use crate::model::file_analysis::MemberKind;
 
 /// Hover for pack languages: a presentation of the CandidateSet's hover
 /// projection (`docs/adr/resolution-candidate-set.md` — hover presents the
@@ -23,7 +24,10 @@ pub fn pack_hover_markdown(
     // symbol on another class) can't hijack it with the wrong scope.
     // A data field shows `field: type` (member_hover, keyed on the field's own
     // scope); a method shows its signature.
-    if let Some(r) = analysis.ref_at(point).filter(|r| matches!(r.kind, RefKind::MethodCall { .. })) {
+    if let Some((r, want)) = analysis
+        .ref_at(point)
+        .and_then(|r| Some((r, r.member_kind()?)))
+    {
         if let Some(midx) = module_index {
             if let Some(cn) = analysis.method_call_invocant_class(r, Some(midx)) {
                 let field = r.unqualified_target_name(analysis.names());
@@ -32,36 +36,75 @@ pub fn pack_hover_markdown(
                 // type (`T get()` on a `Box<int>` receiver → `int`) — shown
                 // only when the substitution actually changed the answer,
                 // so non-template hovers stay byte-identical.
-                let recv_ty = match &r.kind {
-                    RefKind::MethodCall { invocant_span: Some(sp), .. } => {
-                        analysis.expr_type_at_span(*sp, Some(midx))
-                    }
-                    _ => None,
-                };
+                let recv_ty = r
+                    .member_site()
+                    .and_then(|m| m.invocant_span)
+                    .and_then(|sp| analysis.expr_type_at_span(sp, Some(midx)));
+                // The ref's family picks the rung: a value read never
+                // answers through a method of the same name.
                 let substituted = |raw: Option<InferredType>| -> Option<InferredType> {
-                    let sub = recv_ty
-                        .as_ref()
-                        .and_then(|t| analysis.member_value_type(t, field, Some(midx), None))?;
+                    let sub = recv_ty.as_ref().and_then(|t| match want {
+                        MemberKind::Value => analysis.field_value_type(t, field, Some(midx)),
+                        MemberKind::Callable => {
+                            analysis.member_value_type(t, field, Some(midx), None)
+                        }
+                    })?;
                     (raw.as_ref() != Some(&sub)).then_some(sub)
                 };
-                if let Some(crate::model::file_analysis::MethodResolution::Local { sym_id, .. }) =
-                    analysis.resolve_method_in_ancestors(&cn, field, Some(midx))
-                {
-                    let sym = analysis.symbol(sym_id);
-                    if matches!(sym.kind, FaSymKind::Method | FaSymKind::Sub) {
-                        let mut text = render_symbol_hover(
-                            sym, source, &sym.span.start, language, analysis, sym.span.start, Some(midx),
-                        );
-                        if let Some(rt) = substituted(
-                            analysis.find_method_return_type(&cn, field, Some(midx), None),
-                        ) {
-                            text.push_str(&format!(
-                                "\n\n*returns: {}*",
-                                crate::model::file_analysis::format_inferred_type(&rt)
-                            ));
-                        }
-                        return Some(text);
+                use crate::model::file_analysis::MethodResolution;
+                let returns_line = |text: &mut String| {
+                    if let Some(rt) = substituted(
+                        analysis.find_method_return_type(&cn, field, Some(midx), None),
+                    ) {
+                        text.push_str(&format!("\n\n*returns: {}*", analysis.render_type(&rt)));
                     }
+                };
+                match analysis.resolve_member(&cn, field, want, Some(midx)) {
+                    Some(MethodResolution::Local { sym_id, .. }) => {
+                        let sym = analysis.symbol(sym_id);
+                        if matches!(sym.kind, FaSymKind::Method | FaSymKind::Sub) {
+                            let mut text = render_symbol_hover(
+                                sym, source, language, analysis, sym.span.start, Some(midx),
+                            );
+                            returns_line(&mut text);
+                            return Some(text);
+                        }
+                    }
+                    // A cross-file method renders exactly like a local one —
+                    // its signature line read from the DEFINING file (a cached
+                    // analysis carries spans, not source), labeled by kind. The
+                    // kind-agnostic `member: type` fallback below is for data
+                    // members; a method routed there lost its signature and
+                    // read as a property.
+                    Some(MethodResolution::CrossFile { class, def_module, .. }) => {
+                        let module = def_module.as_deref().unwrap_or(class.as_str());
+                        let cached = midx
+                            .candidate_defining_sub_in_package(module, &class, field)
+                            .or_else(|| midx.get_cached(module));
+                        if let Some(cached) = cached {
+                            let whole = midx.whole_present(&cached);
+                            let sym = whole.symbols().iter().find(|s| {
+                                matches!(s.kind, FaSymKind::Method | FaSymKind::Sub)
+                                    && s.name == field
+                                    && s.package.as_deref() == Some(class.as_str())
+                            });
+                            // A disk read on the hover path, attributed:
+                            // the declaring file is closed, and its text is
+                            // what the signature is rendered from.
+                            let text = crate::util::timings::phase("lsp::hover_member_read", || {
+                                std::fs::read_to_string(&cached.path)
+                            });
+                            if let (Some(sym), Ok(text)) = (sym, text)
+                            {
+                                let mut out = render_symbol_hover(
+                                    sym, &text, language, &whole, sym.span.start, Some(midx),
+                                );
+                                returns_line(&mut out);
+                                return Some(out);
+                            }
+                        }
+                    }
+                    None => {}
                 }
                 // A param-typed member substitutes the same way (`T v_;` on
                 // `Box<int>` reads `v_: int`; a cross-file method's return
@@ -73,7 +116,7 @@ pub fn pack_hover_markdown(
                         "```{}\n{}: {}\n```\n\n*member*",
                         language,
                         field,
-                        crate::model::file_analysis::format_inferred_type(&sub)
+                        analysis.render_type(&sub)
                     ));
                 }
                 // The member's declared type may be a config-variant macro whose
@@ -101,9 +144,24 @@ pub fn pack_hover_markdown(
                 if let Some(leaf) = storage_leaf {
                     return Some(format!("```{}\n{}: {}\n```\n\n*field*", language, field, leaf));
                 }
-                if let Some(h) = analysis.member_hover(&cn, field, Some(midx)) {
+                if let Some(h) = analysis.member_hover(&cn, field, want, Some(midx)) {
                     return Some(format!("```{}\n{}\n```\n\n*field*", language, h));
                 }
+            }
+        }
+    }
+    // The current-object receiver (`$this`, `this`) has no declaration to
+    // land on; its value IS the enclosing class, which is what a reader
+    // hovering it wants to know.
+    if let Some(tok) = analysis.ref_at(point).map(|r| r.target_name.as_str()) {
+        if crate::build::language_driver::LanguageRegistry::receiver_tokens(&analysis.language)
+            .contains(&tok)
+        {
+            if let Some(cls) = analysis
+                .scope_at(point)
+                .and_then(|sc| analysis.enclosing_class_for_scope(sc))
+            {
+                return Some(format!("```{}\n{}: {}\n```\n\n*variable*", language, tok, cls));
             }
         }
     }
@@ -119,11 +177,12 @@ pub fn pack_hover_markdown(
     // symbol under the cursor directly (its own type point + scope).
     if let Some(sym) = analysis.symbol_at(point) {
         return Some(render_symbol_hover(
-            sym, source, &sym.span.start, language, analysis, point, module_index,
+            sym, source, language, analysis, point, module_index,
         ));
     }
     None
 }
+
 
 /// Render the hover projection's candidate: the symbol declared at the
 /// location — in the origin (fresh text in hand) or a cached pack module
@@ -154,14 +213,17 @@ fn render_candidate_hover(
         if let Some(i) = sym_at(analysis) {
             let sym = &analysis.symbols()[i];
             return Some(render_symbol_hover(
-                sym, source, &sym.span.start, language, analysis, cs.cursor(), module_index,
+                sym, source, language, analysis, cs.cursor(), module_index,
             ));
         }
         let line = source.lines().nth(loc.span.start.row)?.trim();
         return (!line.is_empty()).then(|| format!("```{}\n{}\n```", language, line));
     }
     let path = crate::index::resolve::key_for_sort(&loc.key);
-    let text = std::fs::read_to_string(&path).ok()?;
+    let text = crate::util::timings::phase("lsp::hover_candidate_read", || {
+        std::fs::read_to_string(&path)
+    })
+    .ok()?;
     let fname = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
     // The candidate's own analysis: the scoped index caches every pack file
     // a projection can answer from.
@@ -180,7 +242,7 @@ fn render_candidate_hover(
         if let Some(i) = sym_at(&whole) {
             let sym = &whole.symbols()[i];
             let mut out = render_symbol_hover(
-                sym, &text, &sym.span.start, language, &whole, sym.span.start,
+                sym, &text, language, &whole, sym.span.start,
                 module_index,
             );
             out.push_str(&format!("\n\n— `{}`", fname));
@@ -222,7 +284,6 @@ fn hover_kind_label(sym: &crate::model::file_analysis::Symbol) -> &'static str {
 fn render_symbol_hover(
     sym: &crate::model::file_analysis::Symbol,
     source: &str,
-    line_at: &Point,
     language: &str,
     analysis: &FileAnalysis,
     type_point: Point,
@@ -242,7 +303,7 @@ fn render_symbol_hover(
                         .type_name_edge_of(&sym.name, sym.scope)
                         .and_then(|sp| config_variant_leaf_display(analysis, &sp, midx))
                 })
-                .unwrap_or_else(|| sym.display_type(&ty));
+                .unwrap_or_else(|| analysis.display_type_of(sym, &ty));
             // A union member's def-site hover carries the storage overlay,
             // same as the member-access path (`FileAnalysis::member_hover`).
             let overlay = match analysis.union_overlay(sym) {
@@ -251,19 +312,56 @@ fn render_symbol_hover(
                 }
                 _ => String::new(),
             };
-            return format!(
+            let mut out = format!(
                 "```{}\n{}: {}{}\n```\n\n*{}*",
                 language, sym.name, display, overlay, hover_kind_label(sym)
             );
+            if let Some(doc) = sym.presentation.doc.as_deref() {
+                out.push_str("\n\n");
+                out.push_str(doc);
+            }
+            return out;
         }
     }
-    let line = source.lines().nth(line_at.row).unwrap_or("").trim();
+    // The signature line is the line carrying the NAME token, not the def
+    // span's first row — an attributed def (`#[Test]` above a php method,
+    // `template<...>` above a cpp fn) starts rows earlier, and rendering
+    // that row showed the annotation as the signature.
+    // A variable hovered at a REBIND (php's function-scoped locals: one
+    // def at the first assignment, every later `$x = …` a rebind) must not
+    // show the first assignment's line as if it were this site's — that
+    // attributes another branch's code to the cursor. The site says which
+    // it is: a demoted re-assignment is a WRITE ref. Untyped there, the
+    // honest answer is the name alone.
+    let at_rebind = analysis
+        .ref_at(type_point)
+        .is_some_and(|r| matches!(r.access, crate::model::file_analysis::AccessKind::Write));
+    if matches!(sym.kind, FaSymKind::Variable) && at_rebind {
+        return format!("```{}\n{}\n```\n\n*{}*", language, sym.name, hover_kind_label(sym));
+    }
+    let line = source.lines().nth(sym.selection_span.start.row).unwrap_or("").trim();
     let sig = line.trim_end_matches([' ', '{', ';']).trim();
     let mut out = format!("```{}\n{}\n```\n\n*{}*", language, sig, hover_kind_label(sym));
     if matches!(sym.kind, FaSymKind::Class) {
         for attr in &sym.attributes {
             out.push_str(&format!("\n\n*{}*", attr));
         }
+    }
+    // A callable the source leaves untyped, in a language that writes
+    // native return annotations: what the bag infers for it is the
+    // hover's business — only the TOTAL return (every arm witnessed, none
+    // null), the same value the quick-fix would write.
+    if matches!(sym.kind, FaSymKind::Sub | FaSymKind::Method)
+        && !analysis.spellings().return_annotation_template.is_empty()
+        && sym.declared_return().is_none()
+    {
+        if let Some(rt) = analysis.total_inferred_return(sym.id) {
+            out.push_str(&format!("\n\n*returns: {}*", analysis.render_type(&rt)));
+        }
+    }
+    if let Some(doc) = sym.presentation.doc.as_deref() {
+        out.push_str("\n\n");
+        out.push_str(doc);
     }
     out
 }
