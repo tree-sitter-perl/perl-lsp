@@ -4255,6 +4255,50 @@ function f(Query $q) {
 }
 
 #[test]
+fn php_wp_hook_string_callbacks_are_function_refs() {
+    // The string in `add_action('init', 'wp_cron')` names the function
+    // (docs/prompt-pack-plugins.md tier 1). The WordPress
+    // overlay's `@ref.call.named` mints an ordinary FunctionCall ref whose
+    // span is the content between the quotes — references connect both
+    // directions and rename rewrites exactly those characters.
+    let src = "\
+<?php
+function wp_cron(): int { return 1; }
+add_action('init', 'wp_cron');
+add_filter('the_content', 'wp_cron', 10, 2);
+remove_action('init', 'wp_cron');
+";
+    let (fa, _) = php_fa(src);
+    // cursor on the wp_cron decl name
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 1, column: 10 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("wp_cron decl must mint a target: {other:?}"),
+    };
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/wp/t.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let hook_sites: Vec<_> = locs.iter().filter(|l| l.span.start.row >= 2).collect();
+    assert_eq!(hook_sites.len(), 3, "all three registration strings are refs: {locs:?}");
+    assert!(
+        hook_sites.iter().all(|l| l.is_rewritable()),
+        "rename rewrites the string content: {hook_sites:?}"
+    );
+    // the span is the content INSIDE the quotes: `add_action('init', 'wp_cron');`
+    let first = hook_sites.iter().find(|l| l.span.start.row == 2).expect("row-2 site");
+    assert_eq!((first.span.start.column, first.span.end.column), (20, 27), "span is the quoted content: {first:?}");
+}
+
+#[test]
 fn php_wp_hook_array_callbacks_are_method_refs() {
     // The `array($this, 'on_save')` / `[$this, 'on_save']` callback forms:
     // the overlay's `@ref.method.named` + same-match `@member.recv` mint the
@@ -4355,6 +4399,81 @@ function use_it(Record $record): Level {
         matches!(from_decl, Some(crate::index::resolve::ResolvedTarget::Group { .. })),
         "decl-side cursor resolves to the same group: {from_decl:?}"
     );
+}
+
+#[test]
+fn php_wp_hook_name_identity_connects_registration_and_firing() {
+    // Hook-NAME identity on the `hook` rail: `add_action('init', …)`
+    // declares the hook (a Handler named by the string, owned by the rail
+    // the overlay's capture suffix names) and `do_action('init')` fires
+    // it. References from either side list both; rename rewrites the name
+    // inside the quotes at every site.
+    let src = "\
+<?php
+function wp_cron(): int { return 1; }
+add_action('init', 'wp_cron');
+add_action('init', 'other_cb');
+do_action('init');
+do_action('shutdown');
+";
+    let (fa, _) = php_fa(src);
+    // cursor on the FIRING string ('init' at row 4, inside quotes)
+    let resolved = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 4, column: 12 },
+        None,
+    );
+    let target = match resolved {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("firing string must mint the Handler target: {other:?}"),
+    };
+    assert!(
+        matches!(
+            &target.kind,
+            crate::index::resolve::TargetKind::Handler {
+                owner: crate::model::file_analysis::HandlerOwner::Rail(rail),
+                name,
+                names: crate::model::file_analysis::RailNames::Strings,
+            } if rail == "hook" && name == "init"
+        ),
+        "the hook rail's names are the strings themselves: {target:?}"
+    );
+    let locs = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/wp/h.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    );
+    let rows: Vec<usize> = locs.iter().map(|l| l.span.start.row).collect();
+    assert!(rows.contains(&2) && rows.contains(&3), "both registrations: {locs:?}");
+    assert!(rows.contains(&4), "the firing site: {locs:?}");
+    assert!(!rows.contains(&5), "'shutdown' is a different hook: {locs:?}");
+    assert!(locs.iter().all(|l| l.is_rewritable()), "rename rewrites inside quotes: {locs:?}");
+    // …and the other direction: a cursor on a REGISTRATION string resolves
+    // to the same target, so "from either side" is pinned, not assumed.
+    let from_reg = crate::index::resolve::resolve_symbol(
+        &fa,
+        tree_sitter::Point { row: 2, column: 12 },
+        None,
+    );
+    let reg_target = match from_reg {
+        Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
+        other => panic!("registration string must mint the Handler target: {other:?}"),
+    };
+    let reg_rows: Vec<usize> = crate::index::resolve::refs_to_in_file(
+        &crate::index::file_store::FileStore::new(),
+        None,
+        &reg_target,
+        &crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/wp/h.php")),
+        &fa,
+        crate::index::resolve::RoleMask::VISIBLE,
+    )
+    .iter()
+    .map(|l| l.span.start.row)
+    .collect();
+    assert_eq!(reg_rows, rows, "either side lists the same sites");
 }
 
 /// An unsuffixed `@def.handler.named` names no rail, and a rail is the
@@ -4798,6 +4917,30 @@ fn php_data_provider_docblock_mints_member_ref_on_name_token() {
 }
 
 #[test]
+fn php_get_subscribed_events_map_strings_are_method_refs() {
+    // Every method-name string in a `getSubscribedEvents()` return map is
+    // a dispatch target: 'e' => 'm', 'e' => ['m', $prio], and
+    // 'e' => [['m1', $p], ['m2']] all mint self-flavored member refs
+    // (the symfony bundled overlay). Event-name keys never do.
+    let src = "<?php\nnamespace App;\nclass Sub\n{\n    public static function getSubscribedEvents(): array\n    {\n        return [\n            'kernel.request' => 'onRequest',\n            'kernel.exception' => ['onException', 10],\n            'kernel.view' => [['first', 10], ['second']],\n        ];\n    }\n}\n";
+    let mut parser = php_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &php_pack()).unwrap();
+    let members: Vec<&str> = skel
+        .refs
+        .iter()
+        .filter(|r| r.kind == "member" && r.invocant.as_ref().is_some_and(|(_, t)| t == "Sub"))
+        .map(|r| r.name.as_str())
+        .collect();
+    for want in ["onRequest", "onException", "first", "second"] {
+        assert!(members.contains(&want), "{want} missing from {members:?}");
+    }
+    for key in ["kernel.request", "kernel.exception", "kernel.view"] {
+        assert!(!members.contains(&key), "event key {key} must not be a method ref: {members:?}");
+    }
+}
+
+#[test]
 fn php_stdlib_string_callables_mint_call_refs() {
     // Callback-slot strings in the fixed-position stdlib builtins are
     // function refs (`@ref.call.named`): arg-0 family (array_map,
@@ -4966,6 +5109,104 @@ fn php_instance_array_callable_is_a_method_ref() {
     let names: Vec<(&str, Option<&str>)> = skel.refs.iter().filter(|r| r.kind == "member").map(|r| (r.name.as_str(), r.invocant.as_ref().map(|(_, t)| t.as_str()))).collect();
     assert!(names.contains(&("on", Some("$this"))), "{names:?}");
     assert!(names.contains(&("other", Some("$obj"))), "{names:?}");
+}
+
+/// Every bundled php DOCUMENT loads alone — a query overlay against the
+/// grammar with captures the extractor reads, an entry document and a rail
+/// document against the shapes their loaders deserialize. Each loader drops
+/// a broken document and serves the rest, so a malformed one ships as a
+/// silent feature loss, not an error a verb reports: this is the tripwire.
+#[cfg(feature = "php")]
+#[test]
+fn php_bundled_documents_each_load_alone() {
+    let pack = crate::build::query_extract::php_pack();
+    let language: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP.into();
+    tree_sitter::Query::new(&language, pack.query_source).expect("skeleton compiles");
+    let conv = crate::build::query_extract::rail_conventions_for(&pack);
+    let mut every_capture: Vec<String> = Vec::new();
+    for (name, src) in pack.bundled_overlays {
+        match tree_sitter::Query::new(&language, src) {
+            Ok(q) => {
+                every_capture.extend(q.capture_names().iter().map(|c| c.to_string()));
+                let findings =
+                    crate::build::query_extract::overlay_capture_findings(q.capture_names());
+                assert!(findings.is_empty(), "bundled php overlay {name}: {findings:?}");
+                // a class-keyed capture whose rail no document declares
+                // class-keyed mints handlers every lane then reads as
+                // strings — the two halves of one fact, pinned together
+                let undeclared = crate::build::query_extract::class_rail_capture_findings(
+                    &conv.class_named_rails,
+                    q.capture_names(),
+                );
+                assert!(undeclared.is_empty(), "bundled php overlay {name}: {undeclared:?}");
+                // and every capture it spells is one the extractor serves —
+                // a bundled document that reads as "matches but mints
+                // nothing" is either a typo or a vocabulary gap.
+                let unserved = crate::build::query_extract::unserved_captures(
+                    &pack,
+                    &language,
+                    q.capture_names(),
+                );
+                assert!(unserved.is_empty(), "bundled php overlay {name} spells {unserved:?}");
+            }
+            Err(e) => panic!("bundled php overlay {name} does not compile: {e}"),
+        }
+    }
+    for src in pack.bundled_entry_markers {
+        let doc: serde_json::Value =
+            serde_json::from_str(src).expect("a bundled entry document parses");
+        assert_eq!(doc["language"], "php", "a bundled entry document declares its language");
+        let rules: Vec<crate::build::query_extract::EntryMarker> =
+            serde_json::from_value(doc["entries"].clone()).expect("the entry rule shape");
+        assert!(!rules.is_empty(), "a bundled entry document declares rules");
+        // a rule with no positive condition claims nothing — the evaluator
+        // rejects it, so shipping one is a silent loss too
+        assert!(
+            rules.iter().all(|r| !r.attributes.is_empty()
+                || r.method_prefix.is_some()
+                || !r.methods.is_empty()),
+            "every bundled entry rule carries a positive condition"
+        );
+    }
+    let path_rails = crate::build::query_extract::path_rails_for(&pack);
+    let text_rails = crate::build::query_extract::text_rails_for(&pack);
+    for src in pack.bundled_rail_docs {
+        let doc: serde_json::Value =
+            serde_json::from_str(src).expect("a bundled rail document parses");
+        assert_eq!(doc["language"], "php", "a bundled rail document declares its language");
+        // every family a document declares reaches ITS loader: a family
+        // loaded by nothing is inert with nothing saying so, which is how
+        // `path_rails` stayed bundled-only.
+        let parsed: crate::build::query_extract::RailsDoc =
+            serde_json::from_str(src).expect("the rail document shape");
+        for r in &parsed.path_rails {
+            assert!(
+                path_rails.iter().any(|p| p.rail == r.rail && p.under == r.under),
+                "path rail '{}' under '{}' reaches the driver",
+                r.rail,
+                r.under
+            );
+        }
+        for r in &parsed.text_rails {
+            assert!(
+                text_rails.iter().any(|t| t.rail == r.rail && t.calls == r.calls),
+                "text rail '{}' reaches the scanner",
+                r.rail
+            );
+        }
+    }
+    // and the loaders serve what the documents declare
+    assert!(
+        !crate::build::query_extract::entry_markers_for(&pack).is_empty(),
+        "the bundled entry rules reach the evaluator"
+    );
+    assert!(!conv.labels.is_empty(), "the bundled rail labels reach the diagnostics lane");
+    // and the other half: every declared class rail has a capture family
+    // that mints it, answerable only over the pack's whole capture set.
+    let caps: Vec<&str> = every_capture.iter().map(|s| s.as_str()).collect();
+    let unminted =
+        crate::build::query_extract::class_rail_declaration_findings(&conv.class_named_rails, &caps);
+    assert!(unminted.is_empty(), "{unminted:?}");
 }
 
 /// The overlay lint's findings: a rail family with no rail names a
