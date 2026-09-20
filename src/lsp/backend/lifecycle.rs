@@ -130,7 +130,13 @@ impl PackHealCtx {
         let diags = self
             .files
             .get_open(uri)
-            .map(|doc| symbols::pack_diagnostics(&doc.analysis, self.options));
+            .map(|doc| {
+                symbols::pack_diagnostics(
+                    &doc.analysis,
+                    Some(self.module_index.lookup_for(doc.language).as_lookup()),
+                    self.options,
+                )
+            });
         if let Some(diags) = diags {
             self.client
                 .publish_diagnostics(uri.clone(), diags, None)
@@ -165,6 +171,7 @@ impl Backend {
         let module_index_holder: Arc<std::sync::OnceLock<Arc<ModuleIndex>>> =
             Arc::new(std::sync::OnceLock::new());
 
+        let index_ready = Arc::new(IndexReady::default());
         let on_refresh = make_on_refresh(
             client.clone(),
             Arc::clone(&files),
@@ -188,7 +195,7 @@ impl Backend {
             pack_invalidator: Arc::new(crate::index::pack_invalidator::PackInvalidator::default()),
             diag_options,
             rename_options: Arc::new(std::sync::Mutex::new(crate::index::resolve::RenameOptions::default())),
-            index_ready: Arc::new(IndexReady::default()),
+            index_ready,
             cold_wait_ms: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_COLD_WAIT_MS)),
             max_cache_mb: Arc::new(std::sync::atomic::AtomicU64::new(max_cache_mb_default())),
             opening: Arc::new(dashmap::DashMap::new()),
@@ -271,9 +278,13 @@ impl Backend {
             if let Some(mut doc) = files.get_open_mut(&uri) {
                 doc.apply_rebuilt(analysis);
             }
-            let diags = files
-                .get_open(&uri)
-                .map(|doc| symbols::pack_diagnostics(&doc.analysis, options));
+            let diags = files.get_open(&uri).map(|doc| {
+                symbols::pack_diagnostics(
+                    &doc.analysis,
+                    Some(module_index.lookup_for(doc.language).as_lookup()),
+                    options,
+                )
+            });
             if let Some(diags) = diags {
                 client.publish_diagnostics(uri.clone(), diags, None).await;
             }
@@ -513,7 +524,13 @@ impl DiagCtx {
             Some(_) => self
                 .files
                 .get_open(uri)
-                .map(|doc| symbols::pack_diagnostics(&doc.analysis, self.options))
+                .map(|doc| {
+                    symbols::pack_diagnostics(
+                        &doc.analysis,
+                        Some(self.module_index.lookup_for(doc.language).as_lookup()),
+                        self.options,
+                    )
+                })
                 .unwrap_or_default(),
             None => vec![],
         };
@@ -630,7 +647,11 @@ pub(super) fn refresh_open_diagnostics(
             }
         } else {
             match files.get_open(&uri) {
-                Some(doc) => symbols::pack_diagnostics(&doc.analysis, options),
+                Some(doc) => symbols::pack_diagnostics(
+                    &doc.analysis,
+                    Some(module_index.lookup_for(language).as_lookup()),
+                    options,
+                ),
                 None => continue,
             }
         };
