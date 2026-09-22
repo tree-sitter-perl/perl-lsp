@@ -644,6 +644,36 @@ struct Ops {\n\
     );
 }
 
+// C++ has one member namespace per class: a derived class's member hides a
+// base's same-named member whatever its kind, so a call on a function-
+// pointer field never reaches a base method of the name. The walk answers
+// the nearest declaration the family admits and stops there.
+#[cfg(feature = "cpp")]
+#[test]
+fn a_derived_callback_member_hides_the_base_method_of_its_name() {
+    use crate::model::file_analysis::{MethodResolution, SymKind};
+    let src = "\
+struct B {\n\
+  int read(char *buf);\n\
+};\n\
+struct D : B {\n\
+  int (*read)(char *buf);\n\
+};\n\
+int f(struct D *d) { return d->read(\"x\"); }\n";
+    let fa = cpp_driver().analyze(src);
+    let Some(MethodResolution::Local { class, sym_id }) =
+        fa.resolve_method_in_ancestors("D", "read", None)
+    else {
+        panic!("the call resolves within this file");
+    };
+    assert_eq!(class, "D", "the derived declaration hides the base's");
+    assert_eq!(
+        fa.symbol(sym_id).kind,
+        SymKind::Field,
+        "and it is the function-pointer slot, not B::read()"
+    );
+}
+
 // Implicit-`this` sibling method CALLs — the call half of the same fact. A
 // bare `foo(...)` inside a body that elides the receiver pins its enclosing
 // class onto the `FunctionCall`'s `resolved_package` (in-class AND
