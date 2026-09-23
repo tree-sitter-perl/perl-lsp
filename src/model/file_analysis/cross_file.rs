@@ -25,6 +25,36 @@ impl CachedModule {
     // answer empty at scale.
 }
 
+/// What a name-index entry points at: the unit a registration keyed itself
+/// under. Closed, so no reader tells a module name from a path by looking
+/// at a string (rule #13).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Holder {
+    /// A Perl module/package name — one name, possibly many files, so it
+    /// resolves through the candidate relation (`visible_def_candidates`).
+    Module(String),
+    /// One registered file, by canonical path. The pack tier's unit: a file
+    /// holds its names whether or not it declares a class, which is how a
+    /// classless file (a routes file) is reachable by the names it declares.
+    /// Shared per file, so a bucket entry costs a pointer, not a path.
+    File(std::sync::Arc<std::path::Path>),
+}
+
+impl Holder {
+    pub fn file(path: &std::path::Path) -> Self {
+        Holder::File(std::sync::Arc::from(path))
+    }
+}
+
+impl std::fmt::Display for Holder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Holder::Module(m) => f.write_str(m),
+            Holder::File(p) => write!(f, "{}", p.display()),
+        }
+    }
+}
+
 /// A view into a module's metadata for a named sub/method.
 ///
 /// Composed of a primary symbol plus any additional symbols with the same
@@ -855,28 +885,40 @@ pub trait CrossFileLookup {
     fn has_workspace_tier(&self) -> bool {
         false
     }
-    fn modules_with_symbol(&self, name: &str) -> Vec<String>;
-    /// Files whose recorded handler feed declares `name` — the pack tier's
-    /// rail files, which declare no class and so reach no name-keyed
-    /// registration. Default empty: an index with no handler axis.
-    fn handler_def_files(&self, _name: &str) -> Vec<std::sync::Arc<CachedModule>> {
-        Vec::new()
+    /// Every holder that declares or exports a symbol named `name` — the
+    /// generic "who has X" primitive. Sorted, for a stable order.
+    fn holders_with_symbol(&self, name: &str) -> Vec<Holder>;
+    /// The `Module` holders of `holders_with_symbol` — for readers whose
+    /// question is about packages (exporters, package homes).
+    fn modules_with_symbol(&self, name: &str) -> Vec<String> {
+        self.holders_with_symbol(name)
+            .into_iter()
+            .filter_map(|h| match h {
+                Holder::Module(m) => Some(m),
+                Holder::File(_) => None,
+            })
+            .collect()
     }
-    /// Every file that may declare handler `name` — the ONE speller for
-    /// goto-def, hover and signature help, so none of them can miss a
-    /// registration tier the others see. Stacked registrations live in
-    /// losing candidates, so every candidate of every name-keyed module
-    /// comes back, and the classless rail files follow.
-    fn handler_candidate_files(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
+    /// The files a holder stands for, as seen from this lookup: a module's
+    /// visible candidates, or the registered file itself.
+    fn holder_files(&self, holder: &Holder) -> Vec<std::sync::Arc<CachedModule>> {
+        match holder {
+            Holder::Module(m) => self.visible_def_candidates(m),
+            Holder::File(p) => self.cached_by_path(p).into_iter().collect(),
+        }
+    }
+    /// Every file that may declare `name` — the ONE speller for goto-def,
+    /// hover and signature help, so none of them can miss a registration
+    /// the others see. Stacked registrations live in losing candidates, so
+    /// every candidate of every module holder comes back; a file holder
+    /// (a classless routes file) is its own file. Path-deduped.
+    fn files_with_symbol(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
         let mut out: Vec<std::sync::Arc<CachedModule>> = Vec::new();
-        let named = self.modules_with_symbol(name);
-        for cached in named
-            .iter()
-            .flat_map(|m| self.visible_def_candidates(m))
-            .chain(self.handler_def_files(name))
-        {
-            if !out.iter().any(|c| c.path == cached.path) {
-                out.push(cached);
+        for holder in self.holders_with_symbol(name) {
+            for cached in self.holder_files(&holder) {
+                if !out.iter().any(|c| c.path == cached.path) {
+                    out.push(cached);
+                }
             }
         }
         out
@@ -1358,6 +1400,18 @@ impl<'a> ScopedLookup<'a> {
 }
 
 impl<'a> ScopedLookup<'a> {
+    /// The include-closure connectivity rule: `c` is visible from the asker
+    /// (its own file or in its closure), or includes the asker back (a `.c`
+    /// body defining what the asker's own header declares).
+    fn connected(&self, c: &CachedModule) -> bool {
+        if self.visible.contains(c.path.to_string_lossy().as_ref()) {
+            return true;
+        }
+        self.self_path.as_ref().is_some_and(|sp| {
+            c.analysis.pack.include_closure.contains(sp.to_string_lossy().as_ref())
+        })
+    }
+
     /// The use-map candidate set for `name`, with the widening verdict.
     /// An IDENTITY (a qualified name) is exact: the declarations filed
     /// under it, else the same-leaf declarations whose namespace is its
@@ -1497,21 +1551,11 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
                 // `member_def_location` applies. None connected ⇒ the
                 // scope-ranked winner, so an indirect resolution never
                 // regresses.
-                let self_str = self
-                    .self_path
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().into_owned());
                 let mut out: Vec<std::sync::Arc<CachedModule>> = self
                     .inner
                     .def_candidates(name)
                     .into_iter()
-                    .filter(|c| {
-                        let p = c.path.to_string_lossy();
-                        self.visible.contains(p.as_ref())
-                            || self_str
-                                .as_ref()
-                                .is_some_and(|sp| c.analysis.pack.include_closure.contains(sp))
-                    })
+                    .filter(|c| self.connected(c))
                     .collect();
                 if out.is_empty() {
                     out.extend(self.get_cached(name));
@@ -1631,11 +1675,24 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn has_workspace_tier(&self) -> bool {
         self.inner.has_workspace_tier()
     }
-    fn modules_with_symbol(&self, name: &str) -> Vec<String> {
-        self.inner.modules_with_symbol(name)
+    fn holders_with_symbol(&self, name: &str) -> Vec<Holder> {
+        self.inner.holders_with_symbol(name)
     }
-    fn handler_def_files(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
-        self.inner.handler_def_files(name)
+    fn holder_files(&self, holder: &Holder) -> Vec<std::sync::Arc<CachedModule>> {
+        match holder {
+            Holder::Module(m) => self.visible_def_candidates(m),
+            // A file holder is one file, so the closure axis either admits
+            // it or not — there is no ranked winner to degrade to.
+            Holder::File(p) => self
+                .inner
+                .cached_by_path(p)
+                .into_iter()
+                .filter(|c| !matches!(self.axis, VisibilityAxis::IncludeClosure) || self.connected(c))
+                .collect(),
+        }
+    }
+    fn rail_names(&self, rail: &str) -> Vec<String> {
+        self.inner.rail_names(rail)
     }
     fn find_exporters(&self, func_name: &str) -> Vec<String> {
         self.inner.find_exporters(func_name)

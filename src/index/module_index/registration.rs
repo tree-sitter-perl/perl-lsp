@@ -419,7 +419,7 @@ impl ModuleIndex {
             .get(name)
             .map(|v| v.clone())
             .unwrap_or_default();
-        self.core.edges.purge_module(name);
+        self.core.edges.purge_holder(&Holder::Module(name.to_string()));
         for c in &cands {
             self.core.edges.feed(name, &c.path, &c.analysis);
         }
@@ -1184,7 +1184,7 @@ impl ModuleIndex {
                 .map(|_| entry.key().clone())
         });
         if let Some(name) = name {
-            self.core.edges.purge_module(&name);
+            self.core.edges.purge_holder(&Holder::Module(name.clone()));
             self.core.cache.remove(&name);
             self.workspace_modules.remove(&name);
         }
@@ -1703,11 +1703,12 @@ impl ModuleIndex {
     /// edges, in the exact shape `register_symbols_inner` consumes.
     pub(crate) fn prepare_pack_feed(
         fa: &FileAnalysis,
-    ) -> (Vec<(String, bool)>, Vec<(String, String)>) {
+    ) -> (Vec<(String, bool)>, NameFeed, Vec<(String, String)>) {
         let feed = collect_linkage_feed(fa);
+        let names = NameFeed::of(fa);
         let specs: Vec<(String, String)> =
             fa.pack.specializes.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        (feed, specs)
+        (feed, names, specs)
     }
 
     /// The Perl-workspace twin of `prepare_pack_parts`: the name feed and
@@ -1737,10 +1738,10 @@ impl ModuleIndex {
         mut fa: FileAnalysis,
         level: crate::model::file_analysis::Residency,
     ) -> PackRegistrationParts {
-        let (feed, specs) = Self::prepare_pack_feed(&fa);
+        let (feed, names, specs) = Self::prepare_pack_feed(&fa);
         let surface = crate::model::surface::Surface::project(&fa);
         fa.evict_to(level);
-        PackRegistrationParts { arc: Arc::new(fa), feed, specs, surface: Some(surface) }
+        PackRegistrationParts { arc: Arc::new(fa), feed, names, specs, surface: Some(surface) }
     }
 
     pub fn register_symbols_stripping(
@@ -1766,7 +1767,8 @@ impl ModuleIndex {
         path: std::path::PathBuf,
         parts: PackRegistrationParts,
     ) {
-        let PackRegistrationParts { arc: analysis, feed, specs: specializes, surface: _ } = parts;
+        let PackRegistrationParts { arc: analysis, feed, names, specs: specializes, surface: _ } =
+            parts;
         let feed = &feed;
         let specializes = &specializes;
         let path = std::fs::canonicalize(&path).unwrap_or(path);
@@ -1781,6 +1783,9 @@ impl ModuleIndex {
         // Unconditional: even a file declaring nothing registrable (an
         // include-only shim) must be reachable by whole-project sweeps.
         self.all_files.insert(cached.path.clone(), cached.clone());
+        // The file is its own holder in the name index, whether or not it
+        // declares a class — a classless file is reachable by its names.
+        self.core.edges.feed_file(&Holder::file(&cached.path), &names);
         for (name, is_class) in feed {
             let sym_name = name;
             let incoming_is_class = *is_class;
@@ -1878,6 +1883,7 @@ impl ModuleIndex {
         if self.all_files.remove(&canon).is_none() {
             return;
         }
+        self.core.edges.purge_holder(&Holder::file(&canon));
         // Symbols may be evicted on the resident copy, and rehydration
         // would fetch the WRONG generation after an edit persists — so the
         // inverse runs on the name list registration recorded, not on

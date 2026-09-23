@@ -1412,7 +1412,7 @@ mod restamp_gate_tests {
             ) -> Option<std::sync::Arc<crate::model::file_analysis::CachedModule>> {
                 None
             }
-            fn modules_with_symbol(&self, _n: &str) -> Vec<String> {
+            fn holders_with_symbol(&self, _n: &str) -> Vec<crate::model::file_analysis::Holder> {
                 Vec::new()
             }
             fn find_exporters(&self, _n: &str) -> Vec<String> {

@@ -211,25 +211,23 @@ pub(super) fn dispatch_handler_locations(
 ) -> Vec<RefLocation> {
     use crate::model::file_analysis::SymbolDetail;
     let mut locs: Vec<RefLocation> = Vec::new();
-    for module_name in module_index.modules_with_symbol(name) {
-        // Every file registered under the name — stacked registrations
-        // may live in a losing candidate.
-        for cached in module_index.visible_def_candidates(&module_name) {
-            let whole = module_index.whole_present(&cached);
-            for sym in whole.symbols() {
-                if sym.name != name {
-                    continue;
-                }
-                if let SymbolDetail::Handler { owner: o, .. } = &sym.detail {
-                    if o == owner {
-                        locs.push(RefLocation {
-                            key: FileKey::Path(cached.path.clone()),
-                            span: sym.selection_span,
-                            access: AccessKind::Declaration,
-                            rewritable: true,
-                            label: None
-                        });
-                    }
+    // Every file declaring the name — stacked registrations may live in
+    // a losing candidate, and a classless file is its own holder.
+    for cached in module_index.files_with_symbol(name) {
+        let whole = module_index.whole_present(&cached);
+        for sym in whole.symbols() {
+            if sym.name != name {
+                continue;
+            }
+            if let SymbolDetail::Handler { owner: o, .. } = &sym.detail {
+                if o == owner {
+                    locs.push(RefLocation {
+                        key: FileKey::Path(cached.path.clone()),
+                        span: sym.selection_span,
+                        access: AccessKind::Declaration,
+                        rewritable: true,
+                        label: None
+                    });
                 }
             }
         }
