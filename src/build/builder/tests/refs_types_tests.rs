@@ -365,8 +365,9 @@ fn test_bless_into_ref_invocant_types_clone_return() {
 
 #[test]
 fn test_forward_declaration_does_not_duplicate_symbol() {
-    // `sub foo;` is a forward declaration, not a definition: only the bodied
-    // `sub foo { ... }` should produce a symbol (no outline dup / goto-def shadow).
+    // `sub foo;` ahead of its body declares nothing the body doesn't: only
+    // the bodied `sub foo { ... }` produces a symbol (no outline dup /
+    // goto-def shadow).
     let fa = build_fa("package P;\nsub foo;\nsub foo { my ($self, $x) = @_; $x }\n");
     let foos: Vec<_> = fa
         .symbols()
@@ -380,6 +381,30 @@ fn test_forward_declaration_does_not_duplicate_symbol() {
         foos.iter().map(|s| s.span.start.row).collect::<Vec<_>>()
     );
     assert_eq!(foos[0].span.start.row, 2, "the symbol should be the bodied def on line 2");
+    assert!(!foos[0].flags.contains(crate::model::file_analysis::SymbolFlags::FORWARD_DECL));
+}
+
+#[test]
+fn test_bodiless_forward_declaration_is_a_flagged_symbol() {
+    // With no body in the file (AUTOLOAD, XS, a body in another package's
+    // scope), `sub foo;` is the name's only declaration: a FORWARD_DECL
+    // symbol in its package, kept out of the outline.
+    let fa = build_fa("package P;\nsub foo;\nsub AUTOLOAD { 1 }\npackage Q;\nsub foo { 2 }\n");
+    let foos: Vec<_> = fa
+        .symbols()
+        .iter()
+        .filter(|s| s.name == "foo")
+        .map(|s| {
+            (
+                s.package.clone().unwrap_or_default(),
+                s.flags.contains(crate::model::file_analysis::SymbolFlags::FORWARD_DECL),
+                s.presentation.hide_in_outline,
+            )
+        })
+        .collect();
+    let mut foos = foos;
+    foos.sort();
+    assert_eq!(foos, vec![("P".to_string(), true, true), ("Q".to_string(), false, false)]);
 }
 
 #[test]

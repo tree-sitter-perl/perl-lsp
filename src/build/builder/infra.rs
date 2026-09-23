@@ -214,6 +214,28 @@ impl<'a> Builder<'a> {
         id
     }
 
+    /// Mint the walk's held forward declarations, skipping any whose name
+    /// already has a body in the same package in this file: the body is the
+    /// declaration every consumer wants, and a second symbol would shadow it.
+    /// What survives is a stub whose body lives in AUTOLOAD, XS or elsewhere.
+    pub(super) fn mint_forward_declarations(&mut self) {
+        for mut stub in std::mem::take(&mut self.forward_decls) {
+            let has_body = self.symbols.iter().any(|s| {
+                s.name == stub.name
+                    && s.package == stub.package
+                    && matches!(s.kind, SymKind::Sub | SymKind::Method)
+                    && !s.flags.contains(crate::model::file_analysis::SymbolFlags::FORWARD_DECL)
+                    && !self.contract_symbols.contains(&s.id)
+            });
+            if has_body {
+                continue;
+            }
+            stub.id = SymbolId(self.next_symbol_id);
+            self.next_symbol_id += 1;
+            self.symbols.push(stub);
+        }
+    }
+
     /// The just-minted symbol's presentation, for the synthesis sites
     /// that stamp policy (hidden twins, plugin display/label). SymbolId
     /// is the positional index, so this is O(1).

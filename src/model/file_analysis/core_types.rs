@@ -427,6 +427,12 @@ bitflags::bitflags! {
         /// `int (*read)(char *)`). The declarator says so, so a call landing
         /// on the slot asks the declaration instead of a callback-name list.
         const CALLABLE_VALUE = 1 << 28;
+        /// A bodiless declaration of a callable (Perl `sub frob;`): the name
+        /// exists — `can` answers it, so it discharges a role's `requires` —
+        /// but its body is elsewhere (a later `sub frob {…}`, AUTOLOAD, XS).
+        /// A consumer after the DEFINITION prefers a bodied symbol and lands
+        /// here only when none exists.
+        const FORWARD_DECL = 1 << 29;
     }
 }
 

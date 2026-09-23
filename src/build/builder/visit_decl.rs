@@ -745,13 +745,31 @@ impl<'a> Builder<'a> {
             Err(_) => { self.queue_children(node); return; }
         };
 
-        // A bodyless `sub NAME;` / `method NAME;` is a forward declaration, not
-        // a definition (ts-parser-perl 1.1.1 parses these as real decl
-        // statements). Emitting a symbol would duplicate the real definition in
-        // the outline and shadow it in goto-def with a body-less target. Skip
-        // it — the navigable symbol is the actual definition (in this file,
-        // cross-file, or installed via AUTOLOAD/XS).
+        // A bodyless `sub NAME;` / `method NAME;` declares the name without
+        // defining it: `can` answers it, so it discharges a role's `requires`,
+        // but the body is a later def, AUTOLOAD or XS. Held until the walk
+        // ends, because a body in this file makes the stub redundant.
         if node.child_by_field_name("body").is_none() {
+            let lexical = node.child_by_field_name("lexical").is_some();
+            let mut presentation = crate::model::file_analysis::Presentation::default();
+            presentation.hide_in_outline = true;
+            self.forward_decls.push(Symbol {
+                id: SymbolId(u32::MAX),
+                name,
+                kind: if is_method { SymKind::Method } else { SymKind::Sub },
+                span: node_to_span(node),
+                selection_span: node_to_span(name_node),
+                scope: self.current_scope(),
+                package: self.current_package.clone(),
+                detail: SymbolDetail::Sub { params: Vec::new(), is_method, doc: None, opaque_return: false, is_constant: false, lexical, declared_return: None },
+                namespace: Default::default(),
+                presentation,
+                attributes: Vec::new(),
+                flags: crate::model::file_analysis::SymbolFlags::FORWARD_DECL,
+                declared_with: None,
+                deref_stack: Vec::new(),
+                arity: None,
+            });
             return;
         }
 
