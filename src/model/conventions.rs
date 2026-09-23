@@ -162,7 +162,7 @@ pub fn field_attribute_flag(attr: &str) -> Option<crate::model::file_analysis::S
 /// Almost everything is empty because Perl genuinely writes none of it:
 /// the engine's type tags ARE its vocabulary, there is no declared type to
 /// insert, no return annotation, no class-name literal member, no static
-/// sigil. The two that matter are the booleans.
+/// sigil. The one that matters is the boolean.
 pub const PERL_PACK_SPELLINGS: crate::model::file_analysis::PackSpellings =
     crate::model::file_analysis::PackSpellings {
         type_display: &[],
@@ -179,8 +179,6 @@ pub const PERL_PACK_SPELLINGS: crate::model::file_analysis::PackSpellings =
         // Typeglobs install a sub into another package, so a member
         // declaration does NOT belong to the container that encloses it.
         members_are_package_bound: false,
-        // An `AUTOLOAD` answers a role's required method at runtime.
-        catch_all_satisfies_contracts: true,
     };
 
 /// A `'static` address for Perl's spellings, so the driver can hand out a
