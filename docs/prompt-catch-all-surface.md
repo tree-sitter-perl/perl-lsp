@@ -31,11 +31,15 @@ the surface.
 
 ## Current state — anchors
 
-**Prerequisite: the PHP arc stack (#181–#187) is on main.** Every anchor
-below except the AutoLoader row lives on that stack; on a main without it
-there is no catch-all flag to narrow.
+**Prerequisite: main carries a catch-all fact to narrow.** That means a
+class-level flag minted from Perl's `sub AUTOLOAD` and from a pack's
+catch-all capture, one MRO query the undefined-member lanes ask, and
+forward-declaration stubs minted as symbols. Without those there is nothing
+for this brief to narrow. The names below are the ones this brief was
+designed against. If a rewrite renamed them, find the fact in the left
+column, not the name.
 
-| Fact | Find it |
+| Fact | Find it (as designed) |
 | --- | --- |
 | Perl mints the flag on the package | `grep -n 'mark_package_answers_any_member' src/build/builder/visit_decl.rs` |
 | Pack capture mints it on the class | `grep -n 'def.method.catch_all' src/build/query_extract/extract.rs` |
