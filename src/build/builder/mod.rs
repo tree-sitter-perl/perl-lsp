@@ -554,6 +554,10 @@ struct Builder<'a> {
     /// into `FileAnalysis.contract_symbols`.
     contract_symbols: std::collections::HashSet<crate::model::file_analysis::SymbolId>,
 
+    /// Bodiless `sub NAME;` declarations seen by the walk, minted after it
+    /// by `mint_forward_declarations` (their ids are placeholders until then).
+    forward_decls: Vec<crate::model::file_analysis::Symbol>,
+
     /// Packages with at least one parent edge we could not fold to a
     /// literal name (runtime-generated roles). Flushed into
     /// `FileAnalysis.dynamic_parent_packages`.

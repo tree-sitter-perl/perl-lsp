@@ -13,8 +13,11 @@
 ; capture the string CONTENT for quoted paths so the cache key is the
 ; clean relative path ("util.h", not "\"util.h\""); system <...>
 ; headers have no content node, so keep the whole token. ----
-(preproc_include path: (string_literal (string_content) @import.name))
-(preproc_include path: (system_lib_string) @import.name)
+; `#include` splices a PATH, it does not bind a name — the capture says so,
+; and every path-shaped lane (goto-def on a header, "who includes this")
+; reads that the document mints it.
+(preproc_include path: (string_literal (string_content) @include.path))
+(preproc_include path: (system_lib_string) @include.path)
 
 ; ---- #define macros become SYMBOLS (completion / goto-def / outline).
 ; For a macro-heavy API (perl5: Newx/SvPV; embedded HALs) the macros ARE
@@ -71,7 +74,7 @@
 ; partial `struct X<T*>`): the name is a `template_type`, and the spec is
 ; its OWN Class (per-spec identity — a spec REPLACES the primary's members
 ; wholesale, so it must own a distinct member table; fork 4 of
-; docs/prompt-template-arc.md). The symbol/package name is the canonical
+; docs/adr/cpp-templates.md). The symbol/package name is the canonical
 ; template spelling (`formatter<int, char>` — see
 ; `canonical_template_spelling`); @spec.primary records the base name so
 ; extraction mints the `Specializes` family edge (goto-implementation
@@ -338,6 +341,32 @@
 ; — the universal `(function_definition) @scope.sub` mints it.
 (function_definition type: (_) @rettype) @ool.def
 (function_definition !type) @ool.def
+; the declarator shapes, captured as themselves — the walks own the DEPTH
+; (unbounded: `Foo**& Class::m()`, `char* const& b`), the document owns the
+; kinds. @ool.wrap is a wrapper the out-of-line unwrap descends through to the
+; @ool.declarator it stops at, whose @ool.qualifier chain names the owner;
+; @deref.* is one level of the declarator peel, @deref.annot its cv-qualifiers,
+; and @deref.leaf.<kind> the chain's leaf — the suffix names the def the leaf
+; mints, so a member outlines as a field and a local as a local.
+(pointer_declarator) @ool.wrap @deref.pointer
+(reference_declarator) @ool.wrap @deref.ref
+(parenthesized_declarator) @ool.wrap
+(function_declarator) @ool.declarator
+(qualified_identifier) @ool.qualifier
+(pointer_declarator (type_qualifier) @deref.annot)
+(pointer_declarator (identifier) @deref.leaf.local)
+(pointer_declarator (field_identifier) @deref.leaf.field)
+(reference_declarator (identifier) @deref.leaf.local)
+(reference_declarator (field_identifier) @deref.leaf.field)
+; two more levels the peel descends: @deref.callable says the declared name
+; holds a value that is INVOKED (a function-pointer declarator), and
+; @deref.paren is the grouping level that denotes nothing of its own.
+(function_declarator) @deref.callable
+(parenthesized_declarator) @deref.paren
+; a templated owner (`Buf<T>::grow`) owns by its BASE class name: the name
+; field IS the class, so every qualifier segment peels through this capture
+; instead of a string split on `<`.
+(qualified_identifier scope: (template_type name: (_) @qualifier.name))
 (function_definition
   declarator: (pointer_declarator
     declarator: (function_declarator
@@ -366,7 +395,10 @@
 ; sub-body content — `scope_within_sub_body` shields them from the outline
 ; and keeps them out of the class-content lane a sticky class package
 ; would otherwise drag them into.
-(function_definition) @scope.sub
+; `.implicit_receiver`: a body in this language elides the member receiver
+; for reads AND for sibling calls (`return inner_;`, `grow()`) — C++ name
+; lookup finds the member before any free function of that name.
+(function_definition) @scope.sub.implicit_receiver
 
 ; ---- top-level / namespaced function prototypes (the bulk of any
 ; header file) — a `declaration`, not a `function_definition`. A
@@ -527,7 +559,7 @@
 ; f<char>(..);` — fmt's src/format.cc is entirely this shape). It is a USE
 ; of the named template, not a def-with-body — but a deliberate,
 ; enumerable one, so it mints an outline symbol (fork 2 of
-; docs/prompt-template-arc.md): the class form under the canonical
+; docs/adr/cpp-templates.md): the class form under the canonical
 ; instantiation spelling, the function form under the function's name
 ; (qualified forms join their class via @qualifier, whose template_type
 ; is peeled to the base name — `buffer<char>::append` files under
@@ -609,6 +641,15 @@
 (field_declaration
   type: (_) @type.annot
   declarator: [(pointer_declarator) (reference_declarator)] @nested.target)
+; a function-POINTER data member (`int (*read)(char *);`) — a stored slot
+; whose value is called. The parenthesized declarator is what distinguishes
+; it from a method prototype (`int read();`), whose declarator names the
+; member directly; the chain's @deref.callable level is what makes
+; `ops->read(buf)` resolve to the slot.
+(field_declaration
+  type: (_) @type.annot
+  declarator: (function_declarator
+    declarator: (parenthesized_declarator)) @nested.target)
 
 ; ---- C goto labels: `done:` is a nav target, `goto done;` jumps to it.
 ; The def is an unpackaged Variable symbol (outline-hidden, like a local);
@@ -630,7 +671,26 @@
 ; joined to its callee ref by adjacency (`ref.end == arglist.start`); a
 ; def's parameter list is joined to the def by span containment. ----
 (argument_list) @arity.args
+; one capture per written argument (the arity count and signature help's
+; active slot), and the bare-variable ones a by-reference parameter binds.
+(argument_list (_) @arity.arg)
+(argument_list (identifier) @arity.arg.var)
 (function_declarator parameters: (parameter_list) @arity.sig)
+; WHICH children of a signature are parameters, and what each does to the
+; count, the document states: @arity.param must be written,
+; @arity.param.optional carries a default, @arity.param.variadic (a template
+; pack or a bare `...`) absorbs the rest. @arity.param.byref marks the
+; parameter that aliases its caller's variable; the name token stays a
+; descent (a declarator nests it under however many pointer/array wrappers
+; the type wrote, which no fixed-depth pattern reaches).
+(parameter_list (parameter_declaration) @arity.param)
+(parameter_list (optional_parameter_declaration) @arity.param.optional)
+(parameter_list (variadic_parameter_declaration) @arity.param.variadic)
+(parameter_list "..." @arity.param.variadic)
+(parameter_list (parameter_declaration declarator: (reference_declarator)) @arity.param.byref)
+(parameter_list (optional_parameter_declaration declarator: (reference_declarator)) @arity.param.byref)
+(parameter_list (optional_parameter_declaration default_value: (_) @arity.param.default))
+(parameter_list (_ type: (_) @arity.param.type))
 
 ; ---- member access (`recv.field` / `recv->field`, AND `recv.method(...)`):
 ; the field is the "method", the receiver subtree the invocant. Mints the same
@@ -643,6 +703,48 @@
   argument: (_) @member.recv
   operator: _ @member.op
   field: (field_identifier) @ref.member)
+; WHICH operator was written rides its own capture suffix — the operator-DX
+; lane (`p.` on a `Box*` should be `->`) asks the capture, never the token's
+; text. An OPEN set on purpose: `.*` / `->*` match neither arm, so they mint
+; the reference above with no operator claim.
+(field_expression operator: "->" @member.op.arrow)
+(field_expression operator: "." @member.op.dot)
+
+; `this` is the object the enclosing method runs on — no typeable value
+; node, the class comes off the scope chain. The receiver's own capture,
+; so every consumer (member completion, the class witness) reads it here.
+((this) @receiver.this (#eq? @receiver.this "this"))
+
+; The CALLED form additionally mints a chain-hop witness on the whole call's
+; span (`@hop.call` + `@hop.member` — deliberately NOT `@ref.member`, the
+; pattern above already minted the ref): `w.get().spin()` types through the
+; receiver span's own hop with no intermediate variable.
+; The receiver rides `@hop.recv` here, not `@member.recv`: this pattern
+; roots at the CALL, and the member-access kinds the cursor climbs to are
+; exactly what `@member.recv`'s patterns root at.
+(call_expression
+  function: (field_expression
+    argument: (_) @hop.recv
+    field: (field_identifier) @hop.member)
+  arguments: (argument_list) @arity.args) @hop.call
+
+; ---- cursor-time shapes ----
+; Where a cursor may not splice: a literal or a comment is not code.
+(string_literal) @skip
+(char_literal) @skip
+(raw_string_literal) @skip
+(comment) @skip
+; Transparent receiver wrappers: `(p)` and `*p` / `&o` denote the same
+; class as their operand, so `(*p).m` reaches the members `p->m` does.
+(parenthesized_expression) @recv.peel
+(pointer_expression) @recv.peel.deref
+; The operators that make a comparison a DOMAIN question — what the
+; type-constrained completion slot opens on (`o->op_type == |` ranks the
+; field's domain first). A declaration only: the coherence vote's own
+; patterns below are deliberately operator-blind, because a site that is
+; NOT an equality is still counter-evidence.
+((binary_expression operator: _ @domain.compare.op)
+ (#any-of? @domain.compare.op "==" "!="))
 
 ; ---- domain typing (int-used-as-enum): a struct-field SLOT compared or
 ; assigned against ANY value. `o->op_type == OP_CONST` / `o->op_type =
@@ -779,7 +881,18 @@
 ; narrowing cutoff end at the reassignment, via the same edge-driven cutoff.
 (assignment_expression
   left: (identifier) @flow.target
-  right: (_) @flow.source)
+  right: (_) @flow.source) @flow.assign
+
+; `x.clear()` / `x.reset()` — a rebinding method call puts a moved-from object
+; back into a known state, so the moved-from window (and any narrowing) ends at
+; the receiver, sparing the reset's own read. Which methods rebind is the
+; pattern's own `#any-of?`; the receiver is captured as the rebind itself, so
+; the effect needs no second vocabulary.
+(call_expression
+  function: (field_expression
+    argument: (identifier) @flow.rebind
+    field: (field_identifier) @_move_rebind)
+  (#any-of? @_move_rebind "clear" "reset" "assign" "emplace" "swap"))
 
 ; `std::move(x)` leaves x in a moved-from (valid-but-unspecified) state: a
 ; subsequent READ of x before it is reassigned is a use-after-move bug.
@@ -832,29 +945,31 @@
 (parameter_list) @param.region
 
 ; `if (dynamic_cast<Derived*>(b)) { b->... }` narrows b to Derived INSIDE the
-; block — the cpp analog of python `isinstance`. The pack's narrow_guard maps
-; `dynamic_cast` + the template type to the refinement; core scopes it to
-; @scope and the edge-driven cutoff ends it at any rebind of b.
+; block — the cpp analog of python `isinstance`. The guard name is the
+; pattern's own `#eq?`, so only a cast reaches the extractor; @narrow.type
+; names the refinement, core scopes it to @scope and the edge-driven cutoff
+; ends it at any rebind of b.
 (if_statement
   condition: (condition_clause
     value: (call_expression
       function: (template_function
-        name: (identifier) @narrow.guard
+        name: (identifier) @_narrow_guard
         arguments: (template_argument_list
           (type_descriptor type: (type_identifier) @narrow.type)))
       arguments: (argument_list (identifier) @narrow.var)))
-  consequence: (compound_statement) @narrow.block)
+  consequence: (compound_statement) @narrow.block
+  (#eq? @_narrow_guard "dynamic_cast"))
 
 ; `std::optional<T>` engaged-state narrowing. Guard-testing an optional as
 ; engaged proves it HOLDS a T inside the block, so `opt->m` / `*opt` resolve on
-; T there. No type token rides these guards (unlike dynamic_cast) — the pack's
-; narrow_guard reads the subject's DECLARED type (std::optional<T>) and peels T,
-; so the refinement keys on the type being optional, not on the guard name (a
-; bare `if (ptr)` over a non-optional declares no inner type → no narrowing).
-; Two clean engagement shapes: bare truthiness `if (opt)` (no @narrow.guard),
-; and `if (opt.has_value())` (guard token gates the method — an arbitrary
-; `opt.foo()` won't narrow). `!= std::nullopt` needs both operator + operand
-; checks the one-token hook can't express, so it's left out.
+; T there. No @narrow.type rides these shapes (unlike dynamic_cast), so the
+; subject's DECLARED type is what gets peeled — the refinement keys on the type
+; being optional, not on the guard (a bare `if (ptr)` over a non-optional
+; declares no inner type → no narrowing). Two clean engagement shapes: bare
+; truthiness `if (opt)`, and `if (opt.has_value())` whose `#eq?` gates the
+; method so an arbitrary `opt.foo()` never reaches the extractor.
+; `!= std::nullopt` needs both operator + operand checks the one-token hook
+; can't express, so it's left out.
 (if_statement
   condition: (condition_clause value: (identifier) @narrow.var)
   consequence: (compound_statement) @narrow.block)
@@ -863,8 +978,9 @@
     value: (call_expression
       function: (field_expression
         argument: (identifier) @narrow.var
-        field: (field_identifier) @narrow.guard)))
-  consequence: (compound_statement) @narrow.block)
+        field: (field_identifier) @_narrow_guard)))
+  consequence: (compound_statement) @narrow.block
+  (#eq? @_narrow_guard "has_value"))
 
 ; ---- branch arms are lexical scopes (conditional-move soundness) ----
 ; if/else arm bodies each mint a @scope, so a `std::move` in one arm bounds its

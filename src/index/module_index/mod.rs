@@ -21,7 +21,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use dashmap::DashMap;
 use tower_lsp::Client;
 
-use crate::model::file_analysis::{CrossFileLookup, FileAnalysis, SymKind};
+use crate::model::file_analysis::{CrossFileLookup, FileAnalysis, Holder, SymKind};
 #[cfg(test)]
 use crate::model::file_analysis::InferredType;
 use crate::index::module_resolver;

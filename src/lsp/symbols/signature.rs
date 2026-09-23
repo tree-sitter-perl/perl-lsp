@@ -508,14 +508,15 @@ fn string_dispatch_signature_for(
         push_sig(&mut signatures, sym, None);
     }
     if let Some(idx) = module_index {
-        for module_name in idx.modules_with_symbol(handler_name) {
-            // Every file registered under the name — stacked registrations
-            // may live in a losing candidate.
-            for cached in idx.visible_def_candidates(&module_name) {
+        for holder in idx.holders_with_symbol(handler_name) {
+            // Every file the holder stands for — stacked registrations may
+            // live in a losing candidate.
+            let provenance = holder.to_string();
+            for cached in idx.holder_files(&holder) {
                 let whole = idx.whole_present(&cached);
                 for sym in whole.symbols() {
                     if sym.name != handler_name { continue; }
-                    push_sig(&mut signatures, sym, Some(module_name.as_str()));
+                    push_sig(&mut signatures, sym, Some(provenance.as_str()));
                 }
             }
         }

@@ -5,17 +5,17 @@
 use super::*;
 
 impl FileAnalysis {
-    /// This file's type vocabulary (`PackFacts.type_display`): a mapped
-    /// engine tag renders as the language's own spelling (php `array`, not
-    /// `HashRef`); an unmapped tag, every class name, and every Perl
-    /// analysis (empty map) pass through.
+    /// This file's type vocabulary (`PackSpellings::type_display`): a
+    /// mapped engine tag renders as the language's own spelling (php
+    /// `array`, not `HashRef`); an unmapped tag, every class name, and
+    /// every Perl analysis (empty map) pass through.
     fn type_vocab(&self) -> impl Fn(&str) -> Option<String> + '_ {
         move |tag: &str| {
-            self.pack
+            self.spellings()
                 .type_display
                 .iter()
-                .find(|(k, _)| k == tag)
-                .map(|(_, v)| v.clone())
+                .find(|(k, _)| *k == tag)
+                .map(|(_, v)| v.to_string())
         }
     }
 
@@ -46,11 +46,11 @@ impl FileAnalysis {
                 .then(|| leaf.to_string());
         }
         let root = format_type_root(ty);
-        self.pack
+        self.spellings()
             .native_type_spellings
             .iter()
             .find(|(k, _)| *k == root)
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v.to_string())
     }
 
     /// Hover info: return display text for the symbol at cursor.
@@ -425,25 +425,20 @@ impl FileAnalysis {
             })
             .collect();
 
-        // Cross-file walk — now O(matches) instead of O(workspace)
-        // via the name-based reverse index on ModuleIndex. Only modules
-        // that have a symbol with this name are visited; most of the
-        // workspace is skipped without any per-module inspection.
+        // Cross-file walk — O(matches) rather than O(workspace): only the
+        // files the handler axis names are visited, and a registration
+        // gathering must not stop at the name-slot winner.
         if let Some(idx) = module_index {
-            for module_name in idx.modules_with_symbol(name) {
-                // Every file registered under the name — a registration
-                // gathering must not stop at the name-slot winner.
-                for cached in idx.visible_def_candidates(&module_name) {
-                    let whole = idx.whole_present(&cached);
-                    for sym in &whole.symbols {
-                        if sym.name != name { continue; }
-                        if let SymbolDetail::Handler { owner: o, params, .. } = &sym.detail {
-                            if o == owner {
-                                registrations.push((
-                                    sym.selection_span.start.row + 1,
-                                    display_handler_params(params),
-                                ));
-                            }
+            for cached in idx.files_with_symbol(name) {
+                let whole = idx.whole_present(&cached);
+                for sym in &whole.symbols {
+                    if sym.name != name { continue; }
+                    if let SymbolDetail::Handler { owner: o, params, .. } = &sym.detail {
+                        if o == owner {
+                            registrations.push((
+                                sym.selection_span.start.row + 1,
+                                display_handler_params(params),
+                            ));
                         }
                     }
                 }
@@ -475,14 +470,12 @@ impl FileAnalysis {
         // dispatcher list to the consumer.
         if dispatchers.is_empty() {
             if let Some(idx) = module_index {
-                for module_name in idx.modules_with_symbol(name) {
-                    for cached in idx.visible_def_candidates(&module_name) {
-                        let whole = idx.whole_present(&cached);
-                        for sym in &whole.symbols {
-                            if sym.name != name { continue; }
-                            if let SymbolDetail::Handler { owner: o, dispatchers: ds, .. } = &sym.detail {
-                                if o == owner { dispatchers.extend(ds.clone()); }
-                            }
+                for cached in idx.files_with_symbol(name) {
+                    let whole = idx.whole_present(&cached);
+                    for sym in &whole.symbols {
+                        if sym.name != name { continue; }
+                        if let SymbolDetail::Handler { owner: o, dispatchers: ds, .. } = &sym.detail {
+                            if o == owner { dispatchers.extend(ds.clone()); }
                         }
                     }
                 }

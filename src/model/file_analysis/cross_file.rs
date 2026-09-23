@@ -25,6 +25,36 @@ impl CachedModule {
     // answer empty at scale.
 }
 
+/// What a name-index entry points at: the unit a registration keyed itself
+/// under. Closed, so no reader tells a module name from a path by looking
+/// at a string (rule #13).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Holder {
+    /// A Perl module/package name — one name, possibly many files, so it
+    /// resolves through the candidate relation (`visible_def_candidates`).
+    Module(String),
+    /// One registered file, by canonical path. The pack tier's unit: a file
+    /// holds its names whether or not it declares a class, which is how a
+    /// classless file (a routes file) is reachable by the names it declares.
+    /// Shared per file, so a bucket entry costs a pointer, not a path.
+    File(std::sync::Arc<std::path::Path>),
+}
+
+impl Holder {
+    pub fn file(path: &std::path::Path) -> Self {
+        Holder::File(std::sync::Arc::from(path))
+    }
+}
+
+impl std::fmt::Display for Holder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Holder::Module(m) => f.write_str(m),
+            Holder::File(p) => write!(f, "{}", p.display()),
+        }
+    }
+}
+
 /// A view into a module's metadata for a named sub/method.
 ///
 /// Composed of a primary symbol plus any additional symbols with the same
@@ -619,6 +649,27 @@ pub trait CrossFileLookup {
             })
             .cloned()
     }
+    /// The first candidate for `identity` whose analysis `declares`
+    /// accepts — "the file that declares this name", asked once. Each
+    /// candidate is read on the SYMBOLS axis, because the question is
+    /// about declarations; `candidate_defining_sub_in_package` is the
+    /// sibling for a consumer that also needs the module's path.
+    ///
+    /// The first accepting candidate IS the answer: a consumer that
+    /// scanned on for a more interesting one (a deprecation, a richer
+    /// declaration) was answering from a file its own resolution never
+    /// named.
+    fn defining_analysis(
+        &self,
+        identity: &str,
+        declares: &dyn Fn(&FileAnalysis) -> bool,
+    ) -> Option<std::sync::Arc<FileAnalysis>> {
+        self.visible_def_candidates(identity)
+            .into_iter()
+            .map(|c| self.symbols_present(&c))
+            .find(|a| declares(a))
+    }
+
     /// A cached module's analysis with its witness bag GUARANTEED present.
     /// Slice 2 evicts the bag from resident pack-index copies; every TYPE
     /// query that reads a foreign file's bag (the `PackageSymbol` / `SlotType`
@@ -826,7 +877,58 @@ pub trait CrossFileLookup {
         }
         out
     }
-    fn modules_with_symbol(&self, name: &str) -> Vec<String>;
+    /// Does this index hold files of the WORKSPACE tier? Only a pack
+    /// sub-index does: the hub's cache is `@INC` end to end
+    /// (`dependency_tier` claims every path). Default `false`, so a
+    /// walk that wants workspace files alone skips the index whole instead
+    /// of sweeping every cached file to reject it.
+    fn has_workspace_tier(&self) -> bool {
+        false
+    }
+    /// Every holder that declares or exports a symbol named `name` — the
+    /// generic "who has X" primitive. Sorted, for a stable order.
+    fn holders_with_symbol(&self, name: &str) -> Vec<Holder>;
+    /// The `Module` holders of `holders_with_symbol` — for readers whose
+    /// question is about packages (exporters, package homes).
+    fn modules_with_symbol(&self, name: &str) -> Vec<String> {
+        self.holders_with_symbol(name)
+            .into_iter()
+            .filter_map(|h| match h {
+                Holder::Module(m) => Some(m),
+                Holder::File(_) => None,
+            })
+            .collect()
+    }
+    /// The files a holder stands for, as seen from this lookup: a module's
+    /// visible candidates, or the registered file itself.
+    fn holder_files(&self, holder: &Holder) -> Vec<std::sync::Arc<CachedModule>> {
+        match holder {
+            Holder::Module(m) => self.visible_def_candidates(m),
+            Holder::File(p) => self.cached_by_path(p).into_iter().collect(),
+        }
+    }
+    /// Every file that may declare `name` — the ONE speller for goto-def,
+    /// hover and signature help, so none of them can miss a registration
+    /// the others see. Stacked registrations live in losing candidates, so
+    /// every candidate of every module holder comes back; a file holder
+    /// (a classless routes file) is its own file. Path-deduped.
+    fn files_with_symbol(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
+        let mut out: Vec<std::sync::Arc<CachedModule>> = Vec::new();
+        for holder in self.holders_with_symbol(name) {
+            for cached in self.holder_files(&holder) {
+                if !out.iter().any(|c| c.path == cached.path) {
+                    out.push(cached);
+                }
+            }
+        }
+        out
+    }
+    /// Every handler name registered on the string rail `rail`, across
+    /// every file this index holds — the cross-file half of rail-name
+    /// completion. Default empty: an index with no handler axis.
+    fn rail_names(&self, _rail: &str) -> Vec<String> {
+        Vec::new()
+    }
     fn find_exporters(&self, func_name: &str) -> Vec<String>;
     fn defining_module_cached(&self, entry: &str, name: &str) -> Option<std::sync::Arc<CachedModule>>;
     fn module_declaring_method_in_package(&self, name: &str, class: &str) -> Option<String>;
@@ -841,16 +943,29 @@ pub trait CrossFileLookup {
     fn inc_roots(&self) -> std::sync::Arc<Vec<std::path::PathBuf>> {
         std::sync::Arc::new(Vec::new())
     }
-    /// Is `path` in this lookup's read-only DEPENDENCY tier? Tier
+    /// This lookup's read-only DEPENDENCY tier, as a SNAPSHOT. Tier
     /// attribution for the masked backward walk: a dependency site is
-    /// visible to references but never rewritten by rename. The Perl hub's
-    /// whole cache is dependency BY CONSTRUCTION (workspace Perl files live
-    /// in the FileStore, so anything here came from `@INC`) — hence the
-    /// default. A pack sub-index holds the workspace's own files too, so it
-    /// overrides with membership in its registered dependency-root set
+    /// visible to references but never rewritten by rename. The tier is
+    /// constant for the length of a walk or a sweep, so a caller takes it
+    /// ONCE at the top and asks it per path — the roots live behind a lock,
+    /// and a 30k-file sweep that re-read it per file took 30k read-locks to
+    /// answer one question.
+    ///
+    /// The Perl hub's whole cache is dependency BY CONSTRUCTION (workspace
+    /// Perl files live in the FileStore, so anything here came from `@INC`)
+    /// — hence the default. A pack sub-index holds the workspace's own
+    /// files too, so it answers with its registered dependency roots
     /// (composer's vendor packages).
-    fn is_dependency_path(&self, _path: &std::path::Path) -> bool {
-        true
+    fn dependency_tier(&self) -> DependencyTier {
+        DependencyTier::Everything
+    }
+    /// This lookup's bulk-pass state for `language` — the one answer the
+    /// absence-reporting lanes read, in place of a caller-declared boolean
+    /// that cannot know what any index actually swept. Default `Warming`:
+    /// an index that does not track a bulk pass never licenses a lane to
+    /// call a name absent.
+    fn index_state(&self, _language: &str) -> IndexState {
+        IndexState::Warming
     }
     /// The workspace root, for resolving an origin's relative `use lib`
     /// entries — Perl resolves those against the process CWD, which for a
@@ -1088,10 +1203,50 @@ impl UseMapPins {
     }
 }
 
+/// Has the bulk pass that makes ABSENCE meaningful for a language finished?
+/// A lane that reports "no such class" is claiming the index would have the
+/// name if it existed; while the index is `Warming` that claim is false and
+/// the answer is indistinguishable from "not indexed yet", so the lane stays
+/// silent. Asked PER LANGUAGE — an index is settled for the files it swept,
+/// and says nothing about a language nothing has swept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexState {
+    /// The bulk pass for this language has not finished (or never ran).
+    Warming,
+    /// Everything this index will hold for the language is in it.
+    Settled,
+}
+
+impl IndexState {
+    pub fn is_settled(self) -> bool {
+        matches!(self, IndexState::Settled)
+    }
+}
+
+/// Which of a lookup's files are the read-only DEPENDENCY tier, taken once
+/// and asked many times. `Everything` is the hub's construction-time
+/// semantics; `Roots` is a pack sub-index's registered dependency roots,
+/// canonical and prefix-matched.
+#[derive(Debug, Clone)]
+pub enum DependencyTier {
+    Everything,
+    Roots(std::sync::Arc<Vec<std::path::PathBuf>>),
+}
+
+impl DependencyTier {
+    pub fn contains(&self, path: &std::path::Path) -> bool {
+        match self {
+            DependencyTier::Everything => true,
+            DependencyTier::Roots(roots) => roots.iter().any(|r| path.starts_with(r)),
+        }
+    }
+}
+
 /// How an origin's language scopes cross-file visibility — the routing
-/// fact `for_origin` consumes. Derived by the registry from the pack's
-/// own linkage declaration (`include_path_tokens`), never a
-/// language-name branch here or at a call site.
+/// fact `for_origin` consumes. Derived by the registry from the pack's own
+/// query document — a language whose import tokens are PATHS says so by
+/// minting `@include.path` — never a language-name branch here or at a call
+/// site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackVisibility {
     /// Not a pack: the host's search-path derivation (`use lib` ∪ @INC).
@@ -1245,6 +1400,18 @@ impl<'a> ScopedLookup<'a> {
 }
 
 impl<'a> ScopedLookup<'a> {
+    /// The include-closure connectivity rule: `c` is visible from the asker
+    /// (its own file or in its closure), or includes the asker back (a `.c`
+    /// body defining what the asker's own header declares).
+    fn connected(&self, c: &CachedModule) -> bool {
+        if self.visible.contains(c.path.to_string_lossy().as_ref()) {
+            return true;
+        }
+        self.self_path.as_ref().is_some_and(|sp| {
+            c.analysis.pack.include_closure.contains(sp.to_string_lossy().as_ref())
+        })
+    }
+
     /// The use-map candidate set for `name`, with the widening verdict.
     /// An IDENTITY (a qualified name) is exact: the declarations filed
     /// under it, else the same-leaf declarations whose namespace is its
@@ -1324,8 +1491,11 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn resolution_epoch(&self) -> u64 {
         self.inner.resolution_epoch()
     }
-    fn is_dependency_path(&self, path: &std::path::Path) -> bool {
-        self.inner.is_dependency_path(path)
+    fn dependency_tier(&self) -> DependencyTier {
+        self.inner.dependency_tier()
+    }
+    fn index_state(&self, language: &str) -> IndexState {
+        self.inner.index_state(language)
     }
     fn get_cached(&self, module_name: &str) -> Option<std::sync::Arc<CachedModule>> {
         // A search-path origin's winner is PER-ASKER: the same name means
@@ -1381,21 +1551,11 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
                 // `member_def_location` applies. None connected ⇒ the
                 // scope-ranked winner, so an indirect resolution never
                 // regresses.
-                let self_str = self
-                    .self_path
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().into_owned());
                 let mut out: Vec<std::sync::Arc<CachedModule>> = self
                     .inner
                     .def_candidates(name)
                     .into_iter()
-                    .filter(|c| {
-                        let p = c.path.to_string_lossy();
-                        self.visible.contains(p.as_ref())
-                            || self_str
-                                .as_ref()
-                                .is_some_and(|sp| c.analysis.pack.include_closure.contains(sp))
-                    })
+                    .filter(|c| self.connected(c))
                     .collect();
                 if out.is_empty() {
                     out.extend(self.get_cached(name));
@@ -1512,8 +1672,27 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     // `parents_cached` deliberately NOT delegated: the provided default
     // unions over THIS decorator's `visible_def_candidates`, so the scope
     // (pack closure narrowing) applies to the parent relation too.
-    fn modules_with_symbol(&self, name: &str) -> Vec<String> {
-        self.inner.modules_with_symbol(name)
+    fn has_workspace_tier(&self) -> bool {
+        self.inner.has_workspace_tier()
+    }
+    fn holders_with_symbol(&self, name: &str) -> Vec<Holder> {
+        self.inner.holders_with_symbol(name)
+    }
+    fn holder_files(&self, holder: &Holder) -> Vec<std::sync::Arc<CachedModule>> {
+        match holder {
+            Holder::Module(m) => self.visible_def_candidates(m),
+            // A file holder is one file, so the closure axis either admits
+            // it or not — there is no ranked winner to degrade to.
+            Holder::File(p) => self
+                .inner
+                .cached_by_path(p)
+                .into_iter()
+                .filter(|c| !matches!(self.axis, VisibilityAxis::IncludeClosure) || self.connected(c))
+                .collect(),
+        }
+    }
+    fn rail_names(&self, rail: &str) -> Vec<String> {
+        self.inner.rail_names(rail)
     }
     fn find_exporters(&self, func_name: &str) -> Vec<String> {
         self.inner.find_exporters(func_name)

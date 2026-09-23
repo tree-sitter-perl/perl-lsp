@@ -20,10 +20,11 @@ pub mod cursor_sentinel;
 // multi-language serving seam (LanguageDriver keystone)
 pub mod language_driver;
 pub mod plugin;
+pub mod packs;
 pub mod pod;
 pub mod query_cache;
 #[cfg_attr(
-    not(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake")),
+    not(feature = "pack-langs"),
     allow(dead_code)
 )]
 pub mod query_extract;

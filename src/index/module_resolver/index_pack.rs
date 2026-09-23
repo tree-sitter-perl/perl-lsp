@@ -221,6 +221,7 @@ pub fn index_pack_languages(
                     if fully_stripped {
                         if let Some(blob) = module_cache::encode_stub(
                             parts.feed(),
+                            parts.names(),
                             parts.specs(),
                             parts.surface(),
                             parts.arc(),
@@ -451,6 +452,7 @@ pub fn index_pack_languages(
                         );
                         let stub_blob = module_cache::encode_stub(
                             parts.feed(),
+                            parts.names(),
                             parts.specs(),
                             parts.surface(),
                             parts.arc(),

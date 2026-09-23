@@ -23,6 +23,7 @@ impl<'a> Builder<'a> {
             span,
             owner: None,
             package: pkg,
+            implicit_receiver: false,
         });
         self.scope_stack.push(id);
         id
@@ -177,6 +178,15 @@ impl<'a> Builder<'a> {
     ) -> SymbolId {
         let id = SymbolId(self.next_symbol_id);
         self.next_symbol_id += 1;
+        // Perl spells "this constructs" with a name and nothing else, so the
+        // convention is consulted HERE, at the mint, and nowhere past it:
+        // every consumer asks `Symbol::is_constructor()` (rule #11).
+        let mut flags = crate::model::file_analysis::SymbolFlags::empty();
+        if matches!(kind, SymKind::Sub | SymKind::Method)
+            && crate::model::conventions::is_constructor_name(&name)
+        {
+            flags |= crate::model::file_analysis::SymbolFlags::CONSTRUCTOR;
+        }
         // Every symbol attaches to the current lexical scope. Package
         // context lives separately in `package_ranges`; the variable
         // resolver gates `our` decls by package match at lookup time
@@ -194,7 +204,7 @@ impl<'a> Builder<'a> {
             namespace,
             presentation: Default::default(),
             attributes: Vec::new(),
-            flags: Default::default(),
+            flags,
             declared_with: None,
             deref_stack: Vec::new(),
             // Perl carries params in `SymbolDetail::Sub`; `param_arity()`
@@ -202,6 +212,28 @@ impl<'a> Builder<'a> {
             arity: None,
         });
         id
+    }
+
+    /// Mint the walk's held forward declarations, skipping any whose name
+    /// already has a body in the same package in this file: the body is the
+    /// declaration every consumer wants, and a second symbol would shadow it.
+    /// What survives is a stub whose body lives in AUTOLOAD, XS or elsewhere.
+    pub(super) fn mint_forward_declarations(&mut self) {
+        for mut stub in std::mem::take(&mut self.forward_decls) {
+            let has_body = self.symbols.iter().any(|s| {
+                s.name == stub.name
+                    && s.package == stub.package
+                    && matches!(s.kind, SymKind::Sub | SymKind::Method)
+                    && !s.flags.contains(crate::model::file_analysis::SymbolFlags::FORWARD_DECL)
+                    && !self.contract_symbols.contains(&s.id)
+            });
+            if has_body {
+                continue;
+            }
+            stub.id = SymbolId(self.next_symbol_id);
+            self.next_symbol_id += 1;
+            self.symbols.push(stub);
+        }
     }
 
     /// The just-minted symbol's presentation, for the synthesis sites
@@ -309,6 +341,7 @@ impl<'a> Builder<'a> {
             binding,
             folded_from: None,
             arg_count: None,
+            flags: Default::default(),
         });
     }
 

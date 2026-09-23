@@ -352,8 +352,9 @@ impl ModuleIndex {
     #[cfg(test)]
     pub fn get_return_type_cached(&self, func_name: &str) -> Option<InferredType> {
         use crate::model::file_analysis::CrossFileLookup;
-        let modules = self.core.edges.names.get(func_name)?;
-        for module_name in modules.value() {
+        let holders = self.core.edges.names.get(func_name)?;
+        for holder in holders.value() {
+            let Holder::Module(module_name) = holder else { continue };
             if let Some(cached) = self.get_cached(module_name) {
                 // `sub_return_type_local` walks symbols AND resolves through
                 // the bag — two evictable axes, take the whole view.
@@ -386,12 +387,12 @@ impl ModuleIndex {
         result
     }
 
-    /// Generic "find modules with a symbol named N" primitive —
+    /// Generic "find holders with a symbol named N" primitive —
     /// O(1) hash + O(matches) scan for name-keyed predicates (never
     /// `for_each_cached` over the whole store). Callers apply their
     /// own kind/detail filter + override/stacking semantics after
     /// picking which specific symbols matter to them.
-    pub fn modules_with_symbol(&self, name: &str) -> Vec<String> {
+    pub fn holders_with_symbol(&self, name: &str) -> Vec<Holder> {
         match self.core.edges.names.get(name) {
             Some(bucket) => {
                 // Unique by construction; sort only, for a stable order.
@@ -401,6 +402,23 @@ impl ModuleIndex {
             }
             None => Vec::new(),
         }
+    }
+
+    /// The `Module` holders of `holders_with_symbol`.
+    pub fn modules_with_symbol(&self, name: &str) -> Vec<String> {
+        self.holders_with_symbol(name)
+            .into_iter()
+            .filter_map(|h| match h {
+                Holder::Module(m) => Some(m),
+                Holder::File(_) => None,
+            })
+            .collect()
+    }
+
+    /// Every handler name declared on the string rail `rail` — the
+    /// rail-name completion source.
+    pub fn rail_names(&self, rail: &str) -> Vec<String> {
+        self.core.edges.rail_names(rail)
     }
 
     /// Find the module that declares method `name` *attributed to class*

@@ -66,6 +66,7 @@ impl UndefArm {
 
     /// Decode from a Fact's `value`. `None` when the fact predates the
     /// distinction or carries some other shape.
+    #[allow(dead_code)] // the decode half of the pair; the encode half has the callers
     pub fn from_fact_value(v: &super::FactValue) -> Option<Self> {
         match v {
             super::FactValue::Bool(true) => Some(UndefArm::EmptyList),

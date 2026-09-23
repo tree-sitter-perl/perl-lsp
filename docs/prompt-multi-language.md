@@ -2,9 +2,11 @@
 
 **The `LanguageDriver`/`PackDriver`/`LanguageRegistry` seam this doc
 designed is landed** (`src/build/language_driver.rs`; file-map entry in
-CLAUDE.md). C++/Python/R/CMake ship as pack languages behind opt-in
+CLAUDE.md). C++/Python/R/CMake/PHP ship as pack languages behind opt-in
 Cargo features, each a `PackDriver` constructor plus a `.scm` skeleton
-and predicates — no new types per language. Per-language `ModuleIndex`
+and predicates — no new types per language. PHP is the designated
+next serve-in-anger target — market case, fit, and build-out sequencing
+in `docs/prompt-php-target.md`. Per-language `ModuleIndex`
 instances and the `FileAnalysis.language` tag (cross-language ref
 pollution guard) are both landed. This brief now carries only what
 hasn't shipped.
@@ -58,10 +60,15 @@ languages from one process (LSP document selectors handle this).
 perl-lsp doesn't die — it becomes the Perl-configured distribution of
 that binary, name and install base intact.
 
-Open design round carried from the spikes: keying framework-plugin
-hooks on CAPTURE EVENTS the way rhai hooks key on CallContext today —
-that is what gives pack languages a framework tier (tidyverse, CMake
-module conventions). Everything else on this page is enumerable work.
+The framework-tier design round is CLOSED — `docs/prompt-pack-plugins.md`
+owns it, and its tier 1 is LANDED: loadable QUERY overlays in the
+standard capture vocabulary (the bundled Laravel and WordPress overlays
+are the proof; the string-named reference captures closed the WP hooks
+tenant without callbacks), with the loader's isolation/caching/
+invalidation and a `--plugin-check` `.scm` arm. The deferred rhai
+capture-event hook (`on_match` over capture events, emitting the shared
+`EmitAction` vocabulary) does not build until a tenant needs name
+surgery a query cannot express.
 
 ## Sequencing
 

@@ -59,6 +59,15 @@ sibling role's def, a cross-package typeglob install, or a
 plugin-bridged entity. Modifiers (`around`/`before`/`after`) never
 synthesize symbols, so they correctly don't provide.
 
+A forward declaration (`sub fetch;`) provides; `AUTOLOAD` alone does
+not. Role::Tiny's `_check_requires` is `grep !$to->can($_)` and
+Moose's `check_required_methods` asks `find_method_by_name`; `can`
+answers a declared stub and never consults AUTOLOAD, so a class whose
+AUTOLOAD answers `->fetch` still croaks "missing fetch" until it
+predeclares the name. The builder mints the stub as a `FORWARD_DECL`
+symbol when no body for it exists in the file, so every provision arm
+above sees it with no stub-specific branch.
+
 Role-ness itself is `FileAnalysis::is_role_package`, reading the
 baked `PackageFacts::is_role` verdict. One predicate; consumers never
 re-derive from use lists. The maker set behind the verdict is OPEN —
@@ -80,11 +89,9 @@ A role engine that is neither declared nor Moo-shaped is one
 ## Honest silence rides the one incompleteness seam
 
 The diagnostic must not fire when provision could exist where we can't
-see. All three escape hatches are facts, not message-level special
-cases:
+see. Both escape hatches are facts, not message-level special cases:
 
 - **Roles are never diagnosed** — their obligations transfer.
-- **AUTOLOAD anywhere in the MRO** can satisfy any contract at runtime.
 - **Incomplete ancestry** — `class_has_unresolved_ancestor`, the
   single source of "is the inheritance chain incomplete" (it already
   gated the unresolved-method hint). This ADR added one input to it:
@@ -130,7 +137,8 @@ concrete composer exactly as a Moose role does. `unfulfilled_role_requires`
 then answers php with no php in it: the composer's MRO must provide each
 name with a non-contract declaration, the walk continues through deferring
 ancestors and prunes at concrete ones, and every honest-silence rule above
-holds — except the `AUTOLOAD` silence, which does not transfer: php checks
-a contract when the class is DECLARED, before any call a `__call` could
-catch, so the pack lane (`unimplemented-method`) reports through a
-catch-all method.
+holds. A catch-all satisfies no contract in either language: php checks a
+contract when the class is DECLARED, before any call a `__call` could
+catch, so the pack lane (`unimplemented-method`,
+`docs/adr/php-diagnostics.md`) reports through one exactly as Perl's does
+through `AUTOLOAD`.

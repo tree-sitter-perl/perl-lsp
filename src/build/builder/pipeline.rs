@@ -140,6 +140,7 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
             span: node_to_span(tree.root_node()),
             package: Some("main".to_string()),
             owner: None,
+            implicit_receiver: false,
         }],
         plugin: crate::model::file_analysis::PluginFacts {
             diagnostics: vec![PluginDiagnostic {
@@ -160,6 +161,7 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
         },
         pack: crate::model::file_analysis::PackFacts {
             names: crate::model::conventions::PERL_SPELLINGS,
+            spellings: Some(&crate::model::conventions::PERL_SPELLINGS_PACK),
             ..Default::default()
         },
         ..Default::default()
@@ -351,6 +353,7 @@ fn build_once(
         escape_recorded: std::collections::HashSet::new(),
         role_requires: std::collections::HashMap::new(),
         contract_symbols: std::collections::HashSet::new(),
+        forward_decls: Vec::new(),
         dynamic_parent_packages: std::collections::HashSet::new(),
         dynamic_dispatch_sites: 0,
         role_maker_modules: std::collections::HashSet::new(),
@@ -454,6 +457,9 @@ fn build_once(
     // named-sub flushes below so pattern emissions ride the same
     // machinery as walk-interleaved hook emissions.
     bphase!("pattern_dispatch", b.dispatch_pattern_plugins(tree.root_node()));
+    // After every source of bodied subs (walk, data section, plugins), so a
+    // body anywhere in the file subsumes its stub.
+    b.mint_forward_declarations();
 
     b.pop_scope();
     let _ = file_scope;
@@ -671,6 +677,7 @@ fn build_once(
         // no template params, no `std::move`.
         pack: crate::model::file_analysis::PackFacts {
             names: crate::model::conventions::PERL_SPELLINGS,
+            spellings: Some(&crate::model::conventions::PERL_SPELLINGS_PACK),
             ..Default::default()
         },
         type_provenance: b.type_provenance,
@@ -1070,6 +1077,7 @@ impl<'a> Builder<'a> {
                     opaque_return: false,
                     is_constant: false,
                     lexical: false,
+                    declared_return: None,
                 },
             );
             synth_names.insert(name.to_string());

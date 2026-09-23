@@ -19,6 +19,14 @@ else. There is no `by_ref` bitmask on `ParamArity`, no boolean a
 consumer tests: the aliasing edge IS the binding mode. A position with
 no `Param` witness is by-value by construction.
 
+The pack extractor reads the declaration at the `@arity.sig` parameter
+list (a `reference_modifier`, a `reference_declarator`) and records the
+position with the parameter's name; the skeleton mints the edge when it
+joins the signature to its def and knows the def's body scope — the same
+join that names the scope's owner. The call site's edges are minted where
+the call ref is, from the bare-variable arguments the argument list
+carried.
+
 The call site pushes, for every bare variable it passes,
 
 ```

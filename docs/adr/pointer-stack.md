@@ -17,10 +17,10 @@ it can't peel the chain after the fact either.
 
 ## Decision
 
-Peel **where the node is still live** — at event construction. A pack marks a
-declarator chain with one `@nested.target` capture; `peel_nested` (in
-`query_extract.rs`) walks it to the leaf identifier and the per-level deref
-stack, then emits the leaf as a **synthetic** `@flow.target`/`@def.local`
+Peel **where the node is still live**. A document marks a declarator chain
+with one `@nested.target` capture; `DerefCaps::peel`
+(`query_extract/extract.rs`) walks it to the leaf identifier and the per-level
+deref stack, then emits the leaf as a **synthetic** `@flow.target`/`@def.local`
 event carrying the same `match_id`. Downstream is unchanged: the `@type.annot`
 join still fires, the symbol is created, goto-def/references/witnesses all
 work — and arbitrary depth needs no enumerated patterns. The stack rides to
@@ -29,19 +29,24 @@ gets the stars too).
 
 ## Generic by construction
 
-Core branches on no grammar name. The LangPack declares the rule:
+Core branches on no grammar name (rule #15). The document says what a
+declarator level IS, one capture per level:
 
-- `nested_peel: &[(node_kind, DerefKind)]` — which kinds nest, and the deref
-  each contributes (cpp: `pointer_declarator`→Pointer, `reference_declarator`
-  →Reference);
-- `nested_leaf` — the bottom kind (`identifier`);
-- `nested_annot_kinds: &[node_kind]` — per-level annotation kinds
-  (`type_qualifier` → `const`/`volatile`/`restrict`), collected onto each
-  `DerefStep.annotations` as **free strings** (not typed flags) so new
-  qualifiers and const-correctness diagnostics needn't reshape the type.
+- `@deref.pointer` / `@deref.ref` — this node is a level, contributing that
+  deref (cpp: `pointer_declarator` / `reference_declarator`);
+- `@deref.annot` — a per-level annotation (`type_qualifier` →
+  `const`/`volatile`/`restrict`), collected onto each `DerefStep.annotations`
+  as **free strings** (not typed flags) so new qualifiers and
+  const-correctness diagnostics needn't reshape the type;
+- `@deref.leaf.<kind>` — the bottom, whose suffix names the def the synthetic
+  leaf event mints (`@deref.leaf.field` → `def.field`, so a pointer member
+  outlines as a member).
 
-A future pack with its own chained-wrapper shape declares its own rule; no
-core change.
+`DerefCaps` is the one home for those captures: the extraction pass fills it
+as it flattens matches, and a consumer holding a tree the extractor never saw
+(the member-block reparse of a macro body) fills it by running the same
+document over that tree. One walk, one vocabulary. A language with its own
+chained-wrapper shape spells the captures in its own document; no core change.
 
 ## Stack shape
 

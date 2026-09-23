@@ -9,6 +9,39 @@ impl FileAnalysis {
         &self.pack.names
     }
 
+    /// This language's write and display spellings — what a quick-fix
+    /// inserts and what a human surface renders. Attached by language id
+    /// (never serialized per file, rule #14); a language that declares
+    /// none, and an analysis nothing has attached to, answer the neutral
+    /// defaults, which is what every surface assumed before packs existed.
+    pub fn spellings(&self) -> &'static PackSpellings {
+        self.pack.spellings.unwrap_or(&NEUTRAL_SPELLINGS)
+    }
+
+    /// The callee a bare variable READ is passed to, when the read is a call
+    /// argument: the call site's own binding edge names it
+    /// (`docs/adr/by-ref-binding.md`), so no consumer joins an argument to a
+    /// call by span. `None` when the read is not an argument.
+    pub fn argument_callee(&self, read: &Ref) -> Option<&str> {
+        use crate::model::witnesses::{ProjectionStep, WitnessAttachment, WitnessPayload};
+        let att = WitnessAttachment::Variable {
+            name: read.target_name.clone(),
+            scope: read.scope,
+        };
+        self.witnesses.for_attachment(&att).into_iter().find_map(|w| {
+            if w.span.start != read.span.start {
+                return None;
+            }
+            match &w.payload {
+                WitnessPayload::Edge(WitnessAttachment::Param { name, .. }) => Some(name.as_str()),
+                WitnessPayload::Projected { step: ProjectionStep::ParamOf { member, .. }, .. } => {
+                    Some(member.as_str())
+                }
+                _ => None,
+            }
+        })
+    }
+
     /// Where `var` is bound inside `scope` — the earliest declaring
     /// `Variable` symbol within the scope's span. The anchor every fact
     /// about a parameter lands at (a declaration's write marker retires
@@ -312,7 +345,39 @@ impl FileAnalysis {
             module_index,
             package_parents: &self.packages,
             app_surface_consumers: &self.plugin.app_surface_consumers,
+            class_params: &self.pack.template_params,
         }
+    }
+
+    /// Does a VALUE flow into `var` at or before `point` — a declaration, a
+    /// write, an aliasing by-reference parameter?
+    ///
+    /// Two questions, because neither answers alone. A USAGE observation is
+    /// not a binding: `$x + 1` says the read is numeric without saying
+    /// anything ever wrote `$x`, so a type alone would call every arithmetic
+    /// operand defined. And an edge that RESOLVES to nothing is not a
+    /// binding either: a by-value argument's edge is minted at every call
+    /// site and drops out in the chase, so an edge alone would call every
+    /// argument defined (`docs/adr/by-ref-binding.md`).
+    pub fn variable_is_bound_via_bag(
+        &self,
+        var: &str,
+        point: Point,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> bool {
+        use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+        let Some(scope) = self.scope_at(point) else { return false };
+        let value_witness = self.scope_chain(scope).into_iter().any(|sc| {
+            let att = WitnessAttachment::Variable { name: var.to_string(), scope: sc };
+            self.witnesses.for_attachment(&att).iter().any(|w| {
+                w.span.start <= point
+                    && match &w.payload {
+                        WitnessPayload::Observation(_) => w.payload.binds_value(),
+                        _ => true,
+                    }
+            })
+        });
+        value_witness && self.inferred_type_via_bag_ctx(var, point, module_index).is_some()
     }
 
     pub fn inferred_type_via_bag_ctx(

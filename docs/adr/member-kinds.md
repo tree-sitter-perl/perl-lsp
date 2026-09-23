@@ -54,6 +54,17 @@ A language where a method is also readable as a value (JS `obj.method`)
 publishes the callable on BOTH attachments at mint; the model never learns
 which language did that.
 
+The walk answers the nearest declaration the family admits and stops.
+There is no held fallback that prefers a farther declaration of the family
+the ask named over a nearer one it admits: a class has one member namespace
+where the language does, and a derived declaration hides a base's of the
+same name whatever its kind — C++ finds `D`'s function-pointer `read` for
+`d->read(buf)` and never `B::read()`, so a walk that reached `B::read()`
+answered a member the language would not. Nothing resolves ACROSS families
+by design: a same-named declaration of the other family is a diagnostic's
+suggestion (an undefined method with a property of that name to point at),
+never a resolution.
+
 ### Perl accesses that are semantically value reads
 
 A Perl `$o->name` with no arguments is often a value read in intent (a

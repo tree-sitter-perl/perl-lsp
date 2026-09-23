@@ -16,6 +16,7 @@ fn fa_with_constraints(constraints: Vec<TypeConstraint>) -> FileAnalysis {
             },
             package: None,
             owner: None,
+            implicit_receiver: false,
         }],
         ..Default::default()
     });
@@ -130,6 +131,7 @@ fn test_resolve_sub_return_type() {
             },
             package: None,
             owner: None,
+            implicit_receiver: false,
         }],
         symbols: vec![Symbol {
             id: SymbolId(0),
@@ -152,6 +154,7 @@ fn test_resolve_sub_return_type() {
                 opaque_return: false,
                 is_constant: false,
                 lexical: false,
+                declared_return: None,
             },
             namespace: Namespace::Language,
             presentation: Default::default(),
@@ -1822,7 +1825,7 @@ my $host = $cfg->{host};
 /// link and merges. Stops at the first defining ancestor so
 /// overrides in unrelated branches aren't lumped in.
 #[test]
-fn red_pin_method_rename_chain_walks_to_defining_ancestor() {
+fn red_pin_member_rename_chain_walks_to_defining_ancestor() {
     // Same-file inheritance — keeps the test free of the
     // module_index, which still gets exercised end-to-end via the
     // e2e suite.
@@ -1845,7 +1848,7 @@ $dog->speak();
 
     // Inherited (defined in Animal, not in Dog) — chain runs
     // child → defining ancestor and stops.
-    let chain = fa.method_rename_chain("Dog", "breathe", None);
+    let chain = fa.member_rename_chain("Dog", "breathe", MemberKind::Callable, None);
     assert_eq!(
         chain,
         vec!["Dog".to_string(), "Animal".to_string()],
@@ -1855,7 +1858,7 @@ $dog->speak();
     // Override (Dog defines `speak` itself) — chain stops at
     // child. Walking past the override into Animal would lump
     // two semantically distinct methods together in one rename.
-    let chain = fa.method_rename_chain("Dog", "speak", None);
+    let chain = fa.member_rename_chain("Dog", "speak", MemberKind::Callable, None);
     assert_eq!(
         chain,
         vec!["Dog".to_string()],
@@ -1865,7 +1868,7 @@ $dog->speak();
 
     // Unknown method: degrade to the original class so the
     // backend's per-class rename still runs (no edits, no harm).
-    let chain = fa.method_rename_chain("Dog", "nonexistent", None);
+    let chain = fa.member_rename_chain("Dog", "nonexistent", MemberKind::Callable, None);
     assert_eq!(chain, vec!["Dog".to_string()]);
 }
 
@@ -2536,6 +2539,7 @@ fn binding_owner_restamp_drops_stale_symbol_link() {
         binding: None,
         folded_from: None,
         arg_count: None,
+        flags: Default::default(),
     };
     // Linking without a resolved owner is a no-op — nothing to attach to.
     r.link_owned_symbol(SymbolId(7));
@@ -2987,3 +2991,40 @@ has 'size' => (is => 'rw');
     assert_eq!(key.declared_with, Some(accessor.id));
     assert_eq!(accessor.declared_with, Some(key.id));
 }
+
+/// A forward declaration `sub foo;` ahead of its body is a second
+/// declaration of the same name: every "the definition" consumer lands on
+/// the body, and the outline lists it once.
+#[test]
+fn test_forward_declaration_yields_to_the_definition() {
+    let src = "package P;\nsub foo;\n# the real one\nsub foo { my ($self, $x) = @_; return 7 }\nsub run { my $self = shift; foo(1); $self->foo(2) }\n";
+    let fa = build_fa_from_source(src);
+
+    let def = fa.find_definition(Point::new(4, 29), None).expect("goto-def on foo()");
+    assert_eq!(def.start.row, 3, "function call lands on the body, got {:?}", def);
+    let def = fa.find_definition(Point::new(4, 45), None).expect("goto-def on ->foo");
+    assert_eq!(def.start.row, 3, "method call lands on the body, got {:?}", def);
+
+    let hover = fa.hover_info(Point::new(4, 29), src, None).expect("hover on foo()");
+    assert!(hover.contains("$x"), "hover shows the body's signature, got {hover}");
+
+    assert_eq!(
+        fa.sub_return_type_at_arity("foo", Some(1)),
+        Some(InferredType::Numeric),
+        "the return type is the body's",
+    );
+
+    let rendered = render_outline(&fa.document_symbols());
+    assert_eq!(rendered.matches("foo").count(), 1, "one outline entry, got:\n{rendered}");
+}
+
+/// With no body anywhere, the forward declaration is the only declaration
+/// of the name, so goto-def lands on it.
+#[test]
+fn test_lone_forward_declaration_is_the_landing() {
+    let src = "package P;\nsub foo;\nsub AUTOLOAD { 1 }\nfoo();\n";
+    let fa = build_fa_from_source(src);
+    let def = fa.find_definition(Point::new(3, 1), None).expect("goto-def on foo()");
+    assert_eq!(def.start.row, 1, "lands on `sub foo;`, got {:?}", def);
+}
+

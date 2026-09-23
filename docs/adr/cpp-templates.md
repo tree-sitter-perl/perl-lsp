@@ -97,11 +97,8 @@ SELECTION (this seam).
 The projection engine design: one worklist + seen-set +
 root-chained-provenance spine, with per-domain closures over it — Perl
 generator synthesis (strings, eager symbols, plugin-declared) and template
-instantiation-to-fixpoint (types, whole-program, syntax-derived). The PoC
-modules that proved it (`projection.rs`, `perl_generators.rs`,
-`cpp_templates.rs`) were experiment-only and rest in git history (removed
-at the spike GC, 2026-07-13); a producer arc re-lands the engine from this
-design. Emission policy
+instantiation-to-fixpoint (types, whole-program, syntax-derived). Not yet
+built; a producer arc re-lands the engine from this design. Emission policy
 and seen-set granularity stay the caller's — expressed at the call boundary, not
 by a branch inside the engine — because eager per-declaration symbol minting is
 right for a finite Perl generator group and wrong for a template × every

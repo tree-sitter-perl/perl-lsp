@@ -243,6 +243,9 @@ impl<'a> Builder<'a> {
                     module_index: None,
                     package_parents: &self.package_parents,
                     app_surface_consumers: &self.app_surface_consumers,
+                    // Perl declares no parametric classes; a pack language's
+                    // fold reads its params off the analysis instead.
+                    class_params: &crate::model::file_analysis::NoClassParams,
                 };
                 crate::model::witnesses::emit_mutation_extension_witnesses(
                     &mut self.bag,
@@ -922,6 +925,7 @@ impl<'a> Builder<'a> {
                 }),
                 folded_from: None,
                 arg_count: None,
+                flags: Default::default(),
             });
         }
     }
@@ -1194,6 +1198,7 @@ impl<'a> Builder<'a> {
             module_index: None,
             package_parents: &self.package_parents,
             app_surface_consumers: &self.app_surface_consumers,
+            class_params: &crate::model::file_analysis::NoClassParams,
         }
     }
 

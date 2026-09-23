@@ -857,7 +857,7 @@ fn enriched_present_default_is_the_raw_bag() {
         fn parents_cached(&self, _m: &str) -> Vec<String> {
             Vec::new()
         }
-        fn modules_with_symbol(&self, _n: &str) -> Vec<String> {
+        fn holders_with_symbol(&self, _n: &str) -> Vec<crate::model::file_analysis::Holder> {
             Vec::new()
         }
         fn find_exporters(&self, _n: &str) -> Vec<String> {
@@ -1681,8 +1681,8 @@ fn purge_reaches_every_edge_a_publication_created() {
     assert!(!edges.specs_for("Primary").is_empty());
     assert!(!edges.children_of("Base").is_empty());
 
-    edges.purge_module("Spec::Impl");
-    edges.purge_module("Derived");
+    edges.purge_holder(&crate::model::file_analysis::Holder::Module("Spec::Impl".to_string()));
+    edges.purge_holder(&crate::model::file_analysis::Holder::Module("Derived".to_string()));
     assert!(
         edges.specs_for("Primary").is_empty(),
         "a directly-published spec edge survived its module's purge",
@@ -1700,7 +1700,7 @@ fn purging_a_never_fed_module_is_a_no_op_not_a_wipe() {
     edges.publish_child("Base", "Derived");
     // A name nothing ever fed: the guard skips the sweep, and the sweep
     // skipping must not be observable as lost edges for OTHER modules.
-    edges.purge_module("Never::Fed");
+    edges.purge_holder(&crate::model::file_analysis::Holder::Module("Never::Fed".to_string()));
     assert_eq!(edges.children_of("Base"), vec!["Derived".to_string()]);
 }
 
@@ -2064,7 +2064,7 @@ fn the_record_driven_purge_matches_the_whole_map_sweep() {
             by_sweep.snapshot(),
             "the two indexes did not start identical for {target}"
         );
-        by_record.purge_module(target);
+        by_record.purge_holder(&crate::model::file_analysis::Holder::Module(target.to_string()));
         by_sweep.purge_module_by_sweep(target);
         assert_eq!(
             by_record.snapshot(),
@@ -2092,7 +2092,7 @@ fn a_purge_retracts_every_sibling_feed_under_one_name() {
         let fa = build_fa(src);
         edges.feed("Dup::Mod", &PathBuf::from(format!("/fake/s{i}.pm")), &fa);
     }
-    edges.purge_module("Dup::Mod");
+    edges.purge_holder(&crate::model::file_analysis::Holder::Module("Dup::Mod".to_string()));
     assert!(
         edges.snapshot().is_empty(),
         "a sibling feed's edges survived the purge: {:?}",
@@ -2818,4 +2818,122 @@ fn a_background_write_lands_until_the_open_doc_lane_has_recorded() {
         "a Background write must yield once the open-doc lane owns the record \
          — consumers read the buffer, and the disk state is not what they see"
     );
+}
+
+/// A pack file is its own holder in the name index: every name it can be
+/// found by — methods included, which the linkage feed never registers —
+/// points at the file, a re-registration drops the names it lost, and
+/// unregistering takes the rest.
+#[cfg(feature = "cpp")]
+#[test]
+fn pack_file_is_its_own_holder() {
+    use crate::model::file_analysis::Holder;
+    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let driver = reg.for_id("cpp").expect("cpp driver");
+    let path = std::path::Path::new("/fake/holder.cpp");
+    let v1 = Arc::new(driver.analyze_with_path(
+        "class Box { public: void a_only(); };\nint helper(int x) { return x; }\n",
+        Some(path),
+    ));
+    let idx = ModuleIndex::new_for_test();
+    idx.register_symbols(path.to_path_buf(), v1);
+    let me = vec![Holder::file(path)];
+    for name in ["Box", "a_only", "helper"] {
+        assert_eq!(idx.holders_with_symbol(name), me, "{name} points at its file");
+        let files = CrossFileLookup::files_with_symbol(&idx, name);
+        assert_eq!(files.len(), 1, "{name} resolves to one file");
+        assert_eq!(files[0].path, path);
+    }
+    assert!(idx.modules_with_symbol("a_only").is_empty(), "a file holder is not a module");
+
+    let v2 = Arc::new(driver.analyze_with_path("int helper(int x) { return x; }\n", Some(path)));
+    idx.register_symbols(path.to_path_buf(), v2);
+    assert!(idx.holders_with_symbol("a_only").is_empty(), "a lost name leaves the index");
+    assert_eq!(idx.holders_with_symbol("helper"), me);
+
+    idx.unregister_file(path);
+    assert!(idx.holders_with_symbol("helper").is_empty(), "unregistering purges the holder");
+}
+
+/// A file declaring no class — a routes file — is found by its handler
+/// names, and a rail's names are enumerable without a scan. A name two
+/// files declare survives either one's departure.
+#[cfg(feature = "cpp")]
+#[test]
+fn classless_rail_file_is_found_by_its_handlers() {
+    use crate::model::file_analysis::{
+        Holder, HandlerOwner, Namespace, Presentation, ScopeId, Span, SymKind, Symbol,
+        SymbolDetail, SymbolFlags, SymbolId,
+    };
+    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let driver = reg.for_id("cpp").expect("cpp driver");
+    let zero = Span { start: tree_sitter::Point { row: 0, column: 0 }, end: tree_sitter::Point { row: 0, column: 0 } };
+    let handler = |name: &str| Symbol {
+        id: SymbolId(0),
+        name: name.to_string(),
+        kind: SymKind::Handler,
+        span: zero,
+        selection_span: zero,
+        scope: ScopeId(0),
+        package: None,
+        flags: SymbolFlags::empty(),
+        declared_with: None,
+        detail: SymbolDetail::Handler {
+            owner: HandlerOwner::Rail("route".to_string()),
+            dispatchers: Vec::new(),
+            params: Vec::new(),
+        },
+        namespace: Namespace::Language,
+        presentation: Presentation::default(),
+        attributes: Vec::new(),
+        deref_stack: Vec::new(),
+        arity: None,
+    };
+    let rail_file = |path: &std::path::Path, names: &[&str]| {
+        let mut fa = driver.analyze_with_path("int unrelated = 1;\n", Some(path));
+        fa.adopt_path_symbols(names.iter().map(|n| handler(n)).collect());
+        Arc::new(fa)
+    };
+    let web = std::path::Path::new("/fake/routes/web.php");
+    let api = std::path::Path::new("/fake/routes/api.php");
+    let idx = ModuleIndex::new_for_test();
+    idx.register_symbols(web.to_path_buf(), rail_file(web, &["home", "about"]));
+    idx.register_symbols(api.to_path_buf(), rail_file(api, &["home", "status"]));
+
+    assert_eq!(idx.holders_with_symbol("about"), vec![Holder::file(web)]);
+    let mut home: Vec<_> = CrossFileLookup::files_with_symbol(&idx, "home")
+        .into_iter()
+        .map(|c| c.path.clone())
+        .collect();
+    home.sort();
+    assert_eq!(home, vec![api.to_path_buf(), web.to_path_buf()]);
+    assert_eq!(idx.rail_names("route"), vec!["about", "home", "status"]);
+    assert!(idx.rail_names("view").is_empty(), "rails keep their names apart");
+
+    idx.unregister_file(web);
+    assert_eq!(idx.rail_names("route"), vec!["home", "status"], "api still declares home");
+    assert!(idx.holders_with_symbol("about").is_empty());
+}
+
+/// Under the include-closure axis a file holder is visible only when it is
+/// connected to the asker — the same rule candidates follow — and there is
+/// no ranked winner to fall back to.
+#[cfg(feature = "cpp")]
+#[test]
+fn scoped_file_holder_follows_the_closure() {
+    use crate::model::file_analysis::{ScopedLookup, VisibilityAxis};
+    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let driver = reg.for_id("cpp").expect("cpp driver");
+    let a = std::path::Path::new("/fake/scope_a.cpp");
+    let b = std::path::Path::new("/fake/scope_b.cpp");
+    let idx = ModuleIndex::new_for_test();
+    for p in [a, b] {
+        let fa = driver.analyze_with_path("class Job { public: void run(); };\n", Some(p));
+        idx.register_symbols(p.to_path_buf(), Arc::new(fa));
+    }
+    assert_eq!(CrossFileLookup::files_with_symbol(&idx, "run").len(), 2, "unscoped sees both");
+    let closure = crate::model::file_analysis::path_intern::ClosureList::default();
+    let scoped = ScopedLookup::new(&idx, &closure, Some(a), VisibilityAxis::IncludeClosure);
+    let seen: Vec<_> = scoped.files_with_symbol("run").into_iter().map(|c| c.path.clone()).collect();
+    assert_eq!(seen, vec![a.to_path_buf()], "an unconnected file holder is not visible");
 }
