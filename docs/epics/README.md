@@ -88,6 +88,7 @@ residuals, or (d) explicitly out of scope. Nothing is unaccounted for.
 | `open-problems.md` §"Duplicate-package resolution" | **Epic 1** — the relation landed (`b32814a0`); the consumer conversion is the epic |
 | `prompt-dbic-as-plugin.md` | **Epic 2** (phase 1 landed; phase 2's `meta_methods` manifest was drafted in the unmerged #109 and is re-absorbed here) |
 | `prompt-graph-walking.md` — Scope nodes / Openness | **Epic 3** |
+| `prompt-catch-all-surface.md` — what an `AUTOLOAD` / `__call` answers | **Queued** once main carries the catch-all flag and forward-declaration stubs (the brief's prerequisite), **and after Epic 3 Phase B**, so it narrows the one verdict's `Autoload` cause rather than each lane. Epic 3 Phase A takes the member name for it |
 | `prompt-graph-walking.md` — instance brands | **Parked**: unblocks after Epic 4 + constructor/field flow; rebuild ONLY per its birth-site rule, never the syntactic spike |
 | `prompt-type-inference-residual.md` Parts 1, 2, 5a | **Epic 4** |
 | `prompt-type-inference-residual.md` Parts 3, 4 | Queued after Epic 4 (same engine, QA pulls decide) |

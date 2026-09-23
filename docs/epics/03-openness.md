@@ -122,7 +122,12 @@ into one type. Name yours distinctly and say why in the ADR.
    `PendingGatedEmission` above only if a package can genuinely still
    be awaiting a gate at diagnostic time. If it cannot, drop the
    variant and say so — a cause nothing produces is dead weight.
-4. **Acceptance:** unit tests per cause, plus a Closed case (plain
+4. **Take the member name.** `prompt-catch-all-surface.md` narrows a
+   catch-all to the names it answers, so `Autoload` openness is per
+   name and per member family, not per class. Give `openness_of` the
+   name and family now, even while every cause ignores them; adding
+   them after the lanes call it is a retrofit across every caller.
+5. **Acceptance:** unit tests per cause, plus a Closed case (plain
    class, full local MRO, no bridges) that stays Closed.
 
 ### Phase B — unresolved-method/function rewired
