@@ -237,11 +237,9 @@ pub struct DocDisagreement {
 /// The spellings are the first nine fields: the type vocabularies, the
 /// class-name literal, the import / contract-stub / return-annotation
 /// templates, the static-property sigil and the two signature separators.
-/// The last two are per-language SEMANTICS the engine's rules gate on:
-/// whether a member belongs to its enclosing container and nothing else
-/// (`members_are_package_bound`) and whether a runtime catch-all discharges a
-/// compile-time obligation (`catch_all_satisfies_contracts`). Each says so
-/// on its own doc.
+/// The last is a per-language SEMANTIC the engine's rules gate on: whether
+/// a member belongs to its enclosing container and nothing else
+/// (`members_are_package_bound`).
 ///
 /// Every field is the same for every file of the language, so these are
 /// reached by language id (`LanguageRegistry::spellings`) and attached to
@@ -284,13 +282,6 @@ pub struct PackSpellings {
     /// nothing else — no cross-package installs (Perl's typeglobs), so
     /// contract provision is package-attributed.
     pub members_are_package_bound: bool,
-    /// Does a catch-all member SATISFY a declared obligation? Perl's
-    /// `AUTOLOAD` answers a required method at runtime and role composition
-    /// cannot see past it, so a class carrying one is silent on unfulfilled
-    /// requires. A language that checks its contracts where the class is
-    /// DECLARED (php's `implements`) says `false`: `__call` catches calls
-    /// that a compile error would never let happen.
-    pub catch_all_satisfies_contracts: bool,
 }
 
 impl PackSpellings {
@@ -306,9 +297,6 @@ impl PackSpellings {
         variadic_marker: "",
         default_sep: "",
         members_are_package_bound: false,
-        // Same rule: a catch-all (`__call`, `AUTOLOAD`) satisfying a contract
-        // obligation is the quiet answer, so it is opted into per language.
-        catch_all_satisfies_contracts: false,
     };
 }
 

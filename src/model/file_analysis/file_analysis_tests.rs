@@ -2991,3 +2991,40 @@ has 'size' => (is => 'rw');
     assert_eq!(key.declared_with, Some(accessor.id));
     assert_eq!(accessor.declared_with, Some(key.id));
 }
+
+/// A forward declaration `sub foo;` ahead of its body is a second
+/// declaration of the same name: every "the definition" consumer lands on
+/// the body, and the outline lists it once.
+#[test]
+fn test_forward_declaration_yields_to_the_definition() {
+    let src = "package P;\nsub foo;\n# the real one\nsub foo { my ($self, $x) = @_; return 7 }\nsub run { my $self = shift; foo(1); $self->foo(2) }\n";
+    let fa = build_fa_from_source(src);
+
+    let def = fa.find_definition(Point::new(4, 29), None).expect("goto-def on foo()");
+    assert_eq!(def.start.row, 3, "function call lands on the body, got {:?}", def);
+    let def = fa.find_definition(Point::new(4, 45), None).expect("goto-def on ->foo");
+    assert_eq!(def.start.row, 3, "method call lands on the body, got {:?}", def);
+
+    let hover = fa.hover_info(Point::new(4, 29), src, None).expect("hover on foo()");
+    assert!(hover.contains("$x"), "hover shows the body's signature, got {hover}");
+
+    assert_eq!(
+        fa.sub_return_type_at_arity("foo", Some(1)),
+        Some(InferredType::Numeric),
+        "the return type is the body's",
+    );
+
+    let rendered = render_outline(&fa.document_symbols());
+    assert_eq!(rendered.matches("foo").count(), 1, "one outline entry, got:\n{rendered}");
+}
+
+/// With no body anywhere, the forward declaration is the only declaration
+/// of the name, so goto-def lands on it.
+#[test]
+fn test_lone_forward_declaration_is_the_landing() {
+    let src = "package P;\nsub foo;\nsub AUTOLOAD { 1 }\nfoo();\n";
+    let fa = build_fa_from_source(src);
+    let def = fa.find_definition(Point::new(3, 1), None).expect("goto-def on foo()");
+    assert_eq!(def.start.row, 1, "lands on `sub foo;`, got {:?}", def);
+}
+

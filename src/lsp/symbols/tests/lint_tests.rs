@@ -60,14 +60,41 @@ fn test_role_requires_transitive_and_marker_not_a_def() {
 
 #[test]
 fn test_role_requires_honest_silence() {
-    // AUTOLOAD anywhere in the MRO and unresolvable ancestors both
-    // suppress — the contract may be satisfied where we can't see.
+    // Unresolvable ancestors suppress — the contract may be satisfied
+    // where we can't see.
     let msgs = role_requires_diags(
         "package My::Role;\nuse Moo::Role;\nrequires 'fetch';\n\
-         package My::Auto;\nuse Moo;\nwith 'My::Role';\nsub AUTOLOAD { }\n\
          package My::Mystery;\nuse Moo;\nextends 'Vendor::Unknown';\nwith 'My::Role';\n1;\n",
     );
     assert!(msgs.is_empty(), "expected honest silence, got: {:?}", msgs);
+}
+
+#[test]
+fn test_role_requires_autoload_does_not_provide() {
+    // Role::Tiny checks `$class->can($name)` and Moose
+    // `find_method_by_name`; neither consults AUTOLOAD, so composition
+    // croaks "missing fetch" even though `->fetch` would dispatch.
+    let msgs = role_requires_diags(
+        "package My::Role;\nuse Moo::Role;\nrequires 'fetch';\n\
+         package My::Auto;\nuse Moo;\nwith 'My::Role';\nsub AUTOLOAD { }\n1;\n",
+    );
+    assert_eq!(
+        msgs,
+        vec!["role My::Role requires 'fetch'; My::Auto does not provide it"],
+    );
+}
+
+#[test]
+fn test_role_requires_forward_declaration_provides() {
+    // `sub fetch;` is the idiom that lets `can` see an AUTOLOADed method,
+    // in the composer itself or in a class it inherits from.
+    let msgs = role_requires_diags(
+        "package My::Role;\nuse Moo::Role;\nrequires 'fetch';\n\
+         package My::Stubbed;\nuse Moo;\nwith 'My::Role';\nsub fetch;\nsub AUTOLOAD { }\n\
+         package My::Base;\nsub fetch;\n\
+         package My::Heir;\nuse Moo;\nextends 'My::Base';\nwith 'My::Role';\n1;\n",
+    );
+    assert!(msgs.is_empty(), "a forward declaration provides, got: {:?}", msgs);
 }
 
 #[test]
