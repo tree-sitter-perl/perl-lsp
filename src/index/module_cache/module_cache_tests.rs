@@ -1070,9 +1070,11 @@ fn warm_stub_roundtrip_and_lane_selection() {
     skeleton.evict_refs();
     skeleton.evict_symbols();
 
-    let blob = encode_stub(&feed, &specs, &surface, &skeleton).expect("encodes");
+    let names = crate::index::module_index::NameFeed::of(&cached.analysis);
+    let blob = encode_stub(&feed, &names, &specs, &surface, &skeleton).expect("encodes");
     let stub = decode_stub(&blob).expect("decodes");
     assert_eq!(stub.feed, feed);
+    assert_eq!(stub.names, names, "the name feed rides the stub");
     assert_eq!(stub.surface, surface);
     assert!(stub.skeleton.symbols_are_evicted() && stub.skeleton.refs_are_evicted());
 

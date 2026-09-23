@@ -11,6 +11,7 @@ use super::*;
 /// full-decode-then-strip warm by construction.
 pub struct WarmStub {
     pub feed: Vec<(String, bool)>,
+    pub names: crate::index::module_index::NameFeed,
     pub specs: Vec<(String, String)>,
     pub surface: crate::model::surface::Surface,
     pub skeleton: FileAnalysis,
@@ -19,7 +20,7 @@ pub struct WarmStub {
 /// Bump when the stub's MEANING changes without breaking its bincode
 /// decode (a decode break self-heals to the full-blob path). Mismatch
 /// wipes the `stubs` table; the next warm backfills from full decodes.
-const STUB_VERSION: &str = "9";
+const STUB_VERSION: &str = "10";
 
 /// Gate the `stubs` table on the current stub generation — call once
 /// before a stub-consuming warm scan.
@@ -41,18 +42,20 @@ pub fn validate_stub_version(conn: &Connection) {
 /// the persist path never clones the feed/surface/skeleton it already holds.
 pub fn encode_stub(
     feed: &[(String, bool)],
+    names: &crate::index::module_index::NameFeed,
     specs: &[(String, String)],
     surface: &crate::model::surface::Surface,
     skeleton: &FileAnalysis,
 ) -> Option<Vec<u8>> {
-    let bin = bincode::serialize(&(feed, specs, surface, skeleton)).ok()?;
+    let bin = bincode::serialize(&(feed, names, specs, surface, skeleton)).ok()?;
     zstd::encode_all(bin.as_slice(), ZSTD_LEVEL).ok()
 }
 
 pub fn decode_stub(blob: &[u8]) -> Option<WarmStub> {
     let bin = zstd::decode_all(blob).ok()?;
-    let (feed, specs, surface, mut skeleton): (
+    let (feed, names, specs, surface, mut skeleton): (
         Vec<(String, bool)>,
+        crate::index::module_index::NameFeed,
         Vec<(String, String)>,
         crate::model::surface::Surface,
         FileAnalysis,
@@ -65,7 +68,7 @@ pub fn decode_stub(blob: &[u8]) -> Option<WarmStub> {
     skeleton.evict_witness_bag();
     skeleton.evict_refs();
     skeleton.evict_symbols();
-    Some(WarmStub { feed, specs, surface, skeleton })
+    Some(WarmStub { feed, names, specs, surface, skeleton })
 }
 
 /// The single speller of stub-row removal — every modules-row rewrite or

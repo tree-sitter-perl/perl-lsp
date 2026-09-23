@@ -684,8 +684,16 @@ impl CrossFileLookup for ModuleIndex {
             .and_then(crate::index::module_resolver::uri_to_path)
     }
 
+    fn holders_with_symbol(&self, name: &str) -> Vec<Holder> {
+        self.holders_with_symbol(name)
+    }
+
     fn modules_with_symbol(&self, name: &str) -> Vec<String> {
         self.modules_with_symbol(name)
+    }
+
+    fn rail_names(&self, rail: &str) -> Vec<String> {
+        self.rail_names(rail)
     }
 
     fn find_exporters(&self, func_name: &str) -> Vec<String> {

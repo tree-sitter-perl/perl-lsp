@@ -429,7 +429,7 @@ impl FileAnalysis {
         // files the handler axis names are visited, and a registration
         // gathering must not stop at the name-slot winner.
         if let Some(idx) = module_index {
-            for cached in idx.handler_candidate_files(name) {
+            for cached in idx.files_with_symbol(name) {
                 let whole = idx.whole_present(&cached);
                 for sym in &whole.symbols {
                     if sym.name != name { continue; }
@@ -470,7 +470,7 @@ impl FileAnalysis {
         // dispatcher list to the consumer.
         if dispatchers.is_empty() {
             if let Some(idx) = module_index {
-                for cached in idx.handler_candidate_files(name) {
+                for cached in idx.files_with_symbol(name) {
                     let whole = idx.whole_present(&cached);
                     for sym in &whole.symbols {
                         if sym.name != name { continue; }
