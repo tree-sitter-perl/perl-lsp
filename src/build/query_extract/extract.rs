@@ -224,12 +224,12 @@ fn walk_qualifier_chain<'a>(
 /// Drop transparent receiver wrappers (`(*p)`, `(&o)`, `(p)`) to the value
 /// underneath. Depth-capped; the leaf is an invocant of any shape, so —
 /// unlike the declarator peel — nothing is minted per level.
-pub(crate) fn peel_receiver<'a>(
+fn peel_receiver<'a>(
     mut node: tree_sitter::Node<'a>,
-    wrappers: &std::collections::HashSet<&'static str>,
+    wrappers: &std::collections::HashSet<usize>,
 ) -> tree_sitter::Node<'a> {
     for _ in 0..32 {
-        if !wrappers.contains(node.kind()) {
+        if !wrappers.contains(&node.id()) {
             return node;
         }
         match node.named_child(0) {
@@ -250,16 +250,16 @@ pub(crate) fn peel_receiver<'a>(
 fn param_name_node<'t>(
     ch: tree_sitter::Node<'t>,
     captured: Option<tree_sitter::Node<'t>>,
-    simple_var_kinds: &std::collections::HashSet<&'static str>,
+    bare_var_ids: &std::collections::HashSet<usize>,
 ) -> Option<tree_sitter::Node<'t>> {
     if captured.is_some() {
         return captured;
     }
-    // The descent's stopping kinds are the document's own too: the nodes its
-    // read patterns root at ARE this language's simple variables.
+    // The descent stops at the document's own word: the first node its read
+    // patterns capture as a bare variable.
     let mut stack = vec![ch];
     while let Some(n) = stack.pop() {
-        if n != ch && simple_var_kinds.contains(n.kind()) {
+        if n != ch && bare_var_ids.contains(&n.id()) {
             return Some(n);
         }
         let mut w = n.walk();
@@ -315,15 +315,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let query_source = effective_query_source(&language, pack);
     let query = cached_query(&language, query_source)?;
     // The cursor-time runner serves THIS object, never one of its own.
-    super::cursor_query::remember(pack.lang_id, query, query_source);
-    // A BARE variable: the node kinds the document reads as one. The
-    // by-reference binding lane, the parameter-name walk and the op-DX gate
-    // all mean the same shape, so they ask the same patterns.
-    let simple_var_kinds = super::cursor_query::pattern_root_kinds(query, "expr.read.var");
-    // Transparent receiver wrappers — `(p)`, `*p`, `&o` — named by the
-    // document, so the mint's invocant span lands on the inner expression
-    // `expr_type_at_span` already types.
-    let recv_peel_kinds = super::cursor_query::recv_peel_kinds(query);
+    super::cursor_query::remember(pack.lang_id, query);
     let cap_names: Vec<String> = query
         .capture_names()
         .iter()
@@ -408,6 +400,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // matched AFTER the chain that contains it, so the peel runs post-loop.
     let mut deref_caps = DerefCaps::default();
     let mut nested_targets: Vec<(tree_sitter::Node, usize)> = Vec::new();
+    // The nodes the document reads as a BARE variable (`@expr.read.var`) and
+    // as a transparent receiver wrapper (`@recv.peel*`). The by-reference
+    // lane, the parameter-name walk, the op-DX gate and the receiver peel all
+    // ask these, after the walk: a receiver's match comes before its
+    // children's.
+    let mut bare_var_ids: std::collections::HashSet<usize> = Default::default();
+    let mut peel_ids: std::collections::HashSet<usize> = Default::default();
+    // (event index, the receiver as captured, its match) — finished once the
+    // two sets above are complete.
+    let mut member_recvs: Vec<(usize, tree_sitter::Node, usize)> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), source);
     let mut match_counter = 0usize;
@@ -416,6 +418,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         for c in m.captures {
             let node = c.node;
             let cap = cap_names[c.index as usize].as_str();
+            match cap {
+                "expr.read.var" => {
+                    bare_var_ids.insert(node.id());
+                }
+                "recv.peel" | "recv.peel.deref" => {
+                    peel_ids.insert(node.id());
+                }
+                _ => {}
+            }
             // The out-of-line vocabulary, collected here and joined once the
             // whole tree has been matched: a wrapper the peel descends, the
             // function declarator it stops at, the qualified name whose chain
@@ -454,23 +465,20 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // node is live, so the minted MethodCall ref's invocant_span lands
             // on the inner expression `expr_type_at_span` already types.
             if matches!(cap, "member.recv" | "member.recv.named" | "hop.recv") {
-                // op-DX applies only to a bare-variable immediate receiver
-                // (its deref_stack resolves by name); a wrapper/chain doesn't.
-                member_simple.insert(match_counter, simple_var_kinds.contains(node.kind()));
-                let inner = peel_receiver(node, recv_peel_kinds);
+                member_recvs.push((events.len(), node, match_counter));
                 events.push(Event {
-                    start_byte: inner.start_byte(),
-                    end_byte: inner.end_byte(),
-                    start: inner.start_position(),
-                    end: inner.end_position(),
+                    start_byte: node.start_byte(),
+                    end_byte: node.end_byte(),
+                    start: node.start_position(),
+                    end: node.end_position(),
                     // One receiver lane whichever capture named it: a
                     // string-named member and a chain hop have the same
                     // receiver a written member access does. The spellings
                     // differ so each capture's patterns keep stating one
-                    // thing — `@member.recv`'s roots ARE the member-access
-                    // kinds the cursor climbs to.
+                    // thing — `@member.recv` fires exactly where a written
+                    // member access is, which is what the cursor climbs to.
                     cap: "member.recv".to_string(),
-                    text: inner.utf8_text(source).unwrap_or("").to_string(),
+                    text: String::new(),
                     match_id: match_counter,
                 });
                 continue;
@@ -548,6 +556,20 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             });
         }
     }
+    // Member receivers: op-DX applies only to a bare-variable immediate
+    // receiver (its deref_stack resolves by name), and the minted invocant
+    // span lands on the inner expression of a transparent wrapper (`(*p)`,
+    // `(p)`), the one `expr_type_at_span` already types.
+    for (at, node, match_id) in member_recvs {
+        member_simple.insert(match_id, bare_var_ids.contains(&node.id()));
+        let inner = peel_receiver(node, &peel_ids);
+        let e = &mut events[at];
+        e.start_byte = inner.start_byte();
+        e.end_byte = inner.end_byte();
+        e.start = inner.start_position();
+        e.end = inner.end_position();
+        e.text = inner.utf8_text(source).unwrap_or("").to_string();
+    }
     // ---- declared parameters: the arity counts and the parameters
     // themselves. Each `@arity.param*` capture states what its parameter
     // does to the count — one that must be written, one carrying a default,
@@ -610,7 +632,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         .and_then(|ps| ps.iter().find(|(c, _)| *c == want))
                         .map(|(_, n)| *n)
                 };
-                let name_node = param_name_node(ch, part("arity.param.name"), simple_var_kinds);
+                let name_node = param_name_node(ch, part("arity.param.name"), &bare_var_ids);
                 // A by-reference position (php `&$out`, C++ `T& x`): the
                 // parameter's variable name, so the def mints the aliasing
                 // edge the call sites bind through. A slurpy parameter takes
@@ -736,11 +758,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
     }
     // ---- join each argument capture to its list, then each list to its call ----
-    // The node kinds an argument list IS come from the patterns that capture
-    // an argument, so a document that teaches the language a new call shape
-    // teaches the arity lane with it.
+    // A list is what the document captured as `@arity.args`, so a document
+    // that teaches the language a new call shape teaches the arity lane with
+    // it.
     {
-        let arg_list_kinds = super::cursor_query::pattern_root_kinds(query, "arity.arg");
+        let list_ids: std::collections::HashSet<usize> =
+            arity_lists.iter().map(|(_, n)| n.id()).collect();
         #[derive(Default)]
         struct ListArgs<'t> {
             args: Vec<tree_sitter::Node<'t>>,
@@ -755,12 +778,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             let mut owner = node.parent();
             for _ in 0..8 {
                 match owner {
-                    Some(n) if arg_list_kinds.contains(n.kind()) => break,
+                    Some(n) if list_ids.contains(&n.id()) => break,
                     Some(n) => owner = n.parent(),
                     None => break,
                 }
             }
-            let Some(owner) = owner.filter(|n| arg_list_kinds.contains(n.kind())) else { continue };
+            let Some(owner) = owner.filter(|n| list_ids.contains(&n.id())) else { continue };
             let slot = by_list.entry(owner.id()).or_default();
             match cap {
                 "arity.arg" => slot.args.push(node),

@@ -1,9 +1,5 @@
-//! The cursor-time query runner: what it reads off the document, and the
-//! cost signature the three bounds buy.
+//! The cursor-time query runner: what it reads off the document.
 
-// `LangPack` and the runner's seams: every body below is per-language, so
-// a build with neither pack spells none of them — the same gate they carry.
-#[cfg(any(feature = "cpp"))]
 use super::*;
 
 /// Extract one small file so the language's query is compiled and
@@ -23,40 +19,47 @@ fn warm_query(
 
 #[test]
 #[cfg(feature = "cpp")]
-fn pattern_root_kinds_reads_cpps_member_shapes_off_the_document() {
+fn fires_at_asks_the_patterns_not_the_kind() {
     let pack = crate::build::query_extract::cpp_pack();
-    let query = warm_query(tree_sitter_cpp::LANGUAGE.into(), &pack, "struct A { int x; };\n");
-    let kinds = crate::build::query_extract::pattern_root_kinds(query, "member.recv");
-    assert!(kinds.contains("field_expression"), "field_expression roots @member.recv: {kinds:?}");
-    // A chain hop's receiver is `@hop.recv`, so the member-access kinds
-    // stay exactly the shapes member completion climbs to.
-    let hops = crate::build::query_extract::pattern_root_kinds(query, "hop.recv");
-    assert!(hops.contains("call_expression"), "call_expression roots @hop.recv: {hops:?}");
+    let src = "void f(int a, int b) { a + b; a == b; }\n";
+    let query = warm_query(tree_sitter_cpp::LANGUAGE.into(), &pack, src);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_cpp::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(src, None).unwrap();
+    let at = |needle: &str| {
+        let start = src.find(needle).unwrap();
+        tree.root_node().descendant_for_byte_range(start, start + needle.len()).unwrap()
+    };
+    // Both are `binary_expression`; only the one whose operator the
+    // document's `#any-of?` names is a domain comparison.
+    let (plus, eq) = (at("a + b"), at("a == b"));
+    assert_eq!(plus.kind(), eq.kind());
+    assert!(!fires_at(query, plus, src.as_bytes(), "domain.compare.op"), "`+` is not a comparison");
+    assert!(fires_at(query, eq, src.as_bytes(), "domain.compare.op"), "`==` is");
+    // The capture sits on the operator token, a CHILD: it fires at the
+    // comparison without the comparison itself being captured.
+    assert!(!is_captured_as(query, eq, src.as_bytes(), "domain.compare.op"));
 }
 
-/// A predicate's literals may contain the character that ends the predicate.
-/// Stopping at the first `)` dropped every argument after it and abandoned
-/// the rest of the pattern — a keyword quietly missing from a set.
+/// The literals come off the compiled query exactly: a literal holding the
+/// character that closes a predicate, each capture's own set, and nothing
+/// from a negated or capture-to-capture predicate.
 #[test]
-fn a_predicate_literal_may_contain_a_closing_paren() {
-    let mut out = std::collections::HashSet::new();
-    super::collect_capture_literals(
-        "((name) @kw (#any-of? @kw \"a)b\" \"c\"))\n((name) @other (#eq? @other \"d\"))",
-        "kw",
-        &mut out,
-    );
-    let mut got: Vec<&str> = out.into_iter().collect();
-    got.sort();
-    assert_eq!(got, ["a)b", "c"], "both literals, and the scan survives the first");
-    let mut other = std::collections::HashSet::new();
-    super::collect_capture_literals(
-        "((name) @kw (#any-of? @kw \"a)b\" \"c\"))\n((name) @other (#eq? @other \"d\"))",
-        "other",
-        &mut other,
-    );
-    assert_eq!(
-        other.into_iter().collect::<Vec<_>>(),
-        ["d"],
-        "a later predicate is still reached"
-    );
+fn literals_are_read_off_the_compiled_query() {
+    let language: tree_sitter::Language = ts_parser_perl::LANGUAGE.into();
+    let source = r#"((bareword) @kw (#any-of? @kw "a)b" "c"))
+((bareword) @other (#eq? @other "d"))
+((bareword) @neg (#not-eq? @neg "e"))
+((bareword) @x (bareword) @y (#eq? @x @y))
+"#;
+    let query = super::super::cached_query(&language, source).unwrap();
+    let sorted = |cap: &str| {
+        let mut v: Vec<&str> = capture_literals(query, cap).iter().copied().collect();
+        v.sort();
+        v
+    };
+    assert_eq!(sorted("kw"), ["a)b", "c"]);
+    assert_eq!(sorted("other"), ["d"]);
+    assert!(sorted("neg").is_empty(), "a negated predicate names no member of the set");
+    assert!(sorted("x").is_empty() && sorted("y").is_empty(), "@x @y compares captures, not literals");
 }

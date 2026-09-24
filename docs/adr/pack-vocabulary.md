@@ -80,7 +80,7 @@ stopping kinds are the document's own read-pattern roots.
 
 A consumer that keeps node-kind tables is usually a cursor consumer: the
 sentinel needs to know whether the cursor sits in a member access, a
-call, or a string. It reads the document instead, through three seams in
+call, or a string. It reads the document instead, through the seams in
 `build/query_extract/cursor_query.rs`:
 
 - `pack_query(pack)` — the compiled query the EXTRACTOR uses, memoised
@@ -96,15 +96,20 @@ call, or a string. It reads the document instead, through three seams in
   class body) is matched at every descendant, which is the difference
   between ~2 µs and ~20 ms per keystroke. The cost signature is pinned
   by a test on a 2,000-hop chain inside a 5,000-method class.
-- `pattern_root_kinds(query, capture)` — the node kinds that root a
-  pattern carrying a capture, read off the compiled query's
-  `capture_quantifiers` and its pattern sources. This is where a table
-  like `member_kinds` comes from once the table is gone: "which nodes
-  are a member access" is answered by the patterns that capture
-  `@member.recv`. A pattern whose root is not a named node (an anonymous
-  token, a wildcard, a grouped sibling pattern) names no kind, so the
-  set is what a consumer may match ON, never a claim that nothing else
-  can carry the capture.
+- `fires_at(query, node, src, capture)` / `is_captured_as(..)` — whether
+  a match rooted at `node` carries the capture (anywhere in it / on
+  `node` itself), on the same three bounds, stopping at the first match
+  that does. This is where a table like `member_kinds` goes once the
+  table is gone: "is this a member access" is the document's own
+  `@member.recv` pattern firing on the node, fields and predicates
+  included, so a `binary_expression` is a domain comparison only when
+  the operator predicate holds. A node that roots one match per child (a
+  50,000-argument list) still costs a walk over those matches when the
+  answer is no.
+- `capture_literals(query, capture)` — the literals a capture's `#eq?` /
+  `#any-of?` predicates name. The bindings keep text predicates private,
+  so `cached_query` reads them through the C API between
+  `Query::into_raw` and `Query::from_raw`, once per compiled query.
 
 ### What the three bounds cost (php, measured 2026-09-17)
 
