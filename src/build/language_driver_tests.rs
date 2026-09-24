@@ -1036,6 +1036,45 @@ fn cpp_callable_carries_its_parameters_as_facts() {
     assert_eq!((arity.total, arity.required, arity.variadic), (2, 1, true));
 }
 
+#[cfg(feature = "python")]
+#[test]
+fn python_def_declares_its_parameters_and_arity() {
+    use crate::model::file_analysis::SymbolDetail;
+    // Every parameter spelling the document captures, and the receiver the
+    // call never writes: `obj.m(a, b)` fills `def m(self, a, b: int, ...)`.
+    let src = "class A:\n    def m(self, a, b: int, c=1, d: str = \"x\", *args, e, **kw): pass\n\ndef f(x, *xs: int): pass\n";
+    let fa = python_driver().analyze(src);
+    let sub = |name: &str| {
+        let sym = fa.symbols().iter().find(|s| s.name == name).unwrap_or_else(|| panic!("{name}"));
+        let SymbolDetail::Sub { params, .. } = &sym.detail else {
+            panic!("{name} carries a Sub detail, got {:?}", sym.detail)
+        };
+        (params.clone(), sym.param_arity().expect("a callable has an arity"))
+    };
+
+    let (params, arity) = sub("m");
+    assert_eq!(
+        params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+        vec!["self", "a", "b", "c", "d", "args", "e", "kw"],
+        "every parameter, in source order"
+    );
+    assert!(params[0].is_invocant, "the receiver is the invocant");
+    assert!(params[1..].iter().all(|p| !p.is_invocant));
+    assert_eq!(params[2].declared_type.as_deref(), Some("int"));
+    assert_eq!(params[3].default.as_deref(), Some("1"), "the default is source text");
+    assert_eq!(params[4].default.as_deref(), Some("\"x\""));
+    assert_eq!(params[4].declared_type.as_deref(), Some("str"));
+    assert!(params[5].is_slurpy && params[7].is_slurpy);
+    assert!(!params[6].is_slurpy, "a keyword-only parameter is still written");
+    // a, b, e written; c, d optional; the receiver takes no slot.
+    assert_eq!((arity.total, arity.required, arity.variadic), (5, 3, true));
+
+    let (params, arity) = sub("f");
+    assert_eq!(params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["x", "xs"]);
+    assert!(params[1].is_slurpy, "a typed splat is still slurpy");
+    assert_eq!((arity.total, arity.required, arity.variadic), (1, 1, true));
+}
+
 #[cfg(feature = "cpp")]
 #[test]
 fn cpp_include_row_binds_a_type() {

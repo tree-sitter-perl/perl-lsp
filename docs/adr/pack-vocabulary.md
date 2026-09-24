@@ -110,6 +110,18 @@ call, or a string. It reads the document instead, through the seams in
   `#any-of?` predicates name. The bindings keep text predicates private,
   so `cached_query` reads them through the C API between
   `Query::into_raw` and `Query::from_raw`, once per compiled query.
+- `recovery(query)` — what the document says about half-typed code: the
+  bracket pairs (`(#recover-pair! "(" ")")` on the pattern whose construct
+  they delimit; several closers for one open are tried in declaration
+  order) and the statement terminator (`(#set! recover.terminator ";")`).
+  Directives never filter a match, so they can sit on any pattern. The
+  sentinel closes the innermost open bracket it finds unmatched in the
+  sentinel's damaged region, then appends the terminator unless the
+  grammar already inserted a MISSING one, and keeps the first splice
+  whose construct parses whole. A language that declares no pairs gets no
+  recovery. The attempts are bounded by the declarations, but each is a
+  reparse; error-dense input makes every reparse slow
+  (`docs/scaling-limits.md` §9).
 
 ### What the three bounds cost (php, measured 2026-09-17)
 

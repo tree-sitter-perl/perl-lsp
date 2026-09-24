@@ -817,7 +817,7 @@ mod packs;
 mod skeleton;
 pub(crate) use cursor_query::{
     capture_literals, captures_at, fires_at, is_captured_as, pack_declares_capture, pack_query,
-    query_for,
+    query_for, recovery, Recovery,
 };
 pub use extract::*;
 pub use packs::*;
