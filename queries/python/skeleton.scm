@@ -42,6 +42,20 @@
 ((parameters . (identifier) @param.receiver)
  (#any-of? @param.receiver "self" "cls"))
 
+; ---- declared parameters: the arity a call is checked against and the
+; parameters signature help lists. The receiver is a parameter the call
+; never writes (`obj.m(x)` fills `def m(self, x)`), so it takes no slot.
+(function_definition parameters: (parameters) @arity.sig)
+(parameters (identifier) @arity.param)
+(parameters (typed_parameter . (identifier)) @arity.param)
+(parameters [(default_parameter) (typed_default_parameter)] @arity.param.optional)
+(parameters [(list_splat_pattern) (dictionary_splat_pattern)] @arity.param.variadic)
+(parameters
+  (typed_parameter . [(list_splat_pattern) (dictionary_splat_pattern)]) @arity.param.variadic)
+(parameters (_ name: (identifier) @arity.param.name))
+(parameters (_ value: (_) @arity.param.default))
+(parameters (_ type: (_) @arity.param.type))
+
 (import_statement
   name: (dotted_name) @import.name) @import
 (import_from_statement
@@ -97,7 +111,9 @@
   arguments: (argument_list) @arity.args) @hop.call
 
 ; ---- call arguments: the arity count and signature help's active slot.
-(argument_list) @arity.args
+; A half-typed call or literal is recovered at the cursor by closing the
+; brackets the user left open.
+((argument_list) @arity.args (#recover-pair! "(" ")"))
 (argument_list (_) @arity.arg)
 (argument_list (keyword_argument) @arity.arg.named)
 (argument_list (list_splat) @arity.arg.spread)
@@ -117,8 +133,8 @@
 (string) @expr.lit.string
 (integer) @expr.lit.number
 (float) @expr.lit.number
-(list) @expr.lit.arrayref
-(dictionary) @expr.lit.hashref
+((list) @expr.lit.arrayref (#recover-pair! "[" "]"))
+((dictionary) @expr.lit.hashref (#recover-pair! "{" "}"))
 
 ; Guard narrowing: `if isinstance(x, Foo): <body>` refines x to Foo
 ; inside the block. The guard name is the pattern's own `#eq?`; the type

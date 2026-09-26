@@ -256,10 +256,11 @@ fn param_name_node<'t>(
         return captured;
     }
     // The descent stops at the document's own word: the first node its read
-    // patterns capture as a bare variable.
+    // patterns capture as a bare variable — the parameter itself when the
+    // language spells a parameter as its bare name (python `def f(x)`).
     let mut stack = vec![ch];
     while let Some(n) = stack.pop() {
-        if n != ch && bare_var_ids.contains(&n.id()) {
+        if bare_var_ids.contains(&n.id()) {
             return Some(n);
         }
         let mut w = n.walk();
@@ -407,6 +408,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // children's.
     let mut bare_var_ids: std::collections::HashSet<usize> = Default::default();
     let mut peel_ids: std::collections::HashSet<usize> = Default::default();
+    // The receiver parameters (`@param.receiver`): minted as the invocant,
+    // which takes no argument slot.
+    let mut receiver_param_ids: std::collections::HashSet<usize> = Default::default();
     // (event index, the receiver as captured, its match) — finished once the
     // two sets above are complete.
     let mut member_recvs: Vec<(usize, tree_sitter::Node, usize)> = Vec::new();
@@ -424,6 +428,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 }
                 "recv.peel" | "recv.peel.deref" => {
                     peel_ids.insert(node.id());
+                }
+                "param.receiver" => {
+                    receiver_param_ids.insert(node.id());
                 }
                 _ => {}
             }
@@ -633,6 +640,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         .map(|(_, n)| *n)
                 };
                 let name_node = param_name_node(ch, part("arity.param.name"), &bare_var_ids);
+                let is_invocant = name_node.is_some_and(|n| receiver_param_ids.contains(&n.id()));
                 // A by-reference position (php `&$out`, C++ `T& x`): the
                 // parameter's variable name, so the def mints the aliasing
                 // edge the call sites bind through. A slurpy parameter takes
@@ -664,7 +672,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             .and_then(|d| d.utf8_text(source).ok())
                             .map(str::to_string),
                         is_slurpy,
-                        is_invocant: false,
+                        is_invocant,
                         binding_site: Some(name_node.start_position()),
                         declared_type: part("arity.param.type")
                             .and_then(|t| t.utf8_text(source).ok())
@@ -672,6 +680,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     });
                 }
                 match cap {
+                    _ if is_invocant => {}
                     "arity.param" => {
                         total += 1;
                         required += 1;

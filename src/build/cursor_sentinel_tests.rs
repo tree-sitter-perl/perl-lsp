@@ -267,7 +267,7 @@ fn python_call_sites_come_from_the_document() {
         let mut p = python();
         let tree = p.parse(src, None).unwrap();
         let cursor = after(src, marker);
-        let site = call_at(&tree, &pack, src, cursor).unwrap_or_else(|| panic!("{src}: no call site"));
+        let site = call_at(&mut p, &pack, src, &tree, cursor).unwrap_or_else(|| panic!("{src}: no call site"));
         let start = point_to_byte(src, site.callee.start);
         let end = point_to_byte(src, site.callee.end);
         assert_eq!(&src[start..end], callee, "{src}");
@@ -295,3 +295,82 @@ fn python_method_call_receiver_types_through_its_return() {
     );
 }
 
+
+/// The callee text and active slot `call_at` reports at `marker`'s end.
+fn site_at(mk: fn() -> Parser, pack: &crate::build::query_extract::LangPack, src: &str, marker: &str) -> Option<(String, usize)> {
+    let mut p = mk();
+    let tree = p.parse(src, None).unwrap();
+    let cursor = after(src, marker);
+    let site = call_at(&mut p, pack, src, &tree, cursor)?;
+    let (s, e) = (point_to_byte(src, site.callee.start), point_to_byte(src, site.callee.end));
+    Some((src[s..e].to_string(), site.active_param))
+}
+
+/// A call the user is still typing — no `)` yet, the last thing in its
+/// block — parses to a bare ERROR with no call in it. Signature help still
+/// finds the innermost call and the slot, by closing what was left open.
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_half_typed_calls_recover() {
+    let pack = crate::build::query_extract::cpp_pack();
+    for (src, marker, callee, active) in [
+        ("void f() {\n  g(\n}\n", "g(", "g", 0),
+        ("void f() {\n  g(a, \n}\n", "g(a, ", "g", 1),
+        ("void f() {\n  g(h(x), \n}\n", "g(h(x), ", "g", 1),
+        ("void f() {\n  g(a, h(x, \n}\n", "h(x, ", "h", 1),
+        ("void f() {\n  o.m(x, \n}\n", "o.m(x, ", "m", 1),
+        ("void f() {\n  int y = g(a, \n  int z = 2;\n}\n", "g(a, ", "g", 1),
+        // the text after the cursor already closes it: no closers added
+        ("void f() {\n  g(a, );\n}\n", "g(a, ", "g", 1),
+        ("void f() {\n  g(a, b, );\n}\n", "g(a, b, ", "g", 2),
+    ] {
+        assert_eq!(
+            site_at(cpp, &pack, src, marker),
+            Some((callee.to_string(), active)),
+            "{src:?}"
+        );
+    }
+}
+
+#[test]
+fn python_half_typed_calls_recover() {
+    let pack = crate::build::query_extract::python_pack();
+    for (src, marker, callee, active) in [
+        ("f(1, ", "f(1, ", "f", 1),
+        ("def run():\n    o.m(x, \n", "o.m(x, ", "m", 1),
+        ("f([1, 2], g(3, ", "g(3, ", "g", 1),
+        ("f({'a': 1}, ", "f({'a': 1}, ", "f", 1),
+    ] {
+        assert_eq!(
+            site_at(python, &pack, src, marker),
+            Some((callee.to_string(), active)),
+            "{src:?}"
+        );
+    }
+}
+
+/// What recovery would splice after the sentinel, per case: the closers of
+/// the innermost open left unmatched, each alone then with the terminator —
+/// and no terminator where the grammar already inserted one as a MISSING
+/// token.
+#[cfg(feature = "cpp")]
+#[test]
+fn recovery_tails_come_from_the_tree() {
+    let pack = crate::build::query_extract::cpp_pack();
+    for (src, marker, want) in [
+        // `g(` is open too, but only `h(` starts the construct at the cursor
+        ("void f() {\n  g(h(x, \n}\n", "h(x, ", &[" )", " ) ;"][..]),
+        // a paren inside a string is not an open token; this parse already
+        // carries a MISSING `;`, so no tail repeats it
+        ("void f() {\n  g(a, \"(\", \n}\n", "\"(\", ", &[" )"][..]),
+        // `box.` parses with a MISSING `;` and opens nothing: no retries
+        ("void f() {\n  box.\n}\n", "box.", &[][..]),
+    ] {
+        let mut p = cpp();
+        let tree = p.parse(src, None).unwrap();
+        crate::build::query_extract::query_for(&tree.language(), &pack);
+        let cursor = after(src, marker);
+        let plain = reparse_with(&mut p, src, &tree, cursor, SENTINEL).unwrap();
+        assert_eq!(recovery_tails(&plain, &pack, cursor), want, "{src:?}");
+    }
+}

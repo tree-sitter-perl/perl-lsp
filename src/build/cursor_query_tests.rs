@@ -63,3 +63,23 @@ fn literals_are_read_off_the_compiled_query() {
     assert!(sorted("neg").is_empty(), "a negated predicate names no member of the set");
     assert!(sorted("x").is_empty() && sorted("y").is_empty(), "@x @y compares captures, not literals");
 }
+
+/// Recovery pairs and terminators are directives on existing patterns, read
+/// back off the compiled query: duplicates merge, a second closer for one
+/// open token keeps declaration order.
+#[test]
+fn recovery_directives_are_read_off_the_compiled_query() {
+    let language: tree_sitter::Language = ts_parser_perl::LANGUAGE.into();
+    let source = r#"((bareword) @a (#recover-pair! "(" ")"))
+((number) @b (#recover-pair! "(" ")") (#recover-pair! "do" "end"))
+((string_literal) @c (#recover-pair! "do" "done") (#set! recover.terminator ";"))
+"#;
+    let query = super::super::cached_query(&language, source).unwrap();
+    let rec = recovery(query);
+    assert_eq!(
+        rec.pairs,
+        [("(".to_string(), vec![")".to_string()]), ("do".to_string(), vec!["end".to_string(), "done".to_string()])]
+    );
+    assert_eq!(rec.terminators, [";"]);
+    assert!(rec.is_closer("done") && !rec.is_closer("do"));
+}

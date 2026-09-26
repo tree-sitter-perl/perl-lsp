@@ -158,6 +158,157 @@ pub fn receiver_at(
     receiver_of(member, &patched, cursor)
 }
 
+/// A reparse with a splice at the cursor: the patched text and its tree.
+struct Spliced {
+    patched: String,
+    tree: Tree,
+}
+
+/// Reparse `src` with `insert` spliced at `cursor`, reusing `old`: the splice
+/// is a pure insertion, so the edit is exact and only the damaged region
+/// reparses. Every byte before `cursor` keeps its offset.
+fn reparse_with(parser: &mut Parser, src: &str, old: &Tree, cursor: usize, insert: &str) -> Option<Spliced> {
+    let mut patched = String::with_capacity(src.len() + insert.len());
+    patched.push_str(&src[..cursor]);
+    patched.push_str(insert);
+    patched.push_str(&src[cursor..]);
+    let mut edited = old.clone();
+    let pos = byte_to_point(src, cursor);
+    edited.edit(&InputEdit {
+        start_byte: cursor,
+        old_end_byte: cursor,
+        new_end_byte: cursor + insert.len(),
+        start_position: pos,
+        old_end_position: pos,
+        new_end_position: Point::new(pos.row, pos.column + insert.len()),
+    });
+    let tree = parser.parse(&patched, Some(&edited))?;
+    Some(Spliced { patched, tree })
+}
+
+/// Splice the sentinel at the cursor, and when `accept` rejects that parse,
+/// retry with what the half-typed code is missing: the closers of the
+/// innermost open token left unmatched before the cursor, each alone and
+/// then with the language's terminator (`recovery_tails`). Both vocabularies are the
+/// document's own directives (`Recovery`); a document declaring no pairs
+/// gets no retries.
+///
+/// Returns the first splice `accept` takes, else the plain sentinel parse,
+/// so a caller that finds nothing whole still answers what it did before.
+/// Every retry is one more reparse; on error-dense buffers that is the cost
+/// `docs/scaling-limits.md` §9 records.
+fn recover(
+    parser: &mut Parser,
+    cfg: &crate::build::query_extract::LangPack,
+    src: &str,
+    old: &Tree,
+    cursor: usize,
+    accept: impl Fn(&Tree, &str) -> bool,
+) -> Option<Spliced> {
+    let plain = reparse_with(parser, src, old, cursor, SENTINEL)?;
+    if accept(&plain.tree, &plain.patched) {
+        return Some(plain);
+    }
+    for tail in recovery_tails(&plain, cfg, cursor) {
+        let insert = format!("{SENTINEL}{tail}");
+        if let Some(sp) = reparse_with(parser, src, old, cursor, &insert) {
+            if accept(&sp.tree, &sp.patched) {
+                return Some(sp);
+            }
+        }
+    }
+    Some(plain)
+}
+
+/// The splice tails to try after the sentinel, in order. The damaged region
+/// is the smallest ancestor of the sentinel holding an error; the innermost
+/// open token its tokens before the cursor leave unmatched starts the
+/// construct the cursor is in, so each closer that token declares is one
+/// tail, in declaration order. Outer opens are not closed: they belong to
+/// constructs around it, and a tail per open would make the attempts grow
+/// with the input (2,000 reparses on a 1000-deep unclosed nest). A
+/// terminator follows each tail unless the grammar already inserted it as a
+/// MISSING token.
+fn recovery_tails(plain: &Spliced, cfg: &crate::build::query_extract::LangPack, cursor: usize) -> Vec<String> {
+    let root = plain.tree.root_node();
+    let Some(query) = query_at(root, cfg) else { return Vec::new() };
+    let rec = crate::build::query_extract::recovery(query);
+    if rec.pairs.is_empty() {
+        return Vec::new();
+    }
+    let Some(sentinel) = find_sentinel(root, &plain.patched, cursor) else { return Vec::new() };
+    let Some(region) = std::iter::successors(Some(sentinel), |n| n.parent()).find(|n| n.has_error()) else {
+        return Vec::new();
+    };
+    let terminators: &[String] = if missing_terminator(sentinel, rec) { &[] } else { &rec.terminators };
+    // A space before each token keeps a keyword closer from fusing with the
+    // sentinel into one identifier.
+    let closers: Vec<String> = match innermost_open(region, &plain.patched, cursor, rec) {
+        Some(open) => rec.closers(&open).unwrap_or(&[]).iter().map(|c| format!(" {c}")).collect(),
+        None => vec![String::new()],
+    };
+    let mut tails: Vec<String> = Vec::new();
+    for close in closers {
+        if !close.is_empty() {
+            tails.push(close.clone());
+        }
+        tails.extend(terminators.iter().map(|t| format!("{close} {t}")));
+    }
+    tails
+}
+
+/// The innermost declared open token among `region`'s tokens before
+/// `cursor` that no closer matched.
+fn innermost_open(
+    region: Node,
+    patched: &str,
+    cursor: usize,
+    rec: &crate::build::query_extract::Recovery,
+) -> Option<String> {
+    let mut stack: Vec<String> = Vec::new();
+    let mut todo = vec![region];
+    while let Some(n) = todo.pop() {
+        if n.start_byte() >= cursor {
+            continue;
+        }
+        if n.child_count() == 0 {
+            // A pair's tokens are anonymous; a named leaf (a string's
+            // content, an identifier) is never one, whatever its text.
+            if n.is_named() || n.is_missing() || n.end_byte() > cursor {
+                continue;
+            }
+            let Ok(tok) = n.utf8_text(patched.as_bytes()) else { continue };
+            if rec.closers(tok).is_some() {
+                stack.push(tok.to_string());
+            } else if rec.is_closer(tok)
+                && stack.last().and_then(|o| rec.closers(o)).is_some_and(|c| c.iter().any(|x| x == tok))
+            {
+                stack.pop();
+            }
+            continue;
+        }
+        // `children`, not `child(i)`: indexing walks from the first child, so
+        // an ERROR holding a whole file's tokens went quadratic.
+        let mut w = n.walk();
+        let kids: Vec<Node> = n.children(&mut w).collect();
+        todo.extend(kids.into_iter().rev());
+    }
+    stack.pop()
+}
+
+/// Has the grammar already inserted a terminator for the cursor's
+/// statement — a MISSING terminator among the children of the sentinel's
+/// ancestors?
+fn missing_terminator(sentinel: Node, rec: &crate::build::query_extract::Recovery) -> bool {
+    std::iter::successors(Some(sentinel), |n| n.parent()).any(|x| {
+        let mut w = x.walk();
+        let found = x
+            .children(&mut w)
+            .any(|c| c.is_missing() && rec.terminators.iter().any(|t| t == c.kind()));
+        found
+    })
+}
+
 /// Find the freshly-spliced sentinel identifier node. It begins exactly
 /// at `cursor` and its text is `SENTINEL`. We descend to the smallest
 /// node covering the sentinel byte range and accept it (or its first
@@ -184,6 +335,26 @@ fn find_sentinel<'a>(root: Node<'a>, patched: &str, cursor: usize) -> Option<Nod
         .ok()
         .filter(|t| t.contains(SENTINEL))
         .map(|_| node)
+}
+
+/// The member access the sentinel spliced at `cursor` completes, if any.
+fn member_at<'t>(
+    tree: &'t Tree,
+    patched: &str,
+    cfg: &crate::build::query_extract::LangPack,
+    cursor: usize,
+) -> Option<Node<'t>> {
+    climb_to_member(find_sentinel(tree.root_node(), patched, cursor)?, cfg, patched)
+}
+
+/// The domain comparison the sentinel spliced at `cursor` completes, if any.
+fn domain_compare_at<'t>(
+    tree: &'t Tree,
+    patched: &str,
+    cfg: &crate::build::query_extract::LangPack,
+    cursor: usize,
+) -> Option<Node<'t>> {
+    climb_to_domain_compare(find_sentinel(tree.root_node(), patched, cursor)?, cfg, patched)
 }
 
 /// Walk up from the sentinel to the member-access node that owns it.
@@ -436,20 +607,10 @@ pub fn member_completion_ctx_incremental(
     if cursor_in_skip(old, src, cursor, cfg) {
         return None;
     }
-    let patched = patch(src, cursor);
-    let mut edited = old.clone();
-    let pos = byte_to_point(src, cursor);
-    edited.edit(&InputEdit {
-        start_byte: cursor,
-        old_end_byte: cursor,
-        new_end_byte: cursor + SENTINEL.len(),
-        start_position: pos,
-        old_end_position: pos,
-        new_end_position: Point::new(pos.row, pos.column + SENTINEL.len()),
-    });
-    let tree = parser.parse(&patched, Some(&edited))?;
-    let node = find_sentinel(tree.root_node(), &patched, cursor)?;
-    let member = climb_to_member(node, cfg, &patched)?;
+    let Spliced { patched, tree } = recover(parser, cfg, src, old, cursor, |t, p| {
+        member_at(t, p, cfg, cursor).is_some_and(|m| !m.has_error())
+    })?;
+    let member = member_at(&tree, &patched, cfg, cursor)?;
     let receiver = member.named_child(0)?;
     // Downstream projects `class_name()` without an index, so the
     // exact-spelling-vs-primary dispatch call (a spec class exists for
@@ -516,20 +677,10 @@ pub fn domain_compare_ctx_incremental(
     if cursor_in_skip(old, src, cursor, cfg) {
         return None;
     }
-    let patched = patch(src, cursor);
-    let mut edited = old.clone();
-    let pos = byte_to_point(src, cursor);
-    edited.edit(&InputEdit {
-        start_byte: cursor,
-        old_end_byte: cursor,
-        new_end_byte: cursor + SENTINEL.len(),
-        start_position: pos,
-        old_end_position: pos,
-        new_end_position: Point::new(pos.row, pos.column + SENTINEL.len()),
-    });
-    let tree = parser.parse(&patched, Some(&edited))?;
-    let node = find_sentinel(tree.root_node(), &patched, cursor)?;
-    let cmp = climb_to_domain_compare(node, cfg, &patched)?;
+    let Spliced { patched, tree } = recover(parser, cfg, src, old, cursor, |t, p| {
+        domain_compare_at(t, p, cfg, cursor).is_some_and(|c| !c.has_error())
+    })?;
+    let cmp = domain_compare_at(&tree, &patched, cfg, cursor)?;
     let slot = domain_slot_operand(cmp, cfg, &patched, cursor)?;
     // The field slot is `recv OP field` — recover the receiver's class and
     // the field name, then ask usage what enum this field is used AS.
@@ -741,10 +892,37 @@ pub struct PackCallSite {
 
 /// The innermost call whose argument list holds the cursor
 /// (`docs/adr/cursor-slots.md`'s ArgPosition for pack languages).
-/// Walks the ORIGINAL tree — no sentinel splice: the arguments are what
-/// the user has typed so far, and a cursor right after `(` or `,` is
-/// inside the list by construction.
-pub fn call_at(tree: &Tree, cfg: &crate::build::query_extract::LangPack, src: &str, cursor: usize) -> Option<PackCallSite> {
+///
+/// The tree as typed answers when the list parses whole — a cursor right
+/// after `(` or `,` is inside the list by construction. A half-typed call
+/// (`g(a, |` with no `)` yet) parses to a bare ERROR with no call in it, so
+/// the answer then comes from a recovery splice (`recover`); the arguments
+/// before the cursor are untouched by it, so the active slot is the same.
+pub fn call_at(
+    parser: &mut Parser,
+    cfg: &crate::build::query_extract::LangPack,
+    src: &str,
+    old: &Tree,
+    cursor: usize,
+) -> Option<PackCallSite> {
+    let clean = |t: &Tree, s: &str| call_site_in(t, cfg, s, cursor).is_some_and(|(_, whole)| whole);
+    if clean(old, src) {
+        return call_site_in(old, cfg, src, cursor).map(|(site, _)| site);
+    }
+    let Spliced { patched, tree } = recover(parser, cfg, src, old, cursor, clean)?;
+    call_site_in(&tree, cfg, &patched, cursor)
+        .or_else(|| call_site_in(old, cfg, src, cursor))
+        .map(|(site, _)| site)
+}
+
+/// `call_at` on one tree: the site, and whether its argument list parsed
+/// whole (no ERROR or MISSING inside it).
+fn call_site_in(
+    tree: &Tree,
+    cfg: &crate::build::query_extract::LangPack,
+    src: &str,
+    cursor: usize,
+) -> Option<(PackCallSite, bool)> {
     let root = tree.root_node();
     let query = query_at(root, cfg)?;
     let at = cursor.min(src.len());
@@ -759,12 +937,15 @@ pub fn call_at(tree: &Tree, cfg: &crate::build::query_extract::LangPack, src: &s
                 // before it (the one containing it has not).
                 let active = crate::build::query_extract::captures_at(query, node, src.as_bytes())
                     .into_iter()
-                    .filter(|(cap, n)| *cap == "arity.arg" && n.end_byte() < cursor)
+                    .filter(|(cap, n)| *cap == "arity.arg" && !n.is_missing() && n.end_byte() < cursor)
                     .count();
-                return Some(PackCallSite {
-                    callee: Span { start: callee.start_position(), end: callee.end_position() },
-                    active_param: active,
-                });
+                return Some((
+                    PackCallSite {
+                        callee: Span { start: callee.start_position(), end: callee.end_position() },
+                        active_param: active,
+                    },
+                    !node.has_error(),
+                ));
             }
         }
         node = node.parent()?;
@@ -874,11 +1055,9 @@ pub fn calls_in_rows(
                 }
             }
         }
-        for i in (0..node.named_child_count()).rev() {
-            if let Some(c) = node.named_child(i) {
-                stack.push(c);
-            }
-        }
+        let mut w = node.walk();
+        let kids: Vec<Node> = node.named_children(&mut w).collect();
+        stack.extend(kids.into_iter().rev());
     }
     out.sort_by_key(|c| (c.callee.start.row, c.callee.start.column));
     out

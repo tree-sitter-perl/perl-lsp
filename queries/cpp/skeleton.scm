@@ -670,7 +670,9 @@
 ; fits" is downstream interpretation, `ParamArity::fit`). An arg list is
 ; joined to its callee ref by adjacency (`ref.end == arglist.start`); a
 ; def's parameter list is joined to the def by span containment. ----
-(argument_list) @arity.args
+; A half-typed call (`g(a, |` with no `)` yet) is recovered at the cursor by
+; closing the parens the user left open, then ending the statement.
+((argument_list) @arity.args (#recover-pair! "(" ")"))
 ; one capture per written argument (the arity count and signature help's
 ; active slot), and the bare-variable ones a by-reference parameter binds.
 (argument_list (_) @arity.arg)
@@ -867,7 +869,8 @@
 ; site so `into_file_analysis` can chain the enclosing function's `Symbol`
 ; onto it when the function has no declared return (`auto`) — cpp's side of
 ; Perl's implicit-return machinery, one arm per `return` statement.
-(return_statement (_) @expr.return.value)
+; `;` ends a statement: a recovered splice at the cursor may append it.
+((return_statement (_) @expr.return.value) (#set! recover.terminator ";"))
 
 ; ---- bind shapes + guard narrowing (the value-flow tier, cpp side) ----
 

@@ -262,6 +262,73 @@ pub(crate) fn capture_literals(query: &'static Query, capture: &str) -> &'static
         .unwrap_or_else(|| EMPTY.get_or_init(Default::default))
 }
 
+/// A language's recovery vocabulary for half-typed code, declared in its
+/// own document: `(#recover-pair! "(" ")")` on the pattern of the construct
+/// a pair closes, `(#set! recover.terminator ";")` on a statement pattern.
+/// Directives filter no match, so hanging one on an existing pattern costs
+/// that pattern nothing.
+#[derive(Debug, Default)]
+pub(crate) struct Recovery {
+    /// Each open token with its closers, both in declaration order — the
+    /// skeleton's before an overlay's, because the effective query is
+    /// assembled in that order. A pair declared twice is one entry.
+    pub pairs: Vec<(String, Vec<String>)>,
+    pub terminators: Vec<String>,
+}
+
+impl Recovery {
+    pub fn closers(&self, open: &str) -> Option<&[String]> {
+        self.pairs.iter().find(|(o, _)| o == open).map(|(_, c)| c.as_slice())
+    }
+
+    /// The token closes SOME declared pair — the half of the stack walk
+    /// that pops.
+    pub fn is_closer(&self, token: &str) -> bool {
+        self.pairs.iter().any(|(_, c)| c.iter().any(|x| x == token))
+    }
+}
+
+/// The recovery vocabulary `query`'s document declares, read once per
+/// compiled query off `general_predicates` / `property_settings`.
+pub(crate) fn recovery(query: &'static Query) -> &'static Recovery {
+    static CACHE: OnceLock<Mutex<HashMap<usize, &'static Recovery>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = query as *const Query as usize;
+    if let Some(r) = cache.lock().unwrap().get(&key) {
+        return r;
+    }
+    let mut out = Recovery::default();
+    for pattern in 0..query.pattern_count() {
+        for p in query.general_predicates(pattern) {
+            if &*p.operator != "recover-pair!" {
+                continue;
+            }
+            let [tree_sitter::QueryPredicateArg::String(open), tree_sitter::QueryPredicateArg::String(close)] =
+                &*p.args
+            else {
+                continue;
+            };
+            match out.pairs.iter_mut().find(|(o, _)| **o == **open) {
+                Some((_, closers)) if closers.iter().any(|c| **c == **close) => {}
+                Some((_, closers)) => closers.push(close.to_string()),
+                None => out.pairs.push((open.to_string(), vec![close.to_string()])),
+            }
+        }
+        for prop in query.property_settings(pattern) {
+            if &*prop.key == "recover.terminator" {
+                if let Some(t) = prop.value.as_deref() {
+                    if !out.terminators.iter().any(|x| x == t) {
+                        out.terminators.push(t.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let leaked: &'static Recovery = Box::leak(Box::new(out));
+    cache.lock().unwrap().insert(key, leaked);
+    leaked
+}
+
 #[cfg(test)]
 #[path = "../cursor_query_tests.rs"]
 mod tests;
