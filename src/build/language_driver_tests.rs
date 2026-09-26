@@ -1170,3 +1170,42 @@ fn own_object_token_is_flagged_where_the_document_captured_it() {
     let x = fa.refs().iter().find(|r| r.target_name == "x").expect("the member ref");
     assert!(!x.is_own_object(), "the member is not the object");
 }
+
+/// A construction site names no method, so the method it calls comes from
+/// the construction pattern's own directive, and a token that names the
+/// enclosing class is one the document captured as `@receiver.self`. Python
+/// bundles neither (its construction is a plain call), so an overlay reads
+/// `Foo(...)` and a classmethod's `cls(...)` as constructions of `__init__`.
+#[cfg(feature = "python")]
+#[test]
+fn construction_sites_call_the_method_their_pattern_names() {
+    use crate::model::file_analysis::{RefFlags, RefKind};
+    const OVERLAY: &str = r#"((call function: (identifier) @ref.call arguments: (argument_list) @arity.args) @expr.ctor
+ (#set! construct.method "__init__"))
+((call function: (identifier) @receiver.self) (#eq? @receiver.self "cls"))
+"#;
+    fn pack() -> crate::build::query_extract::LangPack {
+        crate::build::query_extract::LangPack {
+            bundled_overlays: &[("ctor.scm", OVERLAY)],
+            ..crate::build::query_extract::python_pack()
+        }
+    }
+    let driver = PackDriver { pack, ..python_driver() };
+    let src = "class Foo:\n    def __init__(self, a): pass\n    @classmethod\n    def make(cls):\n        return cls(1)\n\nx = Foo(2)\n";
+    let fa = driver.analyze(src);
+    let ctor_calls: Vec<(usize, String)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "__init__" && r.flags.contains(RefFlags::CONSTRUCTS))
+        .map(|r| {
+            let RefKind::MethodCall { invocant, .. } = &r.kind else { panic!("a member call, got {:?}", r.kind) };
+            (r.span.start.row, format!("{invocant:?}"))
+        })
+        .collect();
+    assert_eq!(ctor_calls.len(), 2, "both sites call the constructor: {ctor_calls:?}");
+    for (row, invocant) in &ctor_calls {
+        assert!(invocant.contains("Foo"), "row {row}: the constructor of Foo, got {invocant}");
+    }
+    assert!(ctor_calls.iter().any(|(row, _)| *row == 4), "`cls(1)` constructs the enclosing class");
+    assert!(ctor_calls.iter().any(|(row, _)| *row == 6), "`Foo(2)` constructs Foo");
+}

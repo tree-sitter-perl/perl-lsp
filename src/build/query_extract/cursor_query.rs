@@ -5,15 +5,15 @@
 //! own node-kind tables is asking the same question a second time, with an
 //! answer that drifts from the one the extractor uses (rule #15). These are
 //! the seams that let it read the document instead: the compiled query, the
-//! captures rooted at one node, whether a capture fires there, and the
-//! literals a capture's predicates name.
+//! captures rooted at one node, whether a capture fires there, and what a
+//! pattern's directives state.
 //!
 //! What makes this affordable at keystroke rate is the three bounds
 //! `captures_at` documents. Without them the same idea costs ~20 ms per
 //! keystroke on a large file (a full-tree traversal of a 600-pattern
 //! query); with them it is ~2 µs, because the cursor visits one node.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
@@ -169,97 +169,17 @@ fn first_match_where(
     false
 }
 
-/// capture name → the literals its `#eq?` / `#any-of?` predicates require,
-/// per compiled query (keyed by the leaked object's address).
-type Literals = HashMap<String, &'static HashSet<&'static str>>;
-
-fn literal_tables() -> &'static Mutex<HashMap<usize, Literals>> {
-    static TABLES: OnceLock<Mutex<HashMap<usize, Literals>>> = OnceLock::new();
-    TABLES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Read every positive `#eq?` / `#any-of?` predicate off a raw compiled
-/// query: the capture it constrains and the string literals it names.
-///
-/// The Rust bindings parse these into a private field, so the C API is the
-/// only exact reader; `cached_query` calls this between `Query::into_raw`
-/// and `Query::from_raw`, while it owns the pointer.
-///
-/// # Safety
-/// `raw` must be a live query no other code is using.
-pub(super) unsafe fn read_literals(raw: *const tree_sitter::ffi::TSQuery) -> HashMap<String, HashSet<String>> {
-    use tree_sitter::ffi;
-    let text = |ptr: *const std::ffi::c_char, len: u32| -> String {
-        if ptr.is_null() || len == 0 {
-            return String::new();
-        }
-        let bytes = std::slice::from_raw_parts(ptr.cast::<u8>(), len as usize);
-        String::from_utf8_lossy(bytes).into_owned()
-    };
-    let string = |id: u32| {
-        let mut len = 0u32;
-        text(ffi::ts_query_string_value_for_id(raw, id, &mut len), len)
-    };
-    let capture = |id: u32| {
-        let mut len = 0u32;
-        text(ffi::ts_query_capture_name_for_id(raw, id, &mut len), len)
-    };
-    let mut out: HashMap<String, HashSet<String>> = HashMap::new();
-    for pattern in 0..ffi::ts_query_pattern_count(raw) {
-        let mut count = 0u32;
-        let steps = ffi::ts_query_predicates_for_pattern(raw, pattern, &mut count);
-        if steps.is_null() || count == 0 {
-            continue;
-        }
-        let steps = std::slice::from_raw_parts(steps, count as usize);
-        for predicate in steps.split(|s| s.type_ == ffi::TSQueryPredicateStepTypeDone) {
-            let [op, target, args @ ..] = predicate else { continue };
-            if op.type_ != ffi::TSQueryPredicateStepTypeString
-                || target.type_ != ffi::TSQueryPredicateStepTypeCapture
-                || !matches!(string(op.value_id).as_str(), "eq?" | "any-of?")
-            {
-                continue;
-            }
-            let set = out.entry(capture(target.value_id)).or_default();
-            for arg in args.iter().filter(|a| a.type_ == ffi::TSQueryPredicateStepTypeString) {
-                set.insert(string(arg.value_id));
-            }
-        }
-    }
-    out
-}
-
-/// File the literals `read_literals` found under the query they came from.
-pub(super) fn record_literals(query: &'static Query, literals: HashMap<String, HashSet<String>>) {
-    let table: Literals = literals
-        .into_iter()
-        .map(|(cap, set)| {
-            let set: HashSet<&'static str> =
-                set.into_iter().map(|s| &*Box::leak(s.into_boxed_str())).collect();
-            (cap, &*Box::leak(Box::new(set)))
-        })
-        .collect();
-    literal_tables().lock().unwrap().insert(query as *const Query as usize, table);
-}
-
-/// The string literals a capture's own patterns require it to equal — the
-/// `#eq?` / `#any-of?` arguments written beside `@capture`.
-///
-/// A small closed keyword set (`self`/`static`, `parent`, `__construct`,
-/// the superglobals) belongs in the document, on the capture that fires on
-/// it. A consumer that needs the SET rather than one match — "does this
-/// language spell its own class `self`?" — reads it back off the compiled
-/// query here, so the `.scm` stays the one home and a plugin overlay that
-/// widens the set widens every reader with it. Empty for a capture carrying
-/// no such predicate.
-pub(crate) fn capture_literals(query: &'static Query, capture: &str) -> &'static HashSet<&'static str> {
-    static EMPTY: OnceLock<HashSet<&'static str>> = OnceLock::new();
-    literal_tables()
-        .lock()
-        .unwrap()
-        .get(&(query as *const Query as usize))
-        .and_then(|t| t.get(capture).copied())
-        .unwrap_or_else(|| EMPTY.get_or_init(Default::default))
+/// The value a pattern's `#set!` directive gives `key` — the document stating
+/// a fact about every match of that one pattern (`construct.method` on a
+/// construction pattern names the method it calls). Read through the safe
+/// `property_settings`; a directive never filters, so the pattern's own
+/// predicates still decide what matches.
+pub(crate) fn pattern_property(query: &'static Query, pattern: usize, key: &str) -> Option<&'static str> {
+    query
+        .property_settings(pattern)
+        .iter()
+        .find(|p| &*p.key == key)
+        .and_then(|p| p.value.as_deref())
 }
 
 #[cfg(test)]

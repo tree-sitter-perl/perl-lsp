@@ -63,17 +63,7 @@ fn cached_query(language: &Language, source: &str) -> Result<&'static Query, Str
         let query = crate::util::timings::phase("pack.query_compile", || {
             Query::new(language, source).map_err(|e| format!("query: {e}"))
         })?;
-        // The `#eq?`/`#any-of?` literals are private to the bindings, so they
-        // are read off the C object while this function owns it; taking it
-        // back re-reads only the predicate metadata, not a recompile.
-        let raw = query.into_raw();
-        // SAFETY: `raw` came from `into_raw` just above and nothing else holds it.
-        let literals = unsafe { cursor_query::read_literals(raw) };
-        // SAFETY: `raw` is non-null and was compiled from `source`.
-        let query = unsafe { Query::from_raw(raw, source) }.map_err(|e| format!("query: {e}"))?;
-        let query: &'static Query = Box::leak(Box::new(query));
-        cursor_query::record_literals(query, literals);
-        Ok(query)
+        Ok(Box::leak(Box::new(query)))
     })
     .clone()
 }
@@ -818,7 +808,7 @@ mod extract;
 mod packs;
 mod skeleton;
 pub(crate) use cursor_query::{
-    capture_literals, captures_at, fires_at, is_captured_as, pack_declares_capture, pack_query,
+    captures_at, fires_at, is_captured_as, pack_declares_capture, pack_query, pattern_property,
     query_for,
 };
 pub use extract::*;

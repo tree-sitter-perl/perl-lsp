@@ -41,25 +41,16 @@ fn fires_at_asks_the_patterns_not_the_kind() {
     assert!(!is_captured_as(query, eq, src.as_bytes(), "domain.compare.op"));
 }
 
-/// The literals come off the compiled query exactly: a literal holding the
-/// character that closes a predicate, each capture's own set, and nothing
-/// from a negated or capture-to-capture predicate.
+/// A directive states a fact about its own pattern's matches only, and never
+/// filters them.
 #[test]
-fn literals_are_read_off_the_compiled_query() {
+fn pattern_properties_are_per_pattern() {
     let language: tree_sitter::Language = ts_parser_perl::LANGUAGE.into();
-    let source = r#"((bareword) @kw (#any-of? @kw "a)b" "c"))
-((bareword) @other (#eq? @other "d"))
-((bareword) @neg (#not-eq? @neg "e"))
-((bareword) @x (bareword) @y (#eq? @x @y))
+    let source = r#"((bareword) @a (#set! construct.method "new"))
+(bareword) @b
 "#;
     let query = super::super::cached_query(&language, source).unwrap();
-    let sorted = |cap: &str| {
-        let mut v: Vec<&str> = capture_literals(query, cap).iter().copied().collect();
-        v.sort();
-        v
-    };
-    assert_eq!(sorted("kw"), ["a)b", "c"]);
-    assert_eq!(sorted("other"), ["d"]);
-    assert!(sorted("neg").is_empty(), "a negated predicate names no member of the set");
-    assert!(sorted("x").is_empty() && sorted("y").is_empty(), "@x @y compares captures, not literals");
+    assert_eq!(pattern_property(query, 0, "construct.method"), Some("new"));
+    assert_eq!(pattern_property(query, 1, "construct.method"), None);
+    assert_eq!(pattern_property(query, 0, "other"), None);
 }

@@ -106,10 +106,17 @@ call, or a string. It reads the document instead, through the seams in
   the operator predicate holds. A node that roots one match per child (a
   50,000-argument list) still costs a walk over those matches when the
   answer is no.
-- `capture_literals(query, capture)` — the literals a capture's `#eq?` /
-  `#any-of?` predicates name. The bindings keep text predicates private,
-  so `cached_query` reads them through the C API between
-  `Query::into_raw` and `Query::from_raw`, once per compiled query.
+- `pattern_property(query, pattern, key)` — what a pattern's `#set!`
+  directive states about its matches, read through `property_settings`.
+  A fact a site needs but never spells goes here: a construction pattern
+  names the method it calls (`(#set! construct.method "__construct")`),
+  because `new Foo()` writes no method name. The document says it on
+  every construction pattern rather than once;
+  `layering_tests::construction_patterns_name_the_method_they_call` pins
+  that none forgets. Nothing reads a predicate's literals back: a token
+  that names the enclosing class is one the document captured as
+  `@receiver.self`, asked by span, and a pack's own type parsers answer
+  `self` / `static` written in an annotation or a doc comment.
 
 ### What the three bounds cost (php, measured 2026-09-17)
 
@@ -210,11 +217,8 @@ over the document SOURCE rather than the compiled query — the Rust
 `Query` API exposes patterns, capture names and quantifiers, but no
 per-step capture list, so the compiled form cannot answer which capture
 was dropped. Four or more consecutive `@name` tokens in the source is one
-node's capture list. The predicate literals behind `capture_literals` are
-scanned by hand for the same reason: `#eq?` / `#any-of?` fold into
-tree-sitter's internal text predicates and the compiled query exposes
-neither. Both scanners step over string literals, because a literal may
-contain the character that ends the form.
+node's capture list. The scanner steps over string literals, because a
+literal may contain the character that ends the form.
 
 `layering_tests::bundled_query_documents_are_served_whole` runs the three
 detectors over every registered pack's skeleton and every bundled overlay

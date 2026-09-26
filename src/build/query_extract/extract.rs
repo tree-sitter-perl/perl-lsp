@@ -410,11 +410,17 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // (event index, the receiver as captured, its match) — finished once the
     // two sets above are complete.
     let mut member_recvs: Vec<(usize, tree_sitter::Node, usize)> = Vec::new();
+    // The method a construction pattern says its matches call
+    // (`#set! construct.method`): a site like `new Foo()` never spells it.
+    let mut construct_method_by_match: HashMap<usize, &'static str> = HashMap::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), source);
     let mut match_counter = 0usize;
     while let Some(m) = matches.next() {
         match_counter += 1;
+        if let Some(method) = super::cursor_query::pattern_property(query, m.pattern_index, "construct.method") {
+            construct_method_by_match.insert(match_counter, method);
+        }
         for c in m.captures {
             let node = c.node;
             let cap = cap_names[c.index as usize].as_str();
@@ -954,6 +960,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // Stamped onto the refs once, below, so no lane re-matches a spelling.
     let mut this_receiver_spans: std::collections::HashSet<(Point, Point)> = Default::default();
     let mut relative_scope_spans: std::collections::HashSet<(Point, Point)> = Default::default();
+    // `@receiver.self` alone: the tokens that name the class this code is
+    // written in (`new self()`), not its parent.
+    let mut self_class_spans: std::collections::HashSet<(Point, Point)> = Default::default();
     let mut ctor_call_spans: std::collections::HashSet<(Point, Point)> = Default::default();
     let mut ctor_name_spans: std::collections::HashSet<(Point, Point)> =
         std::collections::HashSet::new();
@@ -1098,6 +1107,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         if e.cap == "receiver.self" {
             self_recv_matches.insert(e.match_id);
             relative_scope_spans.insert((e.start, e.end));
+            self_class_spans.insert((e.start, e.end));
         }
         if e.cap == "receiver.this" {
             this_receiver_spans.insert((e.start, e.end));
@@ -1363,21 +1373,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             _ => None,
         })
         .collect();
-    // The spellings that name the WRITING class rather than a namespaced
-    // one (`self`, `static`): the document says which, on the receiver
-    // capture that fires on them, and every reader asks the document.
-    let self_class_tokens = super::cursor_query::capture_literals(query, "receiver.self");
-    // The constructor's name — the document's own `#eq?` on the capture that
-    // flags it, so the construction sites and the declaration agree by
-    // construction. `None` for a language whose constructor is a convention
-    // rather than a spelling (Perl).
-    let ctor_name: Option<&'static str> =
-        super::cursor_query::capture_literals(query, "def.method.ctor").iter().copied().next();
+    // A written type spelling that names the class this code is written in
+    // (`self`, `static`) never reaches here: at a code site the document's
+    // `@receiver.self` says so by span, and a pack's own type parsers
+    // (annotations, doc comments) answer those spellings themselves.
     let ident = |written: &str, at: Point| -> String {
-        // the current-class spellings name no namespace; the model
-        // resolves them to the enclosing class
-        if self_class_tokens.contains(written)
-            || crate::model::conventions::is_current_package_token(written)
+        if crate::model::conventions::is_current_package_token(written)
             || template_names.contains(written)
         {
             return written.to_string();
@@ -1911,9 +1912,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // `new class(...)` invokes the synthesized identity's
                 // constructor, so the ctor gets the MethodCall a `new
                 // self()` mints — fan-in, goto-def and references on
-                // `__construct` see it like any `new Foo()`.
-                if let (Some(ctor), Some(name)) =
-                    (ctor_name, defaulted_matches.get(&e.match_id))
+                // `__construct` see it like any `new Foo()`. The method is
+                // the one the anchoring pattern's directive names.
+                if let (Some(ctor), Some(name)) = (
+                    construct_method_by_match.get(&e.match_id).copied(),
+                    defaulted_matches.get(&e.match_id),
+                )
                 {
                     if anon_ctor_sites.insert((e.start_byte, e.end_byte)) {
                         let span = Span { start: e.start, end: e.end };
@@ -2329,16 +2333,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // `new self(...)` / `new static(...)`: the token spells no class
                 // name — it IS a call of the constructor on the current class.
                 // Minted as that member call (invocant = the enclosing class,
-                // name = the pack's constructor), so the ctor's references,
-                // hover and goto-def see the site while a class rename never
-                // rewrites the `self` token. Which spellings name the
-                // enclosing class is the document's `@receiver.self`.
+                // name = the method the construction pattern's directive
+                // names), so the ctor's references, hover and goto-def see
+                // the site while a class rename never rewrites the `self`
+                // token. The token names the enclosing class where the
+                // document captured it as `@receiver.self`.
                 if !inside_def
                     && e.cap == "ref.call"
                     && ctor_matches.contains(&e.match_id)
-                    && self_class_tokens.contains(&e.text.as_str())
+                    && self_class_spans.contains(&(e.start, e.end))
                 {
-                    if let (Some(ctor), Some(cls_recv)) = (ctor_name, enclosing_class.clone()) {
+                    if let (Some(ctor), Some(cls_recv)) =
+                        (construct_method_by_match.get(&e.match_id).copied(), enclosing_class.clone())
+                    {
                         let span = Span { start: e.start, end: e.end };
                         out.refs.push(SkelRef {
                             via: None,
@@ -2385,7 +2392,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // references and goto-def see it). Neither consumer has to
                     // ask whether a call that spells a class name constructs.
                     if e.cap == "ref.call" && ctor_matches.contains(&e.match_id) {
-                        if let Some(ctor) = ctor_name {
+                        if let Some(ctor) = construct_method_by_match.get(&e.match_id).copied() {
                             let span = Span { start: e.start, end: e.end };
                             let class = (pack.shape_name)("ref.type", &e.text);
                             out.refs.push(SkelRef {
@@ -2951,15 +2958,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 let callee = events
                     .iter()
                     .find(|x| x.match_id == e.match_id && x.cap == "ref.call")
-                    .map(|x| (pack.shape_name)("ref.call", &x.text));
-                if let Some(name) = callee {
+                    .map(|x| ((pack.shape_name)("ref.call", &x.text), self_class_spans.contains(&(x.start, x.end))));
+                if let Some((name, names_own_class)) = callee {
                     let span = Span { start: e.start, end: e.end };
                     lit_spans.push((e.start_byte, e.end_byte, span));
                     // `new self()` / `new static()`: the class is the
-                    // ENCLOSING one (the document's `@receiver.self` names
-                    // the spellings) — a bare `TypeName` edge would chase a
-                    // class literally named "self".
-                    let payload = if self_class_tokens.contains(&name.as_str()) {
+                    // ENCLOSING one (the document captured the token as
+                    // `@receiver.self`) — a bare `TypeName` edge would chase
+                    // a class literally named "self".
+                    let payload = if names_own_class {
                         // `self` outside a class (invalid source) has no
                         // enclosing class — mint nothing.
                         package.as_ref().map(|cls| {
