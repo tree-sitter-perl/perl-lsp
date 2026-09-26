@@ -582,7 +582,7 @@ impl PackDriver {
             known.extend(ctx.external.macro_names().map(str::to_string));
             let body_refs = crate::build::cpp_reparse::macro_body_name_refs(parser, source, &known);
             for (name, span) in body_refs.name_refs {
-                skel.var_reads.push((name, crate::model::file_analysis::ScopeId(0), span));
+                skel.var_reads.push((name, crate::model::file_analysis::ScopeId(0), span, Default::default()));
             }
             // Field/member uses inside bodies (`->op_next`) — untyped here (the
             // receiver is a macro param), resolved to the declaring class and
@@ -1405,7 +1405,7 @@ fn remap_spans(
             *sp = rspan(*sp);
         }
     }
-    for (_, _, span) in var_reads.iter_mut() {
+    for (_, _, span, _) in var_reads.iter_mut() {
         *span = rspan(*span);
     }
     // Member-write spans are matched against ref spans in
@@ -1616,7 +1616,7 @@ fn mint_erased_macro_reads(
                 scope = sc.id;
             }
         }
-        skel.var_reads.push((name, scope, span));
+        skel.var_reads.push((name, scope, span, Default::default()));
     }
 }
 
@@ -1792,7 +1792,7 @@ impl LanguageRegistry {
     }
 
     /// The literals `id`'s query document requires `capture` to equal — the
-    /// `#eq?` / `#any-of?` set beside it (`receiver.self`, `receiver.this`,
+    /// `#eq?` / `#any-of?` set beside it (`receiver.self`, `def.method.ctor`,
     /// …). The document is the one home for a language's small closed
     /// keyword sets (rule #15), so a consumer that needs the SET reads it
     /// back off the compiled query rather than keeping a table. Empty for a
@@ -1825,17 +1825,6 @@ impl LanguageRegistry {
             })
             .map(|q| crate::build::query_extract::capture_literals(q, capture))
             .unwrap_or_else(|| EMPTY.get_or_init(Default::default))
-    }
-
-    /// How `id` spells the object the enclosing method runs on (`$this`,
-    /// `this`, a `self`/`cls` parameter) — the receiver captures' own
-    /// literals.
-    pub fn receiver_tokens(id: &str) -> Vec<&'static str> {
-        Self::pack_capture_literals(id, "receiver.this")
-            .iter()
-            .chain(Self::pack_capture_literals(id, "param.receiver").iter())
-            .copied()
-            .collect()
     }
 
     /// The visibility routing fact for `id`'s language

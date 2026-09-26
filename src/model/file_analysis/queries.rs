@@ -85,6 +85,15 @@ impl FileAnalysis {
         &self.symbols[id.0 as usize]
     }
 
+    /// Does `r` name the object the enclosing method runs on: the language's
+    /// own object token (`$this`, `this`), or a read of the receiver
+    /// parameter (python `self`)? Both are facts the document stated where
+    /// it captured them, so the answer never matches a spelling.
+    pub fn names_current_object(&self, r: &Ref) -> bool {
+        r.is_own_object()
+            || r.resolved_symbol().is_some_and(|s| self.symbol(s).flags.contains(SymbolFlags::RECEIVER))
+    }
+
     /// Find all symbols visible at a point (walks scope chain).
     pub fn visible_symbols(&self, point: Point) -> Vec<&Symbol> {
         let scope = match self.scope_at(point) {

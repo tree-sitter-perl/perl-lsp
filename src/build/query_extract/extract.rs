@@ -2652,10 +2652,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 let span = Span { start: e.start, end: e.end };
                 // …and a candidate local-var reference, resolved to its
                 // declaration in into_file_analysis (goto-def + hover).
+                // the language's own object token (`$this`) is a read of
+                // nothing the file declares; the capture that said so rides
+                // the ref.
+                let flags = if this_receiver_spans.contains(&(e.start, e.end)) {
+                    crate::model::file_analysis::RefFlags::OWN_OBJECT
+                } else {
+                    Default::default()
+                };
                 out.var_reads.push((
                     (pack.shape_name)("ref.var", &e.text),
                     cur_scope,
                     span,
+                    flags,
                 ));
                 out.witnesses.push(crate::model::witnesses::Witness {
                     attachment: crate::model::witnesses::WitnessAttachment::Expr(span),

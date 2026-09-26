@@ -1132,3 +1132,41 @@ fn a_body_typed_return_survives_repeated_enrichment() {
         );
     }
 }
+
+/// A reference to the object the enclosing method runs on is a fact the
+/// document stated: python's receiver parameter is a symbol flagged
+/// RECEIVER, and every read of it resolves there; a plain parameter is not.
+#[cfg(feature = "python")]
+#[test]
+fn python_self_reads_name_the_current_object() {
+    let fa = python_driver().analyze("class A:\n    def f(self, other):\n        self.x\n        other.x\n");
+    let read = |name: &str| {
+        fa.refs()
+            .iter()
+            .find(|r| r.target_name == name && r.span.start.row == 2 + usize::from(name == "other"))
+            .unwrap_or_else(|| panic!("{name}"))
+    };
+    assert!(fa.names_current_object(read("self")));
+    assert!(!fa.names_current_object(read("other")));
+}
+
+/// The language's own object token carries the flag where the document
+/// captured it. C++'s bundled document mints no reference on `this`, so an
+/// overlay reads it as a variable to give the capture a site to land on.
+#[cfg(feature = "cpp")]
+#[test]
+fn own_object_token_is_flagged_where_the_document_captured_it() {
+    fn pack() -> crate::build::query_extract::LangPack {
+        crate::build::query_extract::LangPack {
+            bundled_overlays: &[("this-read.scm", "(this) @expr.read.var\n")],
+            ..crate::build::query_extract::cpp_pack()
+        }
+    }
+    let driver = PackDriver { pack, ..cpp_driver() };
+    let fa = driver.analyze("struct A { int x; int f() { return this->x; } };\n");
+    let this = fa.refs().iter().find(|r| r.target_name == "this").expect("a ref on `this`");
+    assert!(this.is_own_object());
+    assert!(fa.names_current_object(this));
+    let x = fa.refs().iter().find(|r| r.target_name == "x").expect("the member ref");
+    assert!(!x.is_own_object(), "the member is not the object");
+}

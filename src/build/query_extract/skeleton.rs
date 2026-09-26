@@ -142,10 +142,16 @@ pub struct SkeletonAnalysis {
     /// match. Sorted by position into `FileAnalysis.pack.template_params`
     /// (declaration order is the `ParamOf` index axis).
     pub template_params: Vec<(String, String, usize)>,
-    /// Variable reads (`@expr.read.var`): (name, scope, span). Each resolves
-    /// to the nearest visible Variable declaration by lexical scope walk →
-    /// local goto-def + hover. Resolution runs in `into_file_analysis`.
-    pub var_reads: Vec<(String, crate::model::file_analysis::ScopeId, crate::model::file_analysis::Span)>,
+    /// Variable reads (`@expr.read.var`): (name, scope, span, what the
+    /// document said at the site). Each resolves to the nearest visible
+    /// Variable declaration by lexical scope walk → local goto-def + hover.
+    /// Resolution runs in `into_file_analysis`.
+    pub var_reads: Vec<(
+        String,
+        crate::model::file_analysis::ScopeId,
+        crate::model::file_analysis::Span,
+        crate::model::file_analysis::RefFlags,
+    )>,
     /// `goto LABEL` refs (`@ref.label`): (name, scope, span). Resolve to the
     /// `LABEL:` def (a Variable symbol from `@def.label`) function-wide —
     /// scope-chain walk WITHOUT the declared-before constraint (a forward
@@ -1198,8 +1204,13 @@ impl SkeletonAnalysis {
         // a C enum constant or global is registered in the pack index; the use
         // resolves the same way a bare call does). rule #7: the token gets a
         // ref whether or not the def is local.
-        let mut unresolved_reads: Vec<(String, crate::model::file_analysis::ScopeId, Span)> = Vec::new();
-        for (name, read_scope, read_span) in &self.var_reads {
+        let mut unresolved_reads: Vec<(
+            String,
+            crate::model::file_analysis::ScopeId,
+            Span,
+            crate::model::file_analysis::RefFlags,
+        )> = Vec::new();
+        for (name, read_scope, read_span, read_flags) in &self.var_reads {
             let rp = (read_span.start.row, read_span.start.column);
             let resolved = defs_by_name.get(name).and_then(|cands| {
                 let mut cur = Some(*read_scope);
@@ -1230,9 +1241,9 @@ impl SkeletonAnalysis {
                     binding: Some(crate::model::file_analysis::RefBinding::Symbol(did)),
                     folded_from: None,
                     arg_count: None,
-                    flags: Default::default(),
+                    flags: *read_flags,
                 }),
-                None => unresolved_reads.push((name.clone(), *read_scope, *read_span)),
+                None => unresolved_reads.push((name.clone(), *read_scope, *read_span, *read_flags)),
             }
         }
         // `goto LABEL` → the `LABEL:` def, function-wide: first matching
@@ -1418,7 +1429,7 @@ impl SkeletonAnalysis {
             .iter()
             .map(|s| (s.start.row, s.start.column))
             .collect();
-        for (name, scope, span) in unresolved_reads {
+        for (name, scope, span, flags) in unresolved_reads {
             if claimed.contains(&(span.start.row, span.start.column, name.clone())) {
                 continue;
             }
@@ -1432,7 +1443,7 @@ impl SkeletonAnalysis {
                 binding: runtime.then_some(crate::model::file_analysis::RefBinding::Runtime),
                 folded_from: None,
                 arg_count: None,
-                flags: Default::default(),
+                flags,
             });
         }
         refs.extend(local_refs);
