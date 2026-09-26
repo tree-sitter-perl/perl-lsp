@@ -759,9 +759,11 @@ fn effective_query_source(language: &Language, pack: &LangPack) -> &'static str 
     let key = {
         let mut h = DefaultHasher::new();
         pack.lang_id.hash(&mut h);
-        // `bundled_overlays` is a per-`lang_id` compile-time constant, so the
-        // id covers it; a runtime-configurable bundle would have to hash in.
         pack.query_source.hash(&mut h);
+        // Hashed, not assumed per-`lang_id`: two packs for one language with
+        // different bundles (a test's overlay beside another's) would
+        // otherwise be served whichever assembled first.
+        pack.bundled_overlays.hash(&mut h);
         for (p, s) in &sources {
             p.hash(&mut h);
             s.hash(&mut h);
@@ -805,11 +807,9 @@ mod cursor_query;
 mod extract;
 mod packs;
 mod skeleton;
-// Tested and unused until the sentinel stops consulting node-kind tables.
-#[allow(unused_imports)]
 pub(crate) use cursor_query::{
-    capture_literals, captures_at, pack_declares_capture, pack_query, pattern_root_kinds,
-    query_for, recv_peel_kinds,
+    captures_at, fires_at, is_captured_as, pack_declares_capture, pack_query, pattern_property,
+    query_for,
 };
 pub use extract::*;
 pub use packs::*;

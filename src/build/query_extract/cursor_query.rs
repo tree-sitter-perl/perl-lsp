@@ -4,22 +4,22 @@
 //! token looks like in this language; a cursor-time consumer that keeps its
 //! own node-kind tables is asking the same question a second time, with an
 //! answer that drifts from the one the extractor uses (rule #15). These are
-//! the three seams that let it read the document instead: the compiled
-//! query, the captures rooted at one node, and the node kinds a capture's
-//! patterns root at.
+//! the seams that let it read the document instead: the compiled query, the
+//! captures rooted at one node, whether a capture fires there, and what a
+//! pattern's directives state.
 //!
 //! What makes this affordable at keystroke rate is the three bounds
 //! `captures_at` documents. Without them the same idea costs ~20 ms per
 //! keystroke on a large file (a full-tree traversal of a 600-pattern
 //! query); with them it is ~2 µs, because the cursor visits one node.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator};
 
 use super::LangPack;
 
-/// lang_id → (the compiled skeleton query, the source it was compiled from).
+/// lang_id → the compiled skeleton query.
 ///
 /// Keyed by language, not by overlay set: a query's overlays are discovered
 /// once and never hot-reload within a process (the same posture that lets
@@ -27,30 +27,15 @@ use super::LangPack;
 /// source to key by it would put a plugin-dir `read_dir` plus a hash of
 /// every overlay on the keystroke path — the cost this memo exists to
 /// avoid. The first compilation of a language wins.
-fn memo() -> &'static Mutex<HashMap<&'static str, (&'static Query, &'static str)>> {
-    static MEMO: OnceLock<Mutex<HashMap<&'static str, (&'static Query, &'static str)>>> =
-        OnceLock::new();
+fn memo() -> &'static Mutex<HashMap<&'static str, &'static Query>> {
+    static MEMO: OnceLock<Mutex<HashMap<&'static str, &'static Query>>> = OnceLock::new();
     MEMO.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Every compiled query's own source, keyed by the object's address.
-///
-/// Separate from `memo` on purpose: `memo` holds ONE query per language
-/// (the first wins, so a cursor keystroke never re-derives the effective
-/// source), while a process that compiles a second query for the same
-/// language — a different plugin-overlay set — still needs THAT object's
-/// patterns readable. A lens that could not find its own query's source
-/// answered EMPTY, which reads downstream as "the document says nothing".
-fn sources() -> &'static Mutex<HashMap<usize, &'static str>> {
-    static SOURCES: OnceLock<Mutex<HashMap<usize, &'static str>>> = OnceLock::new();
-    SOURCES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Record the query `extract` compiled, so a cursor-time caller gets THE
 /// object the extractor matched with rather than one of its own.
-pub(super) fn remember(lang_id: &'static str, query: &'static Query, source: &'static str) {
-    sources().lock().unwrap().insert(query as *const Query as usize, source);
-    memo().lock().unwrap().entry(lang_id).or_insert((query, source));
+pub(super) fn remember(lang_id: &'static str, query: &'static Query) {
+    memo().lock().unwrap().entry(lang_id).or_insert(query);
 }
 
 /// The pack's compiled query — the same object the extractor uses.
@@ -59,7 +44,7 @@ pub(super) fn remember(lang_id: &'static str, query: &'static Query, source: &'s
 /// verb cannot happen: the document under the cursor was analysed by this
 /// pack to produce the analysis the verb is answering from.
 pub(crate) fn pack_query(pack: &LangPack) -> Option<&'static Query> {
-    memo().lock().unwrap().get(pack.lang_id).map(|(q, _)| *q)
+    memo().lock().unwrap().get(pack.lang_id).copied()
 }
 
 /// The pack's compiled query, compiling it here if this process has not
@@ -79,7 +64,7 @@ pub(crate) fn query_for(
     }
     let source = super::effective_query_source(language, pack);
     let query = super::cached_query(language, source).ok()?;
-    remember(pack.lang_id, query, source);
+    remember(pack.lang_id, query);
     Some(query)
 }
 
@@ -143,304 +128,58 @@ pub(crate) fn captures_at<'t>(
     out
 }
 
-/// The node kinds that root a pattern carrying `capture`.
+/// Does a match rooted AT `node` capture `capture` anywhere in it? The
+/// question a cursor climb asks of each ancestor — "is this a member
+/// access / an argument list / a domain comparison" — answered by the
+/// document's own patterns, fields and predicates included, never by the
+/// node's kind alone.
 ///
-/// This is where a consumer's node-kind table comes from once the table is
-/// gone: "which nodes is a member access" is answered by the patterns that
-/// capture `@member.recv`, so a document that teaches the language a new
-/// member shape teaches every consumer at once.
-///
-/// Read off the compiled query: `capture_quantifiers` says which patterns
-/// carry the capture, and each pattern's own source slice names its root.
-/// A pattern whose root is not a named node — a bare anonymous token, a
-/// wildcard `(_)`, a grouped sibling pattern `((a) @x . (b) @y)` — names no
-/// kind and contributes none, so the set is what a consumer may match ON,
-/// never a claim that nothing else can carry the capture. Empty for a query
-/// this process did not compile through `extract`.
-pub(crate) fn pattern_root_kinds(
+/// Stops at the first match that carries the capture: a yes/no over a node
+/// that roots one match per child (a 50,000-argument list) must not pay
+/// for all of them.
+pub(crate) fn fires_at(query: &'static Query, node: Node<'_>, src: &[u8], capture: &str) -> bool {
+    first_match_where(query, node, src, capture, |_| true)
+}
+
+/// Is `node` ITSELF captured as `capture` by a match rooted at it — the
+/// token is a bare variable read, a skip region, a receiver wrapper — as
+/// opposed to the capture landing on one of its children.
+pub(crate) fn is_captured_as(query: &'static Query, node: Node<'_>, src: &[u8], capture: &str) -> bool {
+    let id = node.id();
+    first_match_where(query, node, src, capture, |n| n.id() == id)
+}
+
+fn first_match_where(
     query: &'static Query,
+    node: Node<'_>,
+    src: &[u8],
     capture: &str,
-) -> &'static HashSet<&'static str> {
-    cached_over_patterns(query, capture, "roots", collect_root_kinds)
-}
-
-/// The string literals a capture's own patterns require it to equal — the
-/// `#eq?` / `#any-of?` arguments written beside `@capture`.
-///
-/// A small closed keyword set (`self`/`static`, `parent`, `__construct`,
-/// the superglobals) belongs in the document, on the capture that fires on
-/// it. A consumer that needs the SET rather than one match — "does this
-/// language spell its own class `self`?" — reads it back off the compiled
-/// query here, so the `.scm` stays the one home and a plugin overlay that
-/// widens the set widens every reader with it. Empty for a capture carrying
-/// no such predicate, and for a query this process did not compile through
-/// `extract`.
-pub(crate) fn capture_literals(
-    query: &'static Query,
-    capture: &str,
-) -> &'static HashSet<&'static str> {
-    let cap = capture.to_string();
-    cached_over_patterns(query, capture, "literals", move |src, out| {
-        collect_capture_literals(src, &cap, out)
-    })
-}
-
-/// The node kinds a receiver peels THROUGH — a transparent wrapper the
-/// document names (`@recv.peel`, `@recv.peel.deref` where the wrapper also
-/// dereferences). One set: the peel drops them all, and the distinction is
-/// there for a consumer that reports what it dropped.
-pub(crate) fn recv_peel_kinds(query: &'static Query) -> &'static HashSet<&'static str> {
-    static CACHE: OnceLock<Mutex<HashMap<usize, &'static HashSet<&'static str>>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let key = query as *const Query as usize;
-    if let Some(set) = cache.lock().unwrap().get(&key) {
-        return set;
-    }
-    let mut all: HashSet<&'static str> = HashSet::new();
-    for cap in ["recv.peel", "recv.peel.deref"] {
-        all.extend(pattern_root_kinds(query, cap).iter().copied());
-    }
-    let leaked: &'static HashSet<&'static str> = Box::leak(Box::new(all));
-    cache.lock().unwrap().insert(key, leaked);
-    leaked
-}
-
-/// Fold `collect` over the SOURCE of every pattern carrying `capture`,
-/// memoised per (query, capture, lens). The pattern source is the only
-/// place the compiled object still spells what the document wrote, so both
-/// lenses read it the same way.
-fn cached_over_patterns(
-    query: &'static Query,
-    capture: &str,
-    lens: &str,
-    collect: impl Fn(&'static str, &mut HashSet<&'static str>),
-) -> &'static HashSet<&'static str> {
-    static CACHE: OnceLock<Mutex<HashMap<(usize, String, String), &'static HashSet<&'static str>>>> =
-        OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let key = (query as *const Query as usize, capture.to_string(), lens.to_string());
-    if let Some(set) = cache.lock().unwrap().get(&key) {
-        return set;
-    }
-    let source = sources().lock().unwrap().get(&(query as *const Query as usize)).copied();
-    let mut found: HashSet<&'static str> = HashSet::new();
-    if let (Some(source), Some(index)) =
-        (source, query.capture_names().iter().position(|n| *n == capture))
-    {
-        for pattern in 0..query.pattern_count() {
-            let quantifiers = query.capture_quantifiers(pattern);
-            if quantifiers
-                .get(index)
-                .is_none_or(|q| *q == tree_sitter::CaptureQuantifier::Zero)
-            {
-                continue;
-            }
-            let (start, end) = (
-                query.start_byte_for_pattern(pattern),
-                query.end_byte_for_pattern(pattern).min(source.len()),
-            );
-            if start < end {
-                collect(&source[start..end], &mut found);
-            }
+    admit: impl Fn(Node<'_>) -> bool,
+) -> bool {
+    let Some(index) = query.capture_index_for_name(capture) else { return false };
+    let mut cursor = QueryCursor::new();
+    cursor.set_byte_range(node.byte_range());
+    cursor.set_max_start_depth(Some(0));
+    let mut matches = cursor.matches(query, node, src);
+    while let Some(m) = matches.next() {
+        if m.captures.iter().any(|c| c.index == index && admit(c.node)) {
+            return true;
         }
     }
-    let leaked: &'static HashSet<&'static str> = Box::leak(Box::new(found));
-    cache.lock().unwrap().insert(key, leaked);
-    leaked
+    false
 }
 
-/// The quoted arguments of every `#eq?` / `#any-of?` predicate in `pattern`
-/// whose FIRST argument is `@capture`. A predicate on another capture of
-/// the same pattern states nothing about this one, so it contributes none.
-/// The `)` that closes a predicate's argument list, skipping over string
-/// literals: a literal may itself contain a `)` (`(#any-of? @x "a)b" "c")`),
-/// and stopping at the first one drops every argument after it — and, worse,
-/// abandons the rest of the pattern. Every other scanner in this file steps
-/// over strings the same way.
-fn predicate_close(rest: &str) -> Option<usize> {
-    let b = rest.as_bytes();
-    let mut i = 0usize;
-    while i < b.len() {
-        match b[i] {
-            b'"' => {
-                i += 1;
-                while i < b.len() && b[i] != b'"' {
-                    i += if b[i] == b'\\' { 2 } else { 1 };
-                }
-                i += 1;
-            }
-            b')' => return Some(i),
-            _ => i += 1,
-        }
-    }
-    None
-}
-
-fn collect_capture_literals(
-    pattern: &'static str,
-    capture: &str,
-    out: &mut HashSet<&'static str>,
-) {
-    let want = format!("@{capture}");
-    let mut rest = pattern;
-    while let Some(hash) = rest.find('#') {
-        rest = &rest[hash + 1..];
-        let name_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-        let predicate = &rest[..name_end];
-        rest = &rest[name_end..];
-        if !matches!(predicate, "eq?" | "any-of?") {
-            continue;
-        }
-        let Some(close) = predicate_close(rest) else { return };
-        let args = &rest[..close];
-        let mut tokens = args.split_whitespace();
-        if tokens.next() != Some(want.as_str()) {
-            continue;
-        }
-        // The remaining arguments are the literals, one quoted token each.
-        let mut at = 0usize;
-        while let Some(open) = args[at..].find('"') {
-            let start = at + open + 1;
-            let Some(len) = args[start..].find('"') else { break };
-            out.insert(&args[start..start + len]);
-            at = start + len + 1;
-        }
-    }
-}
-
-/// The named-node kinds a pattern's source can root at: `(kind ...)` names
-/// one, `[(a) (b)] ...` names each alternative's, and a group holding ONE
-/// node pattern beside its predicates — `((kind …) @c (#any-of? @c …))`,
-/// the only spelling that puts a predicate on a capture bound to an
-/// anonymous child — names that node's. Everything else — a string token,
-/// `_`, `(_)`, a group of SIBLING patterns (which matches at no single
-/// root) — names none.
-fn collect_root_kinds(pattern: &'static str, out: &mut HashSet<&'static str>) {
-    let rest = skip_trivia(pattern);
-    match rest.as_bytes().first() {
-        Some(b'(') => {
-            if let Some(kind) = leading_kind(&rest[1..]) {
-                out.insert(kind);
-            } else if let Some(inner) = sole_group_pattern(&rest[1..]) {
-                collect_root_kinds(inner, out);
-            }
-        }
-        // An alternation at the root: each `(kind` inside it is a root.
-        Some(b'[') => {
-            let mut inner = skip_trivia(&rest[1..]);
-            let mut depth = 0usize;
-            while let Some(c) = inner.as_bytes().first() {
-                match c {
-                    b']' if depth == 0 => break,
-                    b'(' if depth == 0 => {
-                        if let Some(kind) = leading_kind(&inner[1..]) {
-                            out.insert(kind);
-                        }
-                        depth += 1;
-                    }
-                    b'(' => depth += 1,
-                    b')' => depth = depth.saturating_sub(1),
-                    _ => {}
-                }
-                inner = skip_trivia(&inner[1..]);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// The single sub-pattern of a group, `s` being the group's interior — the
-/// shape a document writes when a predicate has to sit beside a capture the
-/// node pattern binds to an anonymous child. Predicates state nothing about
-/// what the pattern matches ON, so they are passed over; two sub-patterns
-/// mean a sibling group, which roots at no one node and names none.
-fn sole_group_pattern(s: &'static str) -> Option<&'static str> {
-    let bytes = s.as_bytes();
-    let mut i = 0usize;
-    let mut found: Option<&'static str> = None;
-    while i < bytes.len() {
-        match bytes[i] {
-            // the group's own close
-            b')' => break,
-            b'"' => i = skip_string(bytes, i),
-            b';' => while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            },
-            open @ (b'(' | b'[') => {
-                let close = matching_close(bytes, i)?;
-                if !(open == b'(' && skip_trivia(&s[i + 1..]).starts_with('#'))
-                    && found.replace(&s[i..=close]).is_some()
-                {
-                    return None;
-                }
-                i = close;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    found
-}
-
-/// The index of the bracket closing the one `bytes[open]` opens, counting
-/// only its own bracket flavour and stepping over string literals and
-/// comments.
-fn matching_close(bytes: &[u8], open: usize) -> Option<usize> {
-    let (o, c) = if bytes[open] == b'(' { (b'(', b')') } else { (b'[', b']') };
-    let mut depth = 0usize;
-    let mut i = open;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' => i = skip_string(bytes, i),
-            b';' => while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            },
-            x if x == o => depth += 1,
-            x if x == c => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    None
-}
-
-/// The index of the quote closing the string starting at `at`, or the end
-/// of the input — a quoted argument may hold a bracket of its own.
-fn skip_string(bytes: &[u8], at: usize) -> usize {
-    let mut i = at + 1;
-    while i < bytes.len() && bytes[i] != b'"' {
-        i += if bytes[i] == b'\\' { 2 } else { 1 };
-    }
-    i.min(bytes.len())
-}
-
-/// The identifier at the head of `s`, when it is one — a node kind. `_`
-/// (the wildcard) and `#` (a predicate) are not kinds.
-fn leading_kind(s: &'static str) -> Option<&'static str> {
-    let s = skip_trivia(s);
-    let end = s
-        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .unwrap_or(s.len());
-    let head = &s[..end];
-    (!head.is_empty() && head != "_" && !head.starts_with(|c: char| c.is_ascii_digit()))
-        .then_some(head)
-}
-
-/// Whitespace and `;` comments at the head of a query source slice.
-fn skip_trivia(mut s: &'static str) -> &'static str {
-    loop {
-        let trimmed = s.trim_start();
-        if let Some(rest) = trimmed.strip_prefix(';') {
-            s = rest.find('\n').map_or("", |i| &rest[i + 1..]);
-            continue;
-        }
-        return trimmed;
-    }
+/// The value a pattern's `#set!` directive gives `key` — the document stating
+/// a fact about every match of that one pattern (`construct.method` on a
+/// construction pattern names the method it calls). Read through the safe
+/// `property_settings`; a directive never filters, so the pattern's own
+/// predicates still decide what matches.
+pub(crate) fn pattern_property(query: &'static Query, pattern: usize, key: &str) -> Option<&'static str> {
+    query
+        .property_settings(pattern)
+        .iter()
+        .find(|p| &*p.key == key)
+        .and_then(|p| p.value.as_deref())
 }
 
 #[cfg(test)]

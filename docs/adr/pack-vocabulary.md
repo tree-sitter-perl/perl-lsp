@@ -80,7 +80,7 @@ stopping kinds are the document's own read-pattern roots.
 
 A consumer that keeps node-kind tables is usually a cursor consumer: the
 sentinel needs to know whether the cursor sits in a member access, a
-call, or a string. It reads the document instead, through three seams in
+call, or a string. It reads the document instead, through the seams in
 `build/query_extract/cursor_query.rs`:
 
 - `pack_query(pack)` — the compiled query the EXTRACTOR uses, memoised
@@ -96,15 +96,27 @@ call, or a string. It reads the document instead, through three seams in
   class body) is matched at every descendant, which is the difference
   between ~2 µs and ~20 ms per keystroke. The cost signature is pinned
   by a test on a 2,000-hop chain inside a 5,000-method class.
-- `pattern_root_kinds(query, capture)` — the node kinds that root a
-  pattern carrying a capture, read off the compiled query's
-  `capture_quantifiers` and its pattern sources. This is where a table
-  like `member_kinds` comes from once the table is gone: "which nodes
-  are a member access" is answered by the patterns that capture
-  `@member.recv`. A pattern whose root is not a named node (an anonymous
-  token, a wildcard, a grouped sibling pattern) names no kind, so the
-  set is what a consumer may match ON, never a claim that nothing else
-  can carry the capture.
+- `fires_at(query, node, src, capture)` / `is_captured_as(..)` — whether
+  a match rooted at `node` carries the capture (anywhere in it / on
+  `node` itself), on the same three bounds, stopping at the first match
+  that does. This is where a table like `member_kinds` goes once the
+  table is gone: "is this a member access" is the document's own
+  `@member.recv` pattern firing on the node, fields and predicates
+  included, so a `binary_expression` is a domain comparison only when
+  the operator predicate holds. A node that roots one match per child (a
+  50,000-argument list) still costs a walk over those matches when the
+  answer is no.
+- `pattern_property(query, pattern, key)` — what a pattern's `#set!`
+  directive states about its matches, read through `property_settings`.
+  A fact a site needs but never spells goes here: a construction pattern
+  names the method it calls (`(#set! construct.method "__construct")`),
+  because `new Foo()` writes no method name. The document says it on
+  every construction pattern rather than once;
+  `layering_tests::construction_patterns_name_the_method_they_call` pins
+  that none forgets. Nothing reads a predicate's literals back: a token
+  that names the enclosing class is one the document captured as
+  `@receiver.self`, asked by span, and a pack's own type parsers answer
+  `self` / `static` written in an annotation or a doc comment.
 
 ### What the three bounds cost (php, measured 2026-09-17)
 
@@ -205,11 +217,8 @@ over the document SOURCE rather than the compiled query — the Rust
 `Query` API exposes patterns, capture names and quantifiers, but no
 per-step capture list, so the compiled form cannot answer which capture
 was dropped. Four or more consecutive `@name` tokens in the source is one
-node's capture list. The predicate literals behind `capture_literals` are
-scanned by hand for the same reason: `#eq?` / `#any-of?` fold into
-tree-sitter's internal text predicates and the compiled query exposes
-neither. Both scanners step over string literals, because a literal may
-contain the character that ends the form.
+node's capture list. The scanner steps over string literals, because a
+literal may contain the character that ends the form.
 
 `layering_tests::bundled_query_documents_are_served_whole` runs the three
 detectors over every registered pack's skeleton and every bundled overlay

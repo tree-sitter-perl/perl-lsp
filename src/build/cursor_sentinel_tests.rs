@@ -196,9 +196,8 @@ fn no_receiver_on_plain_identifier() {
 
 // ---- the two readers of a member shape stay one reader ----
 
-/// Rule #15's cursor half: `@member.recv`'s patterns ARE the member-access
-/// kinds, so every shape the document calls a member receiver is a shape
-/// member completion climbs to. `set_max_start_depth(Some(0))` makes the
+/// Rule #15's cursor half: every shape the document calls a member receiver
+/// is a shape member completion climbs to. `set_max_start_depth(Some(0))` makes the
 /// failure silent in the other direction — a pattern that roots at an
 /// ANCESTOR still feeds the extractor while the cursor never reaches it —
 /// which is what this pins.
@@ -234,18 +233,65 @@ fn every_receiver_shape_the_document_names_completes() {
     }
 }
 
-/// The set the cursor climbs to is non-empty for every pack that has
-/// member completion at all — an empty set is the silent form of the same
-/// failure (every climb declines).
+/// Every pack with member completion declares the capture the cursor climbs
+/// to — a document without it is the silent form of the same failure
+/// (every climb declines).
 #[test]
-fn packs_with_member_completion_name_their_member_kinds() {
+fn packs_with_member_completion_declare_their_member_capture() {
     for (pack, language) in [
         #[cfg(feature = "cpp")]
         (crate::build::query_extract::cpp_pack(), tree_sitter_cpp::LANGUAGE.into()),
+        (crate::build::query_extract::python_pack(), tree_sitter_python::LANGUAGE.into()),
     ] {
         let language: tree_sitter::Language = language;
         let query = crate::build::query_extract::query_for(&language, &pack).expect("query");
-        let kinds = crate::build::query_extract::pattern_root_kinds(query, "member.recv");
-        assert!(!kinds.is_empty(), "{}: @member.recv names no node kind", pack.lang_id);
+        assert!(
+            query.capture_index_for_name("member.recv").is_some(),
+            "{}: the document declares no @member.recv",
+            pack.lang_id
+        );
     }
 }
+
+/// A call the document declares is found by signature help's climb, in a
+/// language whose calls are a method shape as well as a plain one.
+#[test]
+fn python_call_sites_come_from_the_document() {
+    let pack = crate::build::query_extract::python_pack();
+    for (src, marker, callee, active) in [
+        ("f(1, )\n", "f(1, ", "f", 1),
+        ("o.m(x, y, )\n", "o.m(x, y, ", "m", 2),
+        ("f(g(1, ), 2)\n", "g(1, ", "g", 1),
+        ("f(k=1, )\n", "f(k=1, ", "f", 1),
+    ] {
+        let mut p = python();
+        let tree = p.parse(src, None).unwrap();
+        let cursor = after(src, marker);
+        let site = call_at(&tree, &pack, src, cursor).unwrap_or_else(|| panic!("{src}: no call site"));
+        let start = point_to_byte(src, site.callee.start);
+        let end = point_to_byte(src, site.callee.end);
+        assert_eq!(&src[start..end], callee, "{src}");
+        assert_eq!(site.active_param, active, "{src}");
+    }
+}
+
+/// `f.get().` completes the members of what `get` returns: the document
+/// declares a method call (`@hop.call`), so the receiver types through the
+/// method's return like any declared call.
+#[test]
+fn python_method_call_receiver_types_through_its_return() {
+    let pack = crate::build::query_extract::python_pack();
+    let src = "class W:\n    def spin(self):\n        return 1\n\nclass F:\n    def get(self):\n        return W()\n\ndef run():\n    f = F()\n    f.get().\n";
+    let mut p = python();
+    let tree = p.parse(src, None).unwrap();
+    let fa = crate::build::query_extract::extract(&tree, src.as_bytes(), &pack).unwrap().into_file_analysis();
+    let cursor = after(src, "f.get().");
+    let ctx = member_completion_ctx_incremental(&mut p, &pack, src, &tree, cursor, &fa, None).expect("member ctx");
+    assert_eq!(
+        ctx.receiver_type.as_ref().and_then(|t| t.class_name()),
+        Some("W"),
+        "got {:?}",
+        ctx.receiver_type
+    );
+}
+

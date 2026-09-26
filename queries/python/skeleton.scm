@@ -86,6 +86,22 @@
   function: (identifier) @ref.call) @expr.call
 (call
   function: (attribute attribute: (identifier) @ref.method))
+; The CALLED form of a member access also mints a chain-hop witness on the
+; whole call's span, so `w.get().spin()` types through the hop with no
+; intermediate variable. `@hop.member`, not `@ref.method`: the pattern above
+; already minted the ref.
+(call
+  function: (attribute
+    object: (_) @hop.recv
+    attribute: (identifier) @hop.member)
+  arguments: (argument_list) @arity.args) @hop.call
+
+; ---- call arguments: the arity count and signature help's active slot.
+(argument_list) @arity.args
+(argument_list (_) @arity.arg)
+(argument_list (keyword_argument) @arity.arg.named)
+(argument_list (list_splat) @arity.arg.spread)
+(argument_list (dictionary_splat) @arity.arg.spread)
 ; `recv.attr` is python's member access; its `object:` is the receiver the
 ; cursor's member completion types.
 (attribute object: (_) @member.recv)
@@ -94,6 +110,9 @@
 ; `x` nothing declares.
 (attribute attribute: (identifier) @var.member)
 (identifier) @expr.read.var
+
+; a function's returned value: the implicit-return chain types the call.
+(return_statement (_) @expr.return.value)
 
 (string) @expr.lit.string
 (integer) @expr.lit.number

@@ -1132,3 +1132,80 @@ fn a_body_typed_return_survives_repeated_enrichment() {
         );
     }
 }
+
+/// A reference to the object the enclosing method runs on is a fact the
+/// document stated: python's receiver parameter is a symbol flagged
+/// RECEIVER, and every read of it resolves there; a plain parameter is not.
+#[cfg(feature = "python")]
+#[test]
+fn python_self_reads_name_the_current_object() {
+    let fa = python_driver().analyze("class A:\n    def f(self, other):\n        self.x\n        other.x\n");
+    let read = |name: &str| {
+        fa.refs()
+            .iter()
+            .find(|r| r.target_name == name && r.span.start.row == 2 + usize::from(name == "other"))
+            .unwrap_or_else(|| panic!("{name}"))
+    };
+    assert!(fa.names_current_object(read("self")));
+    assert!(!fa.names_current_object(read("other")));
+}
+
+/// The language's own object token carries the flag where the document
+/// captured it. C++'s bundled document mints no reference on `this`, so an
+/// overlay reads it as a variable to give the capture a site to land on.
+#[cfg(feature = "cpp")]
+#[test]
+fn own_object_token_is_flagged_where_the_document_captured_it() {
+    fn pack() -> crate::build::query_extract::LangPack {
+        crate::build::query_extract::LangPack {
+            bundled_overlays: &[("this-read.scm", "(this) @expr.read.var\n")],
+            ..crate::build::query_extract::cpp_pack()
+        }
+    }
+    let driver = PackDriver { pack, ..cpp_driver() };
+    let fa = driver.analyze("struct A { int x; int f() { return this->x; } };\n");
+    let this = fa.refs().iter().find(|r| r.target_name == "this").expect("a ref on `this`");
+    assert!(this.is_own_object());
+    assert!(fa.names_current_object(this));
+    let x = fa.refs().iter().find(|r| r.target_name == "x").expect("the member ref");
+    assert!(!x.is_own_object(), "the member is not the object");
+}
+
+/// A construction site names no method, so the method it calls comes from
+/// the construction pattern's own directive, and a token that names the
+/// enclosing class is one the document captured as `@receiver.self`. Python
+/// bundles neither (its construction is a plain call), so an overlay reads
+/// `Foo(...)` and a classmethod's `cls(...)` as constructions of `__init__`.
+#[cfg(feature = "python")]
+#[test]
+fn construction_sites_call_the_method_their_pattern_names() {
+    use crate::model::file_analysis::{RefFlags, RefKind};
+    const OVERLAY: &str = r#"((call function: (identifier) @ref.call arguments: (argument_list) @arity.args) @expr.ctor
+ (#set! construct.method "__init__"))
+((call function: (identifier) @receiver.self) (#eq? @receiver.self "cls"))
+"#;
+    fn pack() -> crate::build::query_extract::LangPack {
+        crate::build::query_extract::LangPack {
+            bundled_overlays: &[("ctor.scm", OVERLAY)],
+            ..crate::build::query_extract::python_pack()
+        }
+    }
+    let driver = PackDriver { pack, ..python_driver() };
+    let src = "class Foo:\n    def __init__(self, a): pass\n    @classmethod\n    def make(cls):\n        return cls(1)\n\nx = Foo(2)\n";
+    let fa = driver.analyze(src);
+    let ctor_calls: Vec<(usize, String)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "__init__" && r.flags.contains(RefFlags::CONSTRUCTS))
+        .map(|r| {
+            let RefKind::MethodCall { invocant, .. } = &r.kind else { panic!("a member call, got {:?}", r.kind) };
+            (r.span.start.row, format!("{invocant:?}"))
+        })
+        .collect();
+    assert_eq!(ctor_calls.len(), 2, "both sites call the constructor: {ctor_calls:?}");
+    for (row, invocant) in &ctor_calls {
+        assert!(invocant.contains("Foo"), "row {row}: the constructor of Foo, got {invocant}");
+    }
+    assert!(ctor_calls.iter().any(|(row, _)| *row == 4), "`cls(1)` constructs the enclosing class");
+    assert!(ctor_calls.iter().any(|(row, _)| *row == 6), "`Foo(2)` constructs Foo");
+}

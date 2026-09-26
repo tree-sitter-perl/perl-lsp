@@ -224,12 +224,12 @@ fn walk_qualifier_chain<'a>(
 /// Drop transparent receiver wrappers (`(*p)`, `(&o)`, `(p)`) to the value
 /// underneath. Depth-capped; the leaf is an invocant of any shape, so —
 /// unlike the declarator peel — nothing is minted per level.
-pub(crate) fn peel_receiver<'a>(
+fn peel_receiver<'a>(
     mut node: tree_sitter::Node<'a>,
-    wrappers: &std::collections::HashSet<&'static str>,
+    wrappers: &std::collections::HashSet<usize>,
 ) -> tree_sitter::Node<'a> {
     for _ in 0..32 {
-        if !wrappers.contains(node.kind()) {
+        if !wrappers.contains(&node.id()) {
             return node;
         }
         match node.named_child(0) {
@@ -250,16 +250,16 @@ pub(crate) fn peel_receiver<'a>(
 fn param_name_node<'t>(
     ch: tree_sitter::Node<'t>,
     captured: Option<tree_sitter::Node<'t>>,
-    simple_var_kinds: &std::collections::HashSet<&'static str>,
+    bare_var_ids: &std::collections::HashSet<usize>,
 ) -> Option<tree_sitter::Node<'t>> {
     if captured.is_some() {
         return captured;
     }
-    // The descent's stopping kinds are the document's own too: the nodes its
-    // read patterns root at ARE this language's simple variables.
+    // The descent stops at the document's own word: the first node its read
+    // patterns capture as a bare variable.
     let mut stack = vec![ch];
     while let Some(n) = stack.pop() {
-        if n != ch && simple_var_kinds.contains(n.kind()) {
+        if n != ch && bare_var_ids.contains(&n.id()) {
             return Some(n);
         }
         let mut w = n.walk();
@@ -315,15 +315,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let query_source = effective_query_source(&language, pack);
     let query = cached_query(&language, query_source)?;
     // The cursor-time runner serves THIS object, never one of its own.
-    super::cursor_query::remember(pack.lang_id, query, query_source);
-    // A BARE variable: the node kinds the document reads as one. The
-    // by-reference binding lane, the parameter-name walk and the op-DX gate
-    // all mean the same shape, so they ask the same patterns.
-    let simple_var_kinds = super::cursor_query::pattern_root_kinds(query, "expr.read.var");
-    // Transparent receiver wrappers — `(p)`, `*p`, `&o` — named by the
-    // document, so the mint's invocant span lands on the inner expression
-    // `expr_type_at_span` already types.
-    let recv_peel_kinds = super::cursor_query::recv_peel_kinds(query);
+    super::cursor_query::remember(pack.lang_id, query);
     let cap_names: Vec<String> = query
         .capture_names()
         .iter()
@@ -408,14 +400,39 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // matched AFTER the chain that contains it, so the peel runs post-loop.
     let mut deref_caps = DerefCaps::default();
     let mut nested_targets: Vec<(tree_sitter::Node, usize)> = Vec::new();
+    // The nodes the document reads as a BARE variable (`@expr.read.var`) and
+    // as a transparent receiver wrapper (`@recv.peel*`). The by-reference
+    // lane, the parameter-name walk, the op-DX gate and the receiver peel all
+    // ask these, after the walk: a receiver's match comes before its
+    // children's.
+    let mut bare_var_ids: std::collections::HashSet<usize> = Default::default();
+    let mut peel_ids: std::collections::HashSet<usize> = Default::default();
+    // (event index, the receiver as captured, its match) — finished once the
+    // two sets above are complete.
+    let mut member_recvs: Vec<(usize, tree_sitter::Node, usize)> = Vec::new();
+    // The method a construction pattern says its matches call
+    // (`#set! construct.method`): a site like `new Foo()` never spells it.
+    let mut construct_method_by_match: HashMap<usize, &'static str> = HashMap::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), source);
     let mut match_counter = 0usize;
     while let Some(m) = matches.next() {
         match_counter += 1;
+        if let Some(method) = super::cursor_query::pattern_property(query, m.pattern_index, "construct.method") {
+            construct_method_by_match.insert(match_counter, method);
+        }
         for c in m.captures {
             let node = c.node;
             let cap = cap_names[c.index as usize].as_str();
+            match cap {
+                "expr.read.var" => {
+                    bare_var_ids.insert(node.id());
+                }
+                "recv.peel" | "recv.peel.deref" => {
+                    peel_ids.insert(node.id());
+                }
+                _ => {}
+            }
             // The out-of-line vocabulary, collected here and joined once the
             // whole tree has been matched: a wrapper the peel descends, the
             // function declarator it stops at, the qualified name whose chain
@@ -454,23 +471,20 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // node is live, so the minted MethodCall ref's invocant_span lands
             // on the inner expression `expr_type_at_span` already types.
             if matches!(cap, "member.recv" | "member.recv.named" | "hop.recv") {
-                // op-DX applies only to a bare-variable immediate receiver
-                // (its deref_stack resolves by name); a wrapper/chain doesn't.
-                member_simple.insert(match_counter, simple_var_kinds.contains(node.kind()));
-                let inner = peel_receiver(node, recv_peel_kinds);
+                member_recvs.push((events.len(), node, match_counter));
                 events.push(Event {
-                    start_byte: inner.start_byte(),
-                    end_byte: inner.end_byte(),
-                    start: inner.start_position(),
-                    end: inner.end_position(),
+                    start_byte: node.start_byte(),
+                    end_byte: node.end_byte(),
+                    start: node.start_position(),
+                    end: node.end_position(),
                     // One receiver lane whichever capture named it: a
                     // string-named member and a chain hop have the same
                     // receiver a written member access does. The spellings
                     // differ so each capture's patterns keep stating one
-                    // thing — `@member.recv`'s roots ARE the member-access
-                    // kinds the cursor climbs to.
+                    // thing — `@member.recv` fires exactly where a written
+                    // member access is, which is what the cursor climbs to.
                     cap: "member.recv".to_string(),
-                    text: inner.utf8_text(source).unwrap_or("").to_string(),
+                    text: String::new(),
                     match_id: match_counter,
                 });
                 continue;
@@ -548,6 +562,20 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             });
         }
     }
+    // Member receivers: op-DX applies only to a bare-variable immediate
+    // receiver (its deref_stack resolves by name), and the minted invocant
+    // span lands on the inner expression of a transparent wrapper (`(*p)`,
+    // `(p)`), the one `expr_type_at_span` already types.
+    for (at, node, match_id) in member_recvs {
+        member_simple.insert(match_id, bare_var_ids.contains(&node.id()));
+        let inner = peel_receiver(node, &peel_ids);
+        let e = &mut events[at];
+        e.start_byte = inner.start_byte();
+        e.end_byte = inner.end_byte();
+        e.start = inner.start_position();
+        e.end = inner.end_position();
+        e.text = inner.utf8_text(source).unwrap_or("").to_string();
+    }
     // ---- declared parameters: the arity counts and the parameters
     // themselves. Each `@arity.param*` capture states what its parameter
     // does to the count — one that must be written, one carrying a default,
@@ -610,7 +638,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         .and_then(|ps| ps.iter().find(|(c, _)| *c == want))
                         .map(|(_, n)| *n)
                 };
-                let name_node = param_name_node(ch, part("arity.param.name"), simple_var_kinds);
+                let name_node = param_name_node(ch, part("arity.param.name"), &bare_var_ids);
                 // A by-reference position (php `&$out`, C++ `T& x`): the
                 // parameter's variable name, so the def mints the aliasing
                 // edge the call sites bind through. A slurpy parameter takes
@@ -736,11 +764,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
     }
     // ---- join each argument capture to its list, then each list to its call ----
-    // The node kinds an argument list IS come from the patterns that capture
-    // an argument, so a document that teaches the language a new call shape
-    // teaches the arity lane with it.
+    // A list is what the document captured as `@arity.args`, so a document
+    // that teaches the language a new call shape teaches the arity lane with
+    // it.
     {
-        let arg_list_kinds = super::cursor_query::pattern_root_kinds(query, "arity.arg");
+        let list_ids: std::collections::HashSet<usize> =
+            arity_lists.iter().map(|(_, n)| n.id()).collect();
         #[derive(Default)]
         struct ListArgs<'t> {
             args: Vec<tree_sitter::Node<'t>>,
@@ -755,12 +784,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             let mut owner = node.parent();
             for _ in 0..8 {
                 match owner {
-                    Some(n) if arg_list_kinds.contains(n.kind()) => break,
+                    Some(n) if list_ids.contains(&n.id()) => break,
                     Some(n) => owner = n.parent(),
                     None => break,
                 }
             }
-            let Some(owner) = owner.filter(|n| arg_list_kinds.contains(n.kind())) else { continue };
+            let Some(owner) = owner.filter(|n| list_ids.contains(&n.id())) else { continue };
             let slot = by_list.entry(owner.id()).or_default();
             match cap {
                 "arity.arg" => slot.args.push(node),
@@ -931,6 +960,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // Stamped onto the refs once, below, so no lane re-matches a spelling.
     let mut this_receiver_spans: std::collections::HashSet<(Point, Point)> = Default::default();
     let mut relative_scope_spans: std::collections::HashSet<(Point, Point)> = Default::default();
+    // `@receiver.self` alone: the tokens that name the class this code is
+    // written in (`new self()`), not its parent.
+    let mut self_class_spans: std::collections::HashSet<(Point, Point)> = Default::default();
     let mut ctor_call_spans: std::collections::HashSet<(Point, Point)> = Default::default();
     let mut ctor_name_spans: std::collections::HashSet<(Point, Point)> =
         std::collections::HashSet::new();
@@ -1075,6 +1107,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         if e.cap == "receiver.self" {
             self_recv_matches.insert(e.match_id);
             relative_scope_spans.insert((e.start, e.end));
+            self_class_spans.insert((e.start, e.end));
         }
         if e.cap == "receiver.this" {
             this_receiver_spans.insert((e.start, e.end));
@@ -1340,21 +1373,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             _ => None,
         })
         .collect();
-    // The spellings that name the WRITING class rather than a namespaced
-    // one (`self`, `static`): the document says which, on the receiver
-    // capture that fires on them, and every reader asks the document.
-    let self_class_tokens = super::cursor_query::capture_literals(query, "receiver.self");
-    // The constructor's name — the document's own `#eq?` on the capture that
-    // flags it, so the construction sites and the declaration agree by
-    // construction. `None` for a language whose constructor is a convention
-    // rather than a spelling (Perl).
-    let ctor_name: Option<&'static str> =
-        super::cursor_query::capture_literals(query, "def.method.ctor").iter().copied().next();
+    // A written type spelling that names the class this code is written in
+    // (`self`, `static`) never reaches here: at a code site the document's
+    // `@receiver.self` says so by span, and a pack's own type parsers
+    // (annotations, doc comments) answer those spellings themselves.
     let ident = |written: &str, at: Point| -> String {
-        // the current-class spellings name no namespace; the model
-        // resolves them to the enclosing class
-        if self_class_tokens.contains(written)
-            || crate::model::conventions::is_current_package_token(written)
+        if crate::model::conventions::is_current_package_token(written)
             || template_names.contains(written)
         {
             return written.to_string();
@@ -1888,9 +1912,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // `new class(...)` invokes the synthesized identity's
                 // constructor, so the ctor gets the MethodCall a `new
                 // self()` mints — fan-in, goto-def and references on
-                // `__construct` see it like any `new Foo()`.
-                if let (Some(ctor), Some(name)) =
-                    (ctor_name, defaulted_matches.get(&e.match_id))
+                // `__construct` see it like any `new Foo()`. The method is
+                // the one the anchoring pattern's directive names.
+                if let (Some(ctor), Some(name)) = (
+                    construct_method_by_match.get(&e.match_id).copied(),
+                    defaulted_matches.get(&e.match_id),
+                )
                 {
                     if anon_ctor_sites.insert((e.start_byte, e.end_byte)) {
                         let span = Span { start: e.start, end: e.end };
@@ -2306,16 +2333,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // `new self(...)` / `new static(...)`: the token spells no class
                 // name — it IS a call of the constructor on the current class.
                 // Minted as that member call (invocant = the enclosing class,
-                // name = the pack's constructor), so the ctor's references,
-                // hover and goto-def see the site while a class rename never
-                // rewrites the `self` token. Which spellings name the
-                // enclosing class is the document's `@receiver.self`.
+                // name = the method the construction pattern's directive
+                // names), so the ctor's references, hover and goto-def see
+                // the site while a class rename never rewrites the `self`
+                // token. The token names the enclosing class where the
+                // document captured it as `@receiver.self`.
                 if !inside_def
                     && e.cap == "ref.call"
                     && ctor_matches.contains(&e.match_id)
-                    && self_class_tokens.contains(&e.text.as_str())
+                    && self_class_spans.contains(&(e.start, e.end))
                 {
-                    if let (Some(ctor), Some(cls_recv)) = (ctor_name, enclosing_class.clone()) {
+                    if let (Some(ctor), Some(cls_recv)) =
+                        (construct_method_by_match.get(&e.match_id).copied(), enclosing_class.clone())
+                    {
                         let span = Span { start: e.start, end: e.end };
                         out.refs.push(SkelRef {
                             via: None,
@@ -2362,7 +2392,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // references and goto-def see it). Neither consumer has to
                     // ask whether a call that spells a class name constructs.
                     if e.cap == "ref.call" && ctor_matches.contains(&e.match_id) {
-                        if let Some(ctor) = ctor_name {
+                        if let Some(ctor) = construct_method_by_match.get(&e.match_id).copied() {
                             let span = Span { start: e.start, end: e.end };
                             let class = (pack.shape_name)("ref.type", &e.text);
                             out.refs.push(SkelRef {
@@ -2629,10 +2659,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 let span = Span { start: e.start, end: e.end };
                 // …and a candidate local-var reference, resolved to its
                 // declaration in into_file_analysis (goto-def + hover).
+                // the language's own object token (`$this`) is a read of
+                // nothing the file declares; the capture that said so rides
+                // the ref.
+                let flags = if this_receiver_spans.contains(&(e.start, e.end)) {
+                    crate::model::file_analysis::RefFlags::OWN_OBJECT
+                } else {
+                    Default::default()
+                };
                 out.var_reads.push((
                     (pack.shape_name)("ref.var", &e.text),
                     cur_scope,
                     span,
+                    flags,
                 ));
                 out.witnesses.push(crate::model::witnesses::Witness {
                     attachment: crate::model::witnesses::WitnessAttachment::Expr(span),
@@ -2919,15 +2958,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 let callee = events
                     .iter()
                     .find(|x| x.match_id == e.match_id && x.cap == "ref.call")
-                    .map(|x| (pack.shape_name)("ref.call", &x.text));
-                if let Some(name) = callee {
+                    .map(|x| ((pack.shape_name)("ref.call", &x.text), self_class_spans.contains(&(x.start, x.end))));
+                if let Some((name, names_own_class)) = callee {
                     let span = Span { start: e.start, end: e.end };
                     lit_spans.push((e.start_byte, e.end_byte, span));
                     // `new self()` / `new static()`: the class is the
-                    // ENCLOSING one (the document's `@receiver.self` names
-                    // the spellings) — a bare `TypeName` edge would chase a
-                    // class literally named "self".
-                    let payload = if self_class_tokens.contains(&name.as_str()) {
+                    // ENCLOSING one (the document captured the token as
+                    // `@receiver.self`) — a bare `TypeName` edge would chase
+                    // a class literally named "self".
+                    let payload = if names_own_class {
                         // `self` outside a class (invalid source) has no
                         // enclosing class — mint nothing.
                         package.as_ref().map(|cls| {

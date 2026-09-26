@@ -85,8 +85,8 @@ pub fn patch(src: &str, cursor: usize) -> String {
 /// True when `cursor` lands inside a string/char/comment in the ORIGINAL
 /// parse — splicing there would be a no-op at best, corruption at worst.
 fn cursor_in_skip(orig: &Tree, src: &str, cursor: usize, cfg: &crate::build::query_extract::LangPack) -> bool {
-    let skip = kinds(orig.root_node(), cfg, "skip");
-    if skip.is_empty() {
+    let Some(query) = query_at(orig.root_node(), cfg) else { return false };
+    if query.capture_index_for_name("skip").is_none() {
         return false;
     }
     // Probe one byte back: at `box.` the cursor is past the `.`, but a
@@ -100,7 +100,7 @@ fn cursor_in_skip(orig: &Tree, src: &str, cursor: usize, cfg: &crate::build::que
     };
     let mut n = Some(node);
     while let Some(x) = n {
-        if skip.contains(x.kind()) {
+        if crate::build::query_extract::is_captured_as(query, x, src.as_bytes(), "skip") {
             return true;
         }
         n = x.parent();
@@ -114,25 +114,24 @@ fn query_at(at: Node, cfg: &crate::build::query_extract::LangPack) -> Option<&'s
     crate::build::query_extract::query_for(&at.language(), cfg)
 }
 
-/// The node kinds `cfg`'s document roots `capture`'s patterns at — the one
-/// way this module answers "which nodes are a member access / a call / a
-/// place not to splice".
-fn kinds(
-    at: Node,
-    cfg: &crate::build::query_extract::LangPack,
-    capture: &str,
-) -> &'static std::collections::HashSet<&'static str> {
-    static EMPTY: std::sync::OnceLock<std::collections::HashSet<&'static str>> =
-        std::sync::OnceLock::new();
+/// Does a match of `cfg`'s document rooted at `at` capture `capture` — the
+/// one way this module answers "is this a member access / a comparison"?
+fn fires(at: Node, cfg: &crate::build::query_extract::LangPack, src: &str, capture: &str) -> bool {
     query_at(at, cfg)
-        .map(|q| crate::build::query_extract::pattern_root_kinds(q, capture))
-        .unwrap_or_else(|| EMPTY.get_or_init(Default::default))
+        .is_some_and(|q| crate::build::query_extract::fires_at(q, at, src.as_bytes(), capture))
 }
 
-/// Is `at`'s kind one of the shapes the document calls a CALL — a call
-/// expression, a chain hop, or a construction?
-fn is_call_kind(at: Node, cfg: &crate::build::query_extract::LangPack) -> bool {
-    ["expr.call", "hop.call", "expr.ctor"].iter().any(|c| kinds(at, cfg, c).contains(at.kind()))
+/// Is `at` itself captured as `capture` — a call, a receiver wrapper, a
+/// place not to splice?
+fn captured(at: Node, cfg: &crate::build::query_extract::LangPack, src: &str, capture: &str) -> bool {
+    query_at(at, cfg)
+        .is_some_and(|q| crate::build::query_extract::is_captured_as(q, at, src.as_bytes(), capture))
+}
+
+/// Does `cfg`'s document declare `capture` at all — a capability, asked of
+/// the compiled query rather than of any node.
+fn declares(at: Node, cfg: &crate::build::query_extract::LangPack, capture: &str) -> bool {
+    query_at(at, cfg).is_some_and(|q| q.capture_index_for_name(capture).is_some())
 }
 
 /// Patch a sentinel at `cursor`, re-parse, and return the receiver of the
@@ -155,7 +154,7 @@ pub fn receiver_at(
     let patched = patch(src, cursor);
     let tree = parser.parse(&patched, None)?;
     let node = find_sentinel(tree.root_node(), &patched, cursor)?;
-    let member = climb_to_member(node, cfg)?;
+    let member = climb_to_member(node, cfg, &patched)?;
     receiver_of(member, &patched, cursor)
 }
 
@@ -188,11 +187,15 @@ fn find_sentinel<'a>(root: Node<'a>, patched: &str, cursor: usize) -> Option<Nod
 }
 
 /// Walk up from the sentinel to the member-access node that owns it.
-fn climb_to_member<'a>(node: Node<'a>, cfg: &crate::build::query_extract::LangPack) -> Option<Node<'a>> {
+fn climb_to_member<'a>(
+    node: Node<'a>,
+    cfg: &crate::build::query_extract::LangPack,
+    patched: &str,
+) -> Option<Node<'a>> {
     let mut n = node;
     for _ in 0..6 {
         let parent = n.parent()?;
-        if kinds(parent, cfg, "member.recv").contains(parent.kind()) {
+        if fires(parent, cfg, patched, "member.recv") {
             return Some(parent);
         }
         n = parent;
@@ -266,7 +269,7 @@ pub fn receiver_at_incremental(
     });
     let tree = parser.parse(&patched, Some(&edited))?;
     let node = find_sentinel(tree.root_node(), &patched, cursor)?;
-    let member = climb_to_member(node, cfg)?;
+    let member = climb_to_member(node, cfg, &patched)?;
     receiver_of(member, &patched, cursor)
 }
 
@@ -446,7 +449,7 @@ pub fn member_completion_ctx_incremental(
     });
     let tree = parser.parse(&patched, Some(&edited))?;
     let node = find_sentinel(tree.root_node(), &patched, cursor)?;
-    let member = climb_to_member(node, cfg)?;
+    let member = climb_to_member(node, cfg, &patched)?;
     let receiver = member.named_child(0)?;
     // Downstream projects `class_name()` without an index, so the
     // exact-spelling-vs-primary dispatch call (a spec class exists for
@@ -507,7 +510,7 @@ pub fn domain_compare_ctx_incremental(
     analysis: &FileAnalysis,
     module_index: Option<&dyn CrossFileLookup>,
 ) -> Option<InferredType> {
-    if kinds(old.root_node(), cfg, "domain.compare.op").is_empty() {
+    if !declares(old.root_node(), cfg, "domain.compare.op") {
         return None;
     }
     if cursor_in_skip(old, src, cursor, cfg) {
@@ -527,7 +530,7 @@ pub fn domain_compare_ctx_incremental(
     let tree = parser.parse(&patched, Some(&edited))?;
     let node = find_sentinel(tree.root_node(), &patched, cursor)?;
     let cmp = climb_to_domain_compare(node, cfg, &patched)?;
-    let slot = domain_slot_operand(cmp, cfg, cursor)?;
+    let slot = domain_slot_operand(cmp, cfg, &patched, cursor)?;
     // The field slot is `recv OP field` — recover the receiver's class and
     // the field name, then ask usage what enum this field is used AS.
     let base = slot.named_child(0)?;
@@ -539,10 +542,9 @@ pub fn domain_compare_ctx_incremental(
     Some(InferredType::ClassName(dom.domain))
 }
 
-/// Climb from the sentinel to the enclosing equality comparison — a
-/// `domain_compare_kinds` node whose operator is one of the pack's
-/// `domain_compare_ops`. The operator gate keeps `<`/`+`/arithmetic
-/// binaries from opening the slot.
+/// Climb from the sentinel to the enclosing domain comparison — the node
+/// the document's `@domain.compare.op` pattern fires on, operator predicate
+/// included, so `<`/`+`/arithmetic binaries never open the slot.
 fn climb_to_domain_compare<'a>(
     node: Node<'a>,
     cfg: &crate::build::query_extract::LangPack,
@@ -551,29 +553,12 @@ fn climb_to_domain_compare<'a>(
     let mut n = node;
     for _ in 0..6 {
         let parent = n.parent()?;
-        if kinds(parent, cfg, "domain.compare.op").contains(parent.kind())
-            && comparison_uses_domain_op(parent, cfg, patched)
-        {
+        if fires(parent, cfg, patched, "domain.compare.op") {
             return Some(parent);
         }
         n = parent;
     }
     None
-}
-
-/// True when the comparison's operator token is a domain-comparison
-/// operator. The operator is an anonymous child between the operands.
-fn comparison_uses_domain_op(
-    cmp: Node,
-    cfg: &crate::build::query_extract::LangPack,
-    patched: &str,
-) -> bool {
-    let Some(query) = query_at(cmp, cfg) else { return false };
-    let ops = crate::build::query_extract::capture_literals(query, "domain.compare.op");
-    (0..cmp.child_count()).filter_map(|i| cmp.child(i)).any(|ch| {
-        !ch.is_named()
-            && ch.utf8_text(patched.as_bytes()).map(|t| ops.contains(t)).unwrap_or(false)
-    })
 }
 
 /// The comparison operand that is a member access (`o->op_type`) — the
@@ -583,13 +568,14 @@ fn comparison_uses_domain_op(
 fn domain_slot_operand<'a>(
     cmp: Node<'a>,
     cfg: &crate::build::query_extract::LangPack,
+    patched: &str,
     cursor: usize,
 ) -> Option<Node<'a>> {
     (0..cmp.named_child_count())
         .filter_map(|i| cmp.named_child(i))
         .find(|n| {
-            kinds(*n, cfg, "member.recv").contains(n.kind())
-                && !(n.start_byte() <= cursor && cursor < n.end_byte())
+            !(n.start_byte() <= cursor && cursor < n.end_byte())
+                && fires(*n, cfg, patched, "member.recv")
         })
 }
 
@@ -613,7 +599,7 @@ fn operator_fix(
     analysis: &FileAnalysis,
     cfg: &crate::build::query_extract::LangPack,
 ) -> Option<(Span, String)> {
-    if !simple_var_kinds(receiver, cfg).contains(receiver.kind()) {
+    if !is_bare_var_read(receiver, cfg, patched) {
         return None; // only simple-variable receivers carry a resolvable stack
     }
     let name = receiver.utf8_text(patched.as_bytes()).ok()?;
@@ -629,16 +615,6 @@ fn operator_fix(
     Some((span, expected.as_str().to_string()))
 }
 
-/// The node kinds this language reads as a BARE variable — the patterns
-/// that capture a plain variable read say which, so the cursor path and the
-/// extractor's by-reference lane mean the same shape.
-fn simple_var_kinds(
-    at: Node,
-    cfg: &crate::build::query_extract::LangPack,
-) -> &'static std::collections::HashSet<&'static str> {
-    kinds(at, cfg, "expr.read.var")
-}
-
 /// Does `node` itself carry the document's bare-variable-read capture? The
 /// pattern roots at the token, so the bounded cursor answers for this node
 /// and no descendant — which is the question, and not one a kind list can
@@ -648,10 +624,7 @@ fn is_bare_var_read(
     cfg: &crate::build::query_extract::LangPack,
     src: &str,
 ) -> bool {
-    let Some(query) = query_at(node, cfg) else { return false };
-    crate::build::query_extract::captures_at(query, node, src.as_bytes())
-        .iter()
-        .any(|(cap, n)| *cap == "expr.read.var" && n.id() == node.id())
+    captured(node, cfg, src, "expr.read.var")
 }
 
 /// Type a receiver node. A member-access node (`field_expression` /
@@ -669,7 +642,7 @@ fn resolve_node_type(
     // (`member_value_type`: dispatch ladder + receiver-threaded method
     // return, falling back to the field's declared type with template
     // params substituted).
-    if kinds(node, cfg, "member.recv").contains(node.kind()) {
+    if fires(node, cfg, src, "member.recv") {
         let base = node.named_child(0)?;
         let field = node.named_child(node.named_child_count() - 1)?;
         let base_ty = resolve_node_type(base, cfg, src, analysis, module_index)?;
@@ -681,9 +654,9 @@ fn resolve_node_type(
     // cross-file flow through the same chase, no special-casing). The
     // receiver's full value threads through so a param-shaped return
     // (`T get()`) substitutes the instance's args.
-    if is_call_kind(node, cfg) {
+    if ["expr.call", "hop.call", "expr.ctor"].iter().any(|c| captured(node, cfg, src, c)) {
         let Some(func) = node.child_by_field_name("function") else { return None };
-        if kinds(func, cfg, "member.recv").contains(func.kind()) {
+        if fires(func, cfg, src, "member.recv") {
             let recv = func.named_child(0)?;
             let method = func.named_child(func.named_child_count() - 1)?;
             let recv_ty = resolve_node_type(recv, cfg, src, analysis, module_index)?;
@@ -698,10 +671,8 @@ fn resolve_node_type(
     // Transparent wrappers — `(expr)`, `*p`, `&obj` — denote the same class
     // as their operand (pointer-/reference-ness dropped). Peel and recurse so
     // `(*p).m` / `(&o)->m` reach the members `p->m` does.
-    if let Some(query) = query_at(node, cfg) {
-        if crate::build::query_extract::recv_peel_kinds(query).contains(node.kind()) {
-            return resolve_node_type(node.named_child(0)?, cfg, src, analysis, module_index);
-        }
+    if captured(node, cfg, src, "recv.peel") || captured(node, cfg, src, "recv.peel.deref") {
+        return resolve_node_type(node.named_child(0)?, cfg, src, analysis, module_index);
     }
     // Implicit receiver: a bare variable read (`iter_->`, `mem_->`,
     // `options_.`) with NO local declaration IS `this->name` inside a scope
@@ -776,11 +747,13 @@ pub struct PackCallSite {
 pub fn call_at(tree: &Tree, cfg: &crate::build::query_extract::LangPack, src: &str, cursor: usize) -> Option<PackCallSite> {
     let root = tree.root_node();
     let query = query_at(root, cfg)?;
-    let lists = crate::build::query_extract::pattern_root_kinds(query, "arity.arg");
     let at = cursor.min(src.len());
     let mut node = root.descendant_for_byte_range(at.saturating_sub(1), at)?;
     loop {
-        if lists.contains(node.kind()) && node.start_byte() < cursor && cursor <= node.end_byte() {
+        if node.start_byte() < cursor
+            && cursor <= node.end_byte()
+            && crate::build::query_extract::is_captured_as(query, node, src.as_bytes(), "arity.args")
+        {
             if let Some(callee) = callee_token(query, node, src.as_bytes()) {
                 // the slot the cursor sits in: every argument that CLOSED
                 // before it (the one containing it has not).
@@ -886,8 +859,7 @@ pub fn calls_in_rows(
 ) -> Vec<PackCallArgs> {
     let mut out = Vec::new();
     let Some(query) = query_at(tree.root_node(), cfg) else { return out };
-    let lists = crate::build::query_extract::pattern_root_kinds(query, "arity.arg");
-    if lists.is_empty() {
+    if query.capture_index_for_name("arity.args").is_none() {
         return out;
     }
     let mut stack = vec![tree.root_node()];
@@ -895,7 +867,7 @@ pub fn calls_in_rows(
         if node.end_position().row < *rows.start() || node.start_position().row > *rows.end() {
             continue;
         }
-        if lists.contains(node.kind()) {
+        if crate::build::query_extract::is_captured_as(query, node, src.as_bytes(), "arity.args") {
             if let Some(site) = call_site_at(query, node, src) {
                 if rows.contains(&site.callee.start.row) {
                     out.push(site);
