@@ -380,3 +380,49 @@ neither started:
   defer on `Pending` and re-run on the resolver's refresh, and treat
   `Absent` as settled instead of honest-silent. The CLI resolves eagerly,
   so every `--check` miss is already `Absent` by construction.
+
+## 9. Error-dense source makes every cursor reparse slow, and recovery multiplies it — PATHOLOGICAL, not fixed
+
+Tree-sitter's error recovery goes superlinear when a buffer holds many error
+states. 20,000 lines of bracket garbage (`) ] } ;; -> . :: < > ( [ {`
+repeated, then a function with `box.|` in it) cost one incremental reparse:
+
+| input | reparse | member completion | signature help |
+|---|---|---|---|
+| C++ garbage (20k lines) | 2.55 s | 2.59 s | 7.84 s |
+| Python garbage (20k lines) | 1.08 s | 1.10 s | 2.13 s |
+| C++ 835 KB function body | 30 ms | 21 ms | 21 ms |
+| Python 20k-statement function | 91 ms | 94 ms | 113 ms |
+
+Measured 2026-09-24, release build, 4-core cloud box at load under 1, median
+of 3 runs (15 under 100 ms). A well-formed file of the same size reparses
+in 30–90 ms.
+
+The pack cursor path reparses once per attempt. Member completion and
+domain compare try the plain sentinel; when it does not yield a whole
+construct they try the closers of the innermost open bracket the document
+declares (`#recover-pair!`), each alone and then with the terminator
+(`recover.terminator`), skipping the terminator where the grammar already
+inserted a MISSING one. Signature help first asks the tree as typed. So
+the attempts are bounded by the document's own pairs — at most three in
+C++, two in Python — and not by the input; signature help on the C++
+garbage above is three pathological reparses. Closing every open bracket
+instead scaled with the input: 2,001 reparses (14 s) for one request on a
+1,000-deep unclosed `g(g(g(`, which now costs 13 ms.
+
+The same inputs found one quadratic walk, now fixed: the open-bracket scan
+indexed children with `child(i)`, which walks from the first child, and the
+garbage file's ERROR holds every token in the file — 34 s of the Python
+signature-help probe, before the reparses.
+
+The other adversarial shapes, for scale: a 50,000-argument unclosed call
+costs 0.66–0.72 s in C++ (three reparses; counting the active argument is
+linear in the arguments before the cursor) and 0.15–0.22 s in Python.
+
+No budget caps the reparse itself. The candidates, none measured:
+- attempting recovery only when the sentinel's ERROR node is small;
+- cancelling the parse through tree-sitter's progress callback.
+
+The C++ pack already reparses to absorb macro damage, so a budget belongs on
+the shared reparse path, not on the cursor alone. PHP's row lands with its
+pack; the spike measured its garbage reparse at 3.3 s (2026-09-23).
