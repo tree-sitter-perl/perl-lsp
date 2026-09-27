@@ -1671,6 +1671,36 @@ fn bundled_query_documents_are_served_whole() {
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
+/// A construction site (`new Foo()`) never spells the method it calls, so a
+/// pattern capturing `@expr.ctor` names it (`#set! construct.method`). One
+/// that forgets mints no constructor reference and nothing else would say
+/// so: the constructor's references just miss that site.
+#[test]
+fn construction_patterns_name_the_method_they_call() {
+    let mut problems: Vec<String> = Vec::new();
+    for (pack, language) in packs_with_grammars() {
+        let docs = std::iter::once(("skeleton", pack.query_source))
+            .chain(pack.bundled_overlays.iter().copied());
+        for (name, source) in docs {
+            let Ok(q) = tree_sitter::Query::new(&language, source) else { continue };
+            let Some(ctor) = q.capture_index_for_name("expr.ctor") else { continue };
+            for pattern in 0..q.pattern_count() {
+                let captures_ctor = q.capture_quantifiers(pattern)[ctor as usize]
+                    != tree_sitter::CaptureQuantifier::Zero;
+                let names_method =
+                    q.property_settings(pattern).iter().any(|p| &*p.key == "construct.method");
+                if captures_ctor && !names_method {
+                    problems.push(format!(
+                        "{}/{name}: pattern {pattern} captures @expr.ctor without `#set! construct.method`",
+                        pack.lang_id
+                    ));
+                }
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
 /// The step-capture detector at the boundary it guards: three captures on a
 /// node are the limit and pass, a fourth is the one that vanishes.
 #[test]

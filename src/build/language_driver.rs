@@ -582,7 +582,7 @@ impl PackDriver {
             known.extend(ctx.external.macro_names().map(str::to_string));
             let body_refs = crate::build::cpp_reparse::macro_body_name_refs(parser, source, &known);
             for (name, span) in body_refs.name_refs {
-                skel.var_reads.push((name, crate::model::file_analysis::ScopeId(0), span));
+                skel.var_reads.push((name, crate::model::file_analysis::ScopeId(0), span, Default::default()));
             }
             // Field/member uses inside bodies (`->op_next`) — untyped here (the
             // receiver is a macro param), resolved to the declaring class and
@@ -1405,7 +1405,7 @@ fn remap_spans(
             *sp = rspan(*sp);
         }
     }
-    for (_, _, span) in var_reads.iter_mut() {
+    for (_, _, span, _) in var_reads.iter_mut() {
         *span = rspan(*span);
     }
     // Member-write spans are matched against ref spans in
@@ -1616,7 +1616,7 @@ fn mint_erased_macro_reads(
                 scope = sc.id;
             }
         }
-        skel.var_reads.push((name, scope, span));
+        skel.var_reads.push((name, scope, span, Default::default()));
     }
 }
 
@@ -1789,53 +1789,6 @@ impl LanguageRegistry {
             .find(|(l, _)| *l == id)
             .map(|(_, s)| *s)
             .unwrap_or(&crate::model::file_analysis::NEUTRAL_SPELLINGS)
-    }
-
-    /// The literals `id`'s query document requires `capture` to equal — the
-    /// `#eq?` / `#any-of?` set beside it (`receiver.self`, `receiver.this`,
-    /// …). The document is the one home for a language's small closed
-    /// keyword sets (rule #15), so a consumer that needs the SET reads it
-    /// back off the compiled query rather than keeping a table. Empty for a
-    /// language with no pack, and before that pack has analysed one file —
-    /// which for a consumer holding one of its analyses cannot happen.
-    pub fn pack_capture_literals(
-        id: &str,
-        capture: &str,
-    ) -> &'static std::collections::HashSet<&'static str> {
-        static EMPTY: std::sync::OnceLock<std::collections::HashSet<&'static str>> =
-            std::sync::OnceLock::new();
-        static PACKS: std::sync::OnceLock<
-            Vec<(&'static str, crate::build::query_extract::LangPack)>,
-        > = std::sync::OnceLock::new();
-        let registry = LanguageRegistry::with_enabled();
-        PACKS
-            .get_or_init(|| {
-                registry.drivers.iter().filter_map(|d| d.lang_pack().map(|p| (d.id(), p))).collect()
-            })
-            .iter()
-            .find(|(l, _)| *l == id)
-            .and_then(|(_, pack)| {
-                // The extractor's own object once this language has analysed
-                // anything; otherwise compile it here, through the same memo,
-                // so the answer never depends on what ran first.
-                crate::build::query_extract::pack_query(pack).or_else(|| {
-                    let language = registry.for_id(id)?.make_parser().language()?.clone();
-                    crate::build::query_extract::query_for(&language, pack)
-                })
-            })
-            .map(|q| crate::build::query_extract::capture_literals(q, capture))
-            .unwrap_or_else(|| EMPTY.get_or_init(Default::default))
-    }
-
-    /// How `id` spells the object the enclosing method runs on (`$this`,
-    /// `this`, a `self`/`cls` parameter) — the receiver captures' own
-    /// literals.
-    pub fn receiver_tokens(id: &str) -> Vec<&'static str> {
-        Self::pack_capture_literals(id, "receiver.this")
-            .iter()
-            .chain(Self::pack_capture_literals(id, "param.receiver").iter())
-            .copied()
-            .collect()
     }
 
     /// The visibility routing fact for `id`'s language

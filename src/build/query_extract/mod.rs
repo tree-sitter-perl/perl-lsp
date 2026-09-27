@@ -63,17 +63,7 @@ fn cached_query(language: &Language, source: &str) -> Result<&'static Query, Str
         let query = crate::util::timings::phase("pack.query_compile", || {
             Query::new(language, source).map_err(|e| format!("query: {e}"))
         })?;
-        // The `#eq?`/`#any-of?` literals are private to the bindings, so they
-        // are read off the C object while this function owns it; taking it
-        // back re-reads only the predicate metadata, not a recompile.
-        let raw = query.into_raw();
-        // SAFETY: `raw` came from `into_raw` just above and nothing else holds it.
-        let literals = unsafe { cursor_query::read_literals(raw) };
-        // SAFETY: `raw` is non-null and was compiled from `source`.
-        let query = unsafe { Query::from_raw(raw, source) }.map_err(|e| format!("query: {e}"))?;
-        let query: &'static Query = Box::leak(Box::new(query));
-        cursor_query::record_literals(query, literals);
-        Ok(query)
+        Ok(Box::leak(Box::new(query)))
     })
     .clone()
 }
@@ -769,9 +759,11 @@ fn effective_query_source(language: &Language, pack: &LangPack) -> &'static str 
     let key = {
         let mut h = DefaultHasher::new();
         pack.lang_id.hash(&mut h);
-        // `bundled_overlays` is a per-`lang_id` compile-time constant, so the
-        // id covers it; a runtime-configurable bundle would have to hash in.
         pack.query_source.hash(&mut h);
+        // Hashed, not assumed per-`lang_id`: two packs for one language with
+        // different bundles (a test's overlay beside another's) would
+        // otherwise be served whichever assembled first.
+        pack.bundled_overlays.hash(&mut h);
         for (p, s) in &sources {
             p.hash(&mut h);
             s.hash(&mut h);
@@ -816,7 +808,7 @@ mod extract;
 mod packs;
 mod skeleton;
 pub(crate) use cursor_query::{
-    capture_literals, captures_at, fires_at, is_captured_as, pack_declares_capture, pack_query,
+    captures_at, fires_at, is_captured_as, pack_declares_capture, pack_query, pattern_property,
     query_for, recovery, Recovery,
 };
 pub use extract::*;

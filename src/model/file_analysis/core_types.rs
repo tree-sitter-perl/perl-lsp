@@ -1209,6 +1209,9 @@ bitflags::bitflags! {
         /// The site calls the receiver's CONSTRUCTOR — a class that declares
         /// none still has the default one.
         const CONSTRUCTS = 1 << 2;
+        /// The token IS the object the enclosing method runs on (`$this`,
+        /// `this`): it declares nothing, and its value is the enclosing class.
+        const OWN_OBJECT = 1 << 3;
     }
 }
 
@@ -1282,6 +1285,11 @@ impl Ref {
     /// so its runtime class may be any descendant of the written one.
     pub fn receiver_is_own_object(&self) -> bool {
         self.flags.contains(RefFlags::RECEIVER_THIS)
+    }
+
+    /// The token is the language's own object token (`$this`, `this`).
+    pub fn is_own_object(&self) -> bool {
+        self.flags.contains(RefFlags::OWN_OBJECT)
     }
 
     /// The written name is the enclosing class or its parent, which resolves
