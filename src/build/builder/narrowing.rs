@@ -777,6 +777,19 @@ impl<'a> Builder<'a> {
             if let Some(bare) = caps.bare {
                 let at = bare.start_position();
                 for name in self.bare_bind_names(bare) {
+                    // `my %h;` is an empty hash, a closed shape its element
+                    // writes extend — the same value as `my %h = ()`.
+                    if name.starts_with('%') && bare.kind() == "variable_declaration" {
+                        self.push_type_constraint(crate::model::file_analysis::TypeConstraint {
+                            variable: name.clone(),
+                            scope: self.scope_at_point(at),
+                            constraint_span: node_to_span(bare),
+                            inferred_type: crate::model::file_analysis::InferredType::HashWithKeys {
+                                keys: crate::model::file_analysis::SharedKeys::new(Vec::new()),
+                                open: false,
+                            },
+                        });
+                    }
                     // Record the rebind (for the narrowing cutoff). A scalar
                     // clears to undef — but that `Undef` is a REGION assertion
                     // truncated at the next rebind (`my $x; $x->[0]` autoviv

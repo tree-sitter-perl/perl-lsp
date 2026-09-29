@@ -1442,8 +1442,10 @@ impl<'a> Builder<'a> {
         // side through the same shape builder.
         if inferred.is_none()
             && op == Some(crate::cst::AssignOp::Plain)
-            && matches!(right.kind(), "list_expression" | "parenthesized_expression")
+            && matches!(right.kind(), "list_expression" | "parenthesized_expression" | "stub_expression")
         {
+            // `()` is a `stub_expression`: the empty list, so `my %h = ()`
+            // is the empty closed shape.
             if let Some(vt) = self.get_var_text_from_lhs(left) {
                 if vt.starts_with('%') {
                     inferred = Some(self.hash_literal_type(right));

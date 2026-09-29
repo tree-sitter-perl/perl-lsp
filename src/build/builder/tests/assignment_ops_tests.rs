@@ -148,3 +148,33 @@ sub g6 { my $x = maybe(1); return unless defined $x; $x ||= Baz->new; return $x 
     // the sub is Optional only because of its bare `return`.
     assert_eq!(ret("g6"), Some(InferredType::Optional(Box::new(bar()))));
 }
+
+
+#[test]
+fn element_writes_extend_an_empty_hash() {
+    for (body, want) in [
+        ("my $h = {}; $h->{k} = Bar->new; return $h->{k};", Some("Bar")),
+        ("my %h; $h{k} = Bar->new; return $h{k};", Some("Bar")),
+        ("my %h = (); $h{k} = Bar->new; return $h{k};", Some("Bar")),
+        ("my $h = {}; $h->{k} ||= Bar->new; return $h->{k};", Some("Bar")),
+        ("my $h = {}; $h->{k} //= Bar->new; return $h->{k};", Some("Bar")),
+        ("my $h = {}; $h->{k} = Bar->new; $h->{k} ||= Baz->new; return $h->{k};", Some("Bar")),
+        // A write the walk can't pin to one key leaves the key untyped.
+        ("my $h = {}; $h->{$_} = Bar->new for 1; return $h->{k};", None),
+    ] {
+        assert_eq!(class(returns(body)).as_deref(), want, "{body}");
+    }
+    assert_eq!(returns("my $h = {}; $h->{k} .= 'x'; return $h->{k};"), Some(InferredType::String));
+    // The memoized-accessor idiom on a file-level cache.
+    let src = format!("{PRELUDE}my $cache = {{}};\nsub user {{ $cache->{{user}} ||= Bar->new }}\n1;\n");
+    let got = build_fa(&src).sub_return_type_at_arity("user", None);
+    assert_eq!(class(got).as_deref(), Some("Bar"));
+}
+
+#[test]
+fn an_empty_shape_reports_no_key_typos() {
+    let src = "package Foo;\nsub f { my %state; while (1) { last if $state{seen}; $state{seen} = 1 } my $h = {}; $h->{x} }\nsub g { {} }\nsub h { g()->{x} }\n1;\n";
+    let fa = build_fa(src);
+    assert!(fa.closed_shape_key_typos(None).is_empty());
+    assert!(fa.projected_key_typos(None).is_empty());
+}

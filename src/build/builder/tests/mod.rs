@@ -13,6 +13,16 @@ fn build_fa(source: &str) -> FileAnalysis {
     build(&tree, source.as_bytes())
 }
 
+/// `{}` — a closed shape with no keys yet.
+fn empty_hash_shape() -> InferredType {
+    InferredType::HashWithKeys { keys: SharedKeys::new(Vec::new()), open: false }
+}
+
+/// `{}` after it escaped: any key may have been written.
+fn escaped_empty_hash_shape() -> InferredType {
+    InferredType::HashWithKeys { keys: SharedKeys::new(Vec::new()), open: true }
+}
+
 mod core_tests;
 mod refs_types_tests;
 mod queries_recovery_tests;

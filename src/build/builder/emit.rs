@@ -87,9 +87,6 @@ impl<'a> Builder<'a> {
             let vt = self.bag_query_expr_span(node_to_span(v_node));
             keys.push((key, vt.map(Box::new)));
         }
-        if keys.is_empty() && !open {
-            return InferredType::HashRef;
-        }
         InferredType::HashWithKeys { keys: crate::model::file_analysis::SharedKeys::new(keys), open }
     }
 
