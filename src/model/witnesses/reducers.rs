@@ -486,6 +486,10 @@ impl WitnessReducer for BranchArmFold {
         // even when the LHS hash access can't be resolved — an honest,
         // reachable type beats the entry vanishing.
         if !fallback.is_empty() {
+            // An LHS that can't be false never reaches the fallback.
+            if let Some(t) = typed.iter().find(|t| t.is_always_true()) {
+                return ReducedValue::Type(t.clone());
+            }
             let all: Vec<&InferredType> = typed.iter().chain(fallback.iter()).collect();
             if let Some((first, rest)) = all.split_first() {
                 if rest.iter().all(|t| *t == *first) {

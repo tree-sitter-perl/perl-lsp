@@ -70,6 +70,8 @@ fn a_fallback_assignment_is_its_short_circuit_spelling() {
         let compound = format!("my $s = Bar->new; $s {op}= Baz->new; return $s");
         let spelled = format!("my $s = Bar->new; $s = $s {op} Baz->new; return $s");
         assert_eq!(returns(&compound), returns(&spelled), "{compound}");
+        // An object is never false, so the fallback is unreachable.
+        assert_eq!(class(returns(&compound)).as_deref(), Some("Bar"), "{compound}");
         // The old value is read before the write, so an untypeable fallback
         // keeps it.
         let untyped = format!("my $s = Bar->new; $s {op}= nothing(); return $s");
@@ -95,3 +97,54 @@ fn append_extends_the_constant_fold() {
     assert!(!got.iter().any(|t| t == "go" || t == "gogo"), "a fold it can't name is dropped: {got:?}");
 }
 
+
+#[test]
+fn a_plain_write_reads_the_value_it_replaces() {
+    let mut bad = Vec::new();
+    for body in [
+        "my $s = Bar->new; $s = $s; return $s",
+        "my $s = Bar->new; $s = $s || nothing(); return $s",
+        "my $s = Bar->new; $s = $s->me; return $s",
+        "my $s = Bar->new; $s = me($s); return $s",
+        "my $s = Bar->new; $s = $s ? $s : Bar->new; return $s",
+    ] {
+        let src = format!(
+            "package Bar; sub new {{ bless {{}}, shift }} sub me {{ Bar->new }}\npackage Foo;\nsub me {{ Bar->new }}\nsub probe {{ {body} }}\n1;\n"
+        );
+        let got = build_fa(&src).sub_return_type_at_arity("probe", None);
+        if class(got.clone()).as_deref() != Some("Bar") {
+            bad.push(format!("{body} => {got:?}"));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
+
+#[test]
+fn compound_writes_compose_with_guards() {
+    let src = "package Bar; sub new { bless {}, shift } sub me { Baz->new }\npackage Baz; sub new { bless {}, shift }\npackage Foo;\n\
+sub maybe { return undef if $_[0]; Bar->new }\n\
+sub g1 { my $x = shift; if ($x->isa('Bar')) { $x ||= Baz->new; return $x } }\n\
+sub g2 { my $x = shift; if ($x->isa('Bar')) { $x = $x->me; return $x } }\n\
+sub g3 { my $x = shift; if ($x->isa('Bar')) { $x .= 's'; return $x } }\n\
+sub g4 { my $x; $x ||= Bar->new; return $x }\n\
+sub g5 { my $x = maybe(1); $x //= Bar->new; return $x }\n\
+sub g6 { my $x = maybe(1); return unless defined $x; $x ||= Baz->new; return $x }\n\
+1;\n";
+    let fa = build_fa(src);
+    let ret = |s: &str| fa.sub_return_type_at_arity(s, None);
+    let bar = || InferredType::ClassName("Bar".into());
+    // The implicit read sees the guard's narrowing; a narrowed object is
+    // never false, so the fallback never runs.
+    assert_eq!(ret("g1"), Some(bar()));
+    // The RHS reads the narrowed value; the write then ends the region.
+    assert_eq!(ret("g2"), Some(InferredType::ClassName("Baz".into())));
+    assert_eq!(ret("g3"), Some(InferredType::String));
+    // `my $x;` is undef, so `||=` always takes the RHS.
+    assert_eq!(ret("g4"), Some(bar()));
+    // An optional LHS falls back to the RHS floor.
+    assert_eq!(ret("g5"), Some(bar()));
+    // `defined` strips the Optional up to the write, so `$x` stays Bar;
+    // the sub is Optional only because of its bare `return`.
+    assert_eq!(ret("g6"), Some(InferredType::Optional(Box::new(bar()))));
+}

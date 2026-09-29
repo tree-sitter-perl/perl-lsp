@@ -907,6 +907,21 @@ impl InferredType {
         !matches!(self, InferredType::Unknown)
     }
 
+    /// A reference is never false or undef, so `$v || $d` / `$v // $d` on
+    /// one short-circuits to `$v`: the fallback is unreachable.
+    pub fn is_always_true(&self) -> bool {
+        matches!(
+            self,
+            InferredType::ClassName(_)
+                | InferredType::FirstParam { .. }
+                | InferredType::BrandedRoute { .. }
+                | InferredType::HashRef
+                | InferredType::ArrayRef
+                | InferredType::CodeRef { .. }
+                | InferredType::Regexp
+        )
+    }
+
     pub fn subsumes_narrowing(&self, narrowing: &InferredType) -> bool {
         match (self, narrowing) {
             // Refinable-payload variants — `self` subsumes only

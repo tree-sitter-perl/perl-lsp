@@ -797,13 +797,12 @@ impl<'a> Builder<'a> {
         &mut self,
         lhs_var: &str,
         cond_expr: Node<'a>,
-        context: Node<'a>,
+        at: Point,
     ) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let scope = self.current_scope();
-        let context_span = node_to_span(context);
         self.emit_expr_witness(cond_expr);
-        // Zero-span at the assignment start: the synthetic InferredType
+        // Zero-span at the write point: the synthetic InferredType
         // witness produced by edge materialization inherits this span,
         // and `FrameworkAwareTypeFold`'s point-contains filter only
         // skips *non-zero* spans that miss the query point. Using the
@@ -812,7 +811,7 @@ impl<'a> Builder<'a> {
             attachment: WitnessAttachment::Variable { name: lhs_var.to_string(), scope },
             source: WitnessSource::Builder("chain_assignment".into()),
             payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(cond_expr))),
-            span: Span { start: context_span.start, end: context_span.start },
+            span: Span { start: at, end: at },
         });
     }
 

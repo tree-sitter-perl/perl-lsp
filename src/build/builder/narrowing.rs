@@ -806,15 +806,15 @@ impl<'a> Builder<'a> {
             }
             let Some(src) = caps.source else { continue };
             let mut source_span = node_to_span(src);
-            // A compound write stores the assignment's value, and lands after
-            // it (`assignment_write_point`).
-            let mut compound_at = None;
+            // The write lands where `assignment_write_point` says, and a
+            // compound write stores the assignment's value, not the RHS.
+            let mut write_at = None;
             if let Some(assign) = src.parent().filter(|p| p.kind() == "assignment_expression") {
+                if let Some(left) = assign.child_by_field_name("left") {
+                    write_at = Some(Self::assignment_write_point(assign, left));
+                }
                 if crate::cst::assign_op(assign) != Some(crate::cst::AssignOp::Plain) {
-                    if let Some(left) = assign.child_by_field_name("left") {
-                        compound_at = Some(Self::assignment_write_point(assign, left));
-                        source_span = node_to_span(assign);
-                    }
+                    source_span = node_to_span(assign);
                 }
             }
             if let Some(lhs_node) = caps.lhs {
@@ -824,7 +824,7 @@ impl<'a> Builder<'a> {
                     // to live in `visit_assignment`'s paren arm, now driven by
                     // the declarative capture.
                     let elem_nodes = self.list_element_nodes(src);
-                    let at = lhs_node.start_position();
+                    let at = write_at.unwrap_or_else(|| lhs_node.start_position());
                     let reassigns = lhs_node.kind() != "variable_declaration";
                     for (vt, extraction) in targets {
                         let (source, extraction) = match (&elem_nodes, &extraction) {
@@ -842,7 +842,7 @@ impl<'a> Builder<'a> {
                     let reassigns = lhs_node.kind() != "variable_declaration";
                     self.push_flow_edge(
                         vt,
-                        compound_at.unwrap_or_else(|| lhs_node.start_position()),
+                        write_at.unwrap_or_else(|| lhs_node.start_position()),
                         source_span,
                         crate::model::file_analysis::Extraction::Whole,
                         reassigns,
@@ -854,7 +854,7 @@ impl<'a> Builder<'a> {
                     let vt = vt.to_string();
                     self.push_flow_edge(
                         vt,
-                        compound_at.unwrap_or_else(|| tnode.start_position()),
+                        write_at.unwrap_or_else(|| tnode.start_position()),
                         source_span,
                         crate::model::file_analysis::Extraction::Whole,
                         true,

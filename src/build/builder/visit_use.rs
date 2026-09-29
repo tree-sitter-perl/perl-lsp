@@ -1371,14 +1371,17 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Where an assignment's write lands. A plain `=` writes at its target;
-    /// a compound op READS the target first (`$x ||= …` is `$x = $x || …`),
-    /// so its write lands after the whole expression and the read still sees
-    /// the value it replaces.
+    /// Where an assignment's write lands: after the whole expression, so
+    /// every read inside it — the RHS of `$n = $n->parent`, the implicit read
+    /// of `$x ||= …` — sees the value being replaced. A declaration is the
+    /// exception: its RHS can't name the variable it declares, and the facts
+    /// a declaration must not kill (a parameter assertion) sit on its
+    /// binding token, so it writes there.
     pub(super) fn assignment_write_point(node: Node<'a>, left: Node<'a>) -> Point {
-        match crate::cst::assign_op(node) {
-            Some(crate::cst::AssignOp::Plain) => left.start_position(),
-            _ => node.end_position(),
+        if left.kind() == "variable_declaration" {
+            left.start_position()
+        } else {
+            node.end_position()
         }
     }
 
@@ -1497,7 +1500,7 @@ impl<'a> Builder<'a> {
                     variable: vt,
                     func_name,
                     scope: self.current_scope(),
-                    span: node_to_span(node),
+                    span: Span { start: at, end: node.end_position() },
                 });
             }
         } else if right.kind() == "method_call_expression" {
@@ -1524,7 +1527,8 @@ impl<'a> Builder<'a> {
                                         invocant_var: inv.to_string(),
                                         method_name: mname,
                                         scope: self.current_scope(),
-                                        span: node_to_span(node),
+                                        span: Span { start: at, end: node.end_position() },
+                                        invocant_span: node_to_span(invocant_node),
                                     });
                                 }
                             }
@@ -1541,7 +1545,7 @@ impl<'a> Builder<'a> {
         // `Edge(Expression(refidx))` for method-call arms.
         if carries_rhs && right.kind() == "conditional_expression" {
             if let Some(vt) = self.get_var_text_from_lhs(left) {
-                self.emit_branch_arm_witnesses_for_ternary(&vt, right, node);
+                self.emit_branch_arm_witnesses_for_ternary(&vt, right, at);
             }
         }
         // `$obj->{k} = <rhs>` slot-type seed. Record key-span →
