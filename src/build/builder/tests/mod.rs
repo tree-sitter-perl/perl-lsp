@@ -25,6 +25,7 @@ mod synthetic_isa_tests;
 mod exports_runtime_tests;
 mod globs_accessors_tests;
 mod slots_hashkeys_tests;
+mod assignment_ops_tests;
 
 #[path = "../narrowing_tests.rs"]
 mod narrowing;

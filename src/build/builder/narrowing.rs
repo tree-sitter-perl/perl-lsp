@@ -805,7 +805,18 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let Some(src) = caps.source else { continue };
-            let source_span = node_to_span(src);
+            let mut source_span = node_to_span(src);
+            // A compound write stores the assignment's value, and lands after
+            // it (`assignment_write_point`).
+            let mut compound_at = None;
+            if let Some(assign) = src.parent().filter(|p| p.kind() == "assignment_expression") {
+                if crate::cst::assign_op(assign) != Some(crate::cst::AssignOp::Plain) {
+                    if let Some(left) = assign.child_by_field_name("left") {
+                        compound_at = Some(Self::assignment_write_point(assign, left));
+                        source_span = node_to_span(assign);
+                    }
+                }
+            }
             if let Some(lhs_node) = caps.lhs {
                 if let Some(targets) = self.lhs_list_targets(lhs_node) {
                     // List/destructuring: each slot edges to its literal element
@@ -831,7 +842,7 @@ impl<'a> Builder<'a> {
                     let reassigns = lhs_node.kind() != "variable_declaration";
                     self.push_flow_edge(
                         vt,
-                        lhs_node.start_position(),
+                        compound_at.unwrap_or_else(|| lhs_node.start_position()),
                         source_span,
                         crate::model::file_analysis::Extraction::Whole,
                         reassigns,
@@ -843,7 +854,7 @@ impl<'a> Builder<'a> {
                     let vt = vt.to_string();
                     self.push_flow_edge(
                         vt,
-                        tnode.start_position(),
+                        compound_at.unwrap_or_else(|| tnode.start_position()),
                         source_span,
                         crate::model::file_analysis::Extraction::Whole,
                         true,

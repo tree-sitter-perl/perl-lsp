@@ -163,6 +163,53 @@ typed_node! {
     }
 }
 
+/// What an `assignment_expression`'s operator does to the value, grouped by
+/// the result it produces. Every compound operator is `LHS = LHS op RHS`, so
+/// the group decides both the new value of the target and the value of the
+/// expression itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AssignOp {
+    /// `=` — the value is the RHS.
+    Plain,
+    /// `||=` / `//=` — the old value when true/defined, else the RHS.
+    Fallback,
+    /// `&&=` — the RHS when the old value is true, else the (false) old value.
+    AndThen,
+    /// `.=` — string append.
+    Append,
+    /// `x=` — string repetition.
+    Repeat,
+    /// Arithmetic, shift and bitwise ops — a number.
+    Numeric,
+}
+
+impl AssignOp {
+    /// Whether the value can be the RHS itself, so facts about the RHS (its
+    /// type, the call it came from) are facts about the target.
+    pub(crate) fn carries_rhs(self) -> bool {
+        matches!(self, AssignOp::Plain | AssignOp::Fallback | AssignOp::AndThen)
+    }
+}
+
+/// The operator of an `assignment_expression`. `None` for any other kind, or
+/// an operator this table doesn't know.
+pub(crate) fn assign_op(node: Node) -> Option<AssignOp> {
+    if node.kind() != "assignment_expression" {
+        return None;
+    }
+    Some(match node.child_by_field_name("operator")?.kind() {
+        "=" => AssignOp::Plain,
+        "||=" | "//=" => AssignOp::Fallback,
+        "&&=" => AssignOp::AndThen,
+        ".=" => AssignOp::Append,
+        "x=" => AssignOp::Repeat,
+        "+=" | "-=" | "*=" | "/=" | "%=" | "**=" | "<<=" | ">>=" | "|=" | "&=" | "^=" => {
+            AssignOp::Numeric
+        }
+        _ => return None,
+    })
+}
+
 /// A call expression's arguments as a flat positional sequence. The
 /// `arguments` field may be a bare single node or a `list_expression` /
 /// `parenthesized_expression` wrapper — callers never see the difference.
