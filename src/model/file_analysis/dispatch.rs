@@ -401,7 +401,12 @@ pub struct MethodCallBinding {
     pub invocant_var: String,
     pub method_name: String,
     pub scope: ScopeId,
+    /// Where the write lands (`Builder::assignment_write_point`) to the end
+    /// of the assignment; the binding is anchored at its start.
     pub span: Span,
+    /// The invocant read. It precedes the write, so `$n = $n->parent`
+    /// types the call on the `$n` being replaced.
+    pub invocant_span: Span,
 }
 
 /// The readable half of a dispatch candidate — everything needed to

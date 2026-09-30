@@ -22,8 +22,28 @@ use super::*;
 /// wrong type). A same-receiver diamond (the inheritance walk holds
 /// `q.receiver` constant within one `PackageSymbol` query) still hashes
 /// to one key, so memoization still kills the exponential re-chase.
-type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>);
+///
+/// A `Variable` is temporal — its reducer answers AT `q.point` — so its key
+/// carries the point: `$x ||= …` reads `$x` before the write the outer query
+/// is resolving, which is a different question, not a cycle. Every other
+/// attachment ignores the point and keeps it out of the key, so the memo
+/// still collapses their diamonds.
+type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>, Option<Point>);
 type VisitedSet = std::collections::HashSet<VisitedKey>;
+
+fn visited_key(bag: &WitnessBag, q: &ReducerQuery) -> VisitedKey {
+    let point = match q.attachment {
+        WitnessAttachment::Variable { .. } => q.point,
+        _ => None,
+    };
+    (
+        bag as *const _ as usize,
+        q.attachment.clone(),
+        receiver_key(&q.receiver),
+        q.arity_hint,
+        point,
+    )
+}
 
 /// Per-top-level-`query` traversal state: the cycle guard plus a result
 /// memo. The bag forms a DAG of edges; without memoization a diamond
@@ -634,12 +654,7 @@ impl ReducerRegistry {
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
             return std::sync::Arc::new(ReducedValue::None);
         }
-        let key: VisitedKey = (
-            bag as *const _ as usize,
-            q.attachment.clone(),
-            receiver_key(&q.receiver),
-            q.arity_hint,
-        );
+        let key = visited_key(bag, q);
         // Memo hit: this key was fully resolved earlier in THIS query and
         // isn't on the current path (cycle guard handles on-path keys).
         if let Some((cached, recorded_exit)) = state.memo.get(&key) {
@@ -1891,12 +1906,7 @@ impl ReducerRegistry {
                     // filtered the targets included the key being
                     // chased, so it matched every time. A
                     // classifier that cannot fail is not one.
-                    let candidate_key: VisitedKey = (
-                        &full.witnesses as *const _ as usize,
-                        q.attachment.clone(),
-                        receiver_key(&q.receiver),
-                        q.arity_hint,
-                    );
+                    let candidate_key = visited_key(&full.witnesses, q);
                     let excused = if truncations_before
                         != QUERY_REC_TRUNCATIONS.with(|c| c.get())
                     {

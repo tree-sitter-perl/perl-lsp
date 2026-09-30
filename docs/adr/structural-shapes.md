@@ -115,6 +115,12 @@ Variable shape witnesses:
   `@$h{…}`/`%$h{k}`, `$h->@{…}`/`$h->%{…}`) record an open-switching
   `KeyWrite`.
 
+An empty literal is a shape too: `{}`, `my %h;` and `my %h = ()` are a
+closed `HashWithKeys` with no keys, so `my $h = {}; $h->{k} = Foo->new`
+reads `k` back typed. The key-typo hint skips an empty shape: a typo
+needs a key to have mistyped, and a read before the first write is
+usually a loop whose write sits later in the source.
+
 Extension witnesses use zero-width spans at the write position — the
 same temporal contract as TC mirrors: invisible to reads before the
 write, latest-wins after. The pass is re-emittable in the worklist

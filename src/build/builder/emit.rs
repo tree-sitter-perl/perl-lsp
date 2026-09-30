@@ -87,9 +87,6 @@ impl<'a> Builder<'a> {
             let vt = self.bag_query_expr_span(node_to_span(v_node));
             keys.push((key, vt.map(Box::new)));
         }
-        if keys.is_empty() && !open {
-            return InferredType::HashRef;
-        }
         InferredType::HashWithKeys { keys: crate::model::file_analysis::SharedKeys::new(keys), open }
     }
 
@@ -377,6 +374,35 @@ impl<'a> Builder<'a> {
                 Some(WitnessPayload::ReturnExpr(crate::model::witnesses::ReturnExpr::Receiver))
             }
 
+            // An assignment's value is the target's new value.
+            // `||=`/`//=` never reach here — `emit_expr_witness` types them
+            // as a short-circuit. `=` / `&&=` produce the RHS (`&&=`'s other
+            // outcome is a false old value, which carries no type), unless
+            // the target is an aggregate: a list assignment in scalar context
+            // is a count, and the list type is `@flow`'s business.
+            "assignment_expression" => match crate::cst::assign_op(node)? {
+                crate::cst::AssignOp::Plain | crate::cst::AssignOp::AndThen => {
+                    let left = node.child_by_field_name("left")?;
+                    if self.lhs_list_targets(left).is_some()
+                        || self
+                            .get_var_text_from_lhs(left)
+                            .is_some_and(|v| v.starts_with(['@', '%']))
+                    {
+                        return None;
+                    }
+                    let rhs = node.child_by_field_name("right")?;
+                    self.emit_expr_witness(rhs);
+                    Some(WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(rhs))))
+                }
+                crate::cst::AssignOp::Append | crate::cst::AssignOp::Repeat => {
+                    Some(WitnessPayload::InferredType(InferredType::String))
+                }
+                crate::cst::AssignOp::Numeric => {
+                    Some(WitnessPayload::InferredType(InferredType::Numeric))
+                }
+                crate::cst::AssignOp::Fallback => None,
+            },
+
             // Ternary — Edge to its own Expr(span). The per-arm
             // `branch_arm`-source witnesses live on that attachment;
             // the registry's edge chase + BranchArmFold agree them.
@@ -566,50 +592,28 @@ impl<'a> Builder<'a> {
             return;
         }
         // `LHS || RHS` / `LHS // RHS` — a short-circuit whose value is the
-        // LHS when truthy/defined, else the RHS. The RHS is the guaranteed
-        // FLOOR (`$ENV{X} || 10` returns the literal default whenever the
-        // env var is unset), so it rides a distinct `fallback_arm` source;
-        // `BranchArmFold` prefers it when the arms disagree or the LHS can't
-        // be typed. Reuses the ternary's BranchArm machinery — one speller
-        // for "this expression's value is one of these arms."
+        // LHS when truthy/defined, else the RHS.
         //
         // EXCEPT a `shift`/`$_[N]`-LHS: `my $x = shift // 'd'` is the param-
         // DEFAULT idiom — the value IS the parameter (unknown type); the
         // literal is a definedness fallback, not a type claim. Folding it to
         // the literal poisons downstream narrowed uses (`return $x if
         // $x->isa(...)`). Leave it untyped so the param stays open.
-        if node.kind() == "binary_expression"
+        let fallback_operands = if node.kind() == "binary_expression"
             && matches!(self.get_operator_text(node).as_deref(), Some("||") | Some("//"))
-            && node
-                .child_by_field_name("left")
-                .is_some_and(|lhs| !self.is_param_pull(lhs))
         {
-            if let (Some(lhs), Some(rhs)) =
-                (node.child_by_field_name("left"), node.child_by_field_name("right"))
-            {
-                let arm_att = WitnessAttachment::BranchArm(span);
-                self.emit_expr_witness(lhs);
-                self.bag.push(Witness {
-                    attachment: arm_att.clone(),
-                    source: WitnessSource::Builder("branch_arm".into()),
-                    payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(lhs))),
-                    span: node_to_span(lhs),
-                });
-                self.emit_expr_witness(rhs);
-                self.bag.push(Witness {
-                    attachment: arm_att.clone(),
-                    source: WitnessSource::Builder("fallback_arm".into()),
-                    payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(rhs))),
-                    span: node_to_span(rhs),
-                });
-                self.bag.push(Witness {
-                    attachment: WitnessAttachment::Expr(span),
-                    source: WitnessSource::Builder("branch_arm".into()),
-                    payload: WitnessPayload::Edge(arm_att),
-                    span,
-                });
-                return;
-            }
+            node.child_by_field_name("left")
+                .filter(|lhs| !self.is_param_pull(*lhs))
+                .zip(node.child_by_field_name("right"))
+        } else if crate::cst::assign_op(node) == Some(crate::cst::AssignOp::Fallback) {
+            // `LHS ||= RHS` is `LHS = LHS || RHS`: the same two arms.
+            node.child_by_field_name("left").zip(node.child_by_field_name("right"))
+        } else {
+            None
+        };
+        if let Some((lhs, rhs)) = fallback_operands {
+            self.push_fallback_arms(span, lhs, rhs);
+            return;
         }
         // Idempotent per span: the walk reaches many expressions twice
         // (child visit first, then the enclosing assignment/invocant
@@ -647,6 +651,37 @@ impl<'a> Builder<'a> {
             // retry is a no-op.
             self.unresolved_expr_nodes.push(node);
         }
+    }
+
+    /// Type `Expr(span)` as a short-circuit of `lhs` and `rhs`. The RHS is
+    /// the guaranteed FLOOR (`$ENV{X} || 10` returns the literal default
+    /// whenever the env var is unset), so it rides a distinct `fallback_arm`
+    /// source; `BranchArmFold` prefers it when the arms disagree or the LHS
+    /// can't be typed. Reuses the ternary's BranchArm machinery — one speller
+    /// for "this expression's value is one of these arms."
+    fn push_fallback_arms(&mut self, span: Span, lhs: Node<'a>, rhs: Node<'a>) {
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let arm_att = WitnessAttachment::BranchArm(span);
+        self.emit_expr_witness(lhs);
+        self.bag.push(Witness {
+            attachment: arm_att.clone(),
+            source: WitnessSource::Builder("branch_arm".into()),
+            payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(lhs))),
+            span: node_to_span(lhs),
+        });
+        self.emit_expr_witness(rhs);
+        self.bag.push(Witness {
+            attachment: arm_att.clone(),
+            source: WitnessSource::Builder("fallback_arm".into()),
+            payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(rhs))),
+            span: node_to_span(rhs),
+        });
+        self.bag.push(Witness {
+            attachment: WitnessAttachment::Expr(span),
+            source: WitnessSource::Builder("branch_arm".into()),
+            payload: WitnessPayload::Edge(arm_att),
+            span,
+        });
     }
 
     /// Callee name for an expression node whose `expr_payload` arm resolves
@@ -759,13 +794,12 @@ impl<'a> Builder<'a> {
         &mut self,
         lhs_var: &str,
         cond_expr: Node<'a>,
-        context: Node<'a>,
+        at: Point,
     ) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let scope = self.current_scope();
-        let context_span = node_to_span(context);
         self.emit_expr_witness(cond_expr);
-        // Zero-span at the assignment start: the synthetic InferredType
+        // Zero-span at the write point: the synthetic InferredType
         // witness produced by edge materialization inherits this span,
         // and `FrameworkAwareTypeFold`'s point-contains filter only
         // skips *non-zero* spans that miss the query point. Using the
@@ -774,7 +808,7 @@ impl<'a> Builder<'a> {
             attachment: WitnessAttachment::Variable { name: lhs_var.to_string(), scope },
             source: WitnessSource::Builder("chain_assignment".into()),
             payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(cond_expr))),
-            span: Span { start: context_span.start, end: context_span.start },
+            span: Span { start: at, end: at },
         });
     }
 

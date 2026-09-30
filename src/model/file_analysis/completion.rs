@@ -1006,7 +1006,7 @@ impl FileAnalysis {
                 && contains_point(&self.scopes[mcb.scope.0 as usize].span, point)
             {
                 let package = self
-                    .resolve_invocant_class(&mcb.invocant_var, mcb.scope, mcb.span.start)
+                    .resolve_invocant_class(&mcb.invocant_var, mcb.scope, mcb.invocant_span.start)
                     .and_then(|cn| {
                         match self.resolve_method_in_ancestors(&cn, &mcb.method_name, None) {
                             Some(MethodResolution::Local { sym_id, .. }) => {

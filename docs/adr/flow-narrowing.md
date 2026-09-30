@@ -52,6 +52,14 @@ mints the same site again post-walk (idempotent), so the two lanes agree on
 every write by construction, and its edge is the RHS's value, a plain
 `Edge` that simply drops out when nothing types it. The marker is a
 PAYLOAD, never a source tag a reducer inspects (CLAUDE.md rule #14).
+
+A reassignment's site is the END of the assignment expression, because
+every read inside it happens before the write: the RHS of `$n = $n->parent`
+and the implicit read of `$x ||= …` both see the value being replaced, and a
+guard's region runs up to the write. A declaration writes at its binding
+token instead, since its RHS cannot name the variable it declares. One
+speller, `Builder::assignment_write_point`, serves the walk, the flow lane
+and chain typing.
 `FrameworkAwareTypeFold` reads it three ways:
 
 - **It is a cutoff.** At the query point, every witness strictly before

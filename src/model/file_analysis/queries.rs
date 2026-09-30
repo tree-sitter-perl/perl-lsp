@@ -837,7 +837,10 @@ impl FileAnalysis {
                 continue;
             };
             let InferredType::HashWithKeys { ref keys, open: false } = t else { continue };
-            if keys.iter().any(|(k, _)| k == &r.target_name) {
+            // A typo needs a key to have mistyped. An empty shape (`{}`,
+            // `my %h;`) read before its first write is usually a loop whose
+            // write the read's position can't see, not a misspelling.
+            if keys.is_empty() || keys.iter().any(|(k, _)| k == &r.target_name) {
                 continue;
             }
             if !self.closed_shape_is_whole_story(var_text) {
@@ -901,7 +904,8 @@ impl FileAnalysis {
                 continue;
             };
             let InferredType::HashWithKeys { ref keys, open: false } = t else { continue };
-            if keys.iter().any(|(k, _)| k == key) {
+            // Same rule as `closed_shape_key_typos`: no keys, no typo.
+            if keys.is_empty() || keys.iter().any(|(k, _)| k == key) {
                 continue;
             }
             out.push(KeyTypoSite {

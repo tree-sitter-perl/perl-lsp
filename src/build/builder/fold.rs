@@ -413,6 +413,10 @@ impl<'a> Builder<'a> {
                 node.child_by_field_name("right"),
             ) else { continue };
             let span = node_to_span(node);
+            // Where the write lands; the typed witness and the idempotency
+            // probe both key on it, like the walk's own TC.
+            let at = Self::assignment_write_point(node, left);
+            let write_span = Span { start: at, end: span.end };
 
             // List-context row extraction: `my ($a, $b, ...) = $rs->search(
             // ...)` / `= $rs->all` — a resultset evaluated in LIST context
@@ -460,7 +464,7 @@ impl<'a> Builder<'a> {
                     let sid = self.innermost_scope_id_at(span.start);
                     for name in list_scalars {
                         let already = typed_at
-                            .get(&(name.clone(), span.start))
+                            .get(&(name.clone(), at))
                             .is_some_and(|idxs| {
                                 idxs.iter().any(|&i| {
                                     let crate::model::witnesses::WitnessPayload::InferredType(t) =
@@ -472,7 +476,7 @@ impl<'a> Builder<'a> {
                                 })
                             });
                         if !already {
-                            to_push.push((name, sid, span, row_ty.clone()));
+                            to_push.push((name, sid, write_span, row_ty.clone()));
                         }
                     }
                     continue;
@@ -543,7 +547,7 @@ impl<'a> Builder<'a> {
                     .map(|sym| self.symbols[sym.0 as usize].scope)
                     .filter(|b| *b != sid);
                 if let Some(bsid) = binding_scope {
-                    markers.push((var.clone(), bsid, span.start));
+                    markers.push((var.clone(), bsid, at));
                 }
             }
 
@@ -555,7 +559,13 @@ impl<'a> Builder<'a> {
             // the brand is in the bag it subsumes the next (identical)
             // brand and the loop settles. `Unknown` subsumes only itself,
             // so a RHS that resolves on a later iteration lands on top of it.
-            let already_typed = typed_at.get(&(var.clone(), span.start)).is_some_and(|idxs| {
+            // A compound write's value is the operator's result, which the
+            // walk typed on the assignment itself; the RHS alone says nothing
+            // about it. Only the may-not-happen `Unknown` applies.
+            if !conditional && crate::cst::assign_op(node) != Some(crate::cst::AssignOp::Plain) {
+                continue;
+            }
+            let already_typed = typed_at.get(&(var.clone(), at)).is_some_and(|idxs| {
                 idxs.iter().any(|&i| {
                     let crate::model::witnesses::WitnessPayload::InferredType(t) =
                         &self.bag.all()[i].payload
@@ -595,7 +605,7 @@ impl<'a> Builder<'a> {
             // A rebind whose RHS nothing can type pushes no value: its reset
             // marker (above) is the record that it happened.
             let Some(ty) = ty_opt else { continue };
-            to_push.push((var, sid, span, ty));
+            to_push.push((var, sid, write_span, ty));
         }
 
         for (variable, scope, constraint_span, ty) in to_push {
@@ -1943,7 +1953,7 @@ impl<'a> Builder<'a> {
             .iter()
             .map(|mcb| {
                 let class = self
-                    .bag_query_variable(&mcb.invocant_var, mcb.scope, mcb.span.start)
+                    .bag_query_variable(&mcb.invocant_var, mcb.scope, mcb.invocant_span.start)
                     .and_then(|t| t.class_name().map(str::to_string));
                 (mcb.variable.as_str(), (mcb.method_name.clone(), class))
             })

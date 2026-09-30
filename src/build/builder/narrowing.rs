@@ -777,6 +777,19 @@ impl<'a> Builder<'a> {
             if let Some(bare) = caps.bare {
                 let at = bare.start_position();
                 for name in self.bare_bind_names(bare) {
+                    // `my %h;` is an empty hash, a closed shape its element
+                    // writes extend — the same value as `my %h = ()`.
+                    if name.starts_with('%') && bare.kind() == "variable_declaration" {
+                        self.push_type_constraint(crate::model::file_analysis::TypeConstraint {
+                            variable: name.clone(),
+                            scope: self.scope_at_point(at),
+                            constraint_span: node_to_span(bare),
+                            inferred_type: crate::model::file_analysis::InferredType::HashWithKeys {
+                                keys: crate::model::file_analysis::SharedKeys::new(Vec::new()),
+                                open: false,
+                            },
+                        });
+                    }
                     // Record the rebind (for the narrowing cutoff). A scalar
                     // clears to undef — but that `Undef` is a REGION assertion
                     // truncated at the next rebind (`my $x; $x->[0]` autoviv
@@ -805,7 +818,18 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let Some(src) = caps.source else { continue };
-            let source_span = node_to_span(src);
+            let mut source_span = node_to_span(src);
+            // The write lands where `assignment_write_point` says, and a
+            // compound write stores the assignment's value, not the RHS.
+            let mut write_at = None;
+            if let Some(assign) = src.parent().filter(|p| p.kind() == "assignment_expression") {
+                if let Some(left) = assign.child_by_field_name("left") {
+                    write_at = Some(Self::assignment_write_point(assign, left));
+                }
+                if crate::cst::assign_op(assign) != Some(crate::cst::AssignOp::Plain) {
+                    source_span = node_to_span(assign);
+                }
+            }
             if let Some(lhs_node) = caps.lhs {
                 if let Some(targets) = self.lhs_list_targets(lhs_node) {
                     // List/destructuring: each slot edges to its literal element
@@ -813,7 +837,7 @@ impl<'a> Builder<'a> {
                     // to live in `visit_assignment`'s paren arm, now driven by
                     // the declarative capture.
                     let elem_nodes = self.list_element_nodes(src);
-                    let at = lhs_node.start_position();
+                    let at = write_at.unwrap_or_else(|| lhs_node.start_position());
                     let reassigns = lhs_node.kind() != "variable_declaration";
                     for (vt, extraction) in targets {
                         let (source, extraction) = match (&elem_nodes, &extraction) {
@@ -831,7 +855,7 @@ impl<'a> Builder<'a> {
                     let reassigns = lhs_node.kind() != "variable_declaration";
                     self.push_flow_edge(
                         vt,
-                        lhs_node.start_position(),
+                        write_at.unwrap_or_else(|| lhs_node.start_position()),
                         source_span,
                         crate::model::file_analysis::Extraction::Whole,
                         reassigns,
@@ -843,7 +867,7 @@ impl<'a> Builder<'a> {
                     let vt = vt.to_string();
                     self.push_flow_edge(
                         vt,
-                        tnode.start_position(),
+                        write_at.unwrap_or_else(|| tnode.start_position()),
                         source_span,
                         crate::model::file_analysis::Extraction::Whole,
                         true,

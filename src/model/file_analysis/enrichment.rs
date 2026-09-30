@@ -886,7 +886,7 @@ impl FileAnalysis {
             let class_name = self.resolve_invocant_class(
                 &binding.invocant_var,
                 binding.scope,
-                binding.span.start,
+                binding.invocant_span.start,
             );
 
             if let Some(cn) = class_name {

@@ -1263,7 +1263,11 @@ impl<'a> Builder<'a> {
                 } else {
                     lhs_text
                 };
-                if var_stripped.starts_with('@') {
+                if var_stripped.starts_with('@')
+                    && crate::cst::assign_op(node) != Some(crate::cst::AssignOp::Plain)
+                {
+                    self.constant_strings.remove(var_stripped);
+                } else if var_stripped.starts_with('@') {
                     let mut values = Vec::new();
                     for i in 0..node.named_child_count() {
                         if let Some(child) = node.named_child(i) {
@@ -1273,6 +1277,10 @@ impl<'a> Builder<'a> {
                     if !values.is_empty() {
                         self.constant_strings.insert(var_stripped.to_string(), values);
                     }
+                } else if var_stripped.starts_with('$')
+                    && crate::cst::assign_op(node) != Some(crate::cst::AssignOp::Plain)
+                {
+                    self.fold_compound_constant_string(var_stripped, node);
                 } else if var_stripped.starts_with('$') {
                     let var = var_stripped;
                     if let Some(right) = node.child_by_field_name("right") {
@@ -1327,6 +1335,56 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// A compound write to a folded scalar: `.=` appends a foldable RHS to
+    /// every value the variable folds to; anything else leaves a value the
+    /// fold can't name, so the fold is dropped. The result is no longer one
+    /// source literal, so the rename source goes with it.
+    fn fold_compound_constant_string(&mut self, var: &str, node: Node<'a>) {
+        self.constant_string_source.remove(var);
+        let appended = (crate::cst::assign_op(node) == Some(crate::cst::AssignOp::Append))
+            .then(|| {
+                let right = node.child_by_field_name("right")?;
+                let tails = match right.kind() {
+                    "interpolated_string_literal" => self.try_fold_interpolated_string(right),
+                    "string_literal" => self.extract_string_content(right).into_iter().collect(),
+                    _ => Vec::new(),
+                };
+                if tails.is_empty() {
+                    return None;
+                }
+                let heads = self.resolve_constant_strings(var, 0)?;
+                Some(
+                    heads
+                        .iter()
+                        .flat_map(|h| tails.iter().map(move |t| format!("{h}{t}")))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .flatten();
+        match appended {
+            Some(values) => {
+                self.constant_strings.insert(var.to_string(), values);
+            }
+            None => {
+                self.constant_strings.remove(var);
+            }
+        }
+    }
+
+    /// Where an assignment's write lands: after the whole expression, so
+    /// every read inside it — the RHS of `$n = $n->parent`, the implicit read
+    /// of `$x ||= …` — sees the value being replaced. A declaration is the
+    /// exception: its RHS can't name the variable it declares, and the facts
+    /// a declaration must not kill (a parameter assertion) sit on its
+    /// binding token, so it writes there.
+    pub(super) fn assignment_write_point(node: Node<'a>, left: Node<'a>) -> Point {
+        if left.kind() == "variable_declaration" {
+            left.start_position()
+        } else {
+            node.end_position()
+        }
+    }
+
     /// The half of `visit_assignment` that can only run once the RHS subtree
     /// is walked: read the rvalue's type, seed constraints and key writes
     /// from it, then descend the LHS.
@@ -1336,6 +1394,8 @@ impl<'a> Builder<'a> {
     /// read is only valid after the RHS walk has allocated its refs and
     /// anon-sub symbols.
     fn assignment_after_rhs(&mut self, node: Node<'a>, left: Node<'a>, right: Node<'a>) {
+        let op = crate::cst::assign_op(node);
+        let at = Self::assignment_write_point(node, left);
         // Every write RESETS its targets — a declaration and a plain
         // assignment alike: the marker lands now, before the walk types
         // anything downstream of it, so a later `my $o = $x` folds against
@@ -1344,7 +1404,6 @@ impl<'a> Builder<'a> {
         // facts a declaration must not kill (a parameter assertion) are
         // anchored at the binding site, never before it.
         {
-            let at = left.start_position();
             let scope = self.current_scope();
             match self.lhs_list_targets(left) {
                 Some(targets) => {
@@ -1367,13 +1426,26 @@ impl<'a> Builder<'a> {
         // ternaries; Edge payloads resolve through the
         // registry's materialization.
         self.emit_expr_witness(right);
-        let mut inferred = self.bag_query_expr_span(node_to_span(right));
+        // The assignment's own value, for `return $x ||= …` and friends.
+        self.emit_expr_witness(node);
+        // A compound write stores the operator's result, not the RHS.
+        let value_span = if op == Some(crate::cst::AssignOp::Plain) {
+            node_to_span(right)
+        } else {
+            node_to_span(node)
+        };
+        let mut inferred = self.bag_query_expr_span(value_span);
         // `my %h = (k => v, …)` — the list IS a hash literal in
         // this position, the hashref's second spelling. The
         // list's own Expr witness can't carry that (its meaning
         // depends on the LHS sigil), so type it from the LHS
         // side through the same shape builder.
-        if inferred.is_none() && matches!(right.kind(), "list_expression" | "parenthesized_expression") {
+        if inferred.is_none()
+            && op == Some(crate::cst::AssignOp::Plain)
+            && matches!(right.kind(), "list_expression" | "parenthesized_expression" | "stub_expression")
+        {
+            // `()` is a `stub_expression`: the empty list, so `my %h = ()`
+            // is the empty closed shape.
             if let Some(vt) = self.get_var_text_from_lhs(left) {
                 if vt.starts_with('%') {
                     inferred = Some(self.hash_literal_type(right));
@@ -1396,11 +1468,13 @@ impl<'a> Builder<'a> {
                 // fallback, i.e. the enclosing class); the deferred
                 // witness keeps the ctor receiver-polymorphic at
                 // call sites (wins via reducer order).
-                self.push_receiver_bless_witness(&vt, right);
+                if op == Some(crate::cst::AssignOp::Plain) {
+                    self.push_receiver_bless_witness(&vt, right);
+                }
                 self.push_type_constraint(TypeConstraint {
                     variable: vt,
                     scope: self.current_scope(),
-                    constraint_span: node_to_span(node),
+                    constraint_span: Span { start: at, end: node.end_position() },
                     inferred_type: it,
                 });
             }
@@ -1418,13 +1492,17 @@ impl<'a> Builder<'a> {
         // `else if` branch; with the implicit-return edge
         // routing through SymbolReturnArm chains, the type
         // surfaces but the binding still has to fire.
-        if let Some(func_name) = self.extract_call_name(right) {
+        let carries_rhs = op.is_some_and(crate::cst::AssignOp::carries_rhs);
+        if !carries_rhs {
+            // `.=`/`+=`/…: the target holds the operator's result, so the
+            // RHS's call or ternary says nothing about it.
+        } else if let Some(func_name) = self.extract_call_name(right) {
             if let Some(vt) = self.get_var_text_from_lhs(left) {
                 self.call_bindings.push(CallBinding {
                     variable: vt,
                     func_name,
                     scope: self.current_scope(),
-                    span: node_to_span(node),
+                    span: Span { start: at, end: node.end_position() },
                 });
             }
         } else if right.kind() == "method_call_expression" {
@@ -1451,7 +1529,8 @@ impl<'a> Builder<'a> {
                                         invocant_var: inv.to_string(),
                                         method_name: mname,
                                         scope: self.current_scope(),
-                                        span: node_to_span(node),
+                                        span: Span { start: at, end: node.end_position() },
+                                        invocant_span: node_to_span(invocant_node),
                                     });
                                 }
                             }
@@ -1466,9 +1545,9 @@ impl<'a> Builder<'a> {
         // Expr(span) payloads. POST visit_node — needs the
         // arms' refs to exist so `expr_payload` can resolve
         // `Edge(Expression(refidx))` for method-call arms.
-        if right.kind() == "conditional_expression" {
+        if carries_rhs && right.kind() == "conditional_expression" {
             if let Some(vt) = self.get_var_text_from_lhs(left) {
-                self.emit_branch_arm_witnesses_for_ternary(&vt, right, node);
+                self.emit_branch_arm_witnesses_for_ternary(&vt, right, at);
             }
         }
         // `$obj->{k} = <rhs>` slot-type seed. Record key-span →
@@ -1476,18 +1555,20 @@ impl<'a> Builder<'a> {
         // `SlotType{owner_class, k} → Edge(Expr(rhs_span))`
         // keyed off the matching HashKeyAccess Write ref (whose
         // span is this key node's span). `emit_expr_witness(right)`
-        // already published the RHS's `Expr(rhs_span)`.
+        // already published the RHS's `Expr(rhs_span)`; a compound write
+        // stores the assignment's own value instead.
+        let stored = if op == Some(crate::cst::AssignOp::Plain) { right } else { node };
         if left.kind() == "hash_element_expression" {
             if let Some(key_node) = left.child_by_field_name("key") {
                 self.slot_write_rhs_span
-                    .insert(node_to_span(key_node), node_to_span(right));
+                    .insert(node_to_span(key_node), node_to_span(stored));
             }
         }
         if matches!(
             left.kind(),
             "hash_element_expression" | "array_element_expression"
         ) {
-            self.record_key_write(left, Some(right));
+            self.record_key_write(left, Some(stored));
         }
         // Slice / keyval writes (`@h{qw(a b)} = …`, `%h{k} = …`,
         // `@$h{…}`) land several keys at once — record an
