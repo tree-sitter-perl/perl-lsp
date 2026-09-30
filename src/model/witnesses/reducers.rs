@@ -499,9 +499,9 @@ impl WitnessReducer for BranchArmFold {
             // TODO(union-join): the value is `left ⊔ right`, e.g.
             // `Optional<Bar> || Baz` is `Bar | Baz`, but `InferredType` has
             // no union beyond `Optional` (T ⊔ undef), so the floor stands in.
-            // The lattice join `JoinFold` needs is the same element; this arm
-            // and the ternary disagreement below answer through it once it
-            // exists (docs/epics/16-cfg-tier.md, "The union element").
+            // The design is option B of docs/open-forks.md, "Union types in the
+            // lattice"; this arm and the ternary disagreement below answer
+            // through it once it lands.
             if let Some(fb) = fallback.into_iter().next() {
                 return ReducedValue::Type(fb);
             }
@@ -528,7 +528,8 @@ impl WitnessReducer for BranchArmFold {
                 ReducedValue::Type(InferredType::Optional(Box::new(t)))
             }
             Some(t) => ReducedValue::Type(t),
-            // TODO(union-join): disagreeing arms are a union, not unknown.
+            // TODO(union-join): disagreeing arms are a union, not unknown
+            // (docs/open-forks.md, "Union types in the lattice").
             None => ReducedValue::None,
         }
     }
