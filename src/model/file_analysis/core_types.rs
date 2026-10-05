@@ -423,10 +423,6 @@ bitflags::bitflags! {
         /// surface. Minted on the CLASS by whoever sees the catch-all
         /// declaration; the lanes ask `class_answers_any_member`.
         const DYNAMIC_MEMBERS = 1 << 27;
-        /// A stored slot whose VALUE is called (a C function-pointer member,
-        /// `int (*read)(char *)`). The declarator says so, so a call landing
-        /// on the slot asks the declaration instead of a callback-name list.
-        const CALLABLE_VALUE = 1 << 28;
         /// A bodiless declaration of a callable (Perl `sub frob;`): the name
         /// exists — `can` answers it, so it discharges a role's `requires` —
         /// but its body is elsewhere (a later `sub frob {…}`, AUTOLOAD, XS).
@@ -496,7 +492,6 @@ impl TryFrom<&str> for SymbolFlags {
             "receiver" => SymbolFlags::RECEIVER,
             "constructor" => SymbolFlags::CONSTRUCTOR,
             "throwaway" => SymbolFlags::THROWAWAY,
-            "callable_value" => SymbolFlags::CALLABLE_VALUE,
             other => return Err(UnknownAttribute(other.to_string())),
         })
     }

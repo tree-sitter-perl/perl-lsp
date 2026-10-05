@@ -358,11 +358,10 @@
 (pointer_declarator (field_identifier) @deref.leaf.field)
 (reference_declarator (identifier) @deref.leaf.local)
 (reference_declarator (field_identifier) @deref.leaf.field)
-; two more levels the peel descends: @deref.callable says the declared name
-; holds a value that is INVOKED (a function-pointer declarator), and
-; @deref.paren is the grouping level that denotes nothing of its own.
-(function_declarator) @deref.callable
-(parenthesized_declarator) @deref.paren
+; @deref.pass is a level the peel descends without a step of its own: the
+; grouping parens, and the function declarator of a function pointer.
+(function_declarator) @deref.pass
+(parenthesized_declarator) @deref.pass
 ; a templated owner (`Buf<T>::grow`) owns by its BASE class name: the name
 ; field IS the class, so every qualifier segment peels through this capture
 ; instead of a string split on `<`.
@@ -644,8 +643,8 @@
 ; a function-POINTER data member (`int (*read)(char *);`) — a stored slot
 ; whose value is called. The parenthesized declarator is what distinguishes
 ; it from a method prototype (`int read();`), whose declarator names the
-; member directly; the chain's @deref.callable level is what makes
-; `ops->read(buf)` resolve to the slot.
+; member directly. `ops->read(buf)` reaches the slot because a class keeps
+; one member namespace, not because the slot says it is called.
 (field_declaration
   type: (_) @type.annot
   declarator: (function_declarator
