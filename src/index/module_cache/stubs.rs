@@ -61,6 +61,7 @@ pub fn decode_stub(blob: &[u8]) -> Option<WarmStub> {
         FileAnalysis,
     ) = bincode::deserialize(&bin).ok()?;
     skeleton.after_deserialize();
+    super::blob::attach_spellings(&mut skeleton);
     // The eviction flags are `#[serde(skip)]` because a decoded BLOB is
     // whole; the stub's skeleton is the opposite — stripped on all three
     // axes by construction. Re-mark it, or its empty bag/refs/symbols
