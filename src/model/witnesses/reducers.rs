@@ -135,6 +135,67 @@ impl ClassIdentity {
     }
 }
 
+/// Which of a variable's witnesses are live at a query point: none past the
+/// point, none behind the latest write at or before it. The fold owns this
+/// rule; the registry's chase asks it (`edge_is_dead`) so it never chases an
+/// edge the fold would discard — a write chain (`$x = $x->next` × N) would
+/// otherwise re-chase every earlier write from every point.
+///
+/// TODO(def-use): this is reaching-definitions computed at query time. The
+/// builder should mint reaching writes as facts in the flow lane, and the
+/// chase follow those instead of asking a reducer —
+/// `docs/adr/flow-narrowing.md` §Reaching writes.
+pub(crate) struct LiveWindow {
+    point: Option<Point>,
+    reset_at: Option<Point>,
+}
+
+impl LiveWindow {
+    /// Point-narrowing is variable-lifetime semantics; every other
+    /// attachment folds all its witnesses.
+    pub(crate) fn at(ws: &[&Witness], q: &ReducerQuery) -> Self {
+        let point = q
+            .point
+            .filter(|_| matches!(q.attachment, WitnessAttachment::Variable { .. }));
+        let in_window = |w: &&&Witness| point.is_none_or(|p| w.span.start <= p);
+        let reset_at = ws
+            .iter()
+            .filter(in_window)
+            .filter(|w| matches!(w.payload, WitnessPayload::Reset))
+            .map(|w| w.span.start)
+            .max();
+        LiveWindow { point, reset_at }
+    }
+
+    fn in_window(&self, w: &Witness) -> bool {
+        self.point.is_none_or(|p| w.span.start <= p)
+    }
+
+    fn admits(&self, w: &Witness) -> bool {
+        self.in_window(w) && self.reset_at.is_none_or(|r| w.span.start >= r)
+    }
+
+    /// An `Edge` the fold will discard, so the chase may skip it. Only
+    /// edges: the fold's "bound before" still reads the other witnesses.
+    /// A reset only retires edges when an earlier marker already answers
+    /// "was anything bound before it" — a first write resets nothing, and
+    /// deciding that would need the very edges being skipped.
+    pub(crate) fn edge_is_dead(&self, ws: &[&Witness], w: &Witness) -> bool {
+        if !matches!(w.payload, WitnessPayload::Edge(_)) {
+            return false;
+        }
+        if !self.in_window(w) {
+            return true;
+        }
+        self.reset_at.is_some_and(|r| {
+            w.span.start < r
+                && ws
+                    .iter()
+                    .any(|m| m.span.start < r && matches!(m.payload, WitnessPayload::Reset))
+        })
+    }
+}
+
 impl WitnessReducer for FrameworkAwareTypeFold {
     fn name(&self) -> &str {
         "framework_aware_type_fold"
@@ -159,9 +220,8 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         // scope wrongly discards them (`my $g = X->new->m` chased at `$g`'s
         // scope-end, where the call span doesn't contain it). So only narrow
         // for variables; expressions fold every witness.
-        let narrow_point = q
-            .point
-            .filter(|_| matches!(q.attachment, WitnessAttachment::Variable { .. }));
+        let window = LiveWindow::at(ws, q);
+        let narrow_point = window.point;
         // Narrowing: with a `point`, pick the narrowest-span
         // InferredType witness containing it (already post-narrowing).
         // Falls through to the full fold otherwise.
@@ -223,33 +283,20 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         // `$r = Foo->new; $r = {}` reads the hash. Facts anchored at the
         // site survive; what lands after accrues. A first write in a scope
         // resets nothing and is not a value.
-        let in_window = |w: &Witness| narrow_point.is_none_or(|p| w.span.start <= p);
         // "Bound before" counts an earlier WRITE as a binding whatever it
         // produced: a write whose RHS nothing typed leaves only its own
         // marker behind, and the next write still replaces something.
         let bound_before = |site: Point| {
-            ws.iter().filter(|w| in_window(w)).any(|w| {
+            ws.iter().filter(|w| window.in_window(w)).any(|w| {
                 w.span.start < site
                     && (w.payload.binds_value() || matches!(w.payload, WitnessPayload::Reset))
             })
         };
-        let reset_at = ws
-            .iter()
-            .filter(|w| in_window(w))
-            .filter(|w| matches!(w.payload, WitnessPayload::Reset))
-            .map(|w| w.span.start)
-            .max();
-
         for w in ws {
             // Temporal ordering: only consider witnesses emitted at or
             // before the query point — a later reassignment shouldn't
             // influence a lookup at an earlier line.
-            if let Some(point) = narrow_point {
-                if w.span.start > point {
-                    continue;
-                }
-            }
-            if reset_at.is_some_and(|r| w.span.start < r) {
+            if !window.admits(w) {
                 continue;
             }
             // Skip scoped InferredType witnesses that don't contain the
@@ -400,7 +447,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
 
         // A write that retired something and was never displaced is the
         // answer; a first write (a declaration nothing typed) is absence.
-        if reset_at.is_some_and(bound_before) {
+        if window.reset_at.is_some_and(bound_before) {
             return ReducedValue::Type(InferredType::Unknown);
         }
         ReducedValue::None
@@ -458,7 +505,9 @@ impl WitnessReducer for BranchArmFold {
         }
         match &w.payload {
             WitnessPayload::InferredType(_) => true,
-            WitnessPayload::Fact { family, .. } => family == tags::FACT_UNDEF_ARM,
+            WitnessPayload::Fact { family, .. } => {
+                family == tags::FACT_UNDEF_ARM || family == tags::FACT_SHORT_CIRCUIT
+            }
             _ => false,
         }
     }
@@ -469,6 +518,8 @@ impl WitnessReducer for BranchArmFold {
         // a distinct source at emission so this fold can prefer them.
         let mut fallback: Vec<InferredType> = Vec::new();
         let mut undef_arms = 0usize;
+        // `Some(exits)` for a short-circuit, whether or not its arms typed.
+        let mut short_circuit: Option<bool> = None;
         for w in ws {
             let is_fallback =
                 matches!(&w.source, WitnessSource::Builder(t) if t == "fallback_arm");
@@ -476,20 +527,33 @@ impl WitnessReducer for BranchArmFold {
                 WitnessPayload::InferredType(t) if is_fallback => fallback.push(t.clone()),
                 WitnessPayload::InferredType(t) => typed.push(t.clone()),
                 WitnessPayload::Fact { family, .. } if family == tags::FACT_UNDEF_ARM => undef_arms += 1,
+                WitnessPayload::Fact { family, value, .. } if family == tags::FACT_SHORT_CIRCUIT => {
+                    short_circuit = Some(matches!(value, FactValue::Bool(true)));
+                }
                 _ => {}
             }
         }
-        // `||` / `//`: the RHS floor is returned whenever the LHS is
-        // falsy/undef, so the expression's type is at least the fallback's.
-        // Prefer agreement across all known arms; else the known floor; else
-        // the known LHS. This is what lets `$ENV{X} || 10` type to `Numeric`
-        // even when the LHS hash access can't be resolved — an honest,
-        // reachable type beats the entry vanishing.
-        if !fallback.is_empty() {
+        if let Some(exits) = short_circuit {
             // An LHS that can't be false never reaches the fallback.
             if let Some(t) = typed.iter().find(|t| t.is_always_true()) {
                 return ReducedValue::Type(t.clone());
             }
+            // `X || return`: when the fallback runs nothing is assigned, so
+            // the value is `X` minus its false part — an `Optional` peels,
+            // and a plain `undef` never gets past the exit.
+            if exits {
+                return match typed.into_iter().next() {
+                    Some(InferredType::Optional(inner)) => ReducedValue::Type(*inner),
+                    Some(t) if !t.is_undef() => ReducedValue::Type(t),
+                    _ => ReducedValue::None,
+                };
+            }
+            // The RHS floor is returned whenever the LHS is falsy/undef, so
+            // the expression's type is at least the fallback's. Prefer
+            // agreement across all known arms; else the known floor; else
+            // the known LHS. This is what lets `$ENV{X} || 10` type to
+            // `Numeric` even when the LHS hash access can't be resolved — an
+            // honest, reachable type beats the entry vanishing.
             let all: Vec<&InferredType> = typed.iter().chain(fallback.iter()).collect();
             if let Some((first, rest)) = all.split_first() {
                 if rest.iter().all(|t| *t == *first) {

@@ -177,6 +177,25 @@ type and the pass's own output can't feed back), and
 `emit_defined_narrowing_witnesses` re-derives `Optional<T> → T` each fold
 iteration (clear-and-emit on tag `defined_narrowing`).
 
+## Reaching writes
+
+A read of `Variable@point` finds the value it sees by folding every witness
+on the variable and discarding those past the point or behind the latest
+write — `LiveWindow` in `FrameworkAwareTypeFold`, which the registry's edge
+chase also asks so it never chases an edge the fold will discard. That is
+reaching definitions computed at query time, once per read. A chain of
+self-reads (`$x = $x->next` × N) still costs N² hops: the value at write N
+depends on write N-1's, and the chase's memo dies with each top-level query.
+
+The fix is to mint the facts at the producer (rule #11). The flow lane
+records, per read, the set of writes that reach it, with refinement nodes
+where a guard narrows the variable (SSA's π), and a read edges to its
+reaching writes' value attachments instead of to `Variable@point`. Each
+write's value is then computed once per fold iteration, and the chase
+needs no temporal rule at all. A loop makes the reaching set plural, which
+is the same join as `TODO(union-join)`. Until then, `TODO(def-use)` marks
+the query-time window.
+
 ## Forward work
 
 The remaining residuals — accessor places and the general

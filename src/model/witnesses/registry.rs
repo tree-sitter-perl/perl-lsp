@@ -1989,8 +1989,12 @@ impl ReducerRegistry {
         // combined with them before this frame returns, so no single exit key
         // names this frame's answer.
         let sole_witness = raw.len() == 1;
+        let window = super::reducers::LiveWindow::at(&raw, q);
         let mut out: Vec<Witness> = Vec::with_capacity(raw.len());
-        for w in raw {
+        for &w in raw.iter() {
+            if window.edge_is_dead(&raw, w) {
+                continue;
+            }
             match &w.payload {
                 WitnessPayload::Edge(target) => {
                     let resolved = match (target, q.context) {

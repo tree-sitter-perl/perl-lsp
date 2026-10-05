@@ -179,8 +179,11 @@ pub(crate) enum AssignOp {
     Append,
     /// `x=` — string repetition.
     Repeat,
-    /// Arithmetic, shift and bitwise ops — a number.
+    /// Arithmetic and shift ops — a number.
     Numeric,
+    /// `|=` / `&=` / `^=` — a number, unless both operands are strings, when
+    /// Perl does the op per character and the result is a string.
+    Bitwise,
 }
 
 impl AssignOp {
@@ -203,9 +206,8 @@ pub(crate) fn assign_op(node: Node) -> Option<AssignOp> {
         "&&=" => AssignOp::AndThen,
         ".=" => AssignOp::Append,
         "x=" => AssignOp::Repeat,
-        "+=" | "-=" | "*=" | "/=" | "%=" | "**=" | "<<=" | ">>=" | "|=" | "&=" | "^=" => {
-            AssignOp::Numeric
-        }
+        "+=" | "-=" | "*=" | "/=" | "%=" | "**=" | "<<=" | ">>=" => AssignOp::Numeric,
+        "|=" | "&=" | "^=" => AssignOp::Bitwise,
         _ => return None,
     })
 }

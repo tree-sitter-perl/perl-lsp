@@ -279,10 +279,11 @@ fn recognize_ref_eq_guard(eq: Node, source: &[u8]) -> Option<GuardFact> {
     })
 }
 
-/// True if a statement-level expression is a guaranteed control-flow exit
-/// (`return`/`die`/`croak`/`last`/`next`/`redo`/`goto`) — the shape that
-/// makes `STMT if/unless G` narrow the rest of the enclosing block.
-fn is_exit_expression(node: Node, source: &[u8]) -> bool {
+/// True if an expression is a guaranteed control-flow exit
+/// (`return`/`die`/`croak`/`last`/`next`/`redo`/`goto`): it never yields a
+/// value, so `STMT if/unless G` narrows the rest of the block and
+/// `X || EXIT` is worth only `X`.
+pub(super) fn is_exit_expression(node: Node, source: &[u8]) -> bool {
     const EXITS: [&str; 7] = ["die", "croak", "confess", "last", "next", "redo", "goto"];
     match node.kind() {
         "return_expression" | "last_expression" | "next_expression" | "redo_expression" => true,

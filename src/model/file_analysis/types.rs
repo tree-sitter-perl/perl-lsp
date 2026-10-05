@@ -907,8 +907,27 @@ impl InferredType {
         !matches!(self, InferredType::Unknown)
     }
 
+    /// A closed hash shape that has no `key`: its known keys, which a read
+    /// of `key` must have misspelled. An empty shape qualifies — nothing
+    /// was written, so any read is of a key it lacks.
+    pub fn closed_keys_lacking(&self, key: &str) -> Option<Vec<String>> {
+        match self {
+            InferredType::HashWithKeys { keys, open: false }
+                if !keys.iter().any(|(k, _)| k == key) =>
+            {
+                Some(keys.iter().map(|(k, _)| k.clone()).collect())
+            }
+            _ => None,
+        }
+    }
+
     /// A reference is never false or undef, so `$v || $d` / `$v // $d` on
     /// one short-circuits to `$v`: the fallback is unreachable.
+    // TODO(overload-bool): an object whose class overloads `bool`
+    // (`JSON::PP::Boolean`) can be false, so `||` reaches its fallback. Needs
+    // `use overload` keys recorded per package and asked here by class; no
+    // overload is modeled yet. Pinned by
+    // `assignment_ops_tests::an_overloaded_bool_is_still_taken_as_true`.
     pub fn is_always_true(&self) -> bool {
         matches!(
             self,

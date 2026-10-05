@@ -57,8 +57,15 @@ fn a_compound_operator_types_its_target_by_its_result() {
         (r#"my $s = 1; $s += Bar->new; return $s"#, InferredType::Numeric),
         (r#"my $s = "a"; $s x= 3; return $s"#, InferredType::String),
         (r#"my $s = 1; $s .= "x"; return $s"#, InferredType::String),
+        (r#"my $s = "a"; $s |= 1; return $s"#, InferredType::Numeric),
+        (r#"my $s = 1; $s ^= "b"; return $s"#, InferredType::Numeric),
     ] {
         assert_eq!(returns(body), Some(want), "{body}");
+    }
+    // Two strings are a per-character string op, which nothing types.
+    for op in ["|=", "&=", "^="] {
+        let body = format!(r#"my $s = "a"; $s {op} "b"; return $s"#);
+        assert_eq!(returns(&body), Some(InferredType::Unknown), "{body}");
     }
     assert_eq!(class(returns("my $s; $s ||= Baz->new; return $s")).as_deref(), Some("Baz"));
     assert_eq!(class(returns("my $s = Bar->new; $s &&= Baz->new; return $s")).as_deref(), Some("Baz"));
@@ -77,6 +84,17 @@ fn a_fallback_assignment_is_its_short_circuit_spelling() {
         let untyped = format!("my $s = Bar->new; $s {op}= nothing(); return $s");
         assert_eq!(class(returns(&untyped)).as_deref(), Some("Bar"), "{untyped}");
     }
+}
+
+// Pins today's wrong answer: `FalseObj` is false, so the real value is a
+// `Foo`. Flips when `is_always_true` learns about overloaded `bool`.
+#[test]
+fn an_overloaded_bool_is_still_taken_as_true() {
+    let src = "package FalseObj; use overload 'bool' => sub { 0 }; sub new { bless {}, shift }\n\
+package Foo; sub new { bless {}, shift }\n\
+sub probe { my $f = FalseObj->new; return $f || Foo->new }\n1;\n";
+    let got = build_fa(src).sub_return_type_at_arity("probe", None);
+    assert_eq!(class(got).as_deref(), Some("FalseObj"));
 }
 
 #[test]
@@ -171,10 +189,38 @@ fn element_writes_extend_an_empty_hash() {
     assert_eq!(class(got).as_deref(), Some("Bar"));
 }
 
+// A shape nothing wrote has no keys, so every read misses one.
 #[test]
-fn an_empty_shape_reports_no_key_typos() {
-    let src = "package Foo;\nsub f { my %state; while (1) { last if $state{seen}; $state{seen} = 1 } my $h = {}; $h->{x} }\nsub g { {} }\nsub h { g()->{x} }\n1;\n";
+fn an_empty_shape_reports_every_read_key() {
+    let src = "package Foo;\nsub f { my %state; $state{seen} }\nsub g { {} }\nsub h { g()->{x} }\n1;\n";
     let fa = build_fa(src);
-    assert!(fa.closed_shape_key_typos(None).is_empty());
-    assert!(fa.projected_key_typos(None).is_empty());
+    let closed = fa.closed_shape_key_typos(None);
+    assert_eq!(closed.len(), 1, "{closed:?}");
+    assert_eq!(closed[0].key, "seen");
+    assert!(closed[0].known_keys.is_empty());
+    let projected = fa.projected_key_typos(None);
+    assert_eq!(projected.len(), 1, "{projected:?}");
+    assert_eq!(projected[0].key, "x");
+}
+
+// An exit fallback leaves the sub, so it never becomes the value: the
+// variable holds the LHS made true. Webmin's MIME::Body, where an abstract
+// `open` returns undef, read `$io` as undef.
+#[test]
+fn an_exit_fallback_contributes_no_value() {
+    let src = "package Bar; sub new { bless {}, shift }\n\
+package Foo;\n\
+sub nothing { undef }\n\
+sub maybe { return undef if $_[0]; Bar->new }\n\
+sub a { my $x = nothing() || return (); $x }\n\
+sub b { my $x = maybe(1) // die 'none'; $x }\n\
+sub c { my $x = maybe(1) || return; $x }\n\
+1;\n";
+    let fa = build_fa(src);
+    let ret = |s: &str| fa.sub_return_type_at_arity(s, None);
+    let bar = || Some(InferredType::ClassName("Bar".into()));
+    assert!(!ret("a").is_some_and(|t| t.is_undef()), "{:?}", ret("a"));
+    assert_eq!(ret("b"), bar());
+    // `c` also returns from the bare `return`.
+    assert_eq!(ret("c"), Some(InferredType::Optional(Box::new(InferredType::ClassName("Bar".into())))));
 }

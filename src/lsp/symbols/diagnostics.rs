@@ -684,17 +684,18 @@ pub fn collect_diagnostics(
         if site.known_keys.len() > 5 {
             known.push("...");
         }
+        let keys = if known.is_empty() {
+            "no keys".to_string()
+        } else {
+            format!("keys: {}", known.join(", "))
+        };
         let message = match &site.spelling {
-            Some(base) => format!(
-                "key '{}' is not in {}'s literal shape (keys: {})",
-                site.key,
-                base,
-                known.join(", "),
-            ),
+            Some(base) => {
+                format!("key '{}' is not in {}'s literal shape ({keys})", site.key, base)
+            }
             None => format!(
-                "key '{}' is not in this expression's literal shape (keys: {})",
+                "key '{}' is not in this expression's literal shape ({keys})",
                 site.key,
-                known.join(", "),
             ),
         };
         diagnostics.push(Diagnostic {

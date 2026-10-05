@@ -376,10 +376,12 @@ impl<'a> Builder<'a> {
 
             // An assignment's value is the target's new value.
             // `||=`/`//=` never reach here — `emit_expr_witness` types them
-            // as a short-circuit. `=` / `&&=` produce the RHS (`&&=`'s other
-            // outcome is a false old value, which carries no type), unless
+            // as a short-circuit. `=` / `&&=` produce the RHS, unless
             // the target is an aggregate: a list assignment in scalar context
             // is a count, and the list type is `@flow`'s business.
+            // TODO(union-join): `&&=` is the false old value ⊔ the RHS; it
+            // types as the RHS until the lattice can join them
+            // (docs/open-forks.md "Union types in the lattice").
             "assignment_expression" => match crate::cst::assign_op(node)? {
                 crate::cst::AssignOp::Plain | crate::cst::AssignOp::AndThen => {
                     let left = node.child_by_field_name("left")?;
@@ -399,6 +401,27 @@ impl<'a> Builder<'a> {
                 }
                 crate::cst::AssignOp::Numeric => {
                     Some(WitnessPayload::InferredType(InferredType::Numeric))
+                }
+                // Two strings make a string Perl builds per character, which
+                // no caller wants typed; anything else is the number.
+                // TODO(bitwise-feature): under `use feature 'bitwise'` (the
+                // v5.28 bundle) these are always numeric and `|.=` & co. are
+                // the string ops. The feature is known before the code it
+                // governs (`use` precedes it, bundle plugins run `on_use`
+                // during the walk), so this can read a per-scope feature set
+                // once the builder records one.
+                crate::cst::AssignOp::Bitwise => {
+                    let is_string = |b: &mut Self, n: Node<'a>| {
+                        b.emit_expr_witness(n);
+                        b.bag_query_expr_span(node_to_span(n)) == Some(InferredType::String)
+                    };
+                    let left = node.child_by_field_name("left")?;
+                    let right = node.child_by_field_name("right")?;
+                    if is_string(self, left) && is_string(self, right) {
+                        None
+                    } else {
+                        Some(WitnessPayload::InferredType(InferredType::Numeric))
+                    }
                 }
                 crate::cst::AssignOp::Fallback => None,
             },
@@ -658,10 +681,16 @@ impl<'a> Builder<'a> {
     /// whenever the env var is unset), so it rides a distinct `fallback_arm`
     /// source; `BranchArmFold` prefers it when the arms disagree or the LHS
     /// can't be typed. Reuses the ternary's BranchArm machinery — one speller
-    /// for "this expression's value is one of these arms."
+    /// for "this expression's value is one of these arms." The arms' union
+    /// would be built in `BranchArmFold` (its `TODO(union-join)`).
     fn push_fallback_arms(&mut self, span: Span, lhs: Node<'a>, rhs: Node<'a>) {
-        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        use crate::model::witnesses::{tags, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let arm_att = WitnessAttachment::BranchArm(span);
+        // Once per span, like every expression witness: a second copy of the
+        // LHS arm would read to `BranchArmFold` as two agreeing arms.
+        if !self.bag.for_attachment(&arm_att).is_empty() {
+            return;
+        }
         self.emit_expr_witness(lhs);
         self.bag.push(Witness {
             attachment: arm_att.clone(),
@@ -669,13 +698,26 @@ impl<'a> Builder<'a> {
             payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(lhs))),
             span: node_to_span(lhs),
         });
-        self.emit_expr_witness(rhs);
+        let exits = super::narrowing::is_exit_expression(rhs, self.source);
         self.bag.push(Witness {
             attachment: arm_att.clone(),
-            source: WitnessSource::Builder("fallback_arm".into()),
-            payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(rhs))),
+            source: WitnessSource::Builder(tags::FACT_SHORT_CIRCUIT.into()),
+            payload: WitnessPayload::Fact {
+                family: tags::FACT_SHORT_CIRCUIT.into(),
+                key: String::new(),
+                value: crate::model::witnesses::FactValue::Bool(exits),
+            },
             span: node_to_span(rhs),
         });
+        if !exits {
+            self.emit_expr_witness(rhs);
+            self.bag.push(Witness {
+                attachment: arm_att.clone(),
+                source: WitnessSource::Builder("fallback_arm".into()),
+                payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(rhs))),
+                span: node_to_span(rhs),
+            });
+        }
         self.bag.push(Witness {
             attachment: WitnessAttachment::Expr(span),
             source: WitnessSource::Builder("branch_arm".into()),
