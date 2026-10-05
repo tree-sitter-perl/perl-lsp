@@ -321,6 +321,14 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<CompletionCandidate> {
         let defs = self.hash_key_defs_for_owner(owner);
+        let detail_of = |key: &str| match owner {
+            HashKeyOwner::Class(name) => format!("{}->{{{}}}", name, key),
+            // A column is reached via its accessor / condition args, not a
+            // hash deref — show the accessor form.
+            HashKeyOwner::Bridged { class } => format!("{}->{}", class, key),
+            HashKeyOwner::Variable { name, .. } => format!("{}{{{}}}", name, key),
+            HashKeyOwner::Sub { name, .. } => format!("{}()->{{{}}}", name, key),
+        };
         let mut seen = HashSet::new();
         let mut candidates = Vec::new();
 
@@ -334,14 +342,7 @@ impl FileAnalysis {
                 SymbolDetail::HashKeyDef { is_dynamic: true, .. }
             );
 
-            let detail = match owner {
-                HashKeyOwner::Class(name) => format!("{}->{{{}}}", name, def.name),
-                // A column is reached via its accessor / condition args, not a
-                // hash deref — show the accessor form.
-                HashKeyOwner::Bridged { class } => format!("{}->{}", class, def.name),
-                HashKeyOwner::Variable { name, .. } => format!("{}{{{}}}", name, def.name),
-                HashKeyOwner::Sub { name, .. } => format!("{}()->{{{}}}", name, def.name),
-            };
+            let detail = detail_of(&def.name);
 
             candidates.push(CompletionCandidate {
                 label: def.name.clone(),
@@ -350,6 +351,30 @@ impl FileAnalysis {
                 detail: Some(detail),
                 insert_text: None,
                 sort_priority: if is_dynamic { PRIORITY_DYNAMIC } else { PRIORITY_FILE_WIDE },
+                additional_edits: vec![],
+                import_fact: None,
+                display_override: None,
+            });
+        }
+
+        // A written key is a known key even with no def: Perl mints a hash
+        // literal's keys (`my %h = (k => 1)`) and `$h{k} = …` as Write refs.
+        let written = self.refs.iter().filter(|r| {
+            r.access == AccessKind::Write
+                && matches!(r.kind, RefKind::HashKeyAccess { .. })
+                && r.hash_key_owner().is_some_and(|o| o.found_by(owner))
+        });
+        for r in written {
+            if !seen.insert(r.target_name.clone()) {
+                continue;
+            }
+            candidates.push(CompletionCandidate {
+                label: r.target_name.clone(),
+                kind: SymKind::Variable,
+                is_static: false,
+                detail: Some(detail_of(&r.target_name)),
+                insert_text: None,
+                sort_priority: PRIORITY_FILE_WIDE,
                 additional_edits: vec![],
                 import_fact: None,
                 display_override: None,
