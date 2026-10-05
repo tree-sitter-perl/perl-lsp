@@ -224,3 +224,20 @@ sub c { my $x = maybe(1) || return; $x }\n\
     // `c` also returns from the bare `return`.
     assert_eq!(ret("c"), Some(InferredType::Optional(Box::new(InferredType::ClassName("Bar".into())))));
 }
+
+// Every declarator names its variable through the CST, so `state` and
+// `local` fold like `my` and `our`.
+#[test]
+fn every_declarator_folds_its_constant() {
+    for decl in ["my", "our", "state", "local"] {
+        let src = format!("package Foo;\nsub f {{ {decl} $m = 'process'; Foo->new->$m() }}\n");
+        let fa = build_fa(&src);
+        let got: Vec<String> = fa
+            .refs()
+            .iter()
+            .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }))
+            .map(|r| r.target_name.clone())
+            .collect();
+        assert!(got.iter().any(|t| t == "process"), "{decl}: {got:?}");
+    }
+}

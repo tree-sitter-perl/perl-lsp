@@ -824,9 +824,7 @@ impl<'a> Builder<'a> {
             // compound write stores the assignment's value, not the RHS.
             let mut write_at = None;
             if let Some(assign) = src.parent().filter(|p| p.kind() == "assignment_expression") {
-                if let Some(left) = assign.child_by_field_name("left") {
-                    write_at = Some(Self::assignment_write_point(assign, left));
-                }
+                write_at = Some(crate::cst::assignment_write_point(assign));
                 if crate::cst::assign_op(assign) != Some(crate::cst::AssignOp::Plain) {
                     source_span = node_to_span(assign);
                 }

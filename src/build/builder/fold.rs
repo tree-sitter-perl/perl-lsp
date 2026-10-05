@@ -415,7 +415,7 @@ impl<'a> Builder<'a> {
             let span = node_to_span(node);
             // Where the write lands; the typed witness and the idempotency
             // probe both key on it, like the walk's own TC.
-            let at = Self::assignment_write_point(node, left);
+            let at = crate::cst::assignment_write_point(node);
             let write_span = Span { start: at, end: span.end };
 
             // List-context row extraction: `my ($a, $b, ...) = $rs->search(

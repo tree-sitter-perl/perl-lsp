@@ -194,6 +194,19 @@ impl AssignOp {
     }
 }
 
+/// Where an assignment's write lands: after the whole expression, so every
+/// read inside it — the RHS of `$n = $n->parent`, the implicit read of
+/// `$x ||= …` — sees the value being replaced. A declaration is the
+/// exception: its RHS can't name the variable it declares, and the facts a
+/// declaration must not kill (a parameter assertion) sit on its binding
+/// token, so it writes there.
+pub(crate) fn assignment_write_point(assign: Node) -> tree_sitter::Point {
+    match assign.child_by_field_name("left") {
+        Some(left) if left.kind() == "variable_declaration" => left.start_position(),
+        _ => assign.end_position(),
+    }
+}
+
 /// The operator of an `assignment_expression`. `None` for any other kind, or
 /// an operator this table doesn't know.
 pub(crate) fn assign_op(node: Node) -> Option<AssignOp> {
@@ -212,6 +225,13 @@ pub(crate) fn assign_op(node: Node) -> Option<AssignOp> {
     })
 }
 
+/// A list literal: the grammar's bare `list_expression` (`a, b`) or an
+/// explicit paren group (`(a, b)`, `(a)`). The two spell the same list. The
+/// empty list `()` is a `stub_expression`, which callers that want it name.
+pub(crate) fn is_list_literal(node: Node) -> bool {
+    matches!(node.kind(), "list_expression" | "parenthesized_expression")
+}
+
 /// A call expression's arguments as a flat positional sequence. The
 /// `arguments` field may be a bare single node or a `list_expression` /
 /// `parenthesized_expression` wrapper — callers never see the difference.
@@ -219,7 +239,7 @@ pub(crate) fn call_args<'a>(call_node: Node<'a>) -> Vec<Node<'a>> {
     let Some(args) = call_node.child_by_field_name("arguments") else {
         return Vec::new();
     };
-    if matches!(args.kind(), "list_expression" | "parenthesized_expression") {
+    if is_list_literal(args) {
         args.named().collect()
     } else {
         vec![args]
@@ -239,7 +259,7 @@ pub(crate) fn flatten_list<'a>(list: Node<'a>, out: &mut Vec<Node<'a>>) {
     let count = list.child_count();
     for i in 0..count {
         let Some(child) = list.child(i) else { continue };
-        if matches!(child.kind(), "list_expression" | "parenthesized_expression") {
+        if is_list_literal(child) {
             flatten_list(child, out);
         } else {
             out.push(child);
@@ -266,7 +286,7 @@ pub(crate) fn list_elements<'a>(list: Node<'a>) -> Vec<Node<'a>> {
 /// no semantics; a call/deref/element-access does, and is left alone.
 /// Loops, so nested `(($x))` collapse.
 pub(crate) fn peel_groups(mut node: Node) -> Node {
-    while matches!(node.kind(), "parenthesized_expression" | "list_expression") {
+    while is_list_literal(node) {
         let mut named = node.named();
         match (named.next(), named.next()) {
             (Some(inner), None) => node = inner,
@@ -725,7 +745,7 @@ pub(crate) fn string_list_with_residue(
                     residue = true;
                 }
             }
-            "parenthesized_expression" | "list_expression" | "anonymous_array_expression" => {
+            k if is_list_literal(child) || k == "anonymous_array_expression" => {
                 let (v, r) = string_list_with_residue(child, src, fold);
                 results.extend(v);
                 residue |= r;

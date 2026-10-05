@@ -401,7 +401,7 @@ pub struct MethodCallBinding {
     pub invocant_var: String,
     pub method_name: String,
     pub scope: ScopeId,
-    /// Where the write lands (`Builder::assignment_write_point`) to the end
+    /// Where the write lands (`cst::assignment_write_point`) to the end
     /// of the assignment; the binding is anchored at its start.
     pub span: Span,
     /// The invocant read. It precedes the write, so `$n = $n->parent`

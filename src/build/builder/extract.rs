@@ -312,7 +312,7 @@ impl<'a> Builder<'a> {
         let mut cursor = lhs.walk();
         let elems: Vec<Node<'a>> = match lhs.kind() {
             "variable_declaration" => lhs.children_by_field_name("variables", &mut cursor).collect(),
-            "parenthesized_expression" | "list_expression" => crate::cst::list_elements(lhs),
+            _ if crate::cst::is_list_literal(lhs) => crate::cst::list_elements(lhs),
             _ => Vec::new(),
         };
         elems
@@ -355,6 +355,13 @@ impl<'a> Builder<'a> {
         if matches!(lhs.kind(), "scalar" | "array" | "hash") {
             return lhs.utf8_text(self.source).ok().map(|s| s.to_string());
         }
+        // `local $x = …` assigns the variable it localizes.
+        if lhs.kind() == "localization_expression" {
+            let mut named = crate::cst::NodeExt::named(&lhs);
+            if let (Some(var), None) = (named.next(), named.next()) {
+                return self.get_var_text_from_lhs(var);
+            }
+        }
         None
     }
 
@@ -380,7 +387,7 @@ impl<'a> Builder<'a> {
                 let mut cursor = lhs.walk();
                 lhs.children_by_field_name("variables", &mut cursor).collect()
             }
-            "parenthesized_expression" | "list_expression" => crate::cst::list_elements(lhs),
+            _ if crate::cst::is_list_literal(lhs) => crate::cst::list_elements(lhs),
             _ => return None,
         };
         let mut out = Vec::new();
@@ -412,7 +419,7 @@ impl<'a> Builder<'a> {
     pub(super) fn list_element_nodes(&self, node: Node<'a>) -> Option<Vec<Node<'a>>> {
         // A paren group is a literal list whatever it holds — `(5)` is a
         // one-element list, so `my ($x) = (5)` binds `$x` to the `5`.
-        matches!(node.kind(), "parenthesized_expression" | "list_expression")
+        crate::cst::is_list_literal(node)
             .then(|| crate::cst::list_elements(node))
     }
 

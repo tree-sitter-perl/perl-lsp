@@ -75,7 +75,7 @@ impl<'a> Builder<'a> {
     pub(super) fn first_call_arg(&self, call_node: Node<'a>) -> Option<Node<'a>> {
         let args = call_node.child_by_field_name("arguments")?;
         match args.kind() {
-            "list_expression" | "parenthesized_expression" => args.named_child(0),
+            _ if crate::cst::is_list_literal(args) => args.named_child(0),
             _ => Some(args), // single arg (ambiguous_function_call_expression)
         }
     }
@@ -408,7 +408,7 @@ impl<'a> Builder<'a> {
         };
         let Some(args) = node.child_by_field_name("arguments") else { return };
         let arg_nodes: Vec<Node> = match args.kind() {
-            "list_expression" | "parenthesized_expression" => {
+            _ if crate::cst::is_list_literal(args) => {
                 (0..args.named_child_count())
                     .filter_map(|i| args.named_child(i))
                     .collect()
@@ -683,7 +683,7 @@ impl<'a> Builder<'a> {
         // value. Same one-level unwrap rule as the literal helper.
         let arg_node = match args.kind() {
             "scalar" => Some(args),
-            "parenthesized_expression" | "list_expression" => {
+            _ if crate::cst::is_list_literal(args) => {
                 let mut found: Option<Node<'a>> = None;
                 for i in 0..args.named_child_count() {
                     if let Some(c) = args.named_child(i) {
@@ -747,14 +747,14 @@ impl<'a> Builder<'a> {
             "string_literal" | "interpolated_string_literal" => {
                 return self.extract_string_content(args);
             }
-            "parenthesized_expression" | "list_expression" => {
+            _ if crate::cst::is_list_literal(args) => {
                 for i in 0..args.named_child_count() {
                     let child = args.named_child(i)?;
                     return match child.kind() {
                         "string_literal" | "interpolated_string_literal" => {
                             self.extract_string_content(child)
                         }
-                        "parenthesized_expression" | "list_expression" => {
+                        _ if crate::cst::is_list_literal(child) => {
                             self.first_string_literal_arg(child)
                         }
                         _ => None,

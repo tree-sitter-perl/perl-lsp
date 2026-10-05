@@ -837,10 +837,7 @@ impl<'a> Builder<'a> {
                 }
                 continue;
             }
-            if child.kind() == "list_expression"
-                || child.kind() == "parenthesized_expression"
-                || child.kind() == "anonymous_array_expression"
-            {
+            if crate::cst::is_list_literal(child) || child.kind() == "anonymous_array_expression" {
                 self.fold_export_tags_table(child);
             }
         }
@@ -1562,7 +1559,7 @@ impl<'a> Builder<'a> {
             "scalar" | "array" | "hash" | "bareword" => self
                 .resolve_constant_strings(expr.utf8_text(self.source).unwrap_or(""), 0)
                 .unwrap_or_default(),
-            "parenthesized_expression" | "list_expression" => expr
+            _ if crate::cst::is_list_literal(expr) => expr
                 .named_child(0)
                 .map(|c| self.enumerate_string_values(c))
                 .unwrap_or_default(),

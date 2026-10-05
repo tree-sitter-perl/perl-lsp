@@ -148,7 +148,7 @@ impl<'a> Builder<'a> {
             match child.kind() {
                 "quoted_word_list" => self.extract_qw_word_spans(child, names),
                 "anonymous_hash_expression" => self.extract_class_tiny_hash_keys(child, names),
-                "list_expression" | "parenthesized_expression" => self.collect_class_tiny_attrs(child, names),
+                _ if crate::cst::is_list_literal(child) => self.collect_class_tiny_attrs(child, names),
                 _ => {}
             }
         }
@@ -501,7 +501,7 @@ impl<'a> Builder<'a> {
                 _ => continue,
             };
             match child.kind() {
-                "list_expression" | "parenthesized_expression" => {
+                _ if crate::cst::is_list_literal(child) => {
                     self.accumulate_constant_pair(child);
                     return;
                 }
@@ -889,10 +889,10 @@ impl<'a> Builder<'a> {
         };
         let Some(list_node) = list_node else { return vec![] };
         match list_node.kind() {
-            "quoted_word_list" | "list_expression" | "parenthesized_expression"
-            | "string_literal" | "interpolated_string_literal" => {
+            "quoted_word_list" | "string_literal" | "interpolated_string_literal" => {
                 self.extract_string_names(list_node)
             }
+            _ if crate::cst::is_list_literal(list_node) => self.extract_string_names(list_node),
             _ => vec![],
         }
     }
@@ -1039,7 +1039,7 @@ impl<'a> Builder<'a> {
                         *pending_name = Some((name, span));
                     }
                 }
-                "list_expression" | "parenthesized_expression" => {
+                _ if crate::cst::is_list_literal(child) => {
                     self.collect_as_renames(child, pending_name, out);
                 }
                 _ => {
@@ -1108,21 +1108,13 @@ impl<'a> Builder<'a> {
     /// package qualifier. Perl exporters write either the lexical-to-package
     /// `our @EXPORT` form or the fully-qualified `@Bugzilla::Error::EXPORT`
     /// form (Bugzilla, many CPAN modules). Both name the *same* package global;
-    /// the qualifier is just an explicit spelling. We strip `our `/`my ` and the
-    /// sigil, then compare the trailing identifier after the last `::` against
-    /// the export-variable basename — so `@EXPORT`, `@Pkg::EXPORT`,
-    /// `%Pkg::EXPORT_TAGS` all match without a per-package branch (rule #10).
-    pub(super) fn export_var_basename(lhs_text: &str) -> Option<&'static str> {
-        let trimmed = lhs_text.trim();
-        let stripped = trimmed
-            .strip_prefix("our ")
-            .or_else(|| trimmed.strip_prefix("my "))
-            .unwrap_or(trimmed)
-            .trim_start();
-        let no_sigil = stripped
-            .strip_prefix('@')
-            .or_else(|| stripped.strip_prefix('%'))
-            .unwrap_or(stripped);
+    /// the qualifier is just an explicit spelling. Takes the assigned
+    /// variable (`get_var_text_from_lhs`), strips the sigil, then compares the
+    /// trailing identifier after the last `::` against the export-variable
+    /// basename — so `@EXPORT`, `@Pkg::EXPORT`, `%Pkg::EXPORT_TAGS` all match
+    /// without a per-package branch (rule #10).
+    pub(super) fn export_var_basename(var: &str) -> Option<&'static str> {
+        let no_sigil = var.strip_prefix('@').or_else(|| var.strip_prefix('%')).unwrap_or(var);
         match crate::model::file_analysis::split_qualified(no_sigil, &crate::model::conventions::PERL_SPELLINGS).1 {
             "EXPORT_OK" => Some("@EXPORT_OK"),
             "EXPORT" => Some("@EXPORT"),
@@ -1160,8 +1152,11 @@ impl<'a> Builder<'a> {
     pub(super) fn visit_assignment(&mut self, node: Node<'a>) {
         // Check for @ISA assignment: `our @ISA = (...)`
         if let Some(left) = node.child_by_field_name("left") {
-            let lhs_text = left.utf8_text(self.source).unwrap_or("");
-            if lhs_text == "@ISA" || lhs_text.ends_with("@ISA") {
+            // The assigned variable, whatever declares it (`my`/`our`/
+            // `state`/`local`); `None` for an element, glob or list target.
+            let lhs_var = self.get_var_text_from_lhs(left).unwrap_or_default();
+            let lhs_text = lhs_var.as_str();
+            if lhs_text == "@ISA" {
                 if let Some(ref pkg) = self.current_package {
                     // child_by_field_name("right") returns `(` paren, not the list.
                     // Iterate named children to find list_expression/quoted_word_list.
@@ -1180,7 +1175,7 @@ impl<'a> Builder<'a> {
 
             // Export package-variable assignment — `our @EXPORT`, the qualified
             // `@Pkg::EXPORT`, `%EXPORT_TAGS`, etc. `export_var_basename` strips
-            // the `our`/`my`, sigil, and any `Pkg::` qualifier so all spellings
+            // the sigil and any `Pkg::` qualifier so all spellings
             // map to one of the three export basenames (rule #10).
             let export_var = Self::export_var_basename(lhs_text);
 
@@ -1192,9 +1187,7 @@ impl<'a> Builder<'a> {
             if export_var == Some("%EXPORT_TAGS") {
                 for i in 0..node.named_child_count() {
                     if let Some(child) = node.named_child(i) {
-                        if child.kind() == "list_expression"
-                            || child.kind() == "parenthesized_expression"
-                        {
+                        if crate::cst::is_list_literal(child) {
                             self.fold_export_tags_table(child);
                         }
                     }
@@ -1255,19 +1248,11 @@ impl<'a> Builder<'a> {
 
             // Accumulate array/scalar assignments as constants
             {
-                // Strip leading "our " or "my " to get the variable name
-                let var_stripped = if lhs_text.starts_with("our ") {
-                    &lhs_text[4..]
-                } else if lhs_text.starts_with("my ") {
-                    &lhs_text[3..]
-                } else {
-                    lhs_text
-                };
-                if var_stripped.starts_with('@')
+                if lhs_text.starts_with('@')
                     && crate::cst::assign_op(node) != Some(crate::cst::AssignOp::Plain)
                 {
-                    self.constant_strings.remove(var_stripped);
-                } else if var_stripped.starts_with('@') {
+                    self.constant_strings.remove(lhs_text);
+                } else if lhs_text.starts_with('@') {
                     let mut values = Vec::new();
                     for i in 0..node.named_child_count() {
                         if let Some(child) = node.named_child(i) {
@@ -1275,14 +1260,14 @@ impl<'a> Builder<'a> {
                         }
                     }
                     if !values.is_empty() {
-                        self.constant_strings.insert(var_stripped.to_string(), values);
+                        self.constant_strings.insert(lhs_text.to_string(), values);
                     }
-                } else if var_stripped.starts_with('$')
+                } else if lhs_text.starts_with('$')
                     && crate::cst::assign_op(node) != Some(crate::cst::AssignOp::Plain)
                 {
-                    self.fold_compound_constant_string(var_stripped, node);
-                } else if var_stripped.starts_with('$') {
-                    let var = var_stripped;
+                    self.fold_compound_constant_string(lhs_text, node);
+                } else if lhs_text.starts_with('$') {
+                    let var = lhs_text;
                     if let Some(right) = node.child_by_field_name("right") {
                         if right.kind() == "interpolated_string_literal" {
                             // Try interpolated string folding first (has variable refs)
@@ -1371,20 +1356,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Where an assignment's write lands: after the whole expression, so
-    /// every read inside it — the RHS of `$n = $n->parent`, the implicit read
-    /// of `$x ||= …` — sees the value being replaced. A declaration is the
-    /// exception: its RHS can't name the variable it declares, and the facts
-    /// a declaration must not kill (a parameter assertion) sit on its
-    /// binding token, so it writes there.
-    pub(super) fn assignment_write_point(node: Node<'a>, left: Node<'a>) -> Point {
-        if left.kind() == "variable_declaration" {
-            left.start_position()
-        } else {
-            node.end_position()
-        }
-    }
-
     /// The half of `visit_assignment` that can only run once the RHS subtree
     /// is walked: read the rvalue's type, seed constraints and key writes
     /// from it, then descend the LHS.
@@ -1395,7 +1366,7 @@ impl<'a> Builder<'a> {
     /// anon-sub symbols.
     fn assignment_after_rhs(&mut self, node: Node<'a>, left: Node<'a>, right: Node<'a>) {
         let op = crate::cst::assign_op(node);
-        let at = Self::assignment_write_point(node, left);
+        let at = crate::cst::assignment_write_point(node);
         // Every write RESETS its targets — a declaration and a plain
         // assignment alike: the marker lands now, before the walk types
         // anything downstream of it, so a later `my $o = $x` folds against
@@ -1442,7 +1413,7 @@ impl<'a> Builder<'a> {
         // side through the same shape builder.
         if inferred.is_none()
             && op == Some(crate::cst::AssignOp::Plain)
-            && matches!(right.kind(), "list_expression" | "parenthesized_expression" | "stub_expression")
+            && (crate::cst::is_list_literal(right) || right.kind() == "stub_expression")
         {
             // `()` is a `stub_expression`: the empty list, so `my %h = ()`
             // is the empty closed shape.

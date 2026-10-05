@@ -332,7 +332,7 @@ impl<'a> Builder<'a> {
     pub(super) fn flat_call_args(&self, args_raw: Vec<Node<'a>>) -> Vec<Node<'a>> {
         let mut out = Vec::new();
         for n in args_raw {
-            if matches!(n.kind(), "list_expression" | "parenthesized_expression") {
+            if crate::cst::is_list_literal(n) {
                 crate::cst::flatten_list(n, &mut out);
             } else {
                 out.push(n);

@@ -240,7 +240,7 @@ impl<'a> Builder<'a> {
         };
 
         // The arguments node might be a list_expression or a single node
-        let args_children: Vec<Node> = if args.kind() == "list_expression" || args.kind() == "parenthesized_expression" {
+        let args_children: Vec<Node> = if crate::cst::is_list_literal(args) {
             (0..args.child_count()).filter_map(|i| args.child(i)).collect()
         } else {
             // Single argument (e.g., has 'name')
@@ -667,10 +667,7 @@ impl<'a> Builder<'a> {
         if mode == FrameworkMode::MojoBase {
             return None;
         }
-        let args_children: Vec<Node<'a>> = if matches!(
-            args_node.kind(),
-            "list_expression" | "parenthesized_expression"
-        ) {
+        let args_children: Vec<Node<'a>> = if crate::cst::is_list_literal(args_node) {
             (0..args_node.child_count())
                 .filter_map(|i| args_node.child(i))
                 .collect()
@@ -697,7 +694,7 @@ impl<'a> Builder<'a> {
     pub(super) fn has_option_pair_nodes(&self, rest: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a>)> {
         let named: Vec<Node<'a>> = rest.iter().copied().filter(|n| n.is_named()).collect();
         if let [only] = named.as_slice() {
-            if matches!(only.kind(), "list_expression" | "parenthesized_expression") {
+            if crate::cst::is_list_literal(*only) {
                 return crate::cst::pair_nodes(*only);
             }
         }
@@ -924,7 +921,7 @@ impl<'a> Builder<'a> {
         // The args are the use statement's list child, bare or parenthesized.
         let args = (0..use_node.named_child_count())
             .filter_map(|i| use_node.named_child(i))
-            .find(|c| matches!(c.kind(), "list_expression" | "parenthesized_expression"));
+            .find(|c| crate::cst::is_list_literal(*c));
         let Some(args) = args else { return; };
         let setup = self.value_node_after_key(args, "-setup");
         // `-setup => { exports => [...] }` or top-level `exports => [...]`.
@@ -1006,8 +1003,7 @@ impl<'a> Builder<'a> {
                 // Generator hashref: keys are export names, values opaque.
                 self.collect_sub_exporter_hash_keys(node, out);
             }
-            "parenthesized_expression" | "list_expression"
-            | "anonymous_array_expression" => {
+            k if crate::cst::is_list_literal(node) || k == "anonymous_array_expression" => {
                 self.collect_sub_exporter_list_members(node, out);
             }
             _ => {}
@@ -1059,10 +1055,7 @@ impl<'a> Builder<'a> {
                 i += 1;
                 continue;
             }
-            if matches!(
-                c.kind(),
-                "parenthesized_expression" | "list_expression" | "anonymous_array_expression"
-            ) {
+            if crate::cst::is_list_literal(c) || c.kind() == "anonymous_array_expression" {
                 self.collect_sub_exporter_list_members(c, out);
                 i += 1;
                 continue;
