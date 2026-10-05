@@ -345,8 +345,8 @@ impl FileAnalysis {
             });
         }
 
-        // A written key is a known key even with no def: Perl mints a hash
-        // literal's keys (`my %h = (k => 1)`) and `$h{k} = …` as Write refs.
+        // A written key is a known key even with no def: a keyed access is an
+        // open container, so a literal's keys and later writes join the set.
         let written = self.refs.iter().filter(|r| {
             r.access == AccessKind::Write
                 && matches!(r.kind, RefKind::HashKeyAccess { .. })
