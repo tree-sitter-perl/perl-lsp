@@ -837,7 +837,7 @@ pub(crate) use cursor_query::{
     query_for, recv_peel_kinds,
 };
 pub use extract::*;
-pub use keyed::{KeyAccessSite, KeyedLiteral};
+pub use keyed::{DynamicKeySite, FoldLiteral, KeyAccessSite, KeyedLiteral};
 pub(crate) use keyed::{mint_keyed_access, nearest_decl, resolve_member_keys, KeyedInputs};
 pub use packs::*;
 pub use skeleton::*;

@@ -264,7 +264,12 @@ impl FileAnalysis {
                             if *ds == def_scope && bare(on) == want
                     )
             })
-            .map(|o| (o.span, o.access))
+            .flat_map(|o| {
+                // A folded key's literal is an occurrence too — the one its
+                // rename rewrites (`rename_at` skips the folded site itself).
+                std::iter::once((o.span, o.access))
+                    .chain(o.folded_from.map(|src| (src, AccessKind::Write)))
+            })
             .collect();
         // A literal that minted its keys as defs (a pack's `$d = ['k' => 1]`)
         // is the declaration of the same lexical key.
@@ -301,6 +306,10 @@ impl FileAnalysis {
         for &idx in self.refs_to_symbol(target_id) {
             let r = &self.refs[idx];
             results.push((r.span, r.access));
+            // A folded site's literal is where its rename lands.
+            if let Some(src) = r.folded_from {
+                results.push((src, AccessKind::Write));
+            }
         }
 
         // For subs/methods/packages/classes, also find refs by name.
@@ -404,7 +413,10 @@ impl FileAnalysis {
         if let Some(group) = self.field_group_at(point) {
             return Some(self.rename_field_group(&group, new_name));
         }
-        let refs = self.find_references(point, None);
+        let mut refs = self.find_references(point, None);
+        // A const-folded site spells the variable it folded through; the
+        // edit lands on that variable's literal, listed separately.
+        refs.retain(|span| !self.refs().iter().any(|r| r.span == *span && r.folded_from.is_some()));
         if refs.is_empty() {
             return None;
         }

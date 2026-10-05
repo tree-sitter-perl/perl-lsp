@@ -833,6 +833,15 @@
   . (_) @subscript.base
   [(string (string_content) @subscript.key)
    (encapsed_string . (string_content) @subscript.key .)] .) @subscript.expr
+; A variable key (`$a[$k]`) is dynamic: it names a key only when `$k` folds
+; to one string literal (`@keyed.fold.lit`, joined in `into_file_analysis`).
+(subscript_expression
+  . (_) @subscript.base
+  (variable_name) @subscript.dynkey .) @subscript.expr
+(assignment_expression
+  left: (variable_name)
+  right: [(string (string_content) @keyed.fold.content)
+          (encapsed_string . (string_content) @keyed.fold.content .)] @keyed.fold.lit)
 ; A subscript on the left of `=` writes its key (`$d['extra'] = 3`): the
 ; key ref carries Write access, the same as Perl's `$d{extra} = 3`.
 (assignment_expression

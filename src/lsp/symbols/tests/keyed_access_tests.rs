@@ -219,12 +219,13 @@ fn written_keys_are_found_from_their_reads_in_both_languages() {
     assert_eq!(write.access, AccessKind::Write);
 }
 
-/// Dynamic keys behave as Perl's do: `extract_key_text` marks a variable or
-/// interpolated key dynamic and no key ref is minted, so the key's variable
-/// stays a plain variable and nothing const-folds `$k` back to `'host'`. A
-/// double-quoted key with nothing to interpolate is static in both.
+/// A key that is not a name stays unnamed in both languages: an interpolated
+/// key mints no key ref, and a double-quoted key with nothing to interpolate
+/// is static. Perl's `extract_key_text` also skips a plain variable key
+/// (`$c->{$k}`): Perl folds method names, not keys, so there the PHP pack
+/// runs ahead (`dynamic_keys_fold_like_perl_method_names`).
 #[test]
-fn dynamic_keys_mint_no_key_ref_in_either_language() {
+fn unnamed_and_quoted_keys_agree_in_both_languages() {
     let perl = "use strict;\n\
                 sub cfg { return { host => 1 }; }\n\
                 my $c = cfg();\n\
@@ -241,21 +242,81 @@ fn dynamic_keys_mint_no_key_ref_in_either_language() {
                echo $c[\"host\"];\n";
     for (lang, src) in [(Lang::Perl, perl), (Lang::Php, php)] {
         let fa = lang.analyze(src);
-        assert_eq!(key_refs_on_row(&fa, 4), 0, "{lang:?}: a variable key mints no key ref");
         assert_eq!(key_refs_on_row(&fa, 5), 0, "{lang:?}: an interpolated key mints no key ref");
         assert_eq!(key_refs_on_row(&fa, 6), 1, "{lang:?}: a plain double-quoted key is static");
     }
-    let f = |lang: Lang| format!("a.{}", lang.ext());
+    assert_eq!(key_refs_on_row(&Lang::Perl.analyze(perl), 4), 0, "perl folds no key");
+    assert_eq!(key_refs_on_row(&Lang::Php.analyze(php), 4), 1, "php folds `$k` to 'host'");
+    // `$k` in the subscript is still the variable in both.
     for (lang, src) in [(Lang::Perl, perl), (Lang::Php, php)] {
-        // The key's references skip the dynamic sites and the folded string.
-        let from_def = answers(lang, &[("a", src)], 1, "host", 1);
-        assert_eq!(from_def.refs, set(&[(&f(lang), 1), (&f(lang), 6)]), "{lang:?}: {from_def:?}");
-        assert_eq!(from_def.rename, Some(from_def.refs.clone()), "{lang:?}: rename misses the fold");
-        // `$k` in the subscript is the variable, nothing more.
+        let f = format!("a.{}", lang.ext());
         let on_var = answers(lang, &[("a", src)], 4, "k", 1);
-        assert_eq!(on_var.refs, set(&[(&f(lang), 3), (&f(lang), 4), (&f(lang), 5)]), "{lang:?}: {on_var:?}");
-        assert_eq!(on_var.defs, set(&[(&f(lang), 3)]), "{lang:?}: {on_var:?}");
+        assert_eq!(on_var.refs, set(&[(&f, 3), (&f, 4), (&f, 5)]), "{lang:?}: {on_var:?}");
+        assert_eq!(on_var.defs, set(&[(&f, 3)]), "{lang:?}: {on_var:?}");
     }
+}
+
+/// A variable key folds the way Perl folds a method name
+/// (`folded_method_dispatch_rewrites_source_literal`): when every assignment
+/// to `$k` is the one literal `'host'`, `$c[$k]` is a reference to the key,
+/// and renaming the key rewrites the LITERAL, never the `$k` site. Rename is
+/// one-way: from the literal itself there is nothing to rename.
+#[test]
+fn dynamic_keys_fold_like_perl_method_names() {
+    let php = "<?php\n\
+               function cfg() { return ['host' => 1]; }\n\
+               $c = cfg();\n\
+               $k = 'host';\n\
+               echo $c[$k];\n\
+               $m = 'host'; $m = 'port';\n\
+               echo $c[$m];\n";
+    let fa = Lang::Php.analyze(php);
+    let folded = fa
+        .refs()
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::HashKeyAccess { .. }) && r.span.start.row == 4)
+        .expect("`$c[$k]` folds to a key ref");
+    assert_eq!(folded.target_name, "host");
+    let src = folded.folded_from.expect("the fold names its literal");
+    assert_eq!((src.start.row, &php.lines().nth(3).unwrap()[src.start.column..src.end.column]), (3, "host"));
+    assert_eq!(key_refs_on_row(&fa, 6), 0, "two assignments fold to nothing");
+
+    let lines: Vec<&str> = php.lines().collect();
+    let edits = |row: usize, needle: &str| -> Option<Vec<(usize, String)>> {
+        let store = FileStore::new();
+        let path = PathBuf::from("/tmp/keyed/f.php");
+        let fa = Arc::new(Lang::Php.analyze(php));
+        store.insert_workspace_arc(path.clone(), fa.clone());
+        let cs = resolve::resolve(&store, &fa, FileKey::Path(path), cursor(php, row, needle, 1), None, OverrideScope::default());
+        let mut out: Vec<(usize, String)> = cs
+            .rename_edits("server")
+            .ok()?
+            .iter()
+            .map(|(l, _)| (l.span.start.row, lines[l.span.start.row][l.span.start.column..l.span.end.column].to_string()))
+            .collect();
+        out.sort();
+        Some(out)
+    };
+    let want = vec![(1, "host".to_string()), (3, "host".to_string())];
+    // From the key's def: the literal is rewritten, `$c[$k]` is not.
+    assert_eq!(edits(1, "host"), Some(want), "rename from the def");
+    // At the folded site the cursor is on `$c` or `$k`, both variables —
+    // the same as Perl's `$self->$m()`, where `$m` answers as the variable.
+    assert_eq!(edits(4, "k]"), Some(vec![(3, "k".to_string()), (4, "k".to_string())]), "`$k` renames the variable");
+    // From the literal: one-way, nothing to rename.
+    assert_eq!(edits(3, "host"), Some(vec![]), "the literal starts no rename");
+    // References from the def list the folded site and its literal.
+    let r = answers(Lang::Php, &[("f", php)], 1, "host", 1);
+    assert_eq!(r.refs, set(&[("f.php", 1), ("f.php", 3), ("f.php", 4)]), "{r:?}");
+}
+
+/// The fold on a literal held in a variable (the lexical owner path).
+#[test]
+fn folded_keys_on_a_literal_held_in_a_variable() {
+    let php = "<?php\n$d = ['alpha' => 1];\n$j = 'alpha';\necho $d[$j];\n";
+    let r = answers(Lang::Php, &[("a", php)], 1, "alpha", 1);
+    assert_eq!(r.refs, set(&[("a.php", 1), ("a.php", 2), ("a.php", 3)]), "{r:?}");
+    assert_eq!(r.rename, Some(set(&[("a.php", 1), ("a.php", 2)])), "literal rewritten, `$d[$j]` not: {r:?}");
 }
 
 /// Cross-file: the producer's key and the consumer's access are one target

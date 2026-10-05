@@ -25,6 +25,26 @@ pub struct KeyAccessSite {
     pub write: bool,
 }
 
+/// A variable-keyed subscript (`$a[$k]`): the key variable's read and the
+/// subscript around it.
+#[derive(Debug, Clone)]
+pub struct DynamicKeySite {
+    pub var: Span,
+    pub expr: Span,
+    pub base: Span,
+    pub scope: ScopeId,
+    pub write: bool,
+}
+
+/// A string literal assigned to a variable (`$k = 'host'`): the whole
+/// literal (the assignment's source) and its content.
+#[derive(Debug, Clone)]
+pub struct FoldLiteral {
+    pub lit: Span,
+    pub content: String,
+    pub content_span: Span,
+}
+
 /// One string key of an array literal (`['k' => v]`) and the literal it
 /// sits in.
 #[derive(Debug, Clone)]
@@ -42,6 +62,8 @@ pub(crate) struct KeyedInputs<'a> {
     /// `$rows[0]` subscripts: (expr, base) — a key subscript over one
     /// reaches the container through it.
     pub index_subscripts: &'a [(Span, Span)],
+    pub dynamic_accesses: &'a [DynamicKeySite],
+    pub fold_literals: &'a [FoldLiteral],
     pub symbols: &'a [Symbol],
     pub scopes: &'a [Scope],
     pub var_reads: &'a [(String, ScopeId, Span)],
@@ -255,6 +277,22 @@ impl<'a> Join<'a> {
         }
     }
 
+    /// The one string literal a key variable folds to: every assignment to
+    /// its declaration must be that single literal, the way Perl folds a
+    /// method name (`constant_string_source`). A parameter, a loop variable
+    /// or a second assignment folds to nothing.
+    fn fold(&self, var: &Span) -> Option<&'a FoldLiteral> {
+        let (name, scope) = self.reads.get(var)?;
+        let did = nearest_decl(&self.defs_by_name, &self.scope_parent, name, *scope, var.start)?;
+        let mut writes = self.inp.flow_edges.iter().filter(|fe| {
+            fe.target_name == *name
+                && nearest_decl(&self.defs_by_name, &self.scope_parent, &fe.target_name, fe.target_scope, fe.target_at)
+                    == Some(did)
+        });
+        let (only, None) = (writes.next()?, writes.next()) else { return None };
+        self.inp.fold_literals.iter().find(|f| f.lit == only.source)
+    }
+
     fn is_literal(&self, span: &Span) -> bool {
         self.inp.literals.iter().any(|l| l.lit == *span)
     }
@@ -345,6 +383,34 @@ pub(crate) fn mint_keyed_access(
             access: if a.write { AccessKind::Write } else { AccessKind::Read },
             binding: None,
             folded_from: None,
+            arg_count: None,
+            flags: Default::default(),
+        };
+        match origin {
+            Origin::Known(owner) => {
+                let mut r = r;
+                r.bind_hash_key_owner(owner);
+                refs.push(r);
+            }
+            Origin::Method { method_span, method, fallback } => {
+                pending.push(PendingKeyRef { r, method_span, method, fallback })
+            }
+        }
+    }
+    // A folded key: the site is the subscript's bracket (`[$k]`, wider than
+    // the `$k` read so the variable keeps its own cursor), and the rewrite
+    // belongs on the literal it folded from — rename is one-way, from the key.
+    for d in inp.dynamic_accesses {
+        let Some(lit) = join.fold(&d.var) else { continue };
+        let Some(origin) = join.value_owner(&d.base, 0) else { continue };
+        let r = Ref {
+            kind: RefKind::HashKeyAccess { var_text: String::new() },
+            span: Span { start: d.base.end, end: d.expr.end },
+            scope: d.scope,
+            target_name: lit.content.clone(),
+            access: if d.write { AccessKind::Write } else { AccessKind::Read },
+            binding: None,
+            folded_from: Some(lit.content_span),
             arg_count: None,
             flags: Default::default(),
         };

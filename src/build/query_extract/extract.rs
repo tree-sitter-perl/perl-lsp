@@ -1490,6 +1490,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut keyed_write_spans: std::collections::HashSet<Span> = Default::default();
     let mut keyed_def_by_match: HashMap<usize, (String, Span)> = HashMap::new();
     let mut keyed_lit_by_match: HashMap<usize, Span> = HashMap::new();
+    let mut dynkey_by_match: HashMap<usize, Span> = HashMap::new();
+    let mut fold_lit_by_match: HashMap<usize, Span> = HashMap::new();
+    let mut fold_content_by_match: HashMap<usize, (String, Span)> = HashMap::new();
     let mut subscript_by_match: HashMap<usize, (Span, Option<Span>, Option<i32>, Option<String>)> =
         HashMap::new();
     let mut annots: HashMap<usize, String> = HashMap::new();
@@ -2740,6 +2743,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     .3 = Some(e.text.clone());
                 subscript_key_site.insert(e.match_id, (Span { start: e.start, end: e.end }, cur_scope));
             }
+            "subscript.dynkey" => {
+                dynkey_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+                subscript_key_site.insert(e.match_id, (Span { start: e.start, end: e.end }, cur_scope));
+            }
+            "keyed.fold.lit" => {
+                fold_lit_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+            }
+            "keyed.fold.content" => {
+                fold_content_by_match.insert(e.match_id, (e.text.clone(), Span { start: e.start, end: e.end }));
+            }
             "keyed.write" => {
                 keyed_write_spans.insert(Span { start: e.start, end: e.end });
             }
@@ -3606,8 +3619,23 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             });
         }
     }
+    for (mid, (content, content_span)) in fold_content_by_match {
+        if let Some(lit) = fold_lit_by_match.get(&mid) {
+            out.fold_literals.push(crate::build::query_extract::FoldLiteral { lit: *lit, content, content_span });
+        }
+    }
     for (mid, (expr, base, idx, key)) in &subscript_by_match {
         let Some(base) = base else { continue };
+        if let (Some(var), Some((_, scope))) = (dynkey_by_match.get(mid), subscript_key_site.get(mid)) {
+            out.dynamic_key_accesses.push(crate::build::query_extract::DynamicKeySite {
+                var: *var,
+                expr: *expr,
+                base: *base,
+                scope: *scope,
+                write: keyed_write_spans.contains(expr),
+            });
+            continue;
+        }
         if let (Some(k), Some((key_span, scope))) = (key, subscript_key_site.get(mid)) {
             out.key_accesses.push(crate::build::query_extract::KeyAccessSite {
                 key: k.clone(),

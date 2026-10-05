@@ -1438,6 +1438,10 @@ pub(super) fn collect_from_analysis(
                 access: r.access,
                 rewritable: if alias_matched {
                     Rewritable::No(NotRewritable::MacroDelegated)
+                } else if r.folded_from.is_some() {
+                    // The site spells a variable, not the name; its literal
+                    // carries the edit (pushed below).
+                    Rewritable::No(NotRewritable::ConstFolded)
                 } else {
                     rewritable_at(span)
                 },

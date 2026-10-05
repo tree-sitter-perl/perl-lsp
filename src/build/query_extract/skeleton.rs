@@ -256,6 +256,11 @@ pub struct SkeletonAnalysis {
     /// Index subscripts (`$rows[0]`): (expr, base), so a key subscript over
     /// one reaches its container.
     pub index_subscripts: Vec<(Span, Span)>,
+    /// Variable-keyed subscripts (`$a[$k]`): a key ref only when `$k` folds
+    /// to one string literal.
+    pub dynamic_key_accesses: Vec<super::DynamicKeySite>,
+    /// String literals assigned to a variable — the fold sources.
+    pub fold_literals: Vec<super::FoldLiteral>,
     /// Domain-typing sites: a `@domain.slot` field access compared/assigned
     /// against a `@domain.value` token. Raw (value's enum resolves cross-file
     /// at query time); folds onto `Field{owner, name}` for the int-used-as-enum
@@ -1729,6 +1734,8 @@ impl SkeletonAnalysis {
                 accesses: &self.key_accesses,
                 literals: &self.keyed_literals,
                 index_subscripts: &self.index_subscripts,
+                dynamic_accesses: &self.dynamic_key_accesses,
+                fold_literals: &self.fold_literals,
                 symbols: &symbols,
                 scopes: &self.scopes,
                 var_reads: &self.var_reads,
