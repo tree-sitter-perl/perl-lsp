@@ -2,6 +2,7 @@
 //! modeling (`push @EXPORT*`, glob installs, eval-replacement refs).
 
 use super::*;
+use crate::cst::LiteralShape;
 
 impl<'a> Builder<'a> {
     pub(super) fn visit_var_ref(&mut self, node: Node<'a>) {
@@ -838,7 +839,10 @@ impl<'a> Builder<'a> {
                 }
                 continue;
             }
-            if crate::cst::is_list_literal(child) || child.kind() == "anonymous_array_expression" {
+            if matches!(
+                crate::cst::literal_shape(child),
+                Some(LiteralShape::List | LiteralShape::ArrayRef)
+            ) {
                 self.fold_export_tags_table(child);
             }
         }
@@ -1553,16 +1557,19 @@ impl<'a> Builder<'a> {
     /// glob-install name derivation (`*{"…"} = sub`) and dynamic helper /
     /// plugin registration names (`$app->helper("get_$name" => …)`).
     pub(super) fn enumerate_string_values(&self, expr: Node<'a>) -> Vec<String> {
-        match expr.kind() {
-            "string_literal" => self.extract_string_content(expr).into_iter().collect(),
-            "interpolated_string_literal" => self.try_fold_interpolated_string(expr),
-            "binary_expression" => self.try_fold_string_concat(expr),
-            "scalar" | "array" | "hash" | "bareword" => self
-                .resolve_constant_strings(expr.utf8_text(self.source).unwrap_or(""), 0)
-                .unwrap_or_default(),
-            _ if crate::cst::is_list_literal(expr) => expr
+        match (crate::cst::literal_shape(expr), expr.kind()) {
+            // An interpolating string folds its parts; a plain one is its text.
+            (Some(LiteralShape::Str), "interpolated_string_literal") => {
+                self.try_fold_interpolated_string(expr)
+            }
+            (Some(LiteralShape::Str), _) => self.extract_string_content(expr).into_iter().collect(),
+            (Some(LiteralShape::List), _) => expr
                 .named_child(0)
                 .map(|c| self.enumerate_string_values(c))
+                .unwrap_or_default(),
+            (None, "binary_expression") => self.try_fold_string_concat(expr),
+            (None, "scalar" | "array" | "hash" | "bareword") => self
+                .resolve_constant_strings(expr.utf8_text(self.source).unwrap_or(""), 0)
                 .unwrap_or_default(),
             _ => vec![],
         }

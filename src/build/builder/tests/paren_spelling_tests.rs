@@ -81,3 +81,15 @@ fn a_comment_in_a_hash_literal_is_not_a_key() {
     let names: Vec<&str> = keys.iter().map(|(k, _)| k.as_str()).collect();
     assert_eq!(names, ["host", "port"]);
 }
+
+// A string literal is one shape however it is quoted.
+#[test]
+fn as_alias_on_a_double_quoted_name() {
+    let fa = build_fa("use ModX \"always_here\" => { -as => 'here' };\nhere();\n");
+    let renamed = fa
+        .imports
+        .iter()
+        .flat_map(|i| i.imported_symbols.iter())
+        .find(|s| s.local_name == "here");
+    assert!(renamed.is_some_and(|s| s.remote() == "always_here"), "{:?}", fa.imports);
+}

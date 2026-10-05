@@ -2,6 +2,7 @@
 //! DBIC components, Sub::Exporter config, and isa-constraint mapping.
 
 use super::*;
+use crate::cst::LiteralShape;
 
 impl<'a> Builder<'a> {
     /// Synthesize accessor methods from `has` calls in Moo/Moose/Mojo::Base classes.
@@ -987,23 +988,23 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn collect_sub_exporter_members(&self, node: Node<'a>, out: &mut Vec<(String, Span)>) {
-        match node.kind() {
-            "quoted_word_list" => self.extract_qw_word_spans(node, out),
-            "string_literal" | "interpolated_string_literal" => {
+        match (crate::cst::literal_shape(node), node.kind()) {
+            (Some(LiteralShape::Qw), _) => self.extract_qw_word_spans(node, out),
+            (Some(LiteralShape::Str), _) => {
                 if let Some(text) = self.extract_string_content(node) {
                     out.push((text, self.string_content_span(node)));
                 }
             }
-            "bareword" | "autoquoted_bareword" => {
+            (None, "bareword" | "autoquoted_bareword") => {
                 if let Ok(text) = node.utf8_text(self.source) {
                     out.push((text.to_string(), node_to_span(node)));
                 }
             }
-            "anonymous_hash_expression" => {
+            (Some(LiteralShape::HashRef), _) => {
                 // Generator hashref: keys are export names, values opaque.
                 self.collect_sub_exporter_hash_keys(node, out);
             }
-            k if crate::cst::is_list_literal(node) || k == "anonymous_array_expression" => {
+            (Some(LiteralShape::List | LiteralShape::ArrayRef), _) => {
                 self.collect_sub_exporter_list_members(node, out);
             }
             _ => {}
@@ -1050,15 +1051,18 @@ impl<'a> Builder<'a> {
                 i += 1;
                 continue;
             }
-            if crate::cst::is_list_literal(c) || c.kind() == "anonymous_array_expression" {
-                self.collect_sub_exporter_list_members(c, out);
-                i += 1;
-                continue;
-            }
-            if c.kind() == "quoted_word_list" {
-                self.extract_qw_word_spans(c, out);
-                i += 1;
-                continue;
+            match crate::cst::literal_shape(c) {
+                Some(LiteralShape::List | LiteralShape::ArrayRef) => {
+                    self.collect_sub_exporter_list_members(c, out);
+                    i += 1;
+                    continue;
+                }
+                Some(LiteralShape::Qw) => {
+                    self.extract_qw_word_spans(c, out);
+                    i += 1;
+                    continue;
+                }
+                _ => {}
             }
             if let Some((name, span)) = self.sub_exporter_name_token(c) {
                 // Look ahead for a fat-comma generator value to skip.

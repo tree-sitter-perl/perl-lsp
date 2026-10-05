@@ -2,6 +2,7 @@
 //! lists, string folding, assignments, and callee-symbol lookup.
 
 use super::*;
+use crate::cst::LiteralShape;
 
 impl<'a> Builder<'a> {
     pub(super) fn visit_use(&mut self, node: Node<'a>) {
@@ -145,10 +146,10 @@ impl<'a> Builder<'a> {
     pub(super) fn collect_class_tiny_attrs(&self, node: Node<'a>, names: &mut Vec<(String, Span)>) {
         for i in 0..node.named_child_count() {
             let Some(child) = node.named_child(i) else { continue };
-            match child.kind() {
-                "quoted_word_list" => self.extract_qw_word_spans(child, names),
-                "anonymous_hash_expression" => self.extract_class_tiny_hash_keys(child, names),
-                _ if crate::cst::is_list_literal(child) => self.collect_class_tiny_attrs(child, names),
+            match crate::cst::literal_shape(child) {
+                Some(LiteralShape::Qw) => self.extract_qw_word_spans(child, names),
+                Some(LiteralShape::HashRef) => self.extract_class_tiny_hash_keys(child, names),
+                Some(LiteralShape::List) => self.collect_class_tiny_attrs(child, names),
                 _ => {}
             }
         }
@@ -487,12 +488,12 @@ impl<'a> Builder<'a> {
                 Some(c) if c.is_named() => c,
                 _ => continue,
             };
-            match child.kind() {
-                _ if crate::cst::is_list_literal(child) => {
+            match crate::cst::literal_shape(child) {
+                Some(LiteralShape::List) => {
                     self.accumulate_constant_pair(child);
                     return;
                 }
-                "anonymous_hash_expression" => {
+                Some(LiteralShape::HashRef) => {
                     self.accumulate_constant_block(child);
                     return;
                 }
@@ -875,11 +876,10 @@ impl<'a> Builder<'a> {
             Some(source)
         };
         let Some(list_node) = list_node else { return vec![] };
-        match list_node.kind() {
-            "quoted_word_list" | "string_literal" | "interpolated_string_literal" => {
+        match crate::cst::literal_shape(list_node) {
+            Some(LiteralShape::Qw | LiteralShape::Str | LiteralShape::List) => {
                 self.extract_string_names(list_node)
             }
-            _ if crate::cst::is_list_literal(list_node) => self.extract_string_names(list_node),
             _ => vec![],
         }
     }
@@ -1002,15 +1002,15 @@ impl<'a> Builder<'a> {
     ) {
         for i in 0..node.named_child_count() {
             let Some(child) = node.named_child(i) else { continue };
-            match child.kind() {
-                "anonymous_hash_expression" => {
+            match (crate::cst::literal_shape(child), child.kind()) {
+                (Some(LiteralShape::HashRef), _) => {
                     if let Some((remote, remote_span)) = pending_name.take() {
                         if let Some((local, alias_span)) = self.extract_as_alias(child) {
                             out.push((local, remote, alias_span, remote_span));
                         }
                     }
                 }
-                "autoquoted_bareword" | "string_literal" | "bareword" => {
+                (Some(LiteralShape::Str), _) | (None, "autoquoted_bareword" | "bareword") => {
                     let text = child.utf8_text(self.source).unwrap_or("");
                     let name = text.trim().trim_matches(|c| c == '\'' || c == '"').to_string();
                     // Skip option flags (`-as` appears at top level too in some
@@ -1018,7 +1018,7 @@ impl<'a> Builder<'a> {
                     if !name.is_empty() && !name.starts_with('-') {
                         // Content span for a quoted remote name; the whole token
                         // for a bareword (`beta`) — either way, just the name.
-                        let span = if child.kind() == "string_literal" {
+                        let span = if crate::cst::literal_shape(child) == Some(LiteralShape::Str) {
                             crate::cst::string_content_span(child)
                         } else {
                             node_to_span(child)
@@ -1026,7 +1026,7 @@ impl<'a> Builder<'a> {
                         *pending_name = Some((name, span));
                     }
                 }
-                _ if crate::cst::is_list_literal(child) => {
+                (Some(LiteralShape::List), _) => {
                     self.collect_as_renames(child, pending_name, out);
                 }
                 _ => {

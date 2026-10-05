@@ -6,6 +6,7 @@
 //! visit_method, docs, pipeline, …).
 
 use super::*;
+use crate::cst::LiteralShape;
 
 impl<'a> Builder<'a> {
     pub(super) fn get_decl_keyword(&self, var_decl: Node<'a>) -> Option<String> {
@@ -310,9 +311,9 @@ impl<'a> Builder<'a> {
         // FIELD PER scalar (not a single list node); a bare `($a, $b)` LHS is
         // a grouping container whose scalars `list_elements` splices out.
         let mut cursor = lhs.walk();
-        let elems: Vec<Node<'a>> = match lhs.kind() {
-            "variable_declaration" => lhs.children_by_field_name("variables", &mut cursor).collect(),
-            _ if crate::cst::is_list_literal(lhs) => crate::cst::list_elements(lhs),
+        let elems: Vec<Node<'a>> = match (crate::cst::literal_shape(lhs), lhs.kind()) {
+            (None, "variable_declaration") => lhs.children_by_field_name("variables", &mut cursor).collect(),
+            (Some(LiteralShape::List), _) => crate::cst::list_elements(lhs),
             _ => Vec::new(),
         };
         elems
@@ -377,17 +378,17 @@ impl<'a> Builder<'a> {
         use crate::model::file_analysis::Extraction;
         // `my ($a, $b)` (variable_declaration) OR a bare `($a, $b) = …`
         // reassignment (a grouping container LHS — no `my`).
-        let elems: Vec<Node<'a>> = match lhs.kind() {
+        let elems: Vec<Node<'a>> = match (crate::cst::literal_shape(lhs), lhs.kind()) {
             // A single `my $x` uses the `variable` field; a list `my ($a, $b)`
             // uses the (repeated) `variables` field. The former is not a list.
-            "variable_declaration" => {
+            (None, "variable_declaration") => {
                 if lhs.child_by_field_name("variable").is_some() {
                     return None;
                 }
                 let mut cursor = lhs.walk();
                 lhs.children_by_field_name("variables", &mut cursor).collect()
             }
-            _ if crate::cst::is_list_literal(lhs) => crate::cst::list_elements(lhs),
+            (Some(LiteralShape::List), _) => crate::cst::list_elements(lhs),
             _ => return None,
         };
         let mut out = Vec::new();

@@ -225,11 +225,39 @@ pub(crate) fn assign_op(node: Node) -> Option<AssignOp> {
     })
 }
 
-/// A list literal: the grammar's bare `list_expression` (`a, b`) or an
-/// explicit paren group (`(a, b)`, `(a)`). The two spell the same list. The
-/// empty list `()` is a `stub_expression`, which callers that want it name.
+/// The shape of a literal, whatever grammar kind spells it. Readers match on
+/// the shape, so a spelling the grammar splits across kinds (a list with or
+/// without parens, a single- or double-quoted string) is one arm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LiteralShape {
+    /// `qw(a b)`.
+    Qw,
+    /// `'a'` / `"a"`.
+    Str,
+    /// `a, b` or `(a, b)` / `(a)`. The empty list `()` is a `stub_expression`,
+    /// which callers that want it name.
+    List,
+    /// `[a, b]`.
+    ArrayRef,
+    /// `{a => 1}`.
+    HashRef,
+}
+
+/// `None` for anything that isn't a literal.
+pub(crate) fn literal_shape(node: Node) -> Option<LiteralShape> {
+    Some(match node.kind() {
+        "quoted_word_list" => LiteralShape::Qw,
+        "string_literal" | "interpolated_string_literal" => LiteralShape::Str,
+        "list_expression" | "parenthesized_expression" => LiteralShape::List,
+        "anonymous_array_expression" => LiteralShape::ArrayRef,
+        "anonymous_hash_expression" => LiteralShape::HashRef,
+        _ => return None,
+    })
+}
+
+/// A list literal ([`LiteralShape::List`]).
 pub(crate) fn is_list_literal(node: Node) -> bool {
-    matches!(node.kind(), "list_expression" | "parenthesized_expression")
+    literal_shape(node) == Some(LiteralShape::List)
 }
 
 /// A call expression's arguments as a flat positional sequence. The
@@ -717,65 +745,70 @@ pub(crate) fn string_list_with_residue(
     src: &[u8],
     fold: &mut dyn FnMut(Node) -> Vec<(String, Span)>,
 ) -> (Vec<(String, Span)>, bool) {
-    match node.kind() {
-        "quoted_word_list" => {
+    match literal_shape(node) {
+        Some(LiteralShape::Qw) => {
             let mut results = Vec::new();
             qw_word_spans(node, src, &mut results);
             return (results, false);
         }
-        "string_literal" | "interpolated_string_literal" => {
+        Some(LiteralShape::Str) => {
             if let Some(text) = string_content_text(node, src) {
                 return (vec![(text, string_content_span(node))], false);
             }
             return (vec![], true);
         }
-        "bareword" | "autoquoted_bareword" | "array" => {
-            let v = fold(node);
-            let residue = v.is_empty();
-            return (v, residue);
-        }
-        "map_grep_expression" => {
-            let v = map_built_strings(node, src, fold);
-            let residue = v.is_empty();
-            return (v, residue);
-        }
-        _ => {}
+        Some(_) => {}
+        None => match node.kind() {
+            "bareword" | "autoquoted_bareword" | "array" => {
+                let v = fold(node);
+                let residue = v.is_empty();
+                return (v, residue);
+            }
+            "map_grep_expression" => {
+                let v = map_built_strings(node, src, fold);
+                let residue = v.is_empty();
+                return (v, residue);
+            }
+            _ => {}
+        },
     }
     let mut results = Vec::new();
     let mut residue = false;
     for i in 0..node.child_count() {
         let Some(child) = node.child(i) else { continue };
-        match child.kind() {
-            "quoted_word_list" => qw_word_spans(child, src, &mut results),
-            "string_literal" | "interpolated_string_literal" => {
+        match literal_shape(child) {
+            Some(LiteralShape::Qw) => qw_word_spans(child, src, &mut results),
+            Some(LiteralShape::Str) => {
                 if let Some(text) = string_content_text(child, src) {
                     results.push((text, string_content_span(child)));
                 } else {
                     residue = true;
                 }
             }
-            k if is_list_literal(child) || k == "anonymous_array_expression" => {
+            Some(LiteralShape::List | LiteralShape::ArrayRef) => {
                 let (v, r) = string_list_with_residue(child, src, fold);
                 results.extend(v);
                 residue |= r;
             }
-            "bareword" | "autoquoted_bareword" | "array" => {
-                let v = fold(child);
-                residue |= v.is_empty();
-                results.extend(v);
-            }
-            "map_grep_expression" => {
-                let v = map_built_strings(child, src, fold);
-                residue |= v.is_empty();
-                results.extend(v);
-            }
-            // Separators and parens are anonymous; anything NAMED we
-            // didn't fold is a real list item we couldn't read.
-            _ => {
-                if child.is_named() && !matches!(child.kind(), "comment" | "pod") {
-                    residue = true;
+            Some(LiteralShape::HashRef) | None => match child.kind() {
+                "bareword" | "autoquoted_bareword" | "array" => {
+                    let v = fold(child);
+                    residue |= v.is_empty();
+                    results.extend(v);
                 }
-            }
+                "map_grep_expression" => {
+                    let v = map_built_strings(child, src, fold);
+                    residue |= v.is_empty();
+                    results.extend(v);
+                }
+                // Separators and parens are anonymous; anything NAMED we
+                // didn't fold is a real list item we couldn't read.
+                _ => {
+                    if child.is_named() && !matches!(child.kind(), "comment" | "pod") {
+                        residue = true;
+                    }
+                }
+            },
         }
     }
     (results, residue)
