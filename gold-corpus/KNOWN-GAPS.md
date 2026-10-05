@@ -106,25 +106,6 @@ assertion is "no diagnostic at this site."
 
 ## 3. Completion harvest
 
-### `completion-datetime-hashkey` — `$self->{` offers too few keys
-- **Cursor:** `DateTime.pm:315:30` (inside a `$self->{` in a method)
-- **Expect:** the constructor-assigned keys appear — `local_rd_days`,
-  `local_rd_secs`, `formatter`, `locale`, `offset_modifier`, `rd_nanosecs`,
-  `utc_year`, … (offered as `key\tDateTime->{key}`).
-- **Actual:** only a couple keys offered (the harvest finds ~2 of ~13).
-- **Root cause:** the mutated-key set for a class is harvested from `$self->{k} =
-  ...` writes, but DateTime's keys are assigned in a separate constructor helper
-  (`_new` / `_recalc_*`) and via patterns the harvest doesn't walk (e.g.
-  `@{$self}{@keys} = ...` hash-slice assignment, or keys set on a differently
-  named lexical that becomes `$self`). So most slots never enter
-  `mutated_keys_on_class`.
-- **Fix sketch:** broaden slot-write harvesting — hash-slice writes
-  (`@{$self}{...} = `), keys assigned on the blessed lexical before `return`, and
-  keys flowing through a constructor helper (A4's cross-procedural tail). Overlaps
-  the deferred "A4 v2 cross-file/cross-proc slot writes."
-- **Difficulty:** medium–high. The cross-procedural part is the narrowing/flow
-  frontier; the hash-slice-write part is a contained emission add.
-
 ### `completion-typetiny-imported-blessed` — imported subs absent from bareword completion
 - **Cursor:** `Type/Tiny.pm:165:15` (a partial bareword in statement position)
 - **Expect:** `blessed` (imported via `use Scalar::Util qw(blessed)`) is offered.
@@ -226,7 +207,6 @@ class. **Subsystem:** first-param-self heuristic (`detect_first_param_type`).
 | diag-08 (loader call) | XS loader recognition | **low** |
 | diag-09 / diag-10 | typeglob-codegen synthesis | medium |
 | def-16-codegen-type-function | Type::Library synthesis | medium |
-| completion-datetime-hashkey | slot-write harvest (A4 tail) | medium–high |
 | mojo-url clone *sub-return* (variable is fixed) | build-time `return_types` seed vs query-time cross-file method-return | medium–high |
 | diag-mojo-cookiejar/daemon first-param-self | invocant heuristic in OO class | **high** (ambiguous) |
 

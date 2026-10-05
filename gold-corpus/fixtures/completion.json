@@ -89,7 +89,7 @@
         ],
         "none": []
       },
-      "status": "xfail"
+      "status": "gold"
     },
     {
       "id": "completion-uri-escape-fq-crossfile",

@@ -2987,3 +2987,20 @@ has 'size' => (is => 'rw');
     assert_eq!(key.declared_with, Some(accessor.id));
     assert_eq!(accessor.declared_with, Some(key.id));
 }
+
+/// A hash literal's keys and a later `$d{k} = …` are minted as Write refs,
+/// not defs; completion still offers them as the hash's keys.
+#[test]
+fn test_complete_hash_keys_offers_literal_and_written_keys() {
+    let fa = build_fa_from_source(
+        "my %d = (alpha => 1, 'beta', 2);\n$d{gamma} = 3;\nmy $x = $d{};\n",
+    );
+    let keys: std::collections::BTreeSet<String> = fa
+        .complete_hash_keys("$d", Point::new(2, 11), None)
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    let want: std::collections::BTreeSet<String> =
+        ["alpha", "beta", "gamma"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(keys, want);
+}
