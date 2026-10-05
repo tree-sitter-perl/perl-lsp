@@ -518,8 +518,9 @@ impl<'a> Builder<'a> {
             None => return,
         };
         // First arg should be the array, rest are values
-        let children: Vec<Node> = if args.kind() == "list_expression" {
-            (0..args.child_count()).filter_map(|i| args.child(i)).filter(|c| c.is_named()).collect()
+        // `push (@a), (x, y)` is `push @a, x, y`: groups splice.
+        let children: Vec<Node> = if crate::cst::is_list_literal(args) {
+            crate::cst::list_elements(args)
         } else {
             return;
         };

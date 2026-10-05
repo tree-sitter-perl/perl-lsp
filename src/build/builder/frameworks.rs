@@ -1013,13 +1013,8 @@ impl<'a> Builder<'a> {
     /// Generator-hashref keys (`{ name => \&gen }`) → `(name, key-span)`. The
     /// key token carries the right span for a member ref; the value is opaque.
     pub(super) fn collect_sub_exporter_hash_keys(&self, node: Node<'a>, out: &mut Vec<(String, Span)>) {
-        let list = (0..node.named_child_count())
-            .filter_map(|i| node.named_child(i))
-            .find(|c| c.kind() == "list_expression")
-            .unwrap_or(node);
-        let children: Vec<Node<'a>> = (0..list.child_count())
-            .filter_map(|i| list.child(i))
-            .collect();
+        let mut children: Vec<Node<'a>> = Vec::new();
+        crate::cst::flatten_list(crate::cst::literal_body(node), &mut children);
         let mut i = 0;
         while i < children.len() {
             let k = children[i];

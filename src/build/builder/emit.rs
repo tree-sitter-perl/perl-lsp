@@ -44,12 +44,8 @@ impl<'a> Builder<'a> {
         // A spread occupies ONE list slot but flattens to an even count
         // at runtime, so pairing must skip it as a unit — `pair_nodes`'
         // strict k/v alternation would mispair everything after it.
-        let list = node
-            .named_child(0)
-            .filter(|c| c.kind() == "list_expression")
-            .unwrap_or(node);
         let mut flat: Vec<Node<'a>> = Vec::new();
-        crate::cst::flatten_list(list, &mut flat);
+        crate::cst::flatten_list(crate::cst::literal_body(node), &mut flat);
         let named: Vec<Node<'a>> = flat.into_iter().filter(|n| n.is_named()).collect();
 
         let mut keys: Vec<(String, Option<Box<InferredType>>)> = Vec::new();
@@ -98,12 +94,8 @@ impl<'a> Builder<'a> {
     /// tuple, not a summary).
     pub(super) fn array_literal_type(&mut self, node: Node<'a>) -> InferredType {
         const MAX_TUPLE: usize = 64;
-        let list = node
-            .named_child(0)
-            .filter(|c| c.kind() == "list_expression")
-            .unwrap_or(node);
         let mut flat: Vec<Node<'a>> = Vec::new();
-        crate::cst::flatten_list(list, &mut flat);
+        crate::cst::flatten_list(crate::cst::literal_body(node), &mut flat);
         let elems: Vec<Node<'a>> = flat.into_iter().filter(|n| n.is_named()).collect();
         if elems.is_empty() || elems.len() > MAX_TUPLE {
             return InferredType::ArrayRef;

@@ -335,15 +335,24 @@ pub(crate) fn pair_nodes_in<'a>(children: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a
     out
 }
 
+/// The list a `{…}` / `[…]` literal holds, in either spelling: `{ a => 1 }`
+/// or `{ (a => 1) }`. The literal itself when it holds one bare element.
+/// Callers walk this rather than the literal's own children, which also
+/// carry its braces and any comment inside them.
+pub(crate) fn literal_body(literal: Node) -> Node {
+    if is_list_literal(literal) {
+        return literal;
+    }
+    literal.named().find(|c| is_list_literal(*c)).unwrap_or(literal)
+}
+
 /// Pair-walk a container node: a bare `list_expression` /
-/// `parenthesized_expression`, or an `anonymous_hash_expression` (its inner
-/// list is unwrapped). Composition of [`flatten_list`] + [`pair_nodes_in`].
+/// `parenthesized_expression`, or an `anonymous_hash_expression` (walked
+/// through [`literal_body`]). Composition of [`flatten_list`] +
+/// [`pair_nodes_in`].
 pub(crate) fn pair_nodes<'a>(container: Node<'a>) -> Vec<(Node<'a>, Node<'a>)> {
     let list = if container.kind() == "anonymous_hash_expression" {
-        container
-            .named()
-            .find(|c| c.kind() == "list_expression")
-            .unwrap_or(container)
+        literal_body(container)
     } else {
         container
     };

@@ -159,20 +159,7 @@ impl<'a> Builder<'a> {
     /// each (default scalar / coderef) is skipped. The grammar nests trailing
     /// pairs as a right-leaning `list_expression`, so recurse into those.
     pub(super) fn extract_class_tiny_hash_keys(&self, node: Node<'a>, names: &mut Vec<(String, Span)>) {
-        // Flatten the (possibly right-nested) list of pair elements.
-        let mut elems: Vec<Node<'a>> = Vec::new();
-        fn flatten<'a>(n: Node<'a>, out: &mut Vec<Node<'a>>) {
-            for i in 0..n.named_child_count() {
-                if let Some(c) = n.named_child(i) {
-                    if c.kind() == "list_expression" {
-                        flatten(c, out);
-                    } else {
-                        out.push(c);
-                    }
-                }
-            }
-        }
-        flatten(node, &mut elems);
+        let elems = crate::cst::list_elements(crate::cst::literal_body(node));
         // Keys are at even indices (key, value, key, value, ...).
         let mut i = 0;
         while i < elems.len() {
@@ -1057,13 +1044,8 @@ impl<'a> Builder<'a> {
     /// `unary_expression` wrapping `as` in the fat-comma form, a `string_literal`
     /// in the plain-comma form), never on a `=>` gate.
     pub(super) fn extract_as_alias(&self, hashref: Node<'a>) -> Option<(String, Span)> {
-        let body = (0..hashref.named_child_count())
-            .filter_map(|i| hashref.named_child(i))
-            .find(|c| c.kind() == "list_expression")
-            .unwrap_or(hashref);
-        let children: Vec<Node<'a>> = (0..body.child_count())
-            .filter_map(|i| body.child(i))
-            .collect();
+        let mut children: Vec<Node<'a>> = Vec::new();
+        crate::cst::flatten_list(crate::cst::literal_body(hashref), &mut children);
         let mut alias = None;
         self.for_each_pair_node_in_children(&children, |k_node, v_node| {
             let key = k_node
