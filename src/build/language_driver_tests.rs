@@ -646,8 +646,9 @@ struct Ops {\n\
 
 // C++ has one member namespace per class: a derived class's member hides a
 // base's same-named member whatever its kind, so a call on a function-
-// pointer field never reaches a base method of the name. The walk answers
-// the nearest declaration the family admits and stops there.
+// pointer field never reaches a base method of the name. The language
+// declares the shared namespace; the walk answers the nearest declaration
+// and stops there.
 #[cfg(feature = "cpp")]
 #[test]
 fn a_derived_callback_member_hides_the_base_method_of_its_name() {

@@ -179,6 +179,8 @@ pub const PERL_PACK_SPELLINGS: crate::model::file_analysis::PackSpellings =
         // Typeglobs install a sub into another package, so a member
         // declaration does NOT belong to the container that encloses it.
         members_are_package_bound: false,
+        // A call reaches a sub, never a `field` of the same name.
+        member_namespace: crate::model::file_analysis::MemberNamespace::PerFamily,
     };
 
 /// A `'static` address for Perl's spellings, so the driver can hand out a

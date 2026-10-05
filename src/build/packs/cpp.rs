@@ -1,7 +1,7 @@
 //! C/C++'s pack.
 
 use crate::build::query_extract::LangPack;
-use crate::model::file_analysis::{canonical_template_spelling, InferredType, NameSpellings, PackSpellings};
+use crate::model::file_analysis::{canonical_template_spelling, InferredType, MemberNamespace, NameSpellings, PackSpellings};
 
 /// C/C++ writes and displays nothing of its own: the engine's type tags are
 /// its vocabulary, and it offers no import or annotation quick-fix. Its
@@ -10,6 +10,9 @@ const SPELLINGS: PackSpellings = PackSpellings {
     variadic_marker: "...",
     default_sep: " = ",
     members_are_package_bound: true,
+    // One member namespace: `d.hook()` reads member `hook` and calls what it
+    // holds, so a derived function pointer hides a base method of the name.
+    member_namespace: MemberNamespace::Shared,
     ..PackSpellings::NONE
 };
 
