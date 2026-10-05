@@ -1455,7 +1455,7 @@ fn language_spellings_have_one_home() {
         ("build/query_extract/extract.rs", 11, "the generic extractor minting the canonical tokens a pack's captures declare"),
         ("build/query_extract/skeleton.rs", 15, "skeleton→model conversion: the kind/attribute vocabulary becomes flags here"),
         ("model/conventions.rs", 3, "Perl's own attribute spellings (`field_attribute_flag`) — Perl's home"),
-        ("model/file_analysis/core_types.rs", 29, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`) — the one table every language maps its spellings onto"),
+        ("model/file_analysis/core_types.rs", 28, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`) — the one table every language maps its spellings onto"),
         ("model/file_analysis/completion.rs", 1, "a `DeclKind` rendered as completion detail text, not an attribute read"),
         ("model/file_analysis/outline.rs", 2, "outline detail text for a union container and a param decl kind"),
         ("model/witnesses/registry.rs", 1, "the `param` owner-keyed fallback key — a witness attachment name"),
@@ -1773,6 +1773,52 @@ fn pack_string_tables_are_ratcheted() {
     ];
     let drift = pack_allowlist_drift("rule #15 (vocabulary tables on the pack)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// Rule #14's other half: a language's spellings are reached by ID, so
+/// they are `#[serde(skip)]` — and every path that rebuilds a
+/// `FileAnalysis` from bytes has to re-attach them. An unattached decode
+/// fails SILENTLY: the analysis answers the neutral defaults, which is
+/// indistinguishable from a language that declares none, and a cpp class
+/// read back from the cache stops answering `obj.field` with its field.
+/// Both codecs (the blob and the warm stub), every registered pack.
+#[test]
+fn decoded_pack_analyses_carry_spellings() {
+    use crate::build::language_driver::LanguageRegistry;
+    let registry = LanguageRegistry::with_enabled();
+    let mut checked: Vec<&'static str> = Vec::new();
+    for id in registry.languages() {
+        let Some(driver) = registry.for_id(id) else { continue };
+        // Every driver answers spellings by id, pack or none — Perl, which
+        // has no pack, included.
+        let expected = LanguageRegistry::spellings(id);
+        let fa = driver.analyze("");
+        assert!(
+            std::ptr::eq(fa.spellings(), expected),
+            "{id}: a freshly built analysis carries its own language's spellings"
+        );
+        let enc = crate::index::module_cache::encode_analysis(&fa).expect("encode");
+        let decoded = crate::index::module_cache::decode_analysis(&enc.analysis).expect("decode");
+        assert!(
+            std::ptr::eq(decoded.spellings(), expected),
+            "{id}: the blob decode path does not re-attach spellings"
+        );
+        let surface = crate::model::surface::Surface::project(&fa);
+        let names = crate::index::module_index::NameFeed::default();
+        let stub = crate::index::module_cache::encode_stub(&[], &names, &[], &surface, &fa)
+            .expect("encode stub");
+        let decoded = crate::index::module_cache::decode_stub(&stub).expect("decode stub");
+        assert!(
+            std::ptr::eq(decoded.skeleton.spellings(), expected),
+            "{id}: the warm-stub decode path does not re-attach spellings"
+        );
+        checked.push(id);
+    }
+    // A pack that declares nothing would make every assertion above hold
+    // vacuously, so pin one that declares plenty.
+    #[cfg(feature = "cpp")]
+    assert!(checked.contains(&"cpp"), "cpp was not exercised: {checked:?}");
+    assert!(checked.contains(&"perl"), "perl was not exercised: {checked:?}");
 }
 
 /// Rule #14: `PackFacts` is per-FILE facts. A per-language constant (the

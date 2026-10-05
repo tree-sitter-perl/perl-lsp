@@ -617,11 +617,12 @@ impl FileAnalysis {
     /// symbols packaged under `cls`, (b) local plugin-namespace entities
     /// bridged to `cls`, (c) cross-file: `cls`'s own module, cross-package
     /// typeglob installs, and plugin bridges from other files. The nearest
-    /// declaration the family admits is the answer: a class has one member
-    /// namespace, and a derived declaration hides a base's of the same name
-    /// whatever its kind (C++ hides `B::read()` behind a derived
-    /// function-pointer `read`), so nothing farther up can be a better
-    /// answer (`docs/adr/member-kinds.md`).
+    /// declaration the ask admits is the answer, so nothing farther up can
+    /// be a better one: where a language keeps one member namespace a
+    /// derived declaration hides a base's of the same name whatever its
+    /// kind (C++ hides `B::read()` behind a derived function-pointer
+    /// `read`), and where it keeps one per family the other family is
+    /// never admitted (`docs/adr/member-kinds.md`).
     fn method_resolution_on_class(
         &self,
         cls: &str,
@@ -639,13 +640,15 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
         want: MemberKind,
     ) -> Option<MethodResolution> {
+        // Which declarations the ask admits is the language's member
+        // namespace, never a branch on the language here.
+        let namespace = self.spellings().member_namespace;
         // (a) Local symbols in this file packaged under `cls`. Methods AND
-        // data members: cpp `obj->field` mints the same `MethodCall` ref as a
-        // method call, and a `Variable`/`Field` member is its def. (Perl
-        // members are always Sub/Method, so this is a no-op there.) A
-        // Variable/Field must be the class's OWN content — a lexical local
-        // inside an inline method carries the class as sticky `package` too
-        // (`T* data = this->data();` in a member body is NOT member `data`).
+        // data members — where the language's namespace admits them, a
+        // `Variable`/`Field` member is a def too. A Variable/Field must be
+        // the class's OWN content — a lexical local inside an inline method
+        // carries the class as sticky `package` too (`T* data =
+        // this->data();` in a member body is NOT member `data`).
         for &sid in self.symbols_named(method_name) {
             let sym = self.symbol(sid);
             let member_kind = match sym.kind {
@@ -657,7 +660,7 @@ impl FileAnalysis {
             };
             // A re-export (`using Base::m;`) is API surface, not a def —
             // fall through so the walk reaches the origin ancestor.
-            if member_kind && want.admits_decl(sym.kind) && !sym.is_reexport() && self.symbol_in_class(sid, cls) {
+            if member_kind && want.admits_decl(sym.kind, namespace) && !sym.is_reexport() && self.symbol_in_class(sid, cls) {
                 return Some(MethodResolution::Local { class: cls.to_string(), sym_id: sid });
             }
         }
@@ -667,9 +670,9 @@ impl FileAnalysis {
             for sym_id in &ns.entities {
                 let Some(sym) = self.symbols.get(sym_id.0 as usize) else { continue };
                 if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
-                // A synthesized entity is a callable; a value ask must not
-                // answer with one (the same family rule as the local arm).
-                if !want.admits_decl(sym.kind) { continue; }
+                // A synthesized entity is a callable, admitted by the same
+                // rule as the local arm.
+                if !want.admits_decl(sym.kind, namespace) { continue; }
                 if sym.name == method_name {
                     return Some(MethodResolution::Local { class: cls.to_string(), sym_id: *sym_id });
                 }
@@ -739,7 +742,7 @@ impl FileAnalysis {
                     s.name == method_name
                         && s.package.as_deref() == Some(cand_cls.as_str())
                         && !s.is_reexport()
-                        && want.admits_decl(s.kind)
+                        && want.admits_decl(s.kind, namespace)
                         && (matches!(s.kind, SymKind::Sub | SymKind::Method)
                             || (matches!(
                                 s.kind,
@@ -785,8 +788,8 @@ impl FileAnalysis {
                 // overflowed the stack on deep dep graphs). See `GatedEmission`.
             }
             // Both remaining arms install a SUB — a typeglob assignment and
-            // a plugin bridge — so a VALUE ask never answers from either.
-            if !want.admits_decl(SymKind::Sub) {
+            // a plugin bridge — so they answer only an ask that admits one.
+            if !want.admits_decl(SymKind::Sub, namespace) {
                 return None;
             }
             // Cross-package typeglob install: the method is attributed to `cls`
@@ -818,9 +821,8 @@ impl FileAnalysis {
     }
 
     /// Walk the inheritance chain to find a CALLED member (DFS, Perl's
-    /// default MRO). Any member kind answers: a language whose member read
-    /// is a call (Perl's `$o->m`, a `has` accessor) has no value-read
-    /// syntax, so the call is the only spelling a data member ever gets.
+    /// default MRO). A callable answers; a stored member answers too where
+    /// the language keeps one member namespace (`MemberKind::admits_decl`).
     pub fn resolve_method_in_ancestors(
         &self,
         class_name: &str,
@@ -831,9 +833,9 @@ impl FileAnalysis {
     }
 
     /// Walk the inheritance chain to find a VALUE member — what a
-    /// `FieldAccess` ref names. Callables never answer: the syntax said the
-    /// token reads a stored value, so a name only a method carries is an
-    /// undeclared property here, not that method.
+    /// `FieldAccess` ref names. Where the families are separate a callable
+    /// never answers: a name only a method carries is an undeclared
+    /// property, not that method.
     pub fn resolve_field_in_ancestors(
         &self,
         class_name: &str,

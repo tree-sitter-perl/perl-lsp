@@ -2948,9 +2948,8 @@ fn probe_heap_estimate_vs_truth_on_a_giant_file() {
 
 #[test]
 fn field_walk_admits_value_members_only() {
-    // A called member admits any kind (Perl's `$o->m` is the only spelling
-    // a data member ever gets); a VALUE read admits fields alone, so a
-    // name only a method carries is an honest miss for it.
+    // Perl keeps a namespace per family: a VALUE read admits stored
+    // members alone, so a name only a method carries is an honest miss.
     let fa = build_fa_from_source(
         "\
 package W;
@@ -2963,6 +2962,30 @@ sub recorded { 1 }
         Some(MethodResolution::Local { .. })
     ));
     assert!(fa.resolve_field_in_ancestors("W", "recorded", None).is_none());
+}
+
+// Nothing resolves across member families: where a language keeps one
+// namespace per family each ask admits its own family alone, and where it
+// keeps one namespace the family never mattered.
+#[test]
+fn a_member_ask_crosses_families_only_in_a_shared_namespace() {
+    let stored = [SymKind::Field, SymKind::Variable, SymKind::Enumerator];
+    let callable = [SymKind::Sub, SymKind::Method];
+    for k in stored {
+        assert!(MemberKind::Value.admits_decl(k, MemberNamespace::PerFamily));
+        assert!(!MemberKind::Callable.admits_decl(k, MemberNamespace::PerFamily));
+        assert!(MemberKind::Callable.admits_decl(k, MemberNamespace::Shared));
+    }
+    for k in callable {
+        assert!(MemberKind::Callable.admits_decl(k, MemberNamespace::PerFamily));
+        assert!(!MemberKind::Value.admits_decl(k, MemberNamespace::PerFamily));
+        assert!(MemberKind::Value.admits_decl(k, MemberNamespace::Shared));
+    }
+    assert_eq!(
+        crate::model::conventions::PERL_PACK_SPELLINGS.member_namespace,
+        MemberNamespace::PerFamily,
+        "a Perl call reaches a sub, never a `field` of the same name"
+    );
 }
 
 #[test]

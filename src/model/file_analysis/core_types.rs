@@ -423,10 +423,6 @@ bitflags::bitflags! {
         /// surface. Minted on the CLASS by whoever sees the catch-all
         /// declaration; the lanes ask `class_answers_any_member`.
         const DYNAMIC_MEMBERS = 1 << 27;
-        /// A stored slot whose VALUE is called (a C function-pointer member,
-        /// `int (*read)(char *)`). The declarator says so, so a call landing
-        /// on the slot asks the declaration instead of a callback-name list.
-        const CALLABLE_VALUE = 1 << 28;
         /// A bodiless declaration of a callable (Perl `sub frob;`): the name
         /// exists — `can` answers it, so it discharges a role's `requires` —
         /// but its body is elsewhere (a later `sub frob {…}`, AUTOLOAD, XS).
@@ -496,7 +492,6 @@ impl TryFrom<&str> for SymbolFlags {
             "receiver" => SymbolFlags::RECEIVER,
             "constructor" => SymbolFlags::CONSTRUCTOR,
             "throwaway" => SymbolFlags::THROWAWAY,
-            "callable_value" => SymbolFlags::CALLABLE_VALUE,
             other => return Err(UnknownAttribute(other.to_string())),
         })
     }
@@ -1013,25 +1008,43 @@ impl MemberKind {
         }
     }
 
-    /// May a declaration of `kind` define a target of this family? The
-    /// value side is strict: the syntax said the token reads a stored
-    /// value, so a callable never answers it. The callable side admits
-    /// every member — a call is the only spelling a data member gets where
-    /// a member read is a call (Perl's `$o->m`, a `has` accessor) — and the
-    /// walk prefers the same-family declaration when both exist.
-    pub fn admits_decl(self, kind: SymKind) -> bool {
-        match self {
-            MemberKind::Value => MemberKind::of_sym(kind) == MemberKind::Value,
-            MemberKind::Callable => true,
+    /// May a declaration of `kind` answer an ask of this family, in a
+    /// language whose classes hold their members in `namespace`? Nothing
+    /// resolves across families: where the families are separate a
+    /// same-named member of the other one is no answer, and where there is
+    /// one namespace the family never mattered.
+    pub fn admits_decl(self, kind: SymKind, namespace: MemberNamespace) -> bool {
+        match namespace {
+            MemberNamespace::PerFamily => MemberKind::of_sym(kind) == self,
+            MemberNamespace::Shared => true,
         }
     }
 
-    /// May a ref of family `other` reference a target of this family? A
-    /// value read never reaches a callable and a call never reaches a value
-    /// target: each side's syntax already said which it wanted.
-    pub fn admits_ref(self, other: Option<MemberKind>) -> bool {
-        other.is_none_or(|o| o == self)
+    /// May a ref of family `other` reference a target of this family, in
+    /// a language whose classes hold their members in `namespace`? The same
+    /// rule as `admits_decl`, read from the use's side.
+    pub fn admits_ref(self, other: Option<MemberKind>, namespace: MemberNamespace) -> bool {
+        match namespace {
+            MemberNamespace::PerFamily => other.is_none_or(|o| o == self),
+            MemberNamespace::Shared => true,
+        }
     }
+}
+
+/// How a language's classes hold their members — the rule a member ask is
+/// answered by (`docs/adr/member-kinds.md`). A language declares it on its
+/// spellings; the walk reads the value and never asks which language it
+/// serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberNamespace {
+    /// A namespace per family: a read reaches only a stored value and a
+    /// call only a callable (Perl's sub beside a `field`).
+    PerFamily,
+    /// One namespace: a name is one member whatever its kind, so every use
+    /// reaches the nearest declaration of it. C++'s `d.hook()` reads member
+    /// `hook` and calls whatever it holds — a derived function pointer
+    /// hides a base method of that name.
+    Shared,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

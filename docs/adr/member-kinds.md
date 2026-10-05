@@ -5,8 +5,9 @@ or a callable (`$this->m()`, `[$obj, 'm']`). Where the syntax tells them
 apart, the extractor says so at mint time and nothing downstream
 re-derives it (CLAUDE.md rule #11). The two kinds are distinct all the
 way down: a distinct ref kind, a distinct witness attachment, a distinct
-ancestor walk. There is no shape tag on a shared ref, no source tag the
-registry partitions on, and no per-pack strictness flag.
+ancestor walk. There is no shape tag on a shared ref and no source tag the
+registry partitions on. What a language does declare is how its classes
+hold members, which decides what an ask may be answered by (below).
 
 ## The three seams
 
@@ -28,42 +29,48 @@ registry partitions on, and no per-pack strictness flag.
   hop — a plugin entity is a callable). `FieldValueReducer` answers the
   materialized value and is registered ahead of `DomainCoherenceFold`, so
   the defeasible domain never becomes the type that flows.
-- **Walk.** `resolve_field_in_ancestors` admits value kinds only
-  (`Field`, class-content `Variable`, `Enumerator`);
-  `resolve_method_in_ancestors` admits any kind. Both are the one MRO walk
-  parameterized by the kind family the asking ref implies.
+- **Walk.** `resolve_field_in_ancestors` asks for a value,
+  `resolve_method_in_ancestors` for a callable. Both are the one MRO walk
+  parameterized by the kind family the asking ref implies, and the
+  language's `MemberNamespace` decides which declarations answer
+  (`MemberKind::admits_decl`).
   `field_value_type(receiver, member)` is the receiver-typed entry for a
   `FieldAccess`; `member_value_type(receiver, member, arity)` is the
   kind-less ladder (method return first, field fallback) for an asker
   with no ref in hand — the sentinel mid-keystroke, member hover before a
   ref exists.
 
-## Why the call walk still admits a data member
+## A language declares its member namespace
 
-A language whose member read IS a call has no value-read syntax: Perl's
-`$o->m` is a call with or without parens, and a `has` accessor is a
-`Method` symbol. C's `obj->field` likewise mints a `MethodCall` until the
-pack's member capture discriminates on the argument list. So the call
-walk keeps the value-kind fallback, and strictness is by construction on
-the value side: a `FieldAccess` exists only where the syntax minted one,
-and it never resolves to a method. `$php->sucks` without parentheses on a
-class that only declares `sucks()` is an undeclared property, not a
-resolved call.
+Whether a call can reach a stored member is not a property of the call. It
+is a property of the language, so it is declared once, on the language's
+spellings (`PackSpellings::member_namespace`, reached by id, rule #14), and
+the walk reads the value without asking which language it serves:
+
+- **`PerFamily`**: a read reaches only a stored value and a call only a
+  callable. Perl is here: a call reaches a sub, never a `field` of the
+  same name. A language with property and method namespaces is here too.
+- **`Shared`**: a name is one member whatever its kind. C++ is here, and
+  Python. A member access reads the member and a call applies to whatever
+  it holds, so `p.x`, `p.len()` and `d.hook()` all reach the nearest
+  declaration of their name. The ref's family does not take part.
+
+The neutral default is `PerFamily`, so a language that declares nothing
+gets no cross-family answers.
+
+The walk answers the nearest declaration the ask admits and stops. There
+is no held fallback that prefers a farther declaration of the asked family
+over a nearer one the namespace admits: C++ finds `D`'s function-pointer
+`read` for `d->read(buf)` and never `B::read()`, so a walk that reached
+`B::read()` answered a member the language would not. A declaration needs
+no flag saying its value is invoked. Nothing resolves ACROSS families
+where the language keeps them apart: a same-named declaration of the
+other family is a diagnostic's suggestion (an undefined method with a
+property of that name to point at), never a resolution.
 
 A language where a method is also readable as a value (JS `obj.method`)
 publishes the callable on BOTH attachments at mint; the model never learns
 which language did that.
-
-The walk answers the nearest declaration the family admits and stops.
-There is no held fallback that prefers a farther declaration of the family
-the ask named over a nearer one it admits: a class has one member namespace
-where the language does, and a derived declaration hides a base's of the
-same name whatever its kind — C++ finds `D`'s function-pointer `read` for
-`d->read(buf)` and never `B::read()`, so a walk that reached `B::read()`
-answered a member the language would not. Nothing resolves ACROSS families
-by design: a same-named declaration of the other family is a diagnostic's
-suggestion (an undefined method with a property of that name to point at),
-never a resolution.
 
 ### Perl accesses that are semantically value reads
 
@@ -76,9 +83,9 @@ the TARGET, not of the site (a 0-arity sub may compute, side-effect, or
 dispatch). Deciding the kind at the call site from the callee's arity
 would be a shape branch on the target (rule #10), and it would be minted
 in the consumer from a fact the producer already has. What the site wants
-is the VALUE, and that already flows: the call walk's value-kind fallback
-and `member_value_type` answer a method's return first and a field's value
-second, so an accessor read types without a second ref kind.
+is the VALUE, and that already flows: a `has` accessor is a `Method`, so
+the call reaches it and its return types the read, without a second ref
+kind.
 
 If Perl ever mints a value-read fact, it is minted at the declaration by
 the producer that knows the sub is storage-shaped — a `has` accessor is

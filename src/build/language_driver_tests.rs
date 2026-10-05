@@ -613,41 +613,11 @@ int lam() { auto f = [&]{ return inner_; }; return f(); } };\n";
 // The complement: php spells the receiver, so its document leaves every
 // sub scope plain and a bare name inside a method binds to nothing —
 // whatever the class declares.
-// A C callback member (`int (*read)(char *)`) is a stored slot the source
-// CALLS. The declarator says so — the peel's `@deref.callable` level mints
-// `SymbolFlags::CALLABLE_VALUE` — while a plain `int count` states nothing
-// of the kind. The rule is on the declaration, never on a list of callback
-// names.
-#[cfg(feature = "cpp")]
-#[test]
-fn a_callback_member_declares_its_slot_invoked() {
-    use crate::model::file_analysis::{SymKind, SymbolFlags};
-    let src = "\
-struct Ops {\n\
-  int (*read)(char *buf);\n\
-  int count;\n\
-};\n";
-    let fa = cpp_driver().analyze(src);
-    let field = |name: &str| {
-        fa.symbols()
-            .iter()
-            .find(|s| s.name == name && s.kind == SymKind::Field)
-            .unwrap_or_else(|| panic!("{name} is a Field"))
-    };
-    assert!(
-        field("read").flags.contains(SymbolFlags::CALLABLE_VALUE),
-        "the function-pointer declarator states the slot is invoked"
-    );
-    assert!(
-        !field("count").flags.contains(SymbolFlags::CALLABLE_VALUE),
-        "a plain int member states nothing of the kind"
-    );
-}
-
 // C++ has one member namespace per class: a derived class's member hides a
 // base's same-named member whatever its kind, so a call on a function-
-// pointer field never reaches a base method of the name. The walk answers
-// the nearest declaration the family admits and stops there.
+// pointer field never reaches a base method of the name. The language
+// declares the shared namespace; the walk answers the nearest declaration
+// and stops there.
 #[cfg(feature = "cpp")]
 #[test]
 fn a_derived_callback_member_hides_the_base_method_of_its_name() {

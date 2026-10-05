@@ -1,7 +1,7 @@
 //! Python's pack.
 
 use crate::build::query_extract::LangPack;
-use crate::model::file_analysis::{InferredType, NameSpellings, PackSpellings};
+use crate::model::file_analysis::{InferredType, MemberNamespace, NameSpellings, PackSpellings};
 
 /// Python writes and displays nothing of its own: the engine's type tags are
 /// its vocabulary, and it offers no import or annotation quick-fix. Its
@@ -10,6 +10,8 @@ const SPELLINGS: PackSpellings = PackSpellings {
     variadic_marker: "*",
     default_sep: "=",
     members_are_package_bound: true,
+    // Attributes and methods share one namespace on the object.
+    member_namespace: MemberNamespace::Shared,
     ..PackSpellings::NONE
 };
 

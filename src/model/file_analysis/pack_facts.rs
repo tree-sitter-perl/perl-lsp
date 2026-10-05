@@ -282,6 +282,9 @@ pub struct PackSpellings {
     /// nothing else — no cross-package installs (Perl's typeglobs), so
     /// contract provision is package-attributed.
     pub members_are_package_bound: bool,
+    /// How a class holds its members: a namespace per family, or one the
+    /// families share (`MemberKind::admits_decl`).
+    pub member_namespace: MemberNamespace,
 }
 
 impl PackSpellings {
@@ -297,6 +300,7 @@ impl PackSpellings {
         variadic_marker: "",
         default_sep: "",
         members_are_package_bound: false,
+        member_namespace: MemberNamespace::PerFamily,
     };
 }
 
