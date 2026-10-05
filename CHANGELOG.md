@@ -88,8 +88,8 @@ crate / VS Code extension versions.
   set in a hash literal (`my %h = (alpha => 1)`) or by an assignment
   (`$h{beta} = 2`, `$self->{tz} = …` in a constructor) were never
   offered, because only declared keys were; `$h{` and `$self->{` now
-  list them. On DateTime, `$self->{` goes from 2 keys to all of the
-  constructor's slots.
+  list them. On DateTime, `$self->{` used to offer 2 keys and now
+  offers the slots its constructor writes.
 
 ## v0.7.0 — 2026-08-31
 
