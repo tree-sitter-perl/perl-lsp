@@ -838,6 +838,19 @@
 (subscript_expression
   . (_) @subscript.base
   (variable_name) @subscript.dynkey .) @subscript.expr
+; `$c['']` is a real key (the empty string), and the slot an editor's
+; auto-closed quotes leave while the user is still choosing one.
+(subscript_expression
+  . (_) @subscript.base
+  [(string) (encapsed_string)] @subscript.emptykey .
+  (#match? @subscript.emptykey "^(''|\"\")$")) @subscript.expr
+; `['a' => $x] = f()` reads `f()`'s key `a`: a string in a destructuring
+; list can only be a key, since a literal is never an assignment target.
+(assignment_expression
+  left: (list_literal
+    [(string (string_content) @keyed.destr.key)
+     (encapsed_string . (string_content) @keyed.destr.key .)])
+  right: (_) @keyed.destr.src)
 (assignment_expression
   left: (variable_name)
   right: [(string (string_content) @keyed.fold.content)

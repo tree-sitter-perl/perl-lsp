@@ -426,6 +426,15 @@ impl FileAnalysis {
         }
     }
 
+    /// Complete the keys of an owner the cursor's key ref is already bound to.
+    pub fn complete_hash_keys_for_key_owner(
+        &self,
+        owner: &HashKeyOwner,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Vec<CompletionCandidate> {
+        self.complete_hash_keys_for_owner(owner, module_index)
+    }
+
     /// Complete hash keys for a known class name (from expression type resolution).
     pub fn complete_hash_keys_for_class(
         &self,

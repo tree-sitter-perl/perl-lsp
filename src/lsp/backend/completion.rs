@@ -72,6 +72,29 @@ pub fn pack_completion(
         symbols::retarget_items_to_span(&mut items, *content);
         return (items, false);
     }
+    // Inside a key (`$c['|']`): the keys of the owner the document bound to
+    // it — nothing else is a valid answer inside the quotes.
+    if let crate::lsp::cursor_slot::Slot::Key { owner } = &slot {
+        if let Some(bound) = &owner.owner {
+            // The model's detail is spelled in Perl (`cfg()->{k}`); name the
+            // owner instead, which reads the same in any language.
+            use crate::model::file_analysis::HashKeyOwner;
+            let of = match bound {
+                HashKeyOwner::Sub { name, .. } => format!("key of {name}()"),
+                HashKeyOwner::Variable { name, .. } => format!("key of {name}"),
+                HashKeyOwner::Class(c) | HashKeyOwner::Bridged { class: c } => format!("key of {c}"),
+            };
+            let items = analysis
+                .complete_hash_keys_for_key_owner(bound, Some(xidx))
+                .into_iter()
+                .map(|mut c| {
+                    c.detail = Some(of.clone());
+                    symbols::candidate_to_completion_item(c)
+                })
+                .collect();
+            return (items, false);
+        }
+    }
     if let crate::lsp::cursor_slot::Slot::Member { receiver, .. } = &slot {
         if let Some(class) =
             receiver.receiver_type.as_ref().and_then(|ty| ty.class_name().map(|s| s.to_string()))

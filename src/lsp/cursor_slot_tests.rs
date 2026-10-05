@@ -76,7 +76,7 @@ fn sigil_decodes_bare_trigger_only() {
     assert_eq!(Slot::Identifier { prefix: "foo".into() }.sigil(), None);
     assert_eq!(Slot::Identifier { prefix: "$x".into() }.sigil(), None);
     assert_eq!(
-        Slot::Key { owner: OwnerCtx { owner_type: None, var_text: String::new(), source_sub: None } }
+        Slot::Key { owner: OwnerCtx { owner_type: None, var_text: String::new(), source_sub: None, owner: None } }
             .sigil(),
         None
     );

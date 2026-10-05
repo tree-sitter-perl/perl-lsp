@@ -384,3 +384,53 @@ fn php_departures_from_perl_are_pinned() {
     assert!(pl.defs.is_empty(), "perl: {pl:?}");
     assert_eq!(ph.defs, set(&[("a.php", 5)]), "php: {ph:?}");
 }
+
+/// `['host' => $h] = get_config()` reads the returned literal's key, so it
+/// navigates and renames with the subscript reads.
+#[test]
+fn php_keyed_destructuring_reads_the_sources_keys() {
+    let php = "<?php\n\
+               function get_config() { return ['host' => 1, 'port' => 2]; }\n\
+               ['host' => $h, \"port\" => $p] = get_config();\n\
+               $c = get_config();\n\
+               ['host' => $again] = $c;\n";
+    let from_def = answers(Lang::Php, &[("a", php)], 1, "host", 1);
+    assert_eq!(from_def.refs, set(&[("a.php", 1), ("a.php", 2), ("a.php", 4)]));
+    assert_eq!(from_def.rename, Some(set(&[("a.php", 1), ("a.php", 2), ("a.php", 4)])));
+    let from_slot = answers(Lang::Php, &[("a", php)], 2, "port", 1);
+    assert_eq!(from_slot.defs, set(&[("a.php", 1)]));
+}
+
+/// The keys offered inside a PHP subscript's quotes are the keys of the
+/// owner the document bound to that key: from a partial key, from the empty
+/// `''` an editor's auto-closed quotes leave, and for a literal held in a
+/// variable.
+#[test]
+fn php_key_completion_offers_the_owners_keys() {
+    let php = "<?php\n\
+               function get_config() { return ['host' => 1, 'port' => 2]; }\n\
+               $c = get_config();\n\
+               echo $c[''];\n\
+               echo $c['ho'];\n\
+               $d = ['alpha' => 1, 'beta' => 2];\n\
+               echo $d[\"\"];\n";
+    let driver = crate::build::language_driver::LanguageRegistry::with_enabled()
+        .for_id("php")
+        .expect("php driver");
+    let fa = driver.analyze(php);
+    let tree = driver.make_parser().parse(php, None).expect("tree");
+    let keys_at = |row: usize, column: usize| -> BTreeSet<String> {
+        let point = tree_sitter::Point { row, column };
+        let detected = crate::lsp::cursor_slot::detect_slot(&fa, &tree, php, point, "php", None);
+        let crate::lsp::cursor_slot::Slot::Key { owner } = detected.slot else {
+            panic!("no key slot at {row}:{column}: {:?}", detected.slot);
+        };
+        let bound = owner.owner.expect("owner bound on the key ref");
+        fa.complete_hash_keys_for_key_owner(&bound, None).into_iter().map(|c| c.label).collect()
+    };
+    let cfg: BTreeSet<String> = ["host", "port"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(keys_at(3, 9), cfg, "empty key");
+    assert_eq!(keys_at(4, 11), cfg, "partial key");
+    let lit: BTreeSet<String> = ["alpha", "beta"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(keys_at(6, 9), lit, "empty key on a literal held in a variable");
+}

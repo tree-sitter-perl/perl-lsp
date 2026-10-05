@@ -1493,6 +1493,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut dynkey_by_match: HashMap<usize, Span> = HashMap::new();
     let mut fold_lit_by_match: HashMap<usize, Span> = HashMap::new();
     let mut fold_content_by_match: HashMap<usize, (String, Span)> = HashMap::new();
+    let mut destr_key_by_match: HashMap<usize, (String, Span, crate::model::file_analysis::ScopeId)> =
+        HashMap::new();
+    let mut destr_src_by_match: HashMap<usize, Span> = HashMap::new();
     let mut subscript_by_match: HashMap<usize, (Span, Option<Span>, Option<i32>, Option<String>)> =
         HashMap::new();
     let mut annots: HashMap<usize, String> = HashMap::new();
@@ -2747,6 +2750,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 dynkey_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
                 subscript_key_site.insert(e.match_id, (Span { start: e.start, end: e.end }, cur_scope));
             }
+            "subscript.emptykey" => {
+                subscript_by_match
+                    .entry(e.match_id)
+                    .or_insert((Span { start: e.start, end: e.end }, None, None, None))
+                    .3 = Some(String::new());
+                // Zero-width, between the quotes: where a typed key would start.
+                let inside = Point::new(e.start.row, e.start.column + 1);
+                subscript_key_site.insert(e.match_id, (Span { start: inside, end: inside }, cur_scope));
+            }
+            "keyed.destr.key" => {
+                destr_key_by_match.insert(e.match_id, (e.text.clone(), Span { start: e.start, end: e.end }, cur_scope));
+            }
+            "keyed.destr.src" => {
+                destr_src_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
+            }
             "keyed.fold.lit" => {
                 fold_lit_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
             }
@@ -3622,6 +3640,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     for (mid, (content, content_span)) in fold_content_by_match {
         if let Some(lit) = fold_lit_by_match.get(&mid) {
             out.fold_literals.push(crate::build::query_extract::FoldLiteral { lit: *lit, content, content_span });
+        }
+    }
+    // A destructuring key reads its source the way `$src['k']` would.
+    for (mid, (key, key_span, scope)) in destr_key_by_match {
+        if let Some(src) = destr_src_by_match.get(&mid) {
+            out.key_accesses.push(crate::build::query_extract::KeyAccessSite {
+                key,
+                key_span,
+                expr: key_span,
+                base: *src,
+                scope,
+                write: false,
+            });
         }
     }
     for (mid, (expr, base, idx, key)) in &subscript_by_match {

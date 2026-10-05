@@ -49,6 +49,10 @@ pub struct OwnerCtx {
     pub owner_type: Option<InferredType>,
     pub var_text: String,
     pub source_sub: Option<String>,
+    /// The owner the document already bound to the key under the cursor —
+    /// a pack mints its key refs with their owner, so the slot reads the
+    /// fact instead of re-deriving it from the container's spelling.
+    pub owner: Option<crate::model::file_analysis::HashKeyOwner>,
 }
 
 /// What kind of hole the cursor sits in (`docs/adr/cursor-slots.md`). Each
@@ -230,6 +234,26 @@ pub fn detect_slot(
     let Some(lang_pack) = driver.lang_pack() else {
         return bare_identifier();
     };
+    // A key the document already minted (`$c['ho|']`, or the empty `$c['|']`
+    // an editor's auto-closed quotes leave): its owner is on the ref.
+    if let Some(owner) = analysis
+        .ref_at(point)
+        .filter(|r| matches!(r.kind, crate::model::file_analysis::RefKind::HashKeyAccess { .. }))
+        .filter(|r| r.folded_from.is_none())
+        .and_then(|r| r.hash_key_owner().cloned())
+    {
+        return DetectedSlot {
+            slot: Slot::Key {
+                owner: OwnerCtx {
+                    owner_type: None,
+                    var_text: String::new(),
+                    source_sub: None,
+                    owner: Some(owner),
+                },
+            },
+            arm: DetectorArm::HashKey,
+        };
+    }
     let mut parser = driver.make_parser();
     // A string on a rail first: inside a string no member / qualifier
     // arm applies, and the rail's names are the only honest answer.
@@ -320,7 +344,7 @@ fn slot_from_cursor_context(ctx: CursorContext) -> DetectedSlot {
             DetectorArm::Member,
         ),
         CursorContext::HashKey { owner_type, var_text, source_sub } => (
-            Slot::Key { owner: OwnerCtx { owner_type, var_text, source_sub } },
+            Slot::Key { owner: OwnerCtx { owner_type, var_text, source_sub, owner: None } },
             DetectorArm::HashKey,
         ),
         CursorContext::UseStatement { module_prefix, in_import_list, module_name } => {
