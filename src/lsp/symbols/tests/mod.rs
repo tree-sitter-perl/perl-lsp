@@ -11,3 +11,5 @@ mod dispatch_tests;
 mod chain_tests;
 mod exports_tests;
 mod lint_tests;
+#[cfg(feature = "php")]
+mod keyed_access_tests;

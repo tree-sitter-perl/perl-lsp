@@ -831,7 +831,22 @@
   (integer) @subscript.int .) @subscript.expr
 (subscript_expression
   . (_) @subscript.base
-  (string (string_content) @subscript.key) .) @subscript.expr
+  [(string (string_content) @subscript.key)
+   (encapsed_string . (string_content) @subscript.key .)] .) @subscript.expr
+; A subscript on the left of `=` writes its key (`$d['extra'] = 3`): the
+; key ref carries Write access, the same as Perl's `$d{extra} = 3`.
+(assignment_expression
+  left: (subscript_expression) @keyed.write)
+
+; ---- keyed literals: each string key of `['host' => …]` is a key def ----
+; The literal's span joins it to what holds the value (a `return`, an
+; assignment's source) — the def's owner, resolved in `into_file_analysis`.
+; A double-quoted key with no interpolation is as constant as a quoted one.
+(array_creation_expression
+  (array_element_initializer
+    . [(string (string_content) @keyed.def)
+       (encapsed_string . (string_content) @keyed.def .)]
+    . (_))) @keyed.lit
 
 ; ---- guard narrowing: `if ($x instanceof User) { ... }` ----
 ; The class token may be bare or namespace-qualified (`Op\Install` —

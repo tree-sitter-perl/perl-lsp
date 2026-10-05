@@ -1343,6 +1343,9 @@ fn remap_spans(
         rails,
         class_rails,
         key_defs,
+        key_accesses,
+        keyed_literals,
+        index_subscripts,
         domain_sites,
         macro_returns: _,
         // Populated in enrich_skeleton (post-remap) already in original coords.
@@ -1539,6 +1542,20 @@ fn remap_spans(
     for k in key_defs.iter_mut() {
         k.key_span = rspan(k.key_span);
         k.elem_span = rspan(k.elem_span);
+    }
+    for a in key_accesses.iter_mut() {
+        let crate::build::query_extract::KeyAccessSite { key: _, key_span, expr, base, scope: _, write: _ } = a;
+        *key_span = rspan(*key_span);
+        *expr = rspan(*expr);
+        *base = rspan(*base);
+    }
+    for l in keyed_literals.iter_mut() {
+        l.key_span = rspan(l.key_span);
+        l.lit = rspan(l.lit);
+    }
+    for (expr, base) in index_subscripts.iter_mut() {
+        *expr = rspan(*expr);
+        *base = rspan(*base);
     }
     for ds in domain_sites.iter_mut() {
         let crate::model::file_analysis::DomainSite { slot: _, value: _, slot_span } = ds;

@@ -277,6 +277,7 @@ fn hover_kind_label(sym: &crate::model::file_analysis::Symbol) -> &'static str {
         FaSymKind::Variable => "variable",
         FaSymKind::Field => "field",
         FaSymKind::Enumerator => "enumerator",
+        FaSymKind::HashKeyDef => "array key",
         _ => "symbol",
     }
 }

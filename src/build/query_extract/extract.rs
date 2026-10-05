@@ -1483,6 +1483,13 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // joined per match after the loop.
     let mut branch_expr_by_match: HashMap<usize, Span> = HashMap::new();
     let mut branch_arm_by_match: HashMap<usize, Span> = HashMap::new();
+    // The key token of a string-keyed subscript (its content span) and the
+    // scope it sits in — the identity half of the drill (`KeyAccessSite`).
+    let mut subscript_key_site: HashMap<usize, (Span, crate::model::file_analysis::ScopeId)> =
+        HashMap::new();
+    let mut keyed_write_spans: std::collections::HashSet<Span> = Default::default();
+    let mut keyed_def_by_match: HashMap<usize, (String, Span)> = HashMap::new();
+    let mut keyed_lit_by_match: HashMap<usize, Span> = HashMap::new();
     let mut subscript_by_match: HashMap<usize, (Span, Option<Span>, Option<i32>, Option<String>)> =
         HashMap::new();
     let mut annots: HashMap<usize, String> = HashMap::new();
@@ -2731,6 +2738,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     .entry(e.match_id)
                     .or_insert((Span { start: e.start, end: e.end }, None, None, None))
                     .3 = Some(e.text.clone());
+                subscript_key_site.insert(e.match_id, (Span { start: e.start, end: e.end }, cur_scope));
+            }
+            "keyed.write" => {
+                keyed_write_spans.insert(Span { start: e.start, end: e.end });
+            }
+            "keyed.def" => {
+                keyed_def_by_match.insert(e.match_id, (e.text.clone(), Span { start: e.start, end: e.end }));
+            }
+            "keyed.lit" => {
+                keyed_lit_by_match.insert(e.match_id, Span { start: e.start, end: e.end });
             }
             "flow.target" => {
                 flow_targets.insert(
@@ -3580,8 +3597,31 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // Subscripts project off their base: an integer index peels a slot, a
     // literal string key drills a keyed shape — the same `Projected` steps
     // the foreach/destructuring binders ride.
-    for (expr, base, idx, key) in subscript_by_match.values() {
+    for (mid, (key, key_span)) in keyed_def_by_match {
+        if let Some(lit) = keyed_lit_by_match.get(&mid) {
+            out.keyed_literals.push(crate::build::query_extract::KeyedLiteral {
+                key,
+                key_span,
+                lit: *lit,
+            });
+        }
+    }
+    for (mid, (expr, base, idx, key)) in &subscript_by_match {
         let Some(base) = base else { continue };
+        if let (Some(k), Some((key_span, scope))) = (key, subscript_key_site.get(mid)) {
+            out.key_accesses.push(crate::build::query_extract::KeyAccessSite {
+                key: k.clone(),
+                key_span: *key_span,
+                expr: *expr,
+                base: *base,
+                scope: *scope,
+                write: keyed_write_spans.contains(expr),
+            });
+        } else if idx.is_some() {
+            // An index subscript names no key, but a key subscript on top of
+            // it (`$rows[0]['id']`) reaches its container through it.
+            out.index_subscripts.push((*expr, *base));
+        }
         let step = match (idx, key) {
             (Some(i), _) => crate::model::witnesses::ProjectionStep::ArrayIndex(*i),
             (None, Some(k)) => crate::model::witnesses::ProjectionStep::HashKey(k.clone()),

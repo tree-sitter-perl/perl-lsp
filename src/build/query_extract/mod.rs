@@ -827,6 +827,7 @@ fn effective_query_source(language: &Language, pack: &LangPack) -> &'static str 
 
 mod cursor_query;
 mod extract;
+mod keyed;
 mod packs;
 mod skeleton;
 // Tested and unused until the sentinel stops consulting node-kind tables.
@@ -836,6 +837,8 @@ pub(crate) use cursor_query::{
     query_for, recv_peel_kinds,
 };
 pub use extract::*;
+pub use keyed::{KeyAccessSite, KeyedLiteral};
+pub(crate) use keyed::{mint_keyed_access, nearest_decl, resolve_member_keys, KeyedInputs};
 pub use packs::*;
 pub use skeleton::*;
 

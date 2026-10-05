@@ -247,6 +247,15 @@ pub struct SkeletonAnalysis {
     /// element on `@key.elem`): promoted to rail names by the driver when
     /// the file's path rail says so (`config/app.php` → `app.<key>`).
     pub key_defs: Vec<KeyDef>,
+    /// String-keyed subscripts (`@subscript.key`): the key ref half of the
+    /// `Projected{HashKey}` drill, owner-bound in `into_file_analysis`.
+    pub key_accesses: Vec<super::KeyAccessSite>,
+    /// String keys of array literals (`@keyed.def` in a `@keyed.lit`) —
+    /// key defs once the literal's holder is known.
+    pub keyed_literals: Vec<super::KeyedLiteral>,
+    /// Index subscripts (`$rows[0]`): (expr, base), so a key subscript over
+    /// one reaches its container.
+    pub index_subscripts: Vec<(Span, Span)>,
     /// Domain-typing sites: a `@domain.slot` field access compared/assigned
     /// against a `@domain.value` token. Raw (value's enum resolves cross-file
     /// at query time); folds onto `Field{owner, name}` for the int-used-as-enum
@@ -1204,26 +1213,8 @@ impl SkeletonAnalysis {
         // ref whether or not the def is local.
         let mut unresolved_reads: Vec<(String, crate::model::file_analysis::ScopeId, Span)> = Vec::new();
         for (name, read_scope, read_span) in &self.var_reads {
-            let rp = (read_span.start.row, read_span.start.column);
-            let resolved = defs_by_name.get(name).and_then(|cands| {
-                let mut cur = Some(*read_scope);
-                while let Some(sc) = cur {
-                    // nearest decl of this name in THIS scope level, declared at
-                    // or before the read (latest-wins for redeclaration).
-                    let mut best: Option<((usize, usize), SymbolId)> = None;
-                    for (dscope, dspan, did) in cands {
-                        let dp = (dspan.start.row, dspan.start.column);
-                        if *dscope == sc && dp <= rp && best.is_none_or(|(bp, _)| dp > bp) {
-                            best = Some((dp, *did));
-                        }
-                    }
-                    if let Some((_, did)) = best {
-                        return Some(did);
-                    }
-                    cur = scope_parent.get(&sc).copied().flatten();
-                }
-                None
-            });
+            let resolved =
+                super::nearest_decl(&defs_by_name, &scope_parent, name, *read_scope, read_span.start);
             match resolved {
                 Some(did) => local_refs.push(crate::model::file_analysis::Ref {
                     kind: crate::model::file_analysis::RefKind::Variable,
@@ -1456,12 +1447,12 @@ impl SkeletonAnalysis {
         // Demoted re-assignments (function-scoped vars): the site is a
         // WRITE of the one declaration, so references/rename see it and
         // documentHighlight classifies it honestly.
-        for (name, scope, span) in var_rebind_refs {
+        for (name, scope, span) in &var_rebind_refs {
             refs.push(crate::model::file_analysis::Ref {
                 kind: crate::model::file_analysis::RefKind::Variable,
-                span,
-                scope,
-                target_name: name,
+                span: *span,
+                scope: *scope,
+                target_name: name.clone(),
                 access: crate::model::file_analysis::AccessKind::Write,
                 binding: None,
                 folded_from: None,
@@ -1730,6 +1721,37 @@ impl SkeletonAnalysis {
                 }
             }
         }
+        // Keyed access: the key defs of literals and the owner-bound key refs
+        // of subscripts. Defs append after every extracted symbol, so ids stay
+        // the vec index.
+        let pending_key_refs = {
+            let inputs = super::KeyedInputs {
+                accesses: &self.key_accesses,
+                literals: &self.keyed_literals,
+                index_subscripts: &self.index_subscripts,
+                symbols: &symbols,
+                scopes: &self.scopes,
+                var_reads: &self.var_reads,
+                var_rebinds: &var_rebind_refs,
+                call_sites: &self.call_sites,
+                import_rows: &self.import_sites,
+                names: &names,
+                return_sites: &self.return_sites,
+                flow_edges: &self.flow_edges,
+                member_calls: self
+                    .refs
+                    .iter()
+                    .filter(|r| r.kind == "member" && !r.value_read)
+                    .filter_map(|r| {
+                        r.invocant.as_ref().map(|(sp, _)| (*sp, r.name.clone(), Span { start: r.start, end: r.end }))
+                    })
+                    .collect(),
+            };
+            let (key_defs, key_refs, pending) = super::mint_keyed_access(&inputs, symbols.len());
+            symbols.extend(key_defs);
+            refs.extend(key_refs);
+            pending
+        };
         // `$var = $recv->method()` bindings: hand the assignment to the
         // language-generic MCB→bag bridge (`emit_method_call_binding_edges`),
         // which resolves the receiver and chases the method's return lazily —
@@ -1839,6 +1861,7 @@ impl SkeletonAnalysis {
         // here means an analysis produced without one still answers the
         // by-language-id lookups (spellings, the document's own literals).
         fa.language = self.lang_id.to_string();
+        super::resolve_member_keys(&mut fa, pending_key_refs);
         // Seal base_*_count so a later enrich pass (the CLI/--batch path
         // runs it unconditionally) truncates to the FULL analysis, not to
         // zero — otherwise enrichment wipes every pack-language symbol.

@@ -1286,6 +1286,19 @@ impl FileAnalysis {
     /// method re-runs the same `(target_name, owner)` linker that
     /// `build_indices` uses, so the ref→target index stays accurate after a
     /// cross-file hash-key binding resolves.
+    /// Adopt key refs a pack bound after the analysis was assembled (their
+    /// owner needed the receiver typed), then re-index and re-link them to
+    /// their defs. Runs before `finalize_post_walk` seals the baseline.
+    pub(crate) fn adopt_key_refs(&mut self, refs: Vec<Ref>) {
+        if refs.is_empty() {
+            return;
+        }
+        for r in refs {
+            self.refs.push(r);
+        }
+        self.rebuild_enrichment_indices();
+    }
+
     fn rebuild_enrichment_indices(&mut self) {
         self.symbols.rebuild_indices();
 

@@ -266,6 +266,15 @@ impl FileAnalysis {
             })
             .map(|o| (o.span, o.access))
             .collect();
+        // A literal that minted its keys as defs (a pack's `$d = ['k' => 1]`)
+        // is the declaration of the same lexical key.
+        let owner = HashKeyOwner::Variable { name: var.clone(), def_scope };
+        pairs.extend(
+            self.hash_key_defs_for_owner(&owner)
+                .into_iter()
+                .filter(|d| d.name == key)
+                .map(|d| (d.selection_span, AccessKind::Declaration)),
+        );
         pairs.sort_by_key(|(s, _)| (s.start.row, s.start.column));
         pairs.dedup_by(|a, b| a.0 == b.0);
         Some(pairs)
