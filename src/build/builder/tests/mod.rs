@@ -24,6 +24,7 @@ fn escaped_empty_hash_shape() -> InferredType {
 }
 
 mod core_tests;
+mod invoke_tests;
 mod refs_types_tests;
 mod queries_recovery_tests;
 mod inheritance_tests;
