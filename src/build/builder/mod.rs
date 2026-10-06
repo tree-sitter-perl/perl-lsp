@@ -606,13 +606,11 @@ struct Builder<'a> {
     /// see `plugin::TopicRouteDsl`.
     topic_dsls: Vec<plugin::TopicRouteDsl>,
 
-    /// Per-MethodCall-ref arg count, keyed by ref index. Lets
-    /// `emit_method_call_return_edges` pin the call site's arity onto its
-    /// `Expression(refidx)` return edge (`CallReturn`), so a fluent
-    /// writer `$obj->setter($v)` resolves the writer arm even when the
-    /// type query that reaches the edge is hint-less (`my $x = …`).
-    /// **Build-only**, like `method_call_invocant`.
-    method_call_arity: std::collections::HashMap<usize, u32>,
+    /// Per-MethodCall-ref argument operands, keyed by ref index — the
+    /// `args` of the call's `Invoke`. Absent for plugin-emitted refs, whose
+    /// arguments were never walked. **Build-only**, like
+    /// `method_call_invocant`.
+    method_call_args: std::collections::HashMap<usize, Vec<crate::model::witnesses::CallArg>>,
 
     /// MethodCall ref indices for which we've published an
     /// `InferredType::Parametric` witness on `Expression(refidx)`
@@ -630,14 +628,6 @@ struct Builder<'a> {
     /// this set keeps a walk-phase full-form emission at the same span
     /// from being duplicated by that fold-phase re-run.
     method_call_ref_dedup: std::collections::HashSet<(Point, Point, String)>,
-
-    /// Refs whose `Expression(refidx)` carries a `route_brand`
-    /// `BrandedRoute` witness. `emit_method_call_return_edges` skips
-    /// these so its `Edge(PackageSymbol{Route, to})` (which folds to a
-    /// brandless `ClassName(Route)`) doesn't mask the brand. Same role
-    /// as `parametric_emitted_refs`. Cleared+refilled each fold
-    /// iteration by `emit_route_brand_witnesses`.
-    route_branded_refs: std::collections::HashSet<usize>,
 
     /// Recorded `defined`/`blessed` guards whose `Optional<T> → T` strip
     /// is re-derived each fold iteration (`emit_defined_narrowing_witnesses`).

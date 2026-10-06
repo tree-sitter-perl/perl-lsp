@@ -372,6 +372,46 @@ pub enum WitnessPayload {
     /// (rule #14). Kept at the END for bincode variant-index stability
     /// (bump `EXTRACT_VERSION`).
     Reset,
+    /// A CALL: "the value at my attachment is what `callee` returns when
+    /// invoked on `receiver` with `args`". Every operand is an attachment
+    /// the chase materializes under the query that holds the index, so a
+    /// chain is one witness per hop, each naming the previous hop's `Expr`
+    /// by key. The receiver's FULL type is substituted (a ResultSet stays
+    /// a ResultSet for `RowOf(Receiver)`); its class only picks the lookup.
+    /// `args: None` = not walked (a plugin-emitted ref): no arity, no arg
+    /// types. Kept at the END for bincode variant-index stability (bump
+    /// `EXTRACT_VERSION`).
+    Invoke { callee: Callee, receiver: Option<WitnessAttachment>, args: Option<Vec<CallArg>> },
+}
+
+/// What an `Invoke` calls.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Callee {
+    /// A named method, looked up per `Lookup`.
+    Method { name: String, lookup: Lookup },
+    /// Whatever callable this attachment holds (`$cb->(…)`, `$obj->$cb(…)`):
+    /// its `CodeRef` return edge is the call's value.
+    Value(WitnessAttachment),
+}
+
+/// Where a named method's lookup starts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Lookup {
+    /// The receiver's class (`$o->m`).
+    Receiver,
+    /// The parents of the package the call is written in (`->SUPER::m`).
+    Super { writer: String },
+    /// A named class (`->Foo::m`, or a plugin-declared dispatch class).
+    Named(String),
+}
+
+/// One argument of an `Invoke`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CallArg {
+    One(WitnessAttachment),
+    /// Flattens to any number of values (`@args`, `%h`): positions after it,
+    /// and the arity, are unknown.
+    Spread(WitnessAttachment),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

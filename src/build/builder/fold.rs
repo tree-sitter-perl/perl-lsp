@@ -954,10 +954,6 @@ impl<'a> Builder<'a> {
     ) {
         use crate::util::ghost_stats::timed;
         timed("fold::arity", || self.emit_arity_return_witnesses());
-        // Brand BEFORE method-call edges so `route_branded_refs` is
-        // current when `emit_method_call_return_edges` consults it to
-        // skip route calls — otherwise the skip set lags one iteration
-        // and the bag oscillates (the fold never reaches a fixed point).
         timed("fold::route_brand", || self.emit_route_brand_witnesses(idx, ref_by_span));
         timed("fold::mc_edges", || self.emit_method_call_return_edges());
         timed("fold::narrowing", || self.emit_defined_narrowing_witnesses());
@@ -985,30 +981,23 @@ impl<'a> Builder<'a> {
     ) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         self.bag.remove_by_source_tag("route_brand");
-        self.route_branded_refs.clear();
 
-        // Snapshot (refidx, brand) first — `invocant_type_at_node`
-        // borrows `&self`, so we can't push while iterating.
-        let mut brands: Vec<(usize, InferredType)> = Vec::new();
+        // Published as computed, in source order: a variable reads its
+        // brand through the edge to the call that produced it, so a later
+        // `$crud->get` must see `$crud`'s brand from this same pass (the
+        // clear above removed last pass's).
         for &node in &idx.method_call_nodes {
             let span = node_to_span(node);
             let Some(&refidx) = ref_by_span.get(&(span.start, span.end)) else {
                 continue;
             };
-            let ty = self.invocant_type_at_node(node);
-            if let Some(b @ InferredType::BrandedRoute { .. }) = ty {
-                brands.push((refidx, b));
-            }
-        }
-        for (refidx, brand) in brands {
+            let Some(brand @ InferredType::BrandedRoute { .. }) = self.invocant_type_at_node(node) else {
+                continue;
+            };
             let r_span = self.refs[refidx].span;
-            // Claim this ref so `emit_method_call_return_edges` skips
-            // its `Edge(PackageSymbol{Route, to})` — that edge folds to
-            // a plain `ClassName(Route)` and `FrameworkAwareTypeFold`
-            // (which runs before `ExprReturn`) would answer with it,
-            // masking the brand. Same precedent as
-            // `parametric_emitted_refs`.
-            self.route_branded_refs.insert(refidx);
+            // Beside the call's `Invoke`, whose plain class the brand
+            // dominates (`FrameworkAwareTypeFold`) and which this pass reads
+            // for the call's own class.
             self.bag.push(Witness {
                 attachment: WitnessAttachment::Expression(crate::model::witnesses::RefIdx(refidx as u32)),
                 source: WitnessSource::Builder("route_brand".into()),
@@ -1065,68 +1054,43 @@ impl<'a> Builder<'a> {
             if self.parametric_emitted_refs.contains(&i) {
                 continue;
             }
-            // Route-branded calls own their `Expression(refidx)` type
-            // (the `BrandedRoute` from `emit_route_brand_witnesses`);
-            // the method-on-class edge would fold to a brandless
-            // `ClassName(Route)` and mask it.
-            if self.route_branded_refs.contains(&i) {
-                continue;
-            }
-            // A qualified method token names an EXPLICIT dispatch class —
-            // Perl looks the method up on the named class, not the
-            // invocant's. Either way the call still blesses into the
-            // INVOCANT's class, so the result is typed relative to the
-            // invocant (falling back to the enclosing package).
-            let token = crate::model::conventions::MethodToken::parse(&r.target_name);
-            if !matches!(token, crate::model::conventions::MethodToken::Bare(_)) {
-                let method = token.name();
-                let Some(encl) = self.package_at_pos(r.span.start) else { continue };
-                let receiver_class = self
-                    .method_call_invocant
-                    .get(&i)
-                    .cloned()
-                    .unwrap_or_else(|| encl.to_string());
-                let arity = self.method_call_arity.get(&i).copied().unwrap_or(0);
-                let lookup_classes = self.qualified_dispatch_classes(token, encl);
-                for class in lookup_classes {
-                    edges.push(Witness {
-                        attachment: WitnessAttachment::Expression(crate::model::witnesses::RefIdx(
-                            i as u32,
-                        )),
-                        source: WitnessSource::Builder("method_call_return".into()),
-                        payload: WitnessPayload::QualifiedCallReturn {
-                            method_lookup: WitnessAttachment::PackageSymbol {
-                                package: class,
-                                name: method.to_string(),
-                            },
-                            receiver_class: receiver_class.clone(),
-                            arity,
-                        },
-                        span: r.span,
-                    });
+            // The call's value is its `Invoke`: the method looked up from the
+            // receiver's class (or the token's explicit start), with the
+            // receiver's full type substituted. A plugin-emitted ref has no
+            // walked invocant; its declared class is the lookup and receiver.
+            use crate::model::conventions::MethodToken;
+            use crate::model::witnesses::{Callee, Lookup};
+            let token = MethodToken::parse(&r.target_name);
+            let walked = self.method_call_args.get(&i);
+            let lookup = match token {
+                MethodToken::Super(_) => {
+                    let Some(writer) = self.package_at_pos(r.span.start) else { continue };
+                    Lookup::Super { writer: writer.to_string() }
                 }
-                continue;
-            }
-            let Some(class) = self.method_call_invocant.get(&i) else {
-                continue;
+                MethodToken::Bare(_) if walked.is_some() => Lookup::Receiver,
+                MethodToken::Bare(_) => {
+                    let Some(class) = self.method_call_invocant.get(&i) else { continue };
+                    Lookup::Named(class.clone())
+                }
+                t => match t.literal_package() {
+                    Some(p) => Lookup::Named(p.to_string()),
+                    None => continue,
+                },
             };
-            let target = WitnessAttachment::PackageSymbol {
-                package: class.clone(),
-                name: r.target_name.clone(),
-            };
-            // Pin the call's arity so the chase dispatches the right
-            // overload arm (fluent writer vs getter) regardless of the
-            // outer query's hint. Plugin-emitted refs that never went
-            // through `visit_method_call` have no recorded arity — fall
-            // back to a plain edge (hint-less union dispatch) for them.
-            let payload = match self.method_call_arity.get(&i) {
-                Some(&arity) => WitnessPayload::CallReturn { target, arity },
-                None => WitnessPayload::Edge(target),
+            let receiver = match (&r.kind, walked) {
+                (RefKind::MethodCall { invocant_span: Some(sp), .. }, Some(_)) => {
+                    Some(WitnessAttachment::Expr(*sp))
+                }
+                _ => None,
             };
             edges.push(Witness {
                 attachment: WitnessAttachment::Expression(crate::model::witnesses::RefIdx(i as u32)),
                 source: WitnessSource::Builder("method_call_return".into()),
-                payload,
+                payload: WitnessPayload::Invoke {
+                    callee: Callee::Method { name: token.name().to_string(), lookup },
+                    receiver,
+                    args: walked.cloned(),
+                },
                 span: r.span,
             });
         }

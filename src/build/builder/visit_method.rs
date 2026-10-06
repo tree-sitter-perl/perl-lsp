@@ -137,6 +137,10 @@ impl<'a> Builder<'a> {
         });
 
         let args = self.extract_call_args(node);
+        if let Some(inv) = invocant_node {
+            self.emit_invocant_witness(inv);
+        }
+        let operands = self.call_operands(&args);
 
         if let Some(ref name) = method_name {
             // Dynamic method dispatch: $self->$method() — resolve $method if known
@@ -171,8 +175,7 @@ impl<'a> Builder<'a> {
                         if let Some(c) = invocant_class.clone() {
                             self.method_call_invocant.insert(idx, c);
                         }
-                        self.method_call_arity
-                            .insert(idx, args.len() as u32);
+                        self.method_call_args.insert(idx, operands.clone());
                     }
                 }
             } else {
@@ -192,8 +195,7 @@ impl<'a> Builder<'a> {
                 if let Some(c) = invocant_class.clone() {
                     self.method_call_invocant.insert(idx, c);
                 }
-                self.method_call_arity
-                    .insert(idx, args.len() as u32);
+                self.method_call_args.insert(idx, operands.clone());
 
                 // Runtime-exporter setup in method-call form:
                 // `Moose::Exporter->setup_import_methods(...)`,

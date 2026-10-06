@@ -2358,6 +2358,16 @@ impl ReducerRegistry {
                         });
                     }
                 }
+                WitnessPayload::Invoke { callee, receiver, args } => {
+                    if let Some(t) = self.invoke(bag, q, state, callee, receiver.as_ref(), args.as_deref()) {
+                        out.push(Witness {
+                            attachment: w.attachment.clone(),
+                            source: w.source.clone(),
+                            payload: WitnessPayload::InferredType(t),
+                            span: w.span,
+                        });
+                    }
+                }
                 WitnessPayload::QualifiedCallReturn { method_lookup, receiver_class, arity } => {
                     // Look the method up on the named/parent class, but the
                     // receiver is the INVOCANT (enclosing) class — prefer a
@@ -2393,6 +2403,123 @@ impl ReducerRegistry {
             }
         }
         out
+    }
+
+    /// Materialize `att` under `q`'s point and context, in an opaque frame:
+    /// an `Invoke` operand is an input to this frame's answer, never the
+    /// answer itself.
+    fn operand_type(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        att: &WitnessAttachment,
+    ) -> Option<InferredType> {
+        let sub_q = ReducerQuery {
+            attachment: att,
+            point: q.point,
+            framework: q.framework,
+            arity_hint: None,
+            // The enclosing call's receiver still binds `$self` inside the
+            // operand (`return $self->m` typed at a `Child->outer` site).
+            receiver: q.receiver.clone(),
+            args: Vec::new(),
+            context: q.context,
+        };
+        state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
+            ReducedValue::Type(t) => Some(t.clone()),
+            ReducedValue::FactMap(_) | ReducedValue::None => None,
+        })
+    }
+
+    /// The value of an `Invoke`: materialize the receiver and arguments,
+    /// pick the lookup attachment, and query it with the receiver's full
+    /// type and the argument types substituted.
+    fn invoke(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        callee: &Callee,
+        receiver: Option<&WitnessAttachment>,
+        args: Option<&[CallArg]>,
+    ) -> Option<InferredType> {
+        let mut recv = receiver.and_then(|r| self.operand_type(bag, q, state, r));
+        // Positional argument types up to the first spread; an operand that
+        // types nothing holds its position as `Unknown`.
+        let mut arg_types: Vec<InferredType> = Vec::new();
+        let mut spread = false;
+        for a in args.unwrap_or_default() {
+            match a {
+                CallArg::One(att) => arg_types.push(
+                    self.operand_type(bag, q, state, att).unwrap_or(InferredType::Unknown),
+                ),
+                CallArg::Spread(_) => {
+                    spread = true;
+                    break;
+                }
+            }
+        }
+        let exact = args.is_some() && !spread;
+        let lookups: Vec<WitnessAttachment> = match callee {
+            Callee::Method { name, lookup } => {
+                let classes: Vec<String> = match lookup {
+                    Lookup::Receiver => {
+                        recv.as_ref().and_then(|t| t.class_name()).map(str::to_string).into_iter().collect()
+                    }
+                    Lookup::Super { writer } => match q.context {
+                        Some(ctx) => crate::model::file_analysis::parents_of(
+                            writer,
+                            ctx.package_parents,
+                            ctx.module_index,
+                            ctx.app_surface_consumers,
+                        ),
+                        None => Vec::new(),
+                    },
+                    Lookup::Named(class) => vec![class.clone()],
+                };
+                // A call with no typed receiver still blesses into the class
+                // it dispatched on (`Foo->new`, a plugin-declared class).
+                if recv.is_none() {
+                    if let Lookup::Named(class) | Lookup::Super { writer: class } = lookup {
+                        recv = Some(InferredType::ClassName(class.clone()));
+                    }
+                }
+                classes
+                    .into_iter()
+                    .map(|package| WitnessAttachment::PackageSymbol { package, name: name.clone() })
+                    .collect()
+            }
+            Callee::Value(att) => {
+                let target = self.operand_type(bag, q, state, att)?.callable_return_edge()?.clone();
+                // Invoking a method through a coderef passes its invocant as
+                // the first argument (`$cb->($obj, …)` for `\&Class::m`).
+                if recv.is_none() && matches!(target, WitnessAttachment::PackageSymbol { .. }) {
+                    if !arg_types.is_empty() {
+                        recv = Some(arg_types.remove(0));
+                    }
+                }
+                vec![target]
+            }
+        };
+        let arity = exact.then_some(arg_types.len() as u32);
+        // SUPER walks the writer's parents in MRO order: the first that
+        // answers is the method Perl would run.
+        lookups.into_iter().find_map(|att| {
+            let sub_q = ReducerQuery {
+                attachment: &att,
+                point: q.point,
+                framework: q.framework,
+                arity_hint: arity,
+                receiver: recv.clone(),
+                args: arg_types.clone(),
+                context: q.context,
+            };
+            state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
+                ReducedValue::Type(t) => Some(t.clone()),
+                ReducedValue::FactMap(_) | ReducedValue::None => None,
+            })
+        })
     }
 
     /// Scope-chain variable lookup with an explicit visited set.
