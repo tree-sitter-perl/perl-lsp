@@ -176,10 +176,9 @@ A portable `ConclusionKey` target, an optional arity override, and a
 `ReceiverRule`. It subsumes every cross-file edge hop the live chase makes:
 a fresh-dispatch edge from a non-`MethodOnClass` attachment
 (`receiver: Dispatch(c)`), an inheritance-hop edge between `MethodOnClass`
-entries (`receiver: Thread`), `CallReturn { target, arity }`
-(`arity: Some(n), receiver: Dispatch(target.class)`), and
-`QualifiedCallReturn { method_lookup, receiver_class, arity }` (same shape
-with an explicit target key).
+entries (`receiver: Thread`), and a method `Invoke` (`arity: Some(n),
+receiver: Dispatch(target.class)`, with an explicit target key for a
+SUPER or qualified lookup).
 
 Example: `sub active { return $self->search({ active => 1 }) }` on a DBIC
 resultset bakes `MethodOnClass{"...Users","active"}` to `Link { target:
@@ -449,7 +448,7 @@ have completed anyway.
 A `Link` chase must also treat certain sub-chase frames as opaque rather
 than recordable rungs, or it launders a transformed answer into a false
 `Link`: any frame that substitutes a different receiver or arity
-(`CallReturn`, `QualifiedCallReturn`, a re-dispatched `Edge`), folds
+(an `Invoke`, a re-dispatched `Edge`), folds
 across sibling witnesses at one attachment, drills a value out of a
 sub-chase's answer (`Projected`), or exhausts the depth cap. The key the
 chase is currently baking is filtered from its own candidate list for
