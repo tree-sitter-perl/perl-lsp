@@ -101,8 +101,8 @@ pub trait WitnessReducer: Send + Sync {
 
 /// Folds class / rep / scalar observations into a type:
 ///
-/// 1. `ClassAssertion(Foo)` dominates.
-/// 2. `FirstParamInMethod { package }` under a matching framework's
+/// 1. `ClassName(Foo)` dominates.
+/// 2. `FirstParam { package }` under a matching framework's
 ///    backing rep is NOT dethroned by rep observations matching that rep
 ///    (the Mojo `sub name` bug fix).
 /// 3. `BlessTarget(Rep)` pins the rep axis.
@@ -112,7 +112,7 @@ pub trait WitnessReducer: Send + Sync {
 pub struct FrameworkAwareTypeFold;
 
 /// The class-identity axis of `FrameworkAwareTypeFold`: the standing
-/// `ClassName` / `ClassAssertion`, its source priority, and WHERE it was
+/// `ClassName`, its source priority, and WHERE it was
 /// made. Identity dominates rep, so this axis answers ahead of the plain
 /// axis — which is why it has to be retired explicitly: a plain-type write
 /// Retirement is the reset cutoff's job (`my $x = Foo->new; $x = 'str'`
@@ -323,8 +323,8 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                     // they land in): the C++ `T x = {…}` braced-init case,
                     // where the initializer's `Numeric` flow witness would
                     // otherwise clobber the declared container type. This is
-                    // the same annotation-dominates rule the `ClassName`/
-                    // `ClassAssertion` axis above already applies, extended to
+                    // the same annotation-dominates rule the `ClassName`
+                    // class axis above already applies, extended to
                     // every `InferredType` flavor (`Parametric`, `HashRef`,
                     // …). Within equal priority: latest wins UNLESS the
                     // standing answer subsumes the newcomer — structure
@@ -355,12 +355,6 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                 }
                 WitnessPayload::Observation(obs) => {
                     match obs {
-                        TypeObservation::ClassAssertion(name) => {
-                            class_assertion.assert(name, prio);
-                        }
-                        TypeObservation::FirstParamInMethod { package } => {
-                            first_param_class = Some(package.clone())
-                        }
                         TypeObservation::HashRefAccess => rep_obs = merge_rep(rep_obs, Rep::Hash),
                         TypeObservation::ArrayRefAccess => rep_obs = merge_rep(rep_obs, Rep::Array),
                         TypeObservation::CodeRefInvocation => rep_obs = merge_rep(rep_obs, Rep::Code),
@@ -369,12 +363,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                         TypeObservation::StringUse => str_ = true,
                         TypeObservation::RegexpUse => re = true,
                     }
-                    if !matches!(
-                        obs,
-                        TypeObservation::ClassAssertion(_) | TypeObservation::FirstParamInMethod { .. }
-                    ) {
-                        last_observation_at = last_observation_at.max(Some(w.span.start));
-                    }
+                    last_observation_at = last_observation_at.max(Some(w.span.start));
                 }
                 _ => {}
             }

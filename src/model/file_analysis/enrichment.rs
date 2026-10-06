@@ -919,37 +919,14 @@ impl FileAnalysis {
     /// witness construction. Builder has a parallel helper that does
     /// the same thing during the walk.
     pub(crate) fn push_type_constraint(&mut self, tc: TypeConstraint) {
-        use crate::model::witnesses::{
-            TypeObservation, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
-        };
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let TypeConstraint { variable, scope, constraint_span: span, inferred_type: ty } = tc;
         self.witnesses.push(Witness {
-            attachment: WitnessAttachment::Variable { name: variable.clone(), scope },
+            attachment: WitnessAttachment::Variable { name: variable, scope },
             source: WitnessSource::Builder("type_constraint".into()),
-            payload: WitnessPayload::InferredType(ty.clone()),
+            payload: WitnessPayload::InferredType(ty),
             span: Span { start: span.start, end: span.start },
         });
-        match ty {
-            InferredType::ClassName(n) => {
-                self.witnesses.push(Witness {
-                    attachment: WitnessAttachment::Variable { name: variable, scope },
-                    source: WitnessSource::Builder("type_constraint".into()),
-                    payload: WitnessPayload::Observation(TypeObservation::ClassAssertion(n)),
-                    span,
-                });
-            }
-            InferredType::FirstParam { package } => {
-                self.witnesses.push(Witness {
-                    attachment: WitnessAttachment::Variable { name: variable, scope },
-                    source: WitnessSource::Builder("type_constraint".into()),
-                    payload: WitnessPayload::Observation(TypeObservation::FirstParamInMethod {
-                        package,
-                    }),
-                    span,
-                });
-            }
-            _ => {}
-        }
     }
 
     /// Resolve one gated dispatch candidate against its receiver, AT QUERY

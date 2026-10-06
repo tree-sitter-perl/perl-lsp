@@ -751,39 +751,15 @@ impl<'a> Builder<'a> {
         tc: TypeConstraint,
         source: crate::model::witnesses::WitnessSource,
     ) {
-        use crate::model::witnesses::{
-            TypeObservation, Witness, WitnessAttachment, WitnessPayload,
-        };
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload};
         let TypeConstraint { variable, scope, constraint_span: span, inferred_type: ty } = tc;
         self.bag.push(Witness {
-            attachment: WitnessAttachment::Variable { name: variable.clone(), scope },
-            source: source.clone(),
-            payload: WitnessPayload::InferredType(ty.clone()),
+            attachment: WitnessAttachment::Variable { name: variable, scope },
+            source,
+            payload: WitnessPayload::InferredType(ty),
             span: Span { start: span.start, end: span.start },
         });
-        match ty {
-            InferredType::ClassName(n) => {
-                self.bag.push(Witness {
-                    attachment: WitnessAttachment::Variable { name: variable, scope },
-                    source,
-                    payload: WitnessPayload::Observation(TypeObservation::ClassAssertion(n)),
-                    span,
-                });
-            }
-            InferredType::FirstParam { package } => {
-                self.bag.push(Witness {
-                    attachment: WitnessAttachment::Variable { name: variable, scope },
-                    source,
-                    payload: WitnessPayload::Observation(TypeObservation::FirstParamInMethod {
-                        package,
-                    }),
-                    span,
-                });
-            }
-            _ => {}
-        }
     }
-
 
     /// The per-package table as the walk has it so far — the one fold of
     /// the builder's lanes, read by the window seed and the final assembly.

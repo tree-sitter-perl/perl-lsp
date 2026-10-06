@@ -216,12 +216,7 @@ impl WitnessPayload {
     pub fn binds_value(&self) -> bool {
         match self {
             WitnessPayload::InferredType(_) => true,
-            WitnessPayload::Observation(o) => matches!(
-                o,
-                TypeObservation::ClassAssertion(_)
-                    | TypeObservation::FirstParamInMethod { .. }
-                    | TypeObservation::BlessTarget(_)
-            ),
+            WitnessPayload::Observation(o) => matches!(o, TypeObservation::BlessTarget(_)),
             _ => false,
         }
     }
@@ -556,10 +551,6 @@ impl ArgGuard {
 /// not the payload, so Hash on the observation isn't needed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TypeObservation {
-    /// `my $x = Foo->new` or direct `InferredType::ClassName(_)` assertion.
-    ClassAssertion(String),
-    /// `my $self = shift` / `$_[0]` at the head of a method body.
-    FirstParamInMethod { package: String },
     /// `$v->{k}`, `%$v`, `@$v{...}` — hashref-like access.
     HashRefAccess,
     /// `$v->[i]`, `@$v`.

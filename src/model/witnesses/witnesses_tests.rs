@@ -32,7 +32,7 @@ fn witness_bag_stores_and_retrieves_by_attachment() {
     bag.push(wvar(
         "$self",
         0,
-        WitnessPayload::Observation(TypeObservation::FirstParamInMethod {
+        WitnessPayload::InferredType(InferredType::FirstParam {
             package: "Foo".into(),
         }),
     ));
@@ -68,7 +68,7 @@ fn mojo_sub_name_does_not_flip_type_to_hashref() {
     bag.push(wvar(
         "$self",
         0,
-        WitnessPayload::Observation(TypeObservation::FirstParamInMethod {
+        WitnessPayload::InferredType(InferredType::FirstParam {
             package: "Mojolicious::Routes::Route".into(),
         }),
     ));
@@ -134,7 +134,7 @@ fn bless_target_array_with_class_assertion_keeps_class() {
     bag.push(wvar(
         "$x",
         2,
-        WitnessPayload::Observation(TypeObservation::ClassAssertion("Arr::Foo".into())),
+        WitnessPayload::InferredType(InferredType::ClassName("Arr::Foo".into())),
     ));
     bag.push(wvar(
         "$x",
@@ -176,7 +176,7 @@ fn core_class_still_holds_class_against_hashref_access() {
     bag.push(wvar(
         "$self",
         0,
-        WitnessPayload::Observation(TypeObservation::FirstParamInMethod {
+        WitnessPayload::InferredType(InferredType::FirstParam {
             package: "MyApp::Thing".into(),
         }),
     ));
