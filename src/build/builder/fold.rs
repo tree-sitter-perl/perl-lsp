@@ -1007,32 +1007,10 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Re-emittable: for every `MethodCall` ref whose
-    /// `invocant_class` is filled (walk-time syntax-known invocants
-    /// like `Foo->m`, plus PostFold-resolved variable invocants),
-    /// publish `Expression(refidx) → Edge(PackageSymbol{package, method})`
-    /// so the chain typer's `bag_query_expression` chases the
-    /// receiver-and-method-resolved type through the class-keyed
-    /// attachment. Refs without a filled class skip emission —
-    /// without a known class there's no class-keyed slot to target.
+    /// Re-emittable: every `MethodCall` ref's value is published as
+    /// `Expression(refidx) → Invoke{..}` — the method on the receiver's
+    /// full type, at the call's own args.
     ///
-    /// Resolve a qualified method token to the class(es) the lookup starts
-    /// at. Qualifier semantics live on `MethodToken`; the SUPER arm is the
-    /// only one needing builder state (the enclosing package's parents —
-    /// possibly several). `Bare` has no qualifier → empty.
-    pub(super) fn qualified_dispatch_classes(
-        &self,
-        token: crate::model::conventions::MethodToken<'_>,
-        enclosing: &str,
-    ) -> Vec<String> {
-        match token {
-            crate::model::conventions::MethodToken::Super(_) => {
-                self.package_parents.get(enclosing).cloned().unwrap_or_default()
-            }
-            t => t.literal_package().map(|p| vec![p.to_string()]).unwrap_or_default(),
-        }
-    }
-
     /// Clear-and-emit on tag `method_call_return` so repeat calls
     /// inside the worklist driver stay idempotent.
     pub(super) fn emit_method_call_return_edges(&mut self) {

@@ -277,37 +277,6 @@ pub enum WitnessPayload {
     /// `InferredType` witness preserving source + span, then run reducers
     /// against the materialized list. A cycle guard breaks `A → B → A`.
     Edge(WitnessAttachment),
-    /// Edge fact for a **method call at a known arity**: "the value at my
-    /// attachment is `target`'s return type, dispatched at `arity` args."
-    /// Distinct from a plain `Edge` because the call site's arity is
-    /// intrinsic to the *call*, not to whatever outer query reached it —
-    /// a hint-less `$x` type query that chases here must still pick the
-    /// fluent-writer arm of `$obj->setter($v)` (arity ≥ 1), not the
-    /// getter arm a hint-less `UnionOnArgs` defaults to. Emitted by
-    /// `emit_method_call_return_edges` (`Expression(refidx)` → its
-    /// `PackageSymbol{package, method}` at the call's `count_call_args`);
-    /// chased like `Edge` but overrides `q.arity_hint` with `arity`.
-    CallReturn { target: WitnessAttachment, arity: u32 },
-    /// **Explicitly-qualified method dispatch** — the method token carried a
-    /// `::` so Perl dispatches from a *named* class, not the invocant's: look
-    /// the method up on `method_lookup` but type the result relative to
-    /// `receiver_class` (the invocant / enclosing class). Two spellings, one
-    /// rule (see `emit_method_call_return_edges`):
-    ///   - `$obj->SUPER::m` → `method_lookup` is `PackageSymbol{<enclosing
-    ///     package's parent>, m}` (SUPER searches the *writing* package's
-    ///     `@ISA`, skipping it);
-    ///   - `$obj->Foo::Bar::m` → `method_lookup` is `PackageSymbol{Foo::Bar,
-    ///     m}` (fully-qualified: search starts at the named class).
-    /// In both, the call still blesses into the CALLER's class, so a ctor
-    /// returning `ReturnExpr::ReceiverOr` must substitute the invocant — the
-    /// dynamic outer receiver wins when it is a subclass of `receiver_class`.
-    /// (A plain `CallReturn` can't express this: its receiver defaults to the
-    /// dispatch class, which here is the parent / named class — wrong.)
-    QualifiedCallReturn {
-        method_lookup: WitnessAttachment,
-        receiver_class: String,
-        arity: u32,
-    },
     /// **Symbol-declarative return type.** A receiver-relative /
     /// arity-relative expression that `ReturnExprReducer` substitutes at
     /// query time using `q.receiver` and `q.arity_hint`. Subsumes both

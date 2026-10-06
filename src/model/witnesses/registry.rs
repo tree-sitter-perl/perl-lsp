@@ -288,7 +288,7 @@ fn receiver_key(r: &Option<InferredType>) -> Option<String> {
 }
 
 /// Receiver to substitute when a chase reaches a *fresh* method dispatch
-/// on `PackageSymbol{package}` (an `Edge` or `CallReturn` into a class's
+/// on `PackageSymbol{package}` (an `Edge` into a class's
 /// method): the receiver is that call's invocant, i.e. `class`. A fluent
 /// `ReturnExpr(Receiver)` substitutes the dispatch class.
 ///
@@ -581,8 +581,7 @@ impl ReducerRegistry {
                 WitnessPayload::Observation(_) => "hop.OBSERVATION",
                 WitnessPayload::InferredType(_) => "hop.inferred_type",
                 WitnessPayload::Edge(_) => "hop.edge",
-                WitnessPayload::CallReturn { .. } => "hop.call_return",
-                WitnessPayload::QualifiedCallReturn { .. } => "hop.qualified_call",
+                WitnessPayload::Invoke { .. } => "hop.invoke",
                 WitnessPayload::ReturnExpr(_) => "hop.return_expr",
                 WitnessPayload::Fact { .. } => "hop.fact",
                 WitnessPayload::Derivation => "hop.derivation",
@@ -604,8 +603,7 @@ impl ReducerRegistry {
                     WitnessPayload::InferredType(_) => "expr_hop.inferred_type",
                     WitnessPayload::Observation(_) => "expr_hop.observation",
                     WitnessPayload::Edge(_) => "expr_hop.edge",
-                    WitnessPayload::CallReturn { .. } => "expr_hop.call_return",
-                    WitnessPayload::QualifiedCallReturn { .. } => "expr_hop.qualified_call",
+                    WitnessPayload::Invoke { .. } => "expr_hop.invoke",
                     WitnessPayload::ReturnExpr(_) => "expr_hop.return_expr",
                     WitnessPayload::Fact { .. } => "expr_hop.fact",
                     WitnessPayload::Derivation => "expr_hop.derivation",
@@ -2092,43 +2090,6 @@ impl ReducerRegistry {
                         None => {}
                     }
                 }
-                WitnessPayload::CallReturn { target, arity } => {
-                    // A fresh method dispatch at the call's own arity. The
-                    // receiver is the dispatch class (`target`'s class, for
-                    // a `PackageSymbol`) so a fluent `Receiver` substitutes
-                    // it; the arity is the call site's, NOT the outer
-                    // query's — that's the whole point of this variant.
-                    let receiver = match target {
-                        WitnessAttachment::PackageSymbol { package, .. } => {
-                            fresh_dispatch_receiver(&q.receiver, package, q.context)
-                        }
-                        _ => q.receiver.clone(),
-                    };
-                    let sub_q = ReducerQuery {
-                        attachment: target,
-                        point: q.point,
-                        framework: q.framework,
-                        arity_hint: Some(*arity),
-                        receiver,
-                        args: q.args.clone(),
-                        context: q.context,
-                    };
-                    // Opaque: the call site's arity and dispatch receiver both
-                    // replace the outer query's, so the exit key is asked a
-                    // different question than a `Link` follow would ask.
-                    let v = state.in_opaque_frame(|state| {
-                        (*self.query_rec(bag, &sub_q, state)).clone()
-                    });
-                    match v {
-                        ReducedValue::Type(t) => out.push(Witness {
-                            attachment: w.attachment.clone(),
-                            source: w.source.clone(),
-                            payload: WitnessPayload::InferredType(t),
-                            span: w.span,
-                        }),
-                        ReducedValue::FactMap(_) | ReducedValue::None => {}
-                    }
-                }
                 WitnessPayload::Projected { base, step } => {
                     // Materialize the base, then narrow through the step —
                     // the value-side mirror of the build-time
@@ -2366,37 +2327,6 @@ impl ReducerRegistry {
                             payload: WitnessPayload::InferredType(t),
                             span: w.span,
                         });
-                    }
-                }
-                WitnessPayload::QualifiedCallReturn { method_lookup, receiver_class, arity } => {
-                    // Look the method up on the named/parent class, but the
-                    // receiver is the INVOCANT (enclosing) class — prefer a
-                    // dynamic outer receiver only when it's a subclass of it
-                    // (same rule as a fresh dispatch onto `receiver_class`).
-                    let receiver =
-                        fresh_dispatch_receiver(&q.receiver, receiver_class, q.context);
-                    let sub_q = ReducerQuery {
-                        attachment: method_lookup,
-                        point: q.point,
-                        framework: q.framework,
-                        arity_hint: Some(*arity),
-                        receiver,
-                        args: q.args.clone(),
-                        context: q.context,
-                    };
-                    // Opaque for the same reason as `CallReturn`, plus the
-                    // lookup class and the receiver class deliberately differ.
-                    let v = state.in_opaque_frame(|state| {
-                        (*self.query_rec(bag, &sub_q, state)).clone()
-                    });
-                    match v {
-                        ReducedValue::Type(t) => out.push(Witness {
-                            attachment: w.attachment.clone(),
-                            source: w.source.clone(),
-                            payload: WitnessPayload::InferredType(t),
-                            span: w.span,
-                        }),
-                        ReducedValue::FactMap(_) | ReducedValue::None => {}
                     }
                 }
                 _ => out.push(w.clone()),

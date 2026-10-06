@@ -1299,7 +1299,7 @@ fn remap_spans(
     // bearing attachment (`Expr`/`BranchArm`), and the same shapes reached
     // through a payload edge target — so `expr_type_at_span` and the temporal
     // ordering all speak original coordinates, like refs.
-    use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+    use crate::model::witnesses::{CallArg, Callee, WitnessAttachment, WitnessPayload};
     let remap_att = |a: &mut WitnessAttachment| match a {
         WitnessAttachment::Expr(sp) | WitnessAttachment::BranchArm(sp) => *sp = rspan(*sp),
         _ => {}
@@ -1307,10 +1307,19 @@ fn remap_spans(
     for w in witnesses.iter_mut() {
         remap_att(&mut w.attachment);
         match &mut w.payload {
-            WitnessPayload::Edge(t)
-            | WitnessPayload::CallReturn { target: t, .. }
-            | WitnessPayload::QualifiedCallReturn { method_lookup: t, .. }
-            | WitnessPayload::Projected { base: t, .. } => remap_att(t),
+            WitnessPayload::Edge(t) | WitnessPayload::Projected { base: t, .. } => remap_att(t),
+            WitnessPayload::Invoke { callee, receiver, args } => {
+                if let Callee::Value(t) = callee {
+                    remap_att(t);
+                }
+                if let Some(t) = receiver {
+                    remap_att(t);
+                }
+                for arg in args.iter_mut().flatten() {
+                    let (CallArg::One(t) | CallArg::Spread(t)) = arg;
+                    remap_att(t);
+                }
+            }
             _ => {}
         }
         w.span = rspan(w.span);
