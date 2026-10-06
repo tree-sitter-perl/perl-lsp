@@ -1030,18 +1030,20 @@ impl FileAnalysis {
                 && mcb.span.start <= point
                 && contains_point(&self.scopes[mcb.scope.0 as usize].span, point)
             {
+                let call = &self.refs()[mcb.call.0 as usize];
+                let method_name = &call.target_name;
                 let package = self
-                    .resolve_invocant_class(&mcb.invocant_var, mcb.scope, mcb.invocant_span.start)
+                    .method_call_invocant_class(call, None)
                     .and_then(|cn| {
-                        match self.resolve_method_in_ancestors(&cn, &mcb.method_name, None) {
+                        match self.resolve_method_in_ancestors(&cn, method_name, None) {
                             Some(MethodResolution::Local { sym_id, .. }) => {
                                 self.symbol(sym_id).package.clone()
                             }
                             _ => None,
                         }
                     })
-                    .or_else(|| self.sub_defining_package(&mcb.method_name));
-                return Some(HashKeyOwner::Sub { package, name: mcb.method_name.clone() });
+                    .or_else(|| self.sub_defining_package(method_name));
+                return Some(HashKeyOwner::Sub { package, name: method_name.clone() });
             }
         }
 

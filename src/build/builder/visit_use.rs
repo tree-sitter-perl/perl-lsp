@@ -1470,37 +1470,19 @@ impl<'a> Builder<'a> {
                     span: Span { start: at, end: node.end_position() },
                 });
             }
-        } else if right.kind() == "method_call_expression" {
-            // RHS is a method call — record binding for return-type post-pass
-            if let Some(method_node) = right.child_by_field_name("method") {
-                if let Some(invocant_node) = right.child_by_field_name("invocant") {
-                    if let (Ok(method), Ok(inv)) = (
-                        method_node.utf8_text(self.source),
-                        invocant_node.utf8_text(self.source),
-                    ) {
-                        // Skip constructors — already handled by extract_constructor_class
-                        if !crate::model::conventions::is_constructor_name(method) {
-                            if let Some(vt) = self.get_var_text_from_lhs(left) {
-                                // Resolve dynamic method names via constant folding
-                                let method_names = if method.starts_with('$') {
-                                    self.resolve_constant_strings(method, 0)
-                                        .unwrap_or_else(|| vec![method.to_string()])
-                                } else {
-                                    vec![method.to_string()]
-                                };
-                                for mname in method_names {
-                                    self.method_call_bindings.push(MethodCallBinding {
-                                        variable: vt.clone(),
-                                        invocant_var: inv.to_string(),
-                                        method_name: mname,
-                                        scope: self.current_scope(),
-                                        span: Span { start: at, end: node.end_position() },
-                                        invocant_span: node_to_span(invocant_node),
-                                    });
-                                }
-                            }
-                        }
+        } else if let Some(calls) = self.method_call_refs.get(&right.id()).cloned() {
+            if let Some(vt) = self.get_var_text_from_lhs(left) {
+                for call in calls {
+                    // Constructors key their own hash shape.
+                    if crate::model::conventions::is_constructor_name(&self.refs[call].target_name) {
+                        continue;
                     }
+                    self.method_call_bindings.push(MethodCallBinding {
+                        variable: vt.clone(),
+                        call: crate::model::witnesses::RefIdx(call as u32),
+                        scope: self.current_scope(),
+                        span: Span { start: at, end: node.end_position() },
+                    });
                 }
             }
         }

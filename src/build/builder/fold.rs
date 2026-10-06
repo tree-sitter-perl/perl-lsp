@@ -1846,10 +1846,14 @@ impl<'a> Builder<'a> {
             .method_call_bindings
             .iter()
             .map(|mcb| {
-                let class = self
-                    .bag_query_variable(&mcb.invocant_var, mcb.scope, mcb.invocant_span.start)
-                    .and_then(|t| t.class_name().map(str::to_string));
-                (mcb.variable.as_str(), (mcb.method_name.clone(), class))
+                let call = &self.refs[mcb.call.0 as usize];
+                let class = match call.kind {
+                    RefKind::MethodCall { invocant_span: Some(sp), .. } => self
+                        .bag_query_expr_span(sp)
+                        .and_then(|t| t.class_name().map(str::to_string)),
+                    _ => None,
+                };
+                (mcb.variable.as_str(), (call.target_name.clone(), class))
             })
             .collect();
 

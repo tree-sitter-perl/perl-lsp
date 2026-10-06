@@ -259,7 +259,7 @@ fn test_demo_file_chain_to_resolves_on_line_71() {
         r_ty_legacy,
         mcb_for_r
             .iter()
-            .map(|b| format!("{}.{}", b.invocant_var, b.method_name))
+            .map(|b| analysis.refs()[b.call.0 as usize].target_name.clone())
             .collect::<Vec<_>>(),
         cb_for_r.iter().map(|b| &b.func_name).collect::<Vec<_>>(),
         app_known,
