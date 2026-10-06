@@ -31,6 +31,14 @@ fn class(t: Option<InferredType>) -> Option<String> {
 }
 
 #[test]
+fn a_fluent_call_returns_the_receivers_own_class() {
+    // `me` is declared on Base; the receiver is a Kid, so the call is a Kid.
+    for body in ["my $k = Kid->new; return $k->me;", "my $k = Kid->new; my $m = $k->me; return $m;"] {
+        assert_eq!(class(returns(body)).as_deref(), Some("Kid"), "{body}");
+    }
+}
+
+#[test]
 fn the_receiver_binds_through_the_argument_window() {
     // `return $_[0]` reads the receiver out of `@_` at the call.
     assert_eq!(class(returns("my $k = Kid->new; return $k->first;")).as_deref(), Some("Kid"));
@@ -44,8 +52,25 @@ fn super_looks_up_on_the_writers_parents_with_the_callers_receiver() {
 
 #[test]
 fn a_coderef_call_takes_its_first_arg_as_the_receiver() {
-    let body = "my $cb = \\&Base::first; my $k = Kid->new; return $cb->($k);";
+    let body = "my $cb = \\&Base::me; my $k = Kid->new; return $cb->($k);";
     assert_eq!(class(returns(body)).as_deref(), Some("Kid"));
+}
+
+#[test]
+fn a_call_dispatches_on_its_own_arity() {
+    // One arg picks the writer arm, which returns the receiver.
+    assert_eq!(class(returns("my $k = Kid->new; return $k->name('x');")).as_deref(), Some("Kid"));
+    // The getter arm returns the stored field, not the receiver.
+    assert_eq!(class(returns("my $k = Kid->new; return $k->name;")), None);
+}
+
+#[test]
+fn a_spread_argument_leaves_the_arity_unknown() {
+    // `@v` may be empty or not: the call is neither the zero-arg getter nor a
+    // pinned arity, so it reads the union's catch-all (the fluent writer).
+    let spread = returns("my $k = Kid->new; my @v; return $k->name(@v);");
+    assert_eq!(class(spread).as_deref(), Some("Kid"));
+    assert_eq!(class(returns("my $k = Kid->new; return $k->name;")), None);
 }
 
 #[test]

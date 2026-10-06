@@ -299,7 +299,7 @@ fn receiver_key(r: &Option<InferredType>) -> Option<String> {
 /// `Operator(RowOf(Receiver))` (DBIC `find`) needs to project the row
 /// class. Same class, strictly more information; the value answers the
 /// projection (rule #10), the chase never inspects the shape.
-fn fresh_dispatch_receiver(
+pub(super) fn fresh_dispatch_receiver(
     incoming: &Option<InferredType>,
     class: &str,
     ctx: Option<&BagContext>,
@@ -2322,6 +2322,23 @@ impl ReducerRegistry {
                             span: w.span,
                         });
                     }
+                }
+                WitnessPayload::ReturnExpr(re) if re.reads_attachments() => {
+                    // Opaque: each leaf is read under this query's receiver and
+                    // args, and the answer is the expression around it.
+                    let resolved = re.map_of(&mut |att| {
+                        let sub_q = ReducerQuery { attachment: att, ..q.clone() };
+                        state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
+                            ReducedValue::Type(t) => Some(t.clone()),
+                            ReducedValue::FactMap(_) | ReducedValue::None => None,
+                        })
+                    });
+                    out.push(Witness {
+                        attachment: w.attachment.clone(),
+                        source: w.source.clone(),
+                        payload: WitnessPayload::ReturnExpr(resolved),
+                        span: w.span,
+                    });
                 }
                 WitnessPayload::Invoke { callee, receiver, args } => {
                     if let Some(t) = self.invoke(bag, q, state, callee, receiver.as_ref(), args.as_deref()) {

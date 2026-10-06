@@ -384,26 +384,19 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         if let Some(b) = branded {
             return ReducedValue::Type(b);
         }
-        // Class axis wins when consistent with the rep axis. On
-        // contradiction or unknown rep, still return the class — the
-        // user's intent is object-typed use; a rep mismatch is a
-        // separate diagnostic.
-        if let Some(name) = class_assertion.name.clone().or(first_param_class.clone()) {
-            let backing = bless_rep.or_else(|| q.framework.backing_rep());
-            match (rep_obs, backing) {
-                (None, _) => return ReducedValue::Type(InferredType::ClassName(name)),
-                (Some(obs), Some(b)) if obs == b => {
-                    return ReducedValue::Type(InferredType::ClassName(name));
-                }
-                (Some(obs), None) => {
-                    let _ = obs;
-                    return ReducedValue::Type(InferredType::ClassName(name));
-                }
-                (Some(obs), Some(b)) => {
-                    let _ = (obs, b);
-                    return ReducedValue::Type(InferredType::ClassName(name));
-                }
-            }
+        // The class axis wins over rep, consistent or not: the user's intent
+        // is object-typed use, and a rep mismatch is a separate diagnostic.
+        if let Some(name) = class_assertion.name {
+            return ReducedValue::Type(InferredType::ClassName(name));
+        }
+        // A method's invocant IS the call's receiver: with one in hand (a
+        // chase through `$o->m`) it answers that receiver, so `return $self`
+        // on a subclass instance types the subclass.
+        if let Some(package) = first_param_class {
+            return ReducedValue::Type(
+                super::registry::fresh_dispatch_receiver(&q.receiver, &package, q.context)
+                    .unwrap_or(InferredType::ClassName(package)),
+            );
         }
 
         // Explicit assignments dominate rep observations — `my $x = []`
@@ -1125,6 +1118,8 @@ pub(super) fn eval_return_expr(re: &ReturnExpr, q: &ReducerQuery) -> Option<Infe
         ReturnExpr::Concrete(t) => Some(t.clone()),
         ReturnExpr::Receiver => q.receiver.clone(),
         ReturnExpr::Arg(i) => q.args.get(*i as usize).cloned(),
+        // The registry resolves `Of` before reducing; one left here had no answer.
+        ReturnExpr::Of(_) => None,
         ReturnExpr::ReceiverOr(fallback) => {
             Some(q.receiver.clone().unwrap_or_else(|| fallback.clone()))
         }

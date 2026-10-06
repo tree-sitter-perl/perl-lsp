@@ -269,6 +269,7 @@ impl ReturnExpr {
             ReturnExpr::UnionOnArgs { branches } => {
                 branches.iter_mut().for_each(|(_, r)| r.for_each_attachment_mut(f))
             }
+            ReturnExpr::Of(a) => f(a),
             ReturnExpr::Receiver | ReturnExpr::Arg(_) => {}
         }
     }
@@ -537,6 +538,38 @@ pub enum ReturnExpr {
     /// Kept at the END for bincode variant-index stability (bump
     /// `EXTRACT_VERSION`).
     Arg(u32),
+    /// Whatever `att` answers under the same query — an arity arm's body
+    /// read with the call's own receiver and args, not a value the build
+    /// computed without them. The registry resolves it before a reducer
+    /// sees the expression.
+    Of(WitnessAttachment),
+}
+
+impl ReturnExpr {
+    /// Rewrite every `Of` leaf through `f`; `None` from `f` leaves the leaf
+    /// unresolved (the reducer then reads it as no answer).
+    pub fn map_of(&self, f: &mut impl FnMut(&WitnessAttachment) -> Option<InferredType>) -> ReturnExpr {
+        match self {
+            ReturnExpr::Of(att) => match f(att) {
+                Some(t) => ReturnExpr::Concrete(t),
+                None => self.clone(),
+            },
+            ReturnExpr::UnionOnArgs { branches } => ReturnExpr::UnionOnArgs {
+                branches: branches.iter().map(|(g, e)| (g.clone(), e.map_of(f))).collect(),
+            },
+            other => other.clone(),
+        }
+    }
+
+    /// True when the expression reads another attachment the registry must
+    /// resolve first.
+    pub fn reads_attachments(&self) -> bool {
+        match self {
+            ReturnExpr::Of(_) => true,
+            ReturnExpr::UnionOnArgs { branches } => branches.iter().any(|(_, e)| e.reads_attachments()),
+            _ => false,
+        }
+    }
 }
 
 /// Type-level operators with `ReturnExpr`-valued sub-positions —

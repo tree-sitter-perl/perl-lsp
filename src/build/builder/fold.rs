@@ -1258,17 +1258,20 @@ impl<'a> Builder<'a> {
                 .filter_map(|(_, body_span)| self.bag_query_expr_span(*body_span))
                 .collect();
             let mut sorted: Vec<(ArgGuard, ReturnExpr)> = Vec::new();
+            // Guarded arms hold their arity even when their body doesn't type
+            // yet: the read is lazy (the call's receiver, the index), and an
+            // arm that never answers must leave its arity honestly empty
+            // rather than ceding it to the fluent fall-through.
             // Pass 1a: exact-match guards (Empty / Exact) — most specific,
             // must precede the magnitude bands so a point arity claims its own
             // arm first (`unless @_` before `unless @_ > 1` at arity 0).
             for (branch, body_span) in arms {
-                let Some(t) = self.bag_query_expr_span(*body_span) else { continue };
                 match branch {
                     ArityBranch::Zero => {
-                        sorted.push((ArgGuard::Empty, ReturnExpr::Concrete(t)));
+                        sorted.push((ArgGuard::Empty, ReturnExpr::Of(WitnessAttachment::Expr(*body_span))));
                     }
                     ArityBranch::Exact(n) => {
-                        sorted.push((ArgGuard::Exact(*n), ReturnExpr::Concrete(t)));
+                        sorted.push((ArgGuard::Exact(*n), ReturnExpr::Of(WitnessAttachment::Expr(*body_span))));
                     }
                     _ => {}
                 }
@@ -1276,13 +1279,12 @@ impl<'a> Builder<'a> {
             // Pass 1b: magnitude bands (AtMost / AtLeast) — narrower than the
             // fluent Any arm, broader than an exact point.
             for (branch, body_span) in arms {
-                let Some(t) = self.bag_query_expr_span(*body_span) else { continue };
                 match branch {
                     ArityBranch::AtMost(n) => {
-                        sorted.push((ArgGuard::AtMost(*n), ReturnExpr::Concrete(t)));
+                        sorted.push((ArgGuard::AtMost(*n), ReturnExpr::Of(WitnessAttachment::Expr(*body_span))));
                     }
                     ArityBranch::AtLeast(n) => {
-                        sorted.push((ArgGuard::AtLeast(*n), ReturnExpr::Concrete(t)));
+                        sorted.push((ArgGuard::AtLeast(*n), ReturnExpr::Of(WitnessAttachment::Expr(*body_span))));
                     }
                     _ => {}
                 }
@@ -1308,20 +1310,18 @@ impl<'a> Builder<'a> {
                     _ => None,
                 })
                 .max();
-            let mut default_t: Option<InferredType> = None;
+            let mut default_arm: Option<Span> = None;
             for (branch, body_span) in arms {
-                if matches!(branch, ArityBranch::Default) {
-                    if let Some(t) = self.bag_query_expr_span(*body_span) {
-                        default_t = Some(t);
-                    }
+                if matches!(branch, ArityBranch::Default) && self.bag_query_expr_span(*body_span).is_some() {
+                    default_arm = Some(*body_span);
                 }
             }
-            if let Some(t) = default_t {
+            if let Some(body_span) = default_arm {
                 let guard = match atmost_ceiling {
                     Some(n) => ArgGuard::AtLeast(n.saturating_add(1)),
                     None => ArgGuard::Any,
                 };
-                sorted.push((guard, ReturnExpr::Concrete(t)));
+                sorted.push((guard, ReturnExpr::Of(WitnessAttachment::Expr(body_span))));
             }
             if sorted.is_empty() {
                 continue;
@@ -1335,7 +1335,9 @@ impl<'a> Builder<'a> {
             // correct answer at any arity AND at the no-hint query hover uses,
             // so the fallback must stay. "Agree" excludes the lossy
             // Object-subsumes-HashRef dominance — that's a merge, not agreement.
-            if arms_genuinely_agree(&known_arm_types).is_none() {
+            // An arm that doesn't type yet can't be shown to agree, so it
+            // keeps the union authoritative too.
+            if known_arm_types.len() < arms.len() || arms_genuinely_agree(&known_arm_types).is_none() {
                 authoritative_syms.push(sym_id);
             }
             let return_expr = ReturnExpr::UnionOnArgs { branches: sorted };
