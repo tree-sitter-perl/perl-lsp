@@ -778,6 +778,7 @@ impl<'a> Builder<'a> {
             self.emit_refs_for_strings(node, &parent_set, RefKind::PackageRef, None);
         }
         self.package_parents.entry(pkg).or_default().extend(parents);
+        crate::model::witnesses::FoldMemoScope::invalidate();
     }
 
     /// The `use Mojo::Base ...` args as strings: `-base`/`-strict` flags

@@ -1151,6 +1151,7 @@ impl<'a> Builder<'a> {
                     if !parents.is_empty() {
                         // @ISA = replaces (not appends)
                         self.package_parents.insert(pkg.clone(), parents);
+                        crate::model::witnesses::FoldMemoScope::invalidate();
                     }
                 }
             }

@@ -504,6 +504,7 @@ impl<'a> Builder<'a> {
             }
             plugin::EmitAction::PackageParent { package, parent } => {
                 self.package_parents.entry(package).or_default().push(parent);
+                crate::model::witnesses::FoldMemoScope::invalidate();
             }
             plugin::EmitAction::FrameworkImport { keyword } => {
                 self.framework_imports.insert(keyword);

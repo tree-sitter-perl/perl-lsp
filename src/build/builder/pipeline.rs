@@ -260,6 +260,14 @@ pub(super) fn build_with_plugins_inner(
             })
         });
     }
+    #[cfg(test)]
+    if crate::model::witnesses::fold_memo_equiv_enabled() {
+        super::walk::assert_analyses_agree("fold-memo", &fa, || {
+            crate::model::witnesses::without_fold_memo(|| {
+                build_once(tree, source, plugins.clone(), extra_re_fold)
+            })
+        });
+    }
     fa
 }
 
@@ -547,6 +555,9 @@ fn build_once(
     // (branch arms, arity gating) are already in `b.bag` — pushed
     // live during the walk.
     bphase!("populate_witness_bag", b.populate_witness_bag());
+    // From here the scopes and frameworks are settled, so the fold's queries
+    // can share answers until the build returns.
+    let _fold_memo = crate::model::witnesses::FoldMemoScope::enter();
 
     // Forward-reference resolution: walk-time `expr_payload` arms for
     // `function_call_expression` / `bareword` / `scoped_identifier` did

@@ -109,6 +109,137 @@ thread_local! {
         const { std::cell::RefCell::new((false, Vec::new())) };
 }
 
+/// `(value, recorded_exit, cut)` — see `QueryState::memo`.
+type MemoEntry = (std::sync::Arc<ReducedValue>, bool, bool);
+
+/// What a fold-memo answer depends on beyond the per-query key: the bag's
+/// content, the framework and arguments the per-query memo holds fixed for
+/// one query, and which scope table the context reads.
+type FoldMemoKey = (VisitedKey, u64, FrameworkFact, Option<String>, usize);
+
+thread_local! {
+    /// The build's memo, shared by every top-level query while a
+    /// `FoldMemoScope` is open. `None` outside a build.
+    static FOLD_MEMO: std::cell::RefCell<Option<std::collections::HashMap<FoldMemoKey, (std::sync::Arc<ReducedValue>, bool)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Shares resolved sub-answers across the top-level queries of one build.
+///
+/// The fold asks the same questions many times: every pass, every iteration,
+/// and every call in a chain re-types the chain's prefix. Within a build the
+/// answers can only change when the bag does, and build-time queries run with
+/// no module index, so nothing outside the file can move them. Entries are
+/// keyed on the bag's generation, so any mutation retires them, and only
+/// subtrees that were never cut short are stored.
+///
+/// `invalidate` covers the one input that changes without a bag mutation:
+/// the builder's package parents, which plugin emission can extend mid-build.
+pub(crate) struct FoldMemoScope {
+    outer: Option<std::collections::HashMap<FoldMemoKey, (std::sync::Arc<ReducedValue>, bool)>>,
+}
+
+impl FoldMemoScope {
+    /// `PERL_LSP_NO_FOLD_MEMO=1` leaves the scope closed: the A/B control,
+    /// and the check that the memo changes no answer.
+    pub(crate) fn enter() -> Self {
+        static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let disabled = *DISABLED.get_or_init(|| std::env::var_os("PERL_LSP_NO_FOLD_MEMO").is_some());
+        #[cfg(test)]
+        let disabled = disabled || FOLD_MEMO_FORCED_OFF.with(|c| c.get());
+        let fresh = (!disabled).then(std::collections::HashMap::new);
+        let outer = FOLD_MEMO.with(|m| std::mem::replace(&mut *m.borrow_mut(), fresh));
+        FoldMemoScope { outer }
+    }
+
+    pub(crate) fn invalidate() {
+        FOLD_MEMO.with(|m| {
+            if let Some(map) = m.borrow_mut().as_mut() {
+                map.clear();
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static FOLD_MEMO_FORCED_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with the fold memo off — the control arm of the equivalence net.
+#[cfg(test)]
+pub(crate) fn without_fold_memo<R>(f: impl FnOnce() -> R) -> R {
+    let prev = FOLD_MEMO_FORCED_OFF.with(|c| c.replace(true));
+    let out = f();
+    FOLD_MEMO_FORCED_OFF.with(|c| c.set(prev));
+    out
+}
+
+/// `PERL_LSP_FOLD_MEMO_EQUIV=1 cargo test` rebuilds every file the suite
+/// touches with the memo off and asserts the analyses agree.
+#[cfg(test)]
+pub(crate) fn fold_memo_equiv_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PERL_LSP_FOLD_MEMO_EQUIV").as_deref() == Ok("1"))
+}
+
+impl Drop for FoldMemoScope {
+    fn drop(&mut self) {
+        let outer = self.outer.take();
+        FOLD_MEMO.with(|m| *m.borrow_mut() = outer);
+    }
+}
+
+/// Answer `q` from the fold memo, or hand back the key to store under once
+/// it is computed (`None` when no scope is open, or when the answer may depend
+/// on more than this file: a query that can reach the module index is never
+/// shared).
+///
+/// Out of line and boxed for the same reason as `note_moc_exit`: `query_rec`
+/// is live hundreds of frames deep, and the key's temporaries would grow every
+/// one of them.
+#[inline(never)]
+fn fold_memo_probe(
+    bag: &WitnessBag,
+    q: &ReducerQuery,
+    key: &VisitedKey,
+    state: &mut QueryState,
+) -> Result<std::sync::Arc<ReducedValue>, Option<Box<FoldMemoKey>>> {
+    if !FOLD_MEMO.with(|m| m.borrow().is_some()) {
+        return Err(None);
+    }
+    let scopes = match q.context {
+        Some(ctx) if ctx.module_index.is_some() => return Err(None),
+        Some(ctx) => ctx.scopes.as_ptr() as usize,
+        None => 0,
+    };
+    let args = (!q.args.is_empty()).then(|| format!("{:?}", q.args));
+    let fk = Box::new((key.clone(), bag.generation(), q.framework, args, scopes));
+    let Some((cached, recorded_exit)) =
+        FOLD_MEMO.with(|m| m.borrow().as_ref().and_then(|map| map.get(&*fk).cloned()))
+    else {
+        return Err(Some(fk));
+    };
+    crate::util::ghost_stats::count("fold_memo.hit");
+    // The same laundering guard as the per-query memo.
+    if recorded_exit && state.opaque_frames > 0 {
+        crate::util::ghost_stats::count("residual.memo_under_opaque");
+        state.poisoned = true;
+    }
+    state.memo.insert(key.clone(), (std::sync::Arc::clone(&cached), recorded_exit, false));
+    Ok(cached)
+}
+
+#[inline(never)]
+fn fold_memo_store(fk: Box<FoldMemoKey>, result: &std::sync::Arc<ReducedValue>, recorded_exit: bool) {
+    crate::util::ghost_stats::count("fold_memo.store");
+    FOLD_MEMO.with(|m| {
+        if let Some(map) = m.borrow_mut().as_mut() {
+            map.insert(*fk, (std::sync::Arc::clone(result), recorded_exit));
+        }
+    });
+}
+
 pub(super) struct QueryState {
     visited: VisitedSet,
     /// Enriched copies consulted during this query — pinned so memo
@@ -124,7 +255,14 @@ pub(super) struct QueryState {
     /// A memo hit skips the subtree, and with it the `note_exit` calls that
     /// would have poisoned a re-entry from inside a combining frame — so the
     /// fact has to be carried on the entry instead of re-derived.
-    memo: std::collections::HashMap<VisitedKey, (std::sync::Arc<ReducedValue>, bool)>,
+    ///
+    /// The second flag is "this subtree was cut short": a cycle guard returned
+    /// for an on-path key, or the depth cap fired, somewhere beneath it. Such a
+    /// value depends on the path it was reached from, so it may be reused
+    /// inside this query (the memo always has) but never by another one.
+    memo: std::collections::HashMap<VisitedKey, MemoEntry>,
+    /// Cuts seen so far in this query; read as a difference across a subtree.
+    cuts: u64,
     /// Where a BAKE's chase would have consulted the index, in the order the
     /// ladder reached them.
     ///
@@ -162,6 +300,7 @@ impl QueryState {
             visited: std::collections::HashSet::new(),
             pins: Vec::new(),
             memo: std::collections::HashMap::new(),
+            cuts: 0,
             residual: Vec::new(),
             poisoned: false,
             opaque_frames: 0,
@@ -655,8 +794,11 @@ impl ReducerRegistry {
         let key = visited_key(bag, q);
         // Memo hit: this key was fully resolved earlier in THIS query and
         // isn't on the current path (cycle guard handles on-path keys).
-        if let Some((cached, recorded_exit)) = state.memo.get(&key) {
+        if let Some((cached, recorded_exit, cut)) = state.memo.get(&key) {
             let cached = std::sync::Arc::clone(cached);
+            if *cut {
+                state.cuts += 1;
+            }
             // Re-reaching an exiting subtree from inside a combining frame is
             // the same claim as reaching it there the first time; the memo must
             // not launder it into a rung just because the first reach happened
@@ -668,23 +810,38 @@ impl ReducerRegistry {
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
             return cached;
         }
+        let fold_key = match fold_memo_probe(bag, q, &key, state) {
+            Ok(cached) => {
+                QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
+                return cached;
+            }
+            Err(fold_key) => fold_key,
+        };
         // `key` has two owners (the visited set, transiently; the memo,
         // for the rest of the query). Clone once for visited, then move
         // the original into the memo store below.
         if !state.visited.insert(key.clone()) {
+            state.cuts += 1;
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
             return std::sync::Arc::new(ReducedValue::None);
         }
         let exits_before = state.residual.len();
         let poison_before = state.poisoned;
+        let cuts_before = state.cuts;
+        let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
         let result = std::sync::Arc::new(self.query_rec_body(bag, q, state));
         let recorded_exit =
             state.residual.len() > exits_before || (state.poisoned && !poison_before);
+        let cut = state.cuts > cuts_before
+            || QUERY_REC_TRUNCATIONS.with(|c| c.get()) > truncations_before;
         state.visited.remove(&key);
+        if let (Some(fk), false) = (fold_key, cut) {
+            fold_memo_store(fk, &result, recorded_exit);
+        }
         // Cache the off-path resolution. The query depends only on
         // `(bag, attachment, receiver-class, arity)` (all in `key`) plus
         // the static context, which is fixed for one top-level query.
-        state.memo.insert(key, (std::sync::Arc::clone(&result), recorded_exit));
+        state.memo.insert(key, (std::sync::Arc::clone(&result), recorded_exit, cut));
         QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
         result
     }
