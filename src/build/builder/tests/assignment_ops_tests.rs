@@ -77,24 +77,24 @@ fn a_fallback_assignment_is_its_short_circuit_spelling() {
         let compound = format!("my $s = Bar->new; $s {op}= Baz->new; return $s");
         let spelled = format!("my $s = Bar->new; $s = $s {op} Baz->new; return $s");
         assert_eq!(returns(&compound), returns(&spelled), "{compound}");
-        // An object is never false, so the fallback is unreachable.
-        assert_eq!(class(returns(&compound)).as_deref(), Some("Bar"), "{compound}");
-        // The old value is read before the write, so an untypeable fallback
-        // keeps it.
+        // Writing the fallback says the author expects it to run, so the
+        // arms join; with no union yet, disagreeing arms answer the floor.
+        assert_eq!(class(returns(&compound)).as_deref(), Some("Baz"), "{compound}");
+        // An untypeable fallback leaves the join unknown.
         let untyped = format!("my $s = Bar->new; $s {op}= nothing(); return $s");
-        assert_eq!(class(returns(&untyped)).as_deref(), Some("Bar"), "{untyped}");
+        assert_eq!(class(returns(&untyped)), None, "{untyped}");
     }
 }
 
-// Pins today's wrong answer: `FalseObj` is false, so the real value is a
-// `Foo`. Flips when `is_always_true` learns about overloaded `bool`.
+// `FalseObj` is false, so the real value is a `Foo`: the fallback is taken
+// at its word rather than ruled out by the object's truthiness.
 #[test]
-fn an_overloaded_bool_is_still_taken_as_true() {
+fn an_overloaded_bool_reaches_the_fallback() {
     let src = "package FalseObj; use overload 'bool' => sub { 0 }; sub new { bless {}, shift }\n\
 package Foo; sub new { bless {}, shift }\n\
 sub probe { my $f = FalseObj->new; return $f || Foo->new }\n1;\n";
     let got = build_fa(src).sub_return_type_at_arity("probe", None);
-    assert_eq!(class(got).as_deref(), Some("FalseObj"));
+    assert_eq!(class(got).as_deref(), Some("Foo"));
 }
 
 #[test]
@@ -121,7 +121,6 @@ fn a_plain_write_reads_the_value_it_replaces() {
     let mut bad = Vec::new();
     for body in [
         "my $s = Bar->new; $s = $s; return $s",
-        "my $s = Bar->new; $s = $s || nothing(); return $s",
         "my $s = Bar->new; $s = $s->me; return $s",
         "my $s = Bar->new; $s = me($s); return $s",
         "my $s = Bar->new; $s = $s ? $s : Bar->new; return $s",
@@ -152,9 +151,9 @@ sub g6 { my $x = maybe(1); return unless defined $x; $x ||= Baz->new; return $x 
     let fa = build_fa(src);
     let ret = |s: &str| fa.sub_return_type_at_arity(s, None);
     let bar = || InferredType::ClassName("Bar".into());
-    // The implicit read sees the guard's narrowing; a narrowed object is
-    // never false, so the fallback never runs.
-    assert_eq!(ret("g1"), Some(bar()));
+    // The implicit read sees the guard's narrowing, and the arms join to
+    // the floor.
+    assert_eq!(ret("g1"), Some(InferredType::ClassName("Baz".into())));
     // The RHS reads the narrowed value; the write then ends the region.
     assert_eq!(ret("g2"), Some(InferredType::ClassName("Baz".into())));
     assert_eq!(ret("g3"), Some(InferredType::String));
@@ -162,9 +161,10 @@ sub g6 { my $x = maybe(1); return unless defined $x; $x ||= Baz->new; return $x 
     assert_eq!(ret("g4"), Some(bar()));
     // An optional LHS falls back to the RHS floor.
     assert_eq!(ret("g5"), Some(bar()));
-    // `defined` strips the Optional up to the write, so `$x` stays Bar;
-    // the sub is Optional only because of its bare `return`.
-    assert_eq!(ret("g6"), Some(InferredType::Optional(Box::new(bar()))));
+    // `defined` strips the Optional up to the write, then the `||=` arms
+    // join to the floor; the sub is Optional only because of its bare
+    // `return`.
+    assert_eq!(ret("g6"), Some(InferredType::Optional(Box::new(InferredType::ClassName("Baz".into())))));
 }
 
 
@@ -176,7 +176,7 @@ fn element_writes_extend_an_empty_hash() {
         ("my %h = (); $h{k} = Bar->new; return $h{k};", Some("Bar")),
         ("my $h = {}; $h->{k} ||= Bar->new; return $h->{k};", Some("Bar")),
         ("my $h = {}; $h->{k} //= Bar->new; return $h->{k};", Some("Bar")),
-        ("my $h = {}; $h->{k} = Bar->new; $h->{k} ||= Baz->new; return $h->{k};", Some("Bar")),
+        ("my $h = {}; $h->{k} = Bar->new; $h->{k} ||= Baz->new; return $h->{k};", Some("Baz")),
         // A write the walk can't pin to one key leaves the key untyped.
         ("my $h = {}; $h->{$_} = Bar->new for 1; return $h->{k};", None),
     ] {
@@ -241,3 +241,4 @@ fn every_declarator_folds_its_constant() {
         assert!(got.iter().any(|t| t == "process"), "{decl}: {got:?}");
     }
 }
+

@@ -515,10 +515,6 @@ impl WitnessReducer for BranchArmFold {
             }
         }
         if let Some(exits) = short_circuit {
-            // An LHS that can't be false never reaches the fallback.
-            if let Some(t) = typed.iter().find(|t| t.is_always_true()) {
-                return ReducedValue::Type(t.clone());
-            }
             // `X || return`: when the fallback runs nothing is assigned, so
             // the value is `X` minus its false part — an `Optional` peels,
             // and a plain `undef` never gets past the exit.
@@ -529,15 +525,17 @@ impl WitnessReducer for BranchArmFold {
                     _ => ReducedValue::None,
                 };
             }
-            // The RHS floor is returned whenever the LHS is falsy/undef, so
-            // the expression's type is at least the fallback's. Prefer
-            // agreement across all known arms; else the known floor; else
-            // the known LHS. This is what lets `$ENV{X} || 10` type to
-            // `Numeric` even when the LHS hash access can't be resolved — an
-            // honest, reachable type beats the entry vanishing.
+            // Writing a fallback says the author expects it to run, so the
+            // operator is a hint and both arms count, whatever the LHS's
+            // truthiness: two typed arms that agree answer, else the RHS
+            // floor. That floor is what lets `$ENV{X} || 10` type to
+            // `Numeric` when the LHS can't be resolved.
+            // TODO(dead-fallback-lint): an LHS that can't be false (a
+            // reference, an object without `bool` overloading) makes the
+            // fallback dead; that belongs in a diagnostic, not in the type.
             let all: Vec<&InferredType> = typed.iter().chain(fallback.iter()).collect();
             if let Some((first, rest)) = all.split_first() {
-                if rest.iter().all(|t| *t == *first) {
+                if !typed.is_empty() && !rest.is_empty() && rest.iter().all(|t| *t == *first) {
                     return ReducedValue::Type((*first).clone());
                 }
             }
@@ -549,9 +547,6 @@ impl WitnessReducer for BranchArmFold {
             // through it once it lands.
             if let Some(fb) = fallback.into_iter().next() {
                 return ReducedValue::Type(fb);
-            }
-            if let Some(l) = typed.into_iter().next() {
-                return ReducedValue::Type(l);
             }
             return ReducedValue::None;
         }
