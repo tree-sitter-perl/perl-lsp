@@ -148,6 +148,34 @@ impl<'a> Builder<'a> {
         crate::model::file_analysis::class_isa(child, ancestor, &self.package_parents, None)
     }
 
+    /// Record a plugin's marks on the method call spanning `at`, beside the
+    /// call's `Invoke` on its `Expression`: every reader of the call's value
+    /// (a chained call's receiver, an assignment's edge, the chain typer)
+    /// goes through that attachment.
+    pub(super) fn push_brand_overlay(
+        &mut self,
+        plugin_id: String,
+        at: Span,
+        on_class: String,
+        set: Vec<(String, String)>,
+        drop: Vec<String>,
+    ) {
+        use crate::model::witnesses::{RefIdx, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let Some(idx) = self
+            .refs
+            .iter()
+            .position(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.span == at)
+        else {
+            return;
+        };
+        self.bag.push(Witness {
+            attachment: WitnessAttachment::Expression(RefIdx(idx as u32)),
+            source: WitnessSource::Plugin(plugin_id.clone()),
+            payload: WitnessPayload::BrandOverlay { ns: plugin_id, on_class, set, drop },
+            span: at,
+        });
+    }
+
     /// Convert a plugin-produced `EmitAction` into real builder state. All
     /// emitted symbols carry a `Namespace::Framework { id }` tag so downstream
     /// queries can distinguish plugin-synthesized entities from native ones.
@@ -160,6 +188,9 @@ impl<'a> Builder<'a> {
             // walk-phase SetRouteBase has no live stack to write and is
             // ignored.
             plugin::EmitAction::SetRouteBase { .. } => {}
+            plugin::EmitAction::Brand { at, on_class, set, drop } => {
+                self.push_brand_overlay(plugin_id, at, on_class, set, drop);
+            }
             plugin::EmitAction::Diagnostic {
                 message,
                 span,

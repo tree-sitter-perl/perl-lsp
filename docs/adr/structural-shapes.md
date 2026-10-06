@@ -93,7 +93,7 @@ in the slice-write arm.
 
 ### Mutation is modeled on the shape, not gated away
 
-The route-branding lesson (`route-branding.md`): an effect on a value
+The route-branding lesson (`brands.md`): an effect on a value
 belongs on the value's TYPE, not in consumer-side suppression lists.
 `$v->{k} = …` is therefore not a trust break — the walk records a
 `KeyWrite` (var, key-or-dynamic, scope, span, RHS span, syntactic

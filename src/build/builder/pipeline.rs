@@ -14,7 +14,6 @@ pub(super) fn build_chain_typing_index<'a>(tree: &'a Tree) -> ChainTypingIndex<'
         return_nodes: std::collections::HashMap::new(),
         invocant_nodes: std::collections::HashMap::new(),
         method_call_args: std::collections::HashMap::new(),
-        method_call_nodes: Vec::new(),
         chained_hash_elements: Vec::new(),
     };
     // Explicit stack, like every other tree pass here: a recursive descent
@@ -32,7 +31,6 @@ pub(super) fn build_chain_typing_index<'a>(tree: &'a Tree) -> ChainTypingIndex<'
                     .insert((node.start_position(), node.end_position()), node);
             }
             "method_call_expression" => {
-                idx.method_call_nodes.push(node);
                 if let Some(inv) = node.child_by_field_name("invocant") {
                     idx.invocant_nodes
                         .insert((inv.start_position(), inv.end_position()), inv);

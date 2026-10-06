@@ -141,6 +141,12 @@ impl WitnessBag {
             .unwrap_or_default()
     }
 
+    /// [`for_attachment`](Self::for_attachment) without the allocation, for
+    /// a per-hop check that usually finds nothing.
+    pub fn iter_attachment<'b>(&'b self, att: &WitnessAttachment) -> impl Iterator<Item = &'b Witness> + 'b {
+        self.index.get(att).into_iter().flatten().map(|&i| &self.witnesses[i])
+    }
+
     /// Iterate witnesses matching a predicate. O(n).
     #[allow(dead_code)]
     pub fn filter<P: Fn(&Witness) -> bool>(&self, pred: P) -> Vec<&Witness> {

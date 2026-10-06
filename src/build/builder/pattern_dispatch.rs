@@ -703,6 +703,7 @@ impl<'a> Builder<'a> {
                         uses,
                         parents,
                         None,
+                        p.id(),
                     );
                     drop(c);
                     let actions =
@@ -818,7 +819,7 @@ impl<'a> Builder<'a> {
     ///
     ///   - Matches from ALL fold patterns dispatch in DOCUMENT order,
     ///     because `SetRouteBase` emissions from earlier matches feed
-    ///     later matches' `route_defaults` projections.
+    ///     later matches' `topic_base` projections.
     ///   - The topic-route base is REPLAYED: the walk recorded group
     ///     scopes (`topic_group_spans`); a base set inside a group
     ///     restores when the replay passes the group's end — the
@@ -947,6 +948,7 @@ impl<'a> Builder<'a> {
                 uses,
                 parents,
                 current_base.as_deref(),
+                p.id(),
             );
             let actions = p.on_match(&spec.name, &mctx);
             if defer {
@@ -1060,6 +1062,11 @@ impl<'a> Builder<'a> {
         let mut refs: Vec<GatedRef> = Vec::new();
         for a in actions {
             match a {
+                // Marks gate themselves on the value's class, so they need no
+                // trigger confirmation: apply now, where the fold can carry them.
+                EmitAction::Brand { at, on_class, set, drop } => {
+                    self.push_brand_overlay(plugin_id.to_string(), at, on_class, set, drop);
+                }
                 EmitAction::Method {
                     name, span, selection_span, params, is_method, return_type, doc,
                     on_class, display, hide_in_outline, opaque_return, outline_label, ..
@@ -1212,6 +1219,7 @@ impl<'a> Builder<'a> {
         package_uses: Vec<String>,
         package_parents: Vec<String>,
         topic_base: Option<&str>,
+        ns: &str,
     ) -> MatchContext {
         let names = query.capture_names();
         let quants = query.capture_quantifiers(pattern_index);
@@ -1237,7 +1245,7 @@ impl<'a> Builder<'a> {
                 .unwrap_or(&[]);
             let datas: Vec<CaptureData> = nodes
                 .iter()
-                .map(|n| self.project_capture(*n, projections, topic_base))
+                .map(|n| self.project_capture(*n, projections, topic_base, ns))
                 .collect();
             let many = matches!(
                 quants.get(idx as usize),
@@ -1276,6 +1284,7 @@ impl<'a> Builder<'a> {
         node: Node<'a>,
         projections: &[String],
         topic_base: Option<&str>,
+        ns: &str,
     ) -> CaptureData {
         let wants = |k: &str| projections.iter().any(|p| p == k);
         let mut data = CaptureData {
@@ -1294,7 +1303,8 @@ impl<'a> Builder<'a> {
             isa: None,
             ref_sub_name: None,
             call_name: None,
-            route_defaults: Vec::new(),
+            brand: Vec::new(),
+            topic_base: None,
         };
         if wants("str")
             || wants("strs")
@@ -1343,33 +1353,24 @@ impl<'a> Builder<'a> {
         if wants("call_name") {
             data.call_name = self.invocant_call_name(node);
         }
-        if wants("route_defaults") {
-            // Same flattening as the legacy CallContext fill: the
-            // fold-settled brand's stash + controller, then — for a
-            // topic-DSL verb CALL receiver still missing a controller
-            // — the replayed topic base (`under(...)->to('ctrl#')`'s
-            // SetRouteBase, scoped by group frames).
-            let mut defaults: Vec<(String, String)> = Vec::new();
-            if let Some(InferredType::BrandedRoute { controller, stash, .. }) =
-                self.invocant_type_at_node(node)
-            {
-                defaults = stash;
-                if let Some(c) = controller {
-                    defaults.push(("controller".to_string(), c));
+        if wants("brand") {
+            data.brand = self
+                .invocant_type_at_node(node)
+                .map(|t| {
+                    t.marks()
+                        .iter()
+                        .filter(|m| m.ns == ns)
+                        .map(|m| (m.key.clone(), m.value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
+        if wants("topic_base") {
+            if let (Some(dsl), Some(callee)) = (self.active_topic_dsl(), self.invocant_call_name(node)) {
+                if dsl.verbs.iter().any(|v| *v == callee) {
+                    data.topic_base = topic_base.map(str::to_string);
                 }
             }
-            if defaults.iter().all(|(k, _)| k != "controller") {
-                if let (Some(dsl), Some(callee)) =
-                    (self.active_topic_dsl(), self.invocant_call_name(node))
-                {
-                    if dsl.verbs.iter().any(|v| *v == callee) {
-                        if let Some(c) = topic_base {
-                            defaults.push(("controller".to_string(), c.to_string()));
-                        }
-                    }
-                }
-            }
-            data.route_defaults = defaults;
         }
         if wants("is_package_receiver") {
             // Same rule as the emit-hook path's `is_pkg_call`:

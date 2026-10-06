@@ -1372,8 +1372,8 @@ pub fn inferred_type_to_tag(ty: &InferredType) -> String {
         // A constraint is a Type::Tiny object; method dispatch (deferred)
         // routes there, so tag it as such rather than as its inner type.
         InferredType::TypeConstraintOf(_) => "Object:Type::Tiny".to_string(),
-        // Method dispatch is against the base; tag like any object.
-        InferredType::BrandedRoute { base, .. } => format!("Object:{}", base),
+        // Marks never change dispatch: tag the base.
+        InferredType::Branded { base, .. } => inferred_type_to_tag(base),
         // Optional dispatches nowhere until narrowed; tag the inner so the
         // wire format stays backward-compatible, prefixed Maybe.
         InferredType::Optional(inner) => format!("Maybe:{}", inferred_type_to_tag(inner)),
@@ -1454,10 +1454,10 @@ pub(crate) fn format_type_with(ty: &InferredType, vocab: TypeVocab) -> String {
             Some(i) => format!("{}<{}>", tag("TypeConstraint"), format_type_with(i, vocab)),
             None => tag("TypeConstraint"),
         },
-        InferredType::BrandedRoute { base, controller, .. } => match controller {
-            Some(c) => format!("{}<controller={}>", base, c),
-            None => base.clone(),
-        },
+        InferredType::Branded { base, marks } => {
+            let marks: Vec<String> = marks.iter().map(|m| format!("{}={}", m.key, m.value)).collect();
+            format!("{}<{}>", format_type_with(base, vocab), marks.join(", "))
+        }
         InferredType::Optional(inner) => format!("{}<{}>", tag("Maybe"), format_type_with(inner, vocab)),
         InferredType::Undef => tag("Undef"),
         InferredType::Bool => tag("Bool"),
@@ -1474,8 +1474,8 @@ pub(crate) fn format_type_root(ty: &InferredType) -> String {
         InferredType::ClassName(name) => name.clone(),
         InferredType::FirstParam { package } => package.clone(),
         InferredType::Parametric(ParametricType::ResultSet { base, .. })
-        | InferredType::Parametric(ParametricType::Instance { base, .. })
-        | InferredType::BrandedRoute { base, .. } => base.clone(),
+        | InferredType::Parametric(ParametricType::Instance { base, .. }) => base.clone(),
+        InferredType::Branded { base, .. } => format_type_root(base),
         InferredType::Sequence(_) => "Sequence".to_string(),
         InferredType::TypeConstraintOf(_) => "TypeConstraint".to_string(),
         InferredType::Optional(_) => "Maybe".to_string(),

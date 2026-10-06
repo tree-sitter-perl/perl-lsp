@@ -848,7 +848,8 @@ mod tests {
             isa: None,
             ref_sub_name: None,
             call_name: None,
-            route_defaults: Vec::new(),
+            brand: Vec::new(),
+            topic_base: None,
         }
     }
 
@@ -1217,7 +1218,7 @@ mod tests {
         }
         assert_eq!(
             ovs[0].return_type,
-            InferredType::ClassName("Foo".into())
+            crate::build::plugin::OverrideReturn::Type(InferredType::ClassName("Foo".into()))
         );
         assert_eq!(ovs[0].reason, "test");
     }
@@ -1300,28 +1301,28 @@ mod tests {
         let has_req = ovs.iter().any(|o| {
             matches!(&o.target, crate::build::plugin::OverrideTarget::Method { class, name }
                 if class == "Catalyst" && name == "req")
-                && o.return_type == InferredType::ClassName("Catalyst::Request".into())
+                && o.return_type == crate::build::plugin::OverrideReturn::Type(InferredType::ClassName("Catalyst::Request".into()))
         });
         assert!(has_req, "missing req → Catalyst::Request override");
 
         let has_res = ovs.iter().any(|o| {
             matches!(&o.target, crate::build::plugin::OverrideTarget::Method { class, name }
                 if class == "Catalyst" && name == "res")
-                && o.return_type == InferredType::ClassName("Catalyst::Response".into())
+                && o.return_type == crate::build::plugin::OverrideReturn::Type(InferredType::ClassName("Catalyst::Response".into()))
         });
         assert!(has_res, "missing res → Catalyst::Response override");
 
         let has_stash = ovs.iter().any(|o| {
             matches!(&o.target, crate::build::plugin::OverrideTarget::Method { class, name }
                 if class == "Catalyst" && name == "stash")
-                && o.return_type == InferredType::HashRef
+                && o.return_type == crate::build::plugin::OverrideReturn::Type(InferredType::HashRef)
         });
         assert!(has_stash, "missing stash → HashRef override");
 
         let has_log = ovs.iter().any(|o| {
             matches!(&o.target, crate::build::plugin::OverrideTarget::Method { class, name }
                 if class == "Catalyst" && name == "log")
-                && o.return_type == InferredType::ClassName("Catalyst::Log".into())
+                && o.return_type == crate::build::plugin::OverrideReturn::Type(InferredType::ClassName("Catalyst::Log".into()))
         });
         assert!(has_log, "missing log → Catalyst::Log override");
     }

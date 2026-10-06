@@ -451,6 +451,25 @@ pub(super) fn sweep_candidate_may_answer(
     idx.candidate_bag_may_answer(cached, name, class, attributed)
 }
 
+/// Lay the attachment's `BrandOverlay` marks over its reduced value. After
+/// reduction rather than inside a reducer, because marks ride whatever
+/// answered: an `Invoke`, an edge, a plain type.
+#[inline(never)]
+fn apply_brand_overlays(bag: &WitnessBag, q: &ReducerQuery, v: ReducedValue) -> ReducedValue {
+    let ReducedValue::Type(mut t) = v else { return v };
+    for w in bag.iter_attachment(q.attachment) {
+        if let WitnessPayload::BrandOverlay { ns, on_class, set, drop } = &w.payload {
+            let applies = t.class_name().is_some_and(|c| {
+                c == on_class || q.context.is_some_and(|ctx| is_subclass_of(c, on_class, ctx))
+            });
+            if applies {
+                t = t.overlay(ns, set, drop);
+            }
+        }
+    }
+    ReducedValue::Type(t)
+}
+
 fn receiver_key(r: &Option<InferredType>) -> Option<String> {
     r.as_ref().map(|t| format!("{t:?}"))
 }
@@ -858,7 +877,7 @@ impl ReducerRegistry {
         let poison_before = state.poisoned;
         let cuts_before = state.cuts;
         let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
-        let result = std::sync::Arc::new(self.query_rec_body(bag, q, state));
+        let result = std::sync::Arc::new(apply_brand_overlays(bag, q, self.query_rec_body(bag, q, state)));
         let recorded_exit =
             state.residual.len() > exits_before || (state.poisoned && !poison_before);
         let cut = state.cuts > cuts_before

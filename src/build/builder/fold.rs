@@ -140,25 +140,9 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Build the per-iteration lookup maps the fold passes reuse.
-    /// `refs`/`symbols` are stable across the fold, so this runs once.
-    /// Returns `(ref_by_span, method_sym_by_name)` as locals owned by
-    /// `fold_to_fixed_point`; callers that need them receive `&`-refs.
-    pub(super) fn build_fold_lookup_indices(
-        &self,
-    ) -> (
-        std::collections::HashMap<(Point, Point), usize>,
-        std::collections::HashMap<String, Vec<usize>>,
-    ) {
-        let mut ref_by_span = std::collections::HashMap::with_capacity(self.refs.len());
-        for (i, r) in self.refs.iter().enumerate() {
-            if matches!(r.kind, RefKind::MethodCall { .. }) {
-                // First-wins matches the prior `position(...)` semantics.
-                ref_by_span
-                    .entry((r.span.start, r.span.end))
-                    .or_insert(i);
-            }
-        }
+    /// Sub/Method symbols by name, for the fold's seed pass. `symbols` is
+    /// stable across the fold, so this runs once.
+    pub(super) fn build_method_sym_by_name(&self) -> std::collections::HashMap<String, Vec<usize>> {
         let mut sym_by_name: std::collections::HashMap<String, Vec<usize>> =
             std::collections::HashMap::new();
         for (i, s) in self.symbols.iter().enumerate() {
@@ -166,7 +150,7 @@ impl<'a> Builder<'a> {
                 sym_by_name.entry(s.name.clone()).or_default().push(i);
             }
         }
-        (ref_by_span, sym_by_name)
+        sym_by_name
     }
 
     /// Fixed-point loop driving chain typing + reducer dispatch. Each
@@ -201,7 +185,7 @@ impl<'a> Builder<'a> {
     pub(super) fn fold_to_fixed_point(&mut self, idx: &ChainTypingIndex<'a>) {
         use crate::model::witnesses::ReducerRegistry;
         const MAX_FOLD_ITERATIONS: usize = 64;
-        let (ref_by_span, method_sym_by_name) = self.build_fold_lookup_indices();
+        let method_sym_by_name = self.build_method_sym_by_name();
         // One registry for the entire fold — stateless/immutable, so sharing
         // across snapshot queries and seed pass is safe.
         let reg = ReducerRegistry::with_defaults();
@@ -231,7 +215,7 @@ impl<'a> Builder<'a> {
                 let _t = crate::util::ghost_stats::ScopedNs::start("fold::chain_pre");
                 self.run_chain_typing_reducer(idx, ChainPassMode::PreFold);
             }
-            self.resolve_return_types(idx, &reg, &ref_by_span, &method_sym_by_name);
+            self.resolve_return_types(&reg, &method_sym_by_name);
             // Mutation extension: fold key writes into variable shapes
             // (re-emittable, clear-and-emit). After the return-type
             // passes so call-binding-propagated shapes are visible.
@@ -309,12 +293,10 @@ impl<'a> Builder<'a> {
                     ReducedValue::Type(t) => Some(t),
                     ReducedValue::FactMap(_) | ReducedValue::None => None,
                 };
-                // A brand is a route VALUE identity, never a sub
-                // return contract. Project it to its base class for
-                // the fixed-point snapshot so a branded
-                // implicit-return doesn't oscillate against the
-                // brandless writeback push.
-                (s.id, resolved.map(Self::debrand))
+                // Marks are a value's, not a sub's return contract: the
+                // snapshot compares bases so a branded implicit return
+                // doesn't oscillate against the brandless writeback push.
+                (s.id, resolved.map(InferredType::into_unbranded))
             })
             .collect();
         answers.sort_by_key(|(id, _)| id.0);
@@ -895,14 +877,11 @@ impl<'a> Builder<'a> {
     /// `witnesses.rs` and folds the bag at query time.
     pub(super) fn resolve_return_types(
         &mut self,
-        idx: &ChainTypingIndex<'a>,
         reg: &crate::model::witnesses::ReducerRegistry,
-        ref_by_span: &std::collections::HashMap<(Point, Point), usize>,
         method_sym_by_name: &std::collections::HashMap<String, Vec<usize>>,
     ) {
         use crate::util::ghost_stats::timed;
         timed("fold::arity", || self.emit_arity_return_witnesses());
-        timed("fold::route_brand", || self.emit_route_brand_witnesses(idx, ref_by_span));
         timed("fold::mc_edges", || self.emit_method_call_return_edges());
         timed("fold::narrowing", || self.emit_defined_narrowing_witnesses());
         let (return_types, return_provenance) =
@@ -910,49 +889,6 @@ impl<'a> Builder<'a> {
         timed("fold::writeback", || self.write_back_sub_return_types(&return_provenance));
         timed("fold::call_binding", || self.propagate_call_bindings_to_constraints(&return_types));
         timed("fold::fixup_hko", || self.fixup_call_bound_hash_key_owners(&return_types));
-    }
-
-    /// Re-emittable: stamp the resolved `BrandedRoute` onto the
-    /// `Expression(refidx)` of every route-builder `method_call_expression`,
-    /// so a `my $x = $r->...->to('ctrl#')` declaration (which types via
-    /// `Edge(Expression(refidx))`) carries the brand, and the next
-    /// iteration's chained calls / partial `->to('#action')` read the
-    /// inherited controller off it. The brand is computed by the single
-    /// build-time symbolic executor (`invocant_type_at_node`); this pass
-    /// only publishes its answer onto the bag. Recomputed each iteration
-    /// (clear-and-emit on tag `route_brand`) because the receiver type it
-    /// reads converges as the fold progresses.
-    pub(super) fn emit_route_brand_witnesses(
-        &mut self,
-        idx: &ChainTypingIndex<'a>,
-        ref_by_span: &std::collections::HashMap<(Point, Point), usize>,
-    ) {
-        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        self.bag.remove_by_source_tag("route_brand");
-
-        // Published as computed, in source order: a variable reads its
-        // brand through the edge to the call that produced it, so a later
-        // `$crud->get` must see `$crud`'s brand from this same pass (the
-        // clear above removed last pass's).
-        for &node in &idx.method_call_nodes {
-            let span = node_to_span(node);
-            let Some(&refidx) = ref_by_span.get(&(span.start, span.end)) else {
-                continue;
-            };
-            let Some(brand @ InferredType::BrandedRoute { .. }) = self.invocant_type_at_node(node) else {
-                continue;
-            };
-            let r_span = self.refs[refidx].span;
-            // Beside the call's `Invoke`, whose plain class the brand
-            // dominates (`FrameworkAwareTypeFold`) and which this pass reads
-            // for the call's own class.
-            self.bag.push(Witness {
-                attachment: WitnessAttachment::Expression(crate::model::witnesses::RefIdx(refidx as u32)),
-                source: WitnessSource::Builder("route_brand".into()),
-                payload: WitnessPayload::InferredType(brand),
-                span: r_span,
-            });
-        }
     }
 
     /// Re-emittable: every `MethodCall` ref's value is published as
@@ -1954,6 +1890,10 @@ impl<'a> Builder<'a> {
             // and therefore brand — without a vendored Mojolicious.
             // Sub overrides stay symbol-keyed (they name a package
             // function, not a class method).
+            let payload = match &ov.return_type {
+                plugin::OverrideReturn::Type(t) => WitnessPayload::InferredType(t.clone()),
+                plugin::OverrideReturn::Expr(e) => WitnessPayload::ReturnExpr(e.clone()),
+            };
             if let plugin::OverrideTarget::Method { class, name } = &ov.target {
                 self.bag.push(Witness {
                     attachment: WitnessAttachment::PackageSymbol {
@@ -1961,7 +1901,7 @@ impl<'a> Builder<'a> {
                         name: name.clone(),
                     },
                     source: WitnessSource::Plugin(plugin_id.clone()),
-                    payload: WitnessPayload::InferredType(ov.return_type.clone()),
+                    payload: payload.clone(),
                     span: zero,
                 });
             }
@@ -1991,7 +1931,7 @@ impl<'a> Builder<'a> {
                 self.bag.push(Witness {
                     attachment: WitnessAttachment::Symbol(sym_id),
                     source: WitnessSource::Plugin(plugin_id.clone()),
-                    payload: WitnessPayload::InferredType(ov.return_type.clone()),
+                    payload: payload.clone(),
                     span: zero,
                 });
                 self.type_provenance.insert(

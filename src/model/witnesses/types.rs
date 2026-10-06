@@ -250,7 +250,8 @@ impl WitnessPayload {
             | WitnessPayload::Derivation
             | WitnessPayload::Custom { .. }
             | WitnessPayload::DomainCompare { .. }
-            | WitnessPayload::Reset => {}
+            | WitnessPayload::Reset
+            | WitnessPayload::BrandOverlay { .. } => {}
         }
     }
 }
@@ -404,6 +405,15 @@ pub enum WitnessPayload {
     /// types. Kept at the END for bincode variant-index stability (bump
     /// `EXTRACT_VERSION`).
     Invoke { callee: Callee, receiver: Option<WitnessAttachment>, args: Option<Vec<CallArg>> },
+    /// A plugin's marks on the value at this attachment: whatever the
+    /// attachment answers, with `set` laid over namespace `ns`'s marks and
+    /// the `drop` keys removed (`InferredType::overlay`). Applies only when
+    /// the value is an `on_class` instance, so a plugin that parsed a call
+    /// by its method name alone never marks an unrelated class's value.
+    /// The registry applies it after reduction, so no reducer claims it
+    /// (`docs/adr/brands.md`). Kept at the END for bincode variant-index
+    /// stability (bump `EXTRACT_VERSION`).
+    BrandOverlay { ns: String, on_class: String, set: Vec<(String, String)>, drop: Vec<String> },
 }
 
 /// What an `Invoke` calls.

@@ -73,6 +73,16 @@ impl FromIterator<(String, Option<Box<InferredType>>)> for SharedKeys {
     }
 }
 
+/// One plugin-owned fact on a [`InferredType::Branded`] value. `ns` is the
+/// owning plugin's id, so two plugins' keys never collide; `value` is the
+/// literal the plugin parsed.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Mark {
+    pub ns: String,
+    pub key: String,
+    pub value: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InferredType {
     /// `$p = Point->new(...)` — variable is an instance of ClassName.
@@ -152,27 +162,18 @@ pub enum InferredType {
     /// See `docs/adr/type-constraints.md`. Kept at the END for bincode
     /// variant-index stability (bump `EXTRACT_VERSION`).
     TypeConstraintOf(Option<Box<InferredType>>),
-    /// A Mojolicious route-builder value carrying the **accumulated
-    /// route defaults** in force at this point in the builder chain.
-    /// `base` is the class for method dispatch
-    /// (`Mojolicious::Routes::Route`); `controller` / `stash` are the
-    /// inherited `->to(...)` defaults a partial `->to('#action')`
-    /// reads. This is the "brand on the value" from
-    /// `docs/adr/route-branding.md` (option C, collapsed):
-    /// the defaults ride the type through assignment / chaining /
-    /// nesting via the witness bag for free, so there is no separate
-    /// brand-id + side-table to keep cache-stable — the resolved
-    /// defaults ARE the value, content-addressed. Inheritance is baked
-    /// in: each route method that sets a default produces a NEW
-    /// `BrandedRoute` that overlays its own keys onto the receiver's,
-    /// so children never mutate parents and a sibling group with its
-    /// own `->to('other#')` re-brands its descendants without leaking.
-    /// Kept at the END for bincode variant-index stability (bump
-    /// `EXTRACT_VERSION`).
-    BrandedRoute {
-        base: String,
-        controller: Option<String>,
-        stash: Vec<(String, String)>,
+    /// A value carrying plugin-owned **marks**: facts a plugin minted on
+    /// it (a Mojo route's inherited controller) that ride the value
+    /// through assignment, chaining and receiver-returning calls. `base`
+    /// is what the value IS — dispatch, hover and completion project
+    /// through it — and `marks` are opaque to core, which only carries,
+    /// overlays and joins them (`docs/adr/brands.md`). Built through
+    /// [`InferredType::branded`], so `marks` is never empty and `base` is
+    /// never itself branded. Kept at the END for bincode variant-index
+    /// stability (bump `EXTRACT_VERSION`).
+    Branded {
+        base: Box<InferredType>,
+        marks: Vec<Mark>,
     },
     /// `{ host => 'x', port => 5432 }` — a hash literal with literal
     /// keys, each carrying its value's type when inferable (`None` =
@@ -679,11 +680,7 @@ impl InferredType {
             }),
             Sequence(v) => Sequence(v.into_iter().map(|e| e.map_class_names(f)).collect()),
             TypeConstraintOf(t) => TypeConstraintOf(t.map(|b| Box::new(b.map_class_names(f)))),
-            BrandedRoute { base, controller, stash } => BrandedRoute {
-                base: f(&base),
-                controller: controller.map(|c| f(&c)),
-                stash,
-            },
+            Branded { base, marks } => Branded { base: Box::new(base.map_class_names(f)), marks },
             HashWithKeys { mut keys, open } => {
                 for (_, v) in keys.to_mut().iter_mut() {
                     if let Some(b) = v.take() {
@@ -707,10 +704,7 @@ impl InferredType {
             InferredType::ClassName(name) => Some(name.as_str()),
             InferredType::FirstParam { package } => Some(package.as_str()),
             InferredType::Parametric(p) => p.class_name(),
-            // A branded route still dispatches methods against its
-            // base class — `$r->get(...)` works the same whether `$r`
-            // carries inherited defaults or not.
-            InferredType::BrandedRoute { base, .. } => Some(base.as_str()),
+            InferredType::Branded { base, .. } => base.class_name(),
             _ => None,
         }
     }
@@ -774,26 +768,64 @@ impl InferredType {
         }
     }
 
-    /// Read the inherited route default for `key` from a branded
-    /// route value, where `controller` is a distinguished key and
-    /// everything else lives in the stash. `None` for non-route
-    /// types or absent keys. This is the "ask the value" entry point
-    /// (rule #10): a partial `->to('#action')` consumer asks the
-    /// receiver value what controller is in force; it never inspects
-    /// the chain shape. The build-time consumer reads the flattened
-    /// `route_defaults` projection; this is the query-time
-    /// surface for cursor-time stash lookups (hover/completion), which
-    /// aren't wired yet — hence `allow(dead_code)`.
-    #[allow(dead_code)]
-    pub fn route_default(&self, key: &str) -> Option<&str> {
-        let InferredType::BrandedRoute { controller, stash, .. } = self else {
-            return None;
+    /// Brand `base` with `marks`: a branded base contributes its own marks
+    /// underneath (the new ones win per `(ns, key)`), and no marks at all is
+    /// the plain base. The one constructor, so `Branded` stays canonical.
+    pub fn branded(base: InferredType, marks: Vec<Mark>) -> InferredType {
+        let (base, mut all) = match base {
+            InferredType::Branded { base, marks } => (*base, marks),
+            other => (other, Vec::new()),
         };
-        if key == "controller" {
-            return controller.as_deref();
+        for m in marks {
+            all.retain(|e| e.ns != m.ns || e.key != m.key);
+            all.push(m);
         }
-        stash.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+        if all.is_empty() {
+            return base;
+        }
+        all.sort();
+        InferredType::Branded { base: Box::new(base), marks: all }
     }
+
+    /// The value without its marks.
+    pub fn unbranded(&self) -> &InferredType {
+        match self {
+            InferredType::Branded { base, .. } => base,
+            other => other,
+        }
+    }
+
+    /// Owned [`unbranded`](Self::unbranded).
+    pub fn into_unbranded(self) -> InferredType {
+        match self {
+            InferredType::Branded { base, .. } => *base,
+            other => other,
+        }
+    }
+
+    /// Every mark the value carries; empty when it is not branded.
+    pub fn marks(&self) -> &[Mark] {
+        match self {
+            InferredType::Branded { marks, .. } => marks,
+            _ => &[],
+        }
+    }
+
+    /// Lay `set` over the marks in namespace `ns` and remove the `drop`
+    /// keys, keeping every other namespace's marks.
+    pub fn overlay(self, ns: &str, set: &[(String, String)], drop: &[String]) -> InferredType {
+        let (base, mut marks) = match self {
+            InferredType::Branded { base, marks } => (*base, marks),
+            other => (other, Vec::new()),
+        };
+        marks.retain(|m| m.ns != ns || !drop.contains(&m.key));
+        let set = set
+            .iter()
+            .map(|(k, v)| Mark { ns: ns.to_string(), key: k.clone(), value: v.clone() })
+            .collect();
+        InferredType::branded(InferredType::branded(base, marks), set)
+    }
+
 
     /// Project a `TypeConstraintOf(inner)` to its constrained inner type —
     /// the type a value satisfying this constraint has. `None` for any
@@ -878,6 +910,7 @@ impl InferredType {
                 }
             }
             InferredType::TypeConstraintOf(Some(t)) | InferredType::Optional(t) => t.for_each_attachment_mut(f),
+            InferredType::Branded { base, .. } => base.for_each_attachment_mut(f),
             InferredType::HashWithKeys { keys, .. } => {
                 if keys.iter().any(|(_, v)| v.is_some()) {
                     for t in keys.to_mut().iter_mut().filter_map(|(_, v)| v.as_mut()) {
@@ -894,7 +927,6 @@ impl InferredType {
             | InferredType::String
             | InferredType::Parametric(ParametricType::ResultSet { .. })
             | InferredType::TypeConstraintOf(None)
-            | InferredType::BrandedRoute { .. }
             | InferredType::Undef
             | InferredType::Bool
             | InferredType::Unknown => {}
@@ -967,11 +999,13 @@ impl InferredType {
     // overload is modeled yet. Pinned by
     // `assignment_ops_tests::an_overloaded_bool_is_still_taken_as_true`.
     pub fn is_always_true(&self) -> bool {
+        if let InferredType::Branded { base, .. } = self {
+            return base.is_always_true();
+        }
         matches!(
             self,
             InferredType::ClassName(_)
                 | InferredType::FirstParam { .. }
-                | InferredType::BrandedRoute { .. }
                 | InferredType::HashRef
                 | InferredType::ArrayRef
                 | InferredType::CodeRef { .. }
@@ -992,14 +1026,13 @@ impl InferredType {
                 a == b
             }
             (InferredType::Parametric(a), InferredType::Parametric(b)) => a == b,
-            // A route with strictly more resolved defaults subsumes a
-            // plainer one (more keys = more informative). Keep the
-            // assignment chain from clobbering an accumulated brand
-            // with a freshly-typed bare `ClassName(Route)` re-derivation.
+            // A value carrying every mark of the narrowing (and more) is at
+            // least as informative, so a re-derivation with fewer marks never
+            // clobbers an accumulated brand.
             (
-                InferredType::BrandedRoute { controller: hc, stash: hs, .. },
-                InferredType::BrandedRoute { controller: wc, stash: ws, .. },
-            ) => (wc.is_none() || hc.is_some()) && ws.len() <= hs.len(),
+                InferredType::Branded { base: hb, marks: hm },
+                InferredType::Branded { base: wb, marks: wm },
+            ) => hb.subsumes_narrowing(wb) && wm.iter().all(|m| hm.contains(m)),
             // Structure dominates rep: a keyed hash / positional tuple is
             // strictly more informative than the bare ref a deref-
             // narrowing observation re-derives. Structured-vs-structured

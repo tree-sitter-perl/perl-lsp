@@ -423,6 +423,9 @@ fn despan(t: &InferredType) -> InferredType {
             InferredType::TypeConstraintOf(inner.as_deref().map(|i| Box::new(despan(i))))
         }
         InferredType::Optional(inner) => InferredType::Optional(Box::new(despan(inner))),
+        InferredType::Branded { base, marks } => {
+            InferredType::Branded { base: Box::new(despan(base)), marks: marks.clone() }
+        }
         InferredType::HashWithKeys { keys, open } => InferredType::HashWithKeys {
             keys: keys
                 .iter()

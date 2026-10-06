@@ -1,5 +1,5 @@
 //! Build-time symbolic execution: `resolve_invocant_class_tree` /
-//! `invocant_type_at_node` (the single chain typer) and route branding.
+//! `invocant_type_at_node` (the single chain typer).
 
 use super::*;
 
@@ -84,17 +84,6 @@ impl<'a> Builder<'a> {
                     Some(arity),
                     invocant_ty.clone(),
                 );
-                // Mojo route brand: when this call's value is a route
-                // builder, overlay the accumulated defaults from the
-                // receiver (and this call's own `->to(...)`) onto the
-                // type so a downstream partial `->to('#action')` reads
-                // the inherited controller. The brand IS the type, so
-                // it rides assignment / chaining / nesting through the
-                // bag for free — see
-                // `docs/adr/route-branding.md`.
-                if Self::is_route_type(call_ty.as_ref()) {
-                    return Some(self.brand_route_call(node, invocant_ty.as_ref(), call_ty));
-                }
                 if call_ty.is_some() {
                     return call_ty;
                 }
@@ -329,131 +318,6 @@ impl<'a> Builder<'a> {
                 )
             }
             _ => None,
-        }
-    }
-
-    /// The Mojolicious route-builder base class — the class every
-    /// `$r->get/any/under/to/name(...)` value dispatches against.
-    /// Centralized so the brand-overlay logic and any future route
-    /// case agree on one string.
-    const ROUTE_CLASS: &'static str = "Mojolicious::Routes::Route";
-
-    /// True when a resolved call type is a route builder — either a
-    /// plain `ClassName(Route)` (the `_route` override / fluent
-    /// Mojo::Base accessor result) or an already-branded route. The
-    /// brand asks the type, never the method name (rule #10): any
-    /// method whose return types as the route base inherits the brand.
-    pub(super) fn is_route_type(ty: Option<&InferredType>) -> bool {
-        ty.and_then(|t| t.class_name()) == Some(Self::ROUTE_CLASS)
-    }
-
-    /// Project a `BrandedRoute` to its base `ClassName`. A brand is a
-    /// route-value identity (carries inherited `->to` defaults for a
-    /// partial target to read); it is never a sub-return contract or a
-    /// hover/dispatch type. Sub-return materialization and the
-    /// fixed-point snapshot debrand so the chain-internal artifact
-    /// doesn't leak out or oscillate. Other types pass through.
-    pub(super) fn debrand(t: InferredType) -> InferredType {
-        match t {
-            InferredType::BrandedRoute { base, .. } => InferredType::ClassName(base),
-            other => other,
-        }
-    }
-
-    /// Overlay this `->...(...)` call's own route defaults onto the
-    /// receiver's accumulated brand, producing the `BrandedRoute` the
-    /// call's value carries. Inheritance is structural: we seed from
-    /// the receiver's brand (its `controller` + `stash`), then a
-    /// `->to(...)` on THIS call overlays its keys. Non-`to` route
-    /// methods (`get`, `any`, `under`, `name`, …) just propagate the
-    /// receiver's brand unchanged — `under` nesting therefore inherits
-    /// the parent's controller automatically, and a sibling group's
-    /// own `->to('other#')` overlays a fresh controller without
-    /// touching the parent (defaults flow down only).
-    pub(super) fn brand_route_call(
-        &self,
-        node: Node<'a>,
-        invocant_ty: Option<&InferredType>,
-        call_ty: Option<InferredType>,
-    ) -> InferredType {
-        // Seed from the receiver's brand if it had one.
-        let (mut controller, mut stash) = match invocant_ty {
-            Some(InferredType::BrandedRoute { controller, stash, .. }) => {
-                (controller.clone(), stash.clone())
-            }
-            _ => (None, Vec::new()),
-        };
-
-        let method = node
-            .child_by_field_name("method")
-            .and_then(|m| m.utf8_text(self.source).ok());
-        if method == Some("to") {
-            self.merge_to_defaults(node, &mut controller, &mut stash);
-        }
-
-        let base = call_ty
-            .as_ref()
-            .and_then(|t| t.class_name())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| Self::ROUTE_CLASS.to_string());
-        // An empty brand carries no inherited defaults — it's
-        // indistinguishable from a plain `ClassName(base)` and only
-        // adds churn to the fold (a `BrandedRoute{None,[]}` return type
-        // oscillates against `ClassName` in the snapshot). Collapse it.
-        if controller.is_none() && stash.is_empty() {
-            return InferredType::ClassName(base);
-        }
-        InferredType::BrandedRoute { base, controller, stash }
-    }
-
-    /// Parse a `->to(...)` call's args into controller + stash
-    /// overlays. Mirrors mojo-routes.rhai's `to` parsing but on the
-    /// value side: `'ctrl#act'` / `'ctrl#'` set controller;
-    /// `'#act'` leaves the inherited controller intact (action is
-    /// per-route, not inherited); `key => val` pairs (including
-    /// `controller => 'x'`) merge into the stash / controller.
-    pub(super) fn merge_to_defaults(
-        &self,
-        node: Node<'a>,
-        controller: &mut Option<String>,
-        stash: &mut Vec<(String, String)>,
-    ) {
-        let args = self.extract_call_args(node);
-        if args.is_empty() {
-            return;
-        }
-        // A leading `'ctrl#act'` / `'#act'` string sets the controller
-        // (action is per-route, never inherited). Mojo allows trailing
-        // `key => val` stash pairs after it (`->to('a#', section =>
-        // 'x')`), so consume the string then fall through to the
-        // key/value loop starting one arg later.
-        let mut start = 0;
-        if let Some(first) = args.first() {
-            if matches!(first.kind(), "string_literal" | "interpolated_string_literal") {
-                if let Some(s) = self.extract_string_content(*first) {
-                    if let Some((ctrl, _act)) = s.split_once('#') {
-                        if !ctrl.is_empty() {
-                            *controller = Some(ctrl.to_string());
-                        }
-                        start = 1;
-                    }
-                }
-            }
-        }
-        // Key => value form (controller / arbitrary stash defaults).
-        let mut i = start;
-        while i + 1 < args.len() {
-            let key = self.literal_arg_string(args[i]);
-            let val = self.literal_arg_string(args[i + 1]);
-            if let (Some(k), Some(v)) = (key, val) {
-                if k == "controller" {
-                    *controller = Some(v);
-                } else if k != "action" {
-                    stash.retain(|(ek, _)| ek != &k);
-                    stash.push((k, v));
-                }
-            }
-            i += 2;
         }
     }
 

@@ -1401,10 +1401,9 @@ sub action ($c) {\n\
     );
 }
 
-/// Spike: Mojo partial route targets inherit the controller down the
-/// route-builder chain via a value brand (`InferredType::BrandedRoute`).
-/// See `docs/adr/route-branding.md` (option C, collapsed:
-/// resolved defaults ride the type, no separate brand-id/side-table).
+/// Mojo partial route targets inherit the controller down the
+/// route-builder chain via mojo-routes' marks on the route value
+/// (`InferredType::Branded`, `docs/adr/brands.md`).
 ///
 /// The brand carries the inherited `->to('ctrl#')` controller and rides
 /// the chain through assignment (`my $alerts_r = ...`), method chaining
@@ -1497,28 +1496,26 @@ sub startup {
         };
         fa.inferred_type_via_bag(var, pt)
     };
-    assert!(
-        matches!(ty_at("$alerts_r->get", "$alerts_r"),
-            Some(crate::model::file_analysis::InferredType::BrandedRoute { ref controller, .. })
-                if controller.as_deref() == Some("alerts")),
-        "$alerts_r must type as a BrandedRoute carrying controller='alerts'");
-    assert!(
-        matches!(ty_at("$crud->get", "$crud"),
-            Some(crate::model::file_analysis::InferredType::BrandedRoute { ref controller, .. })
-                if controller.as_deref() == Some("alerts")),
-        "$crud (nested under $alerts_r) inherits the 'alerts' brand");
+    let mark = |t: Option<crate::model::file_analysis::InferredType>, key: &str| -> Option<String> {
+        t?.marks()
+            .iter()
+            .find(|m| m.ns == "mojo-routes" && m.key == key)
+            .map(|m| m.value.clone())
+    };
+    assert_eq!(mark(ty_at("$alerts_r->get", "$alerts_r"), "controller").as_deref(), Some("alerts"),
+        "$alerts_r must carry the mark controller='alerts'");
+    assert_eq!(mark(ty_at("$crud->get", "$crud"), "controller").as_deref(), Some("alerts"),
+        "$crud (nested under $alerts_r) inherits the 'alerts' mark");
+    assert_eq!(
+        ty_at("$crud->get", "$crud").and_then(|t| t.class_name().map(str::to_string)).as_deref(),
+        Some("Mojolicious::Routes::Route"),
+        "marks never change dispatch: a branded route still dispatches on Route");
 
     // Stash (beyond controller/action) rides the brand too: the
-    // `section => 'admin'` default set on $alerts_r is queryable via
-    // the rule-#10 `route_default` accessor on a descendant's value.
-    assert_eq!(
-        ty_at("$crud->get", "$crud").as_ref().and_then(|t| t.route_default("section")),
-        Some("admin"),
+    // `section => 'admin'` default set on $alerts_r is a mark on a
+    // descendant's value.
+    assert_eq!(mark(ty_at("$crud->get", "$crud"), "section").as_deref(), Some("admin"),
         "inherited stash default 'section' is readable off $crud's brand");
-    assert_eq!(
-        ty_at("$crud->get", "$crud").as_ref().and_then(|t| t.route_default("controller")),
-        Some("alerts"),
-        "route_default('controller') reads the distinguished controller key");
 
     // End-to-end goto-def: cursor on the `list` action inside
     // `->to('#list')` resolves to `alerts::list` (here the controller

@@ -123,10 +123,6 @@ struct ChainTypingIndex<'a> {
     return_nodes: std::collections::HashMap<(Point, Point), Node<'a>>,
     invocant_nodes: std::collections::HashMap<(Point, Point), Node<'a>>,
     method_call_args: std::collections::HashMap<(Point, Point), Node<'a>>,
-    /// Every `method_call_expression` node. `emit_route_brand_witnesses`
-    /// reads it post-fold to attach resolved `BrandedRoute` witnesses to
-    /// each call's `Expression(refidx)`.
-    method_call_nodes: Vec<Node<'a>>,
     /// `hash_element_expression` nodes whose container is itself a
     /// method-call result (`$obj->get_config->{host}`). The container
     /// type — and thus the key's owner class — is only knowable after

@@ -257,12 +257,9 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         // enclosing class). Same axis as `PluginOverrideReducer` on Symbols.
         let mut class_assertion = ClassIdentity::default();
         let mut first_param_class: Option<String> = None;
-        // A `BrandedRoute` is a class identity that carries extra
-        // inherited-default data. It must dominate the bare
-        // `ClassName(base)` companion that the same assignment also
-        // pushes (so a partial route target reads the brand, not the
-        // brandless class). Track the latest brand separately and
-        // return it ahead of the class axis.
+        // A branded object is its class identity plus marks, so it
+        // dominates a bare `ClassName` of the same class (the walk's own
+        // typing of the assignment) instead of losing its marks to it.
         let mut branded: Option<InferredType> = None;
         let mut rep_obs: Option<Rep> = None;
         let mut bless_rep: Option<Rep> = None;
@@ -316,7 +313,9 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                     InferredType::FirstParam { package } => {
                         first_param_class = Some(package.clone())
                     }
-                    b @ InferredType::BrandedRoute { .. } => branded = Some(b.clone()),
+                    b @ InferredType::Branded { base, .. } if base.class_name().is_some() => {
+                        branded = Some(b.clone())
+                    }
                     // Source priority breaks ties first (an EXPLICIT
                     // annotation — `Annotation`, priority 20 — governs over
                     // an inferred flow type, priority 10, whatever the order
@@ -379,10 +378,10 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             plain_type = None;
         }
 
-        // A branded route dominates the bare-class companion: the
-        // brand IS the class identity plus inherited defaults.
         if let Some(b) = branded {
-            return ReducedValue::Type(b);
+            if class_assertion.name.as_deref().is_none_or(|c| b.class_name() == Some(c)) {
+                return ReducedValue::Type(b);
+            }
         }
         // The class axis wins over rep, consistent or not: the user's intent
         // is object-typed use, and a rep mismatch is a separate diagnostic.
