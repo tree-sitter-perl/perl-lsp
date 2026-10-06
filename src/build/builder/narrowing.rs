@@ -893,10 +893,9 @@ impl<'a> Builder<'a> {
             .collect()
     }
 
-    /// Mint a FlowEdge + lower it as a FALLBACK: a refined eager TC (a direct
-    /// InferredType witness, resolvable pre-fold) wins; the query Edge fills in
-    /// only when the walk left the variable untyped. The single mint+lower for
-    /// the query pass.
+    /// Mint a FlowEdge and lower it to the variable's value edge. Every
+    /// write lowers, declaration or reassignment: the edge is the value the
+    /// fold reads at the write. The single mint+lower for the query pass.
     pub(super) fn push_flow_edge(
         &mut self,
         name: String,
@@ -909,12 +908,6 @@ impl<'a> Builder<'a> {
         // The write's reset marker, idempotent with the walk's own — the two
         // lanes agree on every write site by construction.
         self.push_reset_marker(name.clone(), scope, at);
-        // A REASSIGNMENT always lowers: its edge is the value the fold reads
-        // at the write, whatever the walk's eager TC for the same statement
-        // said — the two agree, or the refined TC subsumes the edge's
-        // re-derived shape. A declaration keeps the gate: a typed
-        // declaration needs no fallback edge.
-        let already_typed = false;
         let fe = crate::model::file_analysis::FlowEdge {
             target_name: name,
             target_scope: scope,
@@ -923,17 +916,15 @@ impl<'a> Builder<'a> {
             extraction,
             reassigns,
         };
-        if !already_typed {
-            if let Some(w) = fe.lower_to_witness() {
-                // The walk mints a single-target write's edge as it passes;
-                // the `@flow` pass reaches the same write again.
-                if self.bag.for_attachment(&w.attachment).iter().any(|o| {
-                    o.span == w.span && o.payload == w.payload
-                }) {
-                    return;
-                }
-                self.bag.push(w);
+        if let Some(w) = fe.lower_to_witness() {
+            // The walk mints a single-target write's edge as it passes;
+            // the `@flow` pass reaches the same write again.
+            if self.bag.for_attachment(&w.attachment).iter().any(|o| {
+                o.span == w.span && o.payload == w.payload
+            }) {
+                return;
             }
+            self.bag.push(w);
         }
         self.flow_edges.push(fe);
     }

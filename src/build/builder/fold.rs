@@ -497,20 +497,6 @@ impl<'a> Builder<'a> {
             // the block, the block has run; whether it ran at all is the
             // binding-scope question below.
             let conditional = is_rebind && crate::cst::is_conditionally_executed_in_block(node);
-            // Compute the fresh type up front so the idempotency check
-            // can compare informativeness. (Cheap: a bag chase on the
-            // already-resolved RHS.)
-            let saved_pkg_probe = self.current_package.clone();
-            self.current_package = self.package_at_pos(span.start).map(|s| s.to_string());
-            let fresh = if conditional {
-                Some(InferredType::Unknown)
-            } else {
-                let _t = crate::util::ghost_stats::ScopedNs::start("chain::rhs_probe");
-                self.invocant_type_at_node(right)
-                    .or_else(|| self.resolve_invocant_class_tree(right).map(InferredType::ClassName))
-            };
-            self.current_package = saved_pkg_probe;
-
             // Innermost scope containing this assignment.
             let _t_scope = crate::util::ghost_stats::ScopedNs::start("chain::scope_pick");
             let scope_idx = self
@@ -551,60 +537,22 @@ impl<'a> Builder<'a> {
                 }
             }
 
-            // Idempotency: skip if an already-pushed Variable witness at
-            // this assignment's start is at least as informative as the
-            // fresh answer. A plain `ClassName(Route)` does NOT subsume a
-            // `BrandedRoute`, so the route brand legitimately upgrades the
-            // walk-time materialization on a later fold iteration; once
-            // the brand is in the bag it subsumes the next (identical)
-            // brand and the loop settles. `Unknown` subsumes only itself,
-            // so a RHS that resolves on a later iteration lands on top of it.
-            // A compound write's value is the operator's result, which the
-            // walk typed on the assignment itself; the RHS alone says nothing
-            // about it. Only the may-not-happen `Unknown` applies.
+            // A write's value is its flow edge, plain or compound; what this
+            // pass adds is the may-not-happen rebind, `Unknown`. Skipped when
+            // an earlier fold iteration already pushed it.
             if !conditional {
                 continue;
             }
+            let ty = InferredType::Unknown;
             let already_typed = typed_at.get(&(var.clone(), at)).is_some_and(|idxs| {
                 idxs.iter().any(|&i| {
-                    let crate::model::witnesses::WitnessPayload::InferredType(t) =
-                        &self.bag.all()[i].payload
-                    else {
-                        return false;
-                    };
-                    fresh.as_ref().map_or(true, |f| t.subsumes_narrowing(f))
+                    matches!(&self.bag.all()[i].payload,
+                        crate::model::witnesses::WitnessPayload::InferredType(t) if t.subsumes_narrowing(&ty))
                 })
             });
             if already_typed {
                 continue;
             }
-
-            // Read the RHS's full `InferredType` first — Parametric
-            // shapes need to land on the variable as Parametric, not
-            // unwrapped to their `base` via `class_name()`. Falls
-            // back to the class-only `resolve_invocant_class_tree`
-            // for the bareword-degrade tail (a non-class type on a
-            // bareword maps to "treat the syntactic text as a
-            // class") which the type-aware path doesn't model.
-            //
-            // When `package_at_pos` answered Some, the `fresh` probe above
-            // already ran this exact computation under this exact package
-            // override — the typer is `&self` and deterministic, so
-            // recomputing is a straight 2x on the symbolic executor. Only
-            // the None case differs (the probe typed under `None`, this
-            // path types under the walk's stale `current_package`).
-            let ty_opt = if conditional || self.package_at_pos(span.start).is_some() {
-                fresh
-            } else {
-                let _t = crate::util::ghost_stats::ScopedNs::start("chain::rhs_type");
-                self.invocant_type_at_node(right)
-                    .or_else(|| self.resolve_invocant_class_tree(right).map(InferredType::ClassName))
-                    .or(fresh)
-            };
-
-            // A rebind whose RHS nothing can type pushes no value: its reset
-            // marker (above) is the record that it happened.
-            let Some(ty) = ty_opt else { continue };
             to_push.push((var, sid, write_span, ty));
         }
 
@@ -2086,12 +2034,9 @@ impl<'a> Builder<'a> {
                 if r.hash_key_owner().is_some() {
                     return None;
                 }
-                let container = var_text
-                    .strip_prefix('$')
-                    .map(|bare| format!("%{bare}"));
-                let t = self
-                    .bag_query_variable(var_text, r.scope, r.span.start)
-                    .or_else(|| self.bag_query_variable(container.as_deref()?, r.scope, r.span.start))?;
+                // The producer names the container canonically (`$h{k}` is
+                // `%h`, `$h->{k}` is `$h`), so the name is the lookup.
+                let t = self.bag_query_variable(var_text, r.scope, r.span.start)?;
                 Some((i, t.hash_key_class()?.to_string()))
             })
             .collect();
@@ -2101,12 +2046,6 @@ impl<'a> Builder<'a> {
                 if r.hash_key_owner().is_some() { continue; }
 
                 let vt = var_text.clone();
-                // Canonicalize: $hash → %hash for lookup
-                let lookup_name = if vt.starts_with('$') {
-                    format!("%{}", &vt[1..])
-                } else {
-                    vt.clone()
-                };
 
                 // The variable's type at the access, edges chased.
                 // `hash_key_class()` so a Parametric narrows to its row-class
@@ -2117,7 +2056,7 @@ impl<'a> Builder<'a> {
                 }
 
                 // Fall back to variable identity
-                if let Some(defs) = var_defs.get(&vt).or(var_defs.get(&lookup_name)) {
+                if let Some(defs) = var_defs.get(&vt) {
                     // Find the innermost declaration before this ref
                     let mut scope = Some(r.scope);
                     while let Some(sid) = scope {
@@ -2138,8 +2077,8 @@ impl<'a> Builder<'a> {
                 // available and the scope/point test missed it) from a design
                 // (nothing in this file could have attributed it).
                 if crate::util::ghost_stats::enabled() && r.hash_key_owner().is_none() {
-                    let known_tc = typed_names.contains(&vt) || typed_names.contains(&lookup_name);
-                    let known_def = var_defs.contains_key(&vt) || var_defs.contains_key(&lookup_name);
+                    let known_tc = typed_names.contains(&vt);
+                    let known_def = var_defs.contains_key(&vt);
                     crate::util::ghost_stats::count("unowned.total");
                     if crate::model::conventions::is_conventional_invocant_name(&vt) {
                         crate::util::ghost_stats::count("unowned.self_like");
