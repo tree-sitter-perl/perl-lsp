@@ -224,6 +224,16 @@ impl<'a> Builder<'a> {
                 let return_edge = self.coderef_return_edge_for(node);
                 Some(WitnessPayload::InferredType(InferredType::CodeRef { return_edge }))
             }
+            // A `shift` of `@_` is the head of the argument window at its
+            // point; the walk's `consume_arg_head` advances the window past it.
+            _ if self.shifts_arg_window(node) => Some(WitnessPayload::Projected {
+                base: WitnessAttachment::Variable {
+                    name: "@_".into(),
+                    scope: self.scope_at_point(node.start_position()),
+                },
+                step: crate::model::witnesses::ProjectionStep::ArrayIndex(0),
+            }),
+
             "binary_expression"
             | "equality_expression"
             | "relational_expression"
@@ -374,19 +384,24 @@ impl<'a> Builder<'a> {
                 Some(WitnessPayload::Edge(WitnessAttachment::Symbol(sid)))
             }
 
-            // `$_[0]` in value position is the positional-receiver
-            // pseudo-invocant (`sub me { return $_[0] }` — the
-            // self-returning idiom). Its return value IS the call's
-            // receiver, so emit the deferred `Receiver` placeholder:
-            // `ReturnExprReducer` substitutes `q.receiver` at the call
-            // site, letting `Symbol(me)` / `PackageSymbol{C, me}` type
-            // a *chained* `$obj->me->me->...` to the receiver class at
-            // arbitrary depth. A general `$arr[N]` read carries no
-            // receiver semantics — leave it to the chain typer's
-            // element-projection arm (no Expr payload).
-            "array_element_expression" if self.is_positional_receiver(node) => {
-                Some(WitnessPayload::ReturnExpr(crate::model::witnesses::ReturnExpr::Receiver))
+            // `$arr[N]` projects off `@arr` at the read's own point, so
+            // `$_[N]` reads `@_`'s argument window as the shifts before it
+            // left it. `$_[0]`'s call-site receiver rides a second witness
+            // (`emit_expr_witness_inner`).
+            "array_element_expression" => {
+                let container = node.child_by_field_name("array")?;
+                let idx: i32 =
+                    node.child_by_field_name("index")?.utf8_text(self.source).ok()?.parse().ok()?;
+                let name = crate::cst::canonical_container_name(container, self.source)?;
+                Some(WitnessPayload::Projected {
+                    base: WitnessAttachment::Variable {
+                        name,
+                        scope: self.scope_at_point(node.start_position()),
+                    },
+                    step: crate::model::witnesses::ProjectionStep::ArrayIndex(idx),
+                })
             }
+
 
             // An assignment's value is the target's new value.
             // `||=`/`//=` never reach here — `emit_expr_witness` types them
@@ -551,6 +566,16 @@ impl<'a> Builder<'a> {
                 }
             })
             .collect()
+    }
+
+    /// A `shift` whose array is `@_` — bare, or spelled `shift @_`.
+    pub(super) fn shifts_arg_window(&self, node: Node<'a>) -> bool {
+        self.is_shift_call(node)
+            && match self.extract_call_args(node).as_slice() {
+                [] => true,
+                [arg] => arg.utf8_text(self.source).ok() == Some("@_"),
+                _ => false,
+            }
     }
 
     /// `$_[0]` — the positional-receiver pseudo-invocant of a method
@@ -756,6 +781,20 @@ impl<'a> Builder<'a> {
                 payload,
                 span,
             });
+            // `$_[0]` is the call's receiver wherever a call site supplies
+            // one (`sub me { $_[0] }` types `$o->me->me` to `$o`'s class);
+            // `ReturnExprReducer` claims it ahead of the window projection
+            // above, which answers when no receiver is in hand.
+            if self.is_positional_receiver(node) {
+                self.bag.push(Witness {
+                    attachment: WitnessAttachment::Expr(span),
+                    source: WitnessSource::Builder("expression".into()),
+                    payload: WitnessPayload::ReturnExpr(
+                        crate::model::witnesses::ReturnExpr::Receiver,
+                    ),
+                    span,
+                });
+            }
         } else {
             // `expr_payload` returned None — either the callee
             // sym isn't in the table yet (forward-defined sub),

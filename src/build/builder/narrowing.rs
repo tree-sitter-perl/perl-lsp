@@ -914,7 +914,7 @@ impl<'a> Builder<'a> {
         // said — the two agree, or the refined TC subsumes the edge's
         // re-derived shape. A declaration keeps the gate: a typed
         // declaration needs no fallback edge.
-        let already_typed = !reassigns && self.bag_query_variable(&name, scope, at).is_some();
+        let already_typed = false;
         let fe = crate::model::file_analysis::FlowEdge {
             target_name: name,
             target_scope: scope,
@@ -925,6 +925,13 @@ impl<'a> Builder<'a> {
         };
         if !already_typed {
             if let Some(w) = fe.lower_to_witness() {
+                // The walk mints a single-target write's edge as it passes;
+                // the `@flow` pass reaches the same write again.
+                if self.bag.for_attachment(&w.attachment).iter().any(|o| {
+                    o.span == w.span && o.payload == w.payload
+                }) {
+                    return;
+                }
                 self.bag.push(w);
             }
         }

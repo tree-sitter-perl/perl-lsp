@@ -1387,14 +1387,13 @@ impl<'a> Builder<'a> {
         } else {
             node_to_span(node)
         };
-        let mut inferred = self.bag_query_expr_span(value_span);
+        let mut inferred = None;
         // `my %h = (k => v, …)` — the list IS a hash literal in
         // this position, the hashref's second spelling. The
         // list's own Expr witness can't carry that (its meaning
         // depends on the LHS sigil), so type it from the LHS
         // side through the same shape builder.
-        if inferred.is_none()
-            && op == Some(crate::cst::AssignOp::Plain)
+        if op == Some(crate::cst::AssignOp::Plain)
             && (crate::cst::is_list_literal(right) || right.kind() == "stub_expression")
         {
             // `()` is a `stub_expression`: the empty list, so `my %h = ()`
@@ -1405,6 +1404,19 @@ impl<'a> Builder<'a> {
                 } else if vt.starts_with('@') {
                     inferred = self.list_literal_type(right);
                 }
+            }
+        }
+        // The target's value is the edge to what the write stored, minted
+        // now so walk-time readers downstream see it.
+        if self.lhs_list_targets(left).is_none() {
+            if let Some(vt) = self.get_var_text_from_lhs(left) {
+                self.push_flow_edge(
+                    vt,
+                    at,
+                    value_span,
+                    crate::model::file_analysis::Extraction::Whole,
+                    left.kind() != "variable_declaration",
+                );
             }
         }
         if self.lhs_list_targets(left).is_some() {

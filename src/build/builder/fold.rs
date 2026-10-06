@@ -562,7 +562,7 @@ impl<'a> Builder<'a> {
             // A compound write's value is the operator's result, which the
             // walk typed on the assignment itself; the RHS alone says nothing
             // about it. Only the may-not-happen `Unknown` applies.
-            if !conditional && crate::cst::assign_op(node) != Some(crate::cst::AssignOp::Plain) {
+            if !conditional {
                 continue;
             }
             let already_typed = typed_at.get(&(var.clone(), at)).is_some_and(|idxs| {
@@ -2048,25 +2048,18 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn resolve_hash_key_owners(&mut self) {
-        use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
-        // Build type constraint lookup from the bag — Variable
-        // witnesses with `InferredType` payloads are the seed-time
-        // type-constraint shape (`push_type_constraint` mirrors every
-        // TC into one of these). The bag is canonical at this phase.
-        let mut type_map: std::collections::HashMap<String, Vec<(ScopeId, InferredType, Point)>> =
-            std::collections::HashMap::new();
-        for w in self.bag.all() {
-            if let (
-                WitnessAttachment::Variable { name, scope },
-                WitnessPayload::InferredType(t),
-            ) = (&w.attachment, &w.payload)
-            {
-                type_map
-                    .entry(name.clone())
-                    .or_default()
-                    .push((*scope, t.clone(), w.span.start));
-            }
-        }
+        use crate::model::witnesses::WitnessAttachment;
+        // Names the bag types at all — the measurement below separates a
+        // known name the scope walk missed from an unattributable one.
+        let typed_names: std::collections::HashSet<String> = self
+            .bag
+            .all()
+            .iter()
+            .filter_map(|w| match &w.attachment {
+                WitnessAttachment::Variable { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
 
         // Build variable def lookup
         let mut var_defs: std::collections::HashMap<String, Vec<(ScopeId, SymbolId)>> =
@@ -2080,7 +2073,26 @@ impl<'a> Builder<'a> {
             }
         }
 
-        for r in &mut self.refs {
+        let owner_class: std::collections::HashMap<usize, String> = self
+            .refs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| {
+                let RefKind::HashKeyAccess { var_text } = &r.kind else { return None };
+                if r.hash_key_owner().is_some() {
+                    return None;
+                }
+                let container = var_text
+                    .strip_prefix('$')
+                    .map(|bare| format!("%{bare}"));
+                let t = self
+                    .bag_query_variable(var_text, r.scope, r.span.start)
+                    .or_else(|| self.bag_query_variable(container.as_deref()?, r.scope, r.span.start))?;
+                Some((i, t.hash_key_class()?.to_string()))
+            })
+            .collect();
+
+        for (i, r) in self.refs.iter_mut().enumerate() {
             if let RefKind::HashKeyAccess { ref var_text } = r.kind {
                 if r.hash_key_owner().is_some() { continue; }
 
@@ -2092,27 +2104,12 @@ impl<'a> Builder<'a> {
                     vt.clone()
                 };
 
-                // Try type constraints first
-                if let Some(constraints) = type_map.get(&vt).or(type_map.get(&lookup_name)) {
-                    // Find best constraint: in scope chain and before ref
-                    let mut scope = Some(r.scope);
-                    'outer: while let Some(sid) = scope {
-                        for (tc_scope, tc_type, tc_point) in constraints {
-                            if *tc_scope == sid && *tc_point <= r.span.start {
-                                // Hash-key owner: read
-                                // `hash_key_class()` so a Parametric
-                                // TC narrows to its row-class arg.
-                                // For non-Parametric this is the
-                                // dispatch class. CLAUDE.md #10.
-                                if let Some(cn) = tc_type.hash_key_class() {
-                                    r.bind_hash_key_owner(HashKeyOwner::Class(cn.to_string()));
-                                    break 'outer;
-                                }
-                            }
-                        }
-                        scope = self.scopes[sid.0 as usize].parent;
-                    }
-                    if r.hash_key_owner().is_some() { continue; }
+                // The variable's type at the access, edges chased.
+                // `hash_key_class()` so a Parametric narrows to its row-class
+                // arg; for anything else it is the dispatch class.
+                if let Some(cn) = owner_class.get(&i) {
+                    r.bind_hash_key_owner(HashKeyOwner::Class(cn.clone()));
+                    continue;
                 }
 
                 // Fall back to variable identity
@@ -2137,7 +2134,7 @@ impl<'a> Builder<'a> {
                 // available and the scope/point test missed it) from a design
                 // (nothing in this file could have attributed it).
                 if crate::util::ghost_stats::enabled() && r.hash_key_owner().is_none() {
-                    let known_tc = type_map.contains_key(&vt) || type_map.contains_key(&lookup_name);
+                    let known_tc = typed_names.contains(&vt) || typed_names.contains(&lookup_name);
                     let known_def = var_defs.contains_key(&vt) || var_defs.contains_key(&lookup_name);
                     crate::util::ghost_stats::count("unowned.total");
                     if crate::model::conventions::is_conventional_invocant_name(&vt) {

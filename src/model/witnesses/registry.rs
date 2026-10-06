@@ -2103,7 +2103,11 @@ impl ReducerRegistry {
                     // exit key beneath it names what this frame produces.
                     let base_t = state.in_opaque_frame(|state| match (base, q.context) {
                         (WitnessAttachment::Variable { name, scope }, Some(ctx)) => {
-                            let point = scope_point(ctx.scopes, *scope);
+                            // The read's own point, as the Edge arm above.
+                            let point = match q.attachment {
+                                WitnessAttachment::Expr(span) => span.start,
+                                _ => scope_point(ctx.scopes, *scope),
+                            };
                             self.query_variable_with_visited(
                                 bag, ctx, name, *scope, point,
                                 q.receiver.as_ref(), state,
