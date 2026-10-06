@@ -473,7 +473,7 @@ impl<'a> Builder<'a> {
 
     pub(super) fn visit_hash_element(&mut self, node: Node<'a>) {
         // Infer HashRef on the operand variable (e.g. $x in $x->{key})
-        self.infer_deref_type(node, InferredType::HashRef);
+        self.infer_deref_type(node, TypeObservation::HashRefAccess);
 
         // Record the hash variable access. Container form (`$h{k}`,
         // grammar field `hash:`) reads `%h`, not scalar `$h` — use the

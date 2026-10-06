@@ -926,26 +926,28 @@ impl<'a> Builder<'a> {
     }
 
     /// Infer a type on the first named child (the operand) of a dereference expression.
-    pub(super) fn infer_deref_type(&mut self, node: Node<'a>, narrowing: InferredType) {
+    pub(super) fn infer_deref_type(&mut self, node: Node<'a>, rep: TypeObservation) {
         if let Some(operand) = node.named_child(0) {
-            // The narrowing is observational — `$cb->()` says
-            // "$cb is a coderef", `${$x}` says "$x is a hashref",
-            // etc. — and doesn't reveal payload (no body span
-            // from the deref site). If the operand is ALREADY
-            // typed with a witness at least as informative as
-            // this narrowing, the TC would only ever clobber
-            // richer payload under latest-wins reduction (the
-            // motivating regression: a `my $cb = sub { ... }`
-            // literal's `CodeRef { return_edge: Some(_) }` losing
-            // its edge to the subsequent `$cb->()`'s
-            // `CodeRef { return_edge: None }`). Skip in that case.
-            if let Some(existing) = self.invocant_type_at_node(operand) {
-                if existing.subsumes_narrowing(&narrowing) {
-                    return;
-                }
-            }
-            self.push_var_type_constraint(operand, node, narrowing);
+            self.push_rep_observation(operand, node, rep);
         }
+    }
+
+    /// A deref reveals the operand's REPRESENTATION, not its value: an
+    /// observation the reducer's rep axis projects only when no value
+    /// answers, so `my $r = maybe(); $r->[0]` keeps the `Optional` its
+    /// writer's edge carries.
+    pub(super) fn push_rep_observation(&mut self, operand: Node<'a>, context_node: Node<'a>, rep: TypeObservation) {
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        if operand.kind() != "scalar" {
+            return;
+        }
+        let Ok(text) = operand.utf8_text(self.source) else { return };
+        self.bag.push(Witness {
+            attachment: WitnessAttachment::Variable { name: text.to_string(), scope: self.current_scope() },
+            source: WitnessSource::Builder("deref_access".into()),
+            payload: WitnessPayload::Observation(rep),
+            span: node_to_span(context_node),
+        });
     }
 
     /// Record a `$x->[i]` / `$x->()` arrow deref whose receiver is a plain

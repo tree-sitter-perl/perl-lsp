@@ -9,6 +9,7 @@ use tree_sitter::{Node, Point, Tree};
 
 use crate::cst::{fq_tail_span, node_to_span};
 use crate::model::file_analysis::*;
+use crate::model::witnesses::TypeObservation;
 
 /// A ready-to-parse tree-sitter Parser for the Perl grammar — the one
 /// constructor every parse site (resolver, document, CLI, the s///e
