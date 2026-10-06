@@ -60,6 +60,29 @@ crate / VS Code extension versions.
 - **A method a class defines itself answers for that class.** The
   inherited definition used to be consulted first, so an override's
   return type was its parent's.
+- **An assignment is worth the value it stores.** `return $h->{k} ||=
+  Foo->new`, `$s //= …` and `$x = …` as a sub's last statement type as
+  the stored value; `.=` / `x=` are strings and the arithmetic and bitwise
+  forms are numbers, whatever the right side was. The memoized-accessor
+  idiom `$cache->{user} ||= User->new` now types its sub.
+- **A short-circuit fallback counts.** `$x || $default`, `//` and their
+  `||=` / `//=` forms join both sides instead of assuming an object can
+  never be false, so a guarded default is no longer ignored. On openQA
+  this removes 15 undefined-deref false positives.
+- **A method call is typed on the receiver it was made on.** An inherited
+  method that returns `$self` (or `$_[0]`, or a fluent `has` writer) types
+  as the caller's subclass, not the class that declared it; a call picks
+  the getter or the writer by its own argument count; and `__PACKAGE__->m`,
+  `$obj->$method` with a constant method name, and a coderef called on an
+  object (`$cb->($obj)`) all type.
+- **A variable holds the value its assignment produced.** A variable
+  assigned from a call is typed through the call itself, so
+  `my $self = shift->SUPER::new` types as the class even when its parent
+  is not indexed, and a dereference no longer erases a value's
+  nullability (`my $r = maybe(); $r->[0]` still warns).
+- **Parenthesized spellings are read like bare ones.** `Class::Tiny`
+  attribute lists, `use constant ({ … })`, export lists, `-as` aliases and
+  hash or array literals wrapped in parentheses were dropped or mistyped.
 
 ### Plugins
 
@@ -75,6 +98,13 @@ crate / VS Code extension versions.
 - `has parent => undef` in Mojo::Base is a mutable slot's initial value,
   not a promise that the getter returns undef, so `$self->parent->…` is
   no longer flagged as a guaranteed die.
+- **Plugins can brand a value.** `EmitAction::Brand` sets or drops
+  namespaced marks on the value a call returns, and a type override may
+  return a `ReturnExpr` (`ReceiverOr`) instead of a fixed type. The Mojo
+  routes plugin uses it: a route's `->to('alerts#')` and its section
+  defaults flow to nested routes, so goto-def on `->to('#list')` reaches
+  the inherited controller's action, and hover shows
+  `Mojolicious::Routes::Route<controller=alerts, section=admin>`.
 
 ### Scoping
 
