@@ -689,12 +689,7 @@ fn build_once(
         loader_config_params: b.loader_config_params,
         flow_edges: b.flow_edges,
     });
-    // Finalize: the MCB→bag bridge (`emit_method_call_binding_edges`)
-    // publishes `Variable → Edge(PackageSymbol{...})` for every recorded
-    // `$var = $invocant->method()` binding — the registry chases the
-    // return lazily, cross-file once a query holds the index. Enrichment
-    // re-runs the same bridge without a tree. Then owner fixup, target
-    // stamping, and the base-count seals.
+    // Finalize: owner fixup, target stamping, and the base-count seals.
     bphase!("finalize_post_walk", fa.finalize_post_walk());
 
     fa

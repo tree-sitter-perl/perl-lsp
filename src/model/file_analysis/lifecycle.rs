@@ -249,10 +249,6 @@ impl FileAnalysis {
         // per-call gap on smaller inputs, so one of these steps scales with
         // something other than file size, and one aggregate tag cannot say
         // which. (ScopedNs, so each lands per-file with exclusive time.)
-        {
-            let _g = crate::util::ghost_stats::ScopedNs::start("finalize::mcb_edges");
-            self.emit_method_call_binding_edges();
-        }
         // Fill HashKeyAccess owners that are resolvable in-file
         // via the invocant ladder (`method_call_invocant_type`).
         // Cross-file gaps stay None until
