@@ -47,3 +47,26 @@ fn a_coderef_call_takes_its_first_arg_as_the_receiver() {
     let body = "my $cb = \\&Base::first; my $k = Kid->new; return $cb->($k);";
     assert_eq!(class(returns(body)).as_deref(), Some("Kid"));
 }
+
+#[test]
+fn the_receiver_is_whatever_the_invocant_holds() {
+    let src = format!(
+        "{PRELUDE}package Kid;\n\
+         sub viapkg {{ __PACKAGE__->first }}\n\
+         sub viac {{ my $c = Kid->new; $c->first }}\n\
+         sub viafold {{ my $k = 'Kid'; $k->first }}\n1;\n"
+    );
+    let fa = build_fa(&src);
+    for sub in ["viapkg", "viac", "viafold"] {
+        assert_eq!(class(fa.sub_return_type_at_arity(sub, None)).as_deref(), Some("Kid"), "{sub}");
+    }
+}
+
+#[test]
+fn a_postfix_deref_argument_spreads() {
+    // `first` reads `$_[0]`, the receiver, only while the window is exact.
+    let src = format!("{PRELUDE}sub probe {{ my $r = []; Base->first($r->@*) }}\n1;\n");
+    let fa = build_fa(&src);
+    assert_eq!(class(fa.sub_return_type_at_arity("probe", None)).as_deref(), Some("Base"));
+}
+

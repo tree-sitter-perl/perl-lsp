@@ -53,11 +53,7 @@ impl<'a> Builder<'a> {
         let mut i = 0;
         while i < named.len() {
             let elem = named[i];
-            if matches!(
-                elem.kind(),
-                "hash" | "hash_deref_expression" | "container_variable"
-                    | "array" | "array_deref_expression"
-            ) {
+            if crate::cst::is_flattening(elem) {
                 // Spread (`%other` / `%$ref` / `@_` / `@rest`) — the
                 // key set is no longer exhaustive. Arrays included:
                 // `my %h = (default => 1, @_)` is the canonical
@@ -264,13 +260,7 @@ impl<'a> Builder<'a> {
                     return Some(WitnessPayload::InferredType(InferredType::ClassName(class)));
                 }
                 // `$obj->$cb(…)`: call whatever `$cb` holds, on `$obj`.
-                let method = node.child_by_field_name("method")?;
-                let cb = if method.kind() == "scalar" {
-                    Some(method)
-                } else {
-                    method.named_child(0).filter(|c| c.kind() == "scalar")
-                };
-                if let Some(cb) = cb {
+                if let Some(cb) = crate::cst::dynamic_method_scalar(node) {
                     self.emit_expr_witness(cb);
                     let receiver = node.child_by_field_name("invocant").map(|inv| {
                         self.emit_invocant_witness(inv);
@@ -505,29 +495,22 @@ impl<'a> Builder<'a> {
         };
         match inv.kind() {
             "bareword" | "package" => {
-                let class = if crate::model::conventions::is_current_package_token(text) {
-                    self.package_for_node(inv)
-                } else {
-                    Some(text.to_string())
-                };
-                if let Some(c) = class {
-                    push_class(self, c);
-                }
+                push_class(self, text.to_string());
                 self.emit_expr_witness(inv);
             }
             "scalar" => {
                 self.emit_expr_witness(inv);
-                let class = if text == "$self" {
-                    self.package_for_node(inv)
-                } else {
-                    let key = crate::cst::canonical_var_name(inv, self.source);
-                    match self.resolve_constant_strings(key.as_deref().unwrap_or(text), 0).as_deref() {
-                        Some([class]) => Some(class.clone()),
-                        _ => None,
+                // TODO: drop once a variable edges to its value; until then a
+                // type-at on `my $self = shift->SUPER::new` (gold ti-12) reads
+                // through this hardcode.
+                if text == "$self" {
+                    if let Some(c) = self.package_for_node(inv) {
+                        push_class(self, c);
                     }
-                };
-                if let Some(c) = class {
-                    push_class(self, c);
+                }
+                let key = crate::cst::canonical_var_name(inv, self.source);
+                if let Some([class]) = self.resolve_constant_strings(key.as_deref().unwrap_or(text), 0).as_deref() {
+                    push_class(self, class.clone());
                 }
             }
             _ => self.emit_expr_witness(inv),
@@ -544,7 +527,7 @@ impl<'a> Builder<'a> {
             .map(|a| {
                 self.emit_expr_witness(a);
                 let att = WitnessAttachment::Expr(node_to_span(a));
-                if a.utf8_text(self.source).is_ok_and(|t| t.starts_with(['@', '%'])) {
+                if crate::cst::is_flattening(a) {
                     CallArg::Spread(att)
                 } else {
                     CallArg::One(att)
@@ -1026,6 +1009,12 @@ impl<'a> Builder<'a> {
             "postinc_expression" | "preinc_expression" => Some(InferredType::Numeric),
             "func1op_call_expression" | "func0op_call_expression" => {
                 let name = node.child(0)?.utf8_text(self.source).ok()?;
+                if crate::model::conventions::is_current_package_token(name) {
+                    // `package_at_pos`, not the scope walk: top-level code
+                    // under `package Foo;` sits in the file scope, whose
+                    // package is `main`.
+                    return self.package_at_pos(node.start_position()).map(|p| InferredType::ClassName(p.to_string()));
+                }
                 crate::model::builtins::builtin_return_type(name)
             }
             _ => None,

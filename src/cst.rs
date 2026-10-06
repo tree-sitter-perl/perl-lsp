@@ -957,6 +957,28 @@ pub(crate) fn constructor_invocant<'a>(node: Node<'a>, src: &'a [u8]) -> Option<
     }
 }
 
+/// The scalar a dynamic method call dispatches through: `$o->$cb(...)`,
+/// `$o->${cb}`, `$o->$$cb`. The `method:` field is always a `method` node,
+/// wrapping the scalar for these spellings and a bare name otherwise.
+pub(crate) fn dynamic_method_scalar(call: Node) -> Option<Node> {
+    call.child_by_field_name("method")?.named_child(0).filter(|c| c.kind() == "scalar")
+}
+
+/// An argument that flattens into any number of values in list context:
+/// an array or hash, a deref of one, or a slice.
+pub(crate) fn is_flattening(node: Node) -> bool {
+    matches!(
+        node.kind(),
+        "array"
+            | "hash"
+            | "array_deref_expression"
+            | "hash_deref_expression"
+            | "container_variable"
+            | "slice_expression"
+            | "keyval_expression"
+    )
+}
+
 /// True when `node` is a `scalar` whose bare varname is a conventional
 /// invocant (`$self` / `$class` / `$this` / `$proto`), matching braced
 /// spellings (`${self}`) and rejecting derefs (`${$ref}`) by reading the
