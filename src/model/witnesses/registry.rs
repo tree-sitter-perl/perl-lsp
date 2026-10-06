@@ -2381,6 +2381,9 @@ impl ReducerRegistry {
         let mut recv = receiver.and_then(|r| self.operand_type(bag, q, state, r));
         // Positional argument types up to the first spread; an operand that
         // types nothing holds its position as `Unknown`.
+        // TODO(prototypes): a callee prototype like `(\@)` takes an aggregate
+        // as ONE value, so whether an argument spreads is the callee's call;
+        // the operand only says it can flatten. Needs prototype parsing.
         let mut arg_types: Vec<InferredType> = Vec::new();
         let mut spread = false;
         for a in args.unwrap_or_default() {

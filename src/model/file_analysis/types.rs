@@ -863,6 +863,44 @@ impl InferredType {
         }
     }
 
+    /// Every witness attachment this value carries, mutably. Exhaustive so a
+    /// variant that grows an attachment can't be skipped by a span rewrite.
+    pub fn for_each_attachment_mut(&mut self, f: &mut dyn FnMut(&mut crate::model::witnesses::WitnessAttachment)) {
+        match self {
+            InferredType::CodeRef { return_edge } => {
+                if let Some(a) = return_edge {
+                    f(a);
+                }
+            }
+            InferredType::Parametric(ParametricType::Instance { args, .. }) | InferredType::Sequence(args) => {
+                for t in args {
+                    t.for_each_attachment_mut(f);
+                }
+            }
+            InferredType::TypeConstraintOf(Some(t)) | InferredType::Optional(t) => t.for_each_attachment_mut(f),
+            InferredType::HashWithKeys { keys, .. } => {
+                if keys.iter().any(|(_, v)| v.is_some()) {
+                    for t in keys.to_mut().iter_mut().filter_map(|(_, v)| v.as_mut()) {
+                        t.for_each_attachment_mut(f);
+                    }
+                }
+            }
+            InferredType::ClassName(_)
+            | InferredType::FirstParam { .. }
+            | InferredType::HashRef
+            | InferredType::ArrayRef
+            | InferredType::Regexp
+            | InferredType::Numeric
+            | InferredType::String
+            | InferredType::Parametric(ParametricType::ResultSet { .. })
+            | InferredType::TypeConstraintOf(None)
+            | InferredType::BrandedRoute { .. }
+            | InferredType::Undef
+            | InferredType::Bool
+            | InferredType::Unknown => {}
+        }
+    }
+
     /// Witness-bag attachment whose type IS this callable's return
     /// when invoked. `Expr(span)` for anon-sub literals (resolves
     /// at query time via the body's last-expression witnesses);

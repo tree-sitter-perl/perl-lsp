@@ -61,3 +61,25 @@ fn a_method_name_held_in_a_variable_calls_that_method() {
     let body = "my $m = 'peer'; my $k = Kid->new; return $k->$m;";
     assert_eq!(class(returns(body)).as_deref(), Some("Base"));
 }
+
+#[test]
+fn the_receiver_is_whatever_the_invocant_holds() {
+    let src = format!(
+        "{PRELUDE}package Kid;\n\
+         sub viapkg {{ __PACKAGE__->first }}\n\
+         sub viac {{ my $c = Kid->new; $c->first }}\n\
+         sub viafold {{ my $k = 'Kid'; $k->first }}\n1;\n"
+    );
+    let fa = build_fa(&src);
+    for sub in ["viapkg", "viac", "viafold"] {
+        assert_eq!(class(fa.sub_return_type_at_arity(sub, None)).as_deref(), Some("Kid"), "{sub}");
+    }
+}
+
+#[test]
+fn a_postfix_deref_argument_spreads() {
+    // `first` reads `$_[0]`, the receiver, only while the window is exact.
+    let src = format!("{PRELUDE}sub probe {{ my $r = []; Base->first($r->@*) }}\n1;\n");
+    let fa = build_fa(&src);
+    assert_eq!(class(fa.sub_return_type_at_arity("probe", None)).as_deref(), Some("Base"));
+}

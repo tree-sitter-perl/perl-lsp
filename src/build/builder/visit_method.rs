@@ -128,10 +128,8 @@ impl<'a> Builder<'a> {
         // inference-dependent stays None for PostFold to fill from the bag.
         let invocant_class = invocant_node.and_then(|n| match n.kind() {
             "method_call_expression" => self.extract_constructor_class(n),
-            "bareword" | "package"
-                if n.utf8_text(self.source).ok().is_some_and(crate::model::conventions::is_current_package_token) =>
-            {
-                self.current_package.clone()
+            "func0op_call_expression" => {
+                self.infer_expression_result_type(n).and_then(|t| t.class_name().map(str::to_string))
             }
             _ => None,
         });

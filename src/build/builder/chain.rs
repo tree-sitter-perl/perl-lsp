@@ -45,27 +45,18 @@ impl<'a> Builder<'a> {
                 // first-arg-is-receiver subtraction here — the
                 // method-call syntax already accounts for the
                 // receiver via the `invocant` field).
-                if let Some(method_field) = node.child_by_field_name("method") {
-                    let scalar_node = if method_field.kind() == "scalar" {
-                        Some(method_field)
-                    } else {
-                        method_field
-                            .named_child(0)
-                            .filter(|c| c.kind() == "scalar")
-                    };
-                    if let Some(scalar) = scalar_node {
-                        let cb_ty = self.invocant_type_at_node(scalar)?;
-                        let target = cb_ty.callable_return_edge()?.clone();
-                        let invocant_ty = node
-                            .child_by_field_name("invocant")
-                            .and_then(|inv| self.invocant_type_at_node(inv));
-                        let arity = self.extract_call_args(node).len() as u32;
-                        return self.bag_query_attachment_with(
-                            &target,
-                            Some(arity),
-                            invocant_ty,
-                        );
-                    }
+                if let Some(scalar) = crate::cst::dynamic_method_scalar(node) {
+                    let cb_ty = self.invocant_type_at_node(scalar)?;
+                    let target = cb_ty.callable_return_edge()?.clone();
+                    let invocant_ty = node
+                        .child_by_field_name("invocant")
+                        .and_then(|inv| self.invocant_type_at_node(inv));
+                    let arity = self.extract_call_args(node).len() as u32;
+                    return self.bag_query_attachment_with(
+                        &target,
+                        Some(arity),
+                        invocant_ty,
+                    );
                 }
                 let span = node_to_span(node);
                 let idx = self.refs.iter().position(|r| {
@@ -208,18 +199,6 @@ impl<'a> Builder<'a> {
             }
             "scalar" => {
                 let text = node.utf8_text(self.source).ok()?;
-                // `$self` short-circuit — the value of the package
-                // CONTAINING this node is the canonical answer
-                // regardless of whether a TC was seeded for `$self`
-                // yet. Use the innermost scope's `package` field
-                // (set on package_statement AND class_statement
-                // entries) so post-walk callers — where
-                // `self.current_package` is stale, holding the
-                // walk's last-opened package, not the one
-                // surrounding this node — get the right answer.
-                if text == "$self" {
-                    return self.package_for_node(node).map(InferredType::ClassName);
-                }
                 // Const-folded class string: `my $c = 'Counter'; $c->bump`.
                 // In invocant position a known constant string IS the
                 // dispatch class — the same fold dynamic method names use
@@ -241,11 +220,9 @@ impl<'a> Builder<'a> {
                 let scope = self.scope_at_point(node.start_position());
                 self.bag_query_variable(text, scope, node.start_position())
             }
+            "func0op_call_expression" => self.infer_expression_result_type(node),
             "bareword" | "package" => {
                 let text = node.utf8_text(self.source).ok()?;
-                if crate::model::conventions::is_current_package_token(text) {
-                    return self.package_for_node(node).map(InferredType::ClassName);
-                }
                 // Bareword invocant is ambiguous: class-name reference
                 // OR zero-arg function call whose return type seeds
                 // the chain (`app->routes` where `sub app :: Mojolicious`).
