@@ -47,3 +47,17 @@ fn a_coderef_call_takes_its_first_arg_as_the_receiver() {
     let body = "my $cb = \\&Base::first; my $k = Kid->new; return $cb->($k);";
     assert_eq!(class(returns(body)).as_deref(), Some("Kid"));
 }
+
+#[test]
+fn a_constructor_whose_parent_is_unseen_still_builds_its_receiver() {
+    let src = "package Orphan;\nour @ISA = ('Unseen::Base');\nsub new {\n  my $self = shift->SUPER::new;\n  return $self;\n}\n1;\n";
+    let fa = build_fa(src);
+    let t = fa.sub_return_type_at_arity("new", None);
+    assert_eq!(class(t).as_deref(), Some("Orphan"));
+}
+
+#[test]
+fn a_method_name_held_in_a_variable_calls_that_method() {
+    let body = "my $m = 'peer'; my $k = Kid->new; return $k->$m;";
+    assert_eq!(class(returns(body)).as_deref(), Some("Base"));
+}

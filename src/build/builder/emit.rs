@@ -273,6 +273,13 @@ impl<'a> Builder<'a> {
                 if let Some(class) = self.extract_constructor_class(node) {
                     return Some(WitnessPayload::InferredType(InferredType::ClassName(class)));
                 }
+                // A named method, or a `$obj->$m` whose `$m` folded to one
+                // name: the call's ref carries its `Invoke`.
+                if let Some(&[idx]) = self.method_call_refs.get(&node.id()).map(Vec::as_slice) {
+                    return Some(WitnessPayload::Edge(WitnessAttachment::Expression(RefIdx(
+                        idx as u32,
+                    ))));
+                }
                 // `$obj->$cb(…)`: call whatever `$cb` holds, on `$obj`.
                 let method = node.child_by_field_name("method")?;
                 let cb = if method.kind() == "scalar" {

@@ -612,6 +612,11 @@ struct Builder<'a> {
     /// `method_call_invocant`.
     method_call_args: std::collections::HashMap<usize, Vec<crate::model::witnesses::CallArg>>,
 
+    /// Call node id → the `MethodCall` refs it minted (one per folded name
+    /// of a dynamic `$o->$m`), so an assignment binds to its call's refs.
+    /// **Build-only**.
+    method_call_refs: std::collections::HashMap<usize, Vec<usize>>,
+
     /// MethodCall ref indices for which we've published an
     /// `InferredType::Parametric` witness on `Expression(refidx)`
     /// — `recv->resultset('Foo')` and search-family threading

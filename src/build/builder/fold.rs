@@ -1065,7 +1065,11 @@ impl<'a> Builder<'a> {
                 attachment: WitnessAttachment::Expression(crate::model::witnesses::RefIdx(i as u32)),
                 source: WitnessSource::Builder("method_call_return".into()),
                 payload: WitnessPayload::Invoke {
-                    callee: Callee::Method { name: token.name().to_string(), lookup },
+                    callee: Callee::Method {
+                        name: token.name().to_string(),
+                        lookup,
+                        constructs: crate::model::conventions::is_constructor_name(token.name()),
+                    },
                     receiver,
                     args: walked.cloned(),
                 },

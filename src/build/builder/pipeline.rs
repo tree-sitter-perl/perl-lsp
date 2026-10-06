@@ -363,6 +363,7 @@ fn build_once(
         reassigned_scalars: std::collections::HashSet::new(),
         key_writes: Vec::new(),
         method_call_args: std::collections::HashMap::new(),
+        method_call_refs: std::collections::HashMap::new(),
         parametric_emitted_refs: std::collections::HashSet::new(),
         method_call_ref_dedup: std::collections::HashSet::new(),
         defined_narrowings: Vec::new(),

@@ -2396,7 +2396,7 @@ impl ReducerRegistry {
         }
         let exact = args.is_some() && !spread;
         let lookups: Vec<WitnessAttachment> = match callee {
-            Callee::Method { name, lookup } => {
+            Callee::Method { name, lookup, .. } => {
                 let classes: Vec<String> = match lookup {
                     Lookup::Receiver => {
                         recv.as_ref().and_then(|t| t.class_name()).map(str::to_string).into_iter().collect()
@@ -2439,7 +2439,7 @@ impl ReducerRegistry {
         let arity = exact.then_some(arg_types.len() as u32);
         // SUPER walks the writer's parents in MRO order: the first that
         // answers is the method Perl would run.
-        lookups.into_iter().find_map(|att| {
+        let found = lookups.into_iter().find_map(|att| {
             let sub_q = ReducerQuery {
                 attachment: &att,
                 point: q.point,
@@ -2453,6 +2453,12 @@ impl ReducerRegistry {
                 ReducedValue::Type(t) => Some(t.clone()),
                 ReducedValue::FactMap(_) | ReducedValue::None => None,
             })
+        });
+        let constructs = matches!(callee, Callee::Method { constructs: true, .. });
+        found.or_else(|| {
+            constructs
+                .then(|| recv?.class_name().map(|c| InferredType::ClassName(c.to_string())))
+                .flatten()
         })
     }
 

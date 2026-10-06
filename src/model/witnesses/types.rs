@@ -356,8 +356,10 @@ pub enum WitnessPayload {
 /// What an `Invoke` calls.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Callee {
-    /// A named method, looked up per `Lookup`.
-    Method { name: String, lookup: Lookup },
+    /// A named method, looked up per `Lookup`. `constructs`: the name is a
+    /// constructor by convention, so when no lookup answers (a parent this
+    /// file can't see) the call is still an instance of the receiver's class.
+    Method { name: String, lookup: Lookup, constructs: bool },
     /// Whatever callable this attachment holds (`$cb->(…)`, `$obj->$cb(…)`):
     /// its `CodeRef` return edge is the call's value.
     Value(WitnessAttachment),

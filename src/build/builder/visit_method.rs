@@ -176,6 +176,7 @@ impl<'a> Builder<'a> {
                             self.method_call_invocant.insert(idx, c);
                         }
                         self.method_call_args.insert(idx, operands.clone());
+                        self.method_call_refs.entry(node.id()).or_default().push(idx);
                     }
                 }
             } else {
@@ -196,6 +197,7 @@ impl<'a> Builder<'a> {
                     self.method_call_invocant.insert(idx, c);
                 }
                 self.method_call_args.insert(idx, operands.clone());
+                self.method_call_refs.entry(node.id()).or_default().push(idx);
 
                 // Runtime-exporter setup in method-call form:
                 // `Moose::Exporter->setup_import_methods(...)`,
