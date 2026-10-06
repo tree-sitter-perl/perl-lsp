@@ -222,6 +222,58 @@ impl WitnessPayload {
     }
 }
 
+impl WitnessPayload {
+    /// Every attachment this payload reaches, mutably — edge targets, call
+    /// operands, and the attachments inside a carried type. Exhaustive so a
+    /// new attachment-bearing shape can't be skipped by a span rewrite.
+    pub fn for_each_attachment_mut(&mut self, f: &mut dyn FnMut(&mut WitnessAttachment)) {
+        match self {
+            WitnessPayload::Edge(t) | WitnessPayload::Projected { base: t, .. } => f(t),
+            WitnessPayload::Tuple(ts) => ts.iter_mut().for_each(|t| f(t)),
+            WitnessPayload::Invoke { callee, receiver, args } => {
+                match callee {
+                    Callee::Value(t) => f(t),
+                    Callee::Method { .. } => {}
+                }
+                if let Some(t) = receiver {
+                    f(t);
+                }
+                for arg in args.iter_mut().flatten() {
+                    let (CallArg::One(t) | CallArg::Spread(t)) = arg;
+                    f(t);
+                }
+            }
+            WitnessPayload::InferredType(t) => t.for_each_attachment_mut(f),
+            WitnessPayload::ReturnExpr(r) => r.for_each_attachment_mut(f),
+            WitnessPayload::Observation(_)
+            | WitnessPayload::Fact { .. }
+            | WitnessPayload::Derivation
+            | WitnessPayload::Custom { .. }
+            | WitnessPayload::DomainCompare { .. }
+            | WitnessPayload::Reset => {}
+        }
+    }
+}
+
+impl ReturnExpr {
+    /// The attachments inside the types this expression names.
+    pub fn for_each_attachment_mut(&mut self, f: &mut dyn FnMut(&mut WitnessAttachment)) {
+        match self {
+            ReturnExpr::Concrete(t) | ReturnExpr::ReceiverOr(t) => t.for_each_attachment_mut(f),
+            ReturnExpr::Operator(ParametricOp::RowOf(r) | ParametricOp::ParamOf { of: r, .. }) => {
+                r.for_each_attachment_mut(f)
+            }
+            ReturnExpr::Operator(ParametricOp::InstanceOf { args, .. }) => {
+                args.iter_mut().for_each(|r| r.for_each_attachment_mut(f))
+            }
+            ReturnExpr::UnionOnArgs { branches } => {
+                branches.iter_mut().for_each(|(_, r)| r.for_each_attachment_mut(f))
+            }
+            ReturnExpr::Receiver | ReturnExpr::Arg(_) => {}
+        }
+    }
+}
+
 impl WitnessSource {
     /// Priority for "highest-priority source wins" tie-breaking in
     /// reducers. Plugin overrides dominate everything else (the whole
