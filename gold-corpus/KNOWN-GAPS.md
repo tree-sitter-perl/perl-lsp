@@ -170,22 +170,6 @@ assertion is "no diagnostic at this site."
 New gaps surfaced while mining gold from fresh CPAN modules. Each is pinned at
 xfail (expected-correct confirmed from source; tool genuinely wrong).
 
-### `hover-mojo-url-clone-via-new` / `ti-mojo-url-abs-clone-chain` — clone sub's stored *return type*
-`Mojo::URL::clone` does `my $clone = $self->new; @$clone{…}=…; return $clone`.
-The **variable** `$clone` types `Mojo::URL` correctly. The fixture cursors the
-`sub clone` declaration, which reports the sub's *declared* return type — still
-`HashRef`/null, NOT `Mojo::URL`. Root cause is **build-time vs query-time**:
-`clone`'s `return_types` entry is seeded in the fold
-(`seed_return_types_from_bag`) at build time, where the module index isn't
-consulted, so the cross-file `$self->new → SUPER::new → Mojo::Base::new` chain
-the variable resolves *at query time* isn't visible to the build-time seed —
-only the local `@$clone{…}` hash-slice rep survives. Same class of gap as
-`ClassIsa`/`param_types` ancestry-gated *emission* deferred to the ReceiverGated
-seam: a sub-return whose value depends on a cross-file chain must resolve on a
-query-time seam, not the build-time `return_types` map. **Subsystem:** build-time
-`return_types` seed vs query-time cross-file method-return composition.
-**Difficulty:** medium–high.
-
 ### `diag-mojo-cookiejar-helper-fp` / `diag-mojo-daemon-callback-fp` — first-param-self over-reach in OO classes
 In an OO class, a plain helper (`sub _compare { my ($cookie,…)=@_ }`) or an
 anonymous callback (`on(request => sub { my $tx = shift; … })` ) has its first
@@ -207,7 +191,6 @@ class. **Subsystem:** first-param-self heuristic (`detect_first_param_type`).
 | diag-08 (loader call) | XS loader recognition | **low** |
 | diag-09 / diag-10 | typeglob-codegen synthesis | medium |
 | def-16-codegen-type-function | Type::Library synthesis | medium |
-| mojo-url clone *sub-return* (variable is fixed) | build-time `return_types` seed vs query-time cross-file method-return | medium–high |
 | diag-mojo-cookiejar/daemon first-param-self | invocant heuristic in OO class | **high** (ambiguous) |
 
 Quickest wins: the signature-help invocant gate, imported-names in completion,

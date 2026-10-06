@@ -273,8 +273,8 @@
         ],
         "none": []
       },
-      "status": "xfail",
-      "note": "GAP: my $abs=$self->clone -> should be Mojo::URL but clone mistyped HashRef propagates."
+      "status": "gold",
+      "note": "my $abs=$self->clone: clone's $clone keeps the constructor's Mojo::URL past its hash-slice deref (a rep observation), so the chain types Mojo::URL."
     },
     {
       "id": "ti-bool-comparison",

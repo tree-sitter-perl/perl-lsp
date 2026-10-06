@@ -342,8 +342,8 @@
         ],
         "none": []
       },
-      "status": "xfail",
-      "note": "GAP: clone does my $clone=$self->new;...;return $clone -> should be Mojo::URL but resolves HashRef."
+      "status": "gold",
+      "note": "clone does my $clone=$self->new; @$clone{...}=...; return $clone. The constructor's value is the receiver's class, and the hash-slice deref is a rep observation that never displaces it, so clone returns Mojo::URL."
     },
     {
       "id": "hover-mojo-collection-each-self",
