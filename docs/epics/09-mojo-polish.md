@@ -17,7 +17,7 @@ completion stretch, explicitly droppable.
 
 1. `docs/prompt-mojo-todo.md` — the spec. Its "Ready vs missing"
    paragraph for stash is the checklist.
-2. `docs/adr/route-branding.md` — `BrandedRoute` accumulates route
+2. `docs/adr/brands.md` — route marks accumulate route
    defaults; the stash key set per action IS the brand's stash at the
    terminal `->to`.
 3. `docs/adr/plugin-system.md` + `docs/PLUGIN_AUTHORING.md` — emit vs
@@ -52,7 +52,7 @@ sourced from the brand. Do not relitigate per-controller ownership; the
 doc explains why it over-broadens.
 
 1. **Emission, route side:** at each terminal `->to` naming an action,
-   emit `HashKeyDef`s for the in-force `BrandedRoute.stash` keys
+   emit `HashKeyDef`s for the in-force route marks
    (inherited overlay + local), owned per-action. Ownership shape: the
    doc's options (a)+(b) BOTH — an action-scoped `HashKeyOwner` variant
    for deref reads AND namespace registration for string-arg
@@ -134,7 +134,7 @@ document for that future tier:
 
 1. **What this epic needs that a query overlay could NOT express.**
    Phase B is the interesting case: the stash key set is accumulated
-   along a route chain (`BrandedRoute` inheritance) and then attributed
+   along a route chain (route brand inheritance) and then attributed
    to an action identified by a decamelize rule. That is *name surgery
    and accumulation across nodes*, not pattern matching. When Epic 13
    asks "does a declarative query overlay suffice, or does the tier need

@@ -1296,23 +1296,27 @@ fn remap_spans(
     // `unsigned op_type`) shifts every span AFTER it, so a declared-type
     // witness left in transformed coords lands past the original query point
     // and the temporal fold drops it. Remap the witness `.span`, any span-
-    // bearing attachment (`Expr`/`BranchArm`), and the same shapes reached
-    // through a payload edge target — so `expr_type_at_span` and the temporal
-    // ordering all speak original coordinates, like refs.
-    use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
-    let remap_att = |a: &mut WitnessAttachment| match a {
+    // bearing attachment (`Expr`/`BranchArm`), and the same shapes anywhere in
+    // the payload — so `expr_type_at_span` and the temporal ordering all speak
+    // original coordinates, like refs. Both matches are exhaustive: a new
+    // span-bearing shape fails to compile here until it is remapped.
+    use crate::model::witnesses::WitnessAttachment;
+    let mut remap_att = |a: &mut WitnessAttachment| match a {
         WitnessAttachment::Expr(sp) | WitnessAttachment::BranchArm(sp) => *sp = rspan(*sp),
-        _ => {}
+        WitnessAttachment::Variable { .. }
+        | WitnessAttachment::Expression(_)
+        | WitnessAttachment::Symbol(_)
+        | WitnessAttachment::HashKey { .. }
+        | WitnessAttachment::PackageSymbol { .. }
+        | WitnessAttachment::SymbolReturnArm(_)
+        | WitnessAttachment::SlotType { .. }
+        | WitnessAttachment::TypeName(_)
+        | WitnessAttachment::Field { .. }
+        | WitnessAttachment::Param { .. } => {}
     };
     for w in witnesses.iter_mut() {
         remap_att(&mut w.attachment);
-        match &mut w.payload {
-            WitnessPayload::Edge(t)
-            | WitnessPayload::CallReturn { target: t, .. }
-            | WitnessPayload::QualifiedCallReturn { method_lookup: t, .. }
-            | WitnessPayload::Projected { base: t, .. } => remap_att(t),
-            _ => {}
-        }
+        w.payload.for_each_attachment_mut(&mut remap_att);
         w.span = rspan(w.span);
     }
     // Value-flow edges (the provenance tier above the bag) + label/goto refs +

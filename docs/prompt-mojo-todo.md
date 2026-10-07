@@ -64,7 +64,7 @@ Not per-controller (`HashKeyOwner::Class(controller)` over-broadens: two
 actions in one controller reached through different `under` branches have
 different in-force stash, e.g. `users#list` under `/admin` sees `layout`
 but `users#show` does not). The authoritative "what stash is in force
-here" is the accumulated `BrandedRoute.stash` (`adr/route-branding.md`) at
+here" is the accumulated the route value's mojo-routes marks (`adr/brands.md`) at
 the route value that targets the action — so the key set is per-action,
 sourced from the brand.
 
@@ -75,7 +75,7 @@ sourced from the brand.
   overlay + local) is that action's default set. We read the pairs with
   the shared `classified_pairs` + `value_shape` now that the `to` work
   landed; the keys we want are exactly the non-`controller`/`action` ones
-  `merge_to_defaults` already drops into `BrandedRoute.stash`.
+  mojo-routes' `to_marks` already sets as marks.
 - `render(k => v)` / `stash(k => v)` *inside* the action body — action-
   LOCAL keys (not inherited via the brand; transient per request). Detect
   the fat-comma tail after the known render options (`template`/`format`/
@@ -118,7 +118,7 @@ controller body (another file) finds keys declared in the app file via
   hash-key completion + goto-def to the defining `->to`/`render` work.
 - hover on an in-force key showing where it was set (which `->to`/`render`).
 
-**Ready vs missing.** Ready: `BrandedRoute.stash` accumulates through all
+**Ready vs missing.** Ready: the route marks accumulate through all
 chain edges; `classified_pairs`/`value_shape` read the keyvals; the
 `Controller#action` Handler + bridge exist. Missing: (1) emit per-action
 stash `HashKeyDef`s from the brand at terminal `->to` + from body-local

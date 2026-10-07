@@ -269,6 +269,21 @@ pub enum EmitAction {
         controller: String,
     },
 
+    /// Mark the value of the method call spanning `at` (`InferredType::
+    /// overlay`): `set` lands in the emitting plugin's namespace and `drop`
+    /// keys leave it, applied only when the call's value is an `on_class`
+    /// instance. The marks then ride the value through assignment and
+    /// receiver-returning calls; a later match reads them back through the
+    /// `brand` projection (`docs/adr/brands.md`).
+    Brand {
+        at: Span,
+        on_class: String,
+        #[serde(default)]
+        set: Vec<(String, String)>,
+        #[serde(default)]
+        drop: Vec<String>,
+    },
+
     /// Emit an accessor-style method. Shorthand for Symbol + SymKind::Method +
     /// SymbolDetail::Sub. The plugin's id becomes the symbol's Namespace tag.
     ///
@@ -801,13 +816,16 @@ pub struct CaptureData {
     /// A generic syntax fact; plugins match their own DSL verbs.
     #[serde(default)]
     pub call_name: Option<String>,
-    /// Projection `route_defaults` — route defaults inherited by this
-    /// node's value, flattened to `[[key, value], …]` (`controller` is
-    /// the distinguished key). Fold-phase patterns only: reads the
-    /// fold-settled `BrandedRoute` brand, falling back to the replayed
-    /// topic-route base for topic-DSL verb-call receivers.
+    /// Projection `brand` — the marks this node's value carries in the
+    /// matching plugin's own namespace, as `[[key, value], …]`. Fold-phase
+    /// patterns only: marks settle with the fold.
     #[serde(default)]
-    pub route_defaults: Vec<(String, String)>,
+    pub brand: Vec<(String, String)>,
+    /// Projection `topic_base` — when this node is a CALL to the active
+    /// topic DSL's verb, the base the replayed topic-route stack has in
+    /// force there (what an earlier `SetRouteBase` set). Fold-phase only.
+    #[serde(default)]
+    pub topic_base: Option<String>,
     /// Projection `isa` — the resolved `isa` option type in a
     /// `has`-style option tail (string vocabulary via the framework
     /// mode, constructor calls via the `type_constraint_*` fold).
@@ -888,11 +906,22 @@ pub struct FrameworkModeMaker {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TypeOverride {
     pub target: OverrideTarget,
-    pub return_type: InferredType,
+    pub return_type: OverrideReturn,
     /// Free-form prose surfacing in `TypeProvenance::PluginOverride.reason`.
     /// Read by humans only — keep it explanatory ("returns $self via
     /// the @_-shift / array-slice idiom that inference doesn't model").
     pub reason: String,
+}
+
+/// What an override says a call returns: a type, or a `ReturnExpr` that the
+/// call site substitutes into (`#{ ReceiverOr: #{ ClassName: "X" } }` returns
+/// the receiver itself, marks and all). Untagged, so a manifest spells a
+/// plain type bare; the two enums' variant names are disjoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum OverrideReturn {
+    Type(InferredType),
+    Expr(crate::model::witnesses::ReturnExpr),
 }
 
 /// A plugin-declared "this method dispatches a named handler when its

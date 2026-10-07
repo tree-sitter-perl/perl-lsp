@@ -2,6 +2,7 @@
 //! DBIC components, Sub::Exporter config, and isa-constraint mapping.
 
 use super::*;
+use crate::cst::LiteralShape;
 
 impl<'a> Builder<'a> {
     /// Synthesize accessor methods from `has` calls in Moo/Moose/Mojo::Base classes.
@@ -63,10 +64,7 @@ impl<'a> Builder<'a> {
         if !parents.is_empty() {
             let parent_set: std::collections::HashSet<&str> = parents.iter().map(|s| s.as_str()).collect();
             self.emit_refs_for_strings(node, &parent_set, RefKind::PackageRef, None);
-            self.package_parents
-                .entry(pkg.to_string())
-                .or_default()
-                .extend(parents);
+            self.package_parents.extend(pkg.to_string(), parents);
         }
     }
 
@@ -97,10 +95,7 @@ impl<'a> Builder<'a> {
             })
             .collect();
         if !components.is_empty() {
-            self.package_parents
-                .entry(pkg)
-                .or_default()
-                .extend(components);
+            self.package_parents.extend(pkg, components);
         }
     }
 
@@ -240,7 +235,7 @@ impl<'a> Builder<'a> {
         };
 
         // The arguments node might be a list_expression or a single node
-        let args_children: Vec<Node> = if args.kind() == "list_expression" || args.kind() == "parenthesized_expression" {
+        let args_children: Vec<Node> = if crate::cst::is_list_literal(args) {
             (0..args.child_count()).filter_map(|i| args.child(i)).collect()
         } else {
             // Single argument (e.g., has 'name')
@@ -667,10 +662,7 @@ impl<'a> Builder<'a> {
         if mode == FrameworkMode::MojoBase {
             return None;
         }
-        let args_children: Vec<Node<'a>> = if matches!(
-            args_node.kind(),
-            "list_expression" | "parenthesized_expression"
-        ) {
+        let args_children: Vec<Node<'a>> = if crate::cst::is_list_literal(args_node) {
             (0..args_node.child_count())
                 .filter_map(|i| args_node.child(i))
                 .collect()
@@ -697,7 +689,7 @@ impl<'a> Builder<'a> {
     pub(super) fn has_option_pair_nodes(&self, rest: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a>)> {
         let named: Vec<Node<'a>> = rest.iter().copied().filter(|n| n.is_named()).collect();
         if let [only] = named.as_slice() {
-            if matches!(only.kind(), "list_expression" | "parenthesized_expression") {
+            if crate::cst::is_list_literal(*only) {
                 return crate::cst::pair_nodes(*only);
             }
         }
@@ -779,7 +771,7 @@ impl<'a> Builder<'a> {
                 parents.iter().map(|s| s.as_str()).collect();
             self.emit_refs_for_strings(node, &parent_set, RefKind::PackageRef, None);
         }
-        self.package_parents.entry(pkg).or_default().extend(parents);
+        self.package_parents.extend(pkg, parents);
     }
 
     /// The `use Mojo::Base ...` args as strings: `-base`/`-strict` flags
@@ -924,7 +916,7 @@ impl<'a> Builder<'a> {
         // The args are the use statement's list child, bare or parenthesized.
         let args = (0..use_node.named_child_count())
             .filter_map(|i| use_node.named_child(i))
-            .find(|c| matches!(c.kind(), "list_expression" | "parenthesized_expression"));
+            .find(|c| crate::cst::is_list_literal(*c));
         let Some(args) = args else { return; };
         let setup = self.value_node_after_key(args, "-setup");
         // `-setup => { exports => [...] }` or top-level `exports => [...]`.
@@ -990,24 +982,23 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn collect_sub_exporter_members(&self, node: Node<'a>, out: &mut Vec<(String, Span)>) {
-        match node.kind() {
-            "quoted_word_list" => self.extract_qw_word_spans(node, out),
-            "string_literal" | "interpolated_string_literal" => {
+        match (crate::cst::literal_shape(node), node.kind()) {
+            (Some(LiteralShape::Qw), _) => self.extract_qw_word_spans(node, out),
+            (Some(LiteralShape::Str), _) => {
                 if let Some(text) = self.extract_string_content(node) {
                     out.push((text, self.string_content_span(node)));
                 }
             }
-            "bareword" | "autoquoted_bareword" => {
+            (None, "bareword" | "autoquoted_bareword") => {
                 if let Ok(text) = node.utf8_text(self.source) {
                     out.push((text.to_string(), node_to_span(node)));
                 }
             }
-            "anonymous_hash_expression" => {
+            (Some(LiteralShape::HashRef), _) => {
                 // Generator hashref: keys are export names, values opaque.
                 self.collect_sub_exporter_hash_keys(node, out);
             }
-            "parenthesized_expression" | "list_expression"
-            | "anonymous_array_expression" => {
+            (Some(LiteralShape::List | LiteralShape::ArrayRef), _) => {
                 self.collect_sub_exporter_list_members(node, out);
             }
             _ => {}
@@ -1017,13 +1008,8 @@ impl<'a> Builder<'a> {
     /// Generator-hashref keys (`{ name => \&gen }`) → `(name, key-span)`. The
     /// key token carries the right span for a member ref; the value is opaque.
     pub(super) fn collect_sub_exporter_hash_keys(&self, node: Node<'a>, out: &mut Vec<(String, Span)>) {
-        let list = (0..node.named_child_count())
-            .filter_map(|i| node.named_child(i))
-            .find(|c| c.kind() == "list_expression")
-            .unwrap_or(node);
-        let children: Vec<Node<'a>> = (0..list.child_count())
-            .filter_map(|i| list.child(i))
-            .collect();
+        let mut children: Vec<Node<'a>> = Vec::new();
+        crate::cst::flatten_list(crate::cst::literal_body(node), &mut children);
         let mut i = 0;
         while i < children.len() {
             let k = children[i];
@@ -1059,18 +1045,18 @@ impl<'a> Builder<'a> {
                 i += 1;
                 continue;
             }
-            if matches!(
-                c.kind(),
-                "parenthesized_expression" | "list_expression" | "anonymous_array_expression"
-            ) {
-                self.collect_sub_exporter_list_members(c, out);
-                i += 1;
-                continue;
-            }
-            if c.kind() == "quoted_word_list" {
-                self.extract_qw_word_spans(c, out);
-                i += 1;
-                continue;
+            match crate::cst::literal_shape(c) {
+                Some(LiteralShape::List | LiteralShape::ArrayRef) => {
+                    self.collect_sub_exporter_list_members(c, out);
+                    i += 1;
+                    continue;
+                }
+                Some(LiteralShape::Qw) => {
+                    self.extract_qw_word_spans(c, out);
+                    i += 1;
+                    continue;
+                }
+                _ => {}
             }
             if let Some((name, span)) = self.sub_exporter_name_token(c) {
                 // Look ahead for a fat-comma generator value to skip.

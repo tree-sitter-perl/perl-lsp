@@ -16,7 +16,7 @@ stays dark — even when the rest of the chain is fully modeled.
 The motivating case is the Alerts partial-route boundary: crm's route
 plugins root their route chain from `my $r = $conf->{root}`. `$conf` is
 an untyped sub param and `root` is a hash element of it, so the
-`BrandedRoute` chain (`docs/adr/route-branding.md`) never gets its
+route brand chain (`docs/adr/brands.md`) never gets its
 starting brand, and partial `->to('#action')` calls hanging off that
 root never resolve their inherited controller. This is *not*
 route-specific — the same gap swallows any chain whose origin is an
@@ -29,7 +29,7 @@ types at the boundary (the `param_types()` manifest in
 role/callback contract, not arbitrary hashref params) or cross-procedure
 value-flow that propagates a type *into* a param from its call sites. The route doc enumerates the option
 space and explicitly chose to leave boundary #4 (param/hashref) out;
-see `adr/route-branding.md` (the unbranded-root boundary). Deferred until
+see `adr/brands.md` (the unbranded-root boundary). Deferred until
 a value-flow story exists; the in-`register` local case is the dominant
 idiom and resolves without it.
 

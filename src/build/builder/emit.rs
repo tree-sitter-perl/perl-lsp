@@ -44,12 +44,8 @@ impl<'a> Builder<'a> {
         // A spread occupies ONE list slot but flattens to an even count
         // at runtime, so pairing must skip it as a unit — `pair_nodes`'
         // strict k/v alternation would mispair everything after it.
-        let list = node
-            .named_child(0)
-            .filter(|c| c.kind() == "list_expression")
-            .unwrap_or(node);
         let mut flat: Vec<Node<'a>> = Vec::new();
-        crate::cst::flatten_list(list, &mut flat);
+        crate::cst::flatten_list(crate::cst::literal_body(node), &mut flat);
         let named: Vec<Node<'a>> = flat.into_iter().filter(|n| n.is_named()).collect();
 
         let mut keys: Vec<(String, Option<Box<InferredType>>)> = Vec::new();
@@ -57,11 +53,7 @@ impl<'a> Builder<'a> {
         let mut i = 0;
         while i < named.len() {
             let elem = named[i];
-            if matches!(
-                elem.kind(),
-                "hash" | "hash_deref_expression" | "container_variable"
-                    | "array" | "array_deref_expression"
-            ) {
+            if crate::cst::is_flattening(elem) {
                 // Spread (`%other` / `%$ref` / `@_` / `@rest`) — the
                 // key set is no longer exhaustive. Arrays included:
                 // `my %h = (default => 1, @_)` is the canonical
@@ -87,9 +79,6 @@ impl<'a> Builder<'a> {
             let vt = self.bag_query_expr_span(node_to_span(v_node));
             keys.push((key, vt.map(Box::new)));
         }
-        if keys.is_empty() && !open {
-            return InferredType::HashRef;
-        }
         InferredType::HashWithKeys { keys: crate::model::file_analysis::SharedKeys::new(keys), open }
     }
 
@@ -101,12 +90,8 @@ impl<'a> Builder<'a> {
     /// tuple, not a summary).
     pub(super) fn array_literal_type(&mut self, node: Node<'a>) -> InferredType {
         const MAX_TUPLE: usize = 64;
-        let list = node
-            .named_child(0)
-            .filter(|c| c.kind() == "list_expression")
-            .unwrap_or(node);
         let mut flat: Vec<Node<'a>> = Vec::new();
-        crate::cst::flatten_list(list, &mut flat);
+        crate::cst::flatten_list(crate::cst::literal_body(node), &mut flat);
         let elems: Vec<Node<'a>> = flat.into_iter().filter(|n| n.is_named()).collect();
         if elems.is_empty() || elems.len() > MAX_TUPLE {
             return InferredType::ArrayRef;
@@ -235,6 +220,16 @@ impl<'a> Builder<'a> {
                 let return_edge = self.coderef_return_edge_for(node);
                 Some(WitnessPayload::InferredType(InferredType::CodeRef { return_edge }))
             }
+            // A `shift` of `@_` is the head of the argument window at its
+            // point; the walk's `consume_arg_head` advances the window past it.
+            _ if self.shifts_arg_window(node) => Some(WitnessPayload::Projected {
+                base: WitnessAttachment::Variable {
+                    name: "@_".into(),
+                    scope: self.scope_at_point(node.start_position()),
+                },
+                step: crate::model::witnesses::ProjectionStep::ArrayIndex(0),
+            }),
+
             "binary_expression"
             | "equality_expression"
             | "relational_expression"
@@ -273,6 +268,29 @@ impl<'a> Builder<'a> {
             "method_call_expression" => {
                 if let Some(class) = self.extract_constructor_class(node) {
                     return Some(WitnessPayload::InferredType(InferredType::ClassName(class)));
+                }
+                // A named method, or a `$obj->$m` whose `$m` folded to one
+                // name: the call's ref carries its `Invoke`.
+                if let Some(&[idx]) = self.method_call_refs.get(&node.id()).map(Vec::as_slice) {
+                    return Some(WitnessPayload::Edge(WitnessAttachment::Expression(RefIdx(
+                        idx as u32,
+                    ))));
+                }
+                // `$obj->$cb(…)`: call whatever `$cb` holds, on `$obj`.
+                if let Some(cb) = crate::cst::dynamic_method_scalar(node) {
+                    self.emit_expr_witness(cb);
+                    let receiver = node.child_by_field_name("invocant").map(|inv| {
+                        self.emit_invocant_witness(inv);
+                        WitnessAttachment::Expr(node_to_span(inv))
+                    });
+                    let args = self.extract_call_args(node);
+                    return Some(WitnessPayload::Invoke {
+                        callee: crate::model::witnesses::Callee::Value(WitnessAttachment::Expr(
+                            node_to_span(cb),
+                        )),
+                        receiver,
+                        args: Some(self.call_operands(&args)),
+                    });
                 }
                 let span = node_to_span(node);
                 let idx = self.refs.iter().position(|r| {
@@ -363,18 +381,89 @@ impl<'a> Builder<'a> {
                 Some(WitnessPayload::Edge(WitnessAttachment::Symbol(sid)))
             }
 
-            // `$_[0]` in value position is the positional-receiver
-            // pseudo-invocant (`sub me { return $_[0] }` — the
-            // self-returning idiom). Its return value IS the call's
-            // receiver, so emit the deferred `Receiver` placeholder:
-            // `ReturnExprReducer` substitutes `q.receiver` at the call
-            // site, letting `Symbol(me)` / `PackageSymbol{C, me}` type
-            // a *chained* `$obj->me->me->...` to the receiver class at
-            // arbitrary depth. A general `$arr[N]` read carries no
-            // receiver semantics — leave it to the chain typer's
-            // element-projection arm (no Expr payload).
-            "array_element_expression" if self.is_positional_receiver(node) => {
-                Some(WitnessPayload::ReturnExpr(crate::model::witnesses::ReturnExpr::Receiver))
+            // `$arr[N]` projects off `@arr` at the read's own point, so
+            // `$_[N]` reads `@_`'s argument window as the shifts before it
+            // left it. `$_[0]`'s call-site receiver rides a second witness
+            // (`emit_expr_witness_inner`).
+            "array_element_expression" => {
+                let container = node.child_by_field_name("array")?;
+                let idx: i32 =
+                    node.child_by_field_name("index")?.utf8_text(self.source).ok()?.parse().ok()?;
+                let name = crate::cst::canonical_container_name(container, self.source)?;
+                Some(WitnessPayload::Projected {
+                    base: WitnessAttachment::Variable {
+                        name,
+                        scope: self.scope_at_point(node.start_position()),
+                    },
+                    step: crate::model::witnesses::ProjectionStep::ArrayIndex(idx),
+                })
+            }
+
+
+            // An assignment's value is the target's new value.
+            // `||=`/`//=` never reach here — `emit_expr_witness` types them
+            // as a short-circuit. `=` / `&&=` produce the RHS, unless
+            // the target is an aggregate: a list assignment in scalar context
+            // is a count, and the list type is `@flow`'s business.
+            // TODO(union-join): `&&=` is the false old value ⊔ the RHS; it
+            // types as the RHS until the lattice can join them
+            // (docs/open-forks.md "Union types in the lattice").
+            "assignment_expression" => match crate::cst::assign_op(node)? {
+                crate::cst::AssignOp::Plain | crate::cst::AssignOp::AndThen => {
+                    let left = node.child_by_field_name("left")?;
+                    if self.lhs_list_targets(left).is_some()
+                        || self
+                            .get_var_text_from_lhs(left)
+                            .is_some_and(|v| v.starts_with(['@', '%']))
+                    {
+                        return None;
+                    }
+                    let rhs = node.child_by_field_name("right")?;
+                    self.emit_expr_witness(rhs);
+                    Some(WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(rhs))))
+                }
+                crate::cst::AssignOp::Append | crate::cst::AssignOp::Repeat => {
+                    Some(WitnessPayload::InferredType(InferredType::String))
+                }
+                crate::cst::AssignOp::Numeric => {
+                    Some(WitnessPayload::InferredType(InferredType::Numeric))
+                }
+                // Two strings make a string Perl builds per character, which
+                // no caller wants typed; anything else is the number.
+                // TODO(bitwise-feature): under `use feature 'bitwise'` (the
+                // v5.28 bundle) these are always numeric and `|.=` & co. are
+                // the string ops. The feature is known before the code it
+                // governs (`use` precedes it, bundle plugins run `on_use`
+                // during the walk), so this can read a per-scope feature set
+                // once the builder records one.
+                crate::cst::AssignOp::Bitwise => {
+                    let is_string = |b: &mut Self, n: Node<'a>| {
+                        b.emit_expr_witness(n);
+                        b.bag_query_expr_span(node_to_span(n)) == Some(InferredType::String)
+                    };
+                    let left = node.child_by_field_name("left")?;
+                    let right = node.child_by_field_name("right")?;
+                    if is_string(self, left) && is_string(self, right) {
+                        None
+                    } else {
+                        Some(WitnessPayload::InferredType(InferredType::Numeric))
+                    }
+                }
+                crate::cst::AssignOp::Fallback => None,
+            },
+
+            // `$cb->(…)`: call whatever the operand holds.
+            "coderef_call_expression" => {
+                let operand = node.named_child(0)?;
+                self.emit_expr_witness(operand);
+                let args = self.extract_call_args(node);
+                Some(WitnessPayload::Invoke {
+                    callee: crate::model::witnesses::Callee::Value(WitnessAttachment::Expr(
+                        node_to_span(operand),
+                    )),
+                    receiver: None,
+                    args: Some(self.call_operands(&args)),
+                })
             }
 
             // Ternary — Edge to its own Expr(span). The per-arm
@@ -403,6 +492,72 @@ impl<'a> Builder<'a> {
             }
         }
         false
+    }
+
+    /// The receiver operand of a method call: `Expr(invocant)` typed as the
+    /// invocant SLOT reads it. A bareword names a class unless a sub of that
+    /// name answers (`app->routes`), so the class lands first and the sub's
+    /// edge after it, winning only when it resolves. A scalar const-folded
+    /// to one class string reads as that class whatever the variable holds,
+    /// so its class lands last.
+    pub(super) fn emit_invocant_witness(&mut self, inv: Node<'a>) {
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let span = node_to_span(inv);
+        let text = inv.utf8_text(self.source).unwrap_or("");
+        let push_class = |b: &mut Self, class: String| {
+            let w = Witness {
+                attachment: WitnessAttachment::Expr(span),
+                source: WitnessSource::Builder("invocant_class".into()),
+                payload: WitnessPayload::InferredType(InferredType::ClassName(class)),
+                span,
+            };
+            if !b.bag.for_attachment(&w.attachment).iter().any(|o| o.payload == w.payload && o.source == w.source) {
+                b.bag.push(w);
+            }
+        };
+        match inv.kind() {
+            "bareword" | "package" => {
+                push_class(self, text.to_string());
+                self.emit_expr_witness(inv);
+            }
+            "scalar" => {
+                self.emit_expr_witness(inv);
+                let key = crate::cst::canonical_var_name(inv, self.source);
+                if let Some([class]) = self.resolve_constant_strings(key.as_deref().unwrap_or(text), 0).as_deref() {
+                    push_class(self, class.clone());
+                }
+            }
+            _ => self.emit_expr_witness(inv),
+        }
+    }
+
+    /// The argument operands of a call, each an `Expr` the walk types now.
+    /// Grouping parens are peeled; an aggregate flattens into any number of
+    /// values, so it is a `Spread`.
+    pub(super) fn call_operands(&mut self, args: &[Node<'a>]) -> Vec<crate::model::witnesses::CallArg> {
+        use crate::model::witnesses::{CallArg, WitnessAttachment};
+        let flat = self.flat_call_args(args.to_vec());
+        flat.into_iter()
+            .map(|a| {
+                self.emit_expr_witness(a);
+                let att = WitnessAttachment::Expr(node_to_span(a));
+                if crate::cst::is_flattening(a) {
+                    CallArg::Spread(att)
+                } else {
+                    CallArg::One(att)
+                }
+            })
+            .collect()
+    }
+
+    /// A `shift` whose array is `@_` — bare, or spelled `shift @_`.
+    pub(super) fn shifts_arg_window(&self, node: Node<'a>) -> bool {
+        self.is_shift_call(node)
+            && match self.extract_call_args(node).as_slice() {
+                [] => true,
+                [arg] => arg.utf8_text(self.source).ok() == Some("@_"),
+                _ => false,
+            }
     }
 
     /// `$_[0]` — the positional-receiver pseudo-invocant of a method
@@ -566,50 +721,28 @@ impl<'a> Builder<'a> {
             return;
         }
         // `LHS || RHS` / `LHS // RHS` — a short-circuit whose value is the
-        // LHS when truthy/defined, else the RHS. The RHS is the guaranteed
-        // FLOOR (`$ENV{X} || 10` returns the literal default whenever the
-        // env var is unset), so it rides a distinct `fallback_arm` source;
-        // `BranchArmFold` prefers it when the arms disagree or the LHS can't
-        // be typed. Reuses the ternary's BranchArm machinery — one speller
-        // for "this expression's value is one of these arms."
+        // LHS when truthy/defined, else the RHS.
         //
         // EXCEPT a `shift`/`$_[N]`-LHS: `my $x = shift // 'd'` is the param-
         // DEFAULT idiom — the value IS the parameter (unknown type); the
         // literal is a definedness fallback, not a type claim. Folding it to
         // the literal poisons downstream narrowed uses (`return $x if
         // $x->isa(...)`). Leave it untyped so the param stays open.
-        if node.kind() == "binary_expression"
+        let fallback_operands = if node.kind() == "binary_expression"
             && matches!(self.get_operator_text(node).as_deref(), Some("||") | Some("//"))
-            && node
-                .child_by_field_name("left")
-                .is_some_and(|lhs| !self.is_param_pull(lhs))
         {
-            if let (Some(lhs), Some(rhs)) =
-                (node.child_by_field_name("left"), node.child_by_field_name("right"))
-            {
-                let arm_att = WitnessAttachment::BranchArm(span);
-                self.emit_expr_witness(lhs);
-                self.bag.push(Witness {
-                    attachment: arm_att.clone(),
-                    source: WitnessSource::Builder("branch_arm".into()),
-                    payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(lhs))),
-                    span: node_to_span(lhs),
-                });
-                self.emit_expr_witness(rhs);
-                self.bag.push(Witness {
-                    attachment: arm_att.clone(),
-                    source: WitnessSource::Builder("fallback_arm".into()),
-                    payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(rhs))),
-                    span: node_to_span(rhs),
-                });
-                self.bag.push(Witness {
-                    attachment: WitnessAttachment::Expr(span),
-                    source: WitnessSource::Builder("branch_arm".into()),
-                    payload: WitnessPayload::Edge(arm_att),
-                    span,
-                });
-                return;
-            }
+            node.child_by_field_name("left")
+                .filter(|lhs| !self.is_param_pull(*lhs))
+                .zip(node.child_by_field_name("right"))
+        } else if crate::cst::assign_op(node) == Some(crate::cst::AssignOp::Fallback) {
+            // `LHS ||= RHS` is `LHS = LHS || RHS`: the same two arms.
+            node.child_by_field_name("left").zip(node.child_by_field_name("right"))
+        } else {
+            None
+        };
+        if let Some((lhs, rhs)) = fallback_operands {
+            self.push_fallback_arms(span, lhs, rhs);
+            return;
         }
         // Idempotent per span: the walk reaches many expressions twice
         // (child visit first, then the enclosing assignment/invocant
@@ -630,6 +763,20 @@ impl<'a> Builder<'a> {
                 payload,
                 span,
             });
+            // `$_[0]` is the call's receiver wherever a call site supplies
+            // one (`sub me { $_[0] }` types `$o->me->me` to `$o`'s class);
+            // `ReturnExprReducer` claims it ahead of the window projection
+            // above, which answers when no receiver is in hand.
+            if self.is_positional_receiver(node) {
+                self.bag.push(Witness {
+                    attachment: WitnessAttachment::Expr(span),
+                    source: WitnessSource::Builder("expression".into()),
+                    payload: WitnessPayload::ReturnExpr(
+                        crate::model::witnesses::ReturnExpr::Receiver,
+                    ),
+                    span,
+                });
+            }
         } else {
             // `expr_payload` returned None — either the callee
             // sym isn't in the table yet (forward-defined sub),
@@ -647,6 +794,56 @@ impl<'a> Builder<'a> {
             // retry is a no-op.
             self.unresolved_expr_nodes.push(node);
         }
+    }
+
+    /// Type `Expr(span)` as a short-circuit of `lhs` and `rhs`. The RHS is
+    /// the guaranteed FLOOR (`$ENV{X} || 10` returns the literal default
+    /// whenever the env var is unset), so it rides a distinct `fallback_arm`
+    /// source; `BranchArmFold` prefers it when the arms disagree or the LHS
+    /// can't be typed. Reuses the ternary's BranchArm machinery — one speller
+    /// for "this expression's value is one of these arms." The arms' union
+    /// would be built in `BranchArmFold` (its `TODO(union-join)`).
+    fn push_fallback_arms(&mut self, span: Span, lhs: Node<'a>, rhs: Node<'a>) {
+        use crate::model::witnesses::{tags, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let arm_att = WitnessAttachment::BranchArm(span);
+        // Once per span, like every expression witness: a second copy of the
+        // LHS arm would read to `BranchArmFold` as two agreeing arms.
+        if !self.bag.for_attachment(&arm_att).is_empty() {
+            return;
+        }
+        self.emit_expr_witness(lhs);
+        self.bag.push(Witness {
+            attachment: arm_att.clone(),
+            source: WitnessSource::Builder("branch_arm".into()),
+            payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(lhs))),
+            span: node_to_span(lhs),
+        });
+        let exits = super::narrowing::is_exit_expression(rhs, self.source);
+        self.bag.push(Witness {
+            attachment: arm_att.clone(),
+            source: WitnessSource::Builder(tags::FACT_SHORT_CIRCUIT.into()),
+            payload: WitnessPayload::Fact {
+                family: tags::FACT_SHORT_CIRCUIT.into(),
+                key: String::new(),
+                value: crate::model::witnesses::FactValue::Bool(exits),
+            },
+            span: node_to_span(rhs),
+        });
+        if !exits {
+            self.emit_expr_witness(rhs);
+            self.bag.push(Witness {
+                attachment: arm_att.clone(),
+                source: WitnessSource::Builder("fallback_arm".into()),
+                payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(rhs))),
+                span: node_to_span(rhs),
+            });
+        }
+        self.bag.push(Witness {
+            attachment: WitnessAttachment::Expr(span),
+            source: WitnessSource::Builder("branch_arm".into()),
+            payload: WitnessPayload::Edge(arm_att),
+            span,
+        });
     }
 
     /// Callee name for an expression node whose `expr_payload` arm resolves
@@ -759,13 +956,12 @@ impl<'a> Builder<'a> {
         &mut self,
         lhs_var: &str,
         cond_expr: Node<'a>,
-        context: Node<'a>,
+        at: Point,
     ) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let scope = self.current_scope();
-        let context_span = node_to_span(context);
         self.emit_expr_witness(cond_expr);
-        // Zero-span at the assignment start: the synthetic InferredType
+        // Zero-span at the write point: the synthetic InferredType
         // witness produced by edge materialization inherits this span,
         // and `FrameworkAwareTypeFold`'s point-contains filter only
         // skips *non-zero* spans that miss the query point. Using the
@@ -774,7 +970,7 @@ impl<'a> Builder<'a> {
             attachment: WitnessAttachment::Variable { name: lhs_var.to_string(), scope },
             source: WitnessSource::Builder("chain_assignment".into()),
             payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(cond_expr))),
-            span: Span { start: context_span.start, end: context_span.start },
+            span: Span { start: at, end: at },
         });
     }
 
@@ -851,6 +1047,12 @@ impl<'a> Builder<'a> {
             "postinc_expression" | "preinc_expression" => Some(InferredType::Numeric),
             "func1op_call_expression" | "func0op_call_expression" => {
                 let name = node.child(0)?.utf8_text(self.source).ok()?;
+                if crate::model::conventions::is_current_package_token(name) {
+                    // `package_at_pos`, not the scope walk: top-level code
+                    // under `package Foo;` sits in the file scope, whose
+                    // package is `main`.
+                    return self.package_at_pos(node.start_position()).map(|p| InferredType::ClassName(p.to_string()));
+                }
                 crate::model::builtins::builtin_return_type(name)
             }
             _ => None,
@@ -858,26 +1060,28 @@ impl<'a> Builder<'a> {
     }
 
     /// Infer a type on the first named child (the operand) of a dereference expression.
-    pub(super) fn infer_deref_type(&mut self, node: Node<'a>, narrowing: InferredType) {
+    pub(super) fn infer_deref_type(&mut self, node: Node<'a>, rep: TypeObservation) {
         if let Some(operand) = node.named_child(0) {
-            // The narrowing is observational — `$cb->()` says
-            // "$cb is a coderef", `${$x}` says "$x is a hashref",
-            // etc. — and doesn't reveal payload (no body span
-            // from the deref site). If the operand is ALREADY
-            // typed with a witness at least as informative as
-            // this narrowing, the TC would only ever clobber
-            // richer payload under latest-wins reduction (the
-            // motivating regression: a `my $cb = sub { ... }`
-            // literal's `CodeRef { return_edge: Some(_) }` losing
-            // its edge to the subsequent `$cb->()`'s
-            // `CodeRef { return_edge: None }`). Skip in that case.
-            if let Some(existing) = self.invocant_type_at_node(operand) {
-                if existing.subsumes_narrowing(&narrowing) {
-                    return;
-                }
-            }
-            self.push_var_type_constraint(operand, node, narrowing);
+            self.push_rep_observation(operand, node, rep);
         }
+    }
+
+    /// A deref reveals the operand's REPRESENTATION, not its value: an
+    /// observation the reducer's rep axis projects only when no value
+    /// answers, so `my $r = maybe(); $r->[0]` keeps the `Optional` its
+    /// writer's edge carries.
+    pub(super) fn push_rep_observation(&mut self, operand: Node<'a>, context_node: Node<'a>, rep: TypeObservation) {
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        if operand.kind() != "scalar" {
+            return;
+        }
+        let Ok(text) = operand.utf8_text(self.source) else { return };
+        self.bag.push(Witness {
+            attachment: WitnessAttachment::Variable { name: text.to_string(), scope: self.current_scope() },
+            source: WitnessSource::Builder("deref_access".into()),
+            payload: WitnessPayload::Observation(rep),
+            span: node_to_span(context_node),
+        });
     }
 
     /// Record a `$x->[i]` / `$x->()` arrow deref whose receiver is a plain

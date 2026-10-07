@@ -131,7 +131,7 @@ fn registry_with_bar_override() -> Arc<PluginRegistry> {
                 class: "Foo".into(),
                 name: "bar".into(),
             },
-            return_type: InferredType::ClassName("Baz".into()),
+            return_type: crate::build::plugin::OverrideReturn::Type(InferredType::ClassName("Baz".into())),
             reason: "test fixture: pin Foo::bar to Baz".into(),
         }],
     }));

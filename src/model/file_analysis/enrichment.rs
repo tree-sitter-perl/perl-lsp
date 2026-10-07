@@ -814,7 +814,6 @@ impl FileAnalysis {
             self.key_writes = key_writes;
         }
 
-        self.emit_method_call_binding_edges();
         // Re-stamp the MethodCall dispatch-target edges now that the bag
         // carries enriched cross-file invocant types. Enrichment truncated
         // refs back to their baseline, wiping the build-time (local-only)
@@ -867,50 +866,6 @@ impl FileAnalysis {
         self.rebuild_enrichment_indices();
     }
 
-    /// The MCB→bag bridge: each recorded `$var = $invocant->method()`
-    /// binding becomes a `Variable → Edge(PackageSymbol{package, method})`
-    /// witness (tag `mcb`), so the registry chases the method's return
-    /// lazily — with whatever index the QUERY holds — instead of a value
-    /// materialized here (edges, not values). The invocant class is
-    /// resolved per run: the finalize run sees only walk-seeded types;
-    /// the enrichment re-run resolves invocants that only type once
-    /// imported TCs land. Append-only (post-finalize removal would shift
-    /// the sealed `base_witness_count`, same rule as
-    /// `emit_mutation_extension_witnesses`): duplicates are idempotent
-    /// under the fold and truncated by the next enrichment cycle.
-    pub(super) fn emit_method_call_binding_edges(&mut self) {
-        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        let bindings = self.method_call_bindings.clone();
-        for binding in &bindings {
-            // Resolve invocant to class name
-            let class_name = self.resolve_invocant_class(
-                &binding.invocant_var,
-                binding.scope,
-                binding.span.start,
-            );
-
-            if let Some(cn) = class_name {
-                self.witnesses.push(Witness {
-                    attachment: WitnessAttachment::Variable {
-                        name: binding.variable.clone(),
-                        scope: binding.scope,
-                    },
-                    source: WitnessSource::Builder("mcb".into()),
-                    payload: WitnessPayload::Edge(WitnessAttachment::PackageSymbol {
-                        package: cn,
-                        name: binding.method_name.clone(),
-                    }),
-                    // Zero-width at the assignment, the TC temporal
-                    // contract: invisible to reads before the binding.
-                    span: Span {
-                        start: binding.span.start,
-                        end: binding.span.start,
-                    },
-                });
-            }
-        }
-    }
-
     /// Push a `TypeConstraint` shape into the witness bag — a Variable
     /// `InferredType` witness plus a class-assertion observation when
     /// the type is a class identity. The bag is the single store; this
@@ -919,37 +874,14 @@ impl FileAnalysis {
     /// witness construction. Builder has a parallel helper that does
     /// the same thing during the walk.
     pub(crate) fn push_type_constraint(&mut self, tc: TypeConstraint) {
-        use crate::model::witnesses::{
-            TypeObservation, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
-        };
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let TypeConstraint { variable, scope, constraint_span: span, inferred_type: ty } = tc;
         self.witnesses.push(Witness {
-            attachment: WitnessAttachment::Variable { name: variable.clone(), scope },
+            attachment: WitnessAttachment::Variable { name: variable, scope },
             source: WitnessSource::Builder("type_constraint".into()),
-            payload: WitnessPayload::InferredType(ty.clone()),
+            payload: WitnessPayload::InferredType(ty),
             span: Span { start: span.start, end: span.start },
         });
-        match ty {
-            InferredType::ClassName(n) => {
-                self.witnesses.push(Witness {
-                    attachment: WitnessAttachment::Variable { name: variable, scope },
-                    source: WitnessSource::Builder("type_constraint".into()),
-                    payload: WitnessPayload::Observation(TypeObservation::ClassAssertion(n)),
-                    span,
-                });
-            }
-            InferredType::FirstParam { package } => {
-                self.witnesses.push(Witness {
-                    attachment: WitnessAttachment::Variable { name: variable, scope },
-                    source: WitnessSource::Builder("type_constraint".into()),
-                    payload: WitnessPayload::Observation(TypeObservation::FirstParamInMethod {
-                        package,
-                    }),
-                    span,
-                });
-            }
-            _ => {}
-        }
     }
 
     /// Resolve one gated dispatch candidate against its receiver, AT QUERY

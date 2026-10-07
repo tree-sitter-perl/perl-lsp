@@ -104,9 +104,9 @@ impl<'a> Builder<'a> {
             // Hash access
             "hash_element_expression" => self.visit_hash_element(node),
 
-            // Dereference expressions → type constraints on operand
+            // Dereference expressions → rep observations on the operand
             "array_element_expression" => {
-                self.infer_deref_type(node, InferredType::ArrayRef);
+                self.infer_deref_type(node, TypeObservation::ArrayRefAccess);
                 // Only the arrow form `$x->[i]` has a scalar-ref receiver; the
                 // direct `$arr[i]` indexes the named array.
                 if crate::cst::element_arrow_deref(node, self.source) {
@@ -115,18 +115,9 @@ impl<'a> Builder<'a> {
                 self.queue_children(node);
             }
             "coderef_call_expression" => {
-                // Walk-time: just narrow the operand to CodeRef.
-                // The callable-return propagation onto this call's
-                // value-type happens at *query* time — `invocant_
-                // type_at_node`'s `coderef_call_expression` arm
-                // chases the operand's `CodeRef.return_edge`
-                // through the bag every time it's asked. Chain
-                // typing already re-asks on each worklist
-                // iteration, so monotone refinement of the
-                // operand's TC lifts the call's type for free as
-                // the lattice settles. No witness emission here;
-                // no post-walk pass.
-                self.infer_deref_type(node, InferredType::CodeRef { return_edge: None });
+                // The call's value is the expr arm's `Invoke` on the
+                // operand; here only the operand's rep is observed.
+                self.infer_deref_type(node, TypeObservation::CodeRefInvocation);
                 self.record_arrow_deref(node, crate::model::file_analysis::DerefForm::Call);
                 self.queue_children(node);
             }
@@ -135,30 +126,16 @@ impl<'a> Builder<'a> {
             // children so the inner scalar still gets its read ref.
             "code_deref_expression" => {
                 if let Some(operand) = code_deref_operand(node) {
-                    if let Some(existing) = self.invocant_type_at_node(operand) {
-                        if !existing.subsumes_narrowing(&InferredType::CodeRef { return_edge: None }) {
-                            self.push_var_type_constraint(
-                                operand,
-                                node,
-                                InferredType::CodeRef { return_edge: None },
-                            );
-                        }
-                    } else {
-                        self.push_var_type_constraint(
-                            operand,
-                            node,
-                            InferredType::CodeRef { return_edge: None },
-                        );
-                    }
+                    self.push_rep_observation(operand, node, TypeObservation::CodeRefInvocation);
                 }
                 self.queue_children(node);
             }
             "array_deref_expression" => {
-                self.infer_deref_type(node, InferredType::ArrayRef);
+                self.infer_deref_type(node, TypeObservation::ArrayRefAccess);
                 self.queue_children(node);
             }
             "hash_deref_expression" => {
-                self.infer_deref_type(node, InferredType::HashRef);
+                self.infer_deref_type(node, TypeObservation::HashRefAccess);
                 self.queue_children(node);
             }
 
@@ -614,17 +591,11 @@ impl<'a> Builder<'a> {
 
         // Write to package_parents for unified inheritance resolution
         if let Some(ref p) = parent {
-            self.package_parents
-                .entry(name.clone())
-                .or_default()
-                .push(p.clone());
+            self.package_parents.push(name.clone(), p.clone());
         }
         // Roles via :does(Role) are also parents for method resolution
         if !roles.is_empty() {
-            self.package_parents
-                .entry(name.clone())
-                .or_default()
-                .extend(roles.iter().cloned());
+            self.package_parents.extend(name.clone(), roles.iter().cloned());
         }
 
         self.add_symbol(

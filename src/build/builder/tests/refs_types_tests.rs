@@ -342,7 +342,7 @@ fn test_statement_bless_receiver_pre_bless_query_keeps_rep() {
     let pre = fa.inferred_type_via_bag("$object", Point::new(3, 14));
     assert_eq!(
         pre,
-        Some(InferredType::HashRef),
+        Some(empty_hash_shape()),
         "pre-bless query must keep the rep type, got {:?}",
         pre
     );
@@ -408,7 +408,8 @@ fn test_non_bless_hashref_stays_hashref() {
     let src = "sub mk {\n  my $h = {};\n  return $h;\n}\n";
     let fa = build_fa(src);
     let ty = fa.inferred_type_via_bag("$h", Point::new(2, 9));
-    assert_eq!(ty, Some(InferredType::HashRef), "unblessed hashref stays HashRef");
+    // `return $h` is an escape, which opens the shape.
+    assert_eq!(ty, Some(escaped_empty_hash_shape()), "unblessed hashref stays a hash");
 }
 
 // ---- Literal constructor extraction tests (via build_fa) ----
@@ -417,7 +418,7 @@ fn test_non_bless_hashref_stays_hashref() {
 fn test_extract_hashref_literal() {
     let fa = build_fa("my $href = {};");
     let ty = fa.inferred_type_via_bag("$href", Point::new(0, 14));
-    assert_eq!(ty, Some(InferredType::HashRef), "empty hash ref literal");
+    assert_eq!(ty, Some(empty_hash_shape()), "empty hash ref literal");
 
     let fa = build_fa("my $href = { a => 1, b => 2 };");
     let ty = fa.inferred_type_via_bag("$href", Point::new(0, 30));
@@ -468,7 +469,7 @@ fn test_extract_reassignment_type_change() {
     let fa = build_fa("my $x = {};\n$x = [];");
     // After line 0 → HashRef
     let ty = fa.inferred_type_via_bag("$x", Point::new(0, 11));
-    assert_eq!(ty, Some(InferredType::HashRef), "initial hashref");
+    assert_eq!(ty, Some(empty_hash_shape()), "initial hashref");
     // After line 1 → ArrayRef
     let ty = fa.inferred_type_via_bag("$x", Point::new(1, 8));
     assert_eq!(ty, Some(InferredType::ArrayRef), "reassigned to arrayref");

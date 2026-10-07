@@ -14,7 +14,6 @@ pub(super) fn build_chain_typing_index<'a>(tree: &'a Tree) -> ChainTypingIndex<'
         return_nodes: std::collections::HashMap::new(),
         invocant_nodes: std::collections::HashMap::new(),
         method_call_args: std::collections::HashMap::new(),
-        method_call_nodes: Vec::new(),
         chained_hash_elements: Vec::new(),
     };
     // Explicit stack, like every other tree pass here: a recursive descent
@@ -32,7 +31,6 @@ pub(super) fn build_chain_typing_index<'a>(tree: &'a Tree) -> ChainTypingIndex<'
                     .insert((node.start_position(), node.end_position()), node);
             }
             "method_call_expression" => {
-                idx.method_call_nodes.push(node);
                 if let Some(inv) = node.child_by_field_name("invocant") {
                     idx.invocant_nodes
                         .insert((inv.start_position(), inv.end_position()), inv);
@@ -260,6 +258,14 @@ pub(super) fn build_with_plugins_inner(
             })
         });
     }
+    #[cfg(test)]
+    if crate::model::witnesses::fold_memo_equiv_enabled() {
+        super::walk::assert_analyses_agree("fold-memo", &fa, || {
+            crate::model::witnesses::without_fold_memo(|| {
+                build_once(tree, source, plugins.clone(), extra_re_fold)
+            })
+        });
+    }
     fa
 }
 
@@ -296,7 +302,7 @@ fn build_once(
         call_bindings: Vec::new(),
         method_call_bindings: Vec::new(),
         pod_texts: Vec::new(),
-        package_parents: std::collections::HashMap::new(),
+        package_parents: Default::default(),
         package_uses: std::collections::HashMap::new(),
         use_dedup: std::collections::HashSet::new(),
         dispatch_dedup: std::collections::HashSet::new(),
@@ -362,10 +368,10 @@ fn build_once(
         topic_dsls,
         reassigned_scalars: std::collections::HashSet::new(),
         key_writes: Vec::new(),
-        method_call_arity: std::collections::HashMap::new(),
+        method_call_args: std::collections::HashMap::new(),
+        method_call_refs: std::collections::HashMap::new(),
         parametric_emitted_refs: std::collections::HashSet::new(),
         method_call_ref_dedup: std::collections::HashSet::new(),
-        route_branded_refs: std::collections::HashSet::new(),
         defined_narrowings: Vec::new(),
         pending_narrowings: Vec::new(),
         guard_sites: Vec::new(),
@@ -547,6 +553,9 @@ fn build_once(
     // (branch arms, arity gating) are already in `b.bag` — pushed
     // live during the walk.
     bphase!("populate_witness_bag", b.populate_witness_bag());
+    // From here the scopes and frameworks are settled, so the fold's queries
+    // can share answers until the build returns.
+    let _fold_memo = crate::model::witnesses::FoldMemoScope::enter();
 
     // Forward-reference resolution: walk-time `expr_payload` arms for
     // `function_call_expression` / `bareword` / `scoped_identifier` did
@@ -690,12 +699,7 @@ fn build_once(
         loader_config_params: b.loader_config_params,
         flow_edges: b.flow_edges,
     });
-    // Finalize: the MCB→bag bridge (`emit_method_call_binding_edges`)
-    // publishes `Variable → Edge(PackageSymbol{...})` for every recorded
-    // `$var = $invocant->method()` binding — the registry chases the
-    // return lazily, cross-file once a query holds the index. Enrichment
-    // re-runs the same bridge without a tree. Then owner fixup, target
-    // stamping, and the base-count seals.
+    // Finalize: owner fixup, target stamping, and the base-count seals.
     bphase!("finalize_post_walk", fa.finalize_post_walk());
 
     fa
@@ -751,45 +755,21 @@ impl<'a> Builder<'a> {
         tc: TypeConstraint,
         source: crate::model::witnesses::WitnessSource,
     ) {
-        use crate::model::witnesses::{
-            TypeObservation, Witness, WitnessAttachment, WitnessPayload,
-        };
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload};
         let TypeConstraint { variable, scope, constraint_span: span, inferred_type: ty } = tc;
         self.bag.push(Witness {
-            attachment: WitnessAttachment::Variable { name: variable.clone(), scope },
-            source: source.clone(),
-            payload: WitnessPayload::InferredType(ty.clone()),
+            attachment: WitnessAttachment::Variable { name: variable, scope },
+            source,
+            payload: WitnessPayload::InferredType(ty),
             span: Span { start: span.start, end: span.start },
         });
-        match ty {
-            InferredType::ClassName(n) => {
-                self.bag.push(Witness {
-                    attachment: WitnessAttachment::Variable { name: variable, scope },
-                    source,
-                    payload: WitnessPayload::Observation(TypeObservation::ClassAssertion(n)),
-                    span,
-                });
-            }
-            InferredType::FirstParam { package } => {
-                self.bag.push(Witness {
-                    attachment: WitnessAttachment::Variable { name: variable, scope },
-                    source,
-                    payload: WitnessPayload::Observation(TypeObservation::FirstParamInMethod {
-                        package,
-                    }),
-                    span,
-                });
-            }
-            _ => {}
-        }
     }
-
 
     /// The per-package table as the walk has it so far — the one fold of
     /// the builder's lanes, read by the window seed and the final assembly.
     fn package_facts(&self) -> std::collections::HashMap<String, PackageFacts> {
         PackageFacts::fold(
-            self.package_parents.clone(),
+            self.package_parents.to_map(),
             self.package_uses.clone(),
             self.package_framework.clone(),
             self.role_requires.clone(),

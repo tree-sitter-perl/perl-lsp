@@ -97,8 +97,17 @@ fn overrides() {
     // Declared on BOTH so the chain types even when Mojolicious isn't
     // indexed — without an indexed copy there are no inheritance edges
     // to carry the verbs down from Route to the router.
+    // On a Route the verbs return the receiver (`$self` for `to`, a child
+    // for the rest), marks included: a child inherits its parent's
+    // defaults by carrying its brand. The router is the unbranded root,
+    // so its verbs hand back a plain Route. `ReceiverOr` keeps the
+    // receiver-less call (the lite `under(...)` import) typed as Route.
     for v in route_verbs {
-        out += route_method_override("Mojolicious::Routes::Route", v, "Mojolicious::Routes::Route", reason);
+        out += #{
+            target: #{ Method: #{ class: "Mojolicious::Routes::Route", name: v }},
+            return_type: #{ ReceiverOr: #{ ClassName: "Mojolicious::Routes::Route" } },
+            reason: reason,
+        };
         out += route_method_override("Mojolicious::Routes", v, "Mojolicious::Routes::Route", reason);
     }
     // The chain root: `$app->routes` / `$c->routes` hand back the
@@ -307,22 +316,42 @@ fn emit_route_name(m, name, span) {
     items
 }
 
-// Read the inherited controller from the receiver's route brand.
-// The `route_defaults` projection flattens the fold-settled
-// `InferredType::BrandedRoute` into `[[key, value], ...]` (plus the
-// replayed topic base for lite verb-call receivers); `controller` is
-// the distinguished key. `()` when the receiver carries no brand
-// (plain `ClassName(Route)` root, or non-route receiver) — partials on
-// an unbranded receiver degrade quietly (no controller, no emission).
+// Read the inherited controller off the receiver: its brand (the marks
+// `to_brand` laid on an ancestor `->to('ctrl#')`), else the replayed
+// topic base for a lite verb-call receiver. `()` when neither has one
+// (a plain root, or a non-route receiver): a partial on it degrades
+// quietly (no controller, no emission).
 fn inherited_controller(m) {
     let recv = m.captures.recv;
     if recv == () { return (); }
-    let defs = recv.route_defaults;
-    if defs == () { return (); }
-    for pair in defs {
+    for pair in recv.brand {
         if pair[0] == "controller" { return pair[1]; }
     }
-    ()
+    recv.topic_base
+}
+
+// The defaults a `->to(...)` call sets, as marks: a leading
+// `'ctrl#act'` sets the controller (an empty half inherits it), then the
+// `key => value` tail sets `controller` and stash keys. `action` is per
+// route and never inherited, so it is not a mark.
+fn to_marks(args) {
+    let set = [];
+    if args.len() < 1 { return set; }
+    let start = 0;
+    let first = args[0].value_shape.Str;
+    if first != () && first.contains("#") {
+        let parts = first.split("#");
+        if parts[0] != "" { set += [["controller", parts[0]]]; }
+        start = 1;
+    }
+    for p in classified_pairs(args, start) {
+        if p.key == "action" || p.value.Str == () { continue; }
+        let kept = [];
+        for e in set { if e[0] != p.key { kept += [e]; } }
+        set = kept;
+        set += [[p.key, p.value.Str]];
+    }
+    set
 }
 
 // Pull `controller`/`action` (+ the action's goto-def span) from a route
@@ -353,14 +382,30 @@ fn route_keyvals(args, start) {
     #{ controller: controller, action: action, action_span: action_span }
 }
 
-// All three arms live on the pattern seam. `plugin` / `name` are
-// walk-phase; `to_route` is FOLD-phase — its `route_defaults`
-// projection reads the receiver's route BRAND, which only settles
-// after chain typing, and its `SetRouteBase` emissions feed the
-// replayed topic-route base that later matches' projections read
-// (document-order dispatch is the fold phase's contract).
+// All arms live on the pattern seam. `to_brand`, `plugin` and `name` are
+// walk-phase; `to_route` is FOLD-phase: its `brand` projection reads the
+// receiver's marks, which only settle with the fold, and its
+// `SetRouteBase` emissions feed the replayed topic-route base that later
+// matches' `topic_base` projections read (document-order dispatch is the
+// fold phase's contract).
 fn patterns() {
     [
+        #{
+            name: "to_brand",
+            query: `
+(method_call_expression
+  method: (_) @verb (#eq? @verb "to")
+  arguments: (_) @args
+) @site
+`,
+            projections: #{
+                args: ["args"],
+            },
+            expect: [
+                #{ src: "$r->any('/a')->to('a#');", matches: 1 },
+                #{ src: "$r->to;", matches: 0 },
+            ],
+        },
         #{
             name: "to_route",
             phase: "fold",
@@ -372,7 +417,7 @@ fn patterns() {
 ) @call
 `,
             projections: #{
-                recv: ["route_defaults", "call_name"],
+                recv: ["brand", "topic_base", "call_name"],
                 args: ["args"],
             },
             expect: [
@@ -439,6 +484,19 @@ fn on_match(pattern, m) {
     let out = [];
 
     if pattern == "to_route" { return to_route_emissions(m); }
+
+    if pattern == "to_brand" {
+        let args_cap = m.captures.args;
+        if args_cap == () { return out; }
+        let set = to_marks(args_cap.args);
+        if set.len() == 0 { return out; }
+        out += #{ Brand: #{
+            at: m.captures.site.span,
+            on_class: "Mojolicious::Routes::Route",
+            set: set,
+        }};
+        return out;
+    }
 
     if pattern == "plugin_load" {
         let name_cap = m.captures.name;
@@ -520,8 +578,8 @@ fn to_route_emissions(m) {
             let lit_controller_len = controller.len();
             // Partial target `'#action'`: the controller half is empty,
             // inherited from a parent `->to('ctrl#')` down the builder
-            // chain. The brand on the receiver value carries it — read
-            // it off `receiver_route_defaults`. `route_emissions`
+            // chain. The brand on the receiver value carries it.
+            // `route_emissions`
             // still early-returns if BOTH stay empty (unresolvable).
             if controller == "" {
                 let inh = inherited_controller(m);

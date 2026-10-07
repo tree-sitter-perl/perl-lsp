@@ -140,25 +140,9 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Build the per-iteration lookup maps the fold passes reuse.
-    /// `refs`/`symbols` are stable across the fold, so this runs once.
-    /// Returns `(ref_by_span, method_sym_by_name)` as locals owned by
-    /// `fold_to_fixed_point`; callers that need them receive `&`-refs.
-    pub(super) fn build_fold_lookup_indices(
-        &self,
-    ) -> (
-        std::collections::HashMap<(Point, Point), usize>,
-        std::collections::HashMap<String, Vec<usize>>,
-    ) {
-        let mut ref_by_span = std::collections::HashMap::with_capacity(self.refs.len());
-        for (i, r) in self.refs.iter().enumerate() {
-            if matches!(r.kind, RefKind::MethodCall { .. }) {
-                // First-wins matches the prior `position(...)` semantics.
-                ref_by_span
-                    .entry((r.span.start, r.span.end))
-                    .or_insert(i);
-            }
-        }
+    /// Sub/Method symbols by name, for the fold's seed pass. `symbols` is
+    /// stable across the fold, so this runs once.
+    pub(super) fn build_method_sym_by_name(&self) -> std::collections::HashMap<String, Vec<usize>> {
         let mut sym_by_name: std::collections::HashMap<String, Vec<usize>> =
             std::collections::HashMap::new();
         for (i, s) in self.symbols.iter().enumerate() {
@@ -166,7 +150,7 @@ impl<'a> Builder<'a> {
                 sym_by_name.entry(s.name.clone()).or_default().push(i);
             }
         }
-        (ref_by_span, sym_by_name)
+        sym_by_name
     }
 
     /// Fixed-point loop driving chain typing + reducer dispatch. Each
@@ -201,7 +185,7 @@ impl<'a> Builder<'a> {
     pub(super) fn fold_to_fixed_point(&mut self, idx: &ChainTypingIndex<'a>) {
         use crate::model::witnesses::ReducerRegistry;
         const MAX_FOLD_ITERATIONS: usize = 64;
-        let (ref_by_span, method_sym_by_name) = self.build_fold_lookup_indices();
+        let method_sym_by_name = self.build_method_sym_by_name();
         // One registry for the entire fold — stateless/immutable, so sharing
         // across snapshot queries and seed pass is safe.
         let reg = ReducerRegistry::with_defaults();
@@ -231,7 +215,7 @@ impl<'a> Builder<'a> {
                 let _t = crate::util::ghost_stats::ScopedNs::start("fold::chain_pre");
                 self.run_chain_typing_reducer(idx, ChainPassMode::PreFold);
             }
-            self.resolve_return_types(idx, &reg, &ref_by_span, &method_sym_by_name);
+            self.resolve_return_types(&reg, &method_sym_by_name);
             // Mutation extension: fold key writes into variable shapes
             // (re-emittable, clear-and-emit). After the return-type
             // passes so call-binding-propagated shapes are visible.
@@ -309,12 +293,10 @@ impl<'a> Builder<'a> {
                     ReducedValue::Type(t) => Some(t),
                     ReducedValue::FactMap(_) | ReducedValue::None => None,
                 };
-                // A brand is a route VALUE identity, never a sub
-                // return contract. Project it to its base class for
-                // the fixed-point snapshot so a branded
-                // implicit-return doesn't oscillate against the
-                // brandless writeback push.
-                (s.id, resolved.map(Self::debrand))
+                // Marks are a value's, not a sub's return contract: the
+                // snapshot compares bases so a branded implicit return
+                // doesn't oscillate against the brandless writeback push.
+                (s.id, resolved.map(InferredType::into_unbranded))
             })
             .collect();
         answers.sort_by_key(|(id, _)| id.0);
@@ -413,6 +395,10 @@ impl<'a> Builder<'a> {
                 node.child_by_field_name("right"),
             ) else { continue };
             let span = node_to_span(node);
+            // Where the write lands; the typed witness and the idempotency
+            // probe both key on it, like the walk's own TC.
+            let at = crate::cst::assignment_write_point(node);
+            let write_span = Span { start: at, end: span.end };
 
             // List-context row extraction: `my ($a, $b, ...) = $rs->search(
             // ...)` / `= $rs->all` — a resultset evaluated in LIST context
@@ -460,7 +446,7 @@ impl<'a> Builder<'a> {
                     let sid = self.innermost_scope_id_at(span.start);
                     for name in list_scalars {
                         let already = typed_at
-                            .get(&(name.clone(), span.start))
+                            .get(&(name.clone(), at))
                             .is_some_and(|idxs| {
                                 idxs.iter().any(|&i| {
                                     let crate::model::witnesses::WitnessPayload::InferredType(t) =
@@ -472,7 +458,7 @@ impl<'a> Builder<'a> {
                                 })
                             });
                         if !already {
-                            to_push.push((name, sid, span, row_ty.clone()));
+                            to_push.push((name, sid, write_span, row_ty.clone()));
                         }
                     }
                     continue;
@@ -493,20 +479,6 @@ impl<'a> Builder<'a> {
             // the block, the block has run; whether it ran at all is the
             // binding-scope question below.
             let conditional = is_rebind && crate::cst::is_conditionally_executed_in_block(node);
-            // Compute the fresh type up front so the idempotency check
-            // can compare informativeness. (Cheap: a bag chase on the
-            // already-resolved RHS.)
-            let saved_pkg_probe = self.current_package.clone();
-            self.current_package = self.package_at_pos(span.start).map(|s| s.to_string());
-            let fresh = if conditional {
-                Some(InferredType::Unknown)
-            } else {
-                let _t = crate::util::ghost_stats::ScopedNs::start("chain::rhs_probe");
-                self.invocant_type_at_node(right)
-                    .or_else(|| self.resolve_invocant_class_tree(right).map(InferredType::ClassName))
-            };
-            self.current_package = saved_pkg_probe;
-
             // Innermost scope containing this assignment.
             let _t_scope = crate::util::ghost_stats::ScopedNs::start("chain::scope_pick");
             let scope_idx = self
@@ -543,59 +515,27 @@ impl<'a> Builder<'a> {
                     .map(|sym| self.symbols[sym.0 as usize].scope)
                     .filter(|b| *b != sid);
                 if let Some(bsid) = binding_scope {
-                    markers.push((var.clone(), bsid, span.start));
+                    markers.push((var.clone(), bsid, at));
                 }
             }
 
-            // Idempotency: skip if an already-pushed Variable witness at
-            // this assignment's start is at least as informative as the
-            // fresh answer. A plain `ClassName(Route)` does NOT subsume a
-            // `BrandedRoute`, so the route brand legitimately upgrades the
-            // walk-time materialization on a later fold iteration; once
-            // the brand is in the bag it subsumes the next (identical)
-            // brand and the loop settles. `Unknown` subsumes only itself,
-            // so a RHS that resolves on a later iteration lands on top of it.
-            let already_typed = typed_at.get(&(var.clone(), span.start)).is_some_and(|idxs| {
+            // A write's value is its flow edge, plain or compound; what this
+            // pass adds is the may-not-happen rebind, `Unknown`. Skipped when
+            // an earlier fold iteration already pushed it.
+            if !conditional {
+                continue;
+            }
+            let ty = InferredType::Unknown;
+            let already_typed = typed_at.get(&(var.clone(), at)).is_some_and(|idxs| {
                 idxs.iter().any(|&i| {
-                    let crate::model::witnesses::WitnessPayload::InferredType(t) =
-                        &self.bag.all()[i].payload
-                    else {
-                        return false;
-                    };
-                    fresh.as_ref().map_or(true, |f| t.subsumes_narrowing(f))
+                    matches!(&self.bag.all()[i].payload,
+                        crate::model::witnesses::WitnessPayload::InferredType(t) if t.subsumes_narrowing(&ty))
                 })
             });
             if already_typed {
                 continue;
             }
-
-            // Read the RHS's full `InferredType` first — Parametric
-            // shapes need to land on the variable as Parametric, not
-            // unwrapped to their `base` via `class_name()`. Falls
-            // back to the class-only `resolve_invocant_class_tree`
-            // for the bareword-degrade tail (a non-class type on a
-            // bareword maps to "treat the syntactic text as a
-            // class") which the type-aware path doesn't model.
-            //
-            // When `package_at_pos` answered Some, the `fresh` probe above
-            // already ran this exact computation under this exact package
-            // override — the typer is `&self` and deterministic, so
-            // recomputing is a straight 2x on the symbolic executor. Only
-            // the None case differs (the probe typed under `None`, this
-            // path types under the walk's stale `current_package`).
-            let ty_opt = if conditional || self.package_at_pos(span.start).is_some() {
-                fresh
-            } else {
-                let _t = crate::util::ghost_stats::ScopedNs::start("chain::rhs_type");
-                self.invocant_type_at_node(right)
-                    .or_else(|| self.resolve_invocant_class_tree(right).map(InferredType::ClassName))
-                    .or(fresh)
-            };
-
-            // A rebind whose RHS nothing can type pushes no value: its reset
-            // marker (above) is the record that it happened.
-            let Some(ty) = ty_opt else { continue };
-            to_push.push((var, sid, span, ty));
+            to_push.push((var, sid, write_span, ty));
         }
 
         for (variable, scope, constraint_span, ty) in to_push {
@@ -937,18 +877,11 @@ impl<'a> Builder<'a> {
     /// `witnesses.rs` and folds the bag at query time.
     pub(super) fn resolve_return_types(
         &mut self,
-        idx: &ChainTypingIndex<'a>,
         reg: &crate::model::witnesses::ReducerRegistry,
-        ref_by_span: &std::collections::HashMap<(Point, Point), usize>,
         method_sym_by_name: &std::collections::HashMap<String, Vec<usize>>,
     ) {
         use crate::util::ghost_stats::timed;
         timed("fold::arity", || self.emit_arity_return_witnesses());
-        // Brand BEFORE method-call edges so `route_branded_refs` is
-        // current when `emit_method_call_return_edges` consults it to
-        // skip route calls — otherwise the skip set lags one iteration
-        // and the bag oscillates (the fold never reaches a fixed point).
-        timed("fold::route_brand", || self.emit_route_brand_witnesses(idx, ref_by_span));
         timed("fold::mc_edges", || self.emit_method_call_return_edges());
         timed("fold::narrowing", || self.emit_defined_narrowing_witnesses());
         let (return_types, return_provenance) =
@@ -958,82 +891,10 @@ impl<'a> Builder<'a> {
         timed("fold::fixup_hko", || self.fixup_call_bound_hash_key_owners(&return_types));
     }
 
-    /// Re-emittable: stamp the resolved `BrandedRoute` onto the
-    /// `Expression(refidx)` of every route-builder `method_call_expression`,
-    /// so a `my $x = $r->...->to('ctrl#')` declaration (which types via
-    /// `Edge(Expression(refidx))`) carries the brand, and the next
-    /// iteration's chained calls / partial `->to('#action')` read the
-    /// inherited controller off it. The brand is computed by the single
-    /// build-time symbolic executor (`invocant_type_at_node`); this pass
-    /// only publishes its answer onto the bag. Recomputed each iteration
-    /// (clear-and-emit on tag `route_brand`) because the receiver type it
-    /// reads converges as the fold progresses.
-    pub(super) fn emit_route_brand_witnesses(
-        &mut self,
-        idx: &ChainTypingIndex<'a>,
-        ref_by_span: &std::collections::HashMap<(Point, Point), usize>,
-    ) {
-        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        self.bag.remove_by_source_tag("route_brand");
-        self.route_branded_refs.clear();
-
-        // Snapshot (refidx, brand) first — `invocant_type_at_node`
-        // borrows `&self`, so we can't push while iterating.
-        let mut brands: Vec<(usize, InferredType)> = Vec::new();
-        for &node in &idx.method_call_nodes {
-            let span = node_to_span(node);
-            let Some(&refidx) = ref_by_span.get(&(span.start, span.end)) else {
-                continue;
-            };
-            let ty = self.invocant_type_at_node(node);
-            if let Some(b @ InferredType::BrandedRoute { .. }) = ty {
-                brands.push((refidx, b));
-            }
-        }
-        for (refidx, brand) in brands {
-            let r_span = self.refs[refidx].span;
-            // Claim this ref so `emit_method_call_return_edges` skips
-            // its `Edge(PackageSymbol{Route, to})` — that edge folds to
-            // a plain `ClassName(Route)` and `FrameworkAwareTypeFold`
-            // (which runs before `ExprReturn`) would answer with it,
-            // masking the brand. Same precedent as
-            // `parametric_emitted_refs`.
-            self.route_branded_refs.insert(refidx);
-            self.bag.push(Witness {
-                attachment: WitnessAttachment::Expression(crate::model::witnesses::RefIdx(refidx as u32)),
-                source: WitnessSource::Builder("route_brand".into()),
-                payload: WitnessPayload::InferredType(brand),
-                span: r_span,
-            });
-        }
-    }
-
-    /// Re-emittable: for every `MethodCall` ref whose
-    /// `invocant_class` is filled (walk-time syntax-known invocants
-    /// like `Foo->m`, plus PostFold-resolved variable invocants),
-    /// publish `Expression(refidx) → Edge(PackageSymbol{package, method})`
-    /// so the chain typer's `bag_query_expression` chases the
-    /// receiver-and-method-resolved type through the class-keyed
-    /// attachment. Refs without a filled class skip emission —
-    /// without a known class there's no class-keyed slot to target.
+    /// Re-emittable: every `MethodCall` ref's value is published as
+    /// `Expression(refidx) → Invoke{..}` — the method on the receiver's
+    /// full type, at the call's own args.
     ///
-    /// Resolve a qualified method token to the class(es) the lookup starts
-    /// at. Qualifier semantics live on `MethodToken`; the SUPER arm is the
-    /// only one needing builder state (the enclosing package's parents —
-    /// possibly several). `Bare` has no qualifier → empty.
-    pub(super) fn qualified_dispatch_classes(
-        &self,
-        token: crate::model::conventions::MethodToken<'_>,
-        enclosing: &str,
-    ) -> Vec<String> {
-        match token {
-            crate::model::conventions::MethodToken::Super(_) => {
-                self.package_parents.get(enclosing).cloned().unwrap_or_default()
-            }
-            t => t.literal_package().map(|p| vec![p.to_string()]).unwrap_or_default(),
-        }
-    }
-
     /// Clear-and-emit on tag `method_call_return` so repeat calls
     /// inside the worklist driver stay idempotent.
     pub(super) fn emit_method_call_return_edges(&mut self) {
@@ -1046,6 +907,20 @@ impl<'a> Builder<'a> {
             if !matches!(r.kind, RefKind::MethodCall { .. }) {
                 continue;
             }
+            // Every reader of a call's value enters at its `Expr`, where brand
+            // overlays sit. The walk links it for calls it visits as values; a
+            // call it never did (a statement, a plugin-emitted ref) is linked
+            // here.
+            if self.bag.iter_attachment(&WitnessAttachment::Expr(r.span)).next().is_none() {
+                edges.push(Witness {
+                    attachment: WitnessAttachment::Expr(r.span),
+                    source: WitnessSource::Builder("method_call_return".into()),
+                    payload: WitnessPayload::Edge(WitnessAttachment::Expression(
+                        crate::model::witnesses::RefIdx(i as u32),
+                    )),
+                    span: r.span,
+                });
+            }
             // Refs we've already handed a Parametric witness keep
             // their custom InferredType — publishing the receiver-
             // class's plain return-type edge would mask the
@@ -1055,68 +930,47 @@ impl<'a> Builder<'a> {
             if self.parametric_emitted_refs.contains(&i) {
                 continue;
             }
-            // Route-branded calls own their `Expression(refidx)` type
-            // (the `BrandedRoute` from `emit_route_brand_witnesses`);
-            // the method-on-class edge would fold to a brandless
-            // `ClassName(Route)` and mask it.
-            if self.route_branded_refs.contains(&i) {
-                continue;
-            }
-            // A qualified method token names an EXPLICIT dispatch class —
-            // Perl looks the method up on the named class, not the
-            // invocant's. Either way the call still blesses into the
-            // INVOCANT's class, so the result is typed relative to the
-            // invocant (falling back to the enclosing package).
-            let token = crate::model::conventions::MethodToken::parse(&r.target_name);
-            if !matches!(token, crate::model::conventions::MethodToken::Bare(_)) {
-                let method = token.name();
-                let Some(encl) = self.package_at_pos(r.span.start) else { continue };
-                let receiver_class = self
-                    .method_call_invocant
-                    .get(&i)
-                    .cloned()
-                    .unwrap_or_else(|| encl.to_string());
-                let arity = self.method_call_arity.get(&i).copied().unwrap_or(0);
-                let lookup_classes = self.qualified_dispatch_classes(token, encl);
-                for class in lookup_classes {
-                    edges.push(Witness {
-                        attachment: WitnessAttachment::Expression(crate::model::witnesses::RefIdx(
-                            i as u32,
-                        )),
-                        source: WitnessSource::Builder("method_call_return".into()),
-                        payload: WitnessPayload::QualifiedCallReturn {
-                            method_lookup: WitnessAttachment::PackageSymbol {
-                                package: class,
-                                name: method.to_string(),
-                            },
-                            receiver_class: receiver_class.clone(),
-                            arity,
-                        },
-                        span: r.span,
-                    });
+            // The call's value is its `Invoke`: the method looked up from the
+            // receiver's class (or the token's explicit start), with the
+            // receiver's full type substituted. A plugin-emitted ref has no
+            // walked invocant; its declared class is the lookup and receiver.
+            use crate::model::conventions::MethodToken;
+            use crate::model::witnesses::{Callee, Lookup};
+            let token = MethodToken::parse(&r.target_name);
+            let walked = self.method_call_args.get(&i);
+            let lookup = match token {
+                MethodToken::Super(_) => {
+                    let Some(writer) = self.package_at_pos(r.span.start) else { continue };
+                    Lookup::Super { writer: writer.to_string() }
                 }
-                continue;
-            }
-            let Some(class) = self.method_call_invocant.get(&i) else {
-                continue;
+                MethodToken::Bare(_) if walked.is_some() => Lookup::Receiver,
+                MethodToken::Bare(_) => {
+                    let Some(class) = self.method_call_invocant.get(&i) else { continue };
+                    Lookup::Named(class.clone())
+                }
+                t => match t.literal_package() {
+                    Some(p) => Lookup::Named(p.to_string()),
+                    None => continue,
+                },
             };
-            let target = WitnessAttachment::PackageSymbol {
-                package: class.clone(),
-                name: r.target_name.clone(),
-            };
-            // Pin the call's arity so the chase dispatches the right
-            // overload arm (fluent writer vs getter) regardless of the
-            // outer query's hint. Plugin-emitted refs that never went
-            // through `visit_method_call` have no recorded arity — fall
-            // back to a plain edge (hint-less union dispatch) for them.
-            let payload = match self.method_call_arity.get(&i) {
-                Some(&arity) => WitnessPayload::CallReturn { target, arity },
-                None => WitnessPayload::Edge(target),
+            let receiver = match (&r.kind, walked) {
+                (RefKind::MethodCall { invocant_span: Some(sp), .. }, Some(_)) => {
+                    Some(WitnessAttachment::Expr(*sp))
+                }
+                _ => None,
             };
             edges.push(Witness {
                 attachment: WitnessAttachment::Expression(crate::model::witnesses::RefIdx(i as u32)),
                 source: WitnessSource::Builder("method_call_return".into()),
-                payload,
+                payload: WitnessPayload::Invoke {
+                    callee: Callee::Method {
+                        name: token.name().to_string(),
+                        lookup,
+                        constructs: crate::model::conventions::is_constructor_name(token.name()),
+                    },
+                    receiver,
+                    args: walked.cloned(),
+                },
                 span: r.span,
             });
         }
@@ -1230,7 +1084,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Bag-routed lookup for a method-call expression's return type
-    /// via its ref index. Mirrors `FileAnalysis::method_call_return_type_via_bag`
+    /// at its `Expr(span)`, where its brand overlays sit too. Mirrors `FileAnalysis::method_call_return_type_via_bag`
     /// but reads `&self.bag` (the in-progress builder bag). Includes
     /// the `FirstParam → ClassName` projection so chain-typer
     /// consumers see a concrete class instead of a parametric type.
@@ -1240,9 +1094,9 @@ impl<'a> Builder<'a> {
     /// at the chase. Direct method calls (`$rs->find(...)`) pass the
     /// invocant's resolved type — for DBIC, that's the
     /// `Parametric(ResultSet)` flowing through chain typing.
-    pub(super) fn bag_query_expression(
+    pub(super) fn bag_query_call(
         &self,
-        ref_idx: crate::model::witnesses::RefIdx,
+        span: Span,
         arity_hint: Option<u32>,
         receiver: Option<InferredType>,
     ) -> Option<InferredType> {
@@ -1250,7 +1104,7 @@ impl<'a> Builder<'a> {
             FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
             WitnessAttachment,
         };
-        let att = WitnessAttachment::Expression(ref_idx);
+        let att = WitnessAttachment::Expr(span);
         let reg = ReducerRegistry::with_defaults();
         let ctx = self.bag_context();
         let q = ReducerQuery {
@@ -1354,17 +1208,20 @@ impl<'a> Builder<'a> {
                 .filter_map(|(_, body_span)| self.bag_query_expr_span(*body_span))
                 .collect();
             let mut sorted: Vec<(ArgGuard, ReturnExpr)> = Vec::new();
+            // Guarded arms hold their arity even when their body doesn't type
+            // yet: the read is lazy (the call's receiver, the index), and an
+            // arm that never answers must leave its arity honestly empty
+            // rather than ceding it to the fluent fall-through.
             // Pass 1a: exact-match guards (Empty / Exact) — most specific,
             // must precede the magnitude bands so a point arity claims its own
             // arm first (`unless @_` before `unless @_ > 1` at arity 0).
             for (branch, body_span) in arms {
-                let Some(t) = self.bag_query_expr_span(*body_span) else { continue };
                 match branch {
                     ArityBranch::Zero => {
-                        sorted.push((ArgGuard::Empty, ReturnExpr::Concrete(t)));
+                        sorted.push((ArgGuard::Empty, ReturnExpr::Of(WitnessAttachment::Expr(*body_span))));
                     }
                     ArityBranch::Exact(n) => {
-                        sorted.push((ArgGuard::Exact(*n), ReturnExpr::Concrete(t)));
+                        sorted.push((ArgGuard::Exact(*n), ReturnExpr::Of(WitnessAttachment::Expr(*body_span))));
                     }
                     _ => {}
                 }
@@ -1372,13 +1229,12 @@ impl<'a> Builder<'a> {
             // Pass 1b: magnitude bands (AtMost / AtLeast) — narrower than the
             // fluent Any arm, broader than an exact point.
             for (branch, body_span) in arms {
-                let Some(t) = self.bag_query_expr_span(*body_span) else { continue };
                 match branch {
                     ArityBranch::AtMost(n) => {
-                        sorted.push((ArgGuard::AtMost(*n), ReturnExpr::Concrete(t)));
+                        sorted.push((ArgGuard::AtMost(*n), ReturnExpr::Of(WitnessAttachment::Expr(*body_span))));
                     }
                     ArityBranch::AtLeast(n) => {
-                        sorted.push((ArgGuard::AtLeast(*n), ReturnExpr::Concrete(t)));
+                        sorted.push((ArgGuard::AtLeast(*n), ReturnExpr::Of(WitnessAttachment::Expr(*body_span))));
                     }
                     _ => {}
                 }
@@ -1404,20 +1260,18 @@ impl<'a> Builder<'a> {
                     _ => None,
                 })
                 .max();
-            let mut default_t: Option<InferredType> = None;
+            let mut default_arm: Option<Span> = None;
             for (branch, body_span) in arms {
-                if matches!(branch, ArityBranch::Default) {
-                    if let Some(t) = self.bag_query_expr_span(*body_span) {
-                        default_t = Some(t);
-                    }
+                if matches!(branch, ArityBranch::Default) && self.bag_query_expr_span(*body_span).is_some() {
+                    default_arm = Some(*body_span);
                 }
             }
-            if let Some(t) = default_t {
+            if let Some(body_span) = default_arm {
                 let guard = match atmost_ceiling {
                     Some(n) => ArgGuard::AtLeast(n.saturating_add(1)),
                     None => ArgGuard::Any,
                 };
-                sorted.push((guard, ReturnExpr::Concrete(t)));
+                sorted.push((guard, ReturnExpr::Of(WitnessAttachment::Expr(body_span))));
             }
             if sorted.is_empty() {
                 continue;
@@ -1431,7 +1285,9 @@ impl<'a> Builder<'a> {
             // correct answer at any arity AND at the no-hint query hover uses,
             // so the fallback must stay. "Agree" excludes the lossy
             // Object-subsumes-HashRef dominance — that's a merge, not agreement.
-            if arms_genuinely_agree(&known_arm_types).is_none() {
+            // An arm that doesn't type yet can't be shown to agree, so it
+            // keeps the union authoritative too.
+            if known_arm_types.len() < arms.len() || arms_genuinely_agree(&known_arm_types).is_none() {
                 authoritative_syms.push(sym_id);
             }
             let return_expr = ReturnExpr::UnionOnArgs { branches: sorted };
@@ -1942,10 +1798,14 @@ impl<'a> Builder<'a> {
             .method_call_bindings
             .iter()
             .map(|mcb| {
-                let class = self
-                    .bag_query_variable(&mcb.invocant_var, mcb.scope, mcb.span.start)
-                    .and_then(|t| t.class_name().map(str::to_string));
-                (mcb.variable.as_str(), (mcb.method_name.clone(), class))
+                let call = &self.refs[mcb.call.0 as usize];
+                let class = match call.kind {
+                    RefKind::MethodCall { invocant_span: Some(sp), .. } => self
+                        .bag_query_expr_span(sp)
+                        .and_then(|t| t.class_name().map(str::to_string)),
+                    _ => None,
+                };
+                (mcb.variable.as_str(), (call.target_name.clone(), class))
             })
             .collect();
 
@@ -2044,6 +1904,10 @@ impl<'a> Builder<'a> {
             // and therefore brand — without a vendored Mojolicious.
             // Sub overrides stay symbol-keyed (they name a package
             // function, not a class method).
+            let payload = match &ov.return_type {
+                plugin::OverrideReturn::Type(t) => WitnessPayload::InferredType(t.clone()),
+                plugin::OverrideReturn::Expr(e) => WitnessPayload::ReturnExpr(e.clone()),
+            };
             if let plugin::OverrideTarget::Method { class, name } = &ov.target {
                 self.bag.push(Witness {
                     attachment: WitnessAttachment::PackageSymbol {
@@ -2051,7 +1915,7 @@ impl<'a> Builder<'a> {
                         name: name.clone(),
                     },
                     source: WitnessSource::Plugin(plugin_id.clone()),
-                    payload: WitnessPayload::InferredType(ov.return_type.clone()),
+                    payload: payload.clone(),
                     span: zero,
                 });
             }
@@ -2081,7 +1945,7 @@ impl<'a> Builder<'a> {
                 self.bag.push(Witness {
                     attachment: WitnessAttachment::Symbol(sym_id),
                     source: WitnessSource::Plugin(plugin_id.clone()),
-                    payload: WitnessPayload::InferredType(ov.return_type.clone()),
+                    payload: payload.clone(),
                     span: zero,
                 });
                 self.type_provenance.insert(
@@ -2096,25 +1960,18 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn resolve_hash_key_owners(&mut self) {
-        use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
-        // Build type constraint lookup from the bag — Variable
-        // witnesses with `InferredType` payloads are the seed-time
-        // type-constraint shape (`push_type_constraint` mirrors every
-        // TC into one of these). The bag is canonical at this phase.
-        let mut type_map: std::collections::HashMap<String, Vec<(ScopeId, InferredType, Point)>> =
-            std::collections::HashMap::new();
-        for w in self.bag.all() {
-            if let (
-                WitnessAttachment::Variable { name, scope },
-                WitnessPayload::InferredType(t),
-            ) = (&w.attachment, &w.payload)
-            {
-                type_map
-                    .entry(name.clone())
-                    .or_default()
-                    .push((*scope, t.clone(), w.span.start));
-            }
-        }
+        use crate::model::witnesses::WitnessAttachment;
+        // Names the bag types at all — the measurement below separates a
+        // known name the scope walk missed from an unattributable one.
+        let typed_names: std::collections::HashSet<String> = self
+            .bag
+            .all()
+            .iter()
+            .filter_map(|w| match &w.attachment {
+                WitnessAttachment::Variable { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
 
         // Build variable def lookup
         let mut var_defs: std::collections::HashMap<String, Vec<(ScopeId, SymbolId)>> =
@@ -2128,43 +1985,38 @@ impl<'a> Builder<'a> {
             }
         }
 
-        for r in &mut self.refs {
+        let owner_class: std::collections::HashMap<usize, String> = self
+            .refs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| {
+                let RefKind::HashKeyAccess { var_text } = &r.kind else { return None };
+                if r.hash_key_owner().is_some() {
+                    return None;
+                }
+                // The producer names the container canonically (`$h{k}` is
+                // `%h`, `$h->{k}` is `$h`), so the name is the lookup.
+                let t = self.bag_query_variable(var_text, r.scope, r.span.start)?;
+                Some((i, t.hash_key_class()?.to_string()))
+            })
+            .collect();
+
+        for (i, r) in self.refs.iter_mut().enumerate() {
             if let RefKind::HashKeyAccess { ref var_text } = r.kind {
                 if r.hash_key_owner().is_some() { continue; }
 
                 let vt = var_text.clone();
-                // Canonicalize: $hash → %hash for lookup
-                let lookup_name = if vt.starts_with('$') {
-                    format!("%{}", &vt[1..])
-                } else {
-                    vt.clone()
-                };
 
-                // Try type constraints first
-                if let Some(constraints) = type_map.get(&vt).or(type_map.get(&lookup_name)) {
-                    // Find best constraint: in scope chain and before ref
-                    let mut scope = Some(r.scope);
-                    'outer: while let Some(sid) = scope {
-                        for (tc_scope, tc_type, tc_point) in constraints {
-                            if *tc_scope == sid && *tc_point <= r.span.start {
-                                // Hash-key owner: read
-                                // `hash_key_class()` so a Parametric
-                                // TC narrows to its row-class arg.
-                                // For non-Parametric this is the
-                                // dispatch class. CLAUDE.md #10.
-                                if let Some(cn) = tc_type.hash_key_class() {
-                                    r.bind_hash_key_owner(HashKeyOwner::Class(cn.to_string()));
-                                    break 'outer;
-                                }
-                            }
-                        }
-                        scope = self.scopes[sid.0 as usize].parent;
-                    }
-                    if r.hash_key_owner().is_some() { continue; }
+                // The variable's type at the access, edges chased.
+                // `hash_key_class()` so a Parametric narrows to its row-class
+                // arg; for anything else it is the dispatch class.
+                if let Some(cn) = owner_class.get(&i) {
+                    r.bind_hash_key_owner(HashKeyOwner::Class(cn.clone()));
+                    continue;
                 }
 
                 // Fall back to variable identity
-                if let Some(defs) = var_defs.get(&vt).or(var_defs.get(&lookup_name)) {
+                if let Some(defs) = var_defs.get(&vt) {
                     // Find the innermost declaration before this ref
                     let mut scope = Some(r.scope);
                     while let Some(sid) = scope {
@@ -2185,8 +2037,8 @@ impl<'a> Builder<'a> {
                 // available and the scope/point test missed it) from a design
                 // (nothing in this file could have attributed it).
                 if crate::util::ghost_stats::enabled() && r.hash_key_owner().is_none() {
-                    let known_tc = type_map.contains_key(&vt) || type_map.contains_key(&lookup_name);
-                    let known_def = var_defs.contains_key(&vt) || var_defs.contains_key(&lookup_name);
+                    let known_tc = typed_names.contains(&vt);
+                    let known_def = var_defs.contains_key(&vt);
                     crate::util::ghost_stats::count("unowned.total");
                     if crate::model::conventions::is_conventional_invocant_name(&vt) {
                         crate::util::ghost_stats::count("unowned.self_like");

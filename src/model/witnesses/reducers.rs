@@ -101,8 +101,8 @@ pub trait WitnessReducer: Send + Sync {
 
 /// Folds class / rep / scalar observations into a type:
 ///
-/// 1. `ClassAssertion(Foo)` dominates.
-/// 2. `FirstParamInMethod { package }` under a matching framework's
+/// 1. `ClassName(Foo)` dominates.
+/// 2. `FirstParam { package }` under a matching framework's
 ///    backing rep is NOT dethroned by rep observations matching that rep
 ///    (the Mojo `sub name` bug fix).
 /// 3. `BlessTarget(Rep)` pins the rep axis.
@@ -112,7 +112,7 @@ pub trait WitnessReducer: Send + Sync {
 pub struct FrameworkAwareTypeFold;
 
 /// The class-identity axis of `FrameworkAwareTypeFold`: the standing
-/// `ClassName` / `ClassAssertion`, its source priority, and WHERE it was
+/// `ClassName`, its source priority, and WHERE it was
 /// made. Identity dominates rep, so this axis answers ahead of the plain
 /// axis — which is why it has to be retired explicitly: a plain-type write
 /// Retirement is the reset cutoff's job (`my $x = Foo->new; $x = 'str'`
@@ -132,6 +132,67 @@ impl ClassIdentity {
             self.name = Some(name.to_string());
             self.priority = priority;
         }
+    }
+}
+
+/// Which of a variable's witnesses are live at a query point: none past the
+/// point, none behind the latest write at or before it. The fold owns this
+/// rule; the registry's chase asks it (`edge_is_dead`) so it never chases an
+/// edge the fold would discard — a write chain (`$x = $x->next` × N) would
+/// otherwise re-chase every earlier write from every point.
+///
+/// TODO(def-use): this is reaching-definitions computed at query time. The
+/// builder should mint reaching writes as facts in the flow lane, and the
+/// chase follow those instead of asking a reducer —
+/// `docs/adr/flow-narrowing.md` §Reaching writes.
+pub(crate) struct LiveWindow {
+    point: Option<Point>,
+    reset_at: Option<Point>,
+}
+
+impl LiveWindow {
+    /// Point-narrowing is variable-lifetime semantics; every other
+    /// attachment folds all its witnesses.
+    pub(crate) fn at(ws: &[&Witness], q: &ReducerQuery) -> Self {
+        let point = q
+            .point
+            .filter(|_| matches!(q.attachment, WitnessAttachment::Variable { .. }));
+        let in_window = |w: &&&Witness| point.is_none_or(|p| w.span.start <= p);
+        let reset_at = ws
+            .iter()
+            .filter(in_window)
+            .filter(|w| matches!(w.payload, WitnessPayload::Reset))
+            .map(|w| w.span.start)
+            .max();
+        LiveWindow { point, reset_at }
+    }
+
+    fn in_window(&self, w: &Witness) -> bool {
+        self.point.is_none_or(|p| w.span.start <= p)
+    }
+
+    fn admits(&self, w: &Witness) -> bool {
+        self.in_window(w) && self.reset_at.is_none_or(|r| w.span.start >= r)
+    }
+
+    /// An `Edge` the fold will discard, so the chase may skip it. Only
+    /// edges: the fold's "bound before" still reads the other witnesses.
+    /// A reset only retires edges when an earlier marker already answers
+    /// "was anything bound before it" — a first write resets nothing, and
+    /// deciding that would need the very edges being skipped.
+    pub(crate) fn edge_is_dead(&self, ws: &[&Witness], w: &Witness) -> bool {
+        if !matches!(w.payload, WitnessPayload::Edge(_)) {
+            return false;
+        }
+        if !self.in_window(w) {
+            return true;
+        }
+        self.reset_at.is_some_and(|r| {
+            w.span.start < r
+                && ws
+                    .iter()
+                    .any(|m| m.span.start < r && matches!(m.payload, WitnessPayload::Reset))
+        })
     }
 }
 
@@ -159,9 +220,8 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         // scope wrongly discards them (`my $g = X->new->m` chased at `$g`'s
         // scope-end, where the call span doesn't contain it). So only narrow
         // for variables; expressions fold every witness.
-        let narrow_point = q
-            .point
-            .filter(|_| matches!(q.attachment, WitnessAttachment::Variable { .. }));
+        let window = LiveWindow::at(ws, q);
+        let narrow_point = window.point;
         // Narrowing: with a `point`, pick the narrowest-span
         // InferredType witness containing it (already post-narrowing).
         // Falls through to the full fold otherwise.
@@ -197,12 +257,9 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         // enclosing class). Same axis as `PluginOverrideReducer` on Symbols.
         let mut class_assertion = ClassIdentity::default();
         let mut first_param_class: Option<String> = None;
-        // A `BrandedRoute` is a class identity that carries extra
-        // inherited-default data. It must dominate the bare
-        // `ClassName(base)` companion that the same assignment also
-        // pushes (so a partial route target reads the brand, not the
-        // brandless class). Track the latest brand separately and
-        // return it ahead of the class axis.
+        // A branded object is its class identity plus marks, so it
+        // dominates a bare `ClassName` of the same class (the walk's own
+        // typing of the assignment) instead of losing its marks to it.
         let mut branded: Option<InferredType> = None;
         let mut rep_obs: Option<Rep> = None;
         let mut bless_rep: Option<Rep> = None;
@@ -223,33 +280,20 @@ impl WitnessReducer for FrameworkAwareTypeFold {
         // `$r = Foo->new; $r = {}` reads the hash. Facts anchored at the
         // site survive; what lands after accrues. A first write in a scope
         // resets nothing and is not a value.
-        let in_window = |w: &Witness| narrow_point.is_none_or(|p| w.span.start <= p);
         // "Bound before" counts an earlier WRITE as a binding whatever it
         // produced: a write whose RHS nothing typed leaves only its own
         // marker behind, and the next write still replaces something.
         let bound_before = |site: Point| {
-            ws.iter().filter(|w| in_window(w)).any(|w| {
+            ws.iter().filter(|w| window.in_window(w)).any(|w| {
                 w.span.start < site
                     && (w.payload.binds_value() || matches!(w.payload, WitnessPayload::Reset))
             })
         };
-        let reset_at = ws
-            .iter()
-            .filter(|w| in_window(w))
-            .filter(|w| matches!(w.payload, WitnessPayload::Reset))
-            .map(|w| w.span.start)
-            .max();
-
         for w in ws {
             // Temporal ordering: only consider witnesses emitted at or
             // before the query point — a later reassignment shouldn't
             // influence a lookup at an earlier line.
-            if let Some(point) = narrow_point {
-                if w.span.start > point {
-                    continue;
-                }
-            }
-            if reset_at.is_some_and(|r| w.span.start < r) {
+            if !window.admits(w) {
                 continue;
             }
             // Skip scoped InferredType witnesses that don't contain the
@@ -269,15 +313,17 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                     InferredType::FirstParam { package } => {
                         first_param_class = Some(package.clone())
                     }
-                    b @ InferredType::BrandedRoute { .. } => branded = Some(b.clone()),
+                    b @ InferredType::Branded { base, .. } if base.class_name().is_some() => {
+                        branded = Some(b.clone())
+                    }
                     // Source priority breaks ties first (an EXPLICIT
                     // annotation — `Annotation`, priority 20 — governs over
                     // an inferred flow type, priority 10, whatever the order
                     // they land in): the C++ `T x = {…}` braced-init case,
                     // where the initializer's `Numeric` flow witness would
                     // otherwise clobber the declared container type. This is
-                    // the same annotation-dominates rule the `ClassName`/
-                    // `ClassAssertion` axis above already applies, extended to
+                    // the same annotation-dominates rule the `ClassName`
+                    // class axis above already applies, extended to
                     // every `InferredType` flavor (`Parametric`, `HashRef`,
                     // …). Within equal priority: latest wins UNLESS the
                     // standing answer subsumes the newcomer — structure
@@ -308,12 +354,6 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                 }
                 WitnessPayload::Observation(obs) => {
                     match obs {
-                        TypeObservation::ClassAssertion(name) => {
-                            class_assertion.assert(name, prio);
-                        }
-                        TypeObservation::FirstParamInMethod { package } => {
-                            first_param_class = Some(package.clone())
-                        }
                         TypeObservation::HashRefAccess => rep_obs = merge_rep(rep_obs, Rep::Hash),
                         TypeObservation::ArrayRefAccess => rep_obs = merge_rep(rep_obs, Rep::Array),
                         TypeObservation::CodeRefInvocation => rep_obs = merge_rep(rep_obs, Rep::Code),
@@ -322,12 +362,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                         TypeObservation::StringUse => str_ = true,
                         TypeObservation::RegexpUse => re = true,
                     }
-                    if !matches!(
-                        obs,
-                        TypeObservation::ClassAssertion(_) | TypeObservation::FirstParamInMethod { .. }
-                    ) {
-                        last_observation_at = last_observation_at.max(Some(w.span.start));
-                    }
+                    last_observation_at = last_observation_at.max(Some(w.span.start));
                 }
                 _ => {}
             }
@@ -343,31 +378,24 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             plain_type = None;
         }
 
-        // A branded route dominates the bare-class companion: the
-        // brand IS the class identity plus inherited defaults.
         if let Some(b) = branded {
-            return ReducedValue::Type(b);
-        }
-        // Class axis wins when consistent with the rep axis. On
-        // contradiction or unknown rep, still return the class — the
-        // user's intent is object-typed use; a rep mismatch is a
-        // separate diagnostic.
-        if let Some(name) = class_assertion.name.clone().or(first_param_class.clone()) {
-            let backing = bless_rep.or_else(|| q.framework.backing_rep());
-            match (rep_obs, backing) {
-                (None, _) => return ReducedValue::Type(InferredType::ClassName(name)),
-                (Some(obs), Some(b)) if obs == b => {
-                    return ReducedValue::Type(InferredType::ClassName(name));
-                }
-                (Some(obs), None) => {
-                    let _ = obs;
-                    return ReducedValue::Type(InferredType::ClassName(name));
-                }
-                (Some(obs), Some(b)) => {
-                    let _ = (obs, b);
-                    return ReducedValue::Type(InferredType::ClassName(name));
-                }
+            if class_assertion.name.as_deref().is_none_or(|c| b.class_name() == Some(c)) {
+                return ReducedValue::Type(b);
             }
+        }
+        // The class axis wins over rep, consistent or not: the user's intent
+        // is object-typed use, and a rep mismatch is a separate diagnostic.
+        if let Some(name) = class_assertion.name {
+            return ReducedValue::Type(InferredType::ClassName(name));
+        }
+        // A method's invocant IS the call's receiver: with one in hand (a
+        // chase through `$o->m`) it answers that receiver, so `return $self`
+        // on a subclass instance types the subclass.
+        if let Some(package) = first_param_class {
+            return ReducedValue::Type(
+                super::registry::fresh_dispatch_receiver(&q.receiver, &package, q.context)
+                    .unwrap_or(InferredType::ClassName(package)),
+            );
         }
 
         // Explicit assignments dominate rep observations — `my $x = []`
@@ -400,7 +428,7 @@ impl WitnessReducer for FrameworkAwareTypeFold {
 
         // A write that retired something and was never displaced is the
         // answer; a first write (a declaration nothing typed) is absence.
-        if reset_at.is_some_and(bound_before) {
+        if window.reset_at.is_some_and(bound_before) {
             return ReducedValue::Type(InferredType::Unknown);
         }
         ReducedValue::None
@@ -458,7 +486,9 @@ impl WitnessReducer for BranchArmFold {
         }
         match &w.payload {
             WitnessPayload::InferredType(_) => true,
-            WitnessPayload::Fact { family, .. } => family == tags::FACT_UNDEF_ARM,
+            WitnessPayload::Fact { family, .. } => {
+                family == tags::FACT_UNDEF_ARM || family == tags::FACT_SHORT_CIRCUIT
+            }
             _ => false,
         }
     }
@@ -469,6 +499,8 @@ impl WitnessReducer for BranchArmFold {
         // a distinct source at emission so this fold can prefer them.
         let mut fallback: Vec<InferredType> = Vec::new();
         let mut undef_arms = 0usize;
+        // `Some(exits)` for a short-circuit, whether or not its arms typed.
+        let mut short_circuit: Option<bool> = None;
         for w in ws {
             let is_fallback =
                 matches!(&w.source, WitnessSource::Builder(t) if t == "fallback_arm");
@@ -476,27 +508,45 @@ impl WitnessReducer for BranchArmFold {
                 WitnessPayload::InferredType(t) if is_fallback => fallback.push(t.clone()),
                 WitnessPayload::InferredType(t) => typed.push(t.clone()),
                 WitnessPayload::Fact { family, .. } if family == tags::FACT_UNDEF_ARM => undef_arms += 1,
+                WitnessPayload::Fact { family, value, .. } if family == tags::FACT_SHORT_CIRCUIT => {
+                    short_circuit = Some(matches!(value, FactValue::Bool(true)));
+                }
                 _ => {}
             }
         }
-        // `||` / `//`: the RHS floor is returned whenever the LHS is
-        // falsy/undef, so the expression's type is at least the fallback's.
-        // Prefer agreement across all known arms; else the known floor; else
-        // the known LHS. This is what lets `$ENV{X} || 10` type to `Numeric`
-        // even when the LHS hash access can't be resolved — an honest,
-        // reachable type beats the entry vanishing.
-        if !fallback.is_empty() {
+        if let Some(exits) = short_circuit {
+            // `X || return`: when the fallback runs nothing is assigned, so
+            // the value is `X` minus its false part — an `Optional` peels,
+            // and a plain `undef` never gets past the exit.
+            if exits {
+                return match typed.into_iter().next() {
+                    Some(InferredType::Optional(inner)) => ReducedValue::Type(*inner),
+                    Some(t) if !t.is_undef() => ReducedValue::Type(t),
+                    _ => ReducedValue::None,
+                };
+            }
+            // Writing a fallback says the author expects it to run, so the
+            // operator is a hint and both arms count, whatever the LHS's
+            // truthiness: two typed arms that agree answer, else the RHS
+            // floor. That floor is what lets `$ENV{X} || 10` type to
+            // `Numeric` when the LHS can't be resolved.
+            // TODO(dead-fallback-lint): an LHS that can't be false (a
+            // reference, an object without `bool` overloading) makes the
+            // fallback dead; that belongs in a diagnostic, not in the type.
             let all: Vec<&InferredType> = typed.iter().chain(fallback.iter()).collect();
             if let Some((first, rest)) = all.split_first() {
-                if rest.iter().all(|t| *t == *first) {
+                if !typed.is_empty() && !rest.is_empty() && rest.iter().all(|t| *t == *first) {
                     return ReducedValue::Type((*first).clone());
                 }
             }
+            // TODO(union-join): the value is `left ⊔ right`, e.g.
+            // `Optional<Bar> || Baz` is `Bar | Baz`, but `InferredType` has
+            // no union beyond `Optional` (T ⊔ undef), so the floor stands in.
+            // The design is option B of docs/open-forks.md, "Union types in the
+            // lattice"; this arm and the ternary disagreement below answer
+            // through it once it lands.
             if let Some(fb) = fallback.into_iter().next() {
                 return ReducedValue::Type(fb);
-            }
-            if let Some(l) = typed.into_iter().next() {
-                return ReducedValue::Type(l);
             }
             return ReducedValue::None;
         }
@@ -509,6 +559,10 @@ impl WitnessReducer for BranchArmFold {
         // agreement, NOT the loose hash/object subsumption the return-arm
         // join uses). An `undef` arm then lifts the agreed `T` to
         // `Optional<T>`.
+        // TODO(brand-join): arms compare whole types, marks included, so one
+        // plugin's disagreeing mark costs every other plugin's agreeing ones.
+        // Agree on the unbranded base, then keep each namespace's marks the
+        // arms share (docs/adr/brands.md, "Joins and the fold").
         let agreed = match typed.split_first() {
             Some((first, rest)) if rest.iter().all(|t| t == first) => Some(first.clone()),
             _ => None,
@@ -518,6 +572,8 @@ impl WitnessReducer for BranchArmFold {
                 ReducedValue::Type(InferredType::Optional(Box::new(t)))
             }
             Some(t) => ReducedValue::Type(t),
+            // TODO(union-join): disagreeing arms are a union, not unknown
+            // (docs/open-forks.md, "Union types in the lattice").
             None => ReducedValue::None,
         }
     }
@@ -1060,6 +1116,8 @@ pub(super) fn eval_return_expr(re: &ReturnExpr, q: &ReducerQuery) -> Option<Infe
         ReturnExpr::Concrete(t) => Some(t.clone()),
         ReturnExpr::Receiver => q.receiver.clone(),
         ReturnExpr::Arg(i) => q.args.get(*i as usize).cloned(),
+        // The registry resolves `Of` before reducing; one left here had no answer.
+        ReturnExpr::Of(_) => None,
         ReturnExpr::ReceiverOr(fallback) => {
             Some(q.receiver.clone().unwrap_or_else(|| fallback.clone()))
         }

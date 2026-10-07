@@ -6,6 +6,7 @@
 //! visit_method, docs, pipeline, …).
 
 use super::*;
+use crate::cst::LiteralShape;
 
 impl<'a> Builder<'a> {
     pub(super) fn get_decl_keyword(&self, var_decl: Node<'a>) -> Option<String> {
@@ -310,9 +311,9 @@ impl<'a> Builder<'a> {
         // FIELD PER scalar (not a single list node); a bare `($a, $b)` LHS is
         // a grouping container whose scalars `list_elements` splices out.
         let mut cursor = lhs.walk();
-        let elems: Vec<Node<'a>> = match lhs.kind() {
-            "variable_declaration" => lhs.children_by_field_name("variables", &mut cursor).collect(),
-            "parenthesized_expression" | "list_expression" => crate::cst::list_elements(lhs),
+        let elems: Vec<Node<'a>> = match (crate::cst::literal_shape(lhs), lhs.kind()) {
+            (None, "variable_declaration") => lhs.children_by_field_name("variables", &mut cursor).collect(),
+            (Some(LiteralShape::List), _) => crate::cst::list_elements(lhs),
             _ => Vec::new(),
         };
         elems
@@ -355,6 +356,13 @@ impl<'a> Builder<'a> {
         if matches!(lhs.kind(), "scalar" | "array" | "hash") {
             return lhs.utf8_text(self.source).ok().map(|s| s.to_string());
         }
+        // `local $x = …` assigns the variable it localizes.
+        if lhs.kind() == "localization_expression" {
+            let mut named = crate::cst::NodeExt::named(&lhs);
+            if let (Some(var), None) = (named.next(), named.next()) {
+                return self.get_var_text_from_lhs(var);
+            }
+        }
         None
     }
 
@@ -370,17 +378,17 @@ impl<'a> Builder<'a> {
         use crate::model::file_analysis::Extraction;
         // `my ($a, $b)` (variable_declaration) OR a bare `($a, $b) = …`
         // reassignment (a grouping container LHS — no `my`).
-        let elems: Vec<Node<'a>> = match lhs.kind() {
+        let elems: Vec<Node<'a>> = match (crate::cst::literal_shape(lhs), lhs.kind()) {
             // A single `my $x` uses the `variable` field; a list `my ($a, $b)`
             // uses the (repeated) `variables` field. The former is not a list.
-            "variable_declaration" => {
+            (None, "variable_declaration") => {
                 if lhs.child_by_field_name("variable").is_some() {
                     return None;
                 }
                 let mut cursor = lhs.walk();
                 lhs.children_by_field_name("variables", &mut cursor).collect()
             }
-            "parenthesized_expression" | "list_expression" => crate::cst::list_elements(lhs),
+            (Some(LiteralShape::List), _) => crate::cst::list_elements(lhs),
             _ => return None,
         };
         let mut out = Vec::new();
@@ -412,7 +420,7 @@ impl<'a> Builder<'a> {
     pub(super) fn list_element_nodes(&self, node: Node<'a>) -> Option<Vec<Node<'a>>> {
         // A paren group is a literal list whatever it holds — `(5)` is a
         // one-element list, so `my ($x) = (5)` binds `$x` to the `5`.
-        matches!(node.kind(), "parenthesized_expression" | "list_expression")
+        crate::cst::is_list_literal(node)
             .then(|| crate::cst::list_elements(node))
     }
 

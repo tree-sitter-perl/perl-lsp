@@ -14,6 +14,12 @@
 /// rvalue type, so it is a Fact rather than an edge.
 pub const FACT_UNDEF_ARM: &str = "undef_arm";
 
+/// A `||` / `//` short-circuit, minted whether or not its arms type, so the
+/// fold knows the shape when the fallback's edge resolves to nothing.
+/// `Bool(true)` when the fallback is a control-flow exit (`X || return`,
+/// `X // die`): the expression is then worth only `X`, made true or defined.
+pub const FACT_SHORT_CIRCUIT: &str = "short_circuit";
+
 /// A return arm that yields a VALUE, counted whether or not it typed.
 ///
 /// The all-undef verdict needs "did I see every way out", and an empty

@@ -2,6 +2,7 @@
 //! hash-element and anonymous-hash visitors.
 
 use super::*;
+use crate::cst::LiteralShape;
 
 impl<'a> Builder<'a> {
     /// Handle func1op_call_expression: abs($x), length($s), int($n), etc.
@@ -74,8 +75,8 @@ impl<'a> Builder<'a> {
     /// Extract the first argument node from a function call.
     pub(super) fn first_call_arg(&self, call_node: Node<'a>) -> Option<Node<'a>> {
         let args = call_node.child_by_field_name("arguments")?;
-        match args.kind() {
-            "list_expression" | "parenthesized_expression" => args.named_child(0),
+        match crate::cst::literal_shape(args) {
+            Some(LiteralShape::List) => args.named_child(0),
             _ => Some(args), // single arg (ambiguous_function_call_expression)
         }
     }
@@ -127,15 +128,17 @@ impl<'a> Builder<'a> {
         // inference-dependent stays None for PostFold to fill from the bag.
         let invocant_class = invocant_node.and_then(|n| match n.kind() {
             "method_call_expression" => self.extract_constructor_class(n),
-            "bareword" | "package"
-                if n.utf8_text(self.source).ok().is_some_and(crate::model::conventions::is_current_package_token) =>
-            {
-                self.current_package.clone()
+            "func0op_call_expression" => {
+                self.infer_expression_result_type(n).and_then(|t| t.class_name().map(str::to_string))
             }
             _ => None,
         });
 
         let args = self.extract_call_args(node);
+        if let Some(inv) = invocant_node {
+            self.emit_invocant_witness(inv);
+        }
+        let operands = self.call_operands(&args);
 
         if let Some(ref name) = method_name {
             // Dynamic method dispatch: $self->$method() — resolve $method if known
@@ -170,8 +173,8 @@ impl<'a> Builder<'a> {
                         if let Some(c) = invocant_class.clone() {
                             self.method_call_invocant.insert(idx, c);
                         }
-                        self.method_call_arity
-                            .insert(idx, args.len() as u32);
+                        self.method_call_args.insert(idx, operands.clone());
+                        self.method_call_refs.entry(node.id()).or_default().push(idx);
                     }
                 }
             } else {
@@ -191,8 +194,8 @@ impl<'a> Builder<'a> {
                 if let Some(c) = invocant_class.clone() {
                     self.method_call_invocant.insert(idx, c);
                 }
-                self.method_call_arity
-                    .insert(idx, args.len() as u32);
+                self.method_call_args.insert(idx, operands.clone());
+                self.method_call_refs.entry(node.id()).or_default().push(idx);
 
                 // Runtime-exporter setup in method-call form:
                 // `Moose::Exporter->setup_import_methods(...)`,
@@ -407,8 +410,8 @@ impl<'a> Builder<'a> {
             _ => return,
         };
         let Some(args) = node.child_by_field_name("arguments") else { return };
-        let arg_nodes: Vec<Node> = match args.kind() {
-            "list_expression" | "parenthesized_expression" => {
+        let arg_nodes: Vec<Node> = match crate::cst::literal_shape(args) {
+            Some(LiteralShape::List) => {
                 (0..args.named_child_count())
                     .filter_map(|i| args.named_child(i))
                     .collect()
@@ -419,18 +422,18 @@ impl<'a> Builder<'a> {
 
         let mut names: Vec<(String, Span)> = Vec::new();
         for child in arg_nodes.iter().skip(skip_first as usize) {
-            match child.kind() {
-                "string_literal" | "interpolated_string_literal" => {
+            match (crate::cst::literal_shape(*child), child.kind()) {
+                (Some(LiteralShape::Str), _) => {
                     if let Some(text) = self.extract_string_content(*child) {
                         names.push((text, self.string_content_span(*child)));
                     }
                 }
-                "bareword" | "autoquoted_bareword" => {
+                (None, "bareword" | "autoquoted_bareword") => {
                     if let Ok(text) = child.utf8_text(self.source) {
                         names.push((text.to_string(), node_to_span(*child)));
                     }
                 }
-                "quoted_word_list" | "anonymous_array_expression" => {
+                (Some(LiteralShape::Qw | LiteralShape::ArrayRef), _) => {
                     self.extract_array_attr_names(*child, &mut names);
                 }
                 _ => {}
@@ -472,7 +475,7 @@ impl<'a> Builder<'a> {
 
     pub(super) fn visit_hash_element(&mut self, node: Node<'a>) {
         // Infer HashRef on the operand variable (e.g. $x in $x->{key})
-        self.infer_deref_type(node, InferredType::HashRef);
+        self.infer_deref_type(node, TypeObservation::HashRefAccess);
 
         // Record the hash variable access. Container form (`$h{k}`,
         // grammar field `hash:`) reads `%h`, not scalar `$h` — use the
@@ -681,9 +684,9 @@ impl<'a> Builder<'a> {
         }
         // Try the first arg as a `scalar` node with const-foldable
         // value. Same one-level unwrap rule as the literal helper.
-        let arg_node = match args.kind() {
-            "scalar" => Some(args),
-            "parenthesized_expression" | "list_expression" => {
+        let arg_node = match (crate::cst::literal_shape(args), args.kind()) {
+            (None, "scalar") => Some(args),
+            (Some(LiteralShape::List), _) => {
                 let mut found: Option<Node<'a>> = None;
                 for i in 0..args.named_child_count() {
                     if let Some(c) = args.named_child(i) {
@@ -743,20 +746,16 @@ impl<'a> Builder<'a> {
         // expression). Multi-arg calls wrap in
         // `list_expression`/`parenthesized_expression`. Handle the
         // bare-string case first, then recurse into wrappers.
-        match args.kind() {
-            "string_literal" | "interpolated_string_literal" => {
+        match crate::cst::literal_shape(args) {
+            Some(LiteralShape::Str) => {
                 return self.extract_string_content(args);
             }
-            "parenthesized_expression" | "list_expression" => {
+            Some(LiteralShape::List) => {
                 for i in 0..args.named_child_count() {
                     let child = args.named_child(i)?;
-                    return match child.kind() {
-                        "string_literal" | "interpolated_string_literal" => {
-                            self.extract_string_content(child)
-                        }
-                        "parenthesized_expression" | "list_expression" => {
-                            self.first_string_literal_arg(child)
-                        }
+                    return match crate::cst::literal_shape(child) {
+                        Some(LiteralShape::Str) => self.extract_string_content(child),
+                        Some(LiteralShape::List) => self.first_string_literal_arg(child),
                         _ => None,
                     };
                 }

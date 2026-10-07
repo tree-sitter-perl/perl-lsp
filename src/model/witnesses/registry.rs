@@ -22,8 +22,28 @@ use super::*;
 /// wrong type). A same-receiver diamond (the inheritance walk holds
 /// `q.receiver` constant within one `PackageSymbol` query) still hashes
 /// to one key, so memoization still kills the exponential re-chase.
-type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>);
+///
+/// A `Variable` is temporal — its reducer answers AT `q.point` — so its key
+/// carries the point: `$x ||= …` reads `$x` before the write the outer query
+/// is resolving, which is a different question, not a cycle. Every other
+/// attachment ignores the point and keeps it out of the key, so the memo
+/// still collapses their diamonds.
+type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>, Option<Point>);
 type VisitedSet = std::collections::HashSet<VisitedKey>;
+
+fn visited_key(bag: &WitnessBag, q: &ReducerQuery) -> VisitedKey {
+    let point = match q.attachment {
+        WitnessAttachment::Variable { .. } => q.point,
+        _ => None,
+    };
+    (
+        bag as *const _ as usize,
+        q.attachment.clone(),
+        receiver_key(&q.receiver),
+        q.arity_hint,
+        point,
+    )
+}
 
 /// Per-top-level-`query` traversal state: the cycle guard plus a result
 /// memo. The bag forms a DAG of edges; without memoization a diamond
@@ -89,6 +109,166 @@ thread_local! {
         const { std::cell::RefCell::new((false, Vec::new())) };
 }
 
+/// `(value, recorded_exit, cut)` — see `QueryState::memo`.
+type MemoEntry = (std::sync::Arc<ReducedValue>, bool, bool);
+
+/// What a fold-memo answer depends on beyond the per-query key and the
+/// generations the memo holds: the framework and arguments the per-query memo
+/// holds fixed for one query, and which scope table the context reads.
+type FoldMemoKey = (VisitedKey, FrameworkFact, Option<String>, usize);
+
+/// The answers for one generation of the bag and of the parent graph.
+/// Generations never repeat, so when either moves on every entry is dead;
+/// holding only the current one keeps the memo bounded by the queries between
+/// two pushes, not by the whole build.
+#[derive(Default)]
+struct FoldMemo {
+    generation: u64,
+    parents_generation: u64,
+    answers: std::collections::HashMap<FoldMemoKey, (std::sync::Arc<ReducedValue>, bool)>,
+}
+
+thread_local! {
+    /// The build's memo, shared by every top-level query while a
+    /// `FoldMemoScope` is open. `None` outside a build.
+    static FOLD_MEMO: std::cell::RefCell<Option<FoldMemo>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Shares resolved sub-answers across the top-level queries of one build.
+///
+/// The fold asks the same questions many times: every pass, every iteration,
+/// and every call in a chain re-types the chain's prefix. Within a build the
+/// answers can only change when the bag or the parent graph does, and
+/// build-time queries run with no module index, so nothing outside the file
+/// can move them. Any write to either moves its generation and empties the
+/// memo, and only subtrees that were never cut short are stored.
+pub(crate) struct FoldMemoScope {
+    outer: Option<FoldMemo>,
+}
+
+impl FoldMemoScope {
+    /// `PERL_LSP_NO_FOLD_MEMO=1` leaves the scope closed: the A/B control,
+    /// and the check that the memo changes no answer.
+    pub(crate) fn enter() -> Self {
+        static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let disabled = *DISABLED.get_or_init(|| std::env::var_os("PERL_LSP_NO_FOLD_MEMO").is_some());
+        #[cfg(test)]
+        let disabled = disabled || FOLD_MEMO_FORCED_OFF.with(|c| c.get());
+        let fresh = (!disabled).then(FoldMemo::default);
+        let outer = FOLD_MEMO.with(|m| std::mem::replace(&mut *m.borrow_mut(), fresh));
+        FoldMemoScope { outer }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static FOLD_MEMO_FORCED_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with the fold memo off — the control arm of the equivalence net.
+#[cfg(test)]
+pub(crate) fn without_fold_memo<R>(f: impl FnOnce() -> R) -> R {
+    let prev = FOLD_MEMO_FORCED_OFF.with(|c| c.replace(true));
+    let out = f();
+    FOLD_MEMO_FORCED_OFF.with(|c| c.set(prev));
+    out
+}
+
+/// `PERL_LSP_FOLD_MEMO_EQUIV=1 cargo test` rebuilds every file the suite
+/// touches with the memo off and asserts the analyses agree.
+#[cfg(test)]
+pub(crate) fn fold_memo_equiv_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PERL_LSP_FOLD_MEMO_EQUIV").as_deref() == Ok("1"))
+}
+
+impl Drop for FoldMemoScope {
+    fn drop(&mut self) {
+        let outer = self.outer.take();
+        FOLD_MEMO.with(|m| *m.borrow_mut() = outer);
+    }
+}
+
+/// Answer `q` from the fold memo, or hand back the generations and key to
+/// store under once it is computed (`None` when no scope is open, or when the answer may depend
+/// on more than this file: a query that can reach the module index is never
+/// shared).
+///
+/// Out of line and boxed for the same reason as `note_moc_exit`: `query_rec`
+/// is live hundreds of frames deep, and the key's temporaries would grow every
+/// one of them.
+#[inline(never)]
+fn fold_memo_probe(
+    bag: &WitnessBag,
+    q: &ReducerQuery,
+    key: &VisitedKey,
+    state: &mut QueryState,
+) -> Result<std::sync::Arc<ReducedValue>, Option<Box<(FoldMemoStamp, FoldMemoKey)>>> {
+    if !FOLD_MEMO.with(|m| m.borrow().is_some()) {
+        return Err(None);
+    }
+    let scopes = match q.context {
+        Some(ctx) if ctx.module_index.is_some() => return Err(None),
+        Some(ctx) => ctx.scopes.as_ptr() as usize,
+        None => 0,
+    };
+    let args = (!q.args.is_empty()).then(|| format!("{:?}", q.args));
+    let stamp = FoldMemoStamp {
+        generation: bag.generation(),
+        parents_generation: q.context.map(|ctx| ctx.package_parents.generation()),
+    };
+    let fk = (key.clone(), q.framework, args, scopes);
+    let hit = FOLD_MEMO.with(|m| {
+        let mut m = m.borrow_mut();
+        let memo = m.as_mut()?;
+        if !stamp.matches(memo) {
+            memo.answers.clear();
+            memo.generation = stamp.generation;
+            if let Some(parents_generation) = stamp.parents_generation {
+                memo.parents_generation = parents_generation;
+            }
+            return None;
+        }
+        memo.answers.get(&fk).cloned()
+    });
+    let Some((cached, recorded_exit)) = hit else {
+        return Err(Some(Box::new((stamp, fk))));
+    };
+    crate::util::ghost_stats::count("fold_memo.hit");
+    // The same laundering guard as the per-query memo.
+    if recorded_exit && state.opaque_frames > 0 {
+        crate::util::ghost_stats::count("residual.memo_under_opaque");
+        state.poisoned = true;
+    }
+    state.memo.insert(key.clone(), (std::sync::Arc::clone(&cached), recorded_exit, false));
+    Ok(cached)
+}
+
+/// The generations a probe saw. A query without a context reads no parent
+/// graph, so it leaves the memo's parent generation alone.
+struct FoldMemoStamp {
+    generation: u64,
+    parents_generation: Option<u64>,
+}
+
+impl FoldMemoStamp {
+    fn matches(&self, memo: &FoldMemo) -> bool {
+        memo.generation == self.generation
+            && self.parents_generation.map_or(true, |p| p == memo.parents_generation)
+    }
+}
+
+#[inline(never)]
+fn fold_memo_store(fk: Box<(FoldMemoStamp, FoldMemoKey)>, result: &std::sync::Arc<ReducedValue>, recorded_exit: bool) {
+    let (stamp, fk) = *fk;
+    FOLD_MEMO.with(|m| {
+        if let Some(memo) = m.borrow_mut().as_mut().filter(|memo| stamp.matches(memo)) {
+            crate::util::ghost_stats::count("fold_memo.store");
+            memo.answers.insert(fk, (std::sync::Arc::clone(result), recorded_exit));
+        }
+    });
+}
+
 pub(super) struct QueryState {
     visited: VisitedSet,
     /// Enriched copies consulted during this query — pinned so memo
@@ -104,7 +284,14 @@ pub(super) struct QueryState {
     /// A memo hit skips the subtree, and with it the `note_exit` calls that
     /// would have poisoned a re-entry from inside a combining frame — so the
     /// fact has to be carried on the entry instead of re-derived.
-    memo: std::collections::HashMap<VisitedKey, (std::sync::Arc<ReducedValue>, bool)>,
+    ///
+    /// The second flag is "this subtree was cut short": a cycle guard returned
+    /// for an on-path key, or the depth cap fired, somewhere beneath it. Such a
+    /// value depends on the path it was reached from, so it may be reused
+    /// inside this query (the memo always has) but never by another one.
+    memo: std::collections::HashMap<VisitedKey, MemoEntry>,
+    /// Cuts seen so far in this query; read as a difference across a subtree.
+    cuts: u64,
     /// Where a BAKE's chase would have consulted the index, in the order the
     /// ladder reached them.
     ///
@@ -142,6 +329,7 @@ impl QueryState {
             visited: std::collections::HashSet::new(),
             pins: Vec::new(),
             memo: std::collections::HashMap::new(),
+            cuts: 0,
             residual: Vec::new(),
             poisoned: false,
             opaque_frames: 0,
@@ -263,12 +451,31 @@ pub(super) fn sweep_candidate_may_answer(
     idx.candidate_bag_may_answer(cached, name, class, attributed)
 }
 
+/// Lay the attachment's `BrandOverlay` marks over its reduced value. After
+/// reduction rather than inside a reducer, because marks ride whatever
+/// answered: an `Invoke`, an edge, a plain type.
+#[inline(never)]
+fn apply_brand_overlays(bag: &WitnessBag, q: &ReducerQuery, v: ReducedValue) -> ReducedValue {
+    let ReducedValue::Type(mut t) = v else { return v };
+    for w in bag.iter_attachment(q.attachment) {
+        if let WitnessPayload::BrandOverlay { ns, on_class, set, drop } = &w.payload {
+            let applies = t.class_name().is_some_and(|c| {
+                c == on_class || q.context.is_some_and(|ctx| is_subclass_of(c, on_class, ctx))
+            });
+            if applies {
+                t = t.overlay(ns, set, drop);
+            }
+        }
+    }
+    ReducedValue::Type(t)
+}
+
 fn receiver_key(r: &Option<InferredType>) -> Option<String> {
     r.as_ref().map(|t| format!("{t:?}"))
 }
 
 /// Receiver to substitute when a chase reaches a *fresh* method dispatch
-/// on `PackageSymbol{package}` (an `Edge` or `CallReturn` into a class's
+/// on `PackageSymbol{package}` (an `Edge` into a class's
 /// method): the receiver is that call's invocant, i.e. `class`. A fluent
 /// `ReturnExpr(Receiver)` substitutes the dispatch class.
 ///
@@ -279,7 +486,7 @@ fn receiver_key(r: &Option<InferredType>) -> Option<String> {
 /// `Operator(RowOf(Receiver))` (DBIC `find`) needs to project the row
 /// class. Same class, strictly more information; the value answers the
 /// projection (rule #10), the chase never inspects the shape.
-fn fresh_dispatch_receiver(
+pub(super) fn fresh_dispatch_receiver(
     incoming: &Option<InferredType>,
     class: &str,
     ctx: Option<&BagContext>,
@@ -561,8 +768,7 @@ impl ReducerRegistry {
                 WitnessPayload::Observation(_) => "hop.OBSERVATION",
                 WitnessPayload::InferredType(_) => "hop.inferred_type",
                 WitnessPayload::Edge(_) => "hop.edge",
-                WitnessPayload::CallReturn { .. } => "hop.call_return",
-                WitnessPayload::QualifiedCallReturn { .. } => "hop.qualified_call",
+                WitnessPayload::Invoke { .. } => "hop.invoke",
                 WitnessPayload::ReturnExpr(_) => "hop.return_expr",
                 WitnessPayload::Fact { .. } => "hop.fact",
                 WitnessPayload::Derivation => "hop.derivation",
@@ -584,8 +790,7 @@ impl ReducerRegistry {
                     WitnessPayload::InferredType(_) => "expr_hop.inferred_type",
                     WitnessPayload::Observation(_) => "expr_hop.observation",
                     WitnessPayload::Edge(_) => "expr_hop.edge",
-                    WitnessPayload::CallReturn { .. } => "expr_hop.call_return",
-                    WitnessPayload::QualifiedCallReturn { .. } => "expr_hop.qualified_call",
+                    WitnessPayload::Invoke { .. } => "expr_hop.invoke",
                     WitnessPayload::ReturnExpr(_) => "expr_hop.return_expr",
                     WitnessPayload::Fact { .. } => "expr_hop.fact",
                     WitnessPayload::Derivation => "expr_hop.derivation",
@@ -634,16 +839,14 @@ impl ReducerRegistry {
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
             return std::sync::Arc::new(ReducedValue::None);
         }
-        let key: VisitedKey = (
-            bag as *const _ as usize,
-            q.attachment.clone(),
-            receiver_key(&q.receiver),
-            q.arity_hint,
-        );
+        let key = visited_key(bag, q);
         // Memo hit: this key was fully resolved earlier in THIS query and
         // isn't on the current path (cycle guard handles on-path keys).
-        if let Some((cached, recorded_exit)) = state.memo.get(&key) {
+        if let Some((cached, recorded_exit, cut)) = state.memo.get(&key) {
             let cached = std::sync::Arc::clone(cached);
+            if *cut {
+                state.cuts += 1;
+            }
             // Re-reaching an exiting subtree from inside a combining frame is
             // the same claim as reaching it there the first time; the memo must
             // not launder it into a rung just because the first reach happened
@@ -655,23 +858,38 @@ impl ReducerRegistry {
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
             return cached;
         }
+        let fold_key = match fold_memo_probe(bag, q, &key, state) {
+            Ok(cached) => {
+                QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
+                return cached;
+            }
+            Err(fold_key) => fold_key,
+        };
         // `key` has two owners (the visited set, transiently; the memo,
         // for the rest of the query). Clone once for visited, then move
         // the original into the memo store below.
         if !state.visited.insert(key.clone()) {
+            state.cuts += 1;
             QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
             return std::sync::Arc::new(ReducedValue::None);
         }
         let exits_before = state.residual.len();
         let poison_before = state.poisoned;
-        let result = std::sync::Arc::new(self.query_rec_body(bag, q, state));
+        let cuts_before = state.cuts;
+        let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
+        let result = std::sync::Arc::new(apply_brand_overlays(bag, q, self.query_rec_body(bag, q, state)));
         let recorded_exit =
             state.residual.len() > exits_before || (state.poisoned && !poison_before);
+        let cut = state.cuts > cuts_before
+            || QUERY_REC_TRUNCATIONS.with(|c| c.get()) > truncations_before;
         state.visited.remove(&key);
+        if let (Some(fk), false) = (fold_key, cut) {
+            fold_memo_store(fk, &result, recorded_exit);
+        }
         // Cache the off-path resolution. The query depends only on
         // `(bag, attachment, receiver-class, arity)` (all in `key`) plus
         // the static context, which is fixed for one top-level query.
-        state.memo.insert(key, (std::sync::Arc::clone(&result), recorded_exit));
+        state.memo.insert(key, (std::sync::Arc::clone(&result), recorded_exit, cut));
         QUERY_REC_DEPTH.with(|c| c.set(c.get() - 1));
         result
     }
@@ -1891,12 +2109,7 @@ impl ReducerRegistry {
                     // filtered the targets included the key being
                     // chased, so it matched every time. A
                     // classifier that cannot fail is not one.
-                    let candidate_key: VisitedKey = (
-                        &full.witnesses as *const _ as usize,
-                        q.attachment.clone(),
-                        receiver_key(&q.receiver),
-                        q.arity_hint,
-                    );
+                    let candidate_key = visited_key(&full.witnesses, q);
                     let excused = if truncations_before
                         != QUERY_REC_TRUNCATIONS.with(|c| c.get())
                     {
@@ -1979,8 +2192,12 @@ impl ReducerRegistry {
         // combined with them before this frame returns, so no single exit key
         // names this frame's answer.
         let sole_witness = raw.len() == 1;
+        let window = super::reducers::LiveWindow::at(&raw, q);
         let mut out: Vec<Witness> = Vec::with_capacity(raw.len());
-        for w in raw {
+        for &w in raw.iter() {
+            if window.edge_is_dead(&raw, w) {
+                continue;
+            }
             match &w.payload {
                 WitnessPayload::Edge(target) => {
                     let resolved = match (target, q.context) {
@@ -2078,43 +2295,6 @@ impl ReducerRegistry {
                         None => {}
                     }
                 }
-                WitnessPayload::CallReturn { target, arity } => {
-                    // A fresh method dispatch at the call's own arity. The
-                    // receiver is the dispatch class (`target`'s class, for
-                    // a `PackageSymbol`) so a fluent `Receiver` substitutes
-                    // it; the arity is the call site's, NOT the outer
-                    // query's — that's the whole point of this variant.
-                    let receiver = match target {
-                        WitnessAttachment::PackageSymbol { package, .. } => {
-                            fresh_dispatch_receiver(&q.receiver, package, q.context)
-                        }
-                        _ => q.receiver.clone(),
-                    };
-                    let sub_q = ReducerQuery {
-                        attachment: target,
-                        point: q.point,
-                        framework: q.framework,
-                        arity_hint: Some(*arity),
-                        receiver,
-                        args: q.args.clone(),
-                        context: q.context,
-                    };
-                    // Opaque: the call site's arity and dispatch receiver both
-                    // replace the outer query's, so the exit key is asked a
-                    // different question than a `Link` follow would ask.
-                    let v = state.in_opaque_frame(|state| {
-                        (*self.query_rec(bag, &sub_q, state)).clone()
-                    });
-                    match v {
-                        ReducedValue::Type(t) => out.push(Witness {
-                            attachment: w.attachment.clone(),
-                            source: w.source.clone(),
-                            payload: WitnessPayload::InferredType(t),
-                            span: w.span,
-                        }),
-                        ReducedValue::FactMap(_) | ReducedValue::None => {}
-                    }
-                }
                 WitnessPayload::Projected { base, step } => {
                     // Materialize the base, then narrow through the step —
                     // the value-side mirror of the build-time
@@ -2128,7 +2308,11 @@ impl ReducerRegistry {
                     // exit key beneath it names what this frame produces.
                     let base_t = state.in_opaque_frame(|state| match (base, q.context) {
                         (WitnessAttachment::Variable { name, scope }, Some(ctx)) => {
-                            let point = scope_point(ctx.scopes, *scope);
+                            // The read's own point, as the Edge arm above.
+                            let point = match q.attachment {
+                                WitnessAttachment::Expr(span) => span.start,
+                                _ => scope_point(ctx.scopes, *scope),
+                            };
                             self.query_variable_with_visited(
                                 bag, ctx, name, *scope, point,
                                 q.receiver.as_ref(), state,
@@ -2344,41 +2528,163 @@ impl ReducerRegistry {
                         });
                     }
                 }
-                WitnessPayload::QualifiedCallReturn { method_lookup, receiver_class, arity } => {
-                    // Look the method up on the named/parent class, but the
-                    // receiver is the INVOCANT (enclosing) class — prefer a
-                    // dynamic outer receiver only when it's a subclass of it
-                    // (same rule as a fresh dispatch onto `receiver_class`).
-                    let receiver =
-                        fresh_dispatch_receiver(&q.receiver, receiver_class, q.context);
-                    let sub_q = ReducerQuery {
-                        attachment: method_lookup,
-                        point: q.point,
-                        framework: q.framework,
-                        arity_hint: Some(*arity),
-                        receiver,
-                        args: q.args.clone(),
-                        context: q.context,
-                    };
-                    // Opaque for the same reason as `CallReturn`, plus the
-                    // lookup class and the receiver class deliberately differ.
-                    let v = state.in_opaque_frame(|state| {
-                        (*self.query_rec(bag, &sub_q, state)).clone()
+                WitnessPayload::ReturnExpr(re) if re.reads_attachments() => {
+                    // Opaque: each leaf is read under this query's receiver and
+                    // args, and the answer is the expression around it.
+                    let resolved = re.map_of(&mut |att| {
+                        let sub_q = ReducerQuery { attachment: att, ..q.clone() };
+                        state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
+                            ReducedValue::Type(t) => Some(t.clone()),
+                            ReducedValue::FactMap(_) | ReducedValue::None => None,
+                        })
                     });
-                    match v {
-                        ReducedValue::Type(t) => out.push(Witness {
+                    out.push(Witness {
+                        attachment: w.attachment.clone(),
+                        source: w.source.clone(),
+                        payload: WitnessPayload::ReturnExpr(resolved),
+                        span: w.span,
+                    });
+                }
+                WitnessPayload::Invoke { callee, receiver, args } => {
+                    if let Some(t) = self.invoke(bag, q, state, callee, receiver.as_ref(), args.as_deref()) {
+                        out.push(Witness {
                             attachment: w.attachment.clone(),
                             source: w.source.clone(),
                             payload: WitnessPayload::InferredType(t),
                             span: w.span,
-                        }),
-                        ReducedValue::FactMap(_) | ReducedValue::None => {}
+                        });
                     }
                 }
                 _ => out.push(w.clone()),
             }
         }
         out
+    }
+
+    /// Materialize `att` under `q`'s point and context, in an opaque frame:
+    /// an `Invoke` operand is an input to this frame's answer, never the
+    /// answer itself.
+    fn operand_type(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        att: &WitnessAttachment,
+    ) -> Option<InferredType> {
+        let sub_q = ReducerQuery {
+            attachment: att,
+            point: q.point,
+            framework: q.framework,
+            arity_hint: None,
+            // The enclosing call's receiver still binds `$self` inside the
+            // operand (`return $self->m` typed at a `Child->outer` site).
+            receiver: q.receiver.clone(),
+            args: Vec::new(),
+            context: q.context,
+        };
+        state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
+            ReducedValue::Type(t) => Some(t.clone()),
+            ReducedValue::FactMap(_) | ReducedValue::None => None,
+        })
+    }
+
+    /// The value of an `Invoke`: materialize the receiver and arguments,
+    /// pick the lookup attachment, and query it with the receiver's full
+    /// type and the argument types substituted.
+    fn invoke(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        callee: &Callee,
+        receiver: Option<&WitnessAttachment>,
+        args: Option<&[CallArg]>,
+    ) -> Option<InferredType> {
+        let mut recv = receiver.and_then(|r| self.operand_type(bag, q, state, r));
+        // Positional argument types up to the first spread; an operand that
+        // types nothing holds its position as `Unknown`.
+        // TODO(prototypes): a callee prototype like `(\@)` takes an aggregate
+        // as ONE value, so whether an argument spreads is the callee's call;
+        // the operand only says it can flatten. Needs prototype parsing.
+        let mut arg_types: Vec<InferredType> = Vec::new();
+        let mut spread = false;
+        for a in args.unwrap_or_default() {
+            match a {
+                CallArg::One(att) => arg_types.push(
+                    self.operand_type(bag, q, state, att).unwrap_or(InferredType::Unknown),
+                ),
+                CallArg::Spread(_) => {
+                    spread = true;
+                    break;
+                }
+            }
+        }
+        let exact = args.is_some() && !spread;
+        let lookups: Vec<WitnessAttachment> = match callee {
+            Callee::Method { name, lookup, .. } => {
+                let classes: Vec<String> = match lookup {
+                    Lookup::Receiver => {
+                        recv.as_ref().and_then(|t| t.class_name()).map(str::to_string).into_iter().collect()
+                    }
+                    Lookup::Super { writer } => match q.context {
+                        Some(ctx) => crate::model::file_analysis::parents_of(
+                            writer,
+                            ctx.package_parents,
+                            ctx.module_index,
+                            ctx.app_surface_consumers,
+                        ),
+                        None => Vec::new(),
+                    },
+                    Lookup::Named(class) => vec![class.clone()],
+                };
+                // A call with no typed receiver still blesses into the class
+                // it dispatched on (`Foo->new`, a plugin-declared class).
+                if recv.is_none() {
+                    if let Lookup::Named(class) | Lookup::Super { writer: class } = lookup {
+                        recv = Some(InferredType::ClassName(class.clone()));
+                    }
+                }
+                classes
+                    .into_iter()
+                    .map(|package| WitnessAttachment::PackageSymbol { package, name: name.clone() })
+                    .collect()
+            }
+            Callee::Value(att) => {
+                let target = self.operand_type(bag, q, state, att)?.callable_return_edge()?.clone();
+                // Invoking a method through a coderef passes its invocant as
+                // the first argument (`$cb->($obj, …)` for `\&Class::m`).
+                if recv.is_none() && matches!(target, WitnessAttachment::PackageSymbol { .. }) {
+                    if !arg_types.is_empty() {
+                        recv = Some(arg_types.remove(0));
+                    }
+                }
+                vec![target]
+            }
+        };
+        let arity = exact.then_some(arg_types.len() as u32);
+        // SUPER walks the writer's parents in MRO order: the first that
+        // answers is the method Perl would run.
+        let found = lookups.into_iter().find_map(|att| {
+            let sub_q = ReducerQuery {
+                attachment: &att,
+                point: q.point,
+                framework: q.framework,
+                arity_hint: arity,
+                receiver: recv.clone(),
+                args: arg_types.clone(),
+                context: q.context,
+            };
+            state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
+                ReducedValue::Type(t) => Some(t.clone()),
+                ReducedValue::FactMap(_) | ReducedValue::None => None,
+            })
+        });
+        let constructs = matches!(callee, Callee::Method { constructs: true, .. });
+        found.or_else(|| {
+            constructs
+                .then(|| recv?.class_name().map(|c| InferredType::ClassName(c.to_string())))
+                .flatten()
+        })
     }
 
     /// Scope-chain variable lookup with an explicit visited set.

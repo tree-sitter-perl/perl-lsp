@@ -20,6 +20,7 @@ designs live in `docs/prompt-storage-residuals.md`.
 | [Cross-file gated-emission visibility](#cross-file-gated-emission-visibility--2026-07-17--open-claude) | 07-17 | how do cross-file readers see a DBIC result class's deferred accessors — index-time materialize (picked) vs a per-query enriched overlay? |
 | [DBIC source-moniker disambiguation without a typed `$schema`](#dbic-source-moniker-disambiguation-without-a-typed-schema--2026-07-17--open-claude) | 07-17 | is the largest-source-family heuristic acceptable as the interim, or should moniker resolution wait for schema-value provenance? |
 | [Stacked refs at one span](#stacked-refs-at-one-span--2026-09-15--open-claude) | 09-15 | when two identities share a token (a class token that is also a rail use), is a companion ref with a cursor tiebreak enough, or should one ref carry several bindings? |
+| [Union types in the lattice](#union-types-in-the-lattice--2026-09-02--open-claude) | 09-02 | `list<A|B>` / `A|B` returns: add a `Union` variant, pick an arm, or stay dark? |
 
 Format per entry:
 
@@ -267,3 +268,24 @@ Format per entry:
   string that is both a route name and a view name is kept APART by the
   rail, so no)? If none does, A is the answer and the fork closes; if one
   does, B is the honest shape and the tiebreak is the tell.
+
+---
+
+## Union types in the lattice — 2026-09-02 — OPEN (Claude)
+- **Context:** php round 5 (composer): `@return list<CompletePackage|CompleteAliasPackage>` — a union INSIDE a generic — leaves the foreach var dark on every verb (hover/gd/refs/rename/completion), isolated against a working `list<Single>` control. `InferredType` has no union; `phpdoc_type` rejects a two-armed spelling ("a two-armed claim is not a type answer") and `php_annot_type` returns `None` for `A|B`, so the whole element type drops.
+- **Options:** A — stay dark (status quo; honest, but composer's package-loading core path is exactly this shape). B — a `Union(Vec<InferredType>)` variant: dispatch = the INTERSECTION of the arms' member sets, hover renders `A|B`, `element_at`/projections map over the arms; a lattice change (bincode append, cache bump) touching every reducer that matches on `InferredType`. C — "first class arm wins" as a display-only heuristic: wrong for members the second arm lacks, cheap.
+- **Picked:** A, sharpened (2026-09-03): a union is KNOWN untypable —
+  `php_annot_type` answers `InferredType::Unknown` for two or more
+  non-null arms (a doc row, a declared `A|B`, a nested element), the
+  value rides every chase (a call, a copy, a return arm: the arm fold
+  reads it as a disagreement instead of electing the arms that resolved)
+  and the registry boundary projects it to `None`, so no renderer sees it
+  and the member lanes stay silent on it. Still dark on hover; B remains
+  the real answer.
+- **Undo cost:** B is a slice with its own gold rows; C is an afternoon and a documented lie.
+- **Discussion needed:** is B worth its blast radius? `?T` (`Optional`) already exists as a one-armed union; the general case is the question.
+- **Perl consumers (2026-09-30):** `BranchArmFold` answers two Perl shapes with a
+  stand-in until B exists — `||` / `//` (and `||=` / `//=`) fall back to the RHS
+  floor (`Optional<Bar> || Baz` reads `Baz`, not `Bar|Baz`), and a ternary whose
+  arms disagree answers nothing. Both sites carry `TODO(union-join)`, and Epic 16's
+  `JoinFold` needs the same element; `Optional` becomes B's `undef` arm.

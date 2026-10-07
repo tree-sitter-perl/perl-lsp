@@ -279,10 +279,11 @@ fn recognize_ref_eq_guard(eq: Node, source: &[u8]) -> Option<GuardFact> {
     })
 }
 
-/// True if a statement-level expression is a guaranteed control-flow exit
-/// (`return`/`die`/`croak`/`last`/`next`/`redo`/`goto`) — the shape that
-/// makes `STMT if/unless G` narrow the rest of the enclosing block.
-fn is_exit_expression(node: Node, source: &[u8]) -> bool {
+/// True if an expression is a guaranteed control-flow exit
+/// (`return`/`die`/`croak`/`last`/`next`/`redo`/`goto`): it never yields a
+/// value, so `STMT if/unless G` narrows the rest of the block and
+/// `X || EXIT` is worth only `X`.
+pub(super) fn is_exit_expression(node: Node, source: &[u8]) -> bool {
     const EXITS: [&str; 7] = ["die", "croak", "confess", "last", "next", "redo", "goto"];
     match node.kind() {
         "return_expression" | "last_expression" | "next_expression" | "redo_expression" => true,
@@ -777,6 +778,19 @@ impl<'a> Builder<'a> {
             if let Some(bare) = caps.bare {
                 let at = bare.start_position();
                 for name in self.bare_bind_names(bare) {
+                    // `my %h;` is an empty hash, a closed shape its element
+                    // writes extend — the same value as `my %h = ()`.
+                    if name.starts_with('%') && bare.kind() == "variable_declaration" {
+                        self.push_type_constraint(crate::model::file_analysis::TypeConstraint {
+                            variable: name.clone(),
+                            scope: self.scope_at_point(at),
+                            constraint_span: node_to_span(bare),
+                            inferred_type: crate::model::file_analysis::InferredType::HashWithKeys {
+                                keys: crate::model::file_analysis::SharedKeys::new(Vec::new()),
+                                open: false,
+                            },
+                        });
+                    }
                     // Record the rebind (for the narrowing cutoff). A scalar
                     // clears to undef — but that `Undef` is a REGION assertion
                     // truncated at the next rebind (`my $x; $x->[0]` autoviv
@@ -805,7 +819,16 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let Some(src) = caps.source else { continue };
-            let source_span = node_to_span(src);
+            let mut source_span = node_to_span(src);
+            // The write lands where `assignment_write_point` says, and a
+            // compound write stores the assignment's value, not the RHS.
+            let mut write_at = None;
+            if let Some(assign) = src.parent().filter(|p| p.kind() == "assignment_expression") {
+                write_at = Some(crate::cst::assignment_write_point(assign));
+                if crate::cst::assign_op(assign) != Some(crate::cst::AssignOp::Plain) {
+                    source_span = node_to_span(assign);
+                }
+            }
             if let Some(lhs_node) = caps.lhs {
                 if let Some(targets) = self.lhs_list_targets(lhs_node) {
                     // List/destructuring: each slot edges to its literal element
@@ -813,7 +836,7 @@ impl<'a> Builder<'a> {
                     // to live in `visit_assignment`'s paren arm, now driven by
                     // the declarative capture.
                     let elem_nodes = self.list_element_nodes(src);
-                    let at = lhs_node.start_position();
+                    let at = write_at.unwrap_or_else(|| lhs_node.start_position());
                     let reassigns = lhs_node.kind() != "variable_declaration";
                     for (vt, extraction) in targets {
                         let (source, extraction) = match (&elem_nodes, &extraction) {
@@ -831,7 +854,7 @@ impl<'a> Builder<'a> {
                     let reassigns = lhs_node.kind() != "variable_declaration";
                     self.push_flow_edge(
                         vt,
-                        lhs_node.start_position(),
+                        write_at.unwrap_or_else(|| lhs_node.start_position()),
                         source_span,
                         crate::model::file_analysis::Extraction::Whole,
                         reassigns,
@@ -843,7 +866,7 @@ impl<'a> Builder<'a> {
                     let vt = vt.to_string();
                     self.push_flow_edge(
                         vt,
-                        tnode.start_position(),
+                        write_at.unwrap_or_else(|| tnode.start_position()),
                         source_span,
                         crate::model::file_analysis::Extraction::Whole,
                         true,
@@ -870,10 +893,9 @@ impl<'a> Builder<'a> {
             .collect()
     }
 
-    /// Mint a FlowEdge + lower it as a FALLBACK: a refined eager TC (a direct
-    /// InferredType witness, resolvable pre-fold) wins; the query Edge fills in
-    /// only when the walk left the variable untyped. The single mint+lower for
-    /// the query pass.
+    /// Mint a FlowEdge and lower it to the variable's value edge. Every
+    /// write lowers, declaration or reassignment: the edge is the value the
+    /// fold reads at the write. The single mint+lower for the query pass.
     pub(super) fn push_flow_edge(
         &mut self,
         name: String,
@@ -886,12 +908,6 @@ impl<'a> Builder<'a> {
         // The write's reset marker, idempotent with the walk's own — the two
         // lanes agree on every write site by construction.
         self.push_reset_marker(name.clone(), scope, at);
-        // A REASSIGNMENT always lowers: its edge is the value the fold reads
-        // at the write, whatever the walk's eager TC for the same statement
-        // said — the two agree, or the refined TC subsumes the edge's
-        // re-derived shape. A declaration keeps the gate: a typed
-        // declaration needs no fallback edge.
-        let already_typed = !reassigns && self.bag_query_variable(&name, scope, at).is_some();
         let fe = crate::model::file_analysis::FlowEdge {
             target_name: name,
             target_scope: scope,
@@ -900,10 +916,15 @@ impl<'a> Builder<'a> {
             extraction,
             reassigns,
         };
-        if !already_typed {
-            if let Some(w) = fe.lower_to_witness() {
-                self.bag.push(w);
+        if let Some(w) = fe.lower_to_witness() {
+            // The walk mints a single-target write's edge as it passes;
+            // the `@flow` pass reaches the same write again.
+            if self.bag.for_attachment(&w.attachment).iter().any(|o| {
+                o.span == w.span && o.payload == w.payload
+            }) {
+                return;
             }
+            self.bag.push(w);
         }
         self.flow_edges.push(fe);
     }

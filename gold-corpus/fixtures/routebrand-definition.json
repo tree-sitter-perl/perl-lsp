@@ -1,0 +1,75 @@
+{
+  "capability": "definition",
+  "rows": [
+    {
+      "id": "routebrand-partial-direct-child",
+      "difficulty": "tricky",
+      "semantic_area": "mojo-routes",
+      "root": "gold-corpus/routebrand-fixture",
+      "file": "lib/MyApp.pm",
+      "line": 7,
+      "col": 28,
+      "expect": {
+        "all": [
+          "Alerts.pm:4:1"
+        ],
+        "none": []
+      },
+      "status": "gold",
+      "note": "`$alerts->get('/')->to('#list')`: the partial target inherits controller 'alerts' from the mark `->to('alerts#')` laid on $alerts; the mark rides the assignment and the Route verb's receiver return."
+    },
+    {
+      "id": "routebrand-partial-under",
+      "difficulty": "tricky",
+      "semantic_area": "mojo-routes",
+      "root": "gold-corpus/routebrand-fixture",
+      "file": "lib/MyApp.pm",
+      "line": 8,
+      "col": 46,
+      "expect": {
+        "all": [
+          "Alerts.pm:6:1"
+        ],
+        "none": []
+      },
+      "status": "gold",
+      "note": "`$alerts->under('/:type')->to('#show')`: under nesting carries the parent's mark through `under` (a receiver-returning override)."
+    },
+    {
+      "id": "routebrand-partial-two-hops",
+      "difficulty": "tricky",
+      "semantic_area": "mojo-routes",
+      "root": "gold-corpus/routebrand-fixture",
+      "file": "lib/MyApp.pm",
+      "line": 9,
+      "col": 34,
+      "expect": {
+        "all": [
+          "Alerts.pm:8:1"
+        ],
+        "none": []
+      },
+      "status": "gold",
+      "note": "`$crud->get('/settings')->to('#settings')`: two assignments and three verbs deep, still 'alerts'."
+    },
+    {
+      "id": "routebrand-sibling-isolated",
+      "difficulty": "tricky",
+      "semantic_area": "mojo-routes",
+      "root": "gold-corpus/routebrand-fixture",
+      "file": "lib/MyApp.pm",
+      "line": 11,
+      "col": 28,
+      "expect": {
+        "all": [
+          "Other.pm:4:1"
+        ],
+        "none": [
+          "Alerts.pm"
+        ]
+      },
+      "status": "gold",
+      "note": "A sibling group's own `->to('other#')` overlays its controller; nothing leaks from the 'alerts' group."
+    }
+  ]
+}

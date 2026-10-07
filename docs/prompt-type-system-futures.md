@@ -1,8 +1,8 @@
 # Aspirational type-system features (NEW features — NOT QA-pass FP fixes)
 
 Two capabilities that **extend what the witness bag carries** — narrowing (§1, landed) and
-effects (§2, forward). Both take `InferredType::BrandedRoute`
-(`docs/adr/route-branding.md`) as the mechanism precedent — *option C collapsed*: extra
+effects (§2, forward). Both take `InferredType::Branded`
+(`docs/adr/brands.md`) as the mechanism precedent — *option C collapsed*: extra
 resolved info lives **in** the carried value (no side-table, no id), rides the bag's existing
 edges/fold for free, and is read through the one chain typer. The two differ in **which edges**
 the payload rides and **how much control-flow** they need.
@@ -28,7 +28,7 @@ mechanism level. (Throws first; the effect-set generalizes — pure / IO / mutat
 
 **Brand-style mechanism (what carries over):**
 - **Collapse into the carried value, no side-table.** Carry an `effects: EffectSet` alongside the
-  `Symbol`'s reduced return value (`{ return: T, effects }`), exactly as `BrandedRoute` carries its
+  `Symbol`'s reduced return value (`{ return: T, effects }`), exactly as `Branded` carries its
   defaults *in* the type rather than a parallel store (which "drifts" — bag-canonical ADR).
 - **Ride the bag's fold to a fixpoint.** Effects propagate along the **call/return edges** the bag
   already chases for return-types (`Symbol`, `PackageSymbol`, call-bindings). A call to a `Throws`

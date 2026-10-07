@@ -244,15 +244,9 @@ impl FileAnalysis {
     }
 
     pub(crate) fn finalize_post_walk(&mut self) {
-        // Four timed children: finalize measured 0.50ms/call on gold
-        // substrate builds and 18.65ms/call on e2e's tiny fixtures — a 37x
-        // per-call gap on smaller inputs, so one of these steps scales with
-        // something other than file size, and one aggregate tag cannot say
-        // which. (ScopedNs, so each lands per-file with exclusive time.)
-        {
-            let _g = crate::util::ghost_stats::ScopedNs::start("finalize::mcb_edges");
-            self.emit_method_call_binding_edges();
-        }
+        // Each step is timed on its own (ScopedNs, per-file exclusive time):
+        // finalize's cost doesn't track file size, and one aggregate tag
+        // can't say which step it is.
         // Fill HashKeyAccess owners that are resolvable in-file
         // via the invocant ladder (`method_call_invocant_type`).
         // Cross-file gaps stay None until

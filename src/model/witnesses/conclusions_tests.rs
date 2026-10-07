@@ -426,8 +426,8 @@ fn residuals_for(fa: &FileAnalysis, class: &str, name: &str) -> Option<Vec<Concl
 /// This is the half of the ladder-frame rule that recording alone does not
 /// give you, and skipping it is not a missed optimisation — it is a wrong
 /// answer. `Link{targets, arity, receiver}` carries ONE set of binders, and a
-/// `CallReturn` frame substitutes both: the call site's arity, and the
-/// dispatch class as the receiver. Minted from the outer query's binders it
+/// `Invoke` frame substitutes both: the call site's arity, and the
+/// invocant's type as the receiver. Minted from the outer query's binders it
 /// asks the exit key a different question than the chase did, and a
 /// receiver-dependent answer at the far end then answers about the wrong
 /// object. That was 4 of the 44 follow breaks the unpoisoned version produced.

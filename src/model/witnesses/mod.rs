@@ -52,6 +52,18 @@ pub struct WitnessBag {
     witnesses: Vec<Witness>,
     #[serde(skip)]
     index: HashMap<WitnessAttachment, Vec<usize>>,
+    /// Names this bag's content: every mutation draws a fresh value from
+    /// [`next_generation`], so a memo that outlives one query can tell
+    /// whether the bag it answered from is still the bag being asked.
+    #[serde(skip)]
+    generation: u64,
+}
+
+/// One process-wide counter for every generation stamp, so two stamped
+/// stores never share a value unless their content is the same.
+pub(crate) fn next_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl<'de> Deserialize<'de> for WitnessBag {
@@ -69,6 +81,7 @@ impl<'de> Deserialize<'de> for WitnessBag {
         let mut bag = WitnessBag {
             witnesses: on_disk.witnesses,
             index: HashMap::new(),
+            generation: 0,
         };
         bag.rebuild_index();
         Ok(bag)
@@ -96,7 +109,12 @@ impl WitnessBag {
         (vec_bytes, idx_bytes)
     }
 
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     pub fn push(&mut self, w: Witness) -> usize {
+        self.generation = next_generation();
         let idx = self.witnesses.len();
         self.index.entry(w.attachment.clone()).or_default().push(idx);
         self.witnesses.push(w);
@@ -123,6 +141,12 @@ impl WitnessBag {
             .unwrap_or_default()
     }
 
+    /// [`for_attachment`](Self::for_attachment) without the allocation, for
+    /// a per-hop check that usually finds nothing.
+    pub fn iter_attachment<'b>(&'b self, att: &WitnessAttachment) -> impl Iterator<Item = &'b Witness> + 'b {
+        self.index.get(att).into_iter().flatten().map(|&i| &self.witnesses[i])
+    }
+
     /// Iterate witnesses matching a predicate. O(n).
     #[allow(dead_code)]
     pub fn filter<P: Fn(&Witness) -> bool>(&self, pred: P) -> Vec<&Witness> {
@@ -130,6 +154,8 @@ impl WitnessBag {
     }
 
     pub fn rebuild_index(&mut self) {
+        // Every removal path rebuilds, so this is where they all mutate.
+        self.generation = next_generation();
         let _t = crate::util::ghost_stats::ScopedNs::start("bag::rebuild_index");
         crate::util::ghost_stats::count_by("bag.rebuild_index_witnesses", self.witnesses.len() as u64);
         self.index.clear();

@@ -216,13 +216,62 @@ impl WitnessPayload {
     pub fn binds_value(&self) -> bool {
         match self {
             WitnessPayload::InferredType(_) => true,
-            WitnessPayload::Observation(o) => matches!(
-                o,
-                TypeObservation::ClassAssertion(_)
-                    | TypeObservation::FirstParamInMethod { .. }
-                    | TypeObservation::BlessTarget(_)
-            ),
+            WitnessPayload::Observation(o) => matches!(o, TypeObservation::BlessTarget(_)),
             _ => false,
+        }
+    }
+}
+
+impl WitnessPayload {
+    /// Every attachment this payload reaches, mutably — edge targets, call
+    /// operands, and the attachments inside a carried type. Exhaustive so a
+    /// new attachment-bearing shape can't be skipped by a span rewrite.
+    pub fn for_each_attachment_mut(&mut self, f: &mut dyn FnMut(&mut WitnessAttachment)) {
+        match self {
+            WitnessPayload::Edge(t) | WitnessPayload::Projected { base: t, .. } => f(t),
+            WitnessPayload::Tuple(ts) => ts.iter_mut().for_each(|t| f(t)),
+            WitnessPayload::Invoke { callee, receiver, args } => {
+                match callee {
+                    Callee::Value(t) => f(t),
+                    Callee::Method { .. } => {}
+                }
+                if let Some(t) = receiver {
+                    f(t);
+                }
+                for arg in args.iter_mut().flatten() {
+                    let (CallArg::One(t) | CallArg::Spread(t)) = arg;
+                    f(t);
+                }
+            }
+            WitnessPayload::InferredType(t) => t.for_each_attachment_mut(f),
+            WitnessPayload::ReturnExpr(r) => r.for_each_attachment_mut(f),
+            WitnessPayload::Observation(_)
+            | WitnessPayload::Fact { .. }
+            | WitnessPayload::Derivation
+            | WitnessPayload::Custom { .. }
+            | WitnessPayload::DomainCompare { .. }
+            | WitnessPayload::Reset
+            | WitnessPayload::BrandOverlay { .. } => {}
+        }
+    }
+}
+
+impl ReturnExpr {
+    /// The attachments inside the types this expression names.
+    pub fn for_each_attachment_mut(&mut self, f: &mut dyn FnMut(&mut WitnessAttachment)) {
+        match self {
+            ReturnExpr::Concrete(t) | ReturnExpr::ReceiverOr(t) => t.for_each_attachment_mut(f),
+            ReturnExpr::Operator(ParametricOp::RowOf(r) | ParametricOp::ParamOf { of: r, .. }) => {
+                r.for_each_attachment_mut(f)
+            }
+            ReturnExpr::Operator(ParametricOp::InstanceOf { args, .. }) => {
+                args.iter_mut().for_each(|r| r.for_each_attachment_mut(f))
+            }
+            ReturnExpr::UnionOnArgs { branches } => {
+                branches.iter_mut().for_each(|(_, r)| r.for_each_attachment_mut(f))
+            }
+            ReturnExpr::Of(a) => f(a),
+            ReturnExpr::Receiver | ReturnExpr::Arg(_) => {}
         }
     }
 }
@@ -282,37 +331,6 @@ pub enum WitnessPayload {
     /// `InferredType` witness preserving source + span, then run reducers
     /// against the materialized list. A cycle guard breaks `A → B → A`.
     Edge(WitnessAttachment),
-    /// Edge fact for a **method call at a known arity**: "the value at my
-    /// attachment is `target`'s return type, dispatched at `arity` args."
-    /// Distinct from a plain `Edge` because the call site's arity is
-    /// intrinsic to the *call*, not to whatever outer query reached it —
-    /// a hint-less `$x` type query that chases here must still pick the
-    /// fluent-writer arm of `$obj->setter($v)` (arity ≥ 1), not the
-    /// getter arm a hint-less `UnionOnArgs` defaults to. Emitted by
-    /// `emit_method_call_return_edges` (`Expression(refidx)` → its
-    /// `PackageSymbol{package, method}` at the call's `count_call_args`);
-    /// chased like `Edge` but overrides `q.arity_hint` with `arity`.
-    CallReturn { target: WitnessAttachment, arity: u32 },
-    /// **Explicitly-qualified method dispatch** — the method token carried a
-    /// `::` so Perl dispatches from a *named* class, not the invocant's: look
-    /// the method up on `method_lookup` but type the result relative to
-    /// `receiver_class` (the invocant / enclosing class). Two spellings, one
-    /// rule (see `emit_method_call_return_edges`):
-    ///   - `$obj->SUPER::m` → `method_lookup` is `PackageSymbol{<enclosing
-    ///     package's parent>, m}` (SUPER searches the *writing* package's
-    ///     `@ISA`, skipping it);
-    ///   - `$obj->Foo::Bar::m` → `method_lookup` is `PackageSymbol{Foo::Bar,
-    ///     m}` (fully-qualified: search starts at the named class).
-    /// In both, the call still blesses into the CALLER's class, so a ctor
-    /// returning `ReturnExpr::ReceiverOr` must substitute the invocant — the
-    /// dynamic outer receiver wins when it is a subclass of `receiver_class`.
-    /// (A plain `CallReturn` can't express this: its receiver defaults to the
-    /// dispatch class, which here is the parent / named class — wrong.)
-    QualifiedCallReturn {
-        method_lookup: WitnessAttachment,
-        receiver_class: String,
-        arity: u32,
-    },
     /// **Symbol-declarative return type.** A receiver-relative /
     /// arity-relative expression that `ReturnExprReducer` substitutes at
     /// query time using `q.receiver` and `q.arity_hint`. Subsumes both
@@ -377,6 +395,57 @@ pub enum WitnessPayload {
     /// (rule #14). Kept at the END for bincode variant-index stability
     /// (bump `EXTRACT_VERSION`).
     Reset,
+    /// A CALL: "the value at my attachment is what `callee` returns when
+    /// invoked on `receiver` with `args`". Every operand is an attachment
+    /// the chase materializes under the query that holds the index, so a
+    /// chain is one witness per hop, each naming the previous hop's `Expr`
+    /// by key. The receiver's FULL type is substituted (a ResultSet stays
+    /// a ResultSet for `RowOf(Receiver)`); its class only picks the lookup.
+    /// `args: None` = not walked (a plugin-emitted ref): no arity, no arg
+    /// types. Kept at the END for bincode variant-index stability (bump
+    /// `EXTRACT_VERSION`).
+    Invoke { callee: Callee, receiver: Option<WitnessAttachment>, args: Option<Vec<CallArg>> },
+    /// A plugin's marks on the value at this attachment: whatever the
+    /// attachment answers, with `set` laid over namespace `ns`'s marks and
+    /// the `drop` keys removed (`InferredType::overlay`). Applies only when
+    /// the value is an `on_class` instance, so a plugin that parsed a call
+    /// by its method name alone never marks an unrelated class's value.
+    /// The registry applies it after reduction, so no reducer claims it
+    /// (`docs/adr/brands.md`). Kept at the END for bincode variant-index
+    /// stability (bump `EXTRACT_VERSION`).
+    BrandOverlay { ns: String, on_class: String, set: Vec<(String, String)>, drop: Vec<String> },
+}
+
+/// What an `Invoke` calls.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Callee {
+    /// A named method, looked up per `Lookup`. `constructs`: the name is a
+    /// constructor by convention, so when no lookup answers (a parent this
+    /// file can't see) the call is still an instance of the receiver's class.
+    Method { name: String, lookup: Lookup, constructs: bool },
+    /// Whatever callable this attachment holds (`$cb->(…)`, `$obj->$cb(…)`):
+    /// its `CodeRef` return edge is the call's value.
+    Value(WitnessAttachment),
+}
+
+/// Where a named method's lookup starts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Lookup {
+    /// The receiver's class (`$o->m`).
+    Receiver,
+    /// The parents of the package the call is written in (`->SUPER::m`).
+    Super { writer: String },
+    /// A named class (`->Foo::m`, or a plugin-declared dispatch class).
+    Named(String),
+}
+
+/// One argument of an `Invoke`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CallArg {
+    One(WitnessAttachment),
+    /// Flattens to any number of values (`@args`, `%h`): positions after it,
+    /// and the arity, are unknown.
+    Spread(WitnessAttachment),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -479,6 +548,38 @@ pub enum ReturnExpr {
     /// Kept at the END for bincode variant-index stability (bump
     /// `EXTRACT_VERSION`).
     Arg(u32),
+    /// Whatever `att` answers under the same query — an arity arm's body
+    /// read with the call's own receiver and args, not a value the build
+    /// computed without them. The registry resolves it before a reducer
+    /// sees the expression.
+    Of(WitnessAttachment),
+}
+
+impl ReturnExpr {
+    /// Rewrite every `Of` leaf through `f`; `None` from `f` leaves the leaf
+    /// unresolved (the reducer then reads it as no answer).
+    pub fn map_of(&self, f: &mut impl FnMut(&WitnessAttachment) -> Option<InferredType>) -> ReturnExpr {
+        match self {
+            ReturnExpr::Of(att) => match f(att) {
+                Some(t) => ReturnExpr::Concrete(t),
+                None => self.clone(),
+            },
+            ReturnExpr::UnionOnArgs { branches } => ReturnExpr::UnionOnArgs {
+                branches: branches.iter().map(|(g, e)| (g.clone(), e.map_of(f))).collect(),
+            },
+            other => other.clone(),
+        }
+    }
+
+    /// True when the expression reads another attachment the registry must
+    /// resolve first.
+    pub fn reads_attachments(&self) -> bool {
+        match self {
+            ReturnExpr::Of(_) => true,
+            ReturnExpr::UnionOnArgs { branches } => branches.iter().any(|(_, e)| e.reads_attachments()),
+            _ => false,
+        }
+    }
 }
 
 /// Type-level operators with `ReturnExpr`-valued sub-positions —
@@ -556,10 +657,6 @@ impl ArgGuard {
 /// not the payload, so Hash on the observation isn't needed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TypeObservation {
-    /// `my $x = Foo->new` or direct `InferredType::ClassName(_)` assertion.
-    ClassAssertion(String),
-    /// `my $self = shift` / `$_[0]` at the head of a method body.
-    FirstParamInMethod { package: String },
     /// `$v->{k}`, `%$v`, `@$v{...}` — hashref-like access.
     HashRefAccess,
     /// `$v->[i]`, `@$v`.

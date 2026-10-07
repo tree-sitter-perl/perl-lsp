@@ -2,6 +2,7 @@
 //! lists, string folding, assignments, and callee-symbol lookup.
 
 use super::*;
+use crate::cst::LiteralShape;
 
 impl<'a> Builder<'a> {
     pub(super) fn visit_use(&mut self, node: Node<'a>) {
@@ -145,10 +146,10 @@ impl<'a> Builder<'a> {
     pub(super) fn collect_class_tiny_attrs(&self, node: Node<'a>, names: &mut Vec<(String, Span)>) {
         for i in 0..node.named_child_count() {
             let Some(child) = node.named_child(i) else { continue };
-            match child.kind() {
-                "quoted_word_list" => self.extract_qw_word_spans(child, names),
-                "anonymous_hash_expression" => self.extract_class_tiny_hash_keys(child, names),
-                "list_expression" | "parenthesized_expression" => self.collect_class_tiny_attrs(child, names),
+            match crate::cst::literal_shape(child) {
+                Some(LiteralShape::Qw) => self.extract_qw_word_spans(child, names),
+                Some(LiteralShape::HashRef) => self.extract_class_tiny_hash_keys(child, names),
+                Some(LiteralShape::List) => self.collect_class_tiny_attrs(child, names),
                 _ => {}
             }
         }
@@ -159,20 +160,7 @@ impl<'a> Builder<'a> {
     /// each (default scalar / coderef) is skipped. The grammar nests trailing
     /// pairs as a right-leaning `list_expression`, so recurse into those.
     pub(super) fn extract_class_tiny_hash_keys(&self, node: Node<'a>, names: &mut Vec<(String, Span)>) {
-        // Flatten the (possibly right-nested) list of pair elements.
-        let mut elems: Vec<Node<'a>> = Vec::new();
-        fn flatten<'a>(n: Node<'a>, out: &mut Vec<Node<'a>>) {
-            for i in 0..n.named_child_count() {
-                if let Some(c) = n.named_child(i) {
-                    if c.kind() == "list_expression" {
-                        flatten(c, out);
-                    } else {
-                        out.push(c);
-                    }
-                }
-            }
-        }
-        flatten(node, &mut elems);
+        let elems = crate::cst::list_elements(crate::cst::literal_body(node));
         // Keys are at even indices (key, value, key, value, ...).
         let mut i = 0;
         while i < elems.len() {
@@ -348,10 +336,7 @@ impl<'a> Builder<'a> {
                         let parent_set: std::collections::HashSet<&str> = parents.iter().map(|s| s.as_str()).collect();
                         self.emit_refs_for_strings(node, &parent_set, RefKind::PackageRef, None);
                     }
-                    self.package_parents
-                        .entry(pkg)
-                        .or_default()
-                        .extend(parents);
+                    self.package_parents.extend(pkg, parents);
                 }
             }
         }
@@ -500,12 +485,12 @@ impl<'a> Builder<'a> {
                 Some(c) if c.is_named() => c,
                 _ => continue,
             };
-            match child.kind() {
-                "list_expression" | "parenthesized_expression" => {
+            match crate::cst::literal_shape(child) {
+                Some(LiteralShape::List) => {
                     self.accumulate_constant_pair(child);
                     return;
                 }
-                "anonymous_hash_expression" => {
+                Some(LiteralShape::HashRef) => {
                     self.accumulate_constant_block(child);
                     return;
                 }
@@ -888,9 +873,8 @@ impl<'a> Builder<'a> {
             Some(source)
         };
         let Some(list_node) = list_node else { return vec![] };
-        match list_node.kind() {
-            "quoted_word_list" | "list_expression" | "parenthesized_expression"
-            | "string_literal" | "interpolated_string_literal" => {
+        match crate::cst::literal_shape(list_node) {
+            Some(LiteralShape::Qw | LiteralShape::Str | LiteralShape::List) => {
                 self.extract_string_names(list_node)
             }
             _ => vec![],
@@ -1015,15 +999,15 @@ impl<'a> Builder<'a> {
     ) {
         for i in 0..node.named_child_count() {
             let Some(child) = node.named_child(i) else { continue };
-            match child.kind() {
-                "anonymous_hash_expression" => {
+            match (crate::cst::literal_shape(child), child.kind()) {
+                (Some(LiteralShape::HashRef), _) => {
                     if let Some((remote, remote_span)) = pending_name.take() {
                         if let Some((local, alias_span)) = self.extract_as_alias(child) {
                             out.push((local, remote, alias_span, remote_span));
                         }
                     }
                 }
-                "autoquoted_bareword" | "string_literal" | "bareword" => {
+                (Some(LiteralShape::Str), _) | (None, "autoquoted_bareword" | "bareword") => {
                     let text = child.utf8_text(self.source).unwrap_or("");
                     let name = text.trim().trim_matches(|c| c == '\'' || c == '"').to_string();
                     // Skip option flags (`-as` appears at top level too in some
@@ -1031,7 +1015,7 @@ impl<'a> Builder<'a> {
                     if !name.is_empty() && !name.starts_with('-') {
                         // Content span for a quoted remote name; the whole token
                         // for a bareword (`beta`) — either way, just the name.
-                        let span = if child.kind() == "string_literal" {
+                        let span = if crate::cst::literal_shape(child) == Some(LiteralShape::Str) {
                             crate::cst::string_content_span(child)
                         } else {
                             node_to_span(child)
@@ -1039,7 +1023,7 @@ impl<'a> Builder<'a> {
                         *pending_name = Some((name, span));
                     }
                 }
-                "list_expression" | "parenthesized_expression" => {
+                (Some(LiteralShape::List), _) => {
                     self.collect_as_renames(child, pending_name, out);
                 }
                 _ => {
@@ -1057,13 +1041,8 @@ impl<'a> Builder<'a> {
     /// `unary_expression` wrapping `as` in the fat-comma form, a `string_literal`
     /// in the plain-comma form), never on a `=>` gate.
     pub(super) fn extract_as_alias(&self, hashref: Node<'a>) -> Option<(String, Span)> {
-        let body = (0..hashref.named_child_count())
-            .filter_map(|i| hashref.named_child(i))
-            .find(|c| c.kind() == "list_expression")
-            .unwrap_or(hashref);
-        let children: Vec<Node<'a>> = (0..body.child_count())
-            .filter_map(|i| body.child(i))
-            .collect();
+        let mut children: Vec<Node<'a>> = Vec::new();
+        crate::cst::flatten_list(crate::cst::literal_body(hashref), &mut children);
         let mut alias = None;
         self.for_each_pair_node_in_children(&children, |k_node, v_node| {
             let key = k_node
@@ -1108,21 +1087,13 @@ impl<'a> Builder<'a> {
     /// package qualifier. Perl exporters write either the lexical-to-package
     /// `our @EXPORT` form or the fully-qualified `@Bugzilla::Error::EXPORT`
     /// form (Bugzilla, many CPAN modules). Both name the *same* package global;
-    /// the qualifier is just an explicit spelling. We strip `our `/`my ` and the
-    /// sigil, then compare the trailing identifier after the last `::` against
-    /// the export-variable basename — so `@EXPORT`, `@Pkg::EXPORT`,
-    /// `%Pkg::EXPORT_TAGS` all match without a per-package branch (rule #10).
-    pub(super) fn export_var_basename(lhs_text: &str) -> Option<&'static str> {
-        let trimmed = lhs_text.trim();
-        let stripped = trimmed
-            .strip_prefix("our ")
-            .or_else(|| trimmed.strip_prefix("my "))
-            .unwrap_or(trimmed)
-            .trim_start();
-        let no_sigil = stripped
-            .strip_prefix('@')
-            .or_else(|| stripped.strip_prefix('%'))
-            .unwrap_or(stripped);
+    /// the qualifier is just an explicit spelling. Takes the assigned
+    /// variable (`get_var_text_from_lhs`), strips the sigil, then compares the
+    /// trailing identifier after the last `::` against the export-variable
+    /// basename — so `@EXPORT`, `@Pkg::EXPORT`, `%Pkg::EXPORT_TAGS` all match
+    /// without a per-package branch (rule #10).
+    pub(super) fn export_var_basename(var: &str) -> Option<&'static str> {
+        let no_sigil = var.strip_prefix('@').or_else(|| var.strip_prefix('%')).unwrap_or(var);
         match crate::model::file_analysis::split_qualified(no_sigil, &crate::model::conventions::PERL_SPELLINGS).1 {
             "EXPORT_OK" => Some("@EXPORT_OK"),
             "EXPORT" => Some("@EXPORT"),
@@ -1160,8 +1131,11 @@ impl<'a> Builder<'a> {
     pub(super) fn visit_assignment(&mut self, node: Node<'a>) {
         // Check for @ISA assignment: `our @ISA = (...)`
         if let Some(left) = node.child_by_field_name("left") {
-            let lhs_text = left.utf8_text(self.source).unwrap_or("");
-            if lhs_text == "@ISA" || lhs_text.ends_with("@ISA") {
+            // The assigned variable, whatever declares it (`my`/`our`/
+            // `state`/`local`); `None` for an element, glob or list target.
+            let lhs_var = self.get_var_text_from_lhs(left).unwrap_or_default();
+            let lhs_text = lhs_var.as_str();
+            if lhs_text == "@ISA" {
                 if let Some(ref pkg) = self.current_package {
                     // child_by_field_name("right") returns `(` paren, not the list.
                     // Iterate named children to find list_expression/quoted_word_list.
@@ -1173,14 +1147,14 @@ impl<'a> Builder<'a> {
                     }
                     if !parents.is_empty() {
                         // @ISA = replaces (not appends)
-                        self.package_parents.insert(pkg.clone(), parents);
+                        self.package_parents.replace(pkg.clone(), parents);
                     }
                 }
             }
 
             // Export package-variable assignment — `our @EXPORT`, the qualified
             // `@Pkg::EXPORT`, `%EXPORT_TAGS`, etc. `export_var_basename` strips
-            // the `our`/`my`, sigil, and any `Pkg::` qualifier so all spellings
+            // the sigil and any `Pkg::` qualifier so all spellings
             // map to one of the three export basenames (rule #10).
             let export_var = Self::export_var_basename(lhs_text);
 
@@ -1192,9 +1166,7 @@ impl<'a> Builder<'a> {
             if export_var == Some("%EXPORT_TAGS") {
                 for i in 0..node.named_child_count() {
                     if let Some(child) = node.named_child(i) {
-                        if child.kind() == "list_expression"
-                            || child.kind() == "parenthesized_expression"
-                        {
+                        if crate::cst::is_list_literal(child) {
                             self.fold_export_tags_table(child);
                         }
                     }
@@ -1255,15 +1227,11 @@ impl<'a> Builder<'a> {
 
             // Accumulate array/scalar assignments as constants
             {
-                // Strip leading "our " or "my " to get the variable name
-                let var_stripped = if lhs_text.starts_with("our ") {
-                    &lhs_text[4..]
-                } else if lhs_text.starts_with("my ") {
-                    &lhs_text[3..]
-                } else {
-                    lhs_text
-                };
-                if var_stripped.starts_with('@') {
+                if lhs_text.starts_with('@')
+                    && crate::cst::assign_op(node) != Some(crate::cst::AssignOp::Plain)
+                {
+                    self.constant_strings.remove(lhs_text);
+                } else if lhs_text.starts_with('@') {
                     let mut values = Vec::new();
                     for i in 0..node.named_child_count() {
                         if let Some(child) = node.named_child(i) {
@@ -1271,10 +1239,14 @@ impl<'a> Builder<'a> {
                         }
                     }
                     if !values.is_empty() {
-                        self.constant_strings.insert(var_stripped.to_string(), values);
+                        self.constant_strings.insert(lhs_text.to_string(), values);
                     }
-                } else if var_stripped.starts_with('$') {
-                    let var = var_stripped;
+                } else if lhs_text.starts_with('$')
+                    && crate::cst::assign_op(node) != Some(crate::cst::AssignOp::Plain)
+                {
+                    self.fold_compound_constant_string(lhs_text, node);
+                } else if lhs_text.starts_with('$') {
+                    let var = lhs_text;
                     if let Some(right) = node.child_by_field_name("right") {
                         if right.kind() == "interpolated_string_literal" {
                             // Try interpolated string folding first (has variable refs)
@@ -1327,6 +1299,42 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// A compound write to a folded scalar: `.=` appends a foldable RHS to
+    /// every value the variable folds to; anything else leaves a value the
+    /// fold can't name, so the fold is dropped. The result is no longer one
+    /// source literal, so the rename source goes with it.
+    fn fold_compound_constant_string(&mut self, var: &str, node: Node<'a>) {
+        self.constant_string_source.remove(var);
+        let appended = (crate::cst::assign_op(node) == Some(crate::cst::AssignOp::Append))
+            .then(|| {
+                let right = node.child_by_field_name("right")?;
+                let tails = match right.kind() {
+                    "interpolated_string_literal" => self.try_fold_interpolated_string(right),
+                    "string_literal" => self.extract_string_content(right).into_iter().collect(),
+                    _ => Vec::new(),
+                };
+                if tails.is_empty() {
+                    return None;
+                }
+                let heads = self.resolve_constant_strings(var, 0)?;
+                Some(
+                    heads
+                        .iter()
+                        .flat_map(|h| tails.iter().map(move |t| format!("{h}{t}")))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .flatten();
+        match appended {
+            Some(values) => {
+                self.constant_strings.insert(var.to_string(), values);
+            }
+            None => {
+                self.constant_strings.remove(var);
+            }
+        }
+    }
+
     /// The half of `visit_assignment` that can only run once the RHS subtree
     /// is walked: read the rvalue's type, seed constraints and key writes
     /// from it, then descend the LHS.
@@ -1336,6 +1344,8 @@ impl<'a> Builder<'a> {
     /// read is only valid after the RHS walk has allocated its refs and
     /// anon-sub symbols.
     fn assignment_after_rhs(&mut self, node: Node<'a>, left: Node<'a>, right: Node<'a>) {
+        let op = crate::cst::assign_op(node);
+        let at = crate::cst::assignment_write_point(node);
         // Every write RESETS its targets — a declaration and a plain
         // assignment alike: the marker lands now, before the walk types
         // anything downstream of it, so a later `my $o = $x` folds against
@@ -1344,7 +1354,6 @@ impl<'a> Builder<'a> {
         // facts a declaration must not kill (a parameter assertion) are
         // anchored at the binding site, never before it.
         {
-            let at = left.start_position();
             let scope = self.current_scope();
             match self.lhs_list_targets(left) {
                 Some(targets) => {
@@ -1367,19 +1376,44 @@ impl<'a> Builder<'a> {
         // ternaries; Edge payloads resolve through the
         // registry's materialization.
         self.emit_expr_witness(right);
-        let mut inferred = self.bag_query_expr_span(node_to_span(right));
+        // The assignment's own value, for `return $x ||= …` and friends.
+        self.emit_expr_witness(node);
+        // A compound write stores the operator's result, not the RHS.
+        let value_span = if op == Some(crate::cst::AssignOp::Plain) {
+            node_to_span(right)
+        } else {
+            node_to_span(node)
+        };
+        let mut inferred = None;
         // `my %h = (k => v, …)` — the list IS a hash literal in
         // this position, the hashref's second spelling. The
         // list's own Expr witness can't carry that (its meaning
         // depends on the LHS sigil), so type it from the LHS
         // side through the same shape builder.
-        if inferred.is_none() && matches!(right.kind(), "list_expression" | "parenthesized_expression") {
+        if op == Some(crate::cst::AssignOp::Plain)
+            && (crate::cst::is_list_literal(right) || right.kind() == "stub_expression")
+        {
+            // `()` is a `stub_expression`: the empty list, so `my %h = ()`
+            // is the empty closed shape.
             if let Some(vt) = self.get_var_text_from_lhs(left) {
                 if vt.starts_with('%') {
                     inferred = Some(self.hash_literal_type(right));
                 } else if vt.starts_with('@') {
                     inferred = self.list_literal_type(right);
                 }
+            }
+        }
+        // The target's value is the edge to what the write stored, minted
+        // now so walk-time readers downstream see it.
+        if self.lhs_list_targets(left).is_none() {
+            if let Some(vt) = self.get_var_text_from_lhs(left) {
+                self.push_flow_edge(
+                    vt,
+                    at,
+                    value_span,
+                    crate::model::file_analysis::Extraction::Whole,
+                    left.kind() != "variable_declaration",
+                );
             }
         }
         if self.lhs_list_targets(left).is_some() {
@@ -1396,11 +1430,13 @@ impl<'a> Builder<'a> {
                 // fallback, i.e. the enclosing class); the deferred
                 // witness keeps the ctor receiver-polymorphic at
                 // call sites (wins via reducer order).
-                self.push_receiver_bless_witness(&vt, right);
+                if op == Some(crate::cst::AssignOp::Plain) {
+                    self.push_receiver_bless_witness(&vt, right);
+                }
                 self.push_type_constraint(TypeConstraint {
                     variable: vt,
                     scope: self.current_scope(),
-                    constraint_span: node_to_span(node),
+                    constraint_span: Span { start: at, end: node.end_position() },
                     inferred_type: it,
                 });
             }
@@ -1418,45 +1454,32 @@ impl<'a> Builder<'a> {
         // `else if` branch; with the implicit-return edge
         // routing through SymbolReturnArm chains, the type
         // surfaces but the binding still has to fire.
-        if let Some(func_name) = self.extract_call_name(right) {
+        let carries_rhs = op.is_some_and(crate::cst::AssignOp::carries_rhs);
+        if !carries_rhs {
+            // `.=`/`+=`/…: the target holds the operator's result, so the
+            // RHS's call or ternary says nothing about it.
+        } else if let Some(func_name) = self.extract_call_name(right) {
             if let Some(vt) = self.get_var_text_from_lhs(left) {
                 self.call_bindings.push(CallBinding {
                     variable: vt,
                     func_name,
                     scope: self.current_scope(),
-                    span: node_to_span(node),
+                    span: Span { start: at, end: node.end_position() },
                 });
             }
-        } else if right.kind() == "method_call_expression" {
-            // RHS is a method call — record binding for return-type post-pass
-            if let Some(method_node) = right.child_by_field_name("method") {
-                if let Some(invocant_node) = right.child_by_field_name("invocant") {
-                    if let (Ok(method), Ok(inv)) = (
-                        method_node.utf8_text(self.source),
-                        invocant_node.utf8_text(self.source),
-                    ) {
-                        // Skip constructors — already handled by extract_constructor_class
-                        if !crate::model::conventions::is_constructor_name(method) {
-                            if let Some(vt) = self.get_var_text_from_lhs(left) {
-                                // Resolve dynamic method names via constant folding
-                                let method_names = if method.starts_with('$') {
-                                    self.resolve_constant_strings(method, 0)
-                                        .unwrap_or_else(|| vec![method.to_string()])
-                                } else {
-                                    vec![method.to_string()]
-                                };
-                                for mname in method_names {
-                                    self.method_call_bindings.push(MethodCallBinding {
-                                        variable: vt.clone(),
-                                        invocant_var: inv.to_string(),
-                                        method_name: mname,
-                                        scope: self.current_scope(),
-                                        span: node_to_span(node),
-                                    });
-                                }
-                            }
-                        }
+        } else if let Some(calls) = self.method_call_refs.get(&right.id()).cloned() {
+            if let Some(vt) = self.get_var_text_from_lhs(left) {
+                for call in calls {
+                    // Constructors key their own hash shape.
+                    if crate::model::conventions::is_constructor_name(&self.refs[call].target_name) {
+                        continue;
                     }
+                    self.method_call_bindings.push(MethodCallBinding {
+                        variable: vt.clone(),
+                        call: crate::model::witnesses::RefIdx(call as u32),
+                        scope: self.current_scope(),
+                        span: Span { start: at, end: node.end_position() },
+                    });
                 }
             }
         }
@@ -1466,9 +1489,9 @@ impl<'a> Builder<'a> {
         // Expr(span) payloads. POST visit_node — needs the
         // arms' refs to exist so `expr_payload` can resolve
         // `Edge(Expression(refidx))` for method-call arms.
-        if right.kind() == "conditional_expression" {
+        if carries_rhs && right.kind() == "conditional_expression" {
             if let Some(vt) = self.get_var_text_from_lhs(left) {
-                self.emit_branch_arm_witnesses_for_ternary(&vt, right, node);
+                self.emit_branch_arm_witnesses_for_ternary(&vt, right, at);
             }
         }
         // `$obj->{k} = <rhs>` slot-type seed. Record key-span →
@@ -1476,18 +1499,20 @@ impl<'a> Builder<'a> {
         // `SlotType{owner_class, k} → Edge(Expr(rhs_span))`
         // keyed off the matching HashKeyAccess Write ref (whose
         // span is this key node's span). `emit_expr_witness(right)`
-        // already published the RHS's `Expr(rhs_span)`.
+        // already published the RHS's `Expr(rhs_span)`; a compound write
+        // stores the assignment's own value instead.
+        let stored = if op == Some(crate::cst::AssignOp::Plain) { right } else { node };
         if left.kind() == "hash_element_expression" {
             if let Some(key_node) = left.child_by_field_name("key") {
                 self.slot_write_rhs_span
-                    .insert(node_to_span(key_node), node_to_span(right));
+                    .insert(node_to_span(key_node), node_to_span(stored));
             }
         }
         if matches!(
             left.kind(),
             "hash_element_expression" | "array_element_expression"
         ) {
-            self.record_key_write(left, Some(right));
+            self.record_key_write(left, Some(stored));
         }
         // Slice / keyval writes (`@h{qw(a b)} = …`, `%h{k} = …`,
         // `@$h{…}`) land several keys at once — record an

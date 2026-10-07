@@ -9,6 +9,7 @@ use tree_sitter::{Node, Point, Tree};
 
 use crate::cst::{fq_tail_span, node_to_span};
 use crate::model::file_analysis::*;
+use crate::model::witnesses::TypeObservation;
 
 /// A ready-to-parse tree-sitter Parser for the Perl grammar — the one
 /// constructor every parse site (resolver, document, CLI, the s///e
@@ -122,10 +123,6 @@ struct ChainTypingIndex<'a> {
     return_nodes: std::collections::HashMap<(Point, Point), Node<'a>>,
     invocant_nodes: std::collections::HashMap<(Point, Point), Node<'a>>,
     method_call_args: std::collections::HashMap<(Point, Point), Node<'a>>,
-    /// Every `method_call_expression` node. `emit_route_brand_witnesses`
-    /// reads it post-fold to attach resolved `BrandedRoute` witnesses to
-    /// each call's `Expression(refidx)`.
-    method_call_nodes: Vec<Node<'a>>,
     /// `hash_element_expression` nodes whose container is itself a
     /// method-call result (`$obj->get_config->{host}`). The container
     /// type — and thus the key's owner class — is only knowable after
@@ -307,7 +304,7 @@ struct Builder<'a> {
     /// Raw POD text blocks collected during the walk (for tail-POD post-pass).
     pod_texts: Vec<String>,
     /// Parent classes for each package (from use parent/base, @ISA, class :isa).
-    package_parents: std::collections::HashMap<String, Vec<String>>,
+    package_parents: crate::model::file_analysis::PackageParents,
     /// Modules the current package has `use`d, in source order. Used by
     /// `PluginRegistry::applicable` for `Trigger::UsesModule` matching.
     package_uses: std::collections::HashMap<String, Vec<String>>,
@@ -605,13 +602,16 @@ struct Builder<'a> {
     /// see `plugin::TopicRouteDsl`.
     topic_dsls: Vec<plugin::TopicRouteDsl>,
 
-    /// Per-MethodCall-ref arg count, keyed by ref index. Lets
-    /// `emit_method_call_return_edges` pin the call site's arity onto its
-    /// `Expression(refidx)` return edge (`CallReturn`), so a fluent
-    /// writer `$obj->setter($v)` resolves the writer arm even when the
-    /// type query that reaches the edge is hint-less (`my $x = …`).
-    /// **Build-only**, like `method_call_invocant`.
-    method_call_arity: std::collections::HashMap<usize, u32>,
+    /// Per-MethodCall-ref argument operands, keyed by ref index — the
+    /// `args` of the call's `Invoke`. Absent for plugin-emitted refs, whose
+    /// arguments were never walked. **Build-only**, like
+    /// `method_call_invocant`.
+    method_call_args: std::collections::HashMap<usize, Vec<crate::model::witnesses::CallArg>>,
+
+    /// Call node id → the `MethodCall` refs it minted (one per folded name
+    /// of a dynamic `$o->$m`), so an assignment binds to its call's refs.
+    /// **Build-only**.
+    method_call_refs: std::collections::HashMap<usize, Vec<usize>>,
 
     /// MethodCall ref indices for which we've published an
     /// `InferredType::Parametric` witness on `Expression(refidx)`
@@ -629,14 +629,6 @@ struct Builder<'a> {
     /// this set keeps a walk-phase full-form emission at the same span
     /// from being duplicated by that fold-phase re-run.
     method_call_ref_dedup: std::collections::HashSet<(Point, Point, String)>,
-
-    /// Refs whose `Expression(refidx)` carries a `route_brand`
-    /// `BrandedRoute` witness. `emit_method_call_return_edges` skips
-    /// these so its `Edge(PackageSymbol{Route, to})` (which folds to a
-    /// brandless `ClassName(Route)`) doesn't mask the brand. Same role
-    /// as `parametric_emitted_refs`. Cleared+refilled each fold
-    /// iteration by `emit_route_brand_witnesses`.
-    route_branded_refs: std::collections::HashSet<usize>,
 
     /// Recorded `defined`/`blessed` guards whose `Optional<T> → T` strip
     /// is re-derived each fold iteration (`emit_defined_narrowing_witnesses`).

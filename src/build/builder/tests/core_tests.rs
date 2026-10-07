@@ -863,9 +863,9 @@ fn test_hash_element_extracted_to_scalar_is_not_container_class() {
     let h_decl_col = line.find("my $h").unwrap();
     let probe = tree_sitter::Point::new(2, h_decl_col + "my $h = $self->{helper}; ".len());
 
-    let ty = fa.inferred_type("$h", probe);
+    let ty = fa.inferred_type_via_bag("$h", probe);
     assert!(
-        !matches!(ty, Some(InferredType::ClassName(c)) if c == "Foo"),
+        !matches!(ty, Some(InferredType::ClassName(ref c)) if c == "Foo"),
         "$h must NOT be typed as the container's class Foo; got {:?}",
         ty
     );
@@ -895,7 +895,7 @@ fn slot_type_write_then_extract_resolves_method() {
         5,
         line.find("my $h").unwrap() + "my $h = $self->{helper}; ".len(),
     );
-    let ty = fa.inferred_type("$h", probe);
+    let ty = fa.inferred_type_via_bag("$h", probe);
     assert_eq!(
         ty.as_ref().and_then(|t| t.class_name()),
         Some("Helper"),

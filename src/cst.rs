@@ -163,6 +163,103 @@ typed_node! {
     }
 }
 
+/// What an `assignment_expression`'s operator does to the value, grouped by
+/// the result it produces. Every compound operator is `LHS = LHS op RHS`, so
+/// the group decides both the new value of the target and the value of the
+/// expression itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AssignOp {
+    /// `=` — the value is the RHS.
+    Plain,
+    /// `||=` / `//=` — the old value when true/defined, else the RHS.
+    Fallback,
+    /// `&&=` — the RHS when the old value is true, else the (false) old value.
+    AndThen,
+    /// `.=` — string append.
+    Append,
+    /// `x=` — string repetition.
+    Repeat,
+    /// Arithmetic and shift ops — a number.
+    Numeric,
+    /// `|=` / `&=` / `^=` — a number, unless both operands are strings, when
+    /// Perl does the op per character and the result is a string.
+    Bitwise,
+}
+
+impl AssignOp {
+    /// Whether the value can be the RHS itself, so facts about the RHS (its
+    /// type, the call it came from) are facts about the target.
+    pub(crate) fn carries_rhs(self) -> bool {
+        matches!(self, AssignOp::Plain | AssignOp::Fallback | AssignOp::AndThen)
+    }
+}
+
+/// Where an assignment's write lands: after the whole expression, so every
+/// read inside it — the RHS of `$n = $n->parent`, the implicit read of
+/// `$x ||= …` — sees the value being replaced. A declaration is the
+/// exception: its RHS can't name the variable it declares, and the facts a
+/// declaration must not kill (a parameter assertion) sit on its binding
+/// token, so it writes there.
+pub(crate) fn assignment_write_point(assign: Node) -> tree_sitter::Point {
+    match assign.child_by_field_name("left") {
+        Some(left) if left.kind() == "variable_declaration" => left.start_position(),
+        _ => assign.end_position(),
+    }
+}
+
+/// The operator of an `assignment_expression`. `None` for any other kind, or
+/// an operator this table doesn't know.
+pub(crate) fn assign_op(node: Node) -> Option<AssignOp> {
+    if node.kind() != "assignment_expression" {
+        return None;
+    }
+    Some(match node.child_by_field_name("operator")?.kind() {
+        "=" => AssignOp::Plain,
+        "||=" | "//=" => AssignOp::Fallback,
+        "&&=" => AssignOp::AndThen,
+        ".=" => AssignOp::Append,
+        "x=" => AssignOp::Repeat,
+        "+=" | "-=" | "*=" | "/=" | "%=" | "**=" | "<<=" | ">>=" => AssignOp::Numeric,
+        "|=" | "&=" | "^=" => AssignOp::Bitwise,
+        _ => return None,
+    })
+}
+
+/// The shape of a literal, whatever grammar kind spells it. Readers match on
+/// the shape, so a spelling the grammar splits across kinds (a list with or
+/// without parens, a single- or double-quoted string) is one arm.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LiteralShape {
+    /// `qw(a b)`.
+    Qw,
+    /// `'a'` / `"a"`.
+    Str,
+    /// `a, b` or `(a, b)` / `(a)`. The empty list `()` is a `stub_expression`,
+    /// which callers that want it name.
+    List,
+    /// `[a, b]`.
+    ArrayRef,
+    /// `{a => 1}`.
+    HashRef,
+}
+
+/// `None` for anything that isn't a literal.
+pub(crate) fn literal_shape(node: Node) -> Option<LiteralShape> {
+    Some(match node.kind() {
+        "quoted_word_list" => LiteralShape::Qw,
+        "string_literal" | "interpolated_string_literal" => LiteralShape::Str,
+        "list_expression" | "parenthesized_expression" => LiteralShape::List,
+        "anonymous_array_expression" => LiteralShape::ArrayRef,
+        "anonymous_hash_expression" => LiteralShape::HashRef,
+        _ => return None,
+    })
+}
+
+/// A list literal ([`LiteralShape::List`]).
+pub(crate) fn is_list_literal(node: Node) -> bool {
+    literal_shape(node) == Some(LiteralShape::List)
+}
+
 /// A call expression's arguments as a flat positional sequence. The
 /// `arguments` field may be a bare single node or a `list_expression` /
 /// `parenthesized_expression` wrapper — callers never see the difference.
@@ -170,7 +267,7 @@ pub(crate) fn call_args<'a>(call_node: Node<'a>) -> Vec<Node<'a>> {
     let Some(args) = call_node.child_by_field_name("arguments") else {
         return Vec::new();
     };
-    if matches!(args.kind(), "list_expression" | "parenthesized_expression") {
+    if is_list_literal(args) {
         args.named().collect()
     } else {
         vec![args]
@@ -190,7 +287,7 @@ pub(crate) fn flatten_list<'a>(list: Node<'a>, out: &mut Vec<Node<'a>>) {
     let count = list.child_count();
     for i in 0..count {
         let Some(child) = list.child(i) else { continue };
-        if matches!(child.kind(), "list_expression" | "parenthesized_expression") {
+        if is_list_literal(child) {
             flatten_list(child, out);
         } else {
             out.push(child);
@@ -217,7 +314,7 @@ pub(crate) fn list_elements<'a>(list: Node<'a>) -> Vec<Node<'a>> {
 /// no semantics; a call/deref/element-access does, and is left alone.
 /// Loops, so nested `(($x))` collapse.
 pub(crate) fn peel_groups(mut node: Node) -> Node {
-    while matches!(node.kind(), "parenthesized_expression" | "list_expression") {
+    while is_list_literal(node) {
         let mut named = node.named();
         match (named.next(), named.next()) {
             (Some(inner), None) => node = inner,
@@ -266,15 +363,24 @@ pub(crate) fn pair_nodes_in<'a>(children: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a
     out
 }
 
+/// The list a `{…}` / `[…]` literal holds, in either spelling: `{ a => 1 }`
+/// or `{ (a => 1) }`. The literal itself when it holds one bare element.
+/// Callers walk this rather than the literal's own children, which also
+/// carry its braces and any comment inside them.
+pub(crate) fn literal_body(literal: Node) -> Node {
+    if is_list_literal(literal) {
+        return literal;
+    }
+    literal.named().find(|c| is_list_literal(*c)).unwrap_or(literal)
+}
+
 /// Pair-walk a container node: a bare `list_expression` /
-/// `parenthesized_expression`, or an `anonymous_hash_expression` (its inner
-/// list is unwrapped). Composition of [`flatten_list`] + [`pair_nodes_in`].
+/// `parenthesized_expression`, or an `anonymous_hash_expression` (walked
+/// through [`literal_body`]). Composition of [`flatten_list`] +
+/// [`pair_nodes_in`].
 pub(crate) fn pair_nodes<'a>(container: Node<'a>) -> Vec<(Node<'a>, Node<'a>)> {
     let list = if container.kind() == "anonymous_hash_expression" {
-        container
-            .named()
-            .find(|c| c.kind() == "list_expression")
-            .unwrap_or(container)
+        literal_body(container)
     } else {
         container
     };
@@ -639,65 +745,70 @@ pub(crate) fn string_list_with_residue(
     src: &[u8],
     fold: &mut dyn FnMut(Node) -> Vec<(String, Span)>,
 ) -> (Vec<(String, Span)>, bool) {
-    match node.kind() {
-        "quoted_word_list" => {
+    match literal_shape(node) {
+        Some(LiteralShape::Qw) => {
             let mut results = Vec::new();
             qw_word_spans(node, src, &mut results);
             return (results, false);
         }
-        "string_literal" | "interpolated_string_literal" => {
+        Some(LiteralShape::Str) => {
             if let Some(text) = string_content_text(node, src) {
                 return (vec![(text, string_content_span(node))], false);
             }
             return (vec![], true);
         }
-        "bareword" | "autoquoted_bareword" | "array" => {
-            let v = fold(node);
-            let residue = v.is_empty();
-            return (v, residue);
-        }
-        "map_grep_expression" => {
-            let v = map_built_strings(node, src, fold);
-            let residue = v.is_empty();
-            return (v, residue);
-        }
-        _ => {}
+        Some(_) => {}
+        None => match node.kind() {
+            "bareword" | "autoquoted_bareword" | "array" => {
+                let v = fold(node);
+                let residue = v.is_empty();
+                return (v, residue);
+            }
+            "map_grep_expression" => {
+                let v = map_built_strings(node, src, fold);
+                let residue = v.is_empty();
+                return (v, residue);
+            }
+            _ => {}
+        },
     }
     let mut results = Vec::new();
     let mut residue = false;
     for i in 0..node.child_count() {
         let Some(child) = node.child(i) else { continue };
-        match child.kind() {
-            "quoted_word_list" => qw_word_spans(child, src, &mut results),
-            "string_literal" | "interpolated_string_literal" => {
+        match literal_shape(child) {
+            Some(LiteralShape::Qw) => qw_word_spans(child, src, &mut results),
+            Some(LiteralShape::Str) => {
                 if let Some(text) = string_content_text(child, src) {
                     results.push((text, string_content_span(child)));
                 } else {
                     residue = true;
                 }
             }
-            "parenthesized_expression" | "list_expression" | "anonymous_array_expression" => {
+            Some(LiteralShape::List | LiteralShape::ArrayRef) => {
                 let (v, r) = string_list_with_residue(child, src, fold);
                 results.extend(v);
                 residue |= r;
             }
-            "bareword" | "autoquoted_bareword" | "array" => {
-                let v = fold(child);
-                residue |= v.is_empty();
-                results.extend(v);
-            }
-            "map_grep_expression" => {
-                let v = map_built_strings(child, src, fold);
-                residue |= v.is_empty();
-                results.extend(v);
-            }
-            // Separators and parens are anonymous; anything NAMED we
-            // didn't fold is a real list item we couldn't read.
-            _ => {
-                if child.is_named() && !matches!(child.kind(), "comment" | "pod") {
-                    residue = true;
+            Some(LiteralShape::HashRef) | None => match child.kind() {
+                "bareword" | "autoquoted_bareword" | "array" => {
+                    let v = fold(child);
+                    residue |= v.is_empty();
+                    results.extend(v);
                 }
-            }
+                "map_grep_expression" => {
+                    let v = map_built_strings(child, src, fold);
+                    residue |= v.is_empty();
+                    results.extend(v);
+                }
+                // Separators and parens are anonymous; anything NAMED we
+                // didn't fold is a real list item we couldn't read.
+                _ => {
+                    if child.is_named() && !matches!(child.kind(), "comment" | "pod") {
+                        residue = true;
+                    }
+                }
+            },
         }
     }
     (results, residue)
@@ -844,6 +955,28 @@ pub(crate) fn constructor_invocant<'a>(node: Node<'a>, src: &'a [u8]) -> Option<
         | InvocantText::NonScalar(_)
         | InvocantText::PositionalReceiver => None,
     }
+}
+
+/// The scalar a dynamic method call dispatches through: `$o->$cb(...)`,
+/// `$o->${cb}`, `$o->$$cb`. The `method:` field is always a `method` node,
+/// wrapping the scalar for these spellings and a bare name otherwise.
+pub(crate) fn dynamic_method_scalar(call: Node) -> Option<Node> {
+    call.child_by_field_name("method")?.named_child(0).filter(|c| c.kind() == "scalar")
+}
+
+/// An argument that flattens into any number of values in list context:
+/// an array or hash, a deref of one, or a slice.
+pub(crate) fn is_flattening(node: Node) -> bool {
+    matches!(
+        node.kind(),
+        "array"
+            | "hash"
+            | "array_deref_expression"
+            | "hash_deref_expression"
+            | "container_variable"
+            | "slice_expression"
+            | "keyval_expression"
+    )
 }
 
 /// True when `node` is a `scalar` whose bare varname is a conventional

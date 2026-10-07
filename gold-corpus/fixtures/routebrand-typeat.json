@@ -1,0 +1,19 @@
+{
+  "capability": "type-at",
+  "comment": "Route brands (docs/adr/brands.md): marks a plugin lays on a value ride its type through assignment and receiver-returning calls.",
+  "rows": [
+    {
+      "id": "routebrand-marks-ride-assignment",
+      "root": "gold-corpus/routebrand-fixture",
+      "file": "lib/MyApp.pm",
+      "line": 9,
+      "col": 6,
+      "status": "gold",
+      "expect": {
+        "all": [
+          "Mojolicious::Routes::Route<controller=alerts, section=admin>"
+        ]
+      }
+    }
+  ]
+}

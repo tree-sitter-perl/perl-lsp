@@ -393,14 +393,19 @@ pub enum WriteKey {
     Unknown,
 }
 
-/// A method call binding: `$var = $invocant->method()`.
-/// Recorded during build, resolved in post-pass via `find_method_return_type`.
+/// A method call binding: `$var = $invocant->method()`. The variable's
+/// VALUE is its flow edge; this is the hash-key ownership relation — `$var`'s
+/// keys are the ones `call`'s method returns.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MethodCallBinding {
     pub variable: String,
-    pub invocant_var: String,
-    pub method_name: String,
+    /// The bound `MethodCall` ref: its method name, and its invocant read
+    /// (which precedes the write, so `$n = $n->parent` keys on the `$n`
+    /// being replaced).
+    pub call: crate::model::witnesses::RefIdx,
     pub scope: ScopeId,
+    /// Where the write lands (`cst::assignment_write_point`) to the end
+    /// of the assignment; the binding is anchored at its start.
     pub span: Span,
 }
 

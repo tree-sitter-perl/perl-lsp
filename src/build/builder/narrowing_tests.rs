@@ -827,9 +827,10 @@ fn a_rebind_to_a_bare_ref_retires_an_object() {
     // and only the reset marker tells the two apart — a subsumption test on
     // the types cannot.
     for (rhs, want) in [
-        ("{}", InferredType::HashRef),
+        // `my $o = $x` is an escape, which opens the shape.
+        ("{}", super::escaped_empty_hash_shape()),
         ("[]", InferredType::ArrayRef),
-        ("$h", InferredType::HashRef),
+        ("$h", super::escaped_empty_hash_shape()),
     ] {
         let src = format!(
             "package P;\nsub m {{\n  my $h = {{}};\n  my $x = Foo->new;\n  $x = {rhs};\n  my $o = $x;\n}}\n1;\n"

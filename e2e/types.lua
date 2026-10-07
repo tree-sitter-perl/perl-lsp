@@ -203,7 +203,11 @@ end)
 
 -- ── diagnostics ──────────────────────────────────────────────────────
 
-lsp.assert_no_diagnostics(t, buf)
+-- `my %hash; $hash{foo}` reads a key nothing wrote: the empty shape's typo
+-- hint is the one diagnostic this file is meant to raise.
+lsp.assert_no_diagnostics(t, buf, {
+  "key 'foo' is not in %hash's literal shape (no keys)",
+})
 
 -- ── done ────────────────────────────────────────────────────────────
 

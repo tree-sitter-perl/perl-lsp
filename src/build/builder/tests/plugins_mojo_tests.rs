@@ -1204,10 +1204,10 @@ my $x = app;
     // `$x = app` — $x should pick up the return type of the plugin's
     // `app` Sub (ClassName("Mojolicious")).
     let ty = fa
-        .inferred_type("$x", tree_sitter::Point::new(4, 0))
+        .inferred_type_via_bag("$x", tree_sitter::Point::new(4, 0))
         .expect("$x must carry a type sourced from `app`'s return type");
     assert!(
-        matches!(ty, InferredType::ClassName(c) if c == "Mojolicious"),
+        matches!(ty, InferredType::ClassName(ref c) if c == "Mojolicious"),
         "`$$x = app` must type as Mojolicious — bareword `app` resolves to the \
              plugin's typed Sub. got: {:?}",
         ty,

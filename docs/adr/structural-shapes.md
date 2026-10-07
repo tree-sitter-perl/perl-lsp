@@ -93,7 +93,7 @@ in the slice-write arm.
 
 ### Mutation is modeled on the shape, not gated away
 
-The route-branding lesson (`route-branding.md`): an effect on a value
+The route-branding lesson (`brands.md`): an effect on a value
 belongs on the value's TYPE, not in consumer-side suppression lists.
 `$v->{k} = …` is therefore not a trust break — the walk records a
 `KeyWrite` (var, key-or-dynamic, scope, span, RHS span, syntactic
@@ -114,6 +114,12 @@ Variable shape witnesses:
   several keys at once; all six spellings (`@h{…}`/`%h{k}`,
   `@$h{…}`/`%$h{k}`, `$h->@{…}`/`$h->%{…}`) record an open-switching
   `KeyWrite`.
+
+An empty literal is a shape too: `{}`, `my %h;` and `my %h = ()` are a
+closed `HashWithKeys` with no keys, so `my $h = {}; $h->{k} = Foo->new`
+reads `k` back typed. The key-typo hint skips an empty shape: a typo
+needs a key to have mistyped, and a read before the first write is
+usually a loop whose write sits later in the source.
 
 Extension witnesses use zero-width spans at the write position — the
 same temporal contract as TC mirrors: invisible to reads before the

@@ -1723,13 +1723,22 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
         let mut vars_in_scope: Vec<serde_json::Value> = Vec::new();
         if let Some(sid) = sub_scope_id {
             use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+            // Each write's value as the registry answers it at the write:
+            // a binding is an edge to its source, so the raw witness is
+            // rarely the type.
             for w in analysis.witnesses.all() {
                 let WitnessAttachment::Variable { name, scope } = &w.attachment else { continue };
                 if *scope != sid { continue; }
-                let WitnessPayload::InferredType(t) = &w.payload else { continue };
+                if !matches!(
+                    w.payload,
+                    WitnessPayload::InferredType(_) | WitnessPayload::Edge(_) | WitnessPayload::Projected { .. }
+                ) {
+                    continue;
+                }
+                let Some(t) = analysis.inferred_type_via_bag_ctx(name, w.span.start, Some(&module_index)) else { continue };
                 vars_in_scope.push(serde_json::json!({
                     "var": name,
-                    "type": file_analysis::format_inferred_type(t),
+                    "type": file_analysis::format_inferred_type(&t),
                     "line": w.span.start.row,
                 }));
             }

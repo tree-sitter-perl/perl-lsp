@@ -52,6 +52,14 @@ mints the same site again post-walk (idempotent), so the two lanes agree on
 every write by construction, and its edge is the RHS's value, a plain
 `Edge` that simply drops out when nothing types it. The marker is a
 PAYLOAD, never a source tag a reducer inspects (CLAUDE.md rule #14).
+
+A reassignment's site is the END of the assignment expression, because
+every read inside it happens before the write: the RHS of `$n = $n->parent`
+and the implicit read of `$x ||= …` both see the value being replaced, and a
+guard's region runs up to the write. A declaration writes at its binding
+token instead, since its RHS cannot name the variable it declares. One
+speller, `Builder::assignment_write_point`, serves the walk, the flow lane
+and chain typing.
 `FrameworkAwareTypeFold` reads it three ways:
 
 - **It is a cutoff.** At the query point, every witness strictly before
@@ -168,6 +176,25 @@ often comes from a sub return that only converges during the fold. So
 type and the pass's own output can't feed back), and
 `emit_defined_narrowing_witnesses` re-derives `Optional<T> → T` each fold
 iteration (clear-and-emit on tag `defined_narrowing`).
+
+## Reaching writes
+
+A read of `Variable@point` finds the value it sees by folding every witness
+on the variable and discarding those past the point or behind the latest
+write — `LiveWindow` in `FrameworkAwareTypeFold`, which the registry's edge
+chase also asks so it never chases an edge the fold will discard. That is
+reaching definitions computed at query time, once per read. A chain of
+self-reads (`$x = $x->next` × N) still costs N² hops: the value at write N
+depends on write N-1's, and the chase's memo dies with each top-level query.
+
+The fix is to mint the facts at the producer (rule #11). The flow lane
+records, per read, the set of writes that reach it, with refinement nodes
+where a guard narrows the variable (SSA's π), and a read edges to its
+reaching writes' value attachments instead of to `Variable@point`. Each
+write's value is then computed once per fold iteration, and the chase
+needs no temporal rule at all. A loop makes the reaching set plural, which
+is the same join as `TODO(union-join)`. Until then, `TODO(def-use)` marks
+the query-time window.
 
 ## Forward work
 
