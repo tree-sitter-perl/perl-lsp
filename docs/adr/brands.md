@@ -78,8 +78,10 @@ to the `topic_base` projection (the lite topic stack's replayed base).
   sub's return contract.
 - Joins compare whole types, so two arms whose marks disagree do not agree
   at all (`BranchArmFold` answers nothing), exactly as two different classes
-  don't. Keeping the marks both arms share is the refinement if a consumer
-  needs it.
+  don't. With two branding plugins that is too strict: arms that agree on
+  one plugin's marks lose them when another's disagree. The refinement
+  (`TODO(brand-join)` in `BranchArmFold`) agrees on the base and keeps the
+  marks the arms share, per namespace.
 
 ## Limits
 

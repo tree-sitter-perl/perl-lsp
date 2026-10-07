@@ -564,6 +564,10 @@ impl WitnessReducer for BranchArmFold {
         // agreement, NOT the loose hash/object subsumption the return-arm
         // join uses). An `undef` arm then lifts the agreed `T` to
         // `Optional<T>`.
+        // TODO(brand-join): arms compare whole types, marks included, so one
+        // plugin's disagreeing mark costs every other plugin's agreeing ones.
+        // Agree on the unbranded base, then keep each namespace's marks the
+        // arms share (docs/adr/brands.md, "Joins and the fold").
         let agreed = match typed.split_first() {
             Some((first, rest)) if rest.iter().all(|t| t == first) => Some(first.clone()),
             _ => None,
