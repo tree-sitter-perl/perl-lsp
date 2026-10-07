@@ -45,6 +45,32 @@ and the driver never sees them.
 methods on the enum, matched exhaustively. A new kind fails to compile
 until it says what it is.
 
+**Each capture family has one handler file.** `query_extract/extract/`
+holds the driver (`mod.rs`: the event flatten, the sort, the scope stack)
+and one file per family: `scopes`, `defs`, `refs`, `members`, `flow`,
+`narrowing`, `commands`, `imports`. `family(Capture)` is an exhaustive
+match, so a new variant does not compile until it names its family. The
+family's state (its per-match joins) lives in the same file, on a
+sub-struct of the shared `ExtractState`, and its handler sees one event
+at a time. A family file may expose up to four entry points, each run by
+the driver at a fixed point:
+
+- a flatten hook, for a capture that needs its live node (a declarator to
+  peel, an argument list to count);
+- `collect`, a pre-pass for joins a handler reads before the capture that
+  feeds them fires (a def's name, qualifier and return type sit inside the
+  def node, so their events sort after the def's own);
+- `handle`, called in source order with the scope stack in force;
+- post-passes, which the driver lists in the order their rows and
+  witnesses land. That order is load-bearing: the witness bag is
+  latest-wins for some reducers, and a flow join reads the symbol table
+  only after def dedup and the command defs.
+
+A feature that teaches the extractor a capture touches the variant, the
+family routing line, and the family file it lives in. When a language
+needs extraction a query cannot express, its frontend adds a typed Rust
+handler in the same shape rather than a string-keyed hook on the pack.
+
 ## Consequences
 
 - A document that wants a new capture adds a variant first. The
