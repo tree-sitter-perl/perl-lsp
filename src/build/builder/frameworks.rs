@@ -64,10 +64,7 @@ impl<'a> Builder<'a> {
         if !parents.is_empty() {
             let parent_set: std::collections::HashSet<&str> = parents.iter().map(|s| s.as_str()).collect();
             self.emit_refs_for_strings(node, &parent_set, RefKind::PackageRef, None);
-            self.package_parents
-                .entry(pkg.to_string())
-                .or_default()
-                .extend(parents);
+            self.package_parents.extend(pkg.to_string(), parents);
         }
     }
 
@@ -98,10 +95,7 @@ impl<'a> Builder<'a> {
             })
             .collect();
         if !components.is_empty() {
-            self.package_parents
-                .entry(pkg)
-                .or_default()
-                .extend(components);
+            self.package_parents.extend(pkg, components);
         }
     }
 
@@ -777,8 +771,7 @@ impl<'a> Builder<'a> {
                 parents.iter().map(|s| s.as_str()).collect();
             self.emit_refs_for_strings(node, &parent_set, RefKind::PackageRef, None);
         }
-        self.package_parents.entry(pkg).or_default().extend(parents);
-        crate::model::witnesses::FoldMemoScope::invalidate();
+        self.package_parents.extend(pkg, parents);
     }
 
     /// The `use Mojo::Base ...` args as strings: `-base`/`-strict` flags

@@ -336,10 +336,7 @@ impl<'a> Builder<'a> {
                         let parent_set: std::collections::HashSet<&str> = parents.iter().map(|s| s.as_str()).collect();
                         self.emit_refs_for_strings(node, &parent_set, RefKind::PackageRef, None);
                     }
-                    self.package_parents
-                        .entry(pkg)
-                        .or_default()
-                        .extend(parents);
+                    self.package_parents.extend(pkg, parents);
                 }
             }
         }
@@ -1150,8 +1147,7 @@ impl<'a> Builder<'a> {
                     }
                     if !parents.is_empty() {
                         // @ISA = replaces (not appends)
-                        self.package_parents.insert(pkg.clone(), parents);
-                        crate::model::witnesses::FoldMemoScope::invalidate();
+                        self.package_parents.replace(pkg.clone(), parents);
                     }
                 }
             }

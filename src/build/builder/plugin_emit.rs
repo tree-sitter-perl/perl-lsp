@@ -503,8 +503,7 @@ impl<'a> Builder<'a> {
                 );
             }
             plugin::EmitAction::PackageParent { package, parent } => {
-                self.package_parents.entry(package).or_default().push(parent);
-                crate::model::witnesses::FoldMemoScope::invalidate();
+                self.package_parents.push(package, parent);
             }
             plugin::EmitAction::FrameworkImport { keyword } => {
                 self.framework_imports.insert(keyword);

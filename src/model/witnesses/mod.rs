@@ -52,14 +52,16 @@ pub struct WitnessBag {
     witnesses: Vec<Witness>,
     #[serde(skip)]
     index: HashMap<WitnessAttachment, Vec<usize>>,
-    /// Names this bag's content: every mutation draws a fresh value from one
-    /// process-wide counter, so a memo that outlives one query can tell
+    /// Names this bag's content: every mutation draws a fresh value from
+    /// [`next_generation`], so a memo that outlives one query can tell
     /// whether the bag it answered from is still the bag being asked.
     #[serde(skip)]
     generation: u64,
 }
 
-fn next_bag_generation() -> u64 {
+/// One process-wide counter for every generation stamp, so two stamped
+/// stores never share a value unless their content is the same.
+pub(crate) fn next_generation() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
@@ -112,7 +114,7 @@ impl WitnessBag {
     }
 
     pub fn push(&mut self, w: Witness) -> usize {
-        self.generation = next_bag_generation();
+        self.generation = next_generation();
         let idx = self.witnesses.len();
         self.index.entry(w.attachment.clone()).or_default().push(idx);
         self.witnesses.push(w);
@@ -147,7 +149,7 @@ impl WitnessBag {
 
     pub fn rebuild_index(&mut self) {
         // Every removal path rebuilds, so this is where they all mutate.
-        self.generation = next_bag_generation();
+        self.generation = next_generation();
         let _t = crate::util::ghost_stats::ScopedNs::start("bag::rebuild_index");
         crate::util::ghost_stats::count_by("bag.rebuild_index_witnesses", self.witnesses.len() as u64);
         self.index.clear();

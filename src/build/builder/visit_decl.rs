@@ -591,17 +591,11 @@ impl<'a> Builder<'a> {
 
         // Write to package_parents for unified inheritance resolution
         if let Some(ref p) = parent {
-            self.package_parents
-                .entry(name.clone())
-                .or_default()
-                .push(p.clone());
+            self.package_parents.push(name.clone(), p.clone());
         }
         // Roles via :does(Role) are also parents for method resolution
         if !roles.is_empty() {
-            self.package_parents
-                .entry(name.clone())
-                .or_default()
-                .extend(roles.iter().cloned());
+            self.package_parents.extend(name.clone(), roles.iter().cloned());
         }
 
         self.add_symbol(

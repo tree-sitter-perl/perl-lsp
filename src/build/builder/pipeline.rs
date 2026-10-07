@@ -304,7 +304,7 @@ fn build_once(
         call_bindings: Vec::new(),
         method_call_bindings: Vec::new(),
         pod_texts: Vec::new(),
-        package_parents: std::collections::HashMap::new(),
+        package_parents: Default::default(),
         package_uses: std::collections::HashMap::new(),
         use_dedup: std::collections::HashSet::new(),
         dispatch_dedup: std::collections::HashSet::new(),
@@ -771,7 +771,7 @@ impl<'a> Builder<'a> {
     /// the builder's lanes, read by the window seed and the final assembly.
     fn package_facts(&self) -> std::collections::HashMap<String, PackageFacts> {
         PackageFacts::fold(
-            self.package_parents.clone(),
+            self.package_parents.to_map(),
             self.package_uses.clone(),
             self.package_framework.clone(),
             self.role_requires.clone(),

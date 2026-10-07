@@ -308,7 +308,7 @@ struct Builder<'a> {
     /// Raw POD text blocks collected during the walk (for tail-POD post-pass).
     pod_texts: Vec<String>,
     /// Parent classes for each package (from use parent/base, @ISA, class :isa).
-    package_parents: std::collections::HashMap<String, Vec<String>>,
+    package_parents: crate::model::file_analysis::PackageParents,
     /// Modules the current package has `use`d, in source order. Used by
     /// `PluginRegistry::applicable` for `Trigger::UsesModule` matching.
     package_uses: std::collections::HashMap<String, Vec<String>>,

@@ -482,17 +482,79 @@ impl FileAnalysis {
 /// which side holds the facts.
 pub trait LocalParents {
     fn declared_parents(&self, package: &str) -> &[String];
+    /// Names the parent graph's content, like the bag's generation: a memo
+    /// that outlives one query keys on it. A store that cannot change while
+    /// it is read answers a constant.
+    fn generation(&self) -> u64;
 }
 
 impl LocalParents for HashMap<String, Vec<String>> {
     fn declared_parents(&self, package: &str) -> &[String] {
         self.get(package).map_or(&[], |v| v.as_slice())
     }
+    fn generation(&self) -> u64 {
+        0
+    }
 }
 
 impl LocalParents for HashMap<String, PackageFacts> {
     fn declared_parents(&self, package: &str) -> &[String] {
         self.get(package).map_or(&[], |f| f.parents.as_slice())
+    }
+    fn generation(&self) -> u64 {
+        0
+    }
+}
+
+/// The builder's parent graph while the walk and plugins still extend it.
+/// Every write goes through a method that draws a fresh generation, so the
+/// fold memo sees a parent added mid-build without anyone remembering to
+/// tell it.
+#[derive(Debug, Default)]
+pub struct PackageParents {
+    parents: HashMap<String, Vec<String>>,
+    generation: u64,
+}
+
+impl PackageParents {
+    pub fn get(&self, package: &str) -> Option<&Vec<String>> {
+        self.parents.get(package)
+    }
+
+    pub fn contains_key(&self, package: &str) -> bool {
+        self.parents.contains_key(package)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Vec<String>)> {
+        self.parents.iter()
+    }
+
+    pub fn to_map(&self) -> HashMap<String, Vec<String>> {
+        self.parents.clone()
+    }
+
+    pub fn push(&mut self, package: String, parent: String) {
+        self.extend(package, std::iter::once(parent));
+    }
+
+    pub fn extend(&mut self, package: String, parents: impl IntoIterator<Item = String>) {
+        self.generation = crate::model::witnesses::next_generation();
+        self.parents.entry(package).or_default().extend(parents);
+    }
+
+    /// `@ISA = (...)` replaces rather than appends.
+    pub fn replace(&mut self, package: String, parents: Vec<String>) {
+        self.generation = crate::model::witnesses::next_generation();
+        self.parents.insert(package, parents);
+    }
+}
+
+impl LocalParents for PackageParents {
+    fn declared_parents(&self, package: &str) -> &[String] {
+        self.parents.declared_parents(package)
+    }
+    fn generation(&self) -> u64 {
+        self.generation
     }
 }
 
