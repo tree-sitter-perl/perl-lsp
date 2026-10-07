@@ -578,7 +578,7 @@ impl PackDriver {
             let guards = crate::build::cpp_reparse::collect_include_guard_names(parser, source);
             if !guards.is_empty() {
                 for s in skel.symbols.iter_mut() {
-                    if s.kind == "var" && guards.contains(&s.name) {
+                    if s.kind == crate::build::query_extract::DefKind::Var && guards.contains(&s.name) {
                         s.attributes.push("include_guard".to_string());
                     }
                 }
@@ -853,8 +853,8 @@ fn inject_member_blocks(
         // through the macro identity lane). Both `#define` sites of a config-
         // variant macro reclassify; `into_file_analysis` dedups them by name.
         for s in &mut skel.symbols {
-            if s.kind == "var" && s.name == base.macro_name && s.package.is_none() {
-                s.kind = "class".to_string();
+            if s.kind == crate::build::query_extract::DefKind::Var && s.name == base.macro_name && s.package.is_none() {
+                s.kind = crate::build::query_extract::DefKind::Class;
             }
         }
         // One scope over the `#define` body, so `scope_at(member_point)` finds
@@ -875,7 +875,7 @@ fn inject_member_blocks(
             // renderer (hover stars, inlay suppression, `*field*` labeling) can
             // tell a macro-pasted member from a directly-declared one (rule #10).
             skel.symbols.push(SkelSymbol {
-                kind: "field".to_string(),
+                kind: crate::build::query_extract::DefKind::Field,
                 name: m.name.clone(),
                 start: m.name_span.start,
                 end: m.name_span.end,
