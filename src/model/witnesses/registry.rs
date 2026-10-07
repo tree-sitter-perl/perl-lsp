@@ -112,16 +112,24 @@ thread_local! {
 /// `(value, recorded_exit, cut)` — see `QueryState::memo`.
 type MemoEntry = (std::sync::Arc<ReducedValue>, bool, bool);
 
-/// What a fold-memo answer depends on beyond the per-query key: the bag's
-/// content, the framework and arguments the per-query memo holds fixed for
+/// What a fold-memo answer depends on beyond the per-query key and the bag's
+/// generation: the framework and arguments the per-query memo holds fixed for
 /// one query, and which scope table the context reads.
-type FoldMemoKey = (VisitedKey, u64, FrameworkFact, Option<String>, usize);
+type FoldMemoKey = (VisitedKey, FrameworkFact, Option<String>, usize);
+
+/// The answers for one bag generation. Generations never repeat, so when the
+/// bag moves on every entry is dead; holding only the current one keeps the
+/// memo bounded by the queries between two pushes, not by the whole build.
+#[derive(Default)]
+struct FoldMemo {
+    generation: u64,
+    answers: std::collections::HashMap<FoldMemoKey, (std::sync::Arc<ReducedValue>, bool)>,
+}
 
 thread_local! {
     /// The build's memo, shared by every top-level query while a
     /// `FoldMemoScope` is open. `None` outside a build.
-    static FOLD_MEMO: std::cell::RefCell<Option<std::collections::HashMap<FoldMemoKey, (std::sync::Arc<ReducedValue>, bool)>>> =
-        const { std::cell::RefCell::new(None) };
+    static FOLD_MEMO: std::cell::RefCell<Option<FoldMemo>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Shares resolved sub-answers across the top-level queries of one build.
@@ -129,14 +137,14 @@ thread_local! {
 /// The fold asks the same questions many times: every pass, every iteration,
 /// and every call in a chain re-types the chain's prefix. Within a build the
 /// answers can only change when the bag does, and build-time queries run with
-/// no module index, so nothing outside the file can move them. Entries are
-/// keyed on the bag's generation, so any mutation retires them, and only
-/// subtrees that were never cut short are stored.
+/// no module index, so nothing outside the file can move them. Any mutation
+/// moves the bag's generation and empties the memo, and only subtrees that
+/// were never cut short are stored.
 ///
 /// `invalidate` covers the one input that changes without a bag mutation:
 /// the builder's package parents, which plugin emission can extend mid-build.
 pub(crate) struct FoldMemoScope {
-    outer: Option<std::collections::HashMap<FoldMemoKey, (std::sync::Arc<ReducedValue>, bool)>>,
+    outer: Option<FoldMemo>,
 }
 
 impl FoldMemoScope {
@@ -147,15 +155,15 @@ impl FoldMemoScope {
         let disabled = *DISABLED.get_or_init(|| std::env::var_os("PERL_LSP_NO_FOLD_MEMO").is_some());
         #[cfg(test)]
         let disabled = disabled || FOLD_MEMO_FORCED_OFF.with(|c| c.get());
-        let fresh = (!disabled).then(std::collections::HashMap::new);
+        let fresh = (!disabled).then(FoldMemo::default);
         let outer = FOLD_MEMO.with(|m| std::mem::replace(&mut *m.borrow_mut(), fresh));
         FoldMemoScope { outer }
     }
 
     pub(crate) fn invalidate() {
         FOLD_MEMO.with(|m| {
-            if let Some(map) = m.borrow_mut().as_mut() {
-                map.clear();
+            if let Some(memo) = m.borrow_mut().as_mut() {
+                memo.answers.clear();
             }
         });
     }
@@ -190,8 +198,8 @@ impl Drop for FoldMemoScope {
     }
 }
 
-/// Answer `q` from the fold memo, or hand back the key to store under once
-/// it is computed (`None` when no scope is open, or when the answer may depend
+/// Answer `q` from the fold memo, or hand back the generation and key to store
+/// under once it is computed (`None` when no scope is open, or when the answer may depend
 /// on more than this file: a query that can reach the module index is never
 /// shared).
 ///
@@ -204,7 +212,7 @@ fn fold_memo_probe(
     q: &ReducerQuery,
     key: &VisitedKey,
     state: &mut QueryState,
-) -> Result<std::sync::Arc<ReducedValue>, Option<Box<FoldMemoKey>>> {
+) -> Result<std::sync::Arc<ReducedValue>, Option<Box<(u64, FoldMemoKey)>>> {
     if !FOLD_MEMO.with(|m| m.borrow().is_some()) {
         return Err(None);
     }
@@ -214,11 +222,20 @@ fn fold_memo_probe(
         None => 0,
     };
     let args = (!q.args.is_empty()).then(|| format!("{:?}", q.args));
-    let fk = Box::new((key.clone(), bag.generation(), q.framework, args, scopes));
-    let Some((cached, recorded_exit)) =
-        FOLD_MEMO.with(|m| m.borrow().as_ref().and_then(|map| map.get(&*fk).cloned()))
-    else {
-        return Err(Some(fk));
+    let generation = bag.generation();
+    let fk = (key.clone(), q.framework, args, scopes);
+    let hit = FOLD_MEMO.with(|m| {
+        let mut m = m.borrow_mut();
+        let memo = m.as_mut()?;
+        if memo.generation != generation {
+            memo.answers.clear();
+            memo.generation = generation;
+            return None;
+        }
+        memo.answers.get(&fk).cloned()
+    });
+    let Some((cached, recorded_exit)) = hit else {
+        return Err(Some(Box::new((generation, fk))));
     };
     crate::util::ghost_stats::count("fold_memo.hit");
     // The same laundering guard as the per-query memo.
@@ -231,11 +248,12 @@ fn fold_memo_probe(
 }
 
 #[inline(never)]
-fn fold_memo_store(fk: Box<FoldMemoKey>, result: &std::sync::Arc<ReducedValue>, recorded_exit: bool) {
-    crate::util::ghost_stats::count("fold_memo.store");
+fn fold_memo_store(fk: Box<(u64, FoldMemoKey)>, result: &std::sync::Arc<ReducedValue>, recorded_exit: bool) {
+    let (generation, fk) = *fk;
     FOLD_MEMO.with(|m| {
-        if let Some(map) = m.borrow_mut().as_mut() {
-            map.insert(*fk, (std::sync::Arc::clone(result), recorded_exit));
+        if let Some(memo) = m.borrow_mut().as_mut().filter(|memo| memo.generation == generation) {
+            crate::util::ghost_stats::count("fold_memo.store");
+            memo.answers.insert(fk, (std::sync::Arc::clone(result), recorded_exit));
         }
     });
 }
