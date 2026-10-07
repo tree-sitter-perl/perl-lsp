@@ -38,12 +38,13 @@ pub struct Mark { ns: String, key: String, value: String }
 ## Producing marks
 
 A plugin emits `EmitAction::Brand { at, on_class, set, drop }` for the
-method call spanning `at`. The builder records it as a `BrandOverlay`
-witness on that call's `Expression`, beside its `Invoke`. The registry
+expression spanning `at`: a method call, a sub call, a constructor. The
+builder records it as a `BrandOverlay` witness on that `Expr(at)`, the
+attachment every reader of the expression's value enters at. The registry
 applies overlays after reduction (`apply_brand_overlays`): whatever the
 attachment answers, with `set` laid over the plugin's marks and `drop`
 removed. An overlay applies only when the value is an `on_class` instance,
-because the plugin matched the call by its method name alone.
+because the plugin matched the expression by its shape alone.
 
 The overlay is a producer fact: the plugin parsed the call's literals at
 walk time and needs no inherited state, so it runs before the fold.

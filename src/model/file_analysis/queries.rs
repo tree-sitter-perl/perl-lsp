@@ -408,7 +408,8 @@ impl FileAnalysis {
             WitnessAttachment,
         };
 
-        let att = WitnessAttachment::Expression(crate::model::witnesses::RefIdx(ref_idx as u32));
+        // The call's value enters at its `Expr`, where brand overlays sit.
+        let att = WitnessAttachment::Expr(self.refs[ref_idx].span);
         let reg = ReducerRegistry::with_defaults();
         let ctx = self.bag_context(module_index);
         // Thread the receiver's resolved type so a receiver-relative
@@ -429,7 +430,7 @@ impl FileAnalysis {
             // spans (degenerate overlapping refs route branding can emit)
             // would recurse back onto this same call; skipping them keeps
             // the receiver `None` (build-time chain typing already pinned
-            // those via `bag_query_expression`).
+            // those via `bag_query_call`).
             let strictly_inside = (span.start.row, span.start.column)
                 >= (own_span.start.row, own_span.start.column)
                 && (span.end.row, span.end.column) <= (own_span.end.row, own_span.end.column)

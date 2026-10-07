@@ -148,10 +148,10 @@ impl<'a> Builder<'a> {
         crate::model::file_analysis::class_isa(child, ancestor, &self.package_parents, None)
     }
 
-    /// Record a plugin's marks on the method call spanning `at`, beside the
-    /// call's `Invoke` on its `Expression`: every reader of the call's value
-    /// (a chained call's receiver, an assignment's edge, the chain typer)
-    /// goes through that attachment.
+    /// Record a plugin's marks on the expression spanning `at`: every reader
+    /// of an expression's value (a chained call's receiver, an assignment's
+    /// edge, the chain typer) enters at its `Expr`, whatever kind of
+    /// expression it is.
     pub(super) fn push_brand_overlay(
         &mut self,
         plugin_id: String,
@@ -160,16 +160,9 @@ impl<'a> Builder<'a> {
         set: Vec<(String, String)>,
         drop: Vec<String>,
     ) {
-        use crate::model::witnesses::{RefIdx, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        let Some(idx) = self
-            .refs
-            .iter()
-            .position(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.span == at)
-        else {
-            return;
-        };
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         self.bag.push(Witness {
-            attachment: WitnessAttachment::Expression(RefIdx(idx as u32)),
+            attachment: WitnessAttachment::Expr(at),
             source: WitnessSource::Plugin(plugin_id.clone()),
             payload: WitnessPayload::BrandOverlay { ns: plugin_id, on_class, set, drop },
             span: at,

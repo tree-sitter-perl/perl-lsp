@@ -907,6 +907,20 @@ impl<'a> Builder<'a> {
             if !matches!(r.kind, RefKind::MethodCall { .. }) {
                 continue;
             }
+            // Every reader of a call's value enters at its `Expr`, where brand
+            // overlays sit. The walk links it for calls it visits as values; a
+            // call it never did (a statement, a plugin-emitted ref) is linked
+            // here.
+            if self.bag.iter_attachment(&WitnessAttachment::Expr(r.span)).next().is_none() {
+                edges.push(Witness {
+                    attachment: WitnessAttachment::Expr(r.span),
+                    source: WitnessSource::Builder("method_call_return".into()),
+                    payload: WitnessPayload::Edge(WitnessAttachment::Expression(
+                        crate::model::witnesses::RefIdx(i as u32),
+                    )),
+                    span: r.span,
+                });
+            }
             // Refs we've already handed a Parametric witness keep
             // their custom InferredType — publishing the receiver-
             // class's plain return-type edge would mask the
@@ -1070,7 +1084,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Bag-routed lookup for a method-call expression's return type
-    /// via its ref index. Mirrors `FileAnalysis::method_call_return_type_via_bag`
+    /// at its `Expr(span)`, where its brand overlays sit too. Mirrors `FileAnalysis::method_call_return_type_via_bag`
     /// but reads `&self.bag` (the in-progress builder bag). Includes
     /// the `FirstParam → ClassName` projection so chain-typer
     /// consumers see a concrete class instead of a parametric type.
@@ -1080,9 +1094,9 @@ impl<'a> Builder<'a> {
     /// at the chase. Direct method calls (`$rs->find(...)`) pass the
     /// invocant's resolved type — for DBIC, that's the
     /// `Parametric(ResultSet)` flowing through chain typing.
-    pub(super) fn bag_query_expression(
+    pub(super) fn bag_query_call(
         &self,
-        ref_idx: crate::model::witnesses::RefIdx,
+        span: Span,
         arity_hint: Option<u32>,
         receiver: Option<InferredType>,
     ) -> Option<InferredType> {
@@ -1090,7 +1104,7 @@ impl<'a> Builder<'a> {
             FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry,
             WitnessAttachment,
         };
-        let att = WitnessAttachment::Expression(ref_idx);
+        let att = WitnessAttachment::Expr(span);
         let reg = ReducerRegistry::with_defaults();
         let ctx = self.bag_context();
         let q = ReducerQuery {

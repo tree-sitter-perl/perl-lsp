@@ -59,9 +59,6 @@ impl<'a> Builder<'a> {
                     );
                 }
                 let span = node_to_span(node);
-                let idx = self.refs.iter().position(|r| {
-                    matches!(r.kind, RefKind::MethodCall { .. }) && r.span == span
-                })?;
                 // Arity from the method-call node disambiguates fluent
                 // accessors (Mojo::Base `has 'title' => 'default'`
                 // synthesizes a 0-arg getter returning String AND a
@@ -79,15 +76,15 @@ impl<'a> Builder<'a> {
                 let invocant_ty = node
                     .child_by_field_name("invocant")
                     .and_then(|inv| self.invocant_type_at_node(inv));
-                let call_ty = self.bag_query_expression(
-                    crate::model::witnesses::RefIdx(idx as u32),
+                let call_ty = self.bag_query_call(
+                    span,
                     Some(arity),
                     invocant_ty.clone(),
                 );
                 if call_ty.is_some() {
                     return call_ty;
                 }
-                // The `Expression(refidx)` chase came up empty. Two
+                // The call's `Expr` chase came up empty. Two
                 // receiver-relative fallbacks let a chain hop resolve
                 // DURING the fold — before `emit_method_call_return_edges`
                 // / `emit_invocant_expr_witnesses` (both post-fold) publish
