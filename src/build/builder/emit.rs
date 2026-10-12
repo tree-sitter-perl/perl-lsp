@@ -202,6 +202,16 @@ impl<'a> Builder<'a> {
                 }
             }
             "quoted_regexp" => Some(WitnessPayload::InferredType(InferredType::Regexp)),
+            // `\@a` / `\%h` take a reference to the container they name;
+            // only `\&f` makes a code ref. A scalar or list operand has no
+            // reference type to state.
+            "refgen_expression" if node.named_child(0).map(|o| o.kind()) != Some("function") => {
+                match node.named_child(0).map(|o| o.kind()) {
+                    Some("array") => Some(WitnessPayload::InferredType(InferredType::ArrayRef)),
+                    Some("hash") => Some(WitnessPayload::InferredType(InferredType::HashRef)),
+                    _ => None,
+                }
+            }
             "anonymous_subroutine_expression" | "refgen_expression" => {
                 // Pre-create the (anon) Symbol so
                 // `coderef_return_edge_for`'s anon-sub arm resolves

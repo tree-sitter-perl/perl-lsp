@@ -458,6 +458,16 @@ fn test_extract_coderef_literal() {
 }
 
 #[test]
+fn test_reference_to_a_container_takes_its_kind() {
+    let fa = build_fa("my @a; my %h; sub f {}\nmy $ar = \\@a; my $hr = \\%h; my $cr = \\&f; my $sr = \\$ar;");
+    let at = Point::new(1, 50);
+    assert_eq!(fa.inferred_type_via_bag("$ar", at), Some(InferredType::ArrayRef));
+    assert!(fa.inferred_type_via_bag("$hr", at).is_some_and(|t| t.is_hash_shaped()));
+    assert!(matches!(fa.inferred_type_via_bag("$cr", at), Some(InferredType::CodeRef { .. })));
+    assert_eq!(fa.inferred_type_via_bag("$sr", at), None, "no scalar-ref type to state");
+}
+
+#[test]
 fn test_extract_regexp_literal() {
     let fa = build_fa("my $re = qr/pattern/;");
     let ty = fa.inferred_type_via_bag("$re", Point::new(0, 21));
