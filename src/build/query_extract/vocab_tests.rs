@@ -1,5 +1,6 @@
 use super::*;
-use crate::build::query_extract::{cmake_pack, cpp_pack, extract, perl_pack, python_pack, r_pack, LangPack};
+use crate::build::packs::{cmake_pack, cpp_pack, perl_pack, python_pack, r_pack};
+use crate::build::query_extract::{extract, LangPack};
 
 fn bundled() -> Vec<(&'static str, LangPack, tree_sitter::Language)> {
     vec![

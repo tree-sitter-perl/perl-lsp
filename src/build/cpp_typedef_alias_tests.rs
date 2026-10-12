@@ -4,7 +4,8 @@
 //! spelling. Covers primitive aliases, `using X = Y`, alias chains, and the
 //! self-referential tag typedef that must not loop.
 
-use super::{cpp_pack, extract};
+use super::extract;
+use crate::build::packs::cpp_pack;
 use crate::model::file_analysis::InferredType;
 use tree_sitter::Point;
 

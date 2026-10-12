@@ -4,6 +4,7 @@
 //! `cargo test query_skeleton -- --nocapture`.
 
 use super::*;
+use crate::build::packs::*;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
