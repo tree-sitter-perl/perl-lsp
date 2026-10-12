@@ -96,8 +96,8 @@ spelled! {
         /// The whole import statement (pattern anchor).
         Statement = "",
         Name = "name",
-        /// An import CALL's callee (R `library`); joins `Arg` by match.
-        Fn = "fn",
+        /// The module an import CALL names (R `library(pkg)`, CMake
+        /// `include(f)`), as written.
         Arg = "arg",
     }
 }
@@ -170,7 +170,7 @@ spelled! {
 }
 
 spelled! {
-    pub enum ShapeCap { Ctor = "ctor", Key = "key" }
+    pub enum ShapeCap { Key = "key" }
 }
 
 spelled! {

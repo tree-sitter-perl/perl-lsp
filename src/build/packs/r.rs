@@ -16,12 +16,6 @@ pub fn r_pack() -> LangPack {
         // resolves into the installed-library tree (a real install
         // would consult .libPaths() — not modeled here).
         module_paths: |m| vec![m.to_string()],
-        shape_ctor: |callee| matches!(callee, "list" | "data.frame" | "tibble"),
-        import_call: |callee, arg| match callee {
-            "library" | "require" | "source" => Some(arg.to_string()),
-            _ => None,
-        },
-        cmd_effects: |_| vec![],
         narrow_guard: |_, _| None,
         rebind_method: |_| false,
         implicit_this_members: false,

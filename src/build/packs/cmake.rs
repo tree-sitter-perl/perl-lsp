@@ -19,22 +19,6 @@ pub fn cmake_pack() -> LangPack {
                 vec![format!("{m}/CMakeLists.txt"), format!("{m}.cmake")]
             }
         },
-        shape_ctor: |_| false,
-        import_call: |_, _| None,
-        cmd_effects: |cmd| match cmd.to_ascii_lowercase().as_str() {
-            "set" | "option" => vec![CmdEffect::Def { kind: DefKind::Var, name_arg: 0 }],
-            "add_library" | "add_executable" | "add_custom_target" => {
-                // Targets. SymKind::Target is the real future; "sub"
-                // rides the full rename/refs machinery today.
-                vec![CmdEffect::Def { kind: DefKind::Sub, name_arg: 0 }]
-            }
-            "target_link_libraries" | "target_include_directories"
-            | "target_compile_definitions" | "target_sources" => vec![
-                CmdEffect::RefArgsFrom { from: 0 },
-            ],
-            "include" | "add_subdirectory" => vec![CmdEffect::Import { arg: 0 }],
-            _ => vec![],
-        },
         narrow_guard: |_, _| None,
         rebind_method: |_| false,
         implicit_this_members: false,

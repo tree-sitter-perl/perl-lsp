@@ -101,16 +101,18 @@ syntax leakiness × ecosystem annotation density, and estimating it
 before writing a pack is a matter of asking those two questions, not
 of guessing at engine capability.
 
-## Command-dispatched languages: one more vocabulary family
+## Command-dispatched languages: one pattern per command family
 
 A language whose defs aren't syntax-dispatched (CMake's `set`,
 `add_library`, and user functions are all the same `normal_command`
-node) needs one further capture family: `@cmd`/`@cmd.arg` deliver
-`(name, ordered args)` to a pack predicate that classifies the effect
-(`Def{kind, name_arg}`, `RefArgsFrom{from}` for a reference-bearing
-argument list, `Import{arg}`). Any future command-dispatched language
-(Tcl, shells, other build DSLs) reuses this family rather than growing
-a bespoke one.
+node) states what each command family does with one pattern per family:
+the command names are the pattern's own `#match?` (case-insensitive where
+the language is), and the effect is the ordinary capture on the argument
+at its position (`@def.var.name`, `@ref.call`, `@import.arg`). `@cmd` /
+`@cmd.arg` add only what every command has, a call of its name and its
+argument count. Any future command-dispatched language (Tcl, shells,
+other build DSLs) writes its families the same way, and the driver reads
+no command name.
 
 ## Consequences
 

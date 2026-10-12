@@ -21,9 +21,8 @@ pub(super) struct State {
     /// expr-literal spans, for narrowing an Edge target onto the actual
     /// literal when the rhs node wraps it.
     lit_spans: Vec<(usize, usize, Span)>,
-    /// keyed-shape collection: ctor + keys grouped per @expr.shape span
+    /// keyed-shape collection: keys grouped per @expr.shape span
     shape_spans: Vec<(usize, usize, Span)>,
-    shape_ctors: HashMap<(usize, usize), String>,
     shape_keys: Vec<(usize, usize, String)>,
     /// `@domain.value` — the operand a field slot is compared/assigned
     /// against. Joined to its `@domain.slot` by match_id (the slot event
@@ -142,13 +141,6 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
         Capture::Expr(ExprCap::Shape) => {
             f.shape_spans.push((e.start_byte, e.end_byte, e.span()));
         }
-        Capture::Shape(ShapeCap::Ctor) => {
-            // belongs to the smallest enclosing expr.shape; matches
-            // share the call node so byte keys line up
-            f.shape_ctors
-                .entry(byte_range_of(events, e.match_id, Capture::Expr(ExprCap::Shape)).unwrap_or((0, 0)))
-                .or_insert_with(|| e.text.clone());
-        }
         Capture::Shape(ShapeCap::Key) => {
             if let Some(range) = byte_range_of(events, e.match_id, Capture::Expr(ExprCap::Shape)) {
                 f.shape_keys.push((range.0, range.1, e.text.clone()));
@@ -191,16 +183,13 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
     }
 }
 
-/// Keyed shapes → `HashWithKeys` witnesses.
+/// Keyed shapes → `HashWithKeys` witnesses. The document captures
+/// `@expr.shape` only on a constructor call, so every span is one.
 pub(super) fn emit_keyed_shapes(st: &mut ExtractState) {
     let f = &mut st.flow;
     let mut seen_spans: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
     for &(sb, eb, span) in &f.shape_spans {
         if !seen_spans.insert((sb, eb)) {
-            continue;
-        }
-        let Some(ctor) = f.shape_ctors.get(&(sb, eb)) else { continue };
-        if !(st.pack.shape_ctor)(ctor) {
             continue;
         }
         let mut keys: Vec<(String, Option<Box<InferredType>>)> = f

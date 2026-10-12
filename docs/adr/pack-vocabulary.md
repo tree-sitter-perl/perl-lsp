@@ -72,9 +72,10 @@ the fields the pack lane carries per file.
 ## Consequences
 
 - A fn is code the reflection cannot see into. A callee name inside one
-  (`shape_ctor`, `import_call`, `rebind_method`, `narrow_guard`) escapes
-  both tripwires; moving it into the document is still rule #15's work,
-  done per language as each lane moves.
+  (`rebind_method`, `narrow_guard`) escapes both tripwires; moving it into
+  the document is still rule #15's work, done per language as each lane
+  moves. R's constructors and imports and CMake's command families already
+  live in their documents.
 - The pack's capability bools (`implicit_this_members`,
   `include_path_tokens`, `preprocessor_macros`, `brace_scoped_members`)
   hold no strings and are not counted. Each is a statement the document

@@ -31,16 +31,6 @@ pub struct LangPack {
     /// (`resolve_imports_with_pack` in query_extract_tests.rs) drive it today.
     #[allow(dead_code)]
     pub module_paths: fn(module: &str) -> Vec<String>,
-    /// Does a call to `callee` construct a KEYED value whose named
-    /// arguments are `$`-style accessible keys? (R: list / data.frame.)
-    pub shape_ctor: fn(callee: &str) -> bool,
-    /// Languages where imports are CALLS, not statements (R's
-    /// library()/source()): map (callee, argument) → imported module.
-    pub import_call: fn(callee: &str, arg: &str) -> Option<String>,
-    /// Command-dispatched languages (CMake): what a command DOES with
-    /// its positional arguments. The @cmd/@cmd.arg captures deliver
-    /// (name, ordered args); this predicate classifies.
-    pub cmd_effects: fn(cmd: &str) -> Vec<CmdEffect>,
     /// Guard narrowing: given the guard token (`@narrow.guard` — a
     /// function/operator like `isinstance`, `has_value`; `None` for the
     /// token-less `if (opt)` truthiness form) and the type text, the
@@ -174,9 +164,6 @@ impl LangPack {
             default_name: _,
             annot_type: _,
             module_paths: _,
-            shape_ctor: _,
-            import_call: _,
-            cmd_effects: _,
             narrow_guard: _,
             rebind_method: _,
             implicit_this_members: _,
@@ -240,23 +227,6 @@ pub struct PeelSpec {
     pub leaf_to_def: &'static [(&'static str, DefKind)],
     /// Accumulate the per-level `DerefStep` stack (pointer depth) vs descend only.
     pub record_stack: bool,
-}
-
-/// One effect of a command-dispatched statement.
-// Variants are constructed only by `cmake_pack` (command languages) and read by
-// the generic cmd-effect match; both absent in a build without that feature.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy)]
-pub enum CmdEffect {
-    /// Argument `name_arg` declares an entity of `kind`.
-    Def { kind: DefKind, name_arg: usize },
-    /// Arguments from `from` onward are name references (all-caps
-    /// keyword arguments like PRIVATE/STATIC are skipped — CMake's
-    /// keyword convention; a finer filter is a later predicate).
-    RefArgsFrom { from: usize },
-    /// Argument `arg` names an imported module (joins import_call's
-    /// role for command languages).
-    Import { arg: usize },
 }
 
 /// Translate a member's declared return type into the deferred
