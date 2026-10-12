@@ -600,18 +600,33 @@ pub fn caller_view(idx: &dyn CrossFileLookup, path: &std::path::Path) -> Option<
 fn verify(idx: &dyn CrossFileLookup, store: &AnswerStore, e: &Entry, epoch: u64, depth: usize) -> bool {
     const MAX_VERIFY_DEPTH: usize = 64;
     if depth > MAX_VERIFY_DEPTH || e.world != idx.world_generation() {
+        crate::util::ghost_stats::count(if depth > MAX_VERIFY_DEPTH { "engine.stale_by.depth" } else { "engine.stale_by.world" });
         return false;
     }
     let reads_hold = e.deps.iter().all(|d| match d {
-        Dep::File { path, version } => idx.file_version(path) == Some(*version),
-        Dep::Mentions { kind, key, hash } => mentions_hash(&mentions_of(idx, *kind, key)) == *hash,
+        Dep::File { path, version } => {
+            let holds = idx.file_version(path) == Some(*version);
+            if !holds {
+                crate::util::ghost_stats::count("engine.stale_by.file");
+            }
+            holds
+        }
+        Dep::Mentions { kind, key, hash } => {
+            let holds = mentions_hash(&mentions_of(idx, *kind, key)) == *hash;
+            if !holds {
+                crate::util::ghost_stats::count("engine.stale_by.mentions");
+            }
+            holds
+        }
     });
     reads_hold
         && e.children.iter().all(|(k, changed)| {
             let Some(child) = store.entries.lock().ok().and_then(|m| m.map.get(k).cloned()) else {
+                crate::util::ghost_stats::count("engine.stale_by.child_evicted");
                 return false;
             };
             if child.changed != *changed {
+                crate::util::ghost_stats::count("engine.stale_by.child_changed");
                 return false;
             }
             if child.epoch == epoch {
