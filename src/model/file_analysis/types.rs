@@ -977,6 +977,26 @@ impl InferredType {
         !matches!(self, InferredType::Unknown)
     }
 
+    /// The same value with every hash shape in it open: keys it doesn't
+    /// list may still be present.
+    pub fn opened(self) -> InferredType {
+        use InferredType::*;
+        match self {
+            HashWithKeys { mut keys, .. } => {
+                for (_, v) in keys.to_mut().iter_mut() {
+                    if let Some(b) = v.take() {
+                        *v = Some(Box::new(b.opened()));
+                    }
+                }
+                HashWithKeys { keys, open: true }
+            }
+            Optional(b) => Optional(Box::new(b.opened())),
+            Sequence(v) => Sequence(v.into_iter().map(InferredType::opened).collect()),
+            Branded { base, marks } => Branded { base: Box::new(base.opened()), marks },
+            other => other,
+        }
+    }
+
     /// A closed hash shape that has no `key`: its known keys, which a read
     /// of `key` must have misspelled. An empty shape qualifies — nothing
     /// was written, so any read is of a key it lacks.

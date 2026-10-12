@@ -169,7 +169,8 @@ pub enum WitnessAttachment {
     /// method as 0, so it is the `@_` position. Answered by joining the
     /// argument at `index` over every call site the index's mentions
     /// relation names for `name` whose callee resolves to `package` (or
-    /// may: an untyped receiver joins as a may-caller). A position with
+    /// may: an untyped receiver in a file naming the family joins as a
+    /// may-caller). A position with
     /// no caller in hand, or callers that disagree, answers nothing.
     /// Kept at the END for bincode variant-index stability (bump
     /// `EXTRACT_VERSION`).
@@ -202,6 +203,21 @@ pub enum WitnessAttachment {
     /// reads its own parameters off it. Kept at the END for bincode
     /// variant-index stability (bump `EXTRACT_VERSION`).
     CallbackIn { package: String, name: String, param: u32, index: u32 },
+}
+
+impl WitnessAttachment {
+    /// The value arrives from call sites: whatever the joined callers pass,
+    /// a caller the index doesn't hold (or a later edit) may pass more. A
+    /// hash shape answered here is never closed.
+    pub fn fed_by_callers(&self) -> bool {
+        matches!(
+            self,
+            WitnessAttachment::ParamIn { .. }
+                | WitnessAttachment::ParamPairs { .. }
+                | WitnessAttachment::InstanceShape { .. }
+                | WitnessAttachment::CallbackIn { .. }
+        )
+    }
 }
 
 /// Index into `FileAnalysis::refs`.

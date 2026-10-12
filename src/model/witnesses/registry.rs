@@ -987,7 +987,11 @@ impl ReducerRegistry {
         let poison_before = state.poisoned;
         let cuts_before = state.cuts;
         let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
-        let result = std::sync::Arc::new(apply_brand_overlays(bag, q, self.query_rec_body(bag, q, state)));
+        let value = match apply_brand_overlays(bag, q, self.query_rec_body(bag, q, state)) {
+            ReducedValue::Type(t) if q.attachment.fed_by_callers() => ReducedValue::Type(t.opened()),
+            v @ (ReducedValue::Type(_) | ReducedValue::FactMap(_) | ReducedValue::None) => v,
+        };
+        let result = std::sync::Arc::new(value);
         let recorded_exit =
             state.residual.len() > exits_before || (state.poisoned && !poison_before);
         let cut = state.cuts > cuts_before
