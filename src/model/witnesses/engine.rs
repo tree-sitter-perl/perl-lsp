@@ -161,6 +161,11 @@ pub struct AnswerStore {
     mentions: Mutex<Budgeted<HashMap<(MentionKind, String), (u64, Arc<Vec<PathBuf>>)>>>,
     /// `uncovered_files` at a `resolution_epoch`.
     uncovered: Mutex<Option<(u64, Arc<Vec<Arc<CachedModule>>>)>>,
+    /// Whether an indexed file holds a plain function call keyed by a
+    /// name, at the file's registration version. An edit moves the epoch
+    /// and drops every `Calls` set; the verdicts let the rebuild re-read
+    /// only the files that changed, not every file mentioning the name.
+    call_verdicts: Mutex<Budgeted<HashMap<(String, PathBuf), (u64, bool)>>>,
 }
 
 impl AnswerStore {
@@ -177,6 +182,7 @@ impl AnswerStore {
         self.entries.lock().map(|m| m.bytes).unwrap_or(0)
             + self.pending.lock().map(|m| m.bytes).unwrap_or(0)
             + self.mentions.lock().map(|m| m.bytes).unwrap_or(0)
+            + self.call_verdicts.lock().map(|m| m.bytes).unwrap_or(0)
     }
 
     /// Rows written since the last take, for the caller to persist.
@@ -366,6 +372,29 @@ fn note_child(key: &WitnessAttachment, changed: u64) {
     });
 }
 
+/// Is a join of the same sub's arguments, at an earlier position, already
+/// open on this thread? A sub that shifts and then forwards `@_` to itself
+/// (`my $this = shift; my $node = shift; $node->evaluate(@_)`) passes its
+/// own position `i + 1` as the callee's position `i`, so each hop of the
+/// recursion asks a NEW key: the chase never meets itself as a cycle and
+/// runs to the depth cap. Cutting the deeper position drops only the
+/// self-forwarding caller's contribution; every other caller still joins.
+pub fn deeper_position_of_open_join(key: &WitnessAttachment) -> bool {
+    use WitnessAttachment::{ParamIn, ParamPairs};
+    let position = |k: &WitnessAttachment| match k {
+        ParamIn { package, name, index, method } | ParamPairs { package, name, from: index, method } => {
+            Some((package.clone(), name.clone(), *method, *index))
+        }
+        _ => None,
+    };
+    let Some((package, name, method, index)) = position(key) else { return false };
+    FRAMES.with(|f| {
+        f.borrow().iter().any(|frame| {
+            position(&frame.key).is_some_and(|(p, n, m, i)| p == package && n == name && m == method && i < index)
+        })
+    })
+}
+
 fn any_frame_open() -> bool {
     FRAMES.with(|f| !f.borrow().is_empty())
 }
@@ -396,7 +425,7 @@ pub fn mentions_of(idx: &dyn CrossFileLookup, kind: MentionKind, key: &str) -> A
         let any = mentions_among(idx, key, &uncovered_files(idx));
         return Arc::new(match kind {
             MentionKind::Any => any,
-            MentionKind::Calls => calls_among(idx, key, &any),
+            MentionKind::Calls => calls_among(idx, None, key, &any),
         });
     };
     let epoch = idx.resolution_epoch();
@@ -418,7 +447,7 @@ pub fn mentions_of(idx: &dyn CrossFileLookup, kind: MentionKind, key: &str) -> A
     };
     let paths = Arc::new(match kind {
         MentionKind::Any => mentions_among(idx, key, &uncovered),
-        MentionKind::Calls => calls_among(idx, key, &mentions_of(idx, MentionKind::Any, key)),
+        MentionKind::Calls => calls_among(idx, Some(store), key, &mentions_of(idx, MentionKind::Any, key)),
     });
     if let Ok(mut m) = store.mentions.lock() {
         let bytes = std::mem::size_of::<((MentionKind, String), (u64, Arc<Vec<PathBuf>>))>()
@@ -476,24 +505,45 @@ fn mentions_among(idx: &dyn CrossFileLookup, key: &str, uncovered: &[Arc<CachedM
 
 /// The files among `mentions` holding a plain function call keyed `key`,
 /// each read through its refs view (open documents through their build).
-fn calls_among(idx: &dyn CrossFileLookup, key: &str, mentions: &[PathBuf]) -> Vec<PathBuf> {
+/// An indexed file's verdict is memoized at its registration version.
+fn calls_among(idx: &dyn CrossFileLookup, store: Option<&AnswerStore>, key: &str, mentions: &[PathBuf]) -> Vec<PathBuf> {
     use crate::model::file_analysis::RefKind;
+    let calls = |analysis: &FileAnalysis| {
+        analysis
+            .ref_indices_keyed(key)
+            .iter()
+            .any(|&ri| matches!(analysis.refs()[ri].kind, RefKind::FunctionCall { .. }))
+    };
     let open = idx.open_callers();
     mentions
         .iter()
         .filter(|path| {
-            let analysis = match open.iter().find(|o| &o.path == *path) {
-                Some(o) => Arc::clone(&o.analysis),
-                None => match idx.cached_by_path(path) {
-                    Some(cached) => idx.refs_present(&cached),
-                    // Unregistered: nothing to read, so nothing calls it.
-                    None => return false,
-                },
-            };
-            analysis
-                .ref_indices_keyed(key)
-                .iter()
-                .any(|&ri| matches!(analysis.refs()[ri].kind, RefKind::FunctionCall { .. }))
+            if let Some(o) = open.iter().find(|o| &o.path == *path) {
+                return calls(&o.analysis);
+            }
+            // Unregistered: nothing to read, so nothing calls it.
+            let Some(cached) = idx.cached_by_path(path) else { return false };
+            let version = idx.file_version(path);
+            let slot = (key.to_string(), (*path).clone());
+            if let (Some(v), Some(store)) = (version, store) {
+                let hit = store.call_verdicts.lock().ok().and_then(|m| m.map.get(&slot).copied());
+                if let Some((_, verdict)) = hit.filter(|(at, _)| *at == v) {
+                    crate::util::ghost_stats::count("engine.call_verdict_hit");
+                    return verdict;
+                }
+            }
+            let verdict = calls(&idx.refs_present(&cached));
+            if let (Some(v), Some(store)) = (version, store) {
+                if let Ok(mut m) = store.call_verdicts.lock() {
+                    let bytes = std::mem::size_of::<((String, PathBuf), (u64, bool))>() + key.len() + path_bytes(path);
+                    if m.bytes + bytes > MENTIONS_BYTE_CAP {
+                        *m = Budgeted::default();
+                    }
+                    m.map.insert(slot, (v, verdict));
+                    m.bytes += bytes;
+                }
+            }
+            verdict
         })
         .cloned()
         .collect()

@@ -1522,6 +1522,10 @@ impl ReducerRegistry {
             super::note_bake_exit("param_in", true);
             return None;
         };
+        if super::engine::deeper_position_of_open_join(q.attachment) {
+            crate::util::ghost_stats::count("param_in.forward_cut");
+            return Some(ReducedValue::None);
+        }
         let v = super::engine::answer(idx, q.attachment, || {
             self.param_in_join(idx, package, name, method, want)
         });
@@ -1838,38 +1842,20 @@ impl ReducerRegistry {
             super::note_bake_exit(site, false);
         }
         if let Some(idx) = ctx.module_index {
-            for cached in idx.visible_def_candidates(owner) {
-                crate::util::ghost_stats::count("moc.provider_fetched");
-                crate::util::ghost_stats::count(if site == "field" {
-                    "mocsite.field"
-                } else {
-                    "mocsite.param"
-                });
-                let full = idx.bag_present(&cached);
-                if std::ptr::eq(bag, &full.witnesses) {
-                    continue;
-                }
-                let cached_ctx = BagContext {
-                    scopes: &full.scopes,
-                    package_framework: &full.packages,
-                    module_index: Some(idx),
-                    package_parents: &full.packages,
-                    app_surface_consumers: &full.plugin.app_surface_consumers,
-                };
-                let sub_q = ReducerQuery {
-                    attachment: q.attachment,
-                    // Cross-file: point normalized (see the slot arm).
-                    point: None,
-                    framework: q.framework,
-                    arity_hint: None,
-                    receiver: q.receiver.clone(),
-                    args: q.args.clone(),
-                    context: Some(&cached_ctx),
-                };
-                let v = self.query_rec(&full.witnesses, &sub_q, state);
-                if *v != ReducedValue::None {
-                    return Some((*v).clone());
-                }
+            // A callback's parameter is asked once per sub literal handed to
+            // the member, from every file holding one, so its provider scan
+            // is an engine answer: the files it reads are its deps. Asked
+            // from the owner's own file the scan re-reads that file at the
+            // normalized point; a re-entry lands on the open frame.
+            let v = if site == "callback_in" {
+                super::engine::answer(idx, q.attachment, || {
+                    self.owner_provider_scan(idx, None, q, &mut QueryState::new(), owner, site)
+                })
+            } else {
+                self.owner_provider_scan(idx, Some(bag), q, state, owner, site)
+            };
+            if v != ReducedValue::None {
+                return Some(v);
             }
         }
         let parents = crate::model::file_analysis::parents_of(
@@ -1895,6 +1881,50 @@ impl ReducerRegistry {
             }
         }
         None
+    }
+
+    /// The cross-file primary hop of an owner-keyed attachment: every file
+    /// declaring `owner`, asked at the normalized point, first answer wins.
+    /// `skip` is the asking bag, which already answered for itself.
+    fn owner_provider_scan(
+        &self,
+        idx: &dyn crate::model::file_analysis::CrossFileLookup,
+        skip: Option<&WitnessBag>,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        owner: &str,
+        site: &'static str,
+    ) -> ReducedValue {
+        for cached in idx.visible_def_candidates(owner) {
+            crate::util::ghost_stats::count("moc.provider_fetched");
+            crate::util::ghost_stats::count(if site == "field" { "mocsite.field" } else { "mocsite.param" });
+            let full = idx.bag_present(&cached);
+            if skip.is_some_and(|b| std::ptr::eq(b, &full.witnesses)) {
+                continue;
+            }
+            let cached_ctx = BagContext {
+                scopes: &full.scopes,
+                package_framework: &full.packages,
+                module_index: Some(idx),
+                package_parents: &full.packages,
+                app_surface_consumers: &full.plugin.app_surface_consumers,
+            };
+            let sub_q = ReducerQuery {
+                attachment: q.attachment,
+                // Cross-file: point normalized (see the slot arm).
+                point: None,
+                framework: q.framework,
+                arity_hint: None,
+                receiver: q.receiver.clone(),
+                args: q.args.clone(),
+                context: Some(&cached_ctx),
+            };
+            let v = self.query_rec(&full.witnesses, &sub_q, state);
+            if *v != ReducedValue::None {
+                return (*v).clone();
+            }
+        }
+        ReducedValue::None
     }
 
     /// The cross-file primary hop of the `PackageSymbol` ladder: every file
