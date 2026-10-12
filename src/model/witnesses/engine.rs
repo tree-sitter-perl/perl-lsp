@@ -28,8 +28,11 @@
 //!
 //! Keys that depend on each other (parameters passed around in a circle)
 //! settle by fixpoint at the outermost key of the cycle (`answer`). Values
-//! computed on the way read an assumption: they are PROVISIONAL, reused only
-//! within the round that produced them, never re-verified or persisted.
+//! computed on the way read an assumption: they are PROVISIONAL, held by the
+//! thread computing the cycle and reused only within the round that produced
+//! them. They reach the shared store, whole, once the cycle settles — another
+//! thread could not use them, and a shared slot would let it overwrite one
+//! mid-cycle.
 //!
 //! Whole entries outlive the process. A persisted entry restates its
 //! dependencies in terms a later process can check: each file by its
@@ -61,12 +64,6 @@ struct Entry {
     epoch: u64,
     world: u64,
     deps: Arc<[Dep]>,
-    /// Computed under an open cycle head's assumption, or from something
-    /// that was: served only in the round that produced it, never
-    /// re-verified, never persisted.
-    provisional: bool,
-    /// `round()` when computed; read only for a provisional entry.
-    round: (u64, u64),
     /// `world_digest` of the world `world` names; `None` when the index
     /// does not persist.
     digest: Option<u64>,
@@ -158,13 +155,10 @@ impl AnswerStore {
 }
 
 /// `e` as a persisted row, encoded when it is computed so its stamps are the
-/// ones it read. `None` for an entry that cannot outlive the process: provisional,
+/// ones it read. `None` for an entry that cannot outlive the process:
 /// unpersisting index, a payload outside the persisted shape, or a file read
 /// with no source stamp.
 fn encode_persisted(idx: &dyn CrossFileLookup, key: &WitnessAttachment, e: &Entry) -> Option<(Vec<u8>, Vec<u8>)> {
-    if e.provisional {
-        return None;
-    }
     let world = e.digest?;
     let value = match &*e.value {
         ReducedValue::Type(t) => Some(t.clone()),
@@ -218,8 +212,6 @@ fn adopt_persisted(idx: &dyn CrossFileLookup, key: &WitnessAttachment, epoch: u6
         epoch,
         world: idx.world_generation(),
         deps: deps.into(),
-        provisional: false,
-        round: round(),
         digest: Some(digest),
     })
 }
@@ -232,14 +224,19 @@ struct Frame {
     /// key was still being computed (a cycle back to an ancestor frame):
     /// the value holds only for that ancestor's assumption.
     reads_open: Option<usize>,
-    /// Read a provisional entry from outside the current fixpoint: a value
-    /// that holds only for assumptions this computation never saw.
+    /// Read a provisional value that read no open frame's assumption: it
+    /// holds only for assumptions this computation never saw.
     tainted: bool,
     /// This key was re-entered while open in the current round.
     is_head: bool,
     /// An assumption inside this computation's cycle moved this round, so
     /// the cycle has not settled.
     changed: bool,
+    /// `MEMBERS` length when this frame opened: the members past it were
+    /// computed under this frame.
+    members_mark: usize,
+    /// `UNSETTLED` when this frame opened, restored when it closes.
+    unsettled_before: bool,
 }
 
 /// Rounds a cycle may take before its fixpoint is declared not to exist
@@ -256,34 +253,31 @@ thread_local! {
     /// computation returns, so a key inside a cycle keeps its assumption
     /// across the outer rounds that recompute it.
     static ASSUMED: RefCell<HashMap<WitnessAttachment, ReducedValue>> = RefCell::new(HashMap::new());
-    /// Provisional entries stored in the current round that read nothing
-    /// path-dependent: when the outermost computation returns with the
-    /// round unmoved, every assumption they read held, and they are whole.
-    static MEMBERS: RefCell<Vec<WitnessAttachment>> = const { RefCell::new(Vec::new()) };
-    /// This thread's identity and current fixpoint round (`round`).
-    static ROUND: std::cell::Cell<(u64, u64)> = std::cell::Cell::new((
-        THREAD_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        0,
-    ));
+    /// Provisional values computed under the open frames, outermost first;
+    /// the only place they live, and what a lookup serves them from:
+    /// when a frame closes outside every open cycle with the cycles under it
+    /// settled, the assumptions its members read were the settled values, so
+    /// they are whole. Each carries the depth of the open frame whose
+    /// assumption it read (nothing, when it read a value from outside the
+    /// fixpoint).
+    static MEMBERS: RefCell<Vec<Member>> = const { RefCell::new(Vec::new()) };
+    /// A cycle under the innermost settling frame gave up unsettled: its
+    /// round's values read assumptions that never held.
+    static UNSETTLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-static THREAD_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// The fixpoint round in force on this thread: it moves whenever a cycle
-/// head's assumption changes. A provisional value was computed under some
-/// head's assumption; it is reusable only in the round that produced it, on
-/// the thread that produced it — after the move the assumption is newer,
-/// and another thread's head may never settle.
-fn round() -> (u64, u64) {
-    ROUND.with(|r| r.get())
+struct Member {
+    key: WitnessAttachment,
+    entry: Entry,
+    /// Depth of the open frame whose assumption it read; `None` when it read
+    /// a value from outside the fixpoint.
+    reads_open: Option<usize>,
 }
 
-fn next_round() {
-    ROUND.with(|r| {
-        let (t, n) = r.get();
-        r.set((t, n + 1));
-    });
-    MEMBERS.with(|m| m.borrow_mut().clear());
+/// Retire the current round of the frame that opened at `mark`: the
+/// members computed under it read an assumption that just moved.
+fn next_round(mark: usize) {
+    MEMBERS.with(|m| m.borrow_mut().truncate(mark));
 }
 
 fn taint_open_frames() {
@@ -405,6 +399,35 @@ fn mentions_among(idx: &dyn CrossFileLookup, key: &str, uncovered: &[Arc<CachedM
     paths
 }
 
+/// Every file that mentions `class` or one of its descendants, each name's
+/// mentions recorded as a dependency.
+pub fn class_family_mentions(idx: &dyn CrossFileLookup, class: &str) -> std::collections::HashSet<PathBuf> {
+    const MAX_FAMILY: usize = 256;
+    let mut family = vec![class.to_string()];
+    let mut i = 0;
+    while i < family.len() && family.len() < MAX_FAMILY {
+        for (child, _) in idx.direct_children_of(&family[i]) {
+            if !family.contains(&child) {
+                family.push(child);
+            }
+        }
+        i += 1;
+    }
+    let mut keys: Vec<String> = family
+        .iter()
+        .map(|c| crate::model::conventions::name_match_key(c, &crate::model::conventions::PERL_SPELLINGS))
+        .collect();
+    keys.sort();
+    keys.dedup();
+    let mut out = std::collections::HashSet::new();
+    for key in keys {
+        let paths = mentions_of(idx, &key);
+        note_dep(Dep::Mentions { key, hash: mentions_hash(&paths) });
+        out.extend(paths.iter().cloned());
+    }
+    out
+}
+
 /// The analysis a caller join reads for `path`: the open document's build
 /// when one is open, else the indexed copy, whole.
 pub fn caller_view(idx: &dyn CrossFileLookup, path: &std::path::Path) -> Option<Arc<FileAnalysis>> {
@@ -456,6 +479,22 @@ pub fn answer(
         crate::util::ghost_stats::count("engine.cycle");
         return ASSUMED.with(|a| a.borrow().get(key).cloned()).unwrap_or(ReducedValue::None);
     }
+    let member = MEMBERS.with(|m| {
+        m.borrow().iter().rev().find(|mb| &mb.key == key).map(|mb| (mb.reads_open, Arc::clone(&mb.entry.value), Arc::clone(&mb.entry.deps)))
+    });
+    if let Some((read, value, deps)) = member {
+        // A member of the fixpoint in progress reads the assumptions its own
+        // computation did.
+        crate::util::ghost_stats::count("engine.member_hit");
+        for d in deps.iter() {
+            note_dep(d.clone());
+        }
+        match read {
+            Some(d) => mark_reads_open(d),
+            None => taint_open_frames(),
+        }
+        return (*value).clone();
+    }
     let store = idx.answer_store();
     let epoch = idx.resolution_epoch();
     if let Some(store) = store {
@@ -468,29 +507,14 @@ pub fn answer(
             }
         }
         if let Some(e) = found {
-            let fresh = if e.provisional {
-                e.epoch == epoch && e.round == round()
-            } else {
-                e.epoch == epoch || {
-                    crate::util::ghost_stats::count("engine.verify");
-                    verify(idx, &e)
-                }
+            let fresh = e.epoch == epoch || {
+                crate::util::ghost_stats::count("engine.verify");
+                verify(idx, &e)
             };
             if fresh {
                 crate::util::ghost_stats::count("engine.hit");
                 for d in e.deps.iter() {
                     note_dep(d.clone());
-                }
-                if e.provisional {
-                    // A member of the fixpoint in progress reads the same
-                    // assumptions this computation does; anything else is
-                    // a path-dependent value from outside it.
-                    let member = MEMBERS.with(|m| m.borrow().contains(key));
-                    if member {
-                        mark_reads_open(0);
-                    } else {
-                        taint_open_frames();
-                    }
                 }
                 if e.epoch != epoch {
                     if let Ok(mut m) = store.entries.lock() {
@@ -507,6 +531,8 @@ pub fn answer(
     crate::util::ghost_stats::count("engine.compute");
     let world = idx.world_generation();
     let digest = idx.world_digest();
+    let members_mark = MEMBERS.with(|m| m.borrow().len());
+    let unsettled_before = UNSETTLED.with(|u| u.replace(false));
     let depth = FRAMES.with(|f| {
         let mut frames = f.borrow_mut();
         frames.push(Frame {
@@ -516,6 +542,8 @@ pub fn answer(
             tainted: false,
             is_head: false,
             changed: false,
+            members_mark,
+            unsettled_before,
         });
         frames.len() - 1
     });
@@ -538,11 +566,12 @@ pub fn answer(
         if inner || !moved {
             break (v, moved);
         }
-        next_round();
+        next_round(members_mark);
         rounds += 1;
         crate::util::ghost_stats::count("engine.fixpoint_round");
         if rounds >= MAX_FIXPOINT_ROUNDS {
             crate::util::ghost_stats::count("engine.fixpoint_unsettled");
+            UNSETTLED.with(|u| u.set(true));
             break (ReducedValue::None, false);
         }
     };
@@ -575,22 +604,43 @@ pub fn answer(
             epoch,
             world,
             deps: deps.into(),
-            provisional,
-            round: round(),
             digest,
         };
-        store_entry(idx, store, key, entry);
-        if provisional && !path_dependent {
-            MEMBERS.with(|m| m.borrow_mut().push(key.clone()));
+        if provisional {
+            MEMBERS.with(|m| m.borrow_mut().push(Member { key: key.clone(), entry, reads_open }));
+        } else {
+            store_entry(idx, store, key, entry);
         }
     }
-    if depth == 0 {
-        // Every cycle under this computation has settled: the members of the
-        // last round read only assumptions that held.
-        let members = MEMBERS.with(|m| std::mem::take(&mut *m.borrow_mut()));
-        if let Some(store) = store {
-            promote(idx, store, &members);
+    let unsettled = UNSETTLED.with(|u| u.get());
+    if reads_open.is_none() {
+        // No open frame's assumption reaches this value, so every cycle under
+        // it is closed: its members read only assumptions that held, unless a
+        // cycle gave up or the chase read a value from outside the fixpoint.
+        let members = MEMBERS.with(|m| m.borrow_mut().split_off(members_mark));
+        if unsettled {
+            // Nothing the round computed is served again.
+            crate::util::ghost_stats::count("engine.retired_unsettled");
+        } else if path_dependent {
+            crate::util::ghost_stats::count("engine.settled_tainted");
+        } else if let Some(store) = store {
+            for m in &members {
+                crate::util::ghost_stats::count("engine.promoted");
+                store_entry(idx, store, &m.key, m.entry.clone());
+            }
         }
+        ASSUMED.with(|a| {
+            let mut a = a.borrow_mut();
+            a.remove(key);
+            for m in &members {
+                a.remove(&m.key);
+            }
+        });
+        UNSETTLED.with(|u| u.set(unsettled_before));
+    } else {
+        UNSETTLED.with(|u| u.set(unsettled_before || unsettled));
+    }
+    if depth == 0 {
         ASSUMED.with(|a| a.borrow_mut().clear());
     }
     value
@@ -620,7 +670,9 @@ fn insert_entry(store: &AnswerStore, key: &WitnessAttachment, entry: Entry) {
             crate::util::ghost_stats::count("engine.reset");
             *m = Budgeted::default();
         }
-        m.map.insert(key.clone(), entry);
+        if let Some(old) = m.map.insert(key.clone(), entry) {
+            m.bytes = m.bytes.saturating_sub(entry_bytes(key, &old));
+        }
         m.bytes += bytes;
     }
 }
@@ -633,23 +685,6 @@ fn push_pending(store: &AnswerStore, row: (Vec<u8>, Vec<u8>)) {
             p.bytes += bytes;
         } else {
             crate::util::ghost_stats::count("engine.pending_full");
-        }
-    }
-}
-
-/// Make the settled members of a fixpoint whole, and persist them.
-fn promote(idx: &dyn CrossFileLookup, store: &AnswerStore, members: &[WitnessAttachment]) {
-    let now = round();
-    for key in members {
-        let promoted = store.entries.lock().ok().and_then(|mut m| {
-            let e = m.map.get_mut(key).filter(|e| e.provisional && e.round == now)?;
-            e.provisional = false;
-            Some(e.clone())
-        });
-        let Some(e) = promoted else { continue };
-        crate::util::ghost_stats::count("engine.promoted");
-        if let Some(row) = encode_persisted(idx, key, &e) {
-            push_pending(store, row);
         }
     }
 }
