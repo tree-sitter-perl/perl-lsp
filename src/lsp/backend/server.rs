@@ -231,6 +231,20 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
+        // Persist long-distance answers as the session computes them, not
+        // only at a shutdown an editor may never send.
+        {
+            let index = Arc::clone(&self.module_index);
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+                tick.tick().await;
+                loop {
+                    tick.tick().await;
+                    let index = Arc::clone(&index);
+                    let _ = tokio::task::spawn_blocking(move || index.flush_answers()).await;
+                }
+            });
+        }
         // Pre-warm each pack language's skeleton-query compilation OFF the
         // message loop, FIRST — before any `.await` that depends on the client
         // answering (register_capability), so the warm-up starts even if the
@@ -303,6 +317,8 @@ impl LanguageServer for Backend {
     }
 
     async fn shutdown(&self) -> Result<()> {
+        let index = Arc::clone(&self.module_index);
+        let _ = tokio::task::spawn_blocking(move || index.flush_answers()).await;
         // Report-only cache instrumentation flush; inert unless
         // PERL_LSP_GHOST_STATS is set.
         crate::util::ghost_stats::emit_all("shutdown");

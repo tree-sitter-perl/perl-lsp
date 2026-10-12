@@ -342,19 +342,14 @@ impl ModuleIndex {
     pub fn answer_flusher(&self) -> impl FnOnce() + Send + 'static {
         let core = Arc::clone(&self.core);
         let root = self.workspace_root();
-        move || {
-            let rows = core.answers.take_pending();
-            if rows.is_empty() {
-                return;
-            }
-            let Some(conn) = crate::index::module_cache::open_cache_db(root.as_deref(), "perl") else {
-                return;
-            };
-            match crate::index::module_cache::save_answers(&conn, &rows) {
-                Ok(()) => crate::util::ghost_stats::count_by("engine.persisted_rows", rows.len() as u64),
-                Err(e) => log::warn!("persisting answers failed: {e}"),
-            }
-        }
+        move || flush_answers_into(&core, root.as_deref())
+    }
+
+    /// Persist the answers computed since the last flush. Blocking (SQLite);
+    /// the server calls it off the message loop, periodically and at
+    /// shutdown, so a session's answers outlive a crash or a kill.
+    pub fn flush_answers(&self) {
+        flush_answers_into(&self.core, self.workspace_root().as_deref());
     }
 
     fn whole_ungated(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
@@ -1023,5 +1018,19 @@ mod member_prefilter_tests {
     fn gated_emissions_fail_open_over_a_provably_absent_row() {
         assert!(member_prefilter_may_declare(true, Some(Some(false))));
         assert!(member_prefilter_may_declare(true, None));
+    }
+}
+
+fn flush_answers_into(core: &super::index_core::IndexCore, root: Option<&str>) {
+    let rows = core.answers.take_pending();
+    if rows.is_empty() {
+        return;
+    }
+    let Some(conn) = crate::index::module_cache::open_cache_db(root, "perl") else {
+        return;
+    };
+    match crate::index::module_cache::save_answers(&conn, &rows) {
+        Ok(()) => crate::util::ghost_stats::count_by("engine.persisted_rows", rows.len() as u64),
+        Err(e) => log::warn!("persisting answers failed: {e}"),
     }
 }
