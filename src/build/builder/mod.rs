@@ -75,6 +75,7 @@ mod visit_method;
 mod visit_bless;
 mod extract;
 mod fold;
+mod consts;
 mod docs;
 
 /// Single CST walk that powers the post-walk `ChainTypingReducer`.
@@ -322,7 +323,7 @@ struct Builder<'a> {
     /// otherwise-identical work identity are genuinely separate work:
     /// `use constant ALPHA => 1; use constant BETA => 2;` share
     /// `(pkg, "constant", [], [])` — the constant name isn't yet folded
-    /// into `constant_strings` when `imports` is extracted, so it's empty
+    /// into the constant table when `imports` is extracted, so it's empty
     /// for every such line. Without the span the second statement would
     /// short-circuit and its symbol never register.
     ///
@@ -348,16 +349,12 @@ struct Builder<'a> {
     framework_modes: std::collections::HashMap<String, FrameworkMode>,
     /// Functions implicitly imported by OOP frameworks (has, extends, with, etc.)
     framework_imports: std::collections::HashSet<String>,
-    /// Known compile-time string values, accumulated during the walk.
-    /// Keyed by variable/constant name (e.g. "@COMMON", "BASE_CLASS", "$PREFIX").
-    constant_strings: std::collections::HashMap<String, Vec<String>>,
-    /// Rename provenance for the const-fold path: for a scalar bound directly
-    /// from a single string literal (`my $m = 'process'`), the literal's
-    /// content span. A call folded through that scalar (`$self->$m()`) stamps
-    /// it as `Ref.folded_from` so rename rewrites the source literal, not the
-    /// `$m` variable read (rule #9). Only the direct single-literal binding is
-    /// recorded — chained / multi-value folds carry no single source span.
-    constant_string_source: std::collections::HashMap<String, Span>,
+    /// Known compile-time string values, accumulated during the walk and
+    /// keyed by what each name resolves to (`consts.rs`).
+    consts: consts::ConstTable,
+    /// Variable/field declarations by `(scope, sigiled name)`, in walk
+    /// order — the walk-time half of variable visibility, for `const_key`.
+    var_decls: std::collections::HashMap<(ScopeId, String), Vec<SymbolId>>,
     /// Names declared via `use constant` (NAME and block forms), per the
     /// enclosing package. A standalone bareword whose text is in this set is
     /// a usage of the constant sub, so it earns a `FunctionCall` ref back to

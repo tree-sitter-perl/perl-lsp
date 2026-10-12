@@ -344,7 +344,7 @@ impl<'a> Builder<'a> {
         // Accumulate constant values: use constant NAME => 'val' / qw(a b).
         // Gated on `Some(node)`: the accumulator scans the CST for the
         // value side of the fat-comma pair, so a synthetic
-        // `SyntheticUse "constant"` can't populate `constant_strings`
+        // `SyntheticUse "constant"` can't populate the constant table
         // (there's no source to scan). This is the one observable
         // axis where synthetic doesn't match a literal — kit plugins
         // that need to inject constants should request a dedicated
@@ -466,7 +466,7 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Accumulate `use constant NAME => value` into constant_strings and
+    /// Accumulate `use constant NAME => value` into the constant table and
     /// register each declared constant as a local Sub symbol.
     ///
     /// Two source shapes, both handled:
@@ -500,9 +500,10 @@ impl<'a> Builder<'a> {
     }
 
     /// Scalar `use constant`: first named entry is the name, the rest is
-    /// the value side (extracted into `constant_strings`).
+    /// the value side (extracted into the constant table).
     pub(super) fn accumulate_constant_pair(&mut self, list: Node<'a>) {
         let mut name: Option<(String, Node)> = None;
+        let mut pair_values = Vec::new();
         for c in crate::cst::list_elements(list) {
             match &name {
                 None => {
@@ -512,15 +513,16 @@ impl<'a> Builder<'a> {
                         }
                     }
                 }
-                Some((n, _)) => {
+                Some(_) => {
                     let values = self.extract_string_names(c);
                     if !values.is_empty() {
-                        self.constant_strings.entry(n.clone()).or_default().extend(values);
+                        pair_values.extend(values);
                     }
                 }
             }
         }
         if let Some((n, name_node)) = name {
+            self.write_constant(&n, list.end_position(), Some(pair_values));
             self.register_constant_symbol(&n, name_node);
         }
     }
@@ -540,9 +542,7 @@ impl<'a> Builder<'a> {
         }
         for (name, name_node, values) in decls {
             self.register_constant_symbol(&name, name_node);
-            if !values.is_empty() {
-                self.constant_strings.entry(name).or_default().extend(values);
-            }
+            self.write_constant(&name, hash.end_position(), Some(values));
         }
     }
 
@@ -717,7 +717,7 @@ impl<'a> Builder<'a> {
     pub(super) fn extract_string_list(&self, node: Node<'a>) -> Vec<(String, Span)> {
         crate::cst::string_list(node, self.source, &mut |n| {
             let Ok(text) = n.utf8_text(self.source) else { return vec![] };
-            let Some(values) = self.resolve_constant_strings(text, 0) else { return vec![] };
+            let Some(values) = self.resolve_constant_strings(text, n.start_position()) else { return vec![] };
             let span = node_to_span(n);
             values.into_iter().map(|v| (v, span)).collect()
         })
@@ -739,7 +739,7 @@ impl<'a> Builder<'a> {
             }
             // plain bareword / @array: a genuine value — fold via constants.
             let Ok(text) = n.utf8_text(self.source) else { return vec![] };
-            let Some(values) = self.resolve_constant_strings(text, 0) else { return vec![] };
+            let Some(values) = self.resolve_constant_strings(text, n.start_position()) else { return vec![] };
             let span = node_to_span(n);
             values.into_iter().map(|v| (v, span)).collect()
         })
@@ -881,22 +881,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Resolve a name to its known constant string values.
-    /// Recurses through constant references up to max_depth.
-    pub(super) fn resolve_constant_strings(&self, name: &str, depth: u8) -> Option<Vec<String>> {
-        if depth > 3 { return None; }
-        let values = self.constant_strings.get(name)?;
-        let mut resolved = Vec::new();
-        for val in values {
-            if let Some(expanded) = self.resolve_constant_strings(val, depth + 1) {
-                resolved.extend(expanded);
-            } else {
-                resolved.push(val.clone());
-            }
-        }
-        Some(resolved)
-    }
-
     /// Try to resolve an interpolated string to concrete value(s).
     /// Returns empty vec if any interpolated variable is unknown.
     /// Returns multiple values if a variable resolves to multiple strings (loop var).
@@ -937,7 +921,7 @@ impl<'a> Builder<'a> {
                     Some(bare) if !bare.is_empty() => format!("${bare}"),
                     _ => return vec![],
                 };
-                match self.resolve_constant_strings(&key, 0) {
+                match self.resolve_constant_strings(&key, var_node.start_position()) {
                     Some(values) if !values.is_empty() => segments.push(values),
                     _ => return vec![],
                 }
@@ -1129,6 +1113,7 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn visit_assignment(&mut self, node: Node<'a>) {
+        let mut const_writes: Vec<(String, ConstFold)> = Vec::new();
         // Check for @ISA assignment: `our @ISA = (...)`
         if let Some(left) = node.child_by_field_name("left") {
             // The assigned variable, whatever declares it (`my`/`our`/
@@ -1225,44 +1210,23 @@ impl<'a> Builder<'a> {
                 self.synthesize_glob_assigned_sub(left, node);
             }
 
-            // Accumulate array/scalar assignments as constants
-            {
-                if lhs_text.starts_with('@')
-                    && crate::cst::assign_op(node) != Some(crate::cst::AssignOp::Plain)
-                {
-                    self.constant_strings.remove(lhs_text);
-                } else if lhs_text.starts_with('@') {
-                    let mut values = Vec::new();
-                    for i in 0..node.named_child_count() {
-                        if let Some(child) = node.named_child(i) {
-                            values.extend(self.extract_string_names(child));
-                        }
-                    }
-                    if !values.is_empty() {
-                        self.constant_strings.insert(lhs_text.to_string(), values);
-                    }
-                } else if lhs_text.starts_with('$')
-                    && crate::cst::assign_op(node) != Some(crate::cst::AssignOp::Plain)
-                {
+            // Fold the write into the constant table. A plain write's fold is
+            // computed now (the RHS reads the pre-write state) and bound after
+            // the declaration is visited, so `my $m = …` keys the new `$m`,
+            // not an outer one.
+            if crate::cst::assign_op(node) != Some(crate::cst::AssignOp::Plain) {
+                if lhs_text.starts_with('$') {
                     self.fold_compound_constant_string(lhs_text, node);
-                } else if lhs_text.starts_with('$') {
-                    let var = lhs_text;
-                    if let Some(right) = node.child_by_field_name("right") {
-                        if right.kind() == "interpolated_string_literal" {
-                            // Try interpolated string folding first (has variable refs)
-                            let folded = self.try_fold_interpolated_string(right);
-                            if !folded.is_empty() {
-                                self.constant_strings.insert(var.to_string(), folded);
-                            }
-                        } else if right.kind() == "string_literal" {
-                            // Plain string literal
-                            if let Some(text) = self.extract_string_content(right) {
-                                self.constant_strings.insert(var.to_string(), vec![text]);
-                                self.constant_string_source
-                                    .insert(var.to_string(), self.string_content_span(right));
-                            }
-                        }
-                    }
+                } else if lhs_text.starts_with('@') {
+                    self.write_constant(lhs_text, node.end_position(), None);
+                }
+            } else if !lhs_text.is_empty() {
+                const_writes.push((lhs_var.clone(), self.plain_write_fold(lhs_text, node)));
+            } else {
+                // A list target (`($m, @l) = …`) has no element-wise fold, so
+                // every variable it assigns loses its fold.
+                for (var, _) in self.lhs_list_targets(left).unwrap_or_default() {
+                    const_writes.push((var, ConstFold::Values(None)));
                 }
             }
         }
@@ -1272,6 +1236,13 @@ impl<'a> Builder<'a> {
             if left.kind() == "variable_declaration" {
                 // Visit the declaration
                 self.visit_variable_decl(left);
+            }
+            for (var, fold) in std::mem::take(&mut const_writes) {
+                let at = node.end_position();
+                match fold {
+                    ConstFold::Literal(text, span) => self.write_constant_literal(&var, at, text, span),
+                    ConstFold::Values(values) => self.write_constant(&var, at, values),
+                }
             }
             if let Some(right) = self.assignment_rhs(node) {
                 // Visit RHS children FIRST so any side-effecting walk
@@ -1304,7 +1275,6 @@ impl<'a> Builder<'a> {
     /// fold can't name, so the fold is dropped. The result is no longer one
     /// source literal, so the rename source goes with it.
     fn fold_compound_constant_string(&mut self, var: &str, node: Node<'a>) {
-        self.constant_string_source.remove(var);
         let appended = (crate::cst::assign_op(node) == Some(crate::cst::AssignOp::Append))
             .then(|| {
                 let right = node.child_by_field_name("right")?;
@@ -1316,7 +1286,7 @@ impl<'a> Builder<'a> {
                 if tails.is_empty() {
                     return None;
                 }
-                let heads = self.resolve_constant_strings(var, 0)?;
+                let heads = self.resolve_constant_strings(var, node.start_position())?;
                 Some(
                     heads
                         .iter()
@@ -1325,13 +1295,30 @@ impl<'a> Builder<'a> {
                 )
             })
             .flatten();
-        match appended {
-            Some(values) => {
-                self.constant_strings.insert(var.to_string(), values);
+        self.write_constant(var, node.end_position(), appended);
+    }
+
+    /// The fold a plain `VAR = RHS` binds: a scalar takes one string literal
+    /// (keeping its span for rename) or a fully foldable interpolation, an
+    /// array the RHS's string list. Anything else is `Values(None)`, a write
+    /// the fold can't name.
+    fn plain_write_fold(&self, var: &str, node: Node<'a>) -> ConstFold {
+        let rhs = self.assignment_rhs(node);
+        if var.starts_with('@') {
+            return ConstFold::Values(rhs.map(|r| self.extract_string_names(r)));
+        }
+        if !var.starts_with('$') {
+            return ConstFold::Values(None);
+        }
+        match rhs {
+            Some(right) if right.kind() == "interpolated_string_literal" => {
+                ConstFold::Values(Some(self.try_fold_interpolated_string(right)))
             }
-            None => {
-                self.constant_strings.remove(var);
-            }
+            Some(right) if right.kind() == "string_literal" => match self.extract_string_content(right) {
+                Some(text) => ConstFold::Literal(text, self.string_content_span(right)),
+                None => ConstFold::Values(None),
+            },
+            _ => ConstFold::Values(None),
         }
     }
 
@@ -1737,4 +1724,11 @@ fn qualifier_admits_local_sub(qualifier: Option<&str>, sym_package: Option<&str>
         Some(pkg) => pkg == qualifier,
         None => qualifier == "main",
     }
+}
+
+/// A plain write's effect on the constant table, computed before the
+/// declaration it may introduce is visited.
+enum ConstFold {
+    Literal(String, Span),
+    Values(Option<Vec<String>>),
 }

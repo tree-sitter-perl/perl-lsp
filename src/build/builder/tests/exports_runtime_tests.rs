@@ -1141,7 +1141,7 @@ fn multiple_name_form_use_constants_each_register() {
     // Several separate NAME-form `use constant` statements in one package:
     // each declares its own package-global sub. The use-dedup key carries the
     // statement span, so identical work identity at different spans (the
-    // constant name isn't folded into `constant_strings` when `imports` is
+    // constant name isn't folded into the constant table when `imports` is
     // extracted, so it's empty for all of them) no longer collapses past the
     // first.
     let src = r#"package Foo;

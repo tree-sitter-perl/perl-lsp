@@ -194,7 +194,7 @@ impl<'a> Builder<'a> {
                 // `String`.
                 let canonical = crate::cst::canonical_var_name(node, self.source);
                 let fold_key = canonical.as_deref().unwrap_or(text);
-                if let Some([class]) = self.resolve_constant_strings(fold_key, 0).as_deref() {
+                if let Some([class]) = self.resolve_constant_strings(fold_key, node.start_position()).as_deref() {
                     return Some(InferredType::ClassName(class.clone()));
                 }
                 // The bag is canonical at every phase, walk-time
