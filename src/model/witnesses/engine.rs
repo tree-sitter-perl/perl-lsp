@@ -7,9 +7,10 @@
 //! - `File { path, version }` — an analysis read through the index (any of
 //!   the residency views). `version` is the index's registration generation
 //!   for the path, so any re-registration of the file moves it.
-//! - `Mentions { key, hash }` — the set of files the index says mention a
-//!   name. A body edit that adds or removes a call site changes it without
-//!   touching any surface.
+//! - `Mentions { kind, key, hash }` — the set of files the index says
+//!   mention a name (`MentionKind::Any`), or call it as a plain function
+//!   (`MentionKind::Calls`). A body edit that adds or removes a call site
+//!   changes it without touching any surface.
 //! - the world generation, carried on the entry: every surface-changing
 //!   write and every structure change (a file added, removed, a provider
 //!   swapped) moves it. Name lookups (exporters, parents, declarers, bridges)
@@ -22,9 +23,13 @@
 //! at the current epoch without recomputing. An edit to a file the answer
 //! never read costs one verification, not a recomputation.
 //!
-//! Dependencies are flattened: a computation's frame collects every read
-//! made beneath it, including the reads of nested engine answers (a hit
-//! replays its entry's dependencies into the open frames).
+//! Dependencies are a graph, as in salsa: a computation's frame records the
+//! reads it makes itself, plus an edge to each engine answer it consults,
+//! stamped with that answer's `changed` serial. Verifying an entry verifies
+//! its children first; a child recomputed to the same value keeps its serial,
+//! so its parents stand (early cutoff). Replaying a child's reads into every
+//! open frame instead made each hit cost its whole read set times the stack
+//! depth.
 //!
 //! Keys that depend on each other (parameters passed around in a circle)
 //! settle by fixpoint at the outermost key of the cycle (`answer`). Values
@@ -54,7 +59,18 @@ use crate::model::file_analysis::{CachedModule, CrossFileLookup, FileAnalysis};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Dep {
     File { path: PathBuf, version: u64 },
-    Mentions { key: String, hash: u64 },
+    Mentions { kind: MentionKind, key: String, hash: u64 },
+}
+
+/// Which files a mentions set holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum MentionKind {
+    /// Any ref keyed by the name.
+    Any,
+    /// A plain function call keyed by the name. A sub's caller join reads
+    /// only these: `Run` is mentioned by every file that calls a `Run`
+    /// method, and each such file would be read whole to find no caller.
+    Calls,
 }
 
 #[derive(Debug, Clone)]
@@ -64,9 +80,19 @@ struct Entry {
     epoch: u64,
     world: u64,
     deps: Arc<[Dep]>,
+    /// The engine answers it consulted, each with the `changed` serial it read.
+    children: Arc<[(WitnessAttachment, u64)]>,
+    /// Moves only when a recomputation produced a different value.
+    changed: u64,
     /// `world_digest` of the world `world` names; `None` when the index
     /// does not persist.
     digest: Option<u64>,
+}
+
+static CHANGED_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_changed() -> u64 {
+    CHANGED_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// An entry as it is persisted: every dependency in a form another process
@@ -77,6 +103,7 @@ struct PersistedAnswer {
     world: u64,
     files: Vec<(PathBuf, u64)>,
     mentions: Vec<(String, u64)>,
+    calls: Vec<(String, u64)>,
 }
 
 /// Byte caps. Past its cap a map drops everything and starts over: a full
@@ -117,6 +144,10 @@ fn entry_bytes(key: &WitnessAttachment, e: &Entry) -> usize {
                     }
             })
             .sum::<usize>()
+        + e.children
+            .iter()
+            .map(|(k, _)| std::mem::size_of::<(WitnessAttachment, u64)>() + bincode::serialized_size(k).unwrap_or(0) as usize)
+            .sum::<usize>()
 }
 
 /// The index-owned answer store. Lives as long as the index; validity is
@@ -127,7 +158,7 @@ pub struct AnswerStore {
     /// Encoded rows not yet persisted.
     pending: Mutex<Budgeted<Vec<(Vec<u8>, Vec<u8>)>>>,
     /// `mentions_of` per key, valid while `resolution_epoch` stands.
-    mentions: Mutex<Budgeted<HashMap<String, (u64, Arc<Vec<PathBuf>>)>>>,
+    mentions: Mutex<Budgeted<HashMap<(MentionKind, String), (u64, Arc<Vec<PathBuf>>)>>>,
     /// `uncovered_files` at a `resolution_epoch`.
     uncovered: Mutex<Option<(u64, Arc<Vec<Arc<CachedModule>>>)>>,
 }
@@ -158,22 +189,42 @@ impl AnswerStore {
 /// ones it read. `None` for an entry that cannot outlive the process:
 /// unpersisting index, a payload outside the persisted shape, or a file read
 /// with no source stamp.
-fn encode_persisted(idx: &dyn CrossFileLookup, key: &WitnessAttachment, e: &Entry) -> Option<(Vec<u8>, Vec<u8>)> {
+fn encode_persisted(
+    idx: &dyn CrossFileLookup,
+    store: &AnswerStore,
+    key: &WitnessAttachment,
+    e: &Entry,
+) -> Option<(Vec<u8>, Vec<u8>)> {
     let world = e.digest?;
     let value = match &*e.value {
         ReducedValue::Type(t) => Some(t.clone()),
         ReducedValue::None => None,
         ReducedValue::FactMap(_) => return None,
     };
+    // A later process has no graph to walk, so a row restates every read
+    // beneath it; a child the store no longer holds leaves it unpersisted.
+    let mut flat: std::collections::BTreeSet<Dep> = e.deps.iter().cloned().collect();
+    let mut seen: std::collections::HashSet<WitnessAttachment> = std::collections::HashSet::new();
+    let mut stack: Vec<WitnessAttachment> = e.children.iter().map(|(k, _)| k.clone()).collect();
+    while let Some(k) = stack.pop() {
+        if !seen.insert(k.clone()) {
+            continue;
+        }
+        let child = store.entries.lock().ok()?.map.get(&k).cloned()?;
+        flat.extend(child.deps.iter().cloned());
+        stack.extend(child.children.iter().map(|(k, _)| k.clone()));
+    }
     let mut files = Vec::new();
     let mut mentions = Vec::new();
-    for d in e.deps.iter() {
+    let mut calls = Vec::new();
+    for d in flat.iter() {
         match d {
             Dep::File { path, .. } => files.push((path.clone(), idx.source_stamp(path)?)),
-            Dep::Mentions { key, hash } => mentions.push((key.clone(), *hash)),
+            Dep::Mentions { kind: MentionKind::Any, key, hash } => mentions.push((key.clone(), *hash)),
+            Dep::Mentions { kind: MentionKind::Calls, key, hash } => calls.push((key.clone(), *hash)),
         }
     }
-    let p = PersistedAnswer { value, world, files, mentions };
+    let p = PersistedAnswer { value, world, files, mentions, calls };
     Some((bincode::serialize(key).ok()?, bincode::serialize(&p).ok()?))
 }
 
@@ -196,12 +247,13 @@ fn adopt_persisted(idx: &dyn CrossFileLookup, key: &WitnessAttachment, epoch: u6
         let version = idx.file_version(&path)?;
         deps.push(Dep::File { path, version });
     }
-    for (key, hash) in p.mentions {
-        if mentions_hash(&mentions_of(idx, &key)) != hash {
+    let sets = p.mentions.into_iter().map(|m| (MentionKind::Any, m)).chain(p.calls.into_iter().map(|m| (MentionKind::Calls, m)));
+    for (kind, (key, hash)) in sets {
+        if mentions_hash(&mentions_of(idx, kind, &key)) != hash {
             crate::util::ghost_stats::count("engine.persisted_mentions_moved");
             return None;
         }
-        deps.push(Dep::Mentions { key, hash });
+        deps.push(Dep::Mentions { kind, key, hash });
     }
     let value = match p.value {
         Some(t) => ReducedValue::Type(t),
@@ -212,6 +264,8 @@ fn adopt_persisted(idx: &dyn CrossFileLookup, key: &WitnessAttachment, epoch: u6
         epoch,
         world: idx.world_generation(),
         deps: deps.into(),
+        children: Arc::from([]),
+        changed: next_changed(),
         digest: Some(digest),
     })
 }
@@ -219,7 +273,11 @@ fn adopt_persisted(idx: &dyn CrossFileLookup, key: &WitnessAttachment, epoch: u6
 /// One open computation.
 struct Frame {
     key: WitnessAttachment,
-    deps: Vec<Dep>,
+    /// A set: a chase reads the same file at every hop that reaches it, and
+    /// a list of every read grows with the chase, not with what it read.
+    deps: std::collections::HashSet<Dep>,
+    /// The engine answers consulted directly beneath this frame.
+    children: HashMap<WitnessAttachment, u64>,
     /// Depth of the outermost open key this computation read while that
     /// key was still being computed (a cycle back to an ancestor frame):
     /// the value holds only for that ancestor's assumption.
@@ -288,13 +346,22 @@ fn taint_open_frames() {
     });
 }
 
-/// Record a read into every open frame. Called by the index's read seams; a
-/// no-op when no engine computation is running.
+/// Record a read into the innermost open frame; the frames around it reach
+/// it through their child edge. Called by the index's read seams; a no-op
+/// when no engine computation is running.
 pub fn note_dep(dep: Dep) {
     FRAMES.with(|f| {
-        let mut frames = f.borrow_mut();
-        for frame in frames.iter_mut() {
-            frame.deps.push(dep.clone());
+        if let Some(frame) = f.borrow_mut().last_mut() {
+            frame.deps.insert(dep);
+        }
+    });
+}
+
+/// Record that the innermost open frame consulted engine answer `key`.
+fn note_child(key: &WitnessAttachment, changed: u64) {
+    FRAMES.with(|f| {
+        if let Some(frame) = f.borrow_mut().last_mut() {
+            frame.children.insert(key.clone(), changed);
         }
     });
 }
@@ -321,15 +388,20 @@ pub fn mentions_hash(paths: &[PathBuf]) -> u64 {
     h.finish()
 }
 
-/// The files the index says mention `key` (`mentions_among`), memoized per
-/// `resolution_epoch`: one verification checks every mentions set its
-/// answer's chase read.
-pub fn mentions_of(idx: &dyn CrossFileLookup, key: &str) -> Arc<Vec<PathBuf>> {
+/// The files the index says mention `key` the way `kind` asks
+/// (`mentions_among`, `calls_among`), memoized per `resolution_epoch`: one
+/// verification checks every mentions set its answer's chase read.
+pub fn mentions_of(idx: &dyn CrossFileLookup, kind: MentionKind, key: &str) -> Arc<Vec<PathBuf>> {
     let Some(store) = idx.answer_store() else {
-        return Arc::new(mentions_among(idx, key, &uncovered_files(idx)));
+        let any = mentions_among(idx, key, &uncovered_files(idx));
+        return Arc::new(match kind {
+            MentionKind::Any => any,
+            MentionKind::Calls => calls_among(idx, key, &any),
+        });
     };
     let epoch = idx.resolution_epoch();
-    if let Some((at, paths)) = store.mentions.lock().ok().and_then(|m| m.map.get(key).cloned()) {
+    let slot = (kind, key.to_string());
+    if let Some((at, paths)) = store.mentions.lock().ok().and_then(|m| m.map.get(&slot).cloned()) {
         if at == epoch {
             return paths;
         }
@@ -344,9 +416,12 @@ pub fn mentions_of(idx: &dyn CrossFileLookup, key: &str) -> Arc<Vec<PathBuf>> {
             files
         }
     };
-    let paths = Arc::new(mentions_among(idx, key, &uncovered));
+    let paths = Arc::new(match kind {
+        MentionKind::Any => mentions_among(idx, key, &uncovered),
+        MentionKind::Calls => calls_among(idx, key, &mentions_of(idx, MentionKind::Any, key)),
+    });
     if let Ok(mut m) = store.mentions.lock() {
-        let bytes = std::mem::size_of::<(String, (u64, Arc<Vec<PathBuf>>))>()
+        let bytes = std::mem::size_of::<((MentionKind, String), (u64, Arc<Vec<PathBuf>>))>()
             + key.len()
             + paths.iter().map(|p| path_bytes(p)).sum::<usize>();
         if m.bytes + bytes > MENTIONS_BYTE_CAP {
@@ -355,7 +430,7 @@ pub fn mentions_of(idx: &dyn CrossFileLookup, key: &str) -> Arc<Vec<PathBuf>> {
         }
         // A replaced entry's bytes stay counted until the next reset: an
         // overcount, never an undercount.
-        m.map.insert(key.to_string(), (epoch, Arc::clone(&paths)));
+        m.map.insert(slot, (epoch, Arc::clone(&paths)));
         m.bytes += bytes;
     }
     paths
@@ -399,9 +474,35 @@ fn mentions_among(idx: &dyn CrossFileLookup, key: &str, uncovered: &[Arc<CachedM
     paths
 }
 
+/// The files among `mentions` holding a plain function call keyed `key`,
+/// each read through its refs view (open documents through their build).
+fn calls_among(idx: &dyn CrossFileLookup, key: &str, mentions: &[PathBuf]) -> Vec<PathBuf> {
+    use crate::model::file_analysis::RefKind;
+    let open = idx.open_callers();
+    mentions
+        .iter()
+        .filter(|path| {
+            let analysis = match open.iter().find(|o| &o.path == *path) {
+                Some(o) => Arc::clone(&o.analysis),
+                None => match idx.cached_by_path(path) {
+                    Some(cached) => idx.refs_present(&cached),
+                    // Unregistered: nothing to read, so nothing calls it.
+                    None => return false,
+                },
+            };
+            analysis
+                .ref_indices_keyed(key)
+                .iter()
+                .any(|&ri| matches!(analysis.refs()[ri].kind, RefKind::FunctionCall { .. }))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Every file that mentions `class` or one of its descendants, each name's
-/// mentions recorded as a dependency.
-pub fn class_family_mentions(idx: &dyn CrossFileLookup, class: &str) -> std::collections::HashSet<PathBuf> {
+/// mentions recorded as a dependency; `None` when the family is too large
+/// to enumerate.
+pub fn class_family_mentions(idx: &dyn CrossFileLookup, class: &str) -> Option<std::collections::HashSet<PathBuf>> {
     const MAX_FAMILY: usize = 256;
     let mut family = vec![class.to_string()];
     let mut i = 0;
@@ -413,6 +514,10 @@ pub fn class_family_mentions(idx: &dyn CrossFileLookup, class: &str) -> std::col
         }
         i += 1;
     }
+    if i < family.len() {
+        crate::util::ghost_stats::count("engine.family_cap");
+        return None;
+    }
     let mut keys: Vec<String> = family
         .iter()
         .map(|c| crate::model::conventions::name_match_key(c, &crate::model::conventions::PERL_SPELLINGS))
@@ -421,11 +526,11 @@ pub fn class_family_mentions(idx: &dyn CrossFileLookup, class: &str) -> std::col
     keys.dedup();
     let mut out = std::collections::HashSet::new();
     for key in keys {
-        let paths = mentions_of(idx, &key);
-        note_dep(Dep::Mentions { key, hash: mentions_hash(&paths) });
+        let paths = mentions_of(idx, MentionKind::Any, &key);
+        note_dep(Dep::Mentions { kind: MentionKind::Any, key, hash: mentions_hash(&paths) });
         out.extend(paths.iter().cloned());
     }
-    out
+    Some(out)
 }
 
 /// The analysis a caller join reads for `path`: the open document's build
@@ -439,14 +544,43 @@ pub fn caller_view(idx: &dyn CrossFileLookup, path: &std::path::Path) -> Option<
     Some(idx.whole_present(&cached))
 }
 
-fn verify(idx: &dyn CrossFileLookup, e: &Entry) -> bool {
-    if e.world != idx.world_generation() {
+/// Is `e` still the answer: its own reads unchanged, and every child it
+/// consulted still holding the value it read (verified first, and restamped
+/// at `epoch` when it holds).
+fn verify(idx: &dyn CrossFileLookup, store: &AnswerStore, e: &Entry, epoch: u64, depth: usize) -> bool {
+    const MAX_VERIFY_DEPTH: usize = 64;
+    if depth > MAX_VERIFY_DEPTH || e.world != idx.world_generation() {
         return false;
     }
-    e.deps.iter().all(|d| match d {
+    let reads_hold = e.deps.iter().all(|d| match d {
         Dep::File { path, version } => idx.file_version(path) == Some(*version),
-        Dep::Mentions { key, hash } => mentions_hash(&mentions_of(idx, key)) == *hash,
-    })
+        Dep::Mentions { kind, key, hash } => mentions_hash(&mentions_of(idx, *kind, key)) == *hash,
+    });
+    reads_hold
+        && e.children.iter().all(|(k, changed)| {
+            let Some(child) = store.entries.lock().ok().and_then(|m| m.map.get(k).cloned()) else {
+                return false;
+            };
+            if child.changed != *changed {
+                return false;
+            }
+            if child.epoch == epoch {
+                return true;
+            }
+            let holds = verify(idx, store, &child, epoch, depth + 1);
+            if holds {
+                restamp(store, k, epoch);
+            }
+            holds
+        })
+}
+
+fn restamp(store: &AnswerStore, key: &WitnessAttachment, epoch: u64) {
+    if let Ok(mut m) = store.entries.lock() {
+        if let Some(slot) = m.map.get_mut(key) {
+            slot.epoch = epoch;
+        }
+    }
 }
 
 /// Answer `key` from the store, or compute it with `compute` and store it.
@@ -480,15 +614,13 @@ pub fn answer(
         return ASSUMED.with(|a| a.borrow().get(key).cloned()).unwrap_or(ReducedValue::None);
     }
     let member = MEMBERS.with(|m| {
-        m.borrow().iter().rev().find(|mb| &mb.key == key).map(|mb| (mb.reads_open, Arc::clone(&mb.entry.value), Arc::clone(&mb.entry.deps)))
+        m.borrow().iter().rev().find(|mb| &mb.key == key).map(|mb| (mb.reads_open, Arc::clone(&mb.entry.value), mb.entry.changed))
     });
-    if let Some((read, value, deps)) = member {
+    if let Some((read, value, changed)) = member {
         // A member of the fixpoint in progress reads the assumptions its own
         // computation did.
         crate::util::ghost_stats::count("engine.member_hit");
-        for d in deps.iter() {
-            note_dep(d.clone());
-        }
+        note_child(key, changed);
         match read {
             Some(d) => mark_reads_open(d),
             None => taint_open_frames(),
@@ -509,19 +641,13 @@ pub fn answer(
         if let Some(e) = found {
             let fresh = e.epoch == epoch || {
                 crate::util::ghost_stats::count("engine.verify");
-                verify(idx, &e)
+                verify(idx, store, &e, epoch, 0)
             };
             if fresh {
                 crate::util::ghost_stats::count("engine.hit");
-                for d in e.deps.iter() {
-                    note_dep(d.clone());
-                }
+                note_child(key, e.changed);
                 if e.epoch != epoch {
-                    if let Ok(mut m) = store.entries.lock() {
-                        if let Some(slot) = m.map.get_mut(key) {
-                            slot.epoch = epoch;
-                        }
-                    }
+                    restamp(store, key, epoch);
                 }
                 return (*e.value).clone();
             }
@@ -537,7 +663,8 @@ pub fn answer(
         let mut frames = f.borrow_mut();
         frames.push(Frame {
             key: key.clone(),
-            deps: Vec::new(),
+            deps: std::collections::HashSet::new(),
+            children: HashMap::new(),
             reads_open: None,
             tainted: false,
             is_head: false,
@@ -575,7 +702,7 @@ pub fn answer(
             break (ReducedValue::None, false);
         }
     };
-    let Some(Frame { mut deps, reads_open, tainted, .. }) = FRAMES.with(|f| f.borrow_mut().pop()) else {
+    let Some(Frame { deps, children, reads_open, tainted, .. }) = FRAMES.with(|f| f.borrow_mut().pop()) else {
         return value;
     };
     if let Some(d) = reads_open {
@@ -597,15 +724,26 @@ pub fn answer(
         crate::util::ghost_stats::count("engine.provisional");
     }
     if let Some(store) = store {
+        let mut deps: Vec<Dep> = deps.into_iter().collect();
         deps.sort();
-        deps.dedup();
+        // Early cutoff: a recomputation that lands on the value already held
+        // keeps its serial, so the answers that read it stay valid.
+        let changed = store
+            .entries
+            .lock()
+            .ok()
+            .and_then(|m| m.map.get(key).filter(|old| *old.value == value).map(|old| old.changed))
+            .unwrap_or_else(next_changed);
         let entry = Entry {
             value: Arc::new(value.clone()),
             epoch,
             world,
             deps: deps.into(),
+            children: children.into_iter().collect::<Vec<_>>().into(),
+            changed,
             digest,
         };
+        note_child(key, changed);
         if provisional {
             MEMBERS.with(|m| m.borrow_mut().push(Member { key: key.clone(), entry, reads_open }));
         } else {
@@ -657,7 +795,7 @@ fn mark_reads_open(depth: usize) {
 }
 
 fn store_entry(idx: &dyn CrossFileLookup, store: &AnswerStore, key: &WitnessAttachment, entry: Entry) {
-    if let Some(row) = encode_persisted(idx, key, &entry) {
+    if let Some(row) = encode_persisted(idx, store, key, &entry) {
         push_pending(store, row);
     }
     insert_entry(store, key, entry);

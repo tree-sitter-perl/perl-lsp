@@ -1565,23 +1565,27 @@ impl ReducerRegistry {
     ) -> ReducedValue {
         use crate::model::file_analysis::RefKind;
         let key = crate::model::conventions::name_match_key(name, &crate::model::conventions::PERL_SPELLINGS);
-        let mut paths = (*super::engine::mentions_of(idx, &key)).clone();
+        // A sub's callers call it as a function; a method's spell any ref.
+        let kind = if method { super::engine::MentionKind::Any } else { super::engine::MentionKind::Calls };
+        let mut paths = (*super::engine::mentions_of(idx, kind, &key)).clone();
         super::engine::note_dep(super::engine::Dep::Mentions {
+            kind,
             key: key.clone(),
             hash: super::engine::mentions_hash(&paths),
         });
-        // A named-argument join never disagrees, so it never stops early: for
-        // a method it reads only the files that name the package or a
-        // subclass (the receiver they spell, the package they declare), or a
-        // name every file mentions (`new`) sweeps the index. A caller whose
-        // receiver is untyped and unnamed is left out of it. A positional
-        // join sweeps every mention: the first unrelated disagreement ends it.
-        // TODO(caller-narrowing): narrowing positional joins too drops real
-        // callers whose receiver is untyped in a file that never names the
-        // family (Catalyst's `$c` reaches `_parse_attrs` that way).
-        if method && matches!(want, ArgWant::PairsFrom(_)) {
-            let family = super::engine::class_family_mentions(idx, package);
-            paths.retain(|p| family.contains(p));
+        // A method's caller names the callee's family somewhere in its file:
+        // the receiver it spells or the package it declares. Reading only
+        // those files keeps a name every file mentions (`new`, `Get`) from
+        // sweeping the index once per class. A sub's callers are already
+        // keyed by the package their call resolves to; a qualified call
+        // (`Pkg::f()`) names no family member, so subs are not narrowed.
+        // TODO(caller-narrowing): a method caller whose receiver is untyped
+        // in a file that never names the family is left out of the join.
+        // A family too large to enumerate reads every mention instead.
+        if method {
+            if let Some(family) = super::engine::class_family_mentions(idx, package) {
+                paths.retain(|p| family.contains(p));
+            }
         }
         crate::util::ghost_stats::count("param_in.join");
         // No cap on the sweep: a name every file mentions (`new`) usually
