@@ -1447,20 +1447,7 @@ impl ReducerRegistry {
                     RefKind::FunctionCall { .. } => false,
                     _ => continue,
                 };
-                // A method call's `Invoke` sits on its ref; a function call's
-                // on the expression its ref's edge names.
-                let at_ref = WitnessAttachment::Expression(super::RefIdx(ri as u32));
-                let att = if method {
-                    at_ref
-                } else {
-                    let Some(target) = full.witnesses.for_attachment(&at_ref).iter().find_map(|w| match &w.payload {
-                        WitnessPayload::Edge(t) => Some(t.clone()),
-                        _ => None,
-                    }) else {
-                        continue;
-                    };
-                    target
-                };
+                let att = WitnessAttachment::Expression(super::RefIdx(ri as u32));
                 let Some((receiver, args)) = full.witnesses.for_attachment(&att).iter().find_map(|w| {
                     match &w.payload {
                         WitnessPayload::Invoke { callee: Callee::Method { name: n, .. }, receiver, args }
@@ -1510,9 +1497,23 @@ impl ReducerRegistry {
                     ReducedValue::Type(t) => match &joined {
                         None => joined = Some(t),
                         Some(j) if *j == t => {}
-                        Some(_) => {
-                            crate::util::ghost_stats::count("param_in.disagree");
-                            return ReducedValue::None;
+                        Some(j) => {
+                            let common = match (j.class_name(), t.class_name()) {
+                                (Some(a), Some(b)) => crate::model::file_analysis::least_common_class(
+                                    &a,
+                                    &b,
+                                    &full.packages,
+                                    Some(idx),
+                                ),
+                                _ => None,
+                            };
+                            match common {
+                                Some(c) => joined = Some(InferredType::ClassName(c)),
+                                None => {
+                                    crate::util::ghost_stats::count("param_in.disagree");
+                                    return ReducedValue::None;
+                                }
+                            }
                         }
                     },
                     ReducedValue::FactMap(_) | ReducedValue::None => {}

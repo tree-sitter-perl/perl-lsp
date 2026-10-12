@@ -164,6 +164,29 @@ pub fn class_isa(
     )
 }
 
+/// The nearest class both `a` and `b` are (`b` itself first, then `b`'s
+/// ancestors breadth-first): what a value that is sometimes an `a` and
+/// sometimes a `b` can be relied on to be. `None` when they share nothing.
+pub fn least_common_class(
+    a: &str,
+    b: &str,
+    local: &dyn LocalParents,
+    module_index: Option<&dyn CrossFileLookup>,
+) -> Option<String> {
+    let mut queue = std::collections::VecDeque::from([b.to_string()]);
+    let mut seen = std::collections::HashSet::new();
+    while let Some(c) = queue.pop_front() {
+        if !seen.insert(c.clone()) || seen.len() > 64 {
+            continue;
+        }
+        if class_isa(a, &c, local, module_index) {
+            return Some(c);
+        }
+        queue.extend(isa_parents(&c, local, module_index));
+    }
+    None
+}
+
 /// Does `class`, or any of its transitive ancestors (cross-file), satisfy
 /// a plugin `ClassIsa(prefix)` trigger? The trigger's PREFIX semantics —
 /// exact match OR a `prefix::`-namespaced descendant — mirror

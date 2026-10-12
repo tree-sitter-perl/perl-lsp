@@ -2513,3 +2513,31 @@ fn persisted_param_answer_adopts_only_while_its_reads_hold() {
         "a caller whose source moved refuses the row and recomputes"
     );
 }
+
+/// Callers passing a class and its subclass agree on the class.
+#[test]
+fn param_type_joins_a_class_and_its_subclass() {
+    let greeter = parse_source_to_cached(GREETER_METHOD, "Greeter");
+    let admin = parse_source_to_cached("package Admin;\nuse parent -norequire, 'User';\n1;\n", "Admin");
+    let user = parse_source_to_cached("package User;\nsub name { 1 }\n1;\n", "User");
+    let app = parse_source_to_cached(
+        "package App;\nsub run { Greeter->greet(bless({}, 'User')); Greeter->greet(bless({}, 'Admin')) }\n1;\n",
+        "App",
+    );
+    let idx = index_of(&[&greeter, &admin, &user, &app]);
+    let t = greet_param_type(&greeter, &idx).expect("the common class");
+    assert_eq!(t.class_name().as_deref(), Some("User"));
+}
+
+/// A same-file call whose value nobody reads as a value — an operand of
+/// `.` — is still a call site.
+#[test]
+fn param_type_joins_a_same_file_call_inside_an_operator() {
+    let greeter = parse_source_to_cached(
+        "package Greeter;\nsub greet { my ($u) = @_;            return $u }\nsub hello { return 'x' . greet(bless({}, 'User')) }\n1;\n",
+        "Greeter",
+    );
+    let idx = index_of(&[&greeter]);
+    let t = greet_param_type(&greeter, &idx).expect("the local caller types the parameter");
+    assert_eq!(t.class_name().as_deref(), Some("User"));
+}

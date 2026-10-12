@@ -285,17 +285,33 @@ impl<'a> Builder<'a> {
                         .clone()
                         .map(|package| RefBinding::Function { package }),
                 );
-                // The ref names the tail token; the call's value (its
-                // `Invoke`) sits on the whole expression. Readers holding the
-                // ref reach the value through this edge.
+                // The call site as a fact on its ref, as a method call's is:
+                // which sub it names and what it passes. Minted here, not
+                // through the call's value, because a call whose value no
+                // one reads (a statement, an operand of `.`) has no value
+                // witness, and a local callee's value is its symbol's edge.
+                let ri = self.refs.len() - 1;
+                let ops = {
+                    let args = self.extract_call_args(node);
+                    self.call_operands(&args)
+                };
+                let (package, leaf) = match crate::model::file_analysis::split_qualified(
+                    name,
+                    &crate::model::conventions::PERL_SPELLINGS,
+                ) {
+                    (Some(p), n) => (Some(p.to_string()), n.to_string()),
+                    (None, n) => (resolved_package.clone(), n.to_string()),
+                };
                 self.bag.push(crate::model::witnesses::Witness {
                     attachment: crate::model::witnesses::WitnessAttachment::Expression(
-                        crate::model::witnesses::RefIdx((self.refs.len() - 1) as u32),
+                        crate::model::witnesses::RefIdx(ri as u32),
                     ),
-                    source: crate::model::witnesses::WitnessSource::Builder("function_call_value".into()),
-                    payload: crate::model::witnesses::WitnessPayload::Edge(
-                        crate::model::witnesses::WitnessAttachment::Expr(node_to_span(node)),
-                    ),
+                    source: crate::model::witnesses::WitnessSource::Builder("function_call".into()),
+                    payload: crate::model::witnesses::WitnessPayload::Invoke {
+                        callee: crate::model::witnesses::Callee::Sub { package, name: leaf },
+                        receiver: None,
+                        args: Some(ops),
+                    },
                     span: ref_span,
                 });
                 // Even-position stringy args → HashKeyAccess refs
@@ -1370,9 +1386,17 @@ impl<'a> Builder<'a> {
             }
         }
         for (span, node) in pending {
+            // An invocant whose value is already an edge answers through it,
+            // at query time, with the index in hand. A type materialized
+            // here would be the build-time answer — blind to everything
+            // another file says — and would shadow the edge's.
+            let att = WitnessAttachment::Expr(span);
+            if self.bag.for_attachment(&att).iter().any(|w| matches!(w.payload, WitnessPayload::Edge(_))) {
+                continue;
+            }
             let Some(ty) = self.invocant_type_at_node(node) else { continue };
             self.bag.push(Witness {
-                attachment: WitnessAttachment::Expr(span),
+                attachment: att,
                 source: WitnessSource::Builder("invocant_expr".into()),
                 payload: WitnessPayload::InferredType(ty),
                 span,
