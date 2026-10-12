@@ -84,31 +84,6 @@ pub(crate) struct IndexCore {
     /// missed bump is silent staleness, so mutators bump even when a gen
     /// mint usually accompanies them.
     pub(crate) shape_bumps: std::sync::atomic::AtomicU64,
-    /// The flush clock, and the per-file marks compared against it.
-    ///
-    /// The re-stamp gate's whole mechanism: a flush bumps `flush_epoch` once,
-    /// then records that epoch for every consumer it enqueued
-    /// (`provider_diff_gen`). A file whose own `stamped_at` is at or past its
-    /// mark has had no provider move since it last stamped, so its re-stamp is
-    /// re-deriving what it already froze.
-    ///
-    /// Sessional on purpose: `FileAnalysis::stamped_at` is `#[serde(skip)]`,
-    /// so both halves die with the process and a fresh one fails open. A
-    /// persisted mark table paired with sessional stamps would be sound; a
-    /// persisted STAMP paired with sessional marks would silently skip a
-    /// re-stamp that was owed, so neither half may outlive the other.
-    ///
-    /// **A dedicated clock, and not the conclusion store's generation** — the
-    /// obvious-looking consolidation, ruled out on purpose. A comparison clock
-    /// must share its lifetime with the operands it orders, and these operands
-    /// are sessional. A persistent clock over sessional operands fails the
-    /// mirror of the half-persistence case above: a restart resets stamps and
-    /// marks while the store generation carries on, so any path that ever
-    /// seeded `stamped_at` from a persisted value would compare a new-session
-    /// stamp against an old-session clock. This counter cannot express that
-    /// bug. If the marks are ever persisted, all three move together.
-    pub(crate) flush_epoch: std::sync::atomic::AtomicU64,
-    pub(crate) provider_diff_gen: DashMap<std::path::PathBuf, u64>,
     /// The witness seams' fallback-on-miss enriched retries only pay off
     /// when the process lives long enough to amortize the overlay (each
     /// miss is a whole-analysis deep copy + enrich). Off by default; the
@@ -131,7 +106,26 @@ pub(crate) struct IndexCore {
     /// cache; absent on an index with no store, which simply keeps decoding.
     pub(crate) conclusion_cache:
         Arc<std::sync::RwLock<Option<Arc<crate::index::conclusion_cache::ConclusionCache>>>>,
+    /// Gate-applied views of files carrying deferred plugin emissions: the
+    /// whole analysis with exactly the emissions whose `ClassIsa` gate holds
+    /// NOW applied. Keyed by path; an entry is reused only while the file's
+    /// registration generation AND the fired set both still match, so an
+    /// ancestry change anywhere re-derives at the next read and nothing has
+    /// to remember to invalidate it. Count-capped (`GATED_VIEW_CAP`).
+    pub(crate) gated_views: DashMap<std::path::PathBuf, GatedView>,
 }
+
+/// One gate-applied view (see `IndexCore::gated_views`).
+pub(crate) struct GatedView {
+    pub(crate) generation: u64,
+    pub(crate) fired: Vec<bool>,
+    pub(crate) view: Arc<FileAnalysis>,
+}
+
+/// How many gate-applied whole copies stay resident. Each is a whole
+/// analysis; only files whose plugin emissions are gated on cross-file
+/// ancestry (DBIC result classes) ever get one.
+pub(crate) const GATED_VIEW_CAP: usize = 512;
 
 impl IndexCore {
     pub(crate) fn new() -> Self {
@@ -159,11 +153,10 @@ impl IndexCore {
             registration_gen: DashMap::new(),
             gen_counter: std::sync::atomic::AtomicU64::new(1),
             shape_bumps: std::sync::atomic::AtomicU64::new(0),
-            flush_epoch: std::sync::atomic::AtomicU64::new(0),
-            provider_diff_gen: DashMap::new(),
             long_lived: std::sync::atomic::AtomicBool::new(false),
             bag_cache: Arc::new(std::sync::RwLock::new(None)),
             conclusion_cache: Arc::new(std::sync::RwLock::new(None)),
+            gated_views: DashMap::new(),
         }
     }
 

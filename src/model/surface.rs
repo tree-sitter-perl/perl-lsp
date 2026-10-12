@@ -612,13 +612,6 @@ impl FreshnessIndex {
         self.surfaces.get(path).map(|r| r.fingerprint)
     }
 
-    /// The provider names `path` last declared edges to (sorted, deduped)
-    /// — the other half of the overlay key: enrichment reads exactly
-    /// these providers' surfaces.
-    pub fn deps_of_names(&self, path: &std::path::Path) -> Vec<String> {
-        self.deps_of.get(path).map(|v| v.clone()).unwrap_or_default()
-    }
-
     /// The mutating-write count — see the `writes` field.
     pub fn write_count(&self) -> u64 {
         self.writes.load(std::sync::atomic::Ordering::Relaxed)

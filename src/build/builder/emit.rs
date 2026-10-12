@@ -377,8 +377,43 @@ impl<'a> Builder<'a> {
                         return Some(WitnessPayload::InferredType(c));
                     }
                 }
-                let sid = self.find_callee_symbol(&called)?;
-                Some(WitnessPayload::Edge(WitnessAttachment::Symbol(sid)))
+                if let Some(sid) = self.find_callee_symbol(&called) {
+                    return Some(WitnessPayload::Edge(WitnessAttachment::Symbol(sid)));
+                }
+                // Not declared here: name the question for the global tier.
+                // Only once the symbol table is final — a walk-time miss may
+                // be a sub defined further down — and only for a real call
+                // (a bareword is as often a class or a filehandle as a call).
+                // The operands are minted at walk time so the retry finds
+                // them in hand.
+                if !matches!(
+                    node.kind(),
+                    "function_call_expression" | "ambiguous_function_call_expression"
+                ) || crate::model::builtins::is_builtin(&bare)
+                {
+                    return None;
+                }
+                if !self.symbol_table_final {
+                    if !self.pending_call_operands.contains_key(&node.id()) {
+                        let args = self.extract_call_args(node);
+                        let ops = self.call_operands(&args);
+                        self.pending_call_operands.insert(node.id(), ops);
+                    }
+                    return None;
+                }
+                let (package, name) = match crate::model::file_analysis::split_qualified(
+                    &called,
+                    &crate::model::conventions::PERL_SPELLINGS,
+                ) {
+                    (Some(p), n) => (Some(p.to_string()), n.to_string()),
+                    (None, n) => (None, n.to_string()),
+                };
+                let args = self.pending_call_operands.get(&node.id()).cloned();
+                Some(WitnessPayload::Invoke {
+                    callee: crate::model::witnesses::Callee::Sub { package, name },
+                    receiver: None,
+                    args,
+                })
             }
 
             // `$arr[N]` projects off `@arr` at the read's own point, so
@@ -877,6 +912,7 @@ impl<'a> Builder<'a> {
     pub(super) fn resolve_forward_expr_witnesses(&mut self) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessSource};
         let queued = std::mem::take(&mut self.unresolved_expr_nodes);
+        self.symbol_table_final = true;
         for node in queued {
             let Some(payload) = self.expr_payload(node) else { continue };
             let span = node_to_span(node);

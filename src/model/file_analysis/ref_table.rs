@@ -1,6 +1,5 @@
 //! The reference table: every ref this file records, together with the
-//! indices derived from them, their eviction axis, and their enrichment
-//! baseline.
+//! indices derived from them, and their eviction axis.
 //!
 //! Refs and their indices are one axis, so they live in one owner: an
 //! `evict()` that forgot an index, or a rebuild that missed one, is not
@@ -11,8 +10,7 @@ use super::*;
 
 /// Every ref in one file, plus the derived lookups over them.
 ///
-/// Serialized fields are the refs themselves and the enrichment baseline;
-/// the three indices are `serde(skip)` and rebuilt after load, and the
+/// The serialized field is the refs themselves; the three indices are `serde(skip)` and rebuilt after load, and the
 /// eviction flag is `serde(skip)` so a rehydrated table is refs-present
 /// (an empty `refs` on a evicted table means "on disk", never "no
 /// references" — see `docs/adr/relational-ref-index.md`).
@@ -20,11 +18,6 @@ use super::*;
 pub struct RefTable {
     refs: Vec<Ref>,
 
-    /// Enrichment baseline: `enrich_imported_types_with_keys` re-derives
-    /// synthetic refs (imported hash keys) on every run, so it truncates
-    /// back to this length first and stays idempotent.
-    #[serde(default)]
-    base_count: usize,
 
     #[serde(skip, default)]
     evicted: bool,
@@ -121,16 +114,6 @@ impl RefTable {
     /// Every ref's relational row seed, in ref order.
     pub fn row_seeds(&self, names: &NameSpellings) -> Vec<RefRowSeed> {
         self.refs.iter().map(|r| r.row_seed(names)).collect()
-    }
-
-    /// Seal the enrichment baseline at the current length.
-    pub fn seal_baseline(&mut self) {
-        self.base_count = self.refs.len();
-    }
-
-    /// Drop everything enrichment appended, restoring the build-time prefix.
-    pub fn truncate_to_baseline(&mut self) {
-        self.refs.truncate(self.base_count);
     }
 
     /// Rebuild every index from the current refs. Both the name/target
@@ -281,7 +264,6 @@ impl FileAnalysis {
             self.refs.push(r);
         }
         self.refs.rebuild_indices(&self.pack.names);
-        self.refs.seal_baseline();
     }
 
     pub fn refs_mut(&mut self) -> &mut [Ref] {

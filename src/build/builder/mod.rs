@@ -423,6 +423,13 @@ struct Builder<'a> {
     /// paths produce byte-identical witnesses (same span, same
     /// `expression` source tag).
     unresolved_expr_nodes: Vec<Node<'a>>,
+    /// Set once the walk is done and the symbol table is final: from here a
+    /// call to a name this file does not declare is a cross-file question
+    /// (`Callee::Sub`), not a forward reference.
+    symbol_table_final: bool,
+    /// Walk-time operands of calls to names the symbol table did not hold
+    /// yet, keyed by call node, for the post-walk retry to mint the call with.
+    pending_call_operands: std::collections::HashMap<usize, Vec<crate::model::witnesses::CallArg>>,
     /// Per-package framework fact, computed from `framework_modes` once
     /// the walk finishes. Available before `resolve_return_types` so
     /// the bag-aware return-arm fold can ask the framework-aware

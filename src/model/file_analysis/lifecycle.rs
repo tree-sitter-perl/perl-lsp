@@ -92,7 +92,6 @@ impl FileAnalysis {
         } = parts;
         witnesses.rebuild_index();
         let mut fa = FileAnalysis {
-            stamped_at: None,
             pack,
             plugin,
             scopes,
@@ -113,7 +112,6 @@ impl FileAnalysis {
             type_provenance,
             witnesses,
             bag_evicted: false,
-            base_witness_count: 0,
             provisional_dispatches,
             guard_sites,
             arrow_deref_sites,
@@ -269,9 +267,6 @@ impl FileAnalysis {
             let _g = crate::util::ghost_stats::ScopedNs::start("finalize::seal_unrowed");
             self.seal_unrowed_attachment_names();
         }
-        self.base_witness_count = self.witnesses.len();
-        self.symbols.seal_baseline();
-        self.refs.seal_baseline();
     }
 
     /// Derive `unrowed_attachment_names` from the FINAL bag: every

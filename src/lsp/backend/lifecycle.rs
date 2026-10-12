@@ -460,11 +460,10 @@ impl DiagCtx {
         }
     }
 
-    /// Publish `uri`'s diagnostics — a pure read over the derived enriched
-    /// analysis. The one enrichment writer is `FileStore::enrich_open`
-    /// (clone-and-enrich off the store lock, ptr-guarded swap); this path
-    /// reads the artifact it returns, never mutates a stored analysis.
-    /// The derivation (enrichment + collection) runs on the BLOCKING pool:
+    /// Publish `uri`'s diagnostics — a pure read over the doc's conditioned
+    /// view (`FileStore::condition_open`, the one writer of that view); every
+    /// other cross-file fact is answered through the index at use time.
+    /// The derivation (conditioning + collection) runs on the BLOCKING pool:
     /// it is minutes of synchronous CPU against a large index, and any
     /// future that runs it inline stalls tower-lsp's single serve task.
     pub(super) async fn publish(&self, uri: &Url) {
@@ -496,7 +495,7 @@ impl DiagCtx {
                 let options = self.options;
                 let uri = uri.clone();
                 tokio::task::spawn_blocking(move || {
-                    match files.enrich_open(&uri, &*idx) {
+                    match files.condition_open(&uri, &*idx) {
                         Some(analysis) => {
                             symbols::collect_diagnostics(&analysis, &idx, options)
                         }
@@ -593,16 +592,16 @@ fn make_on_refresh(
 /// Which open docs a bulk diagnostics refresh covers.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum OpenDocScope {
-    /// Every open doc (the resolver refresh storm — hub-enriched docs
-    /// re-enrich, the rest re-read).
+    /// Every open doc (the resolver refresh storm — hub docs re-condition,
+    /// the rest re-read).
     All,
-    /// Hub-enriched docs only (the hub-family cold-open heal).
+    /// Hub docs only (the hub-family cold-open heal).
     PerlFamily,
 }
 
-/// Re-derive diagnostics for open docs: hub-enriched docs re-enrich through
-/// `FileStore::enrich_open` (the one enrichment writer) and are read from
-/// the returned artifact; the rest are read as-is. URIs are collected
+/// Re-derive diagnostics for open docs: hub docs re-condition through
+/// `FileStore::condition_open` and are read from the returned view; the rest
+/// are read as-is. URIs are collected
 /// under the read iterator first, then each doc is derived with no store
 /// guard held — safe to run from any task, publish after.
 pub(super) fn refresh_open_diagnostics(
@@ -624,7 +623,7 @@ pub(super) fn refresh_open_diagnostics(
     let mut pending: Vec<(Url, Vec<Diagnostic>)> = Vec::new();
     for (uri, language) in docs {
         let diagnostics = if hub(language) {
-            match files.enrich_open(&uri, module_index) {
+            match files.condition_open(&uri, module_index) {
                 Some(analysis) => symbols::collect_diagnostics(&analysis, module_index, options),
                 None => continue, // closed mid-iteration
             }

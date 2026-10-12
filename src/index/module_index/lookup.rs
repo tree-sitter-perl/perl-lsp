@@ -294,6 +294,59 @@ impl ModuleIndex {
     }
 }
 
+impl ModuleIndex {
+    fn whole_ungated(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
+        if cached.analysis.is_fully_resident() {
+            return cached.analysis.clone();
+        }
+        self.rehydrate_or_resident(cached)
+    }
+
+    /// The view of `cached` with its deferred plugin emissions applied
+    /// wherever their `ClassIsa` gate holds through the index's ancestry
+    /// right now, or `None` when the file has none that fire (the caller
+    /// serves its ordinary view). The gate is asked at every read, so a
+    /// parent edit anywhere moves the answer with no invalidation path;
+    /// only the applied copy is cached, under the file's registration
+    /// generation and the fired set it was built for.
+    fn gate_applied(&self, cached: &Arc<CachedModule>) -> Option<Arc<FileAnalysis>> {
+        if cached.analysis.plugin.gated_emissions.is_empty() {
+            return None;
+        }
+        let fired = cached.analysis.fired_gates(self);
+        if !fired.iter().any(|f| *f) {
+            return None;
+        }
+        let generation = self
+            .core
+            .registration_gen
+            .get(&cached.path)
+            .map(|g| *g)
+            .unwrap_or(0);
+        if let Some(hit) = self.core.gated_views.get(&cached.path) {
+            if hit.generation == generation && hit.fired == fired {
+                crate::util::ghost_stats::count("gated_view.hit");
+                return Some(Arc::clone(&hit.view));
+            }
+        }
+        crate::util::ghost_stats::count("gated_view.build");
+        let mut copy = (*self.whole_ungated(cached)).clone();
+        copy.apply_fired_gated_emissions(&fired);
+        let view = Arc::new(copy);
+        if self.core.gated_views.len() >= super::index_core::GATED_VIEW_CAP {
+            let victim = self.core.gated_views.iter().next().map(|e| e.key().clone());
+            if let Some(v) = victim {
+                self.core.gated_views.remove(&v);
+            }
+        }
+        self.core.gated_views.insert(
+            cached.path.clone(),
+            super::index_core::GatedView { generation, fired, view: Arc::clone(&view) },
+        );
+        Some(view)
+    }
+}
+
 /// The capability `file_analysis`/`witnesses` query against. Delegates to
 /// the inherent methods (inherent wins name resolution on `self`, so no
 /// recursion); the generic inherent iterators accept the `&mut dyn FnMut`
@@ -304,39 +357,7 @@ impl CrossFileLookup for ModuleIndex {
         // against — one home for "has anything a cross-file read depends
         // on moved", so a new mutation path bumps one leg and every memo
         // riding it invalidates together.
-        self.enrichment_epoch()
-    }
-
-    fn flush_epoch(&self) -> u64 {
-        self.core.flush_epoch.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    fn restamp_owed(&self, path: &std::path::Path, stamped_at: Option<u64>) -> bool {
-        // Never stamped: owed, unconditionally. Every rehydrated copy reads
-        // `None` (the field is `serde(skip)`), so this is the arm that keeps a
-        // cold process behaving exactly as it did before the gate existed.
-        let Some(stamped_at) = stamped_at else {
-            crate::util::ghost_stats::count("restamp.owed_never_stamped");
-            return true;
-        };
-        match self.core.provider_diff_gen.get(path) {
-            Some(mark) if stamped_at >= *mark => {
-                crate::util::ghost_stats::count("restamp.skipped");
-                false
-            }
-            Some(_) => {
-                crate::util::ghost_stats::count("restamp.owed_provider_moved");
-                true
-            }
-            // No mark at all. Not "no provider moved" — "no wave has ever
-            // spoken about this file", which is also what a lost mark, a
-            // never-flushed session and an uncovered freshness edge all look
-            // like. Fail open; the gate is worth only what it can prove.
-            None => {
-                crate::util::ghost_stats::count("restamp.owed_no_mark");
-                true
-            }
-        }
+        self.resolution_epoch_sum()
     }
 
     fn get_cached(&self, module_name: &str) -> Option<Arc<CachedModule>> {
@@ -353,13 +374,16 @@ impl CrossFileLookup for ModuleIndex {
 
 
     fn whole_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
-        if cached.analysis.is_fully_resident() {
-            return cached.analysis.clone();
+        if let Some(v) = self.gate_applied(cached) {
+            return v;
         }
-        self.rehydrate_or_resident(cached)
+        self.whole_ungated(cached)
     }
 
     fn symbols_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
+        if let Some(v) = self.gate_applied(cached) {
+            return v;
+        }
         // The @INC strip is bag-only, so import-tier copies (the MRO
         // walk's ancestor set) answer resident; workspace copies are
         // symbol-evicted and rehydrate through the rows-axes lane —
@@ -372,6 +396,9 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn refs_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
+        if let Some(v) = self.gate_applied(cached) {
+            return v;
+        }
         // Backward-walk view: refs AND symbols usable (the matcher reads
         // usage rows + declaration rows). The @INC strip is bag-only, so
         // import-tier copies answer resident; the workspace strip evicts
@@ -535,20 +562,6 @@ impl CrossFileLookup for ModuleIndex {
         })
     }
 
-    fn enriched_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
-        if !self.core.long_lived.load(std::sync::atomic::Ordering::Relaxed) {
-            return self.bag_present(cached);
-        }
-        self.enriched_snapshot(cached)
-            .unwrap_or_else(|| self.bag_present(cached))
-    }
-
-    fn serves_enriched(&self) -> bool {
-        // The overlay is long-lived-only (the deep copies never pay for
-        // themselves in a one-shot process), so a not-long-lived index's
-        // `enriched_present` is `bag_present` — never distinct.
-        self.core.long_lived.load(std::sync::atomic::Ordering::Relaxed)
-    }
     fn class_is_bridged_to(&self, class: &str) -> bool {
         // Bucket NON-EMPTY, not key-present: `purge_module` can leave an empty
         // bucket behind, and a key-exists test would then report a bridge that
@@ -653,6 +666,9 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn bag_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
+        if let Some(v) = self.gate_applied(cached) {
+            return v;
+        }
         // Never-evicted copy (open docs, degraded files kept whole): a cheap
         // Arc bump, no I/O.
         if !cached.analysis.bag_is_evicted() {

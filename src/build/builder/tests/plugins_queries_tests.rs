@@ -577,10 +577,10 @@ sub to  { my $self = shift; return $self; }
     let mut fa = build_fa(app_src);
     // First enrichment — simulates publish_diagnostics after module
     // resolution. Populates type_constraints + type_constraints_by_var.
-    fa.enrich_imported_types_with_keys(Some(&idx));
+    fa.condition_with(&idx);
     // Second enrichment — simulates a subsequent change or refresh.
     // Must not panic, and the re-derived state must stay usable.
-    fa.enrich_imported_types_with_keys(Some(&idx));
+    fa.condition_with(&idx);
 
     // Sanity: `$r` is still typed after the second run (not just
     // "didn't crash" — the state is actually usable).
@@ -698,7 +698,7 @@ sub to { my $self = shift; return $self; }
     // Mojolicious.pm's `routes` accessor) don't land in
     // `type_constraints`, and `$r` stays untyped.
     let mut fa = fa;
-    fa.enrich_imported_types_with_keys(Some(&idx));
+    fa.condition_with(&idx);
     let fa = fa;
 
     // Locate the two target lines by content — decoupled from

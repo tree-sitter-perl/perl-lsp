@@ -161,7 +161,6 @@ pub(crate) use index_core::strip_import_copy_one;
 mod lookup;
 mod queries;
 mod registration;
-use registration::EnrichedEntry;
 pub use registration::{SweepAnswerGuard, SweepMemoGuard, SweepProviderGuard};
 
 /// Every file that provides one module name, in provider order. `[0]` is
@@ -218,30 +217,9 @@ pub struct ModuleIndex {
     /// The freshness engine (`docs/adr/storage-engine.md`):
     /// per-file span-free surface records + the reverse-dependency index.
     /// Fed at registration (whole copy, pre-strip) and on open-doc
-    /// rebuilds; `dirty_consumers` names who must re-enrich after a
-    /// surface CHANGE, and an Unchanged verdict is the early-cutoff.
+    /// rebuilds; `dirty_consumers` names whose open diagnostics to refresh
+    /// after a surface CHANGE, and an Unchanged verdict is the early-cutoff.
     freshness: Arc<crate::model::surface::FreshnessIndex>,
-    /// The enrichment overlay (R4): derived enriched copies keyed by the
-    /// surface fingerprints of the file + its providers. Bounded FIFO —
-    /// `enriched_order` is the eviction queue.
-    /// `None` payload = a DECLINED build (byte-cap giant / cycle-tainted)
-    /// at this key: repeat queries skip the deep-copy entirely until a
-    /// provider change moves the key.
-    enriched: Arc<DashMap<std::path::PathBuf, EnrichedEntry>>,
-    enriched_order: Arc<std::sync::Mutex<std::collections::VecDeque<std::path::PathBuf>>>,
-    /// Report-only ghost-list accounting for the overlay
-    /// (`PERL_LSP_GHOST_STATS`). `None` when the gate is off.
-    enriched_ghost: Option<Arc<crate::util::ghost_stats::GhostStats>>,
-    /// Memo for `enrichment_key` (path → (epoch, key)): the key is a
-    /// transitive dep-closure walk and the overlay recomputes it on EVERY
-    /// consult, hit or miss — measured 170k walks from one didOpen on a
-    /// large tree. Validity is the additive epoch from
-    /// `enrichment_epoch()`; any index mutation moves the epoch and every
-    /// entry lazily recomputes (over-invalidation by design). Bounded by
-    /// construction: ONE entry per distinct consulted path — superseded
-    /// (epoch, key) pairs overwrite in place, never accumulate — so the
-    /// ceiling is the registered-file count × ~100 bytes.
-    enrichment_key_memo: Arc<DashMap<std::path::PathBuf, (u64, u64)>>,
     /// The linkage-visible (name, declares-a-Class) pairs each file
     /// registered — the exact inverse list `unregister_file` walks AND the
     /// class-rank source for the cache-slot tie-break. Recorded at

@@ -157,6 +157,23 @@ pub enum WitnessAttachment {
     /// `Field` does. Kept at the END for bincode variant-index stability
     /// (bump `EXTRACT_VERSION`).
     Param { package: String, name: String, index: u32 },
+    /// A sub this file calls by a bare name it does not declare: "what does
+    /// whichever exporter provides `name` return?" The local tier only names
+    /// the question (rule #11's residual); the registry answers it through
+    /// the index's exporters when one is in hand, and a chase without an
+    /// index stops here. Kept at the END for bincode variant-index stability
+    /// (bump `EXTRACT_VERSION`).
+    ImportedSub { name: String },
+    /// The values flowing INTO parameter `index` of `package::name` from
+    /// its call sites — the backward key. `index` counts the invocant of a
+    /// method as 0, so it is the `@_` position. Answered by joining the
+    /// argument at `index` over every call site the index's mentions
+    /// relation names for `name` whose callee resolves to `package` (or
+    /// may: an untyped receiver joins as a may-caller). A position with
+    /// no caller in hand, or callers that disagree, answers nothing.
+    /// Kept at the END for bincode variant-index stability (bump
+    /// `EXTRACT_VERSION`).
+    ParamIn { package: String, name: String, index: u32 },
 }
 
 /// Index into `FileAnalysis::refs`.
@@ -233,7 +250,7 @@ impl WitnessPayload {
             WitnessPayload::Invoke { callee, receiver, args } => {
                 match callee {
                     Callee::Value(t) => f(t),
-                    Callee::Method { .. } => {}
+                    Callee::Method { .. } | Callee::Sub { .. } => {}
                 }
                 if let Some(t) = receiver {
                     f(t);
@@ -426,6 +443,13 @@ pub enum Callee {
     /// Whatever callable this attachment holds (`$cb->(…)`, `$obj->$cb(…)`):
     /// its `CodeRef` return edge is the call's value.
     Value(WitnessAttachment),
+    /// A function called by name (`foo(…)`, `Pkg::foo(…)`) that this file
+    /// does not declare. A qualified call (`package` set by the producer,
+    /// which owns the language's separator) looks up
+    /// `PackageSymbol{package, name}`; a bare one asks `ImportedSub{name}`.
+    /// No receiver: a function call passes none. Kept at the END for bincode
+    /// variant-index stability.
+    Sub { package: Option<String>, name: String },
 }
 
 /// Where a named method's lookup starts.

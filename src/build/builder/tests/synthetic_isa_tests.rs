@@ -918,7 +918,7 @@ mod param_types_manifest {
         parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
         let tree = parser.parse(src, None).unwrap();
         let mut fa = crate::build::builder::build(&tree, src.as_bytes());
-        fa.enrich_imported_types_with_keys(Some(&idx));
+        fa.condition_with(&idx);
         let ready = fa.symbols().iter().filter(|s| {
             s.kind == SymKind::Handler && s.name == "ready"
                 && matches!(&s.namespace, Namespace::Framework { id } if id == "mojo-events")
@@ -971,7 +971,7 @@ mod param_types_manifest {
             "the relationship accessor must NOT synthesize before enrichment \
              (the gate can't see cross-file ancestry at build)",
         );
-        fa.enrich_imported_types_with_keys(Some(&idx));
+        fa.condition_with(&idx);
         let col = fa.symbols().iter().find(|s| {
             s.name == "name"
                 && s.kind == SymKind::Method
@@ -995,7 +995,7 @@ mod param_types_manifest {
             rt,
         );
         // Idempotent: a second enrichment must not double the accessors.
-        fa.enrich_imported_types_with_keys(Some(&idx));
+        fa.condition_with(&idx);
         assert_eq!(
             fa.symbols().iter().filter(|s| s.name == "comments").count(),
             1,
@@ -1027,7 +1027,7 @@ mod param_types_manifest {
         parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
         let tree = parser.parse(src, None).unwrap();
         let mut fa = crate::build::builder::build(&tree, src.as_bytes());
-        fa.enrich_imported_types_with_keys(Some(&idx));
+        fa.condition_with(&idx);
         assert_eq!(
             fa.symbols().iter().filter(|s| s.name == "comments").count(),
             0,

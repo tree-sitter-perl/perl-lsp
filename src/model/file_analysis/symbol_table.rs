@@ -1,6 +1,5 @@
 //! The symbol table: every symbol this file declares, together with the
-//! indices derived from them, their eviction axis, and their enrichment
-//! baseline.
+//! indices derived from them, and their eviction axis.
 //!
 //! Symbols and their indices are one axis, so they live in one owner: an
 //! `evict()` that forgot an index, or a rebuild that missed one, is not
@@ -11,8 +10,7 @@ use super::*;
 
 /// Every symbol in one file, plus the derived lookups over them.
 ///
-/// Serialized fields are the symbols themselves and the enrichment
-/// baseline; the two indices are `serde(skip)` and rebuilt after load, and
+/// The serialized field is the symbols themselves; the two indices are `serde(skip)` and rebuilt after load, and
 /// the eviction flag is `serde(skip)` so a rehydrated table is
 /// symbols-present (an empty `symbols` on an evicted table means "on
 /// disk", never "no symbols" — see `docs/adr/relational-ref-index.md`).
@@ -20,11 +18,6 @@ use super::*;
 pub struct SymbolTable {
     symbols: Vec<Symbol>,
 
-    /// Enrichment baseline: `enrich_imported_types_with_keys` re-derives
-    /// synthetic symbols (imported hash keys, gated emissions) on every
-    /// run, so it truncates back to this length first and stays idempotent.
-    #[serde(default)]
-    base_count: usize,
 
     #[serde(skip, default)]
     evicted: bool,
@@ -119,16 +112,6 @@ impl SymbolTable {
                 }
             })
             .collect()
-    }
-
-    /// Seal the enrichment baseline at the current length.
-    pub fn seal_baseline(&mut self) {
-        self.base_count = self.symbols.len();
-    }
-
-    /// Drop everything enrichment appended, restoring the build-time prefix.
-    pub fn truncate_to_baseline(&mut self) {
-        self.symbols.truncate(self.base_count);
     }
 
     /// Rebuild the name and scope lookups from the current symbols.
@@ -227,7 +210,6 @@ impl FileAnalysis {
             self.symbols.push(s);
         }
         self.symbols.rebuild_indices();
-        self.symbols.seal_baseline();
     }
 
     pub fn symbols(&self) -> &[Symbol] {

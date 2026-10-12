@@ -303,6 +303,9 @@ fn whole_copy_registration_sites_are_allowlisted() {
                 ),
             ],
         ),
+        // insert_cache stores a WHOLE copy by construction (`persisted:
+        // false`): TEST-ONLY today, so a production caller trips here.
+        ("insert_cache", vec![]),
         // register_workspace_module: TEST-ONLY today (fixtures build whole
         // copies directly). Its first production caller lands here.
         ("register_workspace_module", vec![]),
@@ -320,29 +323,6 @@ fn whole_copy_registration_sites_are_allowlisted() {
                 ("module_index", 1, "register_workspace_stripping's residency half"),
                 ("module_resolver", 2, "deferred writer halves — stripped arcs only"),
             ],
-        ),
-        // `insert_cache` stores a WHOLE copy by construction (`persisted:
-        // false` — nothing was written, so the strip has no licence). Its one
-        // production reach is through `register_materialized_whole`, already
-        // bounded by that site's entry; a NEW caller would pin whole copies
-        // without tripping any other gate.
-        (
-            "insert_cache",
-            vec![(
-                "module_index",
-                1,
-                "register_materialized_whole’s cache-slot half",
-            )],
-        ),
-        (
-            "register_materialized_whole",
-            vec![(
-                "module_index",
-                1,
-                "gated-emission CLI/batch materialization — plugin-triggered \
-                 files only (sparse by construction), one-shot startup, whole \
-                 copy deliberate so whole_present sees the emissions",
-            )],
         ),
     ];
     let mut violations: Vec<String> = Vec::new();
@@ -1448,7 +1428,6 @@ fn rendered_strings_are_not_reparsed() {
     let allow: &[(&str, usize, &str)] = &[
         ("model/conventions.rs", 3, "source text: a name split on its language's declared separator, class-token segments, and Perl method tokens"),
         ("model/file_analysis/class_queries.rs", 1, "`use` rows as written, split on the pack's declared separator"),
-        ("model/file_analysis/enrichment.rs", 1, "Perl package leaf vs a load name — both source-spelled"),
         ("model/file_analysis/invocants.rs", 2, "Perl `::` on source-spelled class and sub names"),
         ("model/file_analysis/types.rs", 1, "canonical_template_spelling — a C++ instance as written in source"),
         ("model/file_analysis/use_map.rs", 3, "resolving WRITTEN spellings"),

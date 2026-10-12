@@ -356,8 +356,7 @@ $schema->resultset('Schema::Result::Users')->search({ name => 'X' });
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(producer_path.clone(), Arc::new(parse(producer_src)));
 
-    let mut consumer_fa = parse(consumer_src);
-    consumer_fa.enrich_imported_types_with_keys(Some(&idx));
+    let consumer_fa = parse(consumer_src);
 
     let store = FileStore::new();
     store.insert_workspace(producer_path.clone(), parse(producer_src));
@@ -799,8 +798,7 @@ sub action {
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(producer_path.clone(), Arc::new(parse(producer_src)));
 
-    let mut consumer_fa = parse(consumer_src);
-    consumer_fa.enrich_imported_types_with_keys(Some(&idx));
+    let consumer_fa = parse(consumer_src);
 
     let store = FileStore::new();
     store.insert_workspace(producer_path.clone(), parse(producer_src));
@@ -870,8 +868,7 @@ sub action {
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(producer_path.clone(), Arc::new(parse(producer_src)));
 
-    let mut consumer_fa = parse(consumer_src);
-    consumer_fa.enrich_imported_types_with_keys(Some(&idx));
+    let consumer_fa = parse(consumer_src);
 
     let store = FileStore::new();
     store.insert_workspace(producer_path.clone(), parse(producer_src));
@@ -945,7 +942,7 @@ sub register {
 1;
 ";
     let mut fa = parse(consumer_src);
-    fa.enrich_imported_types_with_keys(Some(&idx));
+    fa.condition_with(&idx);
     let pt = point_at(consumer_src, "$after");
     let minion_t = fa.inferred_type_via_bag_ctx("$minion", pt, Some(&idx));
     assert_eq!(
@@ -1102,7 +1099,7 @@ my $x = $schema->resultset('Artist')->first->cds;
         Arc::new(parse(artist_src)),
     );
     let mut consumer = parse(consumer_src);
-    consumer.enrich_imported_types_with_keys(Some(&idx));
+    consumer.condition_with(&idx);
 
     // The `->cds` MethodCall ref's invocant resolves to the FQ result class,
     // NOT the short moniker `Artist` (which names no class).
@@ -1146,7 +1143,7 @@ my $x = $schema->resultset('SourceNameArtists')->first->cds;
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(PathBuf::from("/tmp/h15_sn.pm"), Arc::new(parse(src)));
     let mut consumer = parse(consumer_src);
-    consumer.enrich_imported_types_with_keys(Some(&idx));
+    consumer.condition_with(&idx);
     let cds_ref = consumer
         .refs
         .iter()

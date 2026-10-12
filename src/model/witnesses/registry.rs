@@ -271,9 +271,9 @@ fn fold_memo_store(fk: Box<(FoldMemoStamp, FoldMemoKey)>, result: &std::sync::Ar
 
 pub(super) struct QueryState {
     visited: VisitedSet,
-    /// Enriched copies consulted during this query — pinned so memo
-    /// entries keyed on their bag ADDRESSES stay valid even if the
-    /// overlay's eviction drops its own reference mid-query.
+    /// Other files' copies consulted during this query — pinned so memo
+    /// entries keyed on their bag ADDRESSES stay valid even if the LRU
+    /// drops its own reference mid-query.
     pins: Vec<std::sync::Arc<crate::model::file_analysis::FileAnalysis>>,
     // `Arc` so a memo store/hit clones one heap pointer, not the
     // (String-bearing) `ReducedValue`. `HashMap::new()` pre-allocates
@@ -1062,34 +1062,19 @@ impl ReducerRegistry {
                             return ControlFlow::Continue(());
                         }
                         // Bridged Method's return lives in the bridging file's
-                        // bag — rehydrate it if evicted before querying.
+                        // bag, and may chain through that file's OWN imports —
+                        // so the hop carries the index and shares this query's
+                        // state: mutual bridges cut on the visited set instead
+                        // of spawning a fresh guard per hop.
                         crate::util::ghost_stats::count("moc.provider_fetched");
                         crate::util::ghost_stats::count("mocsite.bridged");
                         let full = idx.bag_present(cached);
-                        if let Some(t) = full.symbol_return_type_via_bag(sym.id, None) {
-                            found = Some(t);
-                            return ControlFlow::Break(());
-                        }
-                        // Fallback-on-miss (R4): the bridged Method's return may
-                        // chain through the bridging file's OWN imports — baked
-                        // only into the enriched overlay. `symbol_return_type_via_bag`
-                        // owns its answer (private registry + QueryState), so no
-                        // `state.pins` push is needed. Kept index-less by design:
-                        // a ctx-ful leaf query would spawn a fresh cycle guard per
-                        // bridged hop, so mutual bridges recurse unbounded; the
-                        // ENRICHING-guarded bake is the safe route to the same
-                        // transitive answer.
-                        crate::util::ghost_stats::count("consult.bridged");
-                        if idx.serves_enriched() {
-                            let enriched = idx.enriched_present(cached);
-                            if !std::sync::Arc::ptr_eq(&enriched, &full) {
-                                if let Some(t) =
-                                    enriched.symbol_return_type_via_bag(sym.id, None)
-                                {
-                                    found = Some(t);
-                                    return ControlFlow::Break(());
-                                }
+                        match self.query_symbol_in(idx, &full, sym.id, q, state) {
+                            ReducedValue::Type(t) => {
+                                found = Some(t);
+                                return ControlFlow::Break(());
                             }
+                            ReducedValue::FactMap(_) | ReducedValue::None => {}
                         }
                         ControlFlow::Continue(())
                     });
@@ -1235,51 +1220,6 @@ impl ReducerRegistry {
                                 idx.remember_sweep_consult(&cached.path, &verdict_key, &v);
                                 return v;
                             }
-                            // Fallback-on-miss (R4), symmetric with the
-                            // PackageSymbol primary: a slot WRITE typed only in
-                            // C's enriched copy resolves here. Today SlotType
-                            // seeds are build-gated on a resolvable RHS
-                            // (`builder.rs`), so a seed that exists already
-                            // answers on the raw bag and this retry is the
-                            // forward-looking twin — live the moment slot
-                            // seeding emits an unconditional edge. Pin the
-                            // enriched Arc: this chase threads the SHARED
-                            // QueryState, whose memo keys on bag pointers.
-                            crate::util::ghost_stats::count("consult.slot_type");
-                            if idx.serves_enriched() {
-                                let enriched = idx.enriched_present(&cached);
-                                if !std::sync::Arc::ptr_eq(&enriched, &full)
-                                    && !std::ptr::eq(bag, &enriched.witnesses)
-                                {
-                                    state.pins.push(std::sync::Arc::clone(&enriched));
-                                    let v = attempt(&enriched, state);
-                                    if v != ReducedValue::None {
-                                        if prefilter_denied {
-                                            crate::util::ghost_stats::count(
-                                                "consult.prefilter_break",
-                                            );
-                                            log::error!(
-                                                "consult pre-filter break (enriched): \
-                                                 rows proved {:?} silent in {:?} but \
-                                                 the chase answered {v:?}",
-                                                q.attachment,
-                                                cached.path
-                                            );
-                                            debug_assert!(
-                                                false,
-                                                "consult pre-filter hid an answer; see log"
-                                            );
-                                        }
-                                        super::session::remember_candidate_answer(
-                                            idx, &cached.path, &memo_q, &v,
-                                        );
-                                        idx.remember_sweep_consult(
-                                            &cached.path, &verdict_key, &v,
-                                        );
-                                        return v;
-                                    }
-                                }
-                            }
                             super::session::remember_candidate_answer(
                                 idx,
                                 &cached.path,
@@ -1405,7 +1345,114 @@ impl ReducerRegistry {
             }
         }
 
+        if let WitnessAttachment::ImportedSub { name } = q.attachment {
+            if let Some(v) = self.imported_sub_fallback(q, state, name) {
+                return v;
+            }
+        }
+
         ReducedValue::None
+    }
+
+    /// Query `Symbol(sid)` inside another file's bag, as a hop of THIS query:
+    /// the hop carries the index (its answer may chain through that file's own
+    /// imports) and shares `state`, so a cross-file cycle cuts on the visited
+    /// set. The copy is pinned because the memo keys on bag addresses.
+    fn query_symbol_in(
+        &self,
+        idx: &dyn crate::model::file_analysis::CrossFileLookup,
+        full: &std::sync::Arc<crate::model::file_analysis::FileAnalysis>,
+        sid: crate::model::file_analysis::SymbolId,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+    ) -> ReducedValue {
+        state.pins.push(std::sync::Arc::clone(full));
+        let cached_ctx = BagContext {
+            scopes: &full.scopes,
+            package_framework: &full.packages,
+            module_index: Some(idx),
+            package_parents: &full.packages,
+            app_surface_consumers: &full.plugin.app_surface_consumers,
+        };
+        let att = WitnessAttachment::Symbol(sid);
+        let sub_q = ReducerQuery {
+            attachment: &att,
+            point: None,
+            framework: FrameworkFact::Plain,
+            arity_hint: q.arity_hint,
+            receiver: q.receiver.clone(),
+            args: q.args.clone(),
+            context: Some(&cached_ctx),
+        };
+        (*self.query_rec(&full.witnesses, &sub_q, state)).clone()
+    }
+
+    /// `ImportedSub{name}`: the sub a bare call names but its file does not
+    /// declare. Every exporter of `name`, every file registered under that
+    /// exporter (a split exporter's sub lives in whichever file defines it),
+    /// asked for the defining symbol's return under the caller's arity and
+    /// argument types, one visited set throughout — so mutually importing
+    /// modules terminate on the cycle guard rather than a depth cap.
+    #[inline(never)]
+    fn imported_sub_fallback(
+        &self,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        name: &str,
+    ) -> Option<ReducedValue> {
+        let ctx = q.context?;
+        let Some(idx) = ctx.module_index else {
+            super::note_bake_exit("imported_sub", true);
+            return None;
+        };
+        let memo_q = ReducerQuery {
+            attachment: q.attachment,
+            point: None,
+            framework: FrameworkFact::Plain,
+            arity_hint: q.arity_hint,
+            receiver: None,
+            args: q.args.clone(),
+            context: None,
+        };
+        for module_name in idx.find_exporters(name) {
+            for cached in super::session::visible_def_candidates(idx, &module_name).iter() {
+                if let Some(hit) = super::session::candidate_answer(idx, &cached.path, &memo_q) {
+                    if *hit != ReducedValue::None {
+                        return Some((*hit).clone());
+                    }
+                    continue;
+                }
+                crate::util::ghost_stats::count("mocsite.imported_sub");
+                let full = idx.bag_present(cached);
+                let Some(sym) = full.symbols().iter().find(|s| {
+                    s.name == name
+                        && matches!(
+                            s.kind,
+                            crate::model::file_analysis::SymKind::Sub
+                                | crate::model::file_analysis::SymKind::Method
+                        )
+                }) else {
+                    super::session::remember_candidate_answer(
+                        idx,
+                        &cached.path,
+                        &memo_q,
+                        &ReducedValue::None,
+                    );
+                    continue;
+                };
+                let cuts_before = state.cuts;
+                let v = self.query_symbol_in(idx, &full, sym.id, q, state);
+                // A cut answer depends on the path it was reached from; only a
+                // whole one may outlive this query.
+                if state.cuts == cuts_before {
+                    super::session::remember_candidate_answer(idx, &cached.path, &memo_q, &v);
+                }
+                if v != ReducedValue::None {
+                    return Some(v);
+                }
+            }
+        }
+        None
     }
 
     /// Resolve every Edge witness on `q.attachment` to an `InferredType`
@@ -2055,32 +2102,7 @@ impl ReducerRegistry {
                          whole world for this class"
                     );
                 }
-                if v != ReducedValue::None {
-                    v
-                } else {
-                // Fallback-on-miss (R4): the package file's method
-                // return may chain through ITS OWN imports —
-                // invisible to the raw bag, present in the
-                // enriched overlay.
-                crate::util::ghost_stats::count("consult.moc_primary");
-                // `serves_enriched` first: when the overlay is off (one-shot
-                // CLI) the fetch below returns the bag it already has, so the
-                // retry is a guaranteed no-op paid per escalation.
-                if idx.serves_enriched() {
-                    let enriched = crate::util::ghost_stats::timed(
-                        "consult.enriched", || idx.enriched_present(cached));
-                    if !std::sync::Arc::ptr_eq(&enriched, &full)
-                        && !std::ptr::eq(bag, &enriched.witnesses)
-                    {
-                        state.pins.push(std::sync::Arc::clone(&enriched));
-                        attempt(&enriched, state)
-                    } else {
-                        ReducedValue::None
-                    }
-                } else {
-                    ReducedValue::None
-                }
-                }
+                v
             };
             if let Some(followed) = &followed_answer {
                 // Scored against the chase, not against the output.
@@ -2660,6 +2682,13 @@ impl ReducerRegistry {
                 }
                 vec![target]
             }
+            Callee::Sub { package, name } => vec![match package {
+                Some(package) => WitnessAttachment::PackageSymbol {
+                    package: package.clone(),
+                    name: name.clone(),
+                },
+                None => WitnessAttachment::ImportedSub { name: name.clone() },
+            }],
         };
         let arity = exact.then_some(arg_types.len() as u32);
         // SUPER walks the writer's parents in MRO order: the first that

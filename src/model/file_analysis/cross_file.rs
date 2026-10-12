@@ -433,36 +433,6 @@ pub trait CrossFileLookup {
         0
     }
 
-    /// Is a MethodCall re-stamp owed for `path`, last stamped at
-    /// `stamped_at`?
-    ///
-    /// The re-stamp is the dominant driver of cross-file bag rehydration, and
-    /// most of it re-derives an answer the build already froze. What licenses
-    /// skipping it is knowing that no provider of this file has moved since
-    /// the last stamp — which is a question about the FLUSH, not about this
-    /// file, and answering it by walking `providers(F)` here would resurrect
-    /// the transitive closure the enrichment-key memo exists to contain.
-    ///
-    /// So the flush PUSHES: enqueuing a consumer stamps that consumer's mark,
-    /// and this is an O(1) comparison against it. Every unknown — never
-    /// stamped, no mark recorded, no index, a caller with no path — **fails
-    /// open to today's behavior**, which is why the gate can land before the
-    /// flush is the standing path and simply do nothing until it is.
-    ///
-    /// The gate is exactly as sound as the freshness edge coverage it rides
-    /// on, and no more: a provider whose change never reaches
-    /// `dirty_consumers` never marks anyone, and the skip would then be
-    /// wrong. New and deleted files are covered because registration and
-    /// removal already route through `record_and_dirty`.
-    fn restamp_owed(&self, _path: &std::path::Path, _stamped_at: Option<u64>) -> bool {
-        true
-    }
-
-    /// The monotone flush clock a stamp records itself against. Sessional and
-    /// deliberately not persisted — see `FileAnalysis::stamped_at`.
-    fn flush_epoch(&self) -> u64 {
-        0
-    }
     /// Does ANY file bridge plugin-synthesized entities onto `class`?
     ///
     /// The guard on every conclusion form that encodes "everything before the
@@ -633,32 +603,6 @@ pub trait CrossFileLookup {
         cached: &std::sync::Arc<CachedModule>,
     ) -> std::sync::Arc<FileAnalysis> {
         cached.analysis.clone()
-    }
-    /// A cached WORKSPACE module's analysis with cross-file ENRICHMENT
-    /// applied (`docs/adr/storage-engine.md`, the always-enriched
-    /// tier): imported return types propagated, synthetic hash-key defs
-    /// injected — derived through the overlay, never in-place. Consumers
-    /// are FALLBACK-ON-MISS: call this only after the raw bag answered
-    /// None (a miss pays one deep-copy+enrich, then the overlay caches by
-    /// dep-surface fingerprint). Default: the bag-present view — impls
-    /// without an overlay answer unenriched, never wrongly.
-    fn enriched_present(
-        &self,
-        cached: &std::sync::Arc<CachedModule>,
-    ) -> std::sync::Arc<FileAnalysis> {
-        self.bag_present(cached)
-    }
-    /// Can `enriched_present` ever hand back a view DISTINCT from the bag?
-    /// The witness seams' fallback-on-miss arms ask this BEFORE calling it:
-    /// when the answer is no (one-shot CLI — the overlay is long-lived-only),
-    /// the retry is a guaranteed no-op, and skipping it saves a redundant
-    /// per-escalation fetch — measured at 706k calls / 5.3% of a cold
-    /// `--check` wall on a script-heavy corpus — plus the re-chase hazard
-    /// when the LRU evicts between the two fetches. Default `true`: an
-    /// implementor that overrides `enriched_present` without this probe
-    /// keeps its retries.
-    fn serves_enriched(&self) -> bool {
-        true
     }
     /// A cached module's analysis whole on EVERY evictable axis — bag, refs,
     /// AND symbols present. Consumers that read more than one axis from the
@@ -1434,17 +1378,6 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
         // hit the trait default and read the evicted bag — silent Slice-2
         // type regressions while goto/refs stay green.
         self.inner.bag_present(cached)
-    }
-    fn enriched_present(
-        &self,
-        cached: &std::sync::Arc<CachedModule>,
-    ) -> std::sync::Arc<FileAnalysis> {
-        // Same delegation rule as `bag_present` — the inner index owns the
-        // enrichment overlay.
-        self.inner.enriched_present(cached)
-    }
-    fn serves_enriched(&self) -> bool {
-        self.inner.serves_enriched()
     }
     fn whole_present(
         &self,

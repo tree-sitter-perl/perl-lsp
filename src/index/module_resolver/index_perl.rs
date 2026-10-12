@@ -664,45 +664,5 @@ pub fn index_workspace_with_index(
         }
     }
 
-    // End-of-bulk drain: the re-stamp gate's mark, once.
-    //
-    // Once, and here, for two reasons that point the same way. The reverse-dep
-    // answer is only complete now — every file is registered, so
-    // `dirty_consumers` finally returns the whole consumer set rather than
-    // whichever consumers happened to be indexed before the asker. And a
-    // per-file mark during the walk would mint one epoch per file, so a stamp
-    // taken mid-bulk could satisfy an early file's mark while a later file's
-    // change went unaccounted; one epoch for the whole bulk cannot express
-    // that.
-    //
-    // Deliberately a MARK and not a flush wave. The wave's product is a diff
-    // — which files' answers moved — and a bulk has no before-state to diff
-    // against: the persist writer has already written each seed's new map at
-    // the current generation, so the frozen map a wave would compare against
-    // IS the new one, and every surface would compare equal. Marking the
-    // consumers is the whole of what the gate needs, and it is the part a
-    // bulk can actually answer.
-    if let Some(idx) = module_index {
-        let seeds = surface_changed
-            .into_inner()
-            .unwrap_or_else(|e| e.into_inner());
-        if !seeds.is_empty() {
-            crate::util::timings::phase("index.restamp_mark", || {
-                let mut consumers: std::collections::HashSet<std::path::PathBuf> =
-                    Default::default();
-                for p in &seeds {
-                    consumers.extend(idx.dirty_consumers(p));
-                }
-                crate::util::ghost_stats::count_by(
-                    "bulk.surface_changed",
-                    seeds.len() as u64,
-                );
-                if !consumers.is_empty() {
-                    idx.mark_provider_diff(consumers);
-                }
-            });
-        }
-    }
-
     count.load(Ordering::Relaxed)
 }

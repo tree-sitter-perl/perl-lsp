@@ -40,7 +40,6 @@ mod ancestry;
 pub use ancestry::*;
 mod queries;
 mod enrichment;
-pub use enrichment::{declare_enrichment_profile, enrichment_profile, EnrichmentProfile};
 mod class_queries;
 mod cursor_queries;
 mod invocants;
@@ -165,29 +164,6 @@ pub struct FileAnalysis {
     /// bag_present` when this is set; the empty bag is "evicted", not "no facts".
     #[serde(skip, default)]
     bag_evicted: bool,
-
-    /// What the flush clock read when `stamp_method_call_targets` last ran
-    /// WITH the index; `None` for never.
-    ///
-    /// `Option` rather than a sentinel `0`, because 0 is a real clock reading
-    /// — the one every stamp taken before the first flush records — and
-    /// collapsing it into "never" makes a pre-flush stamp compare equal to the
-    /// first wave's mark and skip a re-stamp it was owed.
-    ///
-    /// `#[serde(skip)]` deliberately, and that is what makes the re-stamp gate
-    /// safe rather than merely cheap. The mark it is compared against
-    /// (`CrossFileLookup::restamp_owed`) lives in RAM and dies with the
-    /// process; a stamp record that OUTLIVED its marks would compare a real
-    /// stamp against a lost mark and skip a re-stamp that was owed. Both facts
-    /// are sessional, so they die together and a fresh process fails open.
-    #[serde(skip, default)]
-    pub stamped_at: Option<u64>,
-
-    /// Witness-bag baseline — `enrich_imported_types_with_keys`
-    /// truncates back to this length before re-deriving so repeat
-    /// calls stay idempotent.
-    #[serde(default)]
-    base_witness_count: usize,
 
     /// Build-time dispatch candidates, each gated on its receiver's class.
     /// The builder records one per call matching a plugin `DispatchVerb`,

@@ -1580,7 +1580,7 @@ fn plugin_app_surface_minion_enqueue_resolves_when_app_typed() {
     });
     assert!(mref.is_some(), "an `$app->minion` MethodCall ref must exist");
 
-    fa.enrich_imported_types_with_keys(Some(&idx));
+    fa.condition_with(&idx);
 
     // `Mojolicious::Lite` is a trigger, so the emit-hook materializes the
     // DispatchCall directly; `applicable_dispatches` de-dups the gated

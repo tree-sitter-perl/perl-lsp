@@ -85,72 +85,41 @@ pub fn query_sub_return_type(
     // overrides, and fold rules; only the bag and symbols change.
     if let Some(ctx) = context {
         if let Some(idx) = ctx.module_index {
-            let try_in = |full: &std::sync::Arc<crate::model::file_analysis::FileAnalysis>|
-             -> Option<Option<InferredType>> {
-                // Outer None = no matching symbol (an enriched retry can't
-                // help — enrichment adds no symbols of these kinds);
-                // Some(None) = symbol present, type unresolved (retryable).
-                let sym = full.symbols().iter().find(|s| {
-                    s.name == sub_name
-                        && matches!(
-                            s.kind,
-                            crate::model::file_analysis::SymKind::Sub
-                                | crate::model::file_analysis::SymKind::Method
-                        )
-                })?;
-                let cached_ctx = BagContext {
-                    scopes: &full.scopes,
-                    package_framework: &full.packages,
-                    module_index: Some(idx),
-                    package_parents: &full.packages,
-                    app_surface_consumers: &full.plugin.app_surface_consumers,
-                };
-                let att = WitnessAttachment::Symbol(sym.id);
-                let q = ReducerQuery {
-                    attachment: &att,
-                    point: None,
-                    framework: FrameworkFact::Plain,
-                    arity_hint,
-                    receiver: receiver.clone(),
-                    args: Vec::new(),
-                    context: Some(&cached_ctx),
-                };
-                match reg.query(&full.witnesses, &q) {
-                    ReducedValue::Type(t) => Some(Some(t)),
-                    ReducedValue::FactMap(_) | ReducedValue::None => Some(None),
-                }
-            };
-            // Two passes so the R4 retry can never SHADOW a later
-            // exporter's raw answer: every exporter answers from its raw
-            // bag first; only when ALL raw bags miss do the retryable ones
-            // consult the enrichment overlay (fallback-on-miss — the raw
-            // bag dead-ends when the closed file's sub return chains
-            // through ITS OWN imports; the walker pins no edge for
-            // imported calls).
-            let mut retryable: Vec<std::sync::Arc<crate::model::file_analysis::CachedModule>> =
-                Vec::new();
             for module_name in idx.find_exporters(sub_name) {
                 // Every candidate file registered under the exporter's name —
                 // a split exporter's sub lives in whichever file defines it.
                 for cached in idx.visible_def_candidates(&module_name) {
                     let full = idx.bag_present(&cached);
-                    match try_in(&full) {
-                        Some(Some(t)) => return Some(t),
-                        Some(None) => retryable.push(cached),
-                        None => {}
-                    }
-                }
-            }
-            for cached in retryable {
-                crate::util::ghost_stats::count("consult.imported_sub_return");
-                if !idx.serves_enriched() {
-                    break;
-                }
-                let full = idx.bag_present(&cached);
-                let enriched = idx.enriched_present(&cached);
-                if !std::sync::Arc::ptr_eq(&enriched, &full) {
-                    if let Some(Some(t)) = try_in(&enriched) {
-                        return Some(t);
+                    let Some(sym) = full.symbols().iter().find(|s| {
+                        s.name == sub_name
+                            && matches!(
+                                s.kind,
+                                crate::model::file_analysis::SymKind::Sub
+                                    | crate::model::file_analysis::SymKind::Method
+                            )
+                    }) else {
+                        continue;
+                    };
+                    let cached_ctx = BagContext {
+                        scopes: &full.scopes,
+                        package_framework: &full.packages,
+                        module_index: Some(idx),
+                        package_parents: &full.packages,
+                        app_surface_consumers: &full.plugin.app_surface_consumers,
+                    };
+                    let att = WitnessAttachment::Symbol(sym.id);
+                    let q = ReducerQuery {
+                        attachment: &att,
+                        point: None,
+                        framework: FrameworkFact::Plain,
+                        arity_hint,
+                        receiver: receiver.clone(),
+                        args: Vec::new(),
+                        context: Some(&cached_ctx),
+                    };
+                    match reg.query(&full.witnesses, &q) {
+                        ReducedValue::Type(t) => return Some(t),
+                        ReducedValue::FactMap(_) | ReducedValue::None => {}
                     }
                 }
             }

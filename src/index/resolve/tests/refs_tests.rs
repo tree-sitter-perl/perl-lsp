@@ -1636,15 +1636,16 @@ $b->touch();
     // should know `$b: ClassName('B')` — verify that invariant first
     // so the test fails for the right reason.
     let mut consumer_fa = parse(consumer_src);
-    consumer_fa.enrich_imported_types_with_keys(Some(&idx));
-    let b_type = consumer_fa.inferred_type_via_bag(
+    consumer_fa.condition_with(&idx);
+    let b_type = consumer_fa.inferred_type_via_bag_ctx(
         "$b",
         tree_sitter::Point { row: 4, column: 0 },
+        Some(&idx),
     );
     assert_eq!(
         b_type.as_ref().and_then(|t| t.class_name()),
         Some("B"),
-        "precondition: enrichment must type $$b as B; got {:?}",
+        "precondition: the index must type $$b as B; got {:?}",
         b_type,
     );
 
@@ -1709,7 +1710,7 @@ $b->touch();
     idx.register_workspace_module(producer_path, Arc::new(parse(producer_src)));
 
     let mut consumer_fa = parse(consumer_src);
-    consumer_fa.enrich_imported_types_with_keys(Some(&idx));
+    consumer_fa.condition_with(&idx);
 
     // Cursor on the first $b->touch() — column 4 lands on `t` of touch.
     let store = FileStore::new();
@@ -1772,17 +1773,18 @@ $x->ping();
     idx.register_workspace_module(child_path.clone(), Arc::new(parse(child_src)));
 
     let mut consumer_fa = parse(consumer_src);
-    consumer_fa.enrich_imported_types_with_keys(Some(&idx));
+    consumer_fa.condition_with(&idx);
 
     // Sanity: enrichment typed $x as C.
-    let x_type = consumer_fa.inferred_type_via_bag(
+    let x_type = consumer_fa.inferred_type_via_bag_ctx(
         "$x",
         tree_sitter::Point { row: 4, column: 0 },
+        Some(&idx),
     );
     assert_eq!(
         x_type.as_ref().and_then(|t| t.class_name()),
         Some("C"),
-        "precondition: enrichment must type $$x as C; got {:?}",
+        "precondition: the index must type $$x as C; got {:?}",
         x_type,
     );
 
@@ -1872,7 +1874,7 @@ sub touch  { 1 }
         src.push_str("}\n1;\n");
         let path = PathBuf::from(format!("/tmp/bench_consumer_{}.pm", f));
         let mut fa = parse(&src);
-        fa.enrich_imported_types_with_keys(Some(&idx));
+        fa.condition_with(&idx);
         store.insert_workspace(path, fa);
     }
 
@@ -1947,17 +1949,18 @@ $x->makeFoo()->ping();
     idx.register_workspace_module(producer_path.clone(), Arc::new(parse(producer_src)));
 
     let mut consumer_fa = parse(consumer_src);
-    consumer_fa.enrich_imported_types_with_keys(Some(&idx));
+    consumer_fa.condition_with(&idx);
 
     // Sanity: $x types as P via enrichment.
-    let x_type = consumer_fa.inferred_type_via_bag(
+    let x_type = consumer_fa.inferred_type_via_bag_ctx(
         "$x",
         tree_sitter::Point { row: 4, column: 0 },
+        Some(&idx),
     );
     assert_eq!(
         x_type.as_ref().and_then(|t| t.class_name()),
         Some("P"),
-        "precondition: enrichment must type $$x as P; got {:?}",
+        "precondition: the index must type $$x as P; got {:?}",
         x_type,
     );
 
@@ -2024,7 +2027,7 @@ $x->makeFoo()->ping();
     idx.register_workspace_module(producer_path, Arc::new(parse(producer_src)));
 
     let mut consumer_fa = parse(consumer_src);
-    consumer_fa.enrich_imported_types_with_keys(Some(&idx));
+    consumer_fa.condition_with(&idx);
 
     // Cursor on the first `->ping()` — column 18 lands on `p` of ping.
     let store = FileStore::new();

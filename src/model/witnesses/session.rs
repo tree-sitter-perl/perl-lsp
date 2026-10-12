@@ -11,7 +11,7 @@
 //! than a bag address, so it needs no pins and cannot ABA.
 //!
 //! Validity rides `CrossFileLookup::resolution_epoch()` — the same
-//! additive counter the enrichment-key memo validates against. Any index
+//! additive counter every cross-file memo validates against. Any index
 //! mutation moves it and the session drops everything; over-invalidation
 //! is the safe direction.
 //!
@@ -40,10 +40,8 @@ use std::sync::Arc;
 
 use crate::model::file_analysis::{CachedModule, CrossFileLookup};
 
-/// Which view of a candidate file the answer came from is NOT part of the
-/// key: `candidate_answer` memoizes the candidate's WHOLE contribution
-/// (raw bag, then the enriched-overlay retry), which is what the caller
-/// consumes as one unit.
+/// `candidate_answer` memoizes the candidate's WHOLE contribution, which is
+/// what the caller consumes as one unit.
 #[derive(PartialEq, Eq, Hash, Clone)]
 struct CandidateKey {
     /// Interned candidate path — a `u32` so the millions of lookups hash
@@ -91,13 +89,6 @@ struct SessionState {
     index_id: usize,
     /// `resolution_epoch()` when the memo was last known good.
     epoch: u64,
-    /// What this walk's verb READS out of enrichment.
-    ///
-    /// A server serves many verbs from one process, so the process-wide
-    /// declaration cell cannot express it — a partial profile set there would
-    /// outlive the verb that wanted it and answer the next one. The session is
-    /// the natural scope: it is opened per walk by the verb that knows.
-    profile: Option<crate::model::file_analysis::EnrichmentProfile>,
     /// The store generation of the FIRST conclusions row this walk consumed
     /// — an audit mark, not a gate.
     ///
@@ -213,7 +204,6 @@ impl ResolutionSession {
             *slot = Some(SessionState {
                 index_id: id,
                 epoch,
-                profile: None,
                 conclusion_generation: None,
                 paths: HashMap::new(),
                 memo: HashMap::new(),
@@ -254,24 +244,6 @@ impl ResolutionSession {
         SESSION.with(|s| s.borrow().as_ref().map(|st| st.stats))
     }
 
-    /// Declare what this walk's verb reads out of enrichment. Test-only:
-    /// no server verb declares a profile yet (every server walk enriches
-    /// `full()`); the pins hold the mechanism until one does.
-    #[cfg(test)]
-    pub fn declare_profile(profile: crate::model::file_analysis::EnrichmentProfile) {
-        SESSION.with(|s| {
-            if let Some(st) = s.borrow_mut().as_mut() {
-                st.profile = Some(profile);
-            }
-        });
-    }
-
-    /// The profile the open walk declared, if any. `None` means no walk, or a
-    /// walk that declared nothing — both resolve to the process cell.
-    pub fn declared_profile() -> Option<crate::model::file_analysis::EnrichmentProfile> {
-        SESSION.with(|s| s.borrow().as_ref().and_then(|st| st.profile))
-    }
-
     /// Record that this walk read a conclusions row published at
     /// `generation`, and count it when a walk spans more than one.
     ///
@@ -292,25 +264,6 @@ impl ResolutionSession {
         });
     }
 
-    /// Declare that this walk answered with less than it could have. Any
-    /// degradation a consumer cannot otherwise see routes here — the
-    /// budget, and the enrichment depth cap, whose declines silently serve
-    /// a raw bag where an enriched one was due. A degradation nobody can
-    /// observe is the failure mode this codebase keeps finding: not a
-    /// crash, a quietly smaller answer.
-    pub fn mark_degraded(reason: &str) {
-        SESSION.with(|s| {
-            if let Some(st) = s.borrow_mut().as_mut() {
-                if !st.exhausted {
-                    st.exhausted = true;
-                    eprintln!(
-                        "perl-lsp: resolution degraded ({reason}) — this answer is an \
-                         UNDER-APPROXIMATION, not a complete one."
-                    );
-                }
-            }
-        });
-    }
 }
 
 impl Drop for ResolutionSession {
@@ -337,7 +290,7 @@ fn with_session<R>(
         let mut slot = s.borrow_mut();
         let Some(st) = slot.as_mut() else {
             // No walk open on this thread — the consult belongs to a
-            // background cascade (enrichment, the open-doc heal), not to a
+            // background cascade (a build, a diagnostics refresh), not to a
             // verb. Counted because "the memo did not apply" is the first
             // thing to check when a walk stays slow.
             crate::util::ghost_stats::count("session.absent");

@@ -72,7 +72,7 @@ $d->ping;
     idx.register_workspace_module(child_path.clone(), Arc::new(parse(child_src)));
 
     let mut consumer_fa = parse(consumer_src);
-    consumer_fa.enrich_imported_types_with_keys(Some(&idx));
+    consumer_fa.condition_with(&idx);
 
     let store = FileStore::new();
     store.insert_workspace(base_path.clone(), parse(base_src));
@@ -215,7 +215,7 @@ $g->hello;
     idx.register_workspace_module(child_path.clone(), Arc::new(parse(child_src)));
 
     let mut consumer_fa = parse(consumer_src);
-    consumer_fa.enrich_imported_types_with_keys(Some(&idx));
+    consumer_fa.condition_with(&idx);
 
     let store = FileStore::new();
     store.insert_workspace(base_path.clone(), parse(base_src));
@@ -298,7 +298,7 @@ fn rename_from_child_call_site_includes_inherited_base_declaration() {
     idx.register_workspace_module(child_path.clone(), Arc::new(parse(child_src)));
 
     let mut script_fa = parse(script_src);
-    script_fa.enrich_imported_types_with_keys(Some(&idx));
+    script_fa.condition_with(&idx);
 
     // Resolve the target the way the rename handler does: cursor on the
     // `process` token of `$worker->process()`, mapped via from_rename_kind.

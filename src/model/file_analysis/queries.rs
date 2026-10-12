@@ -13,6 +13,7 @@ impl FileAnalysis {
     /// `Variable` symbol within the scope's span. The anchor every fact
     /// about a parameter lands at (a declaration's write marker retires
     /// only what lies strictly before it); `None` when nothing declares it.
+    #[cfg(test)]
     pub fn binding_site_of(&self, var: &str, scope: ScopeId) -> Option<Point> {
         let owner = self.scopes.get(scope.0 as usize)?.owner?;
         match &self.symbol(owner).detail {
@@ -322,6 +323,13 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
         let scope = self.scope_at(point)?;
+        // A plugin's loader-config parameter takes the shape its loaders
+        // pass. The callers live in other files, so this is a read of the
+        // index at use time; the declared shape dominates whatever rep the
+        // body's own uses observed.
+        if let Some(t) = self.loader_config_type_for(var_name, scope, module_index) {
+            return Some(t);
+        }
         if let Some(t) = crate::model::witnesses::query_variable_type(
             &self.witnesses,
             &self.bag_context(module_index),
@@ -335,6 +343,81 @@ impl FileAnalysis {
         // cross-file ancestry, so they resolve here (index in hand), not in
         // the bag the index-free builder seeded.
         self.gated_param_type_for(var_name, scope, point, module_index)
+    }
+
+    /// The config value plugin loads pass to the loader-config parameter
+    /// `var` (a `LoaderConfigParam` marker on `scope`'s chain), joined over
+    /// every load in the index naming this file's package (FQ or tail).
+    /// Loads that agree give their shape; keyed shapes that disagree give the
+    /// OPEN union of their keys (a key any loader passes may arrive);
+    /// anything else declines. `None` without an index, without a marker,
+    /// when the marker's package no longer reaches its role, or when no load
+    /// names the package.
+    fn loader_config_type_for(
+        &self,
+        var: &str,
+        scope: ScopeId,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<InferredType> {
+        if self.loader_config_params.is_empty() {
+            return None;
+        }
+        let idx = module_index?;
+        let chain = self.scope_chain(scope);
+        let m = self
+            .loader_config_params
+            .iter()
+            .find(|m| m.variable == var && chain.contains(&m.scope))?;
+        let pkg = self.scopes.get(m.scope.0 as usize).and_then(|sc| sc.package.clone())?;
+        if !self.class_isa(&pkg, &m.in_role, module_index) {
+            return None;
+        }
+        let my_packages: Vec<&str> = self
+            .symbols
+            .iter()
+            .filter(|s| matches!(s.kind, SymKind::Package | SymKind::Class))
+            .map(|s| s.name.as_str())
+            .collect();
+        let matches_me = |load_name: &str| {
+            my_packages.iter().any(|p| {
+                *p == load_name
+                    || crate::model::file_analysis::split_qualified(
+                        p,
+                        &crate::model::conventions::PERL_SPELLINGS,
+                    )
+                    .1 == load_name
+            })
+        };
+        let mut shapes: Vec<InferredType> = Vec::new();
+        idx.for_each_loader_shape(&mut |load_name, t| {
+            if matches_me(load_name) {
+                shapes.push(t.clone());
+            }
+        });
+        if shapes.is_empty() {
+            return None;
+        }
+        if shapes.windows(2).all(|w| w[0] == w[1]) {
+            return shapes.pop();
+        }
+        let mut keys: Vec<(String, Option<Box<InferredType>>)> = Vec::new();
+        for sh in &shapes {
+            let InferredType::HashWithKeys { keys: ks, .. } = sh else { return None };
+            for (k, v) in ks.iter() {
+                match keys.iter_mut().find(|(ek, _)| ek == k) {
+                    None => keys.push((k.clone(), v.clone())),
+                    Some((_, ev)) => {
+                        if *ev != *v {
+                            *ev = None;
+                        }
+                    }
+                }
+            }
+        }
+        Some(InferredType::HashWithKeys {
+            keys: crate::model::file_analysis::SharedKeys::new(keys),
+            open: true,
+        })
     }
 
     /// Resolve a `param_types()` role-contract TC for `var` at `point`: find a
@@ -913,6 +996,7 @@ impl FileAnalysis {
     /// only). Routes through the bag — `Symbol(sid)` writeback witness
     /// is the post-field-deletion authority. Returns owned because
     /// the value is synthesized by the reducer, not stored.
+    #[cfg(test)]
     pub fn sub_return_type_local(&self, name: &str) -> Option<InferredType> {
         for sym in &self.symbols {
             if sym.name == name && matches!(sym.kind, SymKind::Sub | SymKind::Method) {

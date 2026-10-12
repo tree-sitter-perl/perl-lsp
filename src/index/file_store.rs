@@ -144,47 +144,32 @@ impl FileStore {
         self.open.get_mut(url)
     }
 
-    /// THE writer of open-doc cross-file enrichment: derives the enriched
-    /// analysis as a clone OFF the store lock, swaps it in via a short
-    /// ptr-guarded write, and returns it for the caller to read (diagnostics)
-    /// without re-locking. Perl-only — pack analyses have no import
-    /// enrichment and are returned untouched. Idempotent through
-    /// `enrich_imported_types_with_keys`'s base_*_count truncation; a
-    /// concurrent rebuild wins the swap (the ptr guard drops this derivation)
-    /// and the next publish re-derives against the newer build. The doc's
-    /// `baseline_surface` is untouched by construction — freshness records
-    /// stay enrichment-invariant no matter when this runs.
-    pub fn enrich_open(
+    /// THE writer of an open doc's conditioned view: re-derives, from the
+    /// doc's pristine build, the copy with the deferred plugin emissions whose
+    /// gate holds through the index right now, swaps it in via a short
+    /// ptr-guarded write (a concurrent rebuild wins), and returns the view the
+    /// caller should read. Every other cross-file fact is answered at use time
+    /// through the index, so this is the whole of what an open doc owes the
+    /// index after a build.
+    pub fn condition_open(
         &self,
         url: &Url,
         idx: &dyn crate::model::file_analysis::CrossFileLookup,
     ) -> Option<Arc<FileAnalysis>> {
-        // The heal runs the SAME cross-file cascade a verb does, on a
-        // background thread, and it is the other half of what made
-        // `references` never return at 138k files. It is a walk: give it
-        // the memo and the budget (`docs/adr/resolution-session.md`).
-        let _session = crate::model::witnesses::ResolutionSession::enter(Some(idx));
-        let (base, language) = {
+        let (built, current) = {
             let doc = self.open.get(url)?;
-            (Arc::clone(&doc.analysis), doc.language)
+            (Arc::clone(&doc.built), Arc::clone(&doc.analysis))
         };
-        // Enrichment is the hub lane; other languages answer as-built.
-        if !crate::build::language_driver::LanguageRegistry::caps(language).hub_enrichment {
-            return Some(base);
-        }
-        crate::util::ghost_stats::count("enrich_open.perl");
-        let mut fa = (*base).clone();
-        fa.enrich_imported_types_with_keys_for(
-            Some(idx),
-            url.to_file_path().ok().as_deref(),
-        );
-        let enriched = Arc::new(fa);
+        let view = match built.with_holding_gates(idx) {
+            Some(applied) => Arc::new(applied),
+            None => Arc::clone(&built),
+        };
         if let Some(mut doc) = self.open.get_mut(url) {
-            if Arc::ptr_eq(&doc.analysis, &base) {
-                doc.analysis = Arc::clone(&enriched);
+            if Arc::ptr_eq(&doc.analysis, &current) {
+                doc.analysis = Arc::clone(&view);
             }
         }
-        Some(enriched)
+        Some(view)
     }
 
     // ---- Workspace population ----

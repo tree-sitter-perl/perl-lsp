@@ -153,8 +153,6 @@ impl FileAnalysis {
             bag_evicted: _bag_evicted,
             degraded: _degraded,
             use_map_pins: _use_map_pins, // sessional memo of a projection over the tables above
-            base_witness_count: _base_witness_count,
-            stamped_at: _stamped_at, // sessional re-stamp bookkeeping; a consumer's view of this file does not change when we last stamped it
 
             // ---- Derived indices, rebuilt from the tables above.
             scope_starts: _scope_starts,

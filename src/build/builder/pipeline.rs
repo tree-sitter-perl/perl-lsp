@@ -322,6 +322,8 @@ fn build_once(
         type_provenance: std::collections::HashMap::new(),
         bag: crate::model::witnesses::WitnessBag::new(),
         unresolved_expr_nodes: Vec::new(),
+        symbol_table_final: false,
+        pending_call_operands: std::collections::HashMap::new(),
         package_framework: std::collections::HashMap::new(),
         blessing_packages: std::collections::HashSet::new(),
         scope_stack: Vec::new(),

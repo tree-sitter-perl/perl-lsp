@@ -164,17 +164,6 @@ impl WitnessBag {
         }
     }
 
-    /// Drop every witness past `baseline` and rebuild the index. Lets
-    /// enrichment revert post-build additions before re-deriving them,
-    /// keeping the bag idempotent across repeat enrichment calls.
-    pub fn truncate(&mut self, baseline: usize) {
-        if baseline >= self.witnesses.len() {
-            return;
-        }
-        self.witnesses.truncate(baseline);
-        self.rebuild_index();
-    }
-
     /// Does an explicitly DECLARED fact (`WitnessSource::Annotation`) sit on
     /// `att`? The inlay-hint suppression for languages with explicit types
     /// asks this: `int c` needs no `: int` hint, `auto x` does.

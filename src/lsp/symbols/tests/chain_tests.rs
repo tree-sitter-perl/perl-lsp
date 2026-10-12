@@ -214,7 +214,7 @@ fn test_demo_file_chain_to_resolves_on_line_71() {
     // `Variable → Edge(PackageSymbol)` witness the registry chases with
     // the index. Without this, `FileStore::enrich_open` hasn't fired
     // yet and the whole chain is un-typed.
-    analysis.enrich_imported_types_with_keys(Some(&idx));
+    analysis.condition_with(&idx);
 
     // Find line 71 ($r->get('/users')->to('Users#list');).
     let (line_idx, chain_line) = demo_source
@@ -613,7 +613,7 @@ fn test_demo_chain_empirical_truth_table() {
         .unwrap();
     let tree = parser.parse(&demo_source, None).unwrap();
     let mut analysis = crate::build::builder::build(&tree, demo_source.as_bytes());
-    analysis.enrich_imported_types_with_keys(Some(&idx));
+    analysis.condition_with(&idx);
 
     let (line_idx, chain_line) = demo_source
         .lines()

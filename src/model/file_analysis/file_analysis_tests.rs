@@ -551,17 +551,16 @@ fn test_phase5_dynamic_method_call_via_constant_folding() {
 
 /// Cross-file consumer-side resolution (the phase-5 follow-up, unified).
 /// Consumer has `my $c = Imported::get_config(); $c->{host}`. At build
-/// time we don't know get_config returns HashRef. Enrichment stamps the
-/// access owner with the PRODUCER's package — no consumer-side synthetic
-/// stub is materialized; the producer's real HashKeyDef is the single
-/// source. rename / references / goto-def all route cross-file through
+/// time we don't know get_config returns HashRef; with the index the
+/// access's owner is the PRODUCER's sub — no consumer-side synthetic stub
+/// is materialized; the producer's real HashKeyDef is the single source. rename / references / goto-def all route cross-file through
 /// that owner edge.
 #[test]
-fn test_phase5_consumer_side_cross_file_resolves_via_enrichment() {
+fn test_phase5_consumer_side_cross_file_resolves_at_query_time() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
 
-    let mut fa = build_fa_from_source(
+    let fa = build_fa_from_source(
         r#"
             use TestExporter qw(get_config);
             my $c = get_config();
@@ -569,7 +568,7 @@ fn test_phase5_consumer_side_cross_file_resolves_via_enrichment() {
         "#,
     );
 
-    // Sanity: before enrichment the access has no link (there's no
+    // Sanity: without the index the access has no link (there's no
     // local HashKeyDef for "host" and no local get_config sub).
     let hka_before = fa
         .refs
@@ -578,13 +577,11 @@ fn test_phase5_consumer_side_cross_file_resolves_via_enrichment() {
         .expect("HashKeyAccess host");
     assert!(
         hka_before.resolved_symbol().is_none(),
-        "pre-enrichment, access should not be resolved"
+        "index-less, the access is not resolved"
     );
 
     // Stub `TestExporter` with `get_config` returning a hashref whose
     // keys (host, port, name) the builder synthesizes as HashKeyDefs.
-    // Enrichment reads these via `cached.sub_info("get_config").hash_keys()`
-    // and injects synthetic local HashKeyDefs against the consumer.
     let test_exporter_pm = r#"
 package TestExporter;
 use Exporter 'import';
@@ -597,7 +594,6 @@ sub get_config { return { host => 'h', port => 1, name => 'n' }; }
         std::path::PathBuf::from("/tmp/TestExporter.pm"),
         Arc::new(build_fa_from_source(test_exporter_pm)),
     );
-    fa.enrich_imported_types_with_keys(Some(&idx));
 
     // Unified model: no consumer-side synthetic HashKeyDef is materialized —
     // the producer's real def is the single source.
@@ -606,9 +602,9 @@ sub get_config { return { host => 'h', port => 1, name => 'n' }; }
         "no consumer-side synthetic HashKeyDef should be injected (producer def is the source)",
     );
 
-    // Enrichment stamps the access owner with the producer's package, so the
-    // `$c->{host}` access reaches the producer's `host` def cross-file. This
-    // owner edge is what rename / references / goto-def walk.
+    // With the index in hand, the access's owner is the producer's sub, so
+    // `$c->{host}` reaches the producer's `host` def cross-file. This owner
+    // edge is what rename / references / goto-def walk.
     let hka = fa
         .refs
         .iter()
@@ -616,12 +612,12 @@ sub get_config { return { host => 'h', port => 1, name => 'n' }; }
         .expect("HashKeyAccess host");
     assert!(
         matches!(
-            hka.hash_key_owner(),
+            fa.hash_key_owner_via(hka, Some(&idx)),
             Some(HashKeyOwner::Sub { package: Some(p), name })
                 if p == "TestExporter" && name == "get_config"
         ),
         "access owner must carry the producer package (Sub{{Some(TestExporter), get_config}}), got {:?}",
-        hka.hash_key_owner(),
+        fa.hash_key_owner_via(hka, Some(&idx)),
     );
 }
 
@@ -664,83 +660,6 @@ sub get_config { return { host => 'h', port => 1 }; }
         keys.contains("host") && keys.contains("port"),
         "cross-file completion should offer imported keys host+port, got {:?}",
         keys,
-    );
-}
-
-/// Enrichment's imported-name scan is NEED-driven (call-bindings-keyed):
-/// an imported sub the file never calls contributes nothing to enrichment
-/// — and must not COST anything either. This pins both halves against a
-/// producer exporting a called sub and a never-called one:
-/// the called binding still gets its TC + owner stamp and its hash-key
-/// completion, while the never-called import leaves zero artifacts (no TC,
-/// no owner stamp — there is no receiver variable a completion or rename
-/// could even start from, so nothing user-visible can depend on scanning it).
-#[test]
-fn enrichment_scan_is_call_binding_keyed_uncalled_imports_contribute_nothing() {
-    use crate::index::module_index::ModuleIndex;
-    use std::sync::Arc;
-
-    let producer = r#"
-package Cfg;
-use Exporter 'import';
-our @EXPORT = ('get_config', 'get_other');
-sub get_config { return { host => 'h', port => 1 }; }
-sub get_other  { return { secret => 's', token => 't' }; }
-1;
-"#;
-    let idx = ModuleIndex::new_for_test();
-    idx.register_workspace_module(
-        std::path::PathBuf::from("/tmp/Cfg.pm"),
-        Arc::new(build_fa_from_source(producer)),
-    );
-
-    let mut fa = build_fa_from_source(
-        "use Cfg;\nmy $c = get_config();\nmy $h = $c->{host};\nmy $x = $c->{};\n",
-    );
-    fa.enrich_imported_types_with_keys(Some(&idx));
-
-    // The CALLED import still enriches: owner stamp on the access...
-    let hka = fa
-        .refs
-        .iter()
-        .find(|r| matches!(r.kind, RefKind::HashKeyAccess { .. }) && r.target_name == "host")
-        .expect("HashKeyAccess host");
-    assert!(
-        matches!(
-            hka.hash_key_owner(),
-            Some(HashKeyOwner::Sub { package: Some(p), name })
-                if p == "Cfg" && name == "get_config"
-        ),
-        "called import keeps its enrichment owner stamp, got {:?}",
-        hka.hash_key_owner(),
-    );
-    // ...and hash-key completion for its receiver still answers cross-file.
-    let keys: std::collections::HashSet<String> = fa
-        .complete_hash_keys("$c", Point::new(3, 13), Some(&idx))
-        .into_iter()
-        .map(|c| c.label)
-        .collect();
-    assert!(
-        keys.contains("host") && keys.contains("port"),
-        "called import keeps cross-file hash-key completion, got {:?}",
-        keys,
-    );
-
-    // The NEVER-called import contributes nothing — exactly as before the
-    // narrowing (its map entries were dead weight: every consumer of the
-    // scan's output is keyed by `call_bindings`).
-    assert!(
-        !fa.symbols.iter().any(|s| s.name == "secret" || s.name == "token"),
-        "no artifacts for an imported sub the file never calls",
-    );
-    assert!(
-        !fa.refs.iter().any(|r| {
-            matches!(
-                r.hash_key_owner(),
-                Some(HashKeyOwner::Sub { name, .. }) if name == "get_other"
-            )
-        }),
-        "no owner stamps referencing the never-called import",
     );
 }
 
@@ -2316,14 +2235,12 @@ fn loader_config_types_register_conf_cross_file() {
     let plugin_src = "package Mojolicious::Plugin::GenericCoApp;\nuse Mojo::Base 'Mojolicious::Plugin';\n\nsub register {\n    my ($self, $app, $conf) = @_;\n}\n1;\n";
     let mut parser = crate::build::builder::create_parser();
     let tree = parser.parse(plugin_src, None).unwrap();
-    let mut fa = crate::build::builder::build(&tree, plugin_src.as_bytes());
+    let fa = crate::build::builder::build(&tree, plugin_src.as_bytes());
     assert!(
         !fa.loader_config_params.is_empty(),
         "the param_types from_loader_config rule should mint a marker",
     );
-    fa.enrich_imported_types_with_keys(Some(&idx));
-
-    let t = fa.inferred_type_via_bag("$conf", Point { row: 5, column: 0 });
+    let t = fa.inferred_type_via_bag_ctx("$conf", Point { row: 5, column: 0 }, Some(&idx));
     match t {
         Some(InferredType::HashWithKeys { keys, .. }) => {
             let mut names: Vec<&str> = keys.iter().map(|(k, _)| k.as_str()).collect();
@@ -2640,7 +2557,7 @@ fn probe_copy_cost_and_delta_size() {
         let before = a.heap_estimate().total();
         let mut c = a.clone();
         let (s0, r0, w0) = (c.symbols().len(), c.refs().len(), c.witnesses.len());
-        c.enrich_imported_types_with_keys(Some(&idx));
+        c.condition_with(&idx);
         base_total += before;
         delta_total += c.heap_estimate().total().saturating_sub(before);
         let (dsi, dri, dwi) = (
@@ -2665,7 +2582,7 @@ fn probe_copy_cost_and_delta_size() {
     let copy_ms = t.elapsed().as_secs_f64() * 1000.0;
     let t = Instant::now();
     for mut c in copies {
-        c.enrich_imported_types_with_keys(Some(&idx));
+        c.condition_with(&idx);
         std::hint::black_box(&c);
     }
     let enrich_ms = t.elapsed().as_secs_f64() * 1000.0;
@@ -2684,7 +2601,6 @@ fn probe_copy_cost_and_delta_size() {
     let t = Instant::now();
     for a in &analyses {
         let mut c = a.clone();
-        c.enrich_imported_types_with_keys(None);
         std::hint::black_box(&c);
     }
     let noidx_ms = t.elapsed().as_secs_f64() * 1000.0;
@@ -2816,71 +2732,6 @@ fn deep_isa_chain_within_visit_budget_still_resolves() {
     assert!(
         crate::model::file_analysis::class_isa("C0", "C149", &parents, None),
         "depth 149 > the graph walker's 21, visits 150 < the isa budget 200: must hold"
-    );
-}
-
-/// The re-stamp gate, honoured end to end — the skip actually happens, and the
-/// next wave un-skips it.
-///
-/// `restamp_gate_tests` covers the decision; this covers enrichment obeying it,
-/// which is the half that can rot silently. A gate that always answered "skip"
-/// and a gate that was never consulted look identical from the decision tests,
-/// and both look identical from every other suite, because a `MethodTarget`
-/// that is never re-derived simply keeps answering whatever it last held.
-///
-/// The observable is a poisoned binding: a re-stamp overwrites it, a skip
-/// leaves it. Nothing else in enrichment writes a baseline ref's binding, so
-/// the sentinel surviving means exactly one thing.
-#[test]
-fn a_marked_file_re_stamps_and_an_unmarked_one_skips() {
-    use crate::index::module_index::ModuleIndex;
-    use crate::model::file_analysis::{MethodTarget, RefBinding};
-
-    let path = std::path::PathBuf::from("/tmp/RestampGate.pm");
-    let mut fa = build_fa_from_source(
-        "package RestampGate;\nsub go { my $self = shift; return $self->hit }\nsub hit { return 1 }\n1;\n",
-    );
-    let idx = ModuleIndex::new_for_test();
-
-    let mc = |fa: &FileAnalysis| {
-        fa.refs
-            .iter()
-            .position(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "hit")
-            .expect("the `$self->hit` MethodCall ref")
-    };
-    let i = mc(&fa);
-
-    // A wave marks the file, so the next enrichment is owed a re-stamp.
-    let epoch = idx.mark_provider_diff([path.clone()]);
-    fa.enrich_imported_types_with_keys_for(Some(&idx), Some(&path));
-    assert_eq!(
-        fa.stamped_at,
-        Some(epoch),
-        "the stamp records the clock as it read it"
-    );
-    let stamped = fa.refs[i].method_target().cloned();
-    assert!(stamped.is_some(), "precondition: the stamp resolves this call");
-
-    // Poison it. With no NEW mark, the file's stamp is at or past the only
-    // mark there is, so the gate must skip and the poison must survive.
-    fa.refs[i].binding = Some(RefBinding::Method(MethodTarget::CrossFile {
-        invocant_class: "SENTINEL".into(),
-    }));
-    fa.enrich_imported_types_with_keys_for(Some(&idx), Some(&path));
-    assert_eq!(
-        fa.refs[i].method_target().map(|t| t.invocant_class()),
-        Some("SENTINEL"),
-        "no provider moved since the last stamp, so the re-stamp is re-deriving \
-         what it already froze — the gate must skip it"
-    );
-
-    // A second wave re-opens the debt; the poison is overwritten.
-    idx.mark_provider_diff([path.clone()]);
-    fa.enrich_imported_types_with_keys_for(Some(&idx), Some(&path));
-    assert_eq!(
-        fa.refs[i].method_target().cloned(),
-        stamped,
-        "a provider moved, so the re-stamp runs and re-derives the real target"
     );
 }
 

@@ -688,10 +688,7 @@ impl<'a> CandidateSet<'a> {
         if let Some(r) = analysis.ref_at(point) {
             if let RefKind::HashKeyAccess { .. } = r.kind {
                 use crate::model::file_analysis::HashKeyOwner;
-                let owner = match r.hash_key_owner() {
-                    Some(o) => Some(o.clone()),
-                    None => analysis.deferred_hash_key_owner(r, Some(idx)),
-                };
+                let owner = analysis.hash_key_owner_via(r, Some(idx));
                 let class = match &owner {
                     Some(HashKeyOwner::Sub { package: Some(c), .. }) => Some(c.clone()),
                     Some(HashKeyOwner::Class(c)) => Some(c.clone()),

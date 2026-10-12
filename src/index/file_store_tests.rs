@@ -33,13 +33,12 @@ fn parse(src: &str) -> FileAnalysis {
     crate::build::builder::build(&tree, src.as_bytes())
 }
 
-/// `enrich_open` is THE open-doc enrichment writer: it derives the
-/// enriched analysis as a fresh Arc, swaps it in, returns it — and the
-/// build-time `baseline_surface` stays untouched, so freshness records
-/// are enrichment-invariant by construction (no record-before-publish
-/// ordering contract).
+/// With no plugin gate holding, `condition_open` serves the pristine build
+/// itself — no copy — and a cross-file type is answered at query time
+/// through the index, never stored. The build-time `baseline_surface` is
+/// untouched, so freshness records stay conditioning-invariant.
 #[test]
-fn enrich_open_swaps_derived_copy_and_keeps_baseline_surface() {
+fn condition_open_serves_the_build_and_types_cross_file_at_query_time() {
     use crate::index::module_index::ModuleIndex;
 
     let producer_src = r#"
@@ -58,12 +57,12 @@ my $b = make_b();
 "#;
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(
-        PathBuf::from("/tmp/enrich_open_producer.pm"),
+        PathBuf::from("/tmp/condition_open_producer.pm"),
         Arc::new(parse(producer_src)),
     );
 
     let store = FileStore::new();
-    let url = Url::parse("file:///tmp/enrich_open_consumer.pm").unwrap();
+    let url = Url::parse("file:///tmp/condition_open_consumer.pm").unwrap();
     assert!(store.open(url.clone(), consumer_src.to_string()));
     let base = Arc::clone(&store.get_open(&url).unwrap().analysis);
     let baseline = store
@@ -78,43 +77,35 @@ my $b = make_b();
         "baseline is the pristine build's projection"
     );
 
-    let enriched = store.enrich_open(&url, &idx).expect("doc is open");
-    assert!(
-        !Arc::ptr_eq(&enriched, &base),
-        "enrichment derives a fresh artifact, never mutates the stored one"
-    );
-    assert!(
-        Arc::ptr_eq(&store.get_open(&url).unwrap().analysis, &enriched),
-        "the derived copy is swapped in for query handlers"
-    );
-    let b_type = enriched.inferred_type_via_bag(
-        "$b",
-        tree_sitter::Point { row: 2, column: 0 },
-    );
+    let view = store.condition_open(&url, &idx).expect("doc is open");
+    assert!(Arc::ptr_eq(&view, &base), "no gate holds, so there is nothing to derive");
+    let pt = tree_sitter::Point { row: 2, column: 0 };
+    assert_eq!(view.inferred_type_via_bag("$b", pt), None, "nothing cross-file is stored");
+    let b_type = view.inferred_type_via_bag_ctx("$b", pt, Some(&idx));
     assert_eq!(
         b_type.as_ref().and_then(|t| t.class_name()),
         Some("B"),
-        "cross-file enrichment landed in the derived copy; got {:?}",
+        "the imported return resolves through the index; got {:?}",
         b_type,
     );
     assert_eq!(
         store.get_open(&url).unwrap().baseline_surface.as_ref(),
         Some(&baseline),
-        "the freshness source is untouched by enrichment"
+        "the freshness source is untouched by conditioning"
     );
 }
 
 #[cfg(feature = "cpp")]
 #[test]
-fn enrich_open_leaves_pack_docs_untouched() {
+fn condition_open_leaves_pack_docs_untouched() {
     use crate::index::module_index::ModuleIndex;
     let store = FileStore::new();
-    let url = Url::parse("file:///tmp/enrich_open_pack.cpp").unwrap();
+    let url = Url::parse("file:///tmp/condition_open_pack.cpp").unwrap();
     assert!(store.open(url.clone(), "class Box { public: int width; };\n".to_string()));
     let base = Arc::clone(&store.get_open(&url).unwrap().analysis);
     let idx = ModuleIndex::new_for_test();
-    let out = store.enrich_open(&url, &idx).expect("doc is open");
-    assert!(Arc::ptr_eq(&out, &base), "pack analyses have no import enrichment");
+    let out = store.condition_open(&url, &idx).expect("doc is open");
+    assert!(Arc::ptr_eq(&out, &base), "pack analyses carry no plugin gates");
     assert!(store.get_open(&url).unwrap().baseline_surface.is_none());
 }
 

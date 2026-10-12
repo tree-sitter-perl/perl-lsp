@@ -22,14 +22,6 @@ pub(crate) fn cli_check(args: &[String]) {
     }
     timings::enable_from_env();
 
-    // Declared BEFORE startup, because startup enriches: the profile has to be
-    // in force by the time the first analysis is enriched, not by the time the
-    // first diagnostic is asked for.
-    //
-    // Sound because this is a one-shot CLI process serving exactly one verb —
-    // see `declare_enrichment_profile`. A server verb must not do this.
-    file_analysis::declare_enrichment_profile(file_analysis::EnrichmentProfile::diagnostics());
-
     // `--check` reports diagnostics for pack files too (the pack-index
     // sweep below), so it needs every family.
     let (ws, module_index) = cli_full_startup(root, language_driver::LanguageScope::All);
@@ -49,7 +41,7 @@ pub(crate) fn cli_check(args: &[String]) {
     if json_mode {
         println!("[");
     }
-    for_each_enriched_diagnostic(&ws, &module_index, options, &mut |file, d| {
+    for_each_tree_diagnostic(&ws, &module_index, options, &mut |file, d| {
         let sev = match d.severity {
             Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::ERROR => "error",
             Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::WARNING => "warning",
@@ -260,9 +252,9 @@ pub(crate) fn cli_semantic_tokens(root: &str, file: &str) {
     print_run_one(&ws, &idx, &req, CoordFmt::EditorOneBasedChar);
 }
 
-/// Build an open `Document` (tree + analysis + stable_outline) and enrich it
-/// against the index exactly like the server's open-file path. Shared by the
-/// interactive CLI modes.
+/// Build an open `Document` (tree + analysis + stable_outline) and condition
+/// it against the index exactly like the server's open-file path. Shared by
+/// the interactive CLI modes.
 fn cli_open_document(file: &str, idx: &module_index::ModuleIndex) -> document::Document {
     let text = std::fs::read_to_string(file).unwrap_or_else(|e| {
         eprintln!("Cannot read {}: {}", file, e);
@@ -285,8 +277,19 @@ fn cli_open_document(file: &str, idx: &module_index::ModuleIndex) -> document::D
         eprintln!("Parse failed: {}", file);
         super::exit_with(1, "exit");
     }));
-    tphase!("enrich_imported_types", std::sync::Arc::make_mut(&mut doc.analysis).enrich_imported_types_with_keys(Some(idx)));
+    if let Some(applied) = tphase!("condition", doc.built.with_holding_gates(idx)) {
+        doc.analysis = std::sync::Arc::new(applied);
+    }
     doc
+}
+
+/// Apply the deferred plugin emissions whose gate holds through `idx` — the
+/// whole of what a CLI-built origin owes the index after its build (the
+/// server's `FileStore::condition_open`).
+fn condition(analysis: &mut file_analysis::FileAnalysis, idx: &module_index::ModuleIndex) {
+    if let Some(applied) = analysis.with_holding_gates(idx) {
+        *analysis = applied;
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -399,7 +402,7 @@ fn run_one(
         "definition" => {
             let (source, _tree, mut analysis) = parse_file(file);
             resolve_imports_blocking(idx, &analysis);
-            analysis.enrich_imported_types_with_keys(Some(idx));
+            condition(&mut analysis, idx);
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
             let uri = tower_lsp::lsp_types::Url::from_file_path(&abs)
                 .unwrap_or_else(|_| tower_lsp::lsp_types::Url::parse("file:///unknown").unwrap());
@@ -459,7 +462,7 @@ fn run_one(
         "references" => {
             let (s, _t, mut analysis) = parse_file(file);
             resolve_imports_blocking(idx, &analysis);
-            analysis.enrich_imported_types_with_keys(Some(idx));
+            condition(&mut analysis, idx);
             let file_path = std::path::Path::new(file).canonicalize()
                 .unwrap_or_else(|_| std::path::PathBuf::from(file));
             let mut sources = SourceCache::new(fmt);
@@ -514,7 +517,7 @@ fn run_one(
         "implementations" => {
             let (s, _t, mut analysis) = parse_file(file);
             resolve_imports_blocking(idx, &analysis);
-            analysis.enrich_imported_types_with_keys(Some(idx));
+            condition(&mut analysis, idx);
             let file_path = std::path::Path::new(file).canonicalize()
                 .unwrap_or_else(|_| std::path::PathBuf::from(file));
             let mut sources = SourceCache::new(fmt);
@@ -546,7 +549,7 @@ fn run_one(
         "type-definition" => {
             let (s, _t, mut analysis) = parse_file(file);
             resolve_imports_blocking(idx, &analysis);
-            analysis.enrich_imported_types_with_keys(Some(idx));
+            condition(&mut analysis, idx);
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
             // Same store routing + staging as goto-def; the projection is the
             // type axis of the same set (value type → dispatch class → def).
@@ -577,7 +580,7 @@ fn run_one(
         "type-hierarchy" | "call-hierarchy" => {
             let (s, _t, mut analysis) = parse_file(file);
             resolve_imports_blocking(idx, &analysis);
-            analysis.enrich_imported_types_with_keys(Some(idx));
+            condition(&mut analysis, idx);
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
             let reg = language_driver::LanguageRegistry::with_enabled();
             let lang_id = reg.driver_or_fallback(std::path::Path::new(file), &s).id();
@@ -684,7 +687,7 @@ fn run_one(
                     .ok_or_else(|| format!("No hover info at {}:{}", req.line, req.col));
             }
             resolve_imports_blocking(idx, &analysis);
-            analysis.enrich_imported_types_with_keys(Some(idx));
+            condition(&mut analysis, idx);
             // Perl routes through the SAME renderer the LSP handler calls, so
             // the CLI cannot answer a different verb than the server: the
             // ladder's import/qualified signature lookups and the projection
@@ -1091,7 +1094,7 @@ fn run_rename(
     let file_path = std::path::Path::new(file).canonicalize()
         .unwrap_or_else(|_| std::path::PathBuf::from(file));
     let (s, _t, mut analysis) = parse_file(file);
-    analysis.enrich_imported_types_with_keys(Some(idx));
+    condition(&mut analysis, idx);
     // Same shape as the LSP handler: stage the origin, construct the set
     // once, project the rename — the per-arm policy (cross-file vs group vs
     // single-file, rewritability, the pack full-or-refuse) lives on the set.
@@ -1122,30 +1125,23 @@ fn run_rename(
     Ok(serde_json::to_string_pretty(&serde_json::json!(all_edits)).unwrap())
 }
 
-/// Whole-tree diagnostics with enrichment parity: each workspace entry
-/// goes through the hub's enrichment overlay (`enriched_snapshot` — a
-/// derived, fingerprint-keyed copy; the same pass `publish_diagnostics`
-/// runs on open docs), so cross-file-typed shapes hint here too. A file
-/// whose snapshot fails degrades to its unenriched whole view rather
-/// than vanishing.
+/// Whole-tree diagnostics: each workspace entry is read through the index's
+/// whole view, and every cross-file fact is answered at use time exactly as
+/// for an open doc in the server.
 /// Collected form for callers that need the whole set at once (`--batch`
 /// diagnostics answers one JSON payload per request by protocol).
-fn enriched_tree_diagnostics(
+fn tree_diagnostics(
     ws: &file_store::FileStore,
     idx: &module_index::ModuleIndex,
     options: symbols::DiagnosticOptions,
 ) -> Vec<(String, tower_lsp::lsp_types::Diagnostic)> {
     let mut all = Vec::new();
-    for_each_enriched_diagnostic(ws, idx, options, &mut |file, d| {
+    for_each_tree_diagnostic(ws, idx, options, &mut |file, d| {
         all.push((file.to_string(), d));
     });
     all
 }
 
-/// One file's enriched diagnostics. Lifted out of the sweep so the serial and
-/// parallel drivers cannot drift — the thread-locals it touches (the stall
-/// watchdog's current file, the sweep memo, `enriched_snapshot`'s cycle guard
-/// and depth counter) are per-worker by construction, which is what makes the
 /// The sweep's in-flight source-byte budget, or `None` when disabled.
 fn sweep_admission_budget() -> Option<u64> {
     let mb = std::env::var("PERL_LSP_SWEEP_INFLIGHT_SOURCE_MB")
@@ -1200,7 +1196,10 @@ impl Drop for SweepPermit<'_> {
     }
 }
 
-/// body safe to run concurrently.
+/// One file's diagnostics. Lifted out of the sweep so the serial and
+/// parallel drivers cannot drift — the thread-locals it touches (the stall
+/// watchdog's current file, the sweep memo) are per-worker by construction,
+/// which is what makes the body safe to run concurrently.
 fn sweep_one_file(
     idx: &module_index::ModuleIndex,
     options: symbols::DiagnosticOptions,
@@ -1220,36 +1219,14 @@ fn sweep_one_file(
     ));
     let _sweep = crate::util::ghost_stats::SweepScope::start();
     let _memo = module_index::SweepMemoGuard::open();
-    // The region the four `diag.*` tags did NOT cover, and the one that holds
-    // the volume: enriching a file pulls its providers' analyses, and that
-    // happens BEFORE `collect_diagnostics` is entered. Bounding the callee
-    // from the inside is worth nothing if the caller is outside every region.
+    // Index copies may be refs/bag-evicted; diagnostics read refs AND the
+    // bag, so take the whole-on-both-axes view (gate-applied by the index).
     // The guard lives in ITS OWN block: it must drop while `CURRENT_FILE` is
-    // still set, or the per-file lane never sees diag.0 — the region that
-    // holds the volume. (Exclusive time makes this guard honest: diag.1-6
-    // subtract out as children, so diag.0's self-time IS enrichment, and a
-    // large self-time here is the signal that something inside it is
-    // uninstrumented.)
+    // still set, or the per-file lane never sees the region.
     let diags = {
-        let _g_enrich =
-            crate::util::ghost_stats::ScopedNs::start("diag.0_enriched_snapshot");
-        match idx.enriched_snapshot(&cached) {
-            Some(fa) => {
-                // Which arm served this file is a DIMENSION: the two arms do
-                // very different work, and a distribution that mixes them
-                // describes neither.
-                crate::util::ghost_stats::count_for_file("check.arm_enriched", 1);
-                symbols::collect_diagnostics(&fa, idx, options)
-            }
-            None => {
-                // Index copies may be refs/bag-evicted; diagnostics read refs AND
-                // the bag, so degrade to the whole-on-both-axes view, not the
-                // resident copy.
-                crate::util::ghost_stats::count_for_file("check.arm_whole_fallback", 1);
-                let whole = file_analysis::CrossFileLookup::whole_present(idx, &cached);
-                symbols::collect_diagnostics(&whole, idx, options)
-            }
-        }
+        let _g_view = crate::util::ghost_stats::ScopedNs::start("diag.0_whole_view");
+        let whole = file_analysis::CrossFileLookup::whole_present(idx, &cached);
+        symbols::collect_diagnostics(&whole, idx, options)
     };
     // Yield per check, per file. Cost-per-check divided by this is the number
     // that justifies gating a lint; neither half alone can.
@@ -1269,7 +1246,7 @@ fn sweep_one_file(
 /// print a timeout can discard whole (`docs/adr/instrument-blindness.md`
 /// — a 0-byte output file at hour two answers "has anything been
 /// PRINTED", not "has anything been found").
-fn for_each_enriched_diagnostic(
+fn for_each_tree_diagnostic(
     ws: &file_store::FileStore,
     idx: &module_index::ModuleIndex,
     options: symbols::DiagnosticOptions,
@@ -1399,7 +1376,7 @@ fn for_each_enriched_diagnostic(
 fn batch_diagnostics(ws: &file_store::FileStore, idx: &module_index::ModuleIndex) -> String {
     let options = symbols::DiagnosticOptions::default();
     let mut all = Vec::new();
-    for (file, d) in enriched_tree_diagnostics(ws, idx, options) {
+    for (file, d) in tree_diagnostics(ws, idx, options) {
         let sev = match d.severity {
             Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::ERROR => "error",
             Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::WARNING => "warning",
@@ -1578,20 +1555,9 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
         super::exit_with(1, "exit");
     };
 
-    // The enrichment overlay (R4): the same derived, fingerprint-keyed
-    // enriched copy the diagnostics sweep reads — imported return types
-    // visible, shared Arc untouched. Degrade to the whole view when the
-    // overlay declines (cycle guard).
-    let analysis = module_index.enriched_snapshot(&cached).unwrap_or_else(|| {
-        // Overlay declined (serde break / byte-cap giant / cycle taint):
-        // dump unenriched, LOUDLY — silent degrade here looks exactly like
-        // the inference bug the user is debugging.
-        eprintln!(
-            "warning: enrichment overlay declined for {path}; cross-file return \
-             types will be missing from this dump"
-        );
-        file_analysis::CrossFileLookup::whole_present(&module_index, &cached)
-    });
+    // Cross-file types are answered at use time through the index, so the
+    // dump reads the plain whole view.
+    let analysis = file_analysis::CrossFileLookup::whole_present(&module_index, &cached);
 
     // Collect subs/methods declared inside this package.
     let mut subs: Vec<&file_analysis::Symbol> = analysis

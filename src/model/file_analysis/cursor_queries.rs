@@ -837,6 +837,24 @@ impl FileAnalysis {
         spans
     }
 
+    /// A hash-key access's owner with the index in hand: the build-time owner
+    /// when it names a producer, else the query-time derivation. A
+    /// `Variable` owner names only the local receiver; when that variable is
+    /// bound to a call whose producer lives across the index, the derivation
+    /// answers the producer.
+    pub fn hash_key_owner_via(
+        &self,
+        key_ref: &Ref,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<HashKeyOwner> {
+        match key_ref.hash_key_owner() {
+            Some(o) if !matches!(o, HashKeyOwner::Variable { .. }) => Some(o.clone()),
+            stored => self
+                .deferred_hash_key_owner(key_ref, module_index)
+                .or_else(|| stored.cloned()),
+        }
+    }
+
     /// Query-time owner for a deferred (`owner: None`) hash-key access:
     /// find the enclosing call ref and derive `Sub { invocant class,
     /// method }` with the index in hand. The build-time gate deferred
@@ -859,6 +877,19 @@ impl FileAnalysis {
                     && contains_point(&c.span, key_ref.span.end)
             })
             .min_by_key(|c| span_size(&c.span));
+
+        // A receiver type that claims its verb's arg keys (a Parametric
+        // ResultSet's `search` args are its ROW class's columns) — the builder's
+        // `method_arg_owner` claim, made here once the receiver types cross-file.
+        if let (Some(enclosing), Some(_)) = (enclosing_call, module_index) {
+            let verb = enclosing.unqualified_target_name(self.names());
+            if let Some(owner) = self
+                .method_call_invocant_type(enclosing, module_index)
+                .and_then(|t| t.as_parametric().and_then(|p| p.method_arg_owner(verb)))
+            {
+                return Some(owner);
+            }
+        }
 
         // Column-keyed call arg (`$rs->search({ name => … })`, columns
         // cross-file): the key is a COLUMN of the invocant class, not a key of

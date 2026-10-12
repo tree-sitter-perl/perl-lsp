@@ -203,14 +203,6 @@ impl Backend {
                     "flush.refresh_set",
                     out.changed.len() as u64,
                 );
-                // The push half of the re-stamp gate: every consumer this
-                // wave enqueued has had a provider move, so its next
-                // enrichment owes a re-stamp. One epoch for the whole wave —
-                // a stamp taken during it must not look newer than the wave
-                // that caused it.
-                if !out.non_convergent {
-                    module_index.mark_provider_diff(out.enqueued.iter().cloned());
-                }
                 dirty_all.extend(out.changed.into_iter().map(|(p, _)| p));
             }
             dirty_all
