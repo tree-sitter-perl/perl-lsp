@@ -330,19 +330,21 @@ impl FileAnalysis {
         if let Some(t) = self.loader_config_type_for(var_name, scope, module_index) {
             return Some(t);
         }
-        if let Some(t) = crate::model::witnesses::query_variable_type(
+        // A plugin's role-contract param type is more specific than what the
+        // callers pass, so it answers first and the caller join never runs.
+        // It is gated on the enclosing package's cross-file ancestry, so it
+        // resolves here (index in hand), not in the bag the index-free
+        // builder seeded.
+        if let Some(t) = self.gated_param_type_for(var_name, scope, point, module_index) {
+            return Some(t);
+        }
+        crate::model::witnesses::query_variable_type(
             &self.witnesses,
             &self.bag_context(module_index),
             var_name,
             scope,
             point,
-        ) {
-            return Some(t);
-        }
-        // Role-contract param types are gated on the enclosing package's
-        // cross-file ancestry, so they resolve here (index in hand), not in
-        // the bag the index-free builder seeded.
-        self.gated_param_type_for(var_name, scope, point, module_index)
+        )
     }
 
     /// The config value plugin loads pass to the loader-config parameter
