@@ -174,6 +174,20 @@ pub enum WitnessAttachment {
     /// Kept at the END for bincode variant-index stability (bump
     /// `EXTRACT_VERSION`).
     ParamIn { package: String, name: String, index: u32 },
+    /// The arguments of `package::name` from `@_` position `from` on, read
+    /// as key/value pairs — what a slurpy hash parameter (`my ($self,
+    /// %args) = @_`) holds. Joined over call sites like `ParamIn`, into a
+    /// `HashWithKeys` whose keys are the literal words the callers pass.
+    /// Kept at the END for bincode variant-index stability (bump
+    /// `EXTRACT_VERSION`).
+    ParamPairs { package: String, name: String, from: u32 },
+    /// The hash an instance of `class` is blessed from, where the literal
+    /// spreads another hash into it (`bless { %args }, $class`): each spread
+    /// is an `Edge` to the spread variable, so a slot read the class's own
+    /// writes can't answer reads its key off whatever that hash holds — a
+    /// constructor's named arguments, joined from its callers. Kept at the
+    /// END for bincode variant-index stability (bump `EXTRACT_VERSION`).
+    InstanceShape { class: String },
 }
 
 /// Index into `FileAnalysis::refs`.
@@ -256,7 +270,7 @@ impl WitnessPayload {
                     f(t);
                 }
                 for arg in args.iter_mut().flatten() {
-                    let (CallArg::One(t) | CallArg::Spread(t)) = arg;
+                    let (CallArg::One(t) | CallArg::Spread(t) | CallArg::Word { at: t, .. }) = arg;
                     f(t);
                 }
             }
@@ -470,6 +484,11 @@ pub enum CallArg {
     /// Flattens to any number of values (`@args`, `%h`): positions after it,
     /// and the arity, are unknown.
     Spread(WitnessAttachment),
+    /// One value that is a literal word (`'to'`, the autoquoted `to` of
+    /// `to => $x`): the caller's text, minted where it is read, so a join
+    /// can pair keys with values without re-reading source. Kept at the END
+    /// for bincode variant-index stability (bump `EXTRACT_VERSION`).
+    Word { word: String, at: WitnessAttachment },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

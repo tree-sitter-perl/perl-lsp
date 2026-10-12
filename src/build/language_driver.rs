@@ -1314,7 +1314,9 @@ fn remap_spans(
         | WitnessAttachment::Field { .. }
         | WitnessAttachment::Param { .. }
         | WitnessAttachment::ImportedSub { .. }
-        | WitnessAttachment::ParamIn { .. } => {}
+        | WitnessAttachment::ParamIn { .. }
+        | WitnessAttachment::ParamPairs { .. }
+        | WitnessAttachment::InstanceShape { .. } => {}
     };
     for w in witnesses.iter_mut() {
         remap_att(&mut w.attachment);

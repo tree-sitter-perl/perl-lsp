@@ -1318,17 +1318,18 @@ impl<'a> Builder<'a> {
         let scope = self.current_scope();
         for p in params {
             let (Some(index), Some(at)) = (p.arg_position, p.binding_site) else { continue };
-            if p.is_invocant || p.is_slurpy {
+            if p.is_invocant {
                 continue;
             }
+            let target = match (p.is_slurpy, p.name.starts_with('%')) {
+                (false, _) => WitnessAttachment::ParamIn { package: package.clone(), name: leaf.to_string(), index },
+                (true, true) => WitnessAttachment::ParamPairs { package: package.clone(), name: leaf.to_string(), from: index },
+                (true, false) => continue,
+            };
             self.bag.push(Witness {
                 attachment: WitnessAttachment::Variable { name: p.name.clone(), scope },
                 source: WitnessSource::Builder("param_in".into()),
-                payload: WitnessPayload::Edge(WitnessAttachment::ParamIn {
-                    package: package.clone(),
-                    name: leaf.to_string(),
-                    index,
-                }),
+                payload: WitnessPayload::Edge(target),
                 span: Span { start: at, end: at },
             });
         }

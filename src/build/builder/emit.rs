@@ -587,9 +587,15 @@ impl<'a> Builder<'a> {
                 self.emit_expr_witness(a);
                 let att = WitnessAttachment::Expr(node_to_span(a));
                 if crate::cst::is_flattening(a) {
-                    CallArg::Spread(att)
-                } else {
-                    CallArg::One(att)
+                    return CallArg::Spread(att);
+                }
+                let word = matches!(a.kind(), "autoquoted_bareword" | "string_literal" | "interpolated_string_literal")
+                    .then(|| self.extract_key_text(a))
+                    .flatten()
+                    .filter(|(_, dynamic)| !dynamic);
+                match word {
+                    Some((word, _)) => CallArg::Word { word, at: att },
+                    None => CallArg::One(att),
                 }
             })
             .collect()

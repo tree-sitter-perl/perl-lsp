@@ -63,7 +63,39 @@ impl<'a> Builder<'a> {
                 None => return,
             },
         };
+        self.push_instance_shape(obj, &class);
         self.push_var_type_constraint(obj, node, InferredType::ClassName(class));
+    }
+
+    /// `bless { %args, ... }, $class`: each spread hash flows into every
+    /// instance's slots (`InstanceShape`).
+    fn push_instance_shape(&mut self, obj: Node<'a>, class: &str) {
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        if obj.kind() != "anonymous_hash_expression" {
+            return;
+        }
+        let scope = self.current_scope();
+        let spreads: Vec<(String, Span)> = crate::cst::NodeExt::named(&obj)
+            .flat_map(|c| if crate::cst::is_list_literal(c) { crate::cst::list_elements(c) } else { vec![c] })
+            .filter(|e| e.kind() == "hash")
+            .filter_map(|e| Some((crate::cst::canonical_var_name(e, self.source)?, node_to_span(e))))
+            .collect();
+        // Edged at the spread's own read, so the variable answers as of
+        // the bless, not as of its scope's start.
+        for (name, span) in spreads {
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::Expr(span),
+                source: WitnessSource::Builder("instance_shape".into()),
+                payload: WitnessPayload::Edge(WitnessAttachment::Variable { name, scope }),
+                span,
+            });
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::InstanceShape { class: class.to_string() },
+                source: WitnessSource::Builder("instance_shape".into()),
+                payload: WitnessPayload::Edge(WitnessAttachment::Expr(span)),
+                span,
+            });
+        }
     }
 
     /// If `bless_node` is a bless whose class argument denotes the RECEIVER

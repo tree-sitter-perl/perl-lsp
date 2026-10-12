@@ -2596,3 +2596,25 @@ fn param_type_cycle_settles_on_the_common_class() {
         }
     }
 }
+
+/// Named arguments join from the callers' key/value pairs, and a field the
+/// constructor spreads them into reads its key off that join.
+#[test]
+fn named_args_type_the_param_hash_and_the_fields_it_fills() {
+    let svc = parse_source_to_cached(
+        "package Svc;\nsub new { my ($class, %args) = @_; return bless {%args}, $class }\nsub run { my ($self) = @_; my $g = $self->{greeter}; my $h = $args{greeter}; return $g }\nsub mail { my ($class, %args) = @_; my $to = $args{to}; return $to }\n1;\n",
+        "Svc",
+    );
+    let app = parse_source_to_cached(
+        "package App;\nsub run { Svc->new(greeter => bless({}, 'Greeter'))->run; Svc->mail(to => bless({}, 'User'), subject => 'x') }\n1;\n",
+        "App",
+    );
+    let idx = index_of(&[&svc, &app]);
+    let at = |var: &str, row: usize, column: usize| {
+        svc.analysis
+            .inferred_type_via_bag_ctx(var, tree_sitter::Point { row, column }, Some(&idx))
+            .and_then(|t| t.class_name().map(str::to_string))
+    };
+    assert_eq!(at("$to", 3, 60).as_deref(), Some("User"), "named argument");
+    assert_eq!(at("$g", 2, 80).as_deref(), Some("Greeter"), "field from a spread constructor hash");
+}

@@ -28,6 +28,88 @@ use super::*;
 /// is resolving, which is a different question, not a cycle. Every other
 /// attachment ignores the point and keeps it out of the key, so the memo
 /// still collapses their diamonds.
+/// Which of a call's arguments a caller join reads.
+#[derive(Debug, Clone, Copy)]
+enum ArgWant {
+    /// The one argument at this `@_` position.
+    At(u32),
+    /// Every argument from this `@_` position on, as key/value pairs.
+    PairsFrom(u32),
+}
+
+/// The hash the arguments from `from` on spell as key/value pairs: a literal
+/// word in key position names a key, the value after it types it. Anything
+/// the pairs can't name (a computed key, a spread, a dangling key) leaves
+/// the hash open.
+fn pairs_type(
+    args: &[CallArg],
+    from: usize,
+    type_of: &mut dyn FnMut(&WitnessAttachment) -> Option<InferredType>,
+) -> InferredType {
+    let mut keys: Vec<(String, Option<Box<InferredType>>)> = Vec::new();
+    let mut open = false;
+    let rest = args.get(from..).unwrap_or_default();
+    for pair in rest.chunks(2) {
+        match pair {
+            [CallArg::Word { word, .. }, CallArg::One(v) | CallArg::Word { at: v, .. }] => {
+                let t = type_of(v).map(Box::new);
+                match keys.iter_mut().find(|(k, _)| k == word) {
+                    Some(slot) => slot.1 = t,
+                    None => keys.push((word.clone(), t)),
+                }
+            }
+            [CallArg::Spread(_), ..] | [_, CallArg::Spread(_)] => {
+                open = true;
+                break;
+            }
+            _ => open = true,
+        }
+    }
+    InferredType::HashWithKeys { keys: crate::model::file_analysis::SharedKeys::new(keys), open }
+}
+
+/// What two callers passing `a` and `b` agree the parameter holds: the same
+/// type, the nearest common class, or a hash holding every key either
+/// passed (a key whose values disagree keeps the key, untyped). `None`:
+/// they disagree.
+fn join_caller_types(
+    a: &InferredType,
+    b: &InferredType,
+    local: &std::collections::HashMap<String, crate::model::file_analysis::PackageFacts>,
+    idx: &dyn crate::model::file_analysis::CrossFileLookup,
+) -> Option<InferredType> {
+    if a == b {
+        return Some(a.clone());
+    }
+    match (a, b) {
+        (
+            InferredType::HashWithKeys { keys: ka, open: oa },
+            InferredType::HashWithKeys { keys: kb, open: ob },
+        ) => {
+            let mut keys: Vec<(String, Option<Box<InferredType>>)> = ka.iter().cloned().collect();
+            for (k, vb) in kb.iter() {
+                match keys.iter_mut().find(|(ka, _)| ka == k) {
+                    Some(slot) => {
+                        slot.1 = match (&slot.1, vb) {
+                            (Some(x), Some(y)) => join_caller_types(x, y, local, idx).map(Box::new),
+                            (x, y) => x.clone().or_else(|| y.clone()),
+                        }
+                    }
+                    None => keys.push((k.clone(), vb.clone())),
+                }
+            }
+            Some(InferredType::HashWithKeys {
+                keys: crate::model::file_analysis::SharedKeys::new(keys),
+                open: *oa || *ob,
+            })
+        }
+        _ => {
+            let (x, y) = (a.class_name()?, b.class_name()?);
+            crate::model::file_analysis::least_common_class(x, y, local, Some(idx)).map(InferredType::ClassName)
+        }
+    }
+}
+
 /// The attachment an argument list holds at `i`, when nothing before it
 /// spreads (a `Spread` makes every later position unknown).
 fn positional_arg(args: Option<&[CallArg]>, i: u32) -> Option<WitnessAttachment> {
@@ -35,8 +117,8 @@ fn positional_arg(args: Option<&[CallArg]>, i: u32) -> Option<WitnessAttachment>
     for (k, a) in args.iter().enumerate() {
         match a {
             CallArg::Spread(_) => return None,
-            CallArg::One(t) if k as u32 == i => return Some(t.clone()),
-            CallArg::One(_) => {}
+            CallArg::One(t) | CallArg::Word { at: t, .. } if k as u32 == i => return Some(t.clone()),
+            CallArg::One(_) | CallArg::Word { .. } => {}
         }
     }
     None
@@ -649,6 +731,7 @@ impl ReducerRegistry {
         // so placement here is non-load-bearing — grouped with the other
         // arm-agreement folds for legibility.
         r.register(Box::new(SlotTypeFold));
+        r.register(Box::new(InstanceShapeFold));
         // BranchArmFold claims the dedicated `BranchArm(_)` shape — no
         // overlap with the Variable/Expr folds below, so order here is
         // not load-bearing.
@@ -1106,6 +1189,9 @@ impl ReducerRegistry {
         // fallback above, same shared visited set; no bridge hop —
         // slot writes are real code, not plugin entities.
         if let WitnessAttachment::SlotType { class, key } = q.attachment {
+            if let Some(t) = self.slot_from_instance_shape(bag, q, state, class, key) {
+                return ReducedValue::Type(t);
+            }
             if let Some(ctx) = q.context {
                 if ctx.module_index.is_none() {
                     super::note_bake_exit("slot_type", true);
@@ -1366,7 +1452,13 @@ impl ReducerRegistry {
         }
 
         if let WitnessAttachment::ParamIn { package, name, index } = q.attachment {
-            if let Some(v) = self.param_in_fallback(q, state, package, name, *index) {
+            if let Some(v) = self.param_in_fallback(q, state, package, name, ArgWant::At(*index)) {
+                return v;
+            }
+        }
+
+        if let WitnessAttachment::ParamPairs { package, name, from } = q.attachment {
+            if let Some(v) = self.param_in_fallback(q, state, package, name, ArgWant::PairsFrom(*from)) {
                 return v;
             }
         }
@@ -1389,7 +1481,7 @@ impl ReducerRegistry {
         _state: &mut QueryState,
         package: &str,
         name: &str,
-        index: u32,
+        want: ArgWant,
     ) -> Option<ReducedValue> {
         let ctx = q.context?;
         let Some(idx) = ctx.module_index else {
@@ -1397,9 +1489,40 @@ impl ReducerRegistry {
             return None;
         };
         let v = super::engine::answer(idx, q.attachment, || {
-            self.param_in_join(idx, &mut QueryState::new(), package, name, index)
+            self.param_in_join(idx, &mut QueryState::new(), package, name, want)
         });
         Some(v)
+    }
+
+    /// A slot no write types may still arrive with the instance: the hash
+    /// its constructor spreads into the blessed literal (`InstanceShape`).
+    /// Out of line so the recursive body's frame doesn't carry it.
+    #[inline(never)]
+    fn slot_from_instance_shape(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        class: &str,
+        key: &str,
+    ) -> Option<InferredType> {
+        let shape = WitnessAttachment::InstanceShape { class: class.to_string() };
+        if bag.for_attachment(&shape).is_empty() {
+            return None;
+        }
+        let sub_q = ReducerQuery {
+            attachment: &shape,
+            point: None,
+            framework: q.framework,
+            arity_hint: None,
+            receiver: None,
+            args: Vec::new(),
+            context: q.context,
+        };
+        state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
+            ReducedValue::Type(t) => t.key_value_type(key).flatten().cloned(),
+            ReducedValue::FactMap(_) | ReducedValue::None => None,
+        })
     }
 
     fn param_in_join(
@@ -1408,7 +1531,7 @@ impl ReducerRegistry {
         state: &mut QueryState,
         package: &str,
         name: &str,
-        index: u32,
+        want: ArgWant,
     ) -> ReducedValue {
         use crate::model::file_analysis::RefKind;
         let key = crate::model::conventions::name_match_key(name, &crate::model::conventions::PERL_SPELLINGS);
@@ -1480,37 +1603,38 @@ impl ReducerRegistry {
                         }
                     }
                 }
-                let value_att = match (method, index) {
-                    (true, 0) => receiver,
-                    (true, i) => positional_arg(args.as_deref(), i - 1),
-                    (false, i) => positional_arg(args.as_deref(), i),
+                let skip = |i: u32| if method { i.checked_sub(1) } else { Some(i) };
+                let value = match want {
+                    ArgWant::At(index) => {
+                        let value_att = match (method, index) {
+                            (true, 0) => receiver,
+                            (_, i) => skip(i).and_then(|i| positional_arg(args.as_deref(), i)),
+                        };
+                        let Some(value_att) = value_att else { continue };
+                        match query_in(self, &value_att, state) {
+                            ReducedValue::Type(t) => Some(t),
+                            ReducedValue::FactMap(_) | ReducedValue::None => None,
+                        }
+                    }
+                    ArgWant::PairsFrom(from) => {
+                        let (Some(from), Some(args)) = (skip(from), args.as_deref()) else { continue };
+                        Some(pairs_type(args, from as usize, &mut |att| match query_in(self, att, state) {
+                            ReducedValue::Type(t) => Some(t),
+                            ReducedValue::FactMap(_) | ReducedValue::None => None,
+                        }))
+                    }
                 };
-                let Some(value_att) = value_att else { continue };
-                match query_in(self, &value_att, state) {
-                    ReducedValue::Type(t) => match &joined {
-                        None => joined = Some(t),
-                        Some(j) if *j == t => {}
-                        Some(j) => {
-                            let common = match (j.class_name(), t.class_name()) {
-                                (Some(a), Some(b)) => crate::model::file_analysis::least_common_class(
-                                    &a,
-                                    &b,
-                                    &full.packages,
-                                    Some(idx),
-                                ),
-                                _ => None,
-                            };
-                            match common {
-                                Some(c) => joined = Some(InferredType::ClassName(c)),
-                                None => {
-                                    crate::util::ghost_stats::count("param_in.disagree");
-                                    return ReducedValue::None;
-                                }
-                            }
+                let Some(t) = value else { continue };
+                joined = match joined {
+                    None => Some(t),
+                    Some(j) => match join_caller_types(&j, &t, &full.packages, idx) {
+                        Some(u) => Some(u),
+                        None => {
+                            crate::util::ghost_stats::count("param_in.disagree");
+                            return ReducedValue::None;
                         }
                     },
-                    ReducedValue::FactMap(_) | ReducedValue::None => {}
-                }
+                };
             }
         }
         match joined {
@@ -2797,7 +2921,7 @@ impl ReducerRegistry {
         let mut spread = false;
         for a in args.unwrap_or_default() {
             match a {
-                CallArg::One(att) => arg_types.push(
+                CallArg::One(att) | CallArg::Word { at: att, .. } => arg_types.push(
                     self.operand_type(bag, q, state, att).unwrap_or(InferredType::Unknown),
                 ),
                 CallArg::Spread(_) => {

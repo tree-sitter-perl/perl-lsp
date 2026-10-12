@@ -661,6 +661,49 @@ impl WitnessReducer for SymbolReturnArmFold {
 // attachment yet — it's the typed half of the hash-key-write seed,
 // paired with the untyped `mutation` Fact.
 
+/// `InstanceShape{class}`: the spreads a constructor's blessed literal
+/// takes, merged in source order — a later spread's key wins, as it does
+/// in the hash Perl builds. A spread that isn't a known hash shape leaves
+/// the merged shape open.
+pub struct InstanceShapeFold;
+
+impl WitnessReducer for InstanceShapeFold {
+    fn name(&self) -> &str {
+        "instance_shape"
+    }
+
+    fn claims(&self, w: &Witness) -> bool {
+        matches!(w.attachment, WitnessAttachment::InstanceShape { .. })
+            && matches!(w.payload, WitnessPayload::InferredType(_))
+    }
+
+    fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
+        let mut keys: Vec<(String, Option<Box<InferredType>>)> = Vec::new();
+        let mut open = false;
+        for w in ws {
+            match &w.payload {
+                WitnessPayload::InferredType(InferredType::HashWithKeys { keys: ks, open: o }) => {
+                    open |= *o;
+                    for (k, v) in ks.iter() {
+                        match keys.iter_mut().find(|(have, _)| have == k) {
+                            Some(slot) => slot.1 = v.clone(),
+                            None => keys.push((k.clone(), v.clone())),
+                        }
+                    }
+                }
+                _ => open = true,
+            }
+        }
+        if keys.is_empty() {
+            return ReducedValue::None;
+        }
+        ReducedValue::Type(InferredType::HashWithKeys {
+            keys: crate::model::file_analysis::SharedKeys::new(keys),
+            open,
+        })
+    }
+}
+
 pub struct SlotTypeFold;
 
 impl WitnessReducer for SlotTypeFold {
