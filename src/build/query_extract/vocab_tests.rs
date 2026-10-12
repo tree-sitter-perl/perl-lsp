@@ -63,3 +63,18 @@ fn malformed_names_do_not_parse() {
         assert!(Capture::parse(name).is_err(), "@{name} must not parse");
     }
 }
+
+/// A link names a node one level from its pattern's `@link.from`; a pattern
+/// that links without one fails the compile instead of recording nothing.
+#[test]
+fn a_link_without_its_from_fails_the_load() {
+    let pack = LangPack {
+        query_source: "(subroutine_declaration_statement)\n(subroutine_declaration_statement name: (_) @link.name)",
+        ..perl_pack()
+    };
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse("sub f {}", None).unwrap();
+    let err = extract(&tree, b"sub f {}", &pack).unwrap_err();
+    assert!(err.contains("line 2: a pattern with @link.<rel> needs exactly one @link.from"), "{err}");
+}

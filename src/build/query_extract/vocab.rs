@@ -181,6 +181,25 @@ spelled! {
     }
 }
 
+spelled! {
+    /// One level of structure the query states and the driver chains to any
+    /// depth: `@link.from` is the node, each other capture in the match is
+    /// the node it links to by that relation.
+    pub enum LinkCap {
+        From = "from",
+        /// A transparent wrapper's operand (`*p`, `&r`, `(d)` declarators).
+        Inner = "inner",
+        /// What a definition or function declarator declares.
+        Declares = "declares",
+        /// A qualified name's scope (`A` in `A::b`).
+        Scope = "scope",
+        /// A qualified name's name (`b` in `A::b`).
+        Name = "name",
+        /// A templated name's base name (`Buf` in `Buf<T>`).
+        Base = "base",
+    }
+}
+
 /// Whether a `@def.<kind>` capture is the def node or its name token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DefPart {
@@ -232,6 +251,7 @@ pub enum Capture {
     NsInline,
     /// A field typed by an anonymous aggregate.
     AnonAggMember,
+    Link(LinkCap),
 }
 
 /// A capture name outside the vocabulary.
@@ -292,6 +312,7 @@ impl Capture {
             ["spec", "primary"] => C::SpecPrimary,
             ["ns", "inline"] => C::NsInline,
             ["anonagg", "member"] => C::AnonAggMember,
+            ["link", k] => C::Link(LinkCap::parse(k)?),
             _ => return None,
         })
     }
@@ -341,6 +362,7 @@ impl fmt::Display for Capture {
             C::SpecPrimary => f.write_str("spec.primary"),
             C::NsInline => f.write_str("ns.inline"),
             C::AnonAggMember => f.write_str("anonagg.member"),
+            C::Link(k) => write!(f, "link.{k}"),
         }
     }
 }
@@ -353,6 +375,27 @@ pub(super) fn capture_table(names: &[&str]) -> Result<Vec<Option<Capture>>, Unkn
         .iter()
         .map(|n| if n.starts_with('_') { Ok(None) } else { Capture::parse(n).map(Some) })
         .collect()
+}
+
+/// A `@link.<rel>` names a node one level from its match's `@link.from`,
+/// so a pattern that links captures exactly one `from`. Checked per pattern
+/// when the query compiles; returns the offending pattern's start byte.
+pub(super) fn check_links(query: &tree_sitter::Query, captures: &[Option<Capture>]) -> Result<(), usize> {
+    use tree_sitter::CaptureQuantifier as Q;
+    for p in 0..query.pattern_count() {
+        let present: Vec<(Capture, Q)> = captures
+            .iter()
+            .zip(query.capture_quantifiers(p))
+            .filter_map(|(c, q)| c.filter(|_| *q != Q::Zero).map(|c| (c, *q)))
+            .collect();
+        let links = present.iter().any(|(c, _)| matches!(c, Capture::Link(r) if *r != LinkCap::From));
+        let froms: Vec<Q> =
+            present.iter().filter(|(c, _)| *c == Capture::Link(LinkCap::From)).map(|(_, q)| *q).collect();
+        if links && froms != [Q::One] {
+            return Err(query.start_byte_for_pattern(p));
+        }
+    }
+    Ok(())
 }
 
 impl DefKind {

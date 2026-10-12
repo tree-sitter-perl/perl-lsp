@@ -50,12 +50,14 @@ not compile until it says what it is.
 
 `query_extract/extract/` holds the driver (`mod.rs`: the event flatten,
 the sort, the shared `ExtractState`) and one file per family: `scopes`,
-`defs`, `refs`, `members`, `flow`, `narrowing`, `commands`, `imports`.
-`family(Capture)` is an exhaustive match, so a new variant does not compile until it names its family. The
-family's state (its per-match joins) lives in the same file, on a
-sub-struct of the shared `ExtractState`, and its handler sees one event
-at a time. A family file may expose up to four entry points, each run by
-the driver at a fixed point:
+`defs`, `refs`, `members`, `flow`, `narrowing`, `commands`, `imports`,
+plus `links`, which the driver reads while flattening (below).
+`family(Capture)` is an exhaustive match, so a new variant does not
+compile until it names its family. The family's state (its per-match
+joins) lives in the same file, on a sub-struct of the shared
+`ExtractState`, and its handler sees one event at a time. A family file
+may expose up to four entry points, each run by the driver at a fixed
+point:
 
 - a flatten hook, for a capture that needs its live node (a declarator to
   peel, an argument list to count);
@@ -73,10 +75,30 @@ family routing line, and the family file it lives in. When a language
 needs extraction a query cannot express, its frontend adds a typed Rust
 handler in the same shape rather than a string-keyed hook on the pack.
 
+## Decision: depth is chained from links, never walked
+
+A tree-sitter pattern has a fixed depth: no descendant axis, no recursion,
+and quantifiers repeat siblings, never nesting. Some structure nests
+without bound, such as a declarator wrapped any number of times
+(`Foo**& f()`) or a name qualified any number of times (`A::B::m`). One
+pattern per depth would silently miss the next depth.
+
+So the document states each level once, as a link: `@link.from` on a node
+and `@link.<rel>` on the node one level away, by a closed set of relations
+(`inner`, `declares`, `scope`, `name`, `base`). The driver records every
+link while it flattens the matches, keyed by node id, and a family that
+needs a chain follows the links (`extract/links.rs`). Rust reads no node
+kind and no field to do it; which node links to which is the document's
+statement. A pattern with a link but no single `@link.from` fails the
+compile.
+
 ## Consequences
 
 - A new capture starts as a new variant. The vocabulary change is an enum
   diff, reviewable apart from the handler that reads it.
+- Links are read before any other capture, because a level inside a
+  definition is matched after the definition. The driver keeps the whole
+  file's captures until every match is in, then flattens them.
 - A variant can have no reader. `@flow.assign` names a pattern's root so
   the document can anchor `@flow.target` and `@flow.source` under it; the
   driver reads the two halves, not the anchor.

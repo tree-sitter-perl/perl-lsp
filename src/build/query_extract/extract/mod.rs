@@ -13,6 +13,7 @@ mod commands;
 mod defs;
 mod flow;
 mod imports;
+mod links;
 mod members;
 mod narrowing;
 mod refs;
@@ -61,6 +62,8 @@ enum Family {
     Narrowing,
     Commands,
     Imports,
+    /// Read while flattening; a link never becomes an event.
+    Links,
 }
 
 fn family(cap: Capture) -> Family {
@@ -92,6 +95,7 @@ fn family(cap: Capture) -> Family {
         }
         C::Cmd(_) => Family::Commands,
         C::Import(_) => Family::Imports,
+        C::Link(_) => Family::Links,
     }
 }
 
@@ -204,38 +208,46 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     };
 
     // ---- flatten matches into ordered events ----
+    // Links first: a level inside a definition is matched after the
+    // definition, so every link must be in before any capture reads them.
+    let mut links = links::Links::default();
+    let mut captured: Vec<(tree_sitter::Node, Capture, usize)> = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&compiled.query, root, source);
+    let mut match_counter = 0usize;
+    let cap_of = |c: &tree_sitter::QueryCapture| compiled.captures[c.index as usize];
+    while let Some(m) = matches.next() {
+        match_counter += 1;
+        let from = m.captures.iter().find(|c| cap_of(c) == Some(Capture::Link(LinkCap::From)));
+        for c in m.captures {
+            match cap_of(c) {
+                None | Some(Capture::Link(LinkCap::From)) => {}
+                Some(Capture::Link(rel)) => {
+                    if let Some(from) = from {
+                        links.record(from.node, rel, c.node);
+                    }
+                }
+                Some(cap) => captured.push((c.node, cap, match_counter)),
+            }
+        }
+    }
     // A capture whose meaning needs its LIVE node (a declarator to peel, an
     // argument list to count) is read here, where the node is in hand;
     // everything else becomes an event carrying its text.
     let mut events: Vec<Event> = Vec::new();
-    let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&compiled.query, root, source);
-    let mut match_counter = 0usize;
-    while let Some(m) = matches.next() {
-        match_counter += 1;
-        for c in m.captures {
-            let Some(cap) = compiled.captures[c.index as usize] else { continue };
-            let node = c.node;
-            match cap {
-                Capture::OolDef => defs::flatten_ool_def(node, pack, source, match_counter, &mut events),
-                Capture::NestedTarget => {
-                    defs::flatten_nested(&mut st.defs, node, pack, source, match_counter, &mut events)
-                }
-                Capture::Member(MemberCap::Recv) => {
-                    members::flatten_recv(&mut st.members, node, pack, source, match_counter, &mut events)
-                }
-                Capture::Arity(ArityCap::Args) => members::count_args(&mut st.members, node),
-                Capture::Arity(ArityCap::Sig) => members::count_params(&mut st.members, node),
-                Capture::Qualifier => {
-                    events.push(Event::at(node, cap, defs::qualifier_text(node, pack, source), match_counter))
-                }
-                _ => events.push(Event::at(
-                    node,
-                    cap,
-                    node.utf8_text(source).unwrap_or("").to_string(),
-                    match_counter,
-                )),
+    for (node, cap, match_id) in captured {
+        match cap {
+            Capture::OolDef => defs::flatten_ool_def(node, &links, source, match_id, &mut events),
+            Capture::NestedTarget => {
+                defs::flatten_nested(&mut st.defs, node, pack, source, match_id, &mut events)
             }
+            Capture::Member(MemberCap::Recv) => {
+                members::flatten_recv(&mut st.members, node, pack, source, match_id, &mut events)
+            }
+            Capture::Arity(ArityCap::Args) => members::count_args(&mut st.members, node),
+            Capture::Arity(ArityCap::Sig) => members::count_params(&mut st.members, node),
+            Capture::Qualifier => events.push(Event::at(node, cap, links.base_text(node, source), match_id)),
+            _ => events.push(Event::at(node, cap, node.utf8_text(source).unwrap_or("").to_string(), match_id)),
         }
     }
     // Source order; outermost first on ties so scopes push before their
@@ -259,7 +271,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             Family::Defs => defs::collect(&mut st, e),
             Family::Flow => flow::collect(&mut st, e),
             Family::Narrowing => narrowing::collect(&mut st, e),
-            Family::Refs | Family::Members | Family::Commands | Family::Imports => {}
+            Family::Refs | Family::Members | Family::Commands | Family::Imports | Family::Links => {}
         }
     }
 
@@ -284,6 +296,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             Family::Narrowing => narrowing::handle(&mut st, e),
             Family::Commands => commands::handle(&mut st, e),
             Family::Imports => imports::handle(&mut st, e),
+            Family::Links => {}
         }
     }
 

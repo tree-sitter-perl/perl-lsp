@@ -329,15 +329,29 @@
 ; out-of-line definitions `RetT Class::method(...) { ... }` (incl.
 ; pointer/reference returns, multi-level qualifiers `A::B::m`, and
 ; ctors/dtors with no return type). ONE general capture per return-type
-; presence — the driver peels the declarator (pointer/reference/parenthesized,
-; any depth) to the function declarator, then walks the qualified name to its
-; leaf (the member name) + owning class. This fires for EVERY function_definition;
-; a non-qualified declarator (free function / in-class method, owned by the
+; presence: the driver follows the links below from the definition to its
+; function declarator and down the qualified name to its leaf (the member
+; name) and owning class. This fires for EVERY function_definition; a
+; non-qualified declarator (free function / in-class method, owned by the
 ; patterns above/below) yields nothing. `!type` splits the ctor/dtor shape off
 ; (a `?`-quantified type capture would kill the sibling capture). No @scope here
 ; — the universal `(function_definition) @scope.sub` mints it.
 (function_definition type: (_) @rettype) @ool.def
 (function_definition !type) @ool.def
+
+; ---- links: one level each, which the driver chains to any depth (no
+; fixed-depth pattern reaches `Foo**& A::B::m()`). A declarator wrapper links
+; to its operand, a definition and a function declarator to what they declare,
+; a qualified name to its scope and name, and a templated owner (`Buf<T>::grow`)
+; to the base name it files under. ----
+(function_definition declarator: (_) @link.declares) @link.from
+(function_declarator declarator: (_) @link.declares) @link.from
+(pointer_declarator declarator: (_) @link.inner) @link.from
+(reference_declarator . (_) @link.inner) @link.from
+(parenthesized_declarator . (_) @link.inner) @link.from
+(qualified_identifier scope: (_) @link.scope) @link.from
+(qualified_identifier name: (_) @link.name) @link.from
+(template_type name: (_) @link.base) @link.from
 (function_definition
   declarator: (pointer_declarator
     declarator: (function_declarator
