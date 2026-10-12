@@ -28,10 +28,6 @@ use super::*;
 /// is resolving, which is a different question, not a cycle. Every other
 /// attachment ignores the point and keeps it out of the key, so the memo
 /// still collapses their diamonds.
-/// Above this many candidate caller files a `ParamIn` answers nothing: a
-/// parameter of a name every file mentions (`new`) is not worth the sweep.
-const PARAM_IN_MAX_FILES: usize = 64;
-
 /// The attachment an argument list holds at `i`, when nothing before it
 /// spreads (a `Spread` makes every later position unknown).
 fn positional_arg(args: Option<&[CallArg]>, i: u32) -> Option<WitnessAttachment> {
@@ -1414,22 +1410,21 @@ impl ReducerRegistry {
         name: &str,
         index: u32,
     ) -> ReducedValue {
-        use crate::model::file_analysis::{FileAnalysis, RefKind};
+        use crate::model::file_analysis::RefKind;
         let key = crate::model::conventions::name_match_key(name, &crate::model::conventions::PERL_SPELLINGS);
         let paths = super::engine::mentions_of(idx, &key);
         super::engine::note_dep(super::engine::Dep::Mentions {
             key: key.clone(),
             hash: super::engine::mentions_hash(&paths),
         });
-        if paths.len() > PARAM_IN_MAX_FILES {
-            crate::util::ghost_stats::count("param_in.over_budget");
-            return ReducedValue::None;
-        }
         crate::util::ghost_stats::count("param_in.join");
+        // No cap on the sweep: a name every file mentions (`new`) usually
+        // meets an unrelated disagreement early, and an agreeing one is
+        // swept once and then answered from the store.
+        crate::util::ghost_stats::count_by("param_in.files", paths.len() as u64);
         let mut joined: Option<InferredType> = None;
         for path in paths.iter() {
-            let Some(cached) = idx.cached_by_path(path) else { continue };
-            let full: std::sync::Arc<FileAnalysis> = idx.whole_present(&cached);
+            let Some(full) = super::engine::caller_view(idx, path) else { continue };
             state.pins.push(std::sync::Arc::clone(&full));
             let caller_ctx = BagContext {
                 scopes: &full.scopes,

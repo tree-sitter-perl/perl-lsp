@@ -45,7 +45,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use crate::model::file_analysis::{CachedModule, CrossFileLookup};
+use crate::model::file_analysis::{CachedModule, CrossFileLookup, FileAnalysis};
 
 /// One thing an answer read.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -332,9 +332,12 @@ fn uncovered_files(idx: &dyn CrossFileLookup) -> Vec<Arc<CachedModule>> {
 }
 
 /// The mentions relation for `key`: its ref rows plus every uncovered file
-/// whose refs carry it. Sorted, so its hash is a stable `Mentions`
+/// whose refs carry it, with each open document answering for its own path
+/// from its current build. Sorted, so its hash is a stable `Mentions`
 /// dependency.
 fn mentions_among(idx: &dyn CrossFileLookup, key: &str, uncovered: &[Arc<CachedModule>]) -> Vec<PathBuf> {
+    let open = idx.open_callers();
+    let is_open = |p: &PathBuf| open.iter().any(|o| &o.path == p);
     let mut paths: Vec<PathBuf> = idx.ref_candidate_paths(&[key.to_string()]);
     for cached in uncovered {
         // An evicted copy can't say, so it stays a candidate.
@@ -342,9 +345,26 @@ fn mentions_among(idx: &dyn CrossFileLookup, key: &str, uncovered: &[Arc<CachedM
             paths.push(cached.path.clone());
         }
     }
+    paths.retain(|p| !is_open(p));
+    for o in &open {
+        if !o.analysis.ref_indices_keyed(key).is_empty() {
+            paths.push(o.path.clone());
+        }
+    }
     paths.sort();
     paths.dedup();
     paths
+}
+
+/// The analysis a caller join reads for `path`: the open document's build
+/// when one is open, else the indexed copy, whole.
+pub fn caller_view(idx: &dyn CrossFileLookup, path: &std::path::Path) -> Option<Arc<FileAnalysis>> {
+    if let Some(o) = idx.open_callers().into_iter().find(|o| o.path == path) {
+        note_file(idx, path);
+        return Some(Arc::clone(&o.analysis));
+    }
+    let cached = idx.cached_by_path(path)?;
+    Some(idx.whole_present(&cached))
 }
 
 fn verify(idx: &dyn CrossFileLookup, e: &Entry) -> bool {

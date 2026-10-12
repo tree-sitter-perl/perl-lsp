@@ -454,6 +454,12 @@ pub trait CrossFileLookup {
         None
     }
 
+    /// Open documents' current builds, each standing in for its path's
+    /// indexed copy as a caller (whole copies).
+    fn open_callers(&self) -> Vec<std::sync::Arc<CachedModule>> {
+        Vec::new()
+    }
+
     /// A digest of everything `world_generation` guards, recomputable by a
     /// later process: two indexes with equal digests answer every name
     /// lookup the same. `None`: this index does not persist answers.

@@ -33,6 +33,10 @@ use crate::index::module_resolver;
 // index consumers keep one import site.
 pub use crate::model::file_analysis::{CachedModule, SubInfo};
 
+/// Set on an open-doc overlay's file version (`set_open_caller`), so it is
+/// never equal to a registration generation of the same path.
+pub(crate) const OPEN_VERSION_BIT: u64 = 1 << 63;
+
 type InferredTypeOwned = crate::model::file_analysis::InferredType;
 
 /// Rehydration misses on evicted copies this process served degraded

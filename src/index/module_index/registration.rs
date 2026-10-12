@@ -548,6 +548,9 @@ impl ModuleIndex {
     pub fn mark_doc_closed(&self, path: &std::path::Path) -> Option<SurfaceDirty> {
         let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         self.open_doc_paths.remove(&canon);
+        if self.core.open_callers.remove(&canon).is_some() {
+            self.core.open_bumps.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let cm = self.all_files.get(&canon).map(|e| e.value().clone())?;
         let whole = crate::model::file_analysis::CrossFileLookup::whole_present(self, &cm);
         Some(self.record_and_dirty(&canon, &whole, SurfaceWrite::Background))
@@ -602,6 +605,16 @@ impl ModuleIndex {
         self.core.gen_counter.load(std::sync::atomic::Ordering::Relaxed)
             + self.core.shape_bumps.load(std::sync::atomic::Ordering::Relaxed)
             + self.freshness.write_count()
+            + self.core.open_bumps.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The open-doc build of `path` is now `analysis`: long-distance joins
+    /// read it in place of the indexed disk copy until `mark_doc_closed`.
+    pub fn set_open_caller(&self, path: &std::path::Path, analysis: Arc<FileAnalysis>) {
+        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let n = self.core.open_bumps.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let cached = Arc::new(CachedModule::new(canon.clone(), analysis));
+        self.core.open_callers.insert(canon, (super::OPEN_VERSION_BIT | n, cached));
     }
 
     /// The transitive consumers of `path`'s last-recorded surface — the

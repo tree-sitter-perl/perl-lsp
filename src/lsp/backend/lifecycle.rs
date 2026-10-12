@@ -418,17 +418,20 @@ impl DiagCtx {
         &self,
         uri: &Url,
     ) -> Option<crate::index::module_index::SurfaceDirty> {
-        let surface = {
+        let (surface, analysis) = {
             let doc = self.files.get_open(uri)?;
             if !crate::build::language_driver::LanguageRegistry::caps(doc.language)
                 .hub_enrichment
             {
                 return None;
             }
-            doc.baseline_surface.clone()?
+            (doc.baseline_surface.clone()?, Arc::clone(&doc.analysis))
         };
         let path = uri.to_file_path().ok()?;
         let canon = std::fs::canonicalize(&path).unwrap_or(path);
+        // Recorded with the surface, so the buffer's call sites join
+        // long-distance answers from the same build its surface came from.
+        self.module_index.set_open_caller(&canon, analysis);
         Some(self.module_index.record_and_dirty_value(
             &canon,
             surface,

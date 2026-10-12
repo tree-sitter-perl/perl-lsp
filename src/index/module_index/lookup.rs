@@ -431,7 +431,14 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn file_version(&self, path: &std::path::Path) -> Option<u64> {
+        if let Some(open) = self.core.open_callers.get(path) {
+            return Some(open.0);
+        }
         self.core.registration_gen.get(path).map(|g| *g)
+    }
+
+    fn open_callers(&self) -> Vec<Arc<CachedModule>> {
+        self.core.open_callers.iter().map(|e| Arc::clone(&e.value().1)).collect()
     }
 
     fn world_digest(&self) -> Option<u64> {
@@ -439,6 +446,10 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn source_stamp(&self, path: &std::path::Path) -> Option<u64> {
+        // An unsaved buffer has no stamp another process could check.
+        if self.core.open_callers.contains_key(path) {
+            return None;
+        }
         self.world_digest_now().stamps.get(path).copied()
     }
 

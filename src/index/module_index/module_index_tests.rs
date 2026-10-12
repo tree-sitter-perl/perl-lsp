@@ -2450,6 +2450,32 @@ fn param_type_follows_a_new_caller_file() {
     assert_eq!(greet_param_type(&greeter, &idx), None, "the new caller disagrees");
 }
 
+/// An open document's unsaved build is a caller in place of its indexed
+/// copy, and closing it hands the path back to the disk copy.
+#[test]
+fn param_type_reads_an_open_buffer_as_its_caller() {
+    let greeter = parse_source_to_cached(GREETER_METHOD, "Greeter");
+    let app = parse_source_to_cached(
+        "package App;\nsub run { Greeter->greet(bless({}, 'User')) }\n1;\n",
+        "App",
+    );
+    let idx = index_of(&[&greeter, &app]);
+    assert_eq!(greet_param_type(&greeter, &idx).unwrap().class_name().as_deref(), Some("User"));
+    let typing = parse_source_to_cached(
+        "package App;\nsub run { Greeter->greet(bless({}, 'Admin')) }\n1;\n",
+        "App",
+    );
+    idx.set_open_caller(&app.path, Arc::clone(&typing.analysis));
+    assert_eq!(greet_param_type(&greeter, &idx).unwrap().class_name().as_deref(), Some("Admin"));
+    // A buffer that drops the call stops being a caller, even though the
+    // disk copy still has one.
+    let removed = parse_source_to_cached("package App;\nsub run { 1 }\n1;\n", "App");
+    idx.set_open_caller(&app.path, Arc::clone(&removed.analysis));
+    assert_eq!(greet_param_type(&greeter, &idx), None);
+    idx.mark_doc_closed(&app.path);
+    assert_eq!(greet_param_type(&greeter, &idx).unwrap().class_name().as_deref(), Some("User"));
+}
+
 /// Parameters passed around in a circle terminate, and the caller from
 /// outside the circle still types them.
 #[test]

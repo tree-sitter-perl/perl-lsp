@@ -90,6 +90,13 @@ pub(crate) struct IndexCore {
     /// Persisted answer rows, `key → answer` in the engine's encoding, read
     /// from the store once, on the first lookup after it opens.
     pub(crate) persisted_answers: std::sync::OnceLock<std::collections::HashMap<Vec<u8>, Vec<u8>>>,
+    /// Open documents' current analyses, as callers: a call site typed into
+    /// an unsaved buffer joins `ParamIn` like a saved one. Keyed by
+    /// canonical path, each with its overlay version (`OPEN_VERSION_BIT` set,
+    /// so it never equals a registration generation).
+    pub(crate) open_callers: DashMap<std::path::PathBuf, (u64, Arc<CachedModule>)>,
+    /// Every overlay write or removal; a leg of the resolution epoch.
+    pub(crate) open_bumps: std::sync::atomic::AtomicU64,
     /// The world digest and every held file's source stamp, rebuilt when the
     /// counters that move with either do.
     pub(crate) world_digest: Mutex<Option<Arc<WorldDigest>>>,
@@ -164,6 +171,8 @@ impl IndexCore {
             shape_bumps: std::sync::atomic::AtomicU64::new(0),
             answers: crate::model::witnesses::engine::AnswerStore::new(),
             persisted_answers: std::sync::OnceLock::new(),
+            open_callers: DashMap::new(),
+            open_bumps: std::sync::atomic::AtomicU64::new(0),
             world_digest: Mutex::new(None),
             long_lived: std::sync::atomic::AtomicBool::new(false),
             bag_cache: Arc::new(std::sync::RwLock::new(None)),
