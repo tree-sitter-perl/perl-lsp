@@ -25,7 +25,10 @@
 //! Dependencies are flattened: a computation's frame collects every read
 //! made beneath it, including the reads of nested engine answers (a hit
 //! replays its entry's dependencies into the open frames). A value computed
-//! while a cycle guard cut something is path-dependent and is never stored.
+//! while a cycle guard cut something is path-dependent: it is kept as
+//! PROVISIONAL, served only while the index has not moved at all, and never
+//! re-verified or persisted. Recomputing it on every ask is what a call
+//! graph full of parameters passed around in circles cannot afford.
 
 use super::*;
 
@@ -50,6 +53,10 @@ struct Entry {
     epoch: u64,
     world: u64,
     deps: Arc<[Dep]>,
+    /// Computed under a cut: path-dependent, so it is served only while
+    /// nothing in the index has moved (the epoch fast path), never
+    /// re-verified, never persisted.
+    provisional: bool,
 }
 
 /// Above this many entries the store drops everything and starts over: an
@@ -123,13 +130,17 @@ pub fn mentions_hash(paths: &[PathBuf]) -> u64 {
 }
 
 /// The files the index says mention `key`: its ref rows, plus every
-/// resident file the rows don't cover (never shredded, so no row can speak
-/// for it). Sorted, so its hash is a stable `Mentions` dependency.
+/// resident file the rows don't cover whose own refs carry the key (never
+/// shredded, so its resident copy still holds its refs). Sorted, so its hash
+/// is a stable `Mentions` dependency.
 pub fn mentions_of(idx: &dyn CrossFileLookup, key: &str) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = idx.ref_candidate_paths(&[key.to_string()]);
     let shredded = idx.ref_indexed_paths();
     idx.for_each_cached_file(&mut |cached| {
-        if !shredded.contains(&cached.path) {
+        // An evicted copy can't say, so it stays a candidate.
+        let mentions = cached.analysis.refs_are_evicted()
+            || !cached.analysis.ref_indices_keyed(key).is_empty();
+        if !shredded.contains(&cached.path) && mentions {
             paths.push(cached.path.clone());
         }
     });
@@ -185,10 +196,11 @@ pub fn answer(
     let epoch = idx.resolution_epoch();
     let found = store.entries.lock().ok().and_then(|m| m.get(key).cloned());
     if let Some(e) = found {
-        let fresh = e.epoch == epoch || {
-            crate::util::ghost_stats::count("engine.verify");
-            verify(idx, &e)
-        };
+        let fresh = e.epoch == epoch
+            || (!e.provisional && {
+                crate::util::ghost_stats::count("engine.verify");
+                verify(idx, &e)
+            });
         if fresh {
             crate::util::ghost_stats::count("engine.hit");
             for d in e.deps.iter() {
@@ -212,19 +224,21 @@ pub fn answer(
     let Some(Frame { mut deps, cut, .. }) = FRAMES.with(|f| f.borrow_mut().pop()) else {
         return value;
     };
-    if !cut && !chase_cut {
-        deps.sort();
-        deps.dedup();
-        if let Ok(mut m) = store.entries.lock() {
-            if m.len() >= ANSWER_STORE_CAP {
-                crate::util::ghost_stats::count("engine.reset");
-                m.clear();
-            }
-            m.insert(
-                key.clone(),
-                Entry { value: Arc::new(value.clone()), epoch, world, deps: deps.into() },
-            );
+    let provisional = cut || chase_cut;
+    if provisional {
+        crate::util::ghost_stats::count("engine.provisional");
+    }
+    deps.sort();
+    deps.dedup();
+    if let Ok(mut m) = store.entries.lock() {
+        if m.len() >= ANSWER_STORE_CAP {
+            crate::util::ghost_stats::count("engine.reset");
+            m.clear();
         }
+        m.insert(
+            key.clone(),
+            Entry { value: Arc::new(value.clone()), epoch, world, deps: deps.into(), provisional },
+        );
     }
     value
 }
