@@ -284,8 +284,10 @@ impl WitnessPayload {
                     f(t);
                 }
                 for arg in args.iter_mut().flatten() {
-                    let (CallArg::One(t) | CallArg::Spread(t) | CallArg::Word { at: t, .. }) = arg;
-                    f(t);
+                    match arg {
+                        CallArg::One(t) | CallArg::Spread(t) | CallArg::Word { at: t, .. } => f(t),
+                        CallArg::Forward { .. } => {}
+                    }
                 }
             }
             WitnessPayload::InferredType(t) => t.for_each_attachment_mut(f),
@@ -503,6 +505,12 @@ pub enum CallArg {
     /// can pair keys with values without re-reading source. Kept at the END
     /// for bincode variant-index stability (bump `EXTRACT_VERSION`).
     Word { word: String, at: WitnessAttachment },
+    /// The rest of the calling sub's own arguments, from its `@_` position
+    /// `from` on (`$self->target(@_)` after a `shift`): each position here
+    /// is `ParamIn{package, name, from + offset}` of the forwarding sub, so
+    /// a join reads through it to that sub's callers. Kept at the END for
+    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
+    Forward { package: String, name: String, from: u32, method: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

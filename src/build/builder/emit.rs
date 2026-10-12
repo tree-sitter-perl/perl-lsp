@@ -595,6 +595,9 @@ impl<'a> Builder<'a> {
         let flat = self.flat_call_args(args.to_vec());
         flat.into_iter()
             .map(|a| {
+                if let Some(forward) = self.forwarded_args(a) {
+                    return forward;
+                }
                 self.emit_expr_witness(a);
                 let att = WitnessAttachment::Expr(node_to_span(a));
                 if crate::cst::is_flattening(a) {
@@ -610,6 +613,29 @@ impl<'a> Builder<'a> {
                 }
             })
             .collect()
+    }
+
+    /// `@_` passed on whole from a named sub's body: the rest of that sub's
+    /// own arguments, past the heads its straight-line `shift`s consumed.
+    fn forwarded_args(&self, a: Node<'a>) -> Option<crate::model::witnesses::CallArg> {
+        if a.kind() != "array" || a.utf8_text(self.source).ok()? != "@_" {
+            return None;
+        }
+        let point = a.start_position();
+        let mut scope = Some(self.scope_at_point(point));
+        let sub = loop {
+            let s = &self.scopes[scope?.0 as usize];
+            match s.kind {
+                ScopeKind::Sub { .. } | ScopeKind::Method { .. } => break s.id,
+                _ => scope = s.parent,
+            }
+        };
+        let (package, name, method) = self.forwarding_subs.get(&sub)?.clone();
+        let from = match self.arg_shifts.get(&sub) {
+            Some(shifts) => shifts.iter().rev().find(|(at, _)| *at <= point).map_or(Some(0), |(_, n)| *n)?,
+            None => 0,
+        };
+        Some(crate::model::witnesses::CallArg::Forward { package, name, from, method })
     }
 
     /// A `shift` whose array is `@_` — bare, or spelled `shift @_`.

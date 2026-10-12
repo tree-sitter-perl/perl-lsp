@@ -381,6 +381,8 @@ fn build_once(
         anon_sub_symbol_by_span: std::collections::HashMap::new(),
         modifier_invocant_pos: None,
         callback_params: std::collections::HashMap::new(),
+        forwarding_subs: std::collections::HashMap::new(),
+        arg_shifts: std::collections::HashMap::new(),
         expr_type_depth: 0,
         walk_stack: Vec::new(),
         #[cfg(test)]
@@ -913,13 +915,9 @@ impl<'a> Builder<'a> {
             });
         }
         for (class, key, span, rhs_span) in slot_writes {
-            // Only seed when the RHS actually resolves to a type — a bare
-            // `Edge(Expr(rhs_span))` to an unresolved span folds to None,
-            // which is honest, but emitting nothing for `= shift` / `= $param`
-            // keeps the attachment absent entirely (no guess).
-            if self.bag_query_expr_span(rhs_span).is_none() {
-                continue;
-            }
+            // An edge whatever the RHS resolves to here: a value that only
+            // the index can type (a parameter its callers fill) types the
+            // slot at query time.
             self.bag.push(Witness {
                 attachment: WitnessAttachment::SlotType { class, key },
                 source: WitnessSource::Builder("slot_type".into()),

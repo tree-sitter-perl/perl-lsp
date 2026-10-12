@@ -679,6 +679,14 @@ struct Builder<'a> {
     /// say which parameter it calls (`CallbackIn`).
     callback_params: std::collections::HashMap<ScopeId, (String, String, Vec<(String, u32)>)>,
 
+    /// Each named sub scope → its package, name and whether it unpacks an
+    /// invocant: what a `@_` forwarded from its body hands on (`CallArg::Forward`).
+    forwarding_subs: std::collections::HashMap<ScopeId, (String, String, bool)>,
+
+    /// Per sub scope, how many `@_` heads straight-line `shift`s consumed,
+    /// from each shift's end point on (`None` once one may not have run).
+    arg_shifts: std::collections::HashMap<ScopeId, Vec<(Point, Option<u32>)>>,
+
     /// Current nesting of expression-shape typing — see
     /// `MAX_EXPR_TYPE_DEPTH`. Post-order type construction cannot be
     /// queued the way the walk is, so it is bounded instead.

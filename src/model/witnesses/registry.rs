@@ -48,21 +48,53 @@ fn pairs_type(
 ) -> InferredType {
     let mut keys: Vec<(String, Option<Box<InferredType>>)> = Vec::new();
     let mut open = false;
+    let mut set = |keys: &mut Vec<(String, Option<Box<InferredType>>)>, word: &str, t: Option<Box<InferredType>>| {
+        match keys.iter_mut().find(|(k, _)| k == word) {
+            Some(slot) => slot.1 = t,
+            None => keys.push((word.to_string(), t)),
+        }
+    };
     let rest = args.get(from..).unwrap_or_default();
-    for pair in rest.chunks(2) {
-        match pair {
-            [CallArg::Word { word, .. }, CallArg::One(v) | CallArg::Word { at: v, .. }] => {
-                let t = type_of(v).map(Box::new);
-                match keys.iter_mut().find(|(k, _)| k == word) {
-                    Some(slot) => slot.1 = t,
-                    None => keys.push((word.clone(), t)),
+    let mut i = 0;
+    while i < rest.len() {
+        // A spread hash (`%args`, a forwarded `@_`) lays its known keys in
+        // place, later keys winning as Perl's list assignment does.
+        let spread = match &rest[i] {
+            CallArg::Spread(att) => type_of(att),
+            CallArg::Forward { package, name, from, method } => type_of(&WitnessAttachment::ParamPairs {
+                package: package.clone(),
+                name: name.clone(),
+                from: *from,
+                method: *method,
+            }),
+            _ => None,
+        };
+        if matches!(rest[i], CallArg::Spread(_) | CallArg::Forward { .. }) {
+            match spread {
+                Some(InferredType::HashWithKeys { keys: spread_keys, open: o }) => {
+                    for (k, t) in spread_keys.iter() {
+                        set(&mut keys, k, t.clone());
+                    }
+                    open |= o;
+                    i += 1;
+                    continue;
+                }
+                _ => {
+                    open = true;
+                    break;
                 }
             }
-            [CallArg::Spread(_), ..] | [_, CallArg::Spread(_)] => {
+        }
+        match (&rest[i], rest.get(i + 1)) {
+            (CallArg::Word { word, .. }, Some(CallArg::One(v) | CallArg::Word { at: v, .. })) => {
+                let t = type_of(v).map(Box::new);
+                set(&mut keys, word, t);
+                i += 2;
+            }
+            _ => {
                 open = true;
                 break;
             }
-            _ => open = true,
         }
     }
     InferredType::HashWithKeys { keys: crate::model::file_analysis::SharedKeys::new(keys), open }
@@ -82,12 +114,21 @@ impl crate::model::file_analysis::ClassOrder for CallerOrder<'_> {
 }
 
 /// The attachment an argument list holds at `i`, when nothing before it
-/// spreads (a `Spread` makes every later position unknown).
+/// spreads (a `Spread` makes every later position unknown; a `Forward` hands
+/// the position to the forwarding sub's own parameter).
 fn positional_arg(args: Option<&[CallArg]>, i: u32) -> Option<WitnessAttachment> {
     let args = args?;
     for (k, a) in args.iter().enumerate() {
         match a {
             CallArg::Spread(_) => return None,
+            CallArg::Forward { package, name, from, method } => {
+                return Some(WitnessAttachment::ParamIn {
+                    package: package.clone(),
+                    name: name.clone(),
+                    index: from + (i - k as u32),
+                    method: *method,
+                })
+            }
             CallArg::One(t) | CallArg::Word { at: t, .. } if k as u32 == i => return Some(t.clone()),
             CallArg::One(_) | CallArg::Word { .. } => {}
         }
@@ -2956,7 +2997,7 @@ impl ReducerRegistry {
                 CallArg::One(att) | CallArg::Word { at: att, .. } => arg_types.push(
                     self.operand_type(bag, q, state, att).unwrap_or(InferredType::Unknown),
                 ),
-                CallArg::Spread(_) => {
+                CallArg::Spread(_) | CallArg::Forward { .. } => {
                     spread = true;
                     break;
                 }

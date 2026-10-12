@@ -64,6 +64,10 @@ impl<'a> Builder<'a> {
     /// tier.md`); any other opens it, so later reads answer unknown.
     pub(super) fn consume_arg_head(&mut self, node: Node<'a>) {
         let Some(scope) = self.enclosing_sub_scope() else { return };
+        let shifts = self.arg_shifts.entry(scope).or_default();
+        let before = shifts.last().map_or(Some(0), |(_, n)| *n);
+        let after = before.filter(|_| !crate::cst::is_conditionally_executed(node)).map(|n| n + 1);
+        shifts.push((node.end_position(), after));
         let tail = match self.arg_window_at(node) {
             Some(InferredType::Sequence(v)) if !crate::cst::is_conditionally_executed(node) => {
                 v.into_iter().skip(1).collect()

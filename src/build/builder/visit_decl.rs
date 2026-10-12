@@ -1426,6 +1426,7 @@ impl<'a> Builder<'a> {
             .filter_map(|p| Some((p.name.clone(), p.arg_position?)))
             .collect();
         self.callback_params.insert(scope, (package.clone(), leaf.to_string(), scalars));
+        self.forwarding_subs.insert(scope, (package.clone(), leaf.to_string(), method));
         for p in params {
             let (Some(index), Some(at)) = (p.arg_position, p.binding_site) else { continue };
             if p.is_invocant {
