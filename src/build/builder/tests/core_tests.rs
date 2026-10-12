@@ -1240,3 +1240,29 @@ fn scopes_own_their_callable_and_params_carry_their_binding_site() {
     assert_eq!(fa.enclosing_callable_at(Point { row: 3, column: 4 }).map(|s| s.name.as_str()), Some("(anon)"));
     assert!(fa.enclosing_callable_at(Point { row: 1, column: 0 }).is_none(), "top-level code has no callable");
 }
+
+/// Chain typing recurses once per hop down an invocant chain. A 120-step
+/// fluent chain builds on a 256 KiB stack — about 50 debug-build hops of raw
+/// recursion — because the recursion grows its own stack. Base-verify by
+/// calling `invocant_type_at_node_on_stack` directly: this aborts.
+#[test]
+fn a_fluent_chain_deeper_than_the_stack_builds() {
+    let mut src = String::from(
+        "package P;\nsub new { my $c = shift; return bless {}, $c }\n\
+         sub step { my $s = shift; return $s }\npackage main;\nmy $r = P->new",
+    );
+    for _ in 0..120 {
+        src.push_str("->step");
+    }
+    src.push_str(";\n");
+    let steps = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            let fa = build_fa(&src);
+            fa.refs().iter().filter(|r| r.target_name == "step").count()
+        })
+        .expect("spawn")
+        .join()
+        .expect("chain typing must not overflow the stack");
+    assert_eq!(steps, 120);
+}
