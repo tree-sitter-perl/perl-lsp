@@ -702,6 +702,11 @@ pub fn signature_help(
                 {
                     return base;
                 }
+                // A slurpy parameter's sigil is its type; its value type is a
+                // ref type (`HashRef`) that would misname `%args`.
+                if p.is_slurpy {
+                    return base;
+                }
                 // Cross-file: use pre-resolved param types
                 if let Some(ref types) = sig_info.param_types {
                     if let Some(Some(ref type_tag)) = types.get(i) {

@@ -542,6 +542,44 @@ impl<'a> Builder<'a> {
     }
 
     /// Handle `push @EXPORT, 'foo', 'bar'` — append to export lists.
+    /// `@{ BASE->{key} }`: the array an element slot holds, as (base, key).
+    pub(super) fn array_slot_deref(&self, node: Node<'a>) -> Option<(Node<'a>, String)> {
+        if node.kind() != "array" {
+            return None;
+        }
+        let block = crate::cst::varname_child(node)?.named_child(0).filter(|b| b.kind() == "block")?;
+        let stmt = crate::cst::NodeExt::named(&block).next()?;
+        let inner = if stmt.kind() == "expression_statement" { stmt.named_child(0)? } else { stmt };
+        if inner.kind() != "hash_element_expression" || inner.child_by_field_name("hash").is_some() {
+            return None;
+        }
+        let (key, dynamic) = self.extract_key_text(inner.child_by_field_name("key")?)?;
+        (!dynamic).then_some((inner.named_child(0)?, key))
+    }
+
+    /// `push @{ $obj->{key} }, VALUES`: each value is an element of `key`'s
+    /// array on every instance of `$obj`'s class (`SlotElements`).
+    fn push_slot_elements(&mut self, target: Node<'a>, values: &[Node<'a>]) {
+        use crate::model::witnesses::{ProjectionStep, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let Some((base, key)) = self.array_slot_deref(target) else { return };
+        let Some(class) = self.resolve_invocant_class_tree(base) else { return };
+        for v in values {
+            self.emit_expr_witness(*v);
+            let at = WitnessAttachment::Expr(node_to_span(*v));
+            let payload = if crate::cst::is_flattening(*v) {
+                WitnessPayload::Projected { base: at, step: ProjectionStep::Element }
+            } else {
+                WitnessPayload::Edge(at)
+            };
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::SlotElements { class: class.clone(), key: key.clone() },
+                source: WitnessSource::Builder("slot_elements".into()),
+                payload,
+                span: node_to_span(*v),
+            });
+        }
+    }
+
     pub(super) fn visit_push_call(&mut self, node: Node<'a>) {
         let args = match node.child_by_field_name("arguments") {
             Some(a) => a,
@@ -557,6 +595,7 @@ impl<'a> Builder<'a> {
         if children.is_empty() { return; }
         let first = children[0];
         if first.kind() != "array" { return; }
+        self.push_slot_elements(first, &children[1..]);
         let arr_name = match first.utf8_text(self.source) {
             Ok(t) => t,
             Err(_) => return,

@@ -221,10 +221,10 @@ fn unknown_absorbs_in_return_arm_agreement() {
 #[test]
 fn an_undef_arm_does_not_wrap_unknown_in_optional() {
     // `Optional<Unknown>` would claim a value half nothing supports.
-    assert_eq!(join_return_arms(&[InferredType::Unknown], true), Some(InferredType::Unknown));
+    assert_eq!(join_return_arms(&[InferredType::Unknown], true, &crate::model::file_analysis::Unordered), Some(InferredType::Unknown));
     // The rule for a KNOWN value arm is untouched.
     assert_eq!(
-        join_return_arms(&[InferredType::ClassName("Foo".into())], true),
+        join_return_arms(&[InferredType::ClassName("Foo".into())], true, &crate::model::file_analysis::Unordered),
         Some(InferredType::Optional(Box::new(InferredType::ClassName("Foo".into())))),
     );
 }

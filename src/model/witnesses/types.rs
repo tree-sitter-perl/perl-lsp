@@ -173,14 +173,17 @@ pub enum WitnessAttachment {
     /// no caller in hand, or callers that disagree, answers nothing.
     /// Kept at the END for bincode variant-index stability (bump
     /// `EXTRACT_VERSION`).
-    ParamIn { package: String, name: String, index: u32 },
+    ///
+    /// `method`: the sub unpacks an invocant, so its callers name `package`
+    /// or a subclass of it — the join reads only files that do.
+    ParamIn { package: String, name: String, index: u32, method: bool },
     /// The arguments of `package::name` from `@_` position `from` on, read
     /// as key/value pairs — what a slurpy hash parameter (`my ($self,
     /// %args) = @_`) holds. Joined over call sites like `ParamIn`, into a
     /// `HashWithKeys` whose keys are the literal words the callers pass.
     /// Kept at the END for bincode variant-index stability (bump
     /// `EXTRACT_VERSION`).
-    ParamPairs { package: String, name: String, from: u32 },
+    ParamPairs { package: String, name: String, from: u32, method: bool },
     /// The hash an instance of `class` is blessed from, where the literal
     /// spreads another hash into it (`bless { %args }, $class`): each spread
     /// is an `Edge` to the spread variable, so a slot read the class's own
@@ -188,6 +191,11 @@ pub enum WitnessAttachment {
     /// constructor's named arguments, joined from its callers. Kept at the
     /// END for bincode variant-index stability (bump `EXTRACT_VERSION`).
     InstanceShape { class: String },
+    /// The elements pushed into the array slot `key` of `class`'s instances
+    /// (`push @{ $self->{key} }, $v`): one `Edge` per pushed value, joined.
+    /// Kept at the END for bincode variant-index stability (bump
+    /// `EXTRACT_VERSION`).
+    SlotElements { class: String, key: String },
 }
 
 /// Index into `FileAnalysis::refs`.
@@ -533,6 +541,10 @@ pub enum ProjectionStep {
     /// $out)`), the same deferred-dispatch shape as `MethodHop`. Kept at
     /// the END for bincode variant-index stability (bump `EXTRACT_VERSION`).
     ParamOf { member: String, index: u32 },
+    /// An element of the array slot `key` on the base's class: chases
+    /// `SlotElements{class, key}` (`for my $x (@{ $self->{key} })`). Kept at
+    /// the END for bincode variant-index stability (bump `EXTRACT_VERSION`).
+    SlotElements { key: String },
 }
 
 /// A sub's return type as a **deferred computation**, not a value:

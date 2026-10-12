@@ -1316,14 +1316,15 @@ impl<'a> Builder<'a> {
             return;
         };
         let scope = self.current_scope();
+        let method = params.iter().any(|p| p.is_invocant);
         for p in params {
             let (Some(index), Some(at)) = (p.arg_position, p.binding_site) else { continue };
             if p.is_invocant {
                 continue;
             }
             let target = match (p.is_slurpy, p.name.starts_with('%')) {
-                (false, _) => WitnessAttachment::ParamIn { package: package.clone(), name: leaf.to_string(), index },
-                (true, true) => WitnessAttachment::ParamPairs { package: package.clone(), name: leaf.to_string(), from: index },
+                (false, _) => WitnessAttachment::ParamIn { package: package.clone(), name: leaf.to_string(), index, method },
+                (true, true) => WitnessAttachment::ParamPairs { package: package.clone(), name: leaf.to_string(), from: index, method },
                 (true, false) => continue,
             };
             self.bag.push(Witness {
@@ -1594,8 +1595,14 @@ impl<'a> Builder<'a> {
                 // The loop variable holds each element of the list in turn.
                 if let Some(list_node) = node.child_by_field_name("list") {
                     if sigil == '$' {
-                        self.emit_expr_witness(list_node);
                         let at = node_to_span(var_node).start;
+                        let (base, step) = match self.array_slot_deref(list_node) {
+                            Some((base, key)) => {
+                                (base, crate::model::witnesses::ProjectionStep::SlotElements { key })
+                            }
+                            None => (list_node, crate::model::witnesses::ProjectionStep::Element),
+                        };
+                        self.emit_expr_witness(base);
                         self.bag.push(crate::model::witnesses::Witness {
                             attachment: crate::model::witnesses::WitnessAttachment::Variable {
                                 name: var_name.clone(),
@@ -1603,8 +1610,8 @@ impl<'a> Builder<'a> {
                             },
                             source: crate::model::witnesses::WitnessSource::Builder("foreach_element".into()),
                             payload: crate::model::witnesses::WitnessPayload::Projected {
-                                base: crate::model::witnesses::WitnessAttachment::Expr(node_to_span(list_node)),
-                                step: crate::model::witnesses::ProjectionStep::Element,
+                                base: crate::model::witnesses::WitnessAttachment::Expr(node_to_span(base)),
+                                step,
                             },
                             span: Span { start: at, end: at },
                         });

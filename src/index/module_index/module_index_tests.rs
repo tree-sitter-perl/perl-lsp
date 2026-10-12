@@ -2618,3 +2618,22 @@ fn named_args_type_the_param_hash_and_the_fields_it_fills() {
     assert_eq!(at("$to", 3, 60).as_deref(), Some("User"), "named argument");
     assert_eq!(at("$g", 2, 80).as_deref(), Some("Greeter"), "field from a spread constructor hash");
 }
+
+/// Values pushed into an array slot type the loop that walks it, the
+/// pushed value itself typed by the pushing method's callers.
+#[test]
+fn pushed_slot_elements_type_the_loop_over_the_slot() {
+    let roster = parse_source_to_cached(
+        "package Roster;\nsub new { bless { users => [] }, shift }\nsub add { my ($self, $u) = @_; push @{ $self->{users} }, $u; return $self }\nsub names { my ($self) = @_; for my $m (@{ $self->{users} }) {\n $m;\n } }\n1;\n",
+        "Roster",
+    );
+    let app = parse_source_to_cached(
+        "package App;\nsub run { Roster->new->add(bless({}, 'User')) }\n1;\n",
+        "App",
+    );
+    let idx = index_of(&[&roster, &app]);
+    let t = roster
+        .analysis
+        .inferred_type_via_bag_ctx("$m", tree_sitter::Point { row: 4, column: 2 }, Some(&idx));
+    assert_eq!(t.and_then(|t| t.class_name().map(str::to_string)).as_deref(), Some("User"));
+}

@@ -68,45 +68,16 @@ fn pairs_type(
     InferredType::HashWithKeys { keys: crate::model::file_analysis::SharedKeys::new(keys), open }
 }
 
-/// What two callers passing `a` and `b` agree the parameter holds: the same
-/// type, the nearest common class, or a hash holding every key either
-/// passed (a key whose values disagree keeps the key, untyped). `None`:
-/// they disagree.
-fn join_caller_types(
-    a: &InferredType,
-    b: &InferredType,
-    local: &std::collections::HashMap<String, crate::model::file_analysis::PackageFacts>,
-    idx: &dyn crate::model::file_analysis::CrossFileLookup,
-) -> Option<InferredType> {
-    if a == b {
-        return Some(a.clone());
-    }
-    match (a, b) {
-        (
-            InferredType::HashWithKeys { keys: ka, open: oa },
-            InferredType::HashWithKeys { keys: kb, open: ob },
-        ) => {
-            let mut keys: Vec<(String, Option<Box<InferredType>>)> = ka.iter().cloned().collect();
-            for (k, vb) in kb.iter() {
-                match keys.iter_mut().find(|(ka, _)| ka == k) {
-                    Some(slot) => {
-                        slot.1 = match (&slot.1, vb) {
-                            (Some(x), Some(y)) => join_caller_types(x, y, local, idx).map(Box::new),
-                            (x, y) => x.clone().or_else(|| y.clone()),
-                        }
-                    }
-                    None => keys.push((k.clone(), vb.clone())),
-                }
-            }
-            Some(InferredType::HashWithKeys {
-                keys: crate::model::file_analysis::SharedKeys::new(keys),
-                open: *oa || *ob,
-            })
-        }
-        _ => {
-            let (x, y) = (a.class_name()?, b.class_name()?);
-            crate::model::file_analysis::least_common_class(x, y, local, Some(idx)).map(InferredType::ClassName)
-        }
+/// Class order for a caller join: the caller file's own parents, then the
+/// index's.
+struct CallerOrder<'a> {
+    local: &'a dyn crate::model::file_analysis::LocalParents,
+    idx: &'a dyn crate::model::file_analysis::CrossFileLookup,
+}
+
+impl crate::model::file_analysis::ClassOrder for CallerOrder<'_> {
+    fn common_class(&self, a: &str, b: &str) -> Option<String> {
+        crate::model::file_analysis::least_common_class(a, b, self.local, Some(self.idx))
     }
 }
 
@@ -732,6 +703,7 @@ impl ReducerRegistry {
         // arm-agreement folds for legibility.
         r.register(Box::new(SlotTypeFold));
         r.register(Box::new(InstanceShapeFold));
+        r.register(Box::new(SlotElementsFold));
         // BranchArmFold claims the dedicated `BranchArm(_)` shape — no
         // overlap with the Variable/Expr folds below, so order here is
         // not load-bearing.
@@ -1445,20 +1417,28 @@ impl ReducerRegistry {
             }
         }
 
+        if let WitnessAttachment::SlotElements { class, key } = q.attachment {
+            if let Some(v) = self.owner_keyed_fallback(bag, q, state, class, "slot_elements", &|p| {
+                WitnessAttachment::SlotElements { class: p, key: key.clone() }
+            }) {
+                return v;
+            }
+        }
+
         if let WitnessAttachment::ImportedSub { name } = q.attachment {
             if let Some(v) = self.imported_sub_fallback(q, state, name) {
                 return v;
             }
         }
 
-        if let WitnessAttachment::ParamIn { package, name, index } = q.attachment {
-            if let Some(v) = self.param_in_fallback(q, state, package, name, ArgWant::At(*index)) {
+        if let WitnessAttachment::ParamIn { package, name, index, method } = q.attachment {
+            if let Some(v) = self.param_in_fallback(q, state, package, name, *method, ArgWant::At(*index)) {
                 return v;
             }
         }
 
-        if let WitnessAttachment::ParamPairs { package, name, from } = q.attachment {
-            if let Some(v) = self.param_in_fallback(q, state, package, name, ArgWant::PairsFrom(*from)) {
+        if let WitnessAttachment::ParamPairs { package, name, from, method } = q.attachment {
+            if let Some(v) = self.param_in_fallback(q, state, package, name, *method, ArgWant::PairsFrom(*from)) {
                 return v;
             }
         }
@@ -1481,6 +1461,7 @@ impl ReducerRegistry {
         _state: &mut QueryState,
         package: &str,
         name: &str,
+        method: bool,
         want: ArgWant,
     ) -> Option<ReducedValue> {
         let ctx = q.context?;
@@ -1489,7 +1470,7 @@ impl ReducerRegistry {
             return None;
         };
         let v = super::engine::answer(idx, q.attachment, || {
-            self.param_in_join(idx, &mut QueryState::new(), package, name, want)
+            self.param_in_join(idx, &mut QueryState::new(), package, name, method, want)
         });
         Some(v)
     }
@@ -1531,15 +1512,26 @@ impl ReducerRegistry {
         state: &mut QueryState,
         package: &str,
         name: &str,
+        method: bool,
         want: ArgWant,
     ) -> ReducedValue {
         use crate::model::file_analysis::RefKind;
         let key = crate::model::conventions::name_match_key(name, &crate::model::conventions::PERL_SPELLINGS);
-        let paths = super::engine::mentions_of(idx, &key);
+        let mut paths = (*super::engine::mentions_of(idx, &key)).clone();
         super::engine::note_dep(super::engine::Dep::Mentions {
             key: key.clone(),
             hash: super::engine::mentions_hash(&paths),
         });
+        // A named-argument join never disagrees, so it never stops early: for
+        // a method it reads only the files that name the package or a
+        // subclass (the receiver they spell, the package they declare), or a
+        // name every file mentions (`new`) sweeps the index. A caller whose
+        // receiver is untyped and unnamed is left out of it. A positional
+        // join sweeps every mention: the first unrelated disagreement ends it.
+        if method && matches!(want, ArgWant::PairsFrom(_)) {
+            let family = super::engine::class_family_mentions(idx, package);
+            paths.retain(|p| family.contains(p));
+        }
         crate::util::ghost_stats::count("param_in.join");
         // No cap on the sweep: a name every file mentions (`new`) usually
         // meets an unrelated disagreement early, and an agreeing one is
@@ -1627,7 +1619,7 @@ impl ReducerRegistry {
                 let Some(t) = value else { continue };
                 joined = match joined {
                     None => Some(t),
-                    Some(j) => match join_caller_types(&j, &t, &full.packages, idx) {
+                    Some(j) => match crate::model::file_analysis::join(&j, &t, &CallerOrder { local: &full.packages, idx }) {
                         Some(u) => Some(u),
                         None => {
                             crate::util::ghost_stats::count("param_in.disagree");
@@ -2684,8 +2676,7 @@ impl ReducerRegistry {
                             ProjectionStep::ArrayIndex(i) => t.element_at(*i).cloned(),
                             ProjectionStep::Element => match &t {
                                 crate::model::file_analysis::InferredType::Sequence(elems) => {
-                                    let mut it = elems.iter();
-                                    it.next().filter(|first| it.all(|e| e == *first)).cloned()
+                                    crate::model::file_analysis::join_all(elems, super::reducers::class_order(q))
                                 }
                                 // A parametric container's TRAILING argument is
                                 // its element by the same positional convention
@@ -2712,6 +2703,24 @@ impl ReducerRegistry {
                                 ) if args.len() == 2 => args.first().cloned(),
                                 _ => None,
                             },
+                            ProjectionStep::SlotElements { key } => {
+                                t.class_name().map(str::to_string).and_then(|class| {
+                                    let att = WitnessAttachment::SlotElements { class, key: key.clone() };
+                                    let sub_q = ReducerQuery {
+                                        attachment: &att,
+                                        point: None,
+                                        framework: q.framework,
+                                        arity_hint: None,
+                                        receiver: None,
+                                        args: Vec::new(),
+                                        context: q.context,
+                                    };
+                                    state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
+                                        ReducedValue::Type(t) => Some(t.clone()),
+                                        ReducedValue::FactMap(_) | ReducedValue::None => None,
+                                    })
+                                })
+                            }
                             ProjectionStep::ParamOf { member, index } => {
                                 // The dispatch class picks the callee; the
                                 // callee's bag says whether the position
