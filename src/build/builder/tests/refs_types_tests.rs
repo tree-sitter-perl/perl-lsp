@@ -468,6 +468,15 @@ fn test_reference_to_a_container_takes_its_kind() {
 }
 
 #[test]
+fn test_foreach_variable_holds_the_lists_element() {
+    let fa = build_fa(
+        "sub all { return (bless({}, 'U'), bless({}, 'U')) }\nfor my $u (all()) {\n  $u;\n}",
+    );
+    let t = fa.inferred_type_via_bag("$u", Point::new(2, 3));
+    assert_eq!(t.and_then(|t| t.class_name().map(str::to_string)).as_deref(), Some("U"));
+}
+
+#[test]
 fn test_extract_regexp_literal() {
     let fa = build_fa("my $re = qr/pattern/;");
     let ty = fa.inferred_type_via_bag("$re", Point::new(0, 21));

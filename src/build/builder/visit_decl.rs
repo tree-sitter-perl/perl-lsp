@@ -1591,6 +1591,25 @@ impl<'a> Builder<'a> {
                     AccessKind::Declaration,
                 );
 
+                // The loop variable holds each element of the list in turn.
+                if let Some(list_node) = node.child_by_field_name("list") {
+                    if sigil == '$' {
+                        self.emit_expr_witness(list_node);
+                        let at = node_to_span(var_node).start;
+                        self.bag.push(crate::model::witnesses::Witness {
+                            attachment: crate::model::witnesses::WitnessAttachment::Variable {
+                                name: var_name.clone(),
+                                scope: self.current_scope(),
+                            },
+                            source: crate::model::witnesses::WitnessSource::Builder("foreach_element".into()),
+                            payload: crate::model::witnesses::WitnessPayload::Projected {
+                                base: crate::model::witnesses::WitnessAttachment::Expr(node_to_span(list_node)),
+                                step: crate::model::witnesses::ProjectionStep::Element,
+                            },
+                            span: Span { start: at, end: at },
+                        });
+                    }
+                }
                 // Accumulate loop variable values for constant folding
                 // for my $x (qw(a b c)) → $x => ["a", "b", "c"]
                 if let Some(list_node) = node.child_by_field_name("list") {
