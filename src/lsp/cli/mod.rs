@@ -366,6 +366,7 @@ fn cli_full_startup(
                 module_index.cache_raw(),
                 module_index.all_defs_raw(),
                 module_index.is_long_lived() && module_resolver::eviction_enabled(),
+                &inc_paths,
             )
         });
         // Stamp generations for the warm-loaded @INC providers (the warm

@@ -300,15 +300,18 @@ fn insert_sentinel_guarded(
 /// The name-keyed (@INC) warm lane. `cache` takes the name-slot winner and
 /// `all_defs` the whole provider relation — the table holds one row per
 /// FILE, so a name with two providers warms as two rows and the winner is
-/// DERIVED (@INC order is unavailable here, so it is the smallest path —
-/// the same order-independent tie-break the workspace tier uses; the
-/// resolver's own insert corrects it to true @INC order once it runs).
+/// DERIVED: the provider under the earliest of `inc_roots` — what a cold
+/// resolve picks — with the smallest path breaking ties among the rest.
 pub fn warm_cache(
     conn: &Connection,
     cache: &DashMap<String, Option<Arc<CachedModule>>>,
     all_defs: &DashMap<String, Vec<Arc<CachedModule>>>,
     strip: bool,
+    inc_roots: &[PathBuf],
 ) -> (usize, Vec<String>) {
+    // Canonical, like the candidate paths the resolver stores.
+    let inc_roots: Vec<PathBuf> =
+        inc_roots.iter().map(|r| std::fs::canonicalize(r).unwrap_or_else(|_| r.clone())).collect();
     // Name-keyed warm serves the @INC tier only; 'workspace' rows are
     // path-keyed and stream through `warm_cache_streaming` — loading them
     // here would pollute the module cache with path-string keys. The tag is
@@ -399,7 +402,7 @@ pub fn warm_cache(
                             fa.evict_to(crate::model::file_analysis::Residency::RowsOnly);
                         }
                         let cand = Arc::new(CachedModule::new(path, Arc::new(fa)));
-                        adopt_warm_provider(cache, all_defs, &module_name, cand);
+                        adopt_warm_provider(cache, all_defs, &module_name, cand, &inc_roots);
                         count += 1;
                     }
                     None => {
@@ -428,20 +431,24 @@ pub fn warm_cache(
 /// Adopt one warmed row as a provider of `module_name`: replace-by-path in
 /// the relation (a re-warm must not stack), then re-derive the name-slot
 /// winner from the SET. Row order out of SQLite is not @INC order and is
-/// not stable, so the winner cannot be "whichever row arrived last" —
-/// smallest path makes repeat warms byte-identical.
+/// not stable, so the winner cannot be "whichever row arrived last": it is
+/// ranked by @INC root, then by path, so repeat warms are byte-identical
+/// and agree with a cold resolve.
 fn adopt_warm_provider(
     cache: &DashMap<String, Option<Arc<CachedModule>>>,
     all_defs: &DashMap<String, Vec<Arc<CachedModule>>>,
     module_name: &str,
     cand: Arc<CachedModule>,
+    inc_roots: &[PathBuf],
 ) {
     let mut v = all_defs.entry(module_name.to_string()).or_default();
     match v.iter().position(|c| c.path == cand.path) {
         Some(i) => v[i] = cand.clone(),
         None => v.push(cand.clone()),
     }
-    let winner = v.iter().min_by(|a, b| a.path.cmp(&b.path)).cloned();
+    let rel = module_name.replace("::", "/") + ".pm";
+    let rank = |c: &CachedModule| inc_roots.iter().position(|r| r.join(&rel) == c.path).unwrap_or(usize::MAX);
+    let winner = v.iter().min_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.path.cmp(&b.path))).cloned();
     drop(v);
     if let Some(w) = winner {
         cache.insert(module_name.to_string(), Some(w));

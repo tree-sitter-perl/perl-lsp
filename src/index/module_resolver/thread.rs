@@ -61,7 +61,7 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
         let strip_warm = server.is_some()
             && core.long_lived.load(std::sync::atomic::Ordering::Relaxed)
             && eviction_enabled();
-        let (n, stale_names) = module_cache::warm_cache(conn, &core.cache, &core.all_defs, strip_warm);
+        let (n, stale_names) = module_cache::warm_cache(conn, &core.cache, &core.all_defs, strip_warm, &inc_paths);
         log::info!("Warmed module cache: {} entries loaded from disk, {} stale", n, stale_names.len());
         // Stamp generations for the warm-loaded @INC providers (they
         // landed in the cache without a registration front door).
