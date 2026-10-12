@@ -2541,3 +2541,30 @@ fn param_type_joins_a_same_file_call_inside_an_operator() {
     let t = greet_param_type(&greeter, &idx).expect("the local caller types the parameter");
     assert_eq!(t.class_name().as_deref(), Some("User"));
 }
+
+/// Two parameters that feed each other settle on the class both callers'
+/// arguments are, whichever is asked first.
+#[test]
+fn param_type_cycle_settles_on_the_common_class() {
+    let user = parse_source_to_cached("package User;\nsub name { 1 }\n1;\n", "User");
+    let admin = parse_source_to_cached("package Admin;\nuse parent -norequire, 'User';\n1;\n", "Admin");
+    let ring = parse_source_to_cached(
+        "package Ring;\nsub a { my ($x) = @_; b($x); return $x }\nsub b { my ($y) = @_; a($y); return $y }\n1;\n",
+        "Ring",
+    );
+    let app = parse_source_to_cached(
+        "package App;\nsub run { Ring::a(bless({}, 'User')); Ring::b(bless({}, 'Admin')) }\n1;\n",
+        "App",
+    );
+    for first in ["$x", "$y"] {
+        let idx = index_of(&[&user, &admin, &ring, &app]);
+        let order = if first == "$x" { ["$x", "$y"] } else { ["$y", "$x"] };
+        for var in order {
+            let t = ring
+                .analysis
+                .inferred_type_via_bag_ctx(var, tree_sitter::Point { row: 1, column: 30 }.max(if var == "$y" { tree_sitter::Point { row: 2, column: 30 } } else { tree_sitter::Point { row: 1, column: 30 } }), Some(&idx))
+                .unwrap_or_else(|| panic!("{var} settles (asked {first} first)"));
+            assert_eq!(t.class_name().as_deref(), Some("User"), "{var}, asked {first} first");
+        }
+    }
+}

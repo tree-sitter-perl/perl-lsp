@@ -1401,9 +1401,7 @@ impl ReducerRegistry {
             return None;
         };
         let v = super::engine::answer(idx, q.attachment, || {
-            let mut own = QueryState::new();
-            let v = self.param_in_join(idx, &mut own, package, name, index);
-            (v, own.cuts != 0)
+            self.param_in_join(idx, &mut QueryState::new(), package, name, index)
         });
         Some(v)
     }

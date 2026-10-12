@@ -24,11 +24,12 @@
 //!
 //! Dependencies are flattened: a computation's frame collects every read
 //! made beneath it, including the reads of nested engine answers (a hit
-//! replays its entry's dependencies into the open frames). A value computed
-//! while a cycle guard cut something is path-dependent: it is kept as
-//! PROVISIONAL, served only while the index has not moved at all, and never
-//! re-verified or persisted. Recomputing it on every ask is what a call
-//! graph full of parameters passed around in circles cannot afford.
+//! replays its entry's dependencies into the open frames).
+//!
+//! Keys that depend on each other (parameters passed around in a circle)
+//! settle by fixpoint at the outermost key of the cycle (`answer`). Values
+//! computed on the way read an assumption: they are PROVISIONAL, reused only
+//! within the round that produced them, never re-verified or persisted.
 //!
 //! Whole entries outlive the process. A persisted entry restates its
 //! dependencies in terms a later process can check: each file by its
@@ -60,10 +61,12 @@ struct Entry {
     epoch: u64,
     world: u64,
     deps: Arc<[Dep]>,
-    /// Computed under a cut: path-dependent, so it is served only while
-    /// nothing in the index has moved (the epoch fast path), never
+    /// Computed under an open cycle head's assumption, or from something
+    /// that was: served only in the round that produced it, never
     /// re-verified, never persisted.
     provisional: bool,
+    /// `round()` when computed; read only for a provisional entry.
+    round: (u64, u64),
     /// `world_digest` of the world `world` names; `None` when the index
     /// does not persist.
     digest: Option<u64>,
@@ -113,7 +116,7 @@ impl AnswerStore {
 }
 
 /// `e` as a persisted row, encoded when it is computed so its stamps are the
-/// ones it read. `None` for an entry that cannot outlive the process: cut,
+/// ones it read. `None` for an entry that cannot outlive the process: provisional,
 /// unpersisting index, a payload outside the persisted shape, or a file read
 /// with no source stamp.
 fn encode_persisted(idx: &dyn CrossFileLookup, key: &WitnessAttachment, e: &Entry) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -174,6 +177,7 @@ fn adopt_persisted(idx: &dyn CrossFileLookup, key: &WitnessAttachment, epoch: u6
         world: idx.world_generation(),
         deps: deps.into(),
         provisional: false,
+        round: round(),
         digest: Some(digest),
     })
 }
@@ -182,15 +186,70 @@ fn adopt_persisted(idx: &dyn CrossFileLookup, key: &WitnessAttachment, epoch: u6
 struct Frame {
     key: WitnessAttachment,
     deps: Vec<Dep>,
-    /// A key on the open path was re-entered beneath this frame, so its
-    /// value depends on the path that reached it.
-    cut: bool,
+    /// Depth of the outermost open key this computation read while that
+    /// key was still being computed (a cycle back to an ancestor frame):
+    /// the value holds only for that ancestor's assumption.
+    reads_open: Option<usize>,
+    /// Read a provisional entry from outside the current fixpoint: a value
+    /// that holds only for assumptions this computation never saw.
+    tainted: bool,
+    /// This key was re-entered while open in the current round.
+    is_head: bool,
+    /// An assumption inside this computation's cycle moved this round, so
+    /// the cycle has not settled.
+    changed: bool,
 }
+
+/// Rounds a cycle may take before its fixpoint is declared not to exist
+/// and its outermost key answers nothing. The joins only move up a finite
+/// class lattice, so real cycles settle in two or three.
+const MAX_FIXPOINT_ROUNDS: usize = 8;
 
 thread_local! {
     /// Open computation frames, innermost last; each collects the reads made
     /// while it is open.
     static FRAMES: RefCell<Vec<Frame>> = const { RefCell::new(Vec::new()) };
+    /// What a re-entered key answers: its value from the previous round of
+    /// the cycle it is in (nothing, at first). Lives until the outermost
+    /// computation returns, so a key inside a cycle keeps its assumption
+    /// across the outer rounds that recompute it.
+    static ASSUMED: RefCell<HashMap<WitnessAttachment, ReducedValue>> = RefCell::new(HashMap::new());
+    /// Provisional entries stored in the current round that read nothing
+    /// path-dependent: when the outermost computation returns with the
+    /// round unmoved, every assumption they read held, and they are whole.
+    static MEMBERS: RefCell<Vec<WitnessAttachment>> = const { RefCell::new(Vec::new()) };
+    /// This thread's identity and current fixpoint round (`round`).
+    static ROUND: std::cell::Cell<(u64, u64)> = std::cell::Cell::new((
+        THREAD_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        0,
+    ));
+}
+
+static THREAD_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The fixpoint round in force on this thread: it moves whenever a cycle
+/// head's assumption changes. A provisional value was computed under some
+/// head's assumption; it is reusable only in the round that produced it, on
+/// the thread that produced it — after the move the assumption is newer,
+/// and another thread's head may never settle.
+fn round() -> (u64, u64) {
+    ROUND.with(|r| r.get())
+}
+
+fn next_round() {
+    ROUND.with(|r| {
+        let (t, n) = r.get();
+        r.set((t, n + 1));
+    });
+    MEMBERS.with(|m| m.borrow_mut().clear());
+}
+
+fn taint_open_frames() {
+    FRAMES.with(|f| {
+        for fr in f.borrow_mut().iter_mut() {
+            fr.tainted = true;
+        }
+    });
 }
 
 /// Record a read into every open frame. Called by the index's read seams; a
@@ -298,97 +357,189 @@ fn verify(idx: &dyn CrossFileLookup, e: &Entry) -> bool {
     })
 }
 
-/// Answer `key` from the store, or compute it with `compute` and store it
-/// when the computation was whole (`compute` returns the value and whether
-/// its own chase was cut). Without a store this is `compute`.
+/// Answer `key` from the store, or compute it with `compute` and store it.
+/// Without a store this is `compute`.
 ///
 /// `compute` must run on a fresh `QueryState`: a memo carried in from the
 /// asking query would answer sub-queries without the reads that record
-/// their dependencies. Cycles across engine keys are cut here instead — a
-/// key re-entered while open answers nothing, and every open frame is
-/// marked cut, so none of the path-dependent values is stored.
+/// their dependencies, and its cycle cuts would depend on the asker. On a
+/// fresh state the chase is a function of the key and the index alone. Cycles across engine keys settle here instead: a key
+/// re-entered while open answers its current assumption (nothing, at
+/// first), and when its computation finishes it is recomputed from what it
+/// produced until the two agree. The values computed on the way read an
+/// assumption, so they are provisional; the settled head is whole unless it
+/// read a head further out.
 pub fn answer(
     idx: &dyn CrossFileLookup,
     key: &WitnessAttachment,
-    compute: impl FnOnce() -> (ReducedValue, bool),
+    mut compute: impl FnMut() -> ReducedValue,
 ) -> ReducedValue {
     let reentered = FRAMES.with(|f| {
         let mut frames = f.borrow_mut();
-        let open = frames.iter().any(|fr| &fr.key == key);
-        if open {
-            for fr in frames.iter_mut() {
-                fr.cut = true;
-            }
+        let pos = frames.iter().position(|fr| &fr.key == key)?;
+        frames[pos].is_head = true;
+        for fr in frames[pos + 1..].iter_mut() {
+            fr.reads_open = Some(fr.reads_open.map_or(pos, |d| d.min(pos)));
         }
-        open
+        Some(())
     });
-    if reentered {
+    if reentered.is_some() {
         crate::util::ghost_stats::count("engine.cycle");
-        return ReducedValue::None;
+        return ASSUMED.with(|a| a.borrow().get(key).cloned()).unwrap_or(ReducedValue::None);
     }
-    let Some(store) = idx.answer_store() else {
-        FRAMES.with(|f| f.borrow_mut().push(Frame { key: key.clone(), deps: Vec::new(), cut: false }));
-        let (v, _) = compute();
-        FRAMES.with(|f| f.borrow_mut().pop());
-        return v;
-    };
+    let store = idx.answer_store();
     let epoch = idx.resolution_epoch();
-    let mut found = store.entries.lock().ok().and_then(|m| m.get(key).cloned());
-    if found.is_none() {
-        if let Some(e) = crate::util::ghost_stats::timed("engine.adopt_time", || adopt_persisted(idx, key, epoch)) {
-            crate::util::ghost_stats::count("engine.persisted_adopt");
-            if let Ok(mut m) = store.entries.lock() {
-                m.insert(key.clone(), e.clone());
-            }
-            found = Some(e);
-        }
-    }
-    if let Some(e) = found {
-        let fresh = e.epoch == epoch
-            || (!e.provisional && {
-                crate::util::ghost_stats::count("engine.verify");
-                verify(idx, &e)
-            });
-        if fresh {
-            crate::util::ghost_stats::count("engine.hit");
-            for d in e.deps.iter() {
-                note_dep(d.clone());
-            }
-            // A path-dependent value makes everything computed from it
-            // path-dependent too.
-            if e.provisional {
-                FRAMES.with(|f| {
-                    for fr in f.borrow_mut().iter_mut() {
-                        fr.cut = true;
-                    }
-                });
-            }
-            if e.epoch != epoch {
+    if let Some(store) = store {
+        let mut found = store.entries.lock().ok().and_then(|m| m.get(key).cloned());
+        if found.is_none() {
+            if let Some(e) = crate::util::ghost_stats::timed("engine.adopt_time", || adopt_persisted(idx, key, epoch)) {
+                crate::util::ghost_stats::count("engine.persisted_adopt");
                 if let Ok(mut m) = store.entries.lock() {
-                    if let Some(slot) = m.get_mut(key) {
-                        slot.epoch = epoch;
+                    m.insert(key.clone(), e.clone());
+                }
+                found = Some(e);
+            }
+        }
+        if let Some(e) = found {
+            let fresh = if e.provisional {
+                e.epoch == epoch && e.round == round()
+            } else {
+                e.epoch == epoch || {
+                    crate::util::ghost_stats::count("engine.verify");
+                    verify(idx, &e)
+                }
+            };
+            if fresh {
+                crate::util::ghost_stats::count("engine.hit");
+                for d in e.deps.iter() {
+                    note_dep(d.clone());
+                }
+                if e.provisional {
+                    // A member of the fixpoint in progress reads the same
+                    // assumptions this computation does; anything else is
+                    // a path-dependent value from outside it.
+                    let member = MEMBERS.with(|m| m.borrow().contains(key));
+                    if member {
+                        mark_reads_open(0);
+                    } else {
+                        taint_open_frames();
                     }
                 }
+                if e.epoch != epoch {
+                    if let Ok(mut m) = store.entries.lock() {
+                        if let Some(slot) = m.get_mut(key) {
+                            slot.epoch = epoch;
+                        }
+                    }
+                }
+                return (*e.value).clone();
             }
-            return (*e.value).clone();
+            crate::util::ghost_stats::count("engine.stale");
         }
-        crate::util::ghost_stats::count("engine.stale");
     }
     crate::util::ghost_stats::count("engine.compute");
     let world = idx.world_generation();
     let digest = idx.world_digest();
-    FRAMES.with(|f| f.borrow_mut().push(Frame { key: key.clone(), deps: Vec::new(), cut: false }));
-    let (value, chase_cut) = crate::util::ghost_stats::timed("engine.compute_time", compute);
-    let Some(Frame { mut deps, cut, .. }) = FRAMES.with(|f| f.borrow_mut().pop()) else {
+    let depth = FRAMES.with(|f| {
+        let mut frames = f.borrow_mut();
+        frames.push(Frame {
+            key: key.clone(),
+            deps: Vec::new(),
+            reads_open: None,
+            tainted: false,
+            is_head: false,
+            changed: false,
+        });
+        frames.len() - 1
+    });
+    let mut rounds = 0;
+    let (value, moved) = loop {
+        let v = crate::util::ghost_stats::timed("engine.compute_time", &mut compute);
+        let (inner, moved) = FRAMES.with(|f| {
+            let mut frames = f.borrow_mut();
+            let fr = &mut frames[depth];
+            let own_moved = fr.is_head
+                && ASSUMED.with(|a| a.borrow_mut().insert(key.clone(), v.clone()))
+                    .map_or(v != ReducedValue::None, |prev| prev != v);
+            let moved = own_moved || fr.changed;
+            fr.is_head = false;
+            fr.changed = false;
+            (fr.reads_open.is_some(), moved)
+        });
+        // A key inside a larger cycle takes one pass: the outermost key's
+        // rounds recompute it, with its assumption carried over.
+        if inner || !moved {
+            break (v, moved);
+        }
+        next_round();
+        rounds += 1;
+        crate::util::ghost_stats::count("engine.fixpoint_round");
+        if rounds >= MAX_FIXPOINT_ROUNDS {
+            crate::util::ghost_stats::count("engine.fixpoint_unsettled");
+            break (ReducedValue::None, false);
+        }
+    };
+    let Some(Frame { mut deps, reads_open, tainted, .. }) = FRAMES.with(|f| f.borrow_mut().pop()) else {
         return value;
     };
-    let provisional = cut || chase_cut;
+    if let Some(d) = reads_open {
+        if moved {
+            FRAMES.with(|f| {
+                if let Some(outer) = f.borrow_mut().get_mut(d) {
+                    outer.changed = true;
+                }
+            });
+        }
+    }
+    let path_dependent = tainted;
+    if path_dependent {
+        crate::util::ghost_stats::count("engine.tainted");
+        taint_open_frames();
+    }
+    let provisional = path_dependent || reads_open.is_some();
     if provisional {
         crate::util::ghost_stats::count("engine.provisional");
     }
-    deps.sort();
-    deps.dedup();
-    let entry = Entry { value: Arc::new(value.clone()), epoch, world, deps: deps.into(), provisional, digest };
+    if let Some(store) = store {
+        deps.sort();
+        deps.dedup();
+        let entry = Entry {
+            value: Arc::new(value.clone()),
+            epoch,
+            world,
+            deps: deps.into(),
+            provisional,
+            round: round(),
+            digest,
+        };
+        store_entry(idx, store, key, entry);
+        if provisional && !path_dependent {
+            MEMBERS.with(|m| m.borrow_mut().push(key.clone()));
+        }
+    }
+    if depth == 0 {
+        // Every cycle under this computation has settled: the members of the
+        // last round read only assumptions that held.
+        let members = MEMBERS.with(|m| std::mem::take(&mut *m.borrow_mut()));
+        if let Some(store) = store {
+            promote(idx, store, &members);
+        }
+        ASSUMED.with(|a| a.borrow_mut().clear());
+    }
+    value
+}
+
+/// Mark every open frame above `depth` as reading an open computation.
+fn mark_reads_open(depth: usize) {
+    FRAMES.with(|f| {
+        let mut frames = f.borrow_mut();
+        for fr in frames.iter_mut().skip(depth + 1) {
+            fr.reads_open = Some(fr.reads_open.map_or(depth, |d| d.min(depth)));
+        }
+    });
+}
+
+fn store_entry(idx: &dyn CrossFileLookup, store: &AnswerStore, key: &WitnessAttachment, entry: Entry) {
     if let Some(row) = encode_persisted(idx, key, &entry) {
         if let Ok(mut p) = store.pending.lock() {
             if p.len() < ANSWER_STORE_CAP {
@@ -403,7 +554,27 @@ pub fn answer(
         }
         m.insert(key.clone(), entry);
     }
-    value
+}
+
+/// Make the settled members of a fixpoint whole, and persist them.
+fn promote(idx: &dyn CrossFileLookup, store: &AnswerStore, members: &[WitnessAttachment]) {
+    let now = round();
+    for key in members {
+        let promoted = store.entries.lock().ok().and_then(|mut m| {
+            let e = m.get_mut(key).filter(|e| e.provisional && e.round == now)?;
+            e.provisional = false;
+            Some(e.clone())
+        });
+        let Some(e) = promoted else { continue };
+        crate::util::ghost_stats::count("engine.promoted");
+        if let Some(row) = encode_persisted(idx, key, &e) {
+            if let Ok(mut p) = store.pending.lock() {
+                if p.len() < ANSWER_STORE_CAP {
+                    p.push(row);
+                }
+            }
+        }
+    }
 }
 
 /// `raw` with its value replaced, every recorded dependency kept: lets a
