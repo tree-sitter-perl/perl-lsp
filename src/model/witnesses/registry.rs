@@ -1478,7 +1478,7 @@ impl ReducerRegistry {
             return None;
         };
         let v = super::engine::answer(idx, q.attachment, || {
-            self.param_in_join(idx, &mut QueryState::new(), package, name, method, want)
+            self.param_in_join(idx, package, name, method, want)
         });
         Some(v)
     }
@@ -1517,7 +1517,6 @@ impl ReducerRegistry {
     fn param_in_join(
         &self,
         idx: &dyn crate::model::file_analysis::CrossFileLookup,
-        state: &mut QueryState,
         package: &str,
         name: &str,
         method: bool,
@@ -1548,7 +1547,10 @@ impl ReducerRegistry {
         let mut joined: Option<InferredType> = None;
         for path in paths.iter() {
             let Some(full) = super::engine::caller_view(idx, path) else { continue };
-            state.pins.push(std::sync::Arc::clone(&full));
+            // One query state per caller: its memo keys on this copy's bag
+            // address, so the copy is pinned exactly as long as the state
+            // lives, and a sweep holds one whole caller at a time, not all.
+            let state = &mut QueryState::new();
             let caller_ctx = BagContext {
                 scopes: &full.scopes,
                 package_framework: &full.packages,
