@@ -2362,6 +2362,8 @@ fn param_type_joins_method_callers() {
     let idx = index_of(&[&greeter, &app]);
     let t = greet_param_type(&greeter, &idx).expect("the caller's argument types the parameter");
     assert_eq!(t.class_name().as_deref(), Some("User"));
+    let store = crate::model::file_analysis::CrossFileLookup::answer_store(&idx).unwrap();
+    assert!(store.heap_bytes() > 0, "the stored answer is byte-accounted");
 }
 
 #[test]

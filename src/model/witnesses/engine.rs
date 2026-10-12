@@ -82,20 +82,55 @@ struct PersistedAnswer {
     mentions: Vec<(String, u64)>,
 }
 
-/// Above this many entries the store drops everything and starts over: an
-/// entry is a few hundred bytes, so the cap bounds the store near a few MB,
-/// and a full reset is the one eviction that can never serve a stale entry.
-const ANSWER_STORE_CAP: usize = 16_384;
+/// Byte caps. Past its cap a map drops everything and starts over: a full
+/// reset is the one eviction that can never serve a stale entry. The pending
+/// buffer instead stops taking rows until it is flushed; a row it refuses
+/// is an answer the next process recomputes.
+const ENTRIES_BYTE_CAP: usize = 32 << 20;
+const MENTIONS_BYTE_CAP: usize = 16 << 20;
+const PENDING_BYTE_CAP: usize = 16 << 20;
+
+/// A map with the estimated heap bytes of what it holds.
+#[derive(Default)]
+struct Budgeted<M> {
+    map: M,
+    bytes: usize,
+}
+
+fn path_bytes(p: &std::path::Path) -> usize {
+    std::mem::size_of::<PathBuf>() + p.as_os_str().len()
+}
+
+fn entry_bytes(key: &WitnessAttachment, e: &Entry) -> usize {
+    std::mem::size_of::<(WitnessAttachment, Entry)>()
+        + bincode::serialized_size(key).unwrap_or(0) as usize
+        + match &*e.value {
+            ReducedValue::Type(t) => bincode::serialized_size(t).unwrap_or(0) as usize,
+            // A fact map is the size of its debug rendering, near enough.
+            ReducedValue::FactMap(m) => format!("{m:?}").len(),
+            ReducedValue::None => 0,
+        }
+        + e.deps
+            .iter()
+            .map(|d| {
+                std::mem::size_of::<Dep>()
+                    + match d {
+                        Dep::File { path, .. } => path.as_os_str().len(),
+                        Dep::Mentions { key, .. } => key.len(),
+                    }
+            })
+            .sum::<usize>()
+}
 
 /// The index-owned answer store. Lives as long as the index; validity is
 /// re-established per lookup, never by a caller remembering to invalidate.
 #[derive(Default)]
 pub struct AnswerStore {
-    entries: Mutex<HashMap<WitnessAttachment, Entry>>,
-    /// Encoded rows not yet persisted; bounded like `entries`.
-    pending: Mutex<Vec<(Vec<u8>, Vec<u8>)>>,
+    entries: Mutex<Budgeted<HashMap<WitnessAttachment, Entry>>>,
+    /// Encoded rows not yet persisted.
+    pending: Mutex<Budgeted<Vec<(Vec<u8>, Vec<u8>)>>>,
     /// `mentions_of` per key, valid while `resolution_epoch` stands.
-    mentions: Mutex<HashMap<String, (u64, Arc<Vec<PathBuf>>)>>,
+    mentions: Mutex<Budgeted<HashMap<String, (u64, Arc<Vec<PathBuf>>)>>>,
     /// `uncovered_files` at a `resolution_epoch`.
     uncovered: Mutex<Option<(u64, Arc<Vec<Arc<CachedModule>>>)>>,
 }
@@ -106,12 +141,19 @@ impl AnswerStore {
     }
 
     pub fn len(&self) -> usize {
-        self.entries.lock().map(|m| m.len()).unwrap_or(0)
+        self.entries.lock().map(|m| m.map.len()).unwrap_or(0)
+    }
+
+    /// Estimated heap bytes held: entries, pending rows, mentions memo.
+    pub fn heap_bytes(&self) -> usize {
+        self.entries.lock().map(|m| m.bytes).unwrap_or(0)
+            + self.pending.lock().map(|m| m.bytes).unwrap_or(0)
+            + self.mentions.lock().map(|m| m.bytes).unwrap_or(0)
     }
 
     /// Rows written since the last take, for the caller to persist.
     pub fn take_pending(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
-        self.pending.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default()
+        self.pending.lock().map(|mut p| std::mem::take(&mut *p).map).unwrap_or_default()
     }
 }
 
@@ -293,7 +335,7 @@ pub fn mentions_of(idx: &dyn CrossFileLookup, key: &str) -> Arc<Vec<PathBuf>> {
         return Arc::new(mentions_among(idx, key, &uncovered_files(idx)));
     };
     let epoch = idx.resolution_epoch();
-    if let Some((at, paths)) = store.mentions.lock().ok().and_then(|m| m.get(key).cloned()) {
+    if let Some((at, paths)) = store.mentions.lock().ok().and_then(|m| m.map.get(key).cloned()) {
         if at == epoch {
             return paths;
         }
@@ -310,10 +352,17 @@ pub fn mentions_of(idx: &dyn CrossFileLookup, key: &str) -> Arc<Vec<PathBuf>> {
     };
     let paths = Arc::new(mentions_among(idx, key, &uncovered));
     if let Ok(mut m) = store.mentions.lock() {
-        if m.len() >= ANSWER_STORE_CAP {
-            m.clear();
+        let bytes = std::mem::size_of::<(String, (u64, Arc<Vec<PathBuf>>))>()
+            + key.len()
+            + paths.iter().map(|p| path_bytes(p)).sum::<usize>();
+        if m.bytes + bytes > MENTIONS_BYTE_CAP {
+            crate::util::ghost_stats::count("engine.mentions_reset");
+            *m = Budgeted::default();
         }
-        m.insert(key.to_string(), (epoch, Arc::clone(&paths)));
+        // A replaced entry's bytes stay counted until the next reset: an
+        // overcount, never an undercount.
+        m.map.insert(key.to_string(), (epoch, Arc::clone(&paths)));
+        m.bytes += bytes;
     }
     paths
 }
@@ -410,13 +459,11 @@ pub fn answer(
     let store = idx.answer_store();
     let epoch = idx.resolution_epoch();
     if let Some(store) = store {
-        let mut found = store.entries.lock().ok().and_then(|m| m.get(key).cloned());
+        let mut found = store.entries.lock().ok().and_then(|m| m.map.get(key).cloned());
         if found.is_none() {
             if let Some(e) = crate::util::ghost_stats::timed("engine.adopt_time", || adopt_persisted(idx, key, epoch)) {
                 crate::util::ghost_stats::count("engine.persisted_adopt");
-                if let Ok(mut m) = store.entries.lock() {
-                    m.insert(key.clone(), e.clone());
-                }
+                insert_entry(store, key, e.clone());
                 found = Some(e);
             }
         }
@@ -447,7 +494,7 @@ pub fn answer(
                 }
                 if e.epoch != epoch {
                     if let Ok(mut m) = store.entries.lock() {
-                        if let Some(slot) = m.get_mut(key) {
+                        if let Some(slot) = m.map.get_mut(key) {
                             slot.epoch = epoch;
                         }
                     }
@@ -561,18 +608,32 @@ fn mark_reads_open(depth: usize) {
 
 fn store_entry(idx: &dyn CrossFileLookup, store: &AnswerStore, key: &WitnessAttachment, entry: Entry) {
     if let Some(row) = encode_persisted(idx, key, &entry) {
-        if let Ok(mut p) = store.pending.lock() {
-            if p.len() < ANSWER_STORE_CAP {
-                p.push(row);
-            }
-        }
+        push_pending(store, row);
     }
+    insert_entry(store, key, entry);
+}
+
+fn insert_entry(store: &AnswerStore, key: &WitnessAttachment, entry: Entry) {
+    let bytes = entry_bytes(key, &entry);
     if let Ok(mut m) = store.entries.lock() {
-        if m.len() >= ANSWER_STORE_CAP {
+        if m.bytes + bytes > ENTRIES_BYTE_CAP {
             crate::util::ghost_stats::count("engine.reset");
-            m.clear();
+            *m = Budgeted::default();
         }
-        m.insert(key.clone(), entry);
+        m.map.insert(key.clone(), entry);
+        m.bytes += bytes;
+    }
+}
+
+fn push_pending(store: &AnswerStore, row: (Vec<u8>, Vec<u8>)) {
+    let bytes = 2 * std::mem::size_of::<Vec<u8>>() + row.0.len() + row.1.len();
+    if let Ok(mut p) = store.pending.lock() {
+        if p.bytes + bytes <= PENDING_BYTE_CAP {
+            p.map.push(row);
+            p.bytes += bytes;
+        } else {
+            crate::util::ghost_stats::count("engine.pending_full");
+        }
     }
 }
 
@@ -581,18 +642,14 @@ fn promote(idx: &dyn CrossFileLookup, store: &AnswerStore, members: &[WitnessAtt
     let now = round();
     for key in members {
         let promoted = store.entries.lock().ok().and_then(|mut m| {
-            let e = m.get_mut(key).filter(|e| e.provisional && e.round == now)?;
+            let e = m.map.get_mut(key).filter(|e| e.provisional && e.round == now)?;
             e.provisional = false;
             Some(e.clone())
         });
         let Some(e) = promoted else { continue };
         crate::util::ghost_stats::count("engine.promoted");
         if let Some(row) = encode_persisted(idx, key, &e) {
-            if let Ok(mut p) = store.pending.lock() {
-                if p.len() < ANSWER_STORE_CAP {
-                    p.push(row);
-                }
-            }
+            push_pending(store, row);
         }
     }
 }
