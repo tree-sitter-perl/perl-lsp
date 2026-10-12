@@ -709,12 +709,12 @@ fn run_one(
             let (_s, _t, analysis) = parse_file(file);
             resolve_imports_blocking(idx, &analysis);
             if let Some(r) = analysis.ref_at(point) {
-                if let Some(ty) = analysis.inferred_type_via_bag(&r.target_name, point) {
+                if let Some(ty) = analysis.inferred_type_via_bag_ctx(&r.target_name, point, Some(idx)) {
                     return Ok(file_analysis::format_inferred_type(&ty));
                 }
             }
             if let Some(sym) = analysis.symbol_at(point) {
-                if let Some(ty) = analysis.inferred_type_via_bag(&sym.name, point) {
+                if let Some(ty) = analysis.inferred_type_via_bag_ctx(&sym.name, point, Some(idx)) {
                     return Ok(file_analysis::format_inferred_type(&ty));
                 }
             }
@@ -1592,12 +1592,12 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
         let probe = sym.span.end;
 
         let bag_default = analysis
-            .sub_return_type_at_arity(&sym.name, None)
+            .sub_return_type_at_arity_ctx(&sym.name, None, Some(&module_index))
             .as_ref()
             .map(file_analysis::format_inferred_type);
         let mut by_arity = serde_json::Map::new();
         for arity in 0u32..=2 {
-            if let Some(t) = analysis.sub_return_type_at_arity(&sym.name, Some(arity)) {
+            if let Some(t) = analysis.sub_return_type_at_arity_ctx(&sym.name, Some(arity), Some(&module_index)) {
                 by_arity.insert(arity.to_string(), serde_json::json!(file_analysis::format_inferred_type(&t)));
             }
         }

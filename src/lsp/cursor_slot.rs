@@ -184,7 +184,7 @@ impl Slot {
         if param.is_invocant || crate::model::conventions::is_conventional_invocant_name(&param.name) {
             return None;
         }
-        analysis.inferred_type_via_bag(&param.name, sig.body_end)
+        analysis.inferred_type_via_bag_ctx(&param.name, sig.body_end, module_index)
     }
 }
 
@@ -276,7 +276,7 @@ fn detect_slot_tree_native(
     let ctx = cursor_context::detect_cursor_context_tree_with_index(
         tree, source.as_bytes(), point, analysis, module_index,
     )
-    .unwrap_or_else(|| cursor_context::detect_cursor_context(source, point, Some(analysis)));
+    .unwrap_or_else(|| cursor_context::detect_cursor_context_with_index(source, point, Some(analysis), module_index));
     slot_from_cursor_context(ctx)
 }
 

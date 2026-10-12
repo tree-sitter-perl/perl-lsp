@@ -576,7 +576,7 @@ impl FileAnalysis {
                 text.push_str(&format!("\n\n*package {}*", pkg));
             }
             if let SymbolDetail::Sub { ref doc, .. } = sym.detail {
-                if let Some(rt) = self.symbol_return_type_via_bag(sym.id, None) {
+                if let Some(rt) = self.symbol_return_type_via_bag_ctx(sym.id, None, module_index) {
                     text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
                 }
                 if let Some(d) = doc {

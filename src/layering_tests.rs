@@ -1056,6 +1056,7 @@ fn verb_readiness_policies_are_enumerated() {
         ("goto_type_definition", "await_open_ready", "Interactive"),
         ("hover", "await_index_ready", "Interactive"),
         ("hover", "await_open_ready", "Interactive"),
+        ("inlay_hint", "await_index_ready", "Interactive"),
         ("inlay_hint", "await_open_ready", "Interactive"),
         // `prepare_rename` only validates the token; `rename` does the edits.
         ("prepare_rename", "await_open_ready", "Interactive"),

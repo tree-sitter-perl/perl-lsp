@@ -538,7 +538,7 @@ impl FileAnalysis {
     ) -> Option<InferredType> {
         match self.resolve_field_in_ancestors(class, field, module_index)? {
             MethodResolution::Local { sym_id, .. } => {
-                self.inferred_type_via_bag(field, self.symbol(sym_id).span.end)
+                self.inferred_type_via_bag_ctx(field, self.symbol(sym_id).span.end, module_index)
             }
             MethodResolution::CrossFile { class, .. } => {
                 let idx = module_index?;
@@ -553,7 +553,7 @@ impl FileAnalysis {
                             && s.package.as_deref() == Some(class.as_str())
                             && full.symbol_is_class_content(s)
                     })?;
-                    full.inferred_type_via_bag(field, sym.span.end)
+                    full.inferred_type_via_bag_ctx(field, sym.span.end, module_index)
                 })
             }
         }
@@ -1035,7 +1035,12 @@ impl FileAnalysis {
     /// This is Perl-semantic resolution, so it belongs on the data
     /// layer (rule #3). Callers in `symbols.rs` / `cursor_context.rs`
     /// compose this; they don't repeat the rules.
-    pub fn invocant_text_to_class(&self, invocant: Option<&str>, point: Point) -> Option<String> {
+    pub fn invocant_text_to_class(
+        &self,
+        invocant: Option<&str>,
+        point: Point,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<String> {
         use crate::model::conventions::InvocantText;
         let text = invocant?;
         if crate::model::conventions::is_conventional_invocant_name(text) {
@@ -1054,7 +1059,7 @@ impl FileAnalysis {
             // accessor; routing through it here keeps the two paths in
             // sync. Rule #3.
             InvocantText::Scalar(_) => self
-                .inferred_type_via_bag(text, point)
+                .inferred_type_via_bag_ctx(text, point, module_index)
                 .and_then(|t| t.class_name().map(str::to_string)),
             InvocantText::NonScalar(_) => None,
             InvocantText::Bareword(b) => Some(self.class_spelling_identity(b)),

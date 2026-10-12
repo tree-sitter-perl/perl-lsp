@@ -318,6 +318,7 @@ struct op { BASEOP };
             start: tower_lsp::lsp_types::Position { line: 0, character: 0 },
             end: tower_lsp::lsp_types::Position { line: 2, character: 0 },
         },
+        None,
     );
     assert!(full.is_empty(), "no inlay hints echo a macro-body member's declared type: {full:?}");
 }

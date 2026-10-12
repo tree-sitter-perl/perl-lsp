@@ -1522,11 +1522,22 @@ impl LanguageServer for Backend {
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         let uri = &params.text_document.uri;
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
-        let doc = match self.files.get_open(uri) {
-            Some(doc) => doc,
+        if let Some(language) = self.files.get_open(uri).map(|d| d.language) {
+            self.await_index_ready(language, WaitPolicy::Interactive).await;
+        }
+        let (analysis, language) = match self.files.get_open(uri) {
+            Some(doc) => (Arc::clone(&doc.analysis), doc.language),
             None => return self.not_ready_or_null(uri),
         };
-        let hints = symbols::inlay_hints(&doc.analysis, params.range);
+        let range = params.range;
+        // Cross-file types are answered at query time through the index, so
+        // the hints run behind the blocking hop like every other index read.
+        let hints = self
+            .run_query(move |cx| {
+                let routed = cx.routed(language);
+                symbols::inlay_hints(&analysis, range, Some(routed.as_lookup()))
+            })
+            .await?;
         if hints.is_empty() {
             Ok(None)
         } else {

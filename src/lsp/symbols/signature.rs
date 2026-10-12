@@ -152,7 +152,7 @@ pub(super) fn dispatch_target_completions(
     point: Point,
     tree: &Tree,
 ) -> Vec<CompletionCandidate> {
-    let class = match analysis.invocant_text_to_class(invocant, point) {
+    let class = match analysis.invocant_text_to_class(invocant, point, Some(module_index)) {
         Some(c) => c,
         None => return Vec::new(),
     };
@@ -546,7 +546,7 @@ fn string_dispatch_signature(
     active_param: usize,
     point: Point,
 ) -> Option<SignatureHelp> {
-    let class = analysis.invocant_text_to_class(invocant, point)?;
+    let class = analysis.invocant_text_to_class(invocant, point, module_index)?;
     string_dispatch_signature_for(analysis, module_index, &class, dispatcher, handler_name, active_param)
 }
 
@@ -564,7 +564,7 @@ pub fn signature_help(
     // claim the slot to suppress native sig (cursor in an options
     // hash of a dispatcher — native would mis-show the task sig).
     let mut skip_string_dispatch = false;
-    if let Some(qctx) = cursor_context::build_plugin_query_context(analysis, tree, text.as_bytes(), point) {
+    if let Some(qctx) = cursor_context::build_plugin_query_context(analysis, tree, text.as_bytes(), point, Some(module_index)) {
         let registry = crate::build::plugin::default_plugin_registry();
         let (uses, parents) = analysis.trigger_view_at(point);
         let query = crate::build::plugin::TriggerQuery {
@@ -713,7 +713,7 @@ pub fn signature_help(
                 // route through the witness bag so framework + branch
                 // + arity rules refine the answer.
                 if let Some(ty) = analysis
-                    .inferred_type_via_bag(&p.name, sig_info.body_end)
+                    .inferred_type_via_bag_ctx(&p.name, sig_info.body_end, Some(module_index))
                     .filter(InferredType::is_known)
                 {
                     format!("{}: {}", base, format_inferred_type(&ty))

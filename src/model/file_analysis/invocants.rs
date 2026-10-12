@@ -890,7 +890,9 @@ impl FileAnalysis {
             return None;
         }
         let bare = split_qualified(invocant, self.names()).1;
-        if let Some(InferredType::ClassName(c)) = self.sub_return_type_at_arity(bare, Some(0)) {
+        if let Some(InferredType::ClassName(c)) =
+            self.sub_return_type_at_arity_ctx(bare, Some(0), module_index)
+        {
             return Some(InferredType::ClassName(c));
         }
         Some(InferredType::ClassName(self.class_spelling_identity(invocant)))
@@ -950,7 +952,7 @@ impl FileAnalysis {
         scope: ScopeId,
         point: Point,
     ) -> Option<String> {
-        self.resolve_invocant_class(invocant, scope, point)
+        self.resolve_invocant_class(invocant, scope, point, None)
     }
 
     /// Resolve an invocant string to a class name. Internal helper
@@ -958,7 +960,13 @@ impl FileAnalysis {
     /// don't have a `Ref` in hand. The ref-aware
     /// `method_call_invocant_class` is preferred everywhere a
     /// `&Ref` is available.
-    pub(super) fn resolve_invocant_class(&self, invocant: &str, scope: ScopeId, point: Point) -> Option<String> {
+    pub(super) fn resolve_invocant_class(
+        &self,
+        invocant: &str,
+        scope: ScopeId,
+        point: Point,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<String> {
         use crate::model::conventions::InvocantText;
         let enclosing = || {
             for scope_id in &self.scope_chain(scope) {
@@ -978,7 +986,7 @@ impl FileAnalysis {
             InvocantText::Scalar(_) => {
                 // Scalar invocant → infer type via the witness bag so
                 // framework/branch/arity rules refine the answer.
-                self.inferred_type_via_bag(invocant, point)
+                self.inferred_type_via_bag_ctx(invocant, point, module_index)
                     .and_then(|t| t.class_name().map(|s| s.to_string()))
                     .or_else(|| {
                         // Enclosing-class fallback only applies to
@@ -1005,7 +1013,7 @@ impl FileAnalysis {
                 // `resolve_invocant_class_tree`.
                 let bare = split_qualified(invocant, self.names()).1;
                 if let Some(InferredType::ClassName(c)) =
-                    self.sub_return_type_at_arity(bare, Some(0))
+                    self.sub_return_type_at_arity_ctx(bare, Some(0), module_index)
                 {
                     return Some(c);
                 }

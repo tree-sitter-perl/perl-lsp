@@ -368,7 +368,7 @@ pub fn collect_diagnostics(
         // warnings on untyped invocants — and skips everything else.
         let class_name = match invocant.classify() {
             InvocantText::Bareword(b) => Some(b.to_string()),
-            InvocantText::Scalar(_) => analysis.inferred_type_via_bag(invocant, r.span.start)
+            InvocantText::Scalar(_) => analysis.inferred_type_via_bag_ctx(invocant, r.span.start, Some(module_index))
                 .and_then(|ty| ty.class_name().map(|s| s.to_string())),
             _ => None,
         };
@@ -607,7 +607,7 @@ pub fn collect_diagnostics(
             let class_name = match invocant.classify() {
                 InvocantText::Bareword(b) => Some(b.to_string()),
                 InvocantText::Scalar(_) => analysis
-                    .inferred_type_via_bag(invocant, r.span.start)
+                    .inferred_type_via_bag_ctx(invocant, r.span.start, Some(module_index))
                     .and_then(|ty| ty.class_name().map(|s| s.to_string())),
                 _ => None,
             };

@@ -29,11 +29,12 @@ fn rank_candidates_by_expected_type(
     expected: &InferredType,
     analysis: &FileAnalysis,
     point: Point,
+    module_index: Option<&dyn crate::model::file_analysis::CrossFileLookup>,
 ) {
     let is_match = |c: &CompletionCandidate| -> bool {
         matches!(c.kind, FaSymKind::Variable)
             && analysis
-                .inferred_type_via_bag(&c.label, point)
+                .inferred_type_via_bag_ctx(&c.label, point, module_index)
                 .is_some_and(|t| inferred_type_matches(expected, &t))
     };
     let mut tagged: Vec<(bool, CompletionCandidate)> =
@@ -276,7 +277,7 @@ pub fn completion_items(
     // contribute items and optionally claim exclusivity for the slot
     // (e.g. Minion's arg-0 task-name completion: pure tasks, no
     // Minion instance-method firehose).
-    if let Some(qctx) = cursor_context::build_plugin_query_context(analysis, tree, source.as_bytes(), point) {
+    if let Some(qctx) = cursor_context::build_plugin_query_context(analysis, tree, source.as_bytes(), point, Some(module_index)) {
         let registry = crate::build::plugin::default_plugin_registry();
         let (uses, parents) = analysis.trigger_view_at(point);
         let query = crate::build::plugin::TriggerQuery {
@@ -407,7 +408,7 @@ fn completion_items_native(
     let mut suppress_firehose = false;
     if let Some(call_ctx) = cursor_context::find_call_context(tree, source.as_bytes(), point) {
         if call_ctx.is_method {
-            let dispatch_class = analysis.invocant_text_to_class(call_ctx.invocant.as_deref(), point);
+            let dispatch_class = analysis.invocant_text_to_class(call_ctx.invocant.as_deref(), point, Some(module_index));
             let has_any_handlers = dispatch_class.as_ref().is_some_and(|c|
                 class_has_dispatch_handlers(analysis, module_index, c, &call_ctx.name)
             );
@@ -629,7 +630,7 @@ fn completion_items_native(
     if let Some(expected) = crate::lsp::cursor_slot::detect_call_slot(tree, source.as_bytes(), point)
         .and_then(|s| s.slot.expected_type(analysis, point, Some(module_index)))
     {
-        rank_candidates_by_expected_type(&mut candidates, &expected, analysis, point);
+        rank_candidates_by_expected_type(&mut candidates, &expected, analysis, point, Some(module_index));
     }
 
     let mut items: Vec<CompletionItem> = candidates

@@ -74,6 +74,17 @@ pub struct CallContext {
 /// Detect what the user is doing at the cursor from the text before cursor.
 /// When `analysis` is provided, also tries to resolve invocant/owner types.
 pub fn detect_cursor_context(source: &str, point: Point, analysis: Option<&FileAnalysis>) -> CursorContext {
+    detect_cursor_context_with_index(source, point, analysis, None)
+}
+
+/// As `detect_cursor_context`, with the index so a receiver typed only
+/// cross-file still names its class.
+pub fn detect_cursor_context_with_index(
+    source: &str,
+    point: Point,
+    analysis: Option<&FileAnalysis>,
+    module_index: Option<&dyn CrossFileLookup>,
+) -> CursorContext {
     let line = match source.lines().nth(point.row) {
         Some(l) => l,
         None => return CursorContext::General,
@@ -117,7 +128,7 @@ pub fn detect_cursor_context(source: &str, point: Point, analysis: Option<&FileA
                 let var_prefix = prefix[..prefix.len() - 2].trim_end();
                 let var_text = extract_invocant_from_prefix(var_prefix);
                 if !var_text.is_empty() {
-                    let owner_type = resolve_text_invocant(var_text, point, analysis);
+                    let owner_type = resolve_text_invocant(var_text, point, analysis, module_index);
                     return CursorContext::HashKey {
                         owner_type,
                         var_text: var_text.to_string(),
@@ -128,7 +139,7 @@ pub fn detect_cursor_context(source: &str, point: Point, analysis: Option<&FileA
             // Direct hash access: $hash{
             let var_text = extract_invocant_from_prefix(prefix);
             if !var_text.is_empty() && var_text.starts_with('$') {
-                let owner_type = resolve_text_invocant(var_text, point, analysis);
+                let owner_type = resolve_text_invocant(var_text, point, analysis, module_index);
                 return CursorContext::HashKey {
                     owner_type,
                     var_text: var_text.to_string(),
@@ -145,7 +156,7 @@ pub fn detect_cursor_context(source: &str, point: Point, analysis: Option<&FileA
             let prefix = check[..check.len() - 2].trim_end();
             let invocant = extract_invocant_from_prefix(prefix);
             if !invocant.is_empty() {
-                let invocant_type = resolve_text_invocant(invocant, point, analysis);
+                let invocant_type = resolve_text_invocant(invocant, point, analysis, module_index);
                 return CursorContext::Method {
                     invocant_type,
                     invocant_text: invocant.to_string(),
@@ -287,7 +298,7 @@ module_index: Option<&dyn CrossFileLookup>,
             let idx_node = node.child_by_field_name("index")?;
             let idx: i32 = idx_node.utf8_text(source).ok()?.parse().ok()?;
             let arr_var = format!("@{}", name);
-            analysis.inferred_type_via_bag(&arr_var, point)
+            analysis.inferred_type_via_bag_ctx(&arr_var, point, module_index)
                 .and_then(|t| t.element_at(idx).cloned())
         }
         "method_call_expression" => {
@@ -310,7 +321,7 @@ module_index: Option<&dyn CrossFileLookup>,
             // arity dispatch (`return X unless @_`) can pick the
             // right branch when the caller's arg count is known.
             let arg_count = crate::cst::call_args(node).len() as u32;
-            analysis.sub_return_type_at_arity(name, Some(arg_count))
+            analysis.sub_return_type_at_arity_ctx(name, Some(arg_count), module_index)
                 .or_else(|| crate::model::builtins::builtin_return_type(name))
         }
         "func1op_call_expression" | "func0op_call_expression" => {
@@ -327,7 +338,12 @@ module_index: Option<&dyn CrossFileLookup>,
 }
 
 /// Resolve an invocant type from its text, using analysis when available.
-fn resolve_text_invocant(text: &str, point: Point, analysis: Option<&FileAnalysis>) -> Option<InferredType> {
+fn resolve_text_invocant(
+    text: &str,
+    point: Point,
+    analysis: Option<&FileAnalysis>,
+    module_index: Option<&dyn CrossFileLookup>,
+) -> Option<InferredType> {
     use crate::model::conventions::InvocantText;
     match InvocantText::parse(text) {
         InvocantText::Bareword(b) => Some(InferredType::ClassName(b.to_string())),
@@ -339,7 +355,7 @@ fn resolve_text_invocant(text: &str, point: Point, analysis: Option<&FileAnalysi
             // Route through the witness-bag path so framework-aware
             // resolution (Mojo `sub name`, blessed-hashref, branch arms,
             // arity) refines the answer.
-            analysis.and_then(|a| a.inferred_type_via_bag(text, point))
+            analysis.and_then(|a| a.inferred_type_via_bag_ctx(text, point, module_index))
         }
     }
 }
@@ -1140,6 +1156,7 @@ pub fn build_plugin_query_context(
     tree: &Tree,
     source: &[u8],
     point: Point,
+    module_index: Option<&dyn crate::model::file_analysis::CrossFileLookup>,
 ) -> Option<crate::build::plugin::SigHelpQueryContext> {
     use crate::build::plugin::{CallFrame, ContainerFrame, ContainerKind, SigHelpQueryContext};
 
@@ -1174,7 +1191,7 @@ pub fn build_plugin_query_context(
             name: c.name.clone(),
             receiver_text: c.invocant.clone(),
             receiver_type: c.invocant.as_deref()
-                .and_then(|inv| analysis.invocant_text_to_class(Some(inv), point))
+                .and_then(|inv| analysis.invocant_text_to_class(Some(inv), point, module_index))
                 .map(InferredType::ClassName),
             args,
             cursor_arg_index: c.active_param,

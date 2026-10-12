@@ -246,6 +246,7 @@ impl FileAnalysis {
             invocant,
             self.scope_at(point).unwrap_or(ScopeId(0)),
             point,
+            module_index,
         );
 
         if let Some(ref cn) = class_name {
@@ -433,7 +434,7 @@ impl FileAnalysis {
         point: Point,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<CompletionCandidate> {
-        match self.resolve_hash_key_owner(var_text, point) {
+        match self.resolve_hash_key_owner(var_text, point, module_index) {
             Some(owner) => self.complete_hash_keys_for_owner(&owner, module_index),
             None => Vec::new(),
         }
@@ -702,6 +703,7 @@ impl FileAnalysis {
                     inv,
                     self.scope_at(point).unwrap_or(ScopeId(0)),
                     point,
+                    module_index,
                 );
                 if let Some(ref cn) = class_name {
                     let param_candidates = self.class_param_completions(cn, used_keys);
@@ -914,7 +916,7 @@ impl FileAnalysis {
         let class_name = if fq_class.is_some() {
             fq_class
         } else if is_method {
-            invocant.and_then(|inv| self.resolve_invocant_class(inv, scope, point))
+            invocant.and_then(|inv| self.resolve_invocant_class(inv, scope, point, module_index))
         } else {
             None
         };
@@ -990,7 +992,12 @@ impl FileAnalysis {
     }
 
     /// Resolve a variable text to a HashKeyOwner for hash key completion.
-    fn resolve_hash_key_owner(&self, var_text: &str, point: Point) -> Option<HashKeyOwner> {
+    fn resolve_hash_key_owner(
+        &self,
+        var_text: &str,
+        point: Point,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<HashKeyOwner> {
         let bare_name = if var_text.starts_with('$') || var_text.starts_with('@') || var_text.starts_with('%') {
             &var_text[1..]
         } else {
@@ -1002,7 +1009,7 @@ impl FileAnalysis {
         // values narrow to their row-class arg (DBIC `$row->{name}`
         // after `find` etc.). For non-Parametric this is
         // equivalent to `class_name()`. CLAUDE.md invariant #10.
-        if let Some(it) = self.inferred_type_via_bag(var_text, point) {
+        if let Some(it) = self.inferred_type_via_bag_ctx(var_text, point, module_index) {
             if let Some(cn) = it.hash_key_class() {
                 return Some(HashKeyOwner::Class(cn.to_string()));
             }

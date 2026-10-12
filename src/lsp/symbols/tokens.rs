@@ -40,7 +40,11 @@ pub fn semantic_token_modifiers() -> Vec<SemanticTokenModifier> {
 ///
 /// Shows type annotations for variable declarations with non-obvious inferred types,
 /// and return type annotations for sub/method declarations.
-pub fn inlay_hints(analysis: &FileAnalysis, range: Range) -> Vec<InlayHint> {
+pub fn inlay_hints(
+    analysis: &FileAnalysis,
+    range: Range,
+    module_index: Option<&dyn crate::model::file_analysis::CrossFileLookup>,
+) -> Vec<InlayHint> {
     let start = position_to_point(range.start);
     let end = position_to_point(range.end);
     let mut hints = Vec::new();
@@ -71,7 +75,7 @@ pub fn inlay_hints(analysis: &FileAnalysis, range: Range) -> Vec<InlayHint> {
                 ) {
                     continue;
                 }
-                if let Some(ty) = analysis.inferred_type_via_bag(&sym.name, sym.span.start) {
+                if let Some(ty) = analysis.inferred_type_via_bag_ctx(&sym.name, sym.span.start, module_index) {
                     // Only show Object/HashRef/ArrayRef/CodeRef/Regexp — not Numeric/String
                     if !ty.is_known() || matches!(ty, InferredType::Numeric | InferredType::String) {
                         continue;
@@ -100,7 +104,7 @@ pub fn inlay_hints(analysis: &FileAnalysis, range: Range) -> Vec<InlayHint> {
                     continue;
                 }
                 if matches!(sym.detail, SymbolDetail::Sub { .. }) {
-                    if let Some(rt) = analysis.symbol_return_type_via_bag(sym.id, None) {
+                    if let Some(rt) = analysis.symbol_return_type_via_bag_ctx(sym.id, None, module_index) {
                         // Only show non-trivial return types
                         if matches!(rt, InferredType::Numeric | InferredType::String) {
                             continue;
