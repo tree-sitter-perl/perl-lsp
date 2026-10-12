@@ -274,6 +274,52 @@ pub(crate) fn call_args<'a>(call_node: Node<'a>) -> Vec<Node<'a>> {
     }
 }
 
+/// The list a `$_` at `node` iterates: the enclosing `EXPR for LIST` or
+/// variable-less `for (LIST) { … }`, unless something nearer rebinds `$_`
+/// (`map`/`grep`, a sub body) first.
+pub(crate) fn topic_list<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    let mut child = node;
+    let mut parent = node.parent()?;
+    loop {
+        match parent.kind() {
+            "postfix_for_expression" => {
+                let list = parent.named_child(1)?;
+                return (list.id() != child.id()).then_some(list);
+            }
+            "for_statement" => {
+                let in_body = parent.child_by_field_name("block").map(|b| b.id()) == Some(child.id());
+                return (in_body && parent.child_by_field_name("variable").is_none())
+                    .then(|| parent.child_by_field_name("list"))
+                    .flatten();
+            }
+            "map_grep_expression"
+            | "anonymous_subroutine_expression"
+            | "subroutine_declaration_statement"
+            | "method_declaration_statement" => return None,
+            _ => {}
+        }
+        child = parent;
+        parent = parent.parent()?;
+    }
+}
+
+/// The call `arg` is an argument of (`f(…, arg)`, `$o->m(arg)`), seen
+/// through any grouping around it.
+pub(crate) fn enclosing_call_of_arg<'a>(arg: Node<'a>) -> Option<Node<'a>> {
+    let mut at = arg;
+    let mut parent = at.parent()?;
+    while is_list_literal(parent) {
+        at = parent;
+        parent = at.parent()?;
+    }
+    matches!(
+        parent.kind(),
+        "function_call_expression" | "ambiguous_function_call_expression" | "method_call_expression"
+    )
+    .then_some(parent)
+    .filter(|call| call.child_by_field_name("arguments").map(|a| a.id()) == Some(at.id()))
+}
+
 /// Flatten a pair-list container's children into one token stream, splicing
 /// EVERY nested `list_expression` / `parenthesized_expression` inline. A plain
 /// comma list is already flat, but explicit parens (`a => (b => c)`) nest a

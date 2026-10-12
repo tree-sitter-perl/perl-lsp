@@ -674,6 +674,11 @@ struct Builder<'a> {
     /// following anon sub, not to nested lambdas.
     modifier_invocant_pos: Option<usize>,
 
+    /// Each named sub's scope → its package, name, and its scalar parameters
+    /// with their `@_` positions: what a `$cb->(…)` in the body needs to
+    /// say which parameter it calls (`CallbackIn`).
+    callback_params: std::collections::HashMap<ScopeId, (String, String, Vec<(String, u32)>)>,
+
     /// Current nesting of expression-shape typing — see
     /// `MAX_EXPR_TYPE_DEPTH`. Post-order type construction cannot be
     /// queued the way the walk is, so it is bounded instead.

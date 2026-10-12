@@ -1425,6 +1425,14 @@ impl ReducerRegistry {
             }
         }
 
+        if let WitnessAttachment::CallbackIn { package, name, param, index } = q.attachment {
+            if let Some(v) = self.owner_keyed_fallback(bag, q, state, package, "callback_in", &|p| {
+                WitnessAttachment::CallbackIn { package: p, name: name.clone(), param: *param, index: *index }
+            }) {
+                return v;
+            }
+        }
+
         if let WitnessAttachment::ImportedSub { name } = q.attachment {
             if let Some(v) = self.imported_sub_fallback(q, state, name) {
                 return v;
@@ -2703,9 +2711,22 @@ impl ReducerRegistry {
                                 ) if args.len() == 2 => args.first().cloned(),
                                 _ => None,
                             },
-                            ProjectionStep::SlotElements { key } => {
+                            ProjectionStep::SlotElements { .. } | ProjectionStep::CallbackOf { .. } => {
                                 t.class_name().map(str::to_string).and_then(|class| {
-                                    let att = WitnessAttachment::SlotElements { class, key: key.clone() };
+                                    let att = match step {
+                                        ProjectionStep::CallbackOf { member, param, index } => {
+                                            WitnessAttachment::CallbackIn {
+                                                package: class,
+                                                name: member.clone(),
+                                                param: *param,
+                                                index: *index,
+                                            }
+                                        }
+                                        ProjectionStep::SlotElements { key } => {
+                                            WitnessAttachment::SlotElements { class, key: key.clone() }
+                                        }
+                                        _ => return None,
+                                    };
                                     let sub_q = ReducerQuery {
                                         attachment: &att,
                                         point: None,

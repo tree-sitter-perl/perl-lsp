@@ -259,6 +259,17 @@ impl<'a> Builder<'a> {
             // to its `Sequence` and `element_at`.
             "scalar" | "array" | "hash" => {
                 let name = node.utf8_text(self.source).ok()?;
+                // The loop topic holds each element of the list in turn.
+                if name == "$_" {
+                    if let Some(list) = crate::cst::topic_list(node) {
+                        let (base, step) = match self.array_slot_deref(list) {
+                            Some((base, key)) => (base, crate::model::witnesses::ProjectionStep::SlotElements { key }),
+                            None => (list, crate::model::witnesses::ProjectionStep::Element),
+                        };
+                        self.emit_expr_witness(base);
+                        return Some(WitnessPayload::Projected { base: WitnessAttachment::Expr(node_to_span(base)), step });
+                    }
+                }
                 Some(WitnessPayload::Edge(WitnessAttachment::Variable {
                     name: name.to_string(),
                     // `expr_payload` re-runs post-walk (forward-ref recovery,

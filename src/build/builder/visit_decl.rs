@@ -119,6 +119,7 @@ impl<'a> Builder<'a> {
                 // operand; here only the operand's rep is observed.
                 self.infer_deref_type(node, TypeObservation::CodeRefInvocation);
                 self.record_arrow_deref(node, crate::model::file_analysis::DerefForm::Call);
+                self.emit_callback_in(node);
                 self.queue_children(node);
             }
             // Symbolic code-deref: `&{ EXPR }` / `&{ EXPR }(...)`. The operand
@@ -861,6 +862,7 @@ impl<'a> Builder<'a> {
         self.push_callable_scope(ScopeKind::Sub { name: "(anon)".into() }, span, sub_id);
         self.record_signature_params(node, &params);
         self.detect_first_param_type(&params, node);
+        self.emit_callback_params(node, &params);
         self.queue_children_then(node, |b| { b.pop_scope(); });
     }
 
@@ -1308,6 +1310,107 @@ impl<'a> Builder<'a> {
     /// `Variable(param) → Edge(ParamIn{package, sub, position})` at its binding
     /// site. The local tier only names the question; the index answers it
     /// from the call sites.
+    /// `$cb->(ARGS)` on a parameter of the enclosing named sub: each argument
+    /// is what that sub passes the code its caller handed it.
+    fn emit_callback_in(&mut self, node: Node<'a>) {
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let Some(operand) = node.named_child(0).filter(|o| o.kind() == "scalar") else { return };
+        let Ok(var) = operand.utf8_text(self.source) else { return };
+        let Some((package, name, param)) = self.scope_stack.iter().rev().find_map(|s| {
+            let (package, name, params) = self.callback_params.get(s)?;
+            let (_, param) = params.iter().find(|(n, _)| n == var)?;
+            Some((package.clone(), name.clone(), *param))
+        }) else {
+            return;
+        };
+        let args = self.flat_call_args(self.extract_call_args(node));
+        for (index, arg) in args.into_iter().enumerate() {
+            if crate::cst::is_flattening(arg) {
+                break;
+            }
+            self.emit_expr_witness(arg);
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::CallbackIn {
+                    package: package.clone(),
+                    name: name.clone(),
+                    param,
+                    index: index as u32,
+                },
+                source: WitnessSource::Builder("callback_in".into()),
+                payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(arg))),
+                span: node_to_span(arg),
+            });
+        }
+    }
+
+    /// A sub literal passed as an argument: each of its parameters is what the
+    /// callee passes when it calls the code at that position (`CallbackIn`).
+    fn emit_callback_params(&mut self, node: Node<'a>, params: &[ParamInfo]) {
+        use crate::model::witnesses::{ProjectionStep, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let Some(call) = crate::cst::enclosing_call_of_arg(node) else { return };
+        let args = self.flat_call_args(self.extract_call_args(call));
+        let Some(pos) = args.iter().position(|a| a.id() == node.id()) else { return };
+        if args[..pos].iter().any(|a| crate::cst::is_flattening(*a)) {
+            return;
+        }
+        // The callee's view of the position: a method's invocant is its `@_[0]`.
+        let callee: Box<dyn Fn(u32) -> WitnessPayload> = match call.kind() {
+            "method_call_expression" => {
+                let Some(inv) = call.child_by_field_name("invocant") else { return };
+                let Some(member) = call
+                    .child_by_field_name("method")
+                    .filter(|m| m.kind() == "method")
+                    .and_then(|m| m.utf8_text(self.source).ok())
+                    .map(str::to_string)
+                else {
+                    return;
+                };
+                self.emit_invocant_witness(inv);
+                let base = WitnessAttachment::Expr(node_to_span(inv));
+                let param = pos as u32 + 1;
+                Box::new(move |index| WitnessPayload::Projected {
+                    base: base.clone(),
+                    step: ProjectionStep::CallbackOf { member: member.clone(), param, index },
+                })
+            }
+            _ => {
+                let Some(name) = call
+                    .child_by_field_name("function")
+                    .and_then(|f| f.utf8_text(self.source).ok())
+                else {
+                    return;
+                };
+                let (qualifier, leaf) =
+                    crate::model::conventions::split_qualified(name, &crate::model::conventions::PERL_SPELLINGS);
+                let Some(package) = qualifier.map(str::to_string).or_else(|| self.current_package.clone()) else {
+                    return;
+                };
+                let (leaf, param) = (leaf.to_string(), pos as u32);
+                Box::new(move |index| {
+                    WitnessPayload::Edge(WitnessAttachment::CallbackIn {
+                        package: package.clone(),
+                        name: leaf.clone(),
+                        param,
+                        index,
+                    })
+                })
+            }
+        };
+        let scope = self.current_scope();
+        for p in params {
+            let (Some(index), Some(at)) = (p.arg_position, p.binding_site) else { continue };
+            if p.is_slurpy || p.is_invocant || !p.name.starts_with('$') {
+                continue;
+            }
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::Variable { name: p.name.clone(), scope },
+                source: WitnessSource::Builder("callback_param".into()),
+                payload: callee(index),
+                span: Span { start: at, end: at },
+            });
+        }
+    }
+
     fn emit_param_in_edges(&mut self, sub_name: &str, params: &[ParamInfo]) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let (qualifier, leaf) =
@@ -1317,6 +1420,12 @@ impl<'a> Builder<'a> {
         };
         let scope = self.current_scope();
         let method = params.iter().any(|p| p.is_invocant);
+        let scalars = params
+            .iter()
+            .filter(|p| !p.is_slurpy && p.name.starts_with('$'))
+            .filter_map(|p| Some((p.name.clone(), p.arg_position?)))
+            .collect();
+        self.callback_params.insert(scope, (package.clone(), leaf.to_string(), scalars));
         for p in params {
             let (Some(index), Some(at)) = (p.arg_position, p.binding_site) else { continue };
             if p.is_invocant {

@@ -196,6 +196,12 @@ pub enum WitnessAttachment {
     /// Kept at the END for bincode variant-index stability (bump
     /// `EXTRACT_VERSION`).
     SlotElements { class: String, key: String },
+    /// What `package::name` passes as argument `index` when it calls the code
+    /// it was handed as parameter `param` (`$cb->($_)`): one `Edge` per such
+    /// call in the sub's body, joined. A sub literal passed at that position
+    /// reads its own parameters off it. Kept at the END for bincode
+    /// variant-index stability (bump `EXTRACT_VERSION`).
+    CallbackIn { package: String, name: String, param: u32, index: u32 },
 }
 
 /// Index into `FileAnalysis::refs`.
@@ -545,6 +551,11 @@ pub enum ProjectionStep {
     /// `SlotElements{class, key}` (`for my $x (@{ $self->{key} })`). Kept at
     /// the END for bincode variant-index stability (bump `EXTRACT_VERSION`).
     SlotElements { key: String },
+    /// Argument `index` of the calls member `member`, dispatched on the
+    /// base's class, makes to the code passed as its parameter `param`:
+    /// chases `CallbackIn{class, member, param, index}`. Kept at the END for
+    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
+    CallbackOf { member: String, param: u32, index: u32 },
 }
 
 /// A sub's return type as a **deferred computation**, not a value:

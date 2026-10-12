@@ -380,6 +380,7 @@ fn build_once(
         arrow_deref_sites: Vec::new(),
         anon_sub_symbol_by_span: std::collections::HashMap::new(),
         modifier_invocant_pos: None,
+        callback_params: std::collections::HashMap::new(),
         expr_type_depth: 0,
         walk_stack: Vec::new(),
         #[cfg(test)]
