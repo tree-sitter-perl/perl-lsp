@@ -10,8 +10,8 @@
       "col": 23,
       "expect": {
         "all": [
-          "_failed_check($name, $value, %attrs)",
-          "active param: 0 ($name)"
+          "_failed_check($name: String, $value, %attrs)",
+          "active param: 0 ($name: String)"
         ],
         "none": []
       },
@@ -26,7 +26,7 @@
       "col": 32,
       "expect": {
         "all": [
-          "_failed_check($name, $value, %attrs)",
+          "_failed_check($name: String, $value, %attrs)",
           "active param: 1 ($value)"
         ],
         "none": []
@@ -42,8 +42,8 @@
       "col": 30,
       "expect": {
         "all": [
-          "_assert_addr_list_ok($header, $allow_empty, $list)",
-          "active param: 0 ($header)"
+          "_assert_addr_list_ok($header: String, $allow_empty: Numeric, $list: ArrayRef)",
+          "active param: 0 ($header: String)"
         ],
         "none": []
       },
@@ -58,8 +58,8 @@
       "col": 41,
       "expect": {
         "all": [
-          "_assert_addr_list_ok($header, $allow_empty, $list)",
-          "active param: 2 ($list)"
+          "_assert_addr_list_ok($header: String, $allow_empty: Numeric, $list: ArrayRef)",
+          "active param: 2 ($list: ArrayRef)"
         ],
         "none": []
       },
@@ -236,7 +236,7 @@
       "col": 65,
       "expect": {
         "all": [
-          "_parse_attr_key_value($c, $attr",
+          "_parse_attr_key_value($c: Catalyst, $attr: String",
           "active param: 1"
         ],
         "none": []

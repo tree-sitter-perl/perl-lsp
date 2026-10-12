@@ -284,6 +284,13 @@ pub struct FileAnalysis {
     #[serde(skip, default)]
     pub degraded: bool,
 
+    /// Identity of the source text this analysis was built from (0 = not
+    /// stamped). An analysis is a function of its source alone, so an
+    /// answer persisted against these stamps is valid in any later process
+    /// whose index holds analyses with the same stamps.
+    #[serde(default)]
+    pub source_stamp: u64,
+
     /// This file's use-map pins (`leaf_namespace_pins`), derived once per
     /// analysis: the backward walk builds a `VisibilityAxis` for EVERY
     /// scanned file of EVERY query, and the derivation scans the symbol
@@ -411,6 +418,14 @@ impl PackageFacts {
     pub fn is_class(&self) -> bool {
         !self.parents.is_empty() || self.framework.is_some() || self.blesses
     }
+}
+
+/// `FileAnalysis::source_stamp` for `source`. Never 0, which means unstamped.
+pub fn source_stamp_of(source: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    source.hash(&mut h);
+    h.finish().max(1)
 }
 
 impl FileAnalysis {

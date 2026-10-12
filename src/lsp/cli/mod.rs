@@ -34,8 +34,31 @@ pub(crate) use query::*;
 ///
 /// `moment` labels the human report; the JSON sinks write regardless of it.
 pub(crate) fn exit_with(code: i32, moment: &str) -> ! {
+    flush_answers();
     crate::util::ghost_stats::emit_all(moment);
     std::process::exit(code); // sanctioned-exit
+}
+
+/// Persists the answers the run computed (`ModuleIndex::answer_flusher`),
+/// installed by `cli_full_startup`.
+static ANSWER_FLUSH: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
+
+/// Persist the answers this run computed. Runs at most once; a no-op for a
+/// verb that never started an index.
+pub(crate) fn flush_answers() {
+    let flush = ANSWER_FLUSH.lock().ok().and_then(|mut g| g.take());
+    if let Some(f) = flush {
+        f();
+    }
+}
+
+/// Runs `flush_answers` when a CLI verb returns instead of exiting.
+pub(crate) struct FlushAnswersOnReturn;
+
+impl Drop for FlushAnswersOnReturn {
+    fn drop(&mut self) {
+        flush_answers();
+    }
 }
 
 pub(crate) fn cli_languages() {
@@ -275,6 +298,9 @@ fn cli_full_startup(
     // Wake the headless resolver: it blocks on this channel for the
     // @INC scan + SQLite warm.
     module_index.set_workspace_root(Some(root_uri.as_str()));
+    if let Ok(mut g) = ANSWER_FLUSH.lock() {
+        *g = Some(Box::new(module_index.answer_flusher()));
+    }
     let ws = file_store::FileStore::new();
     // The reference language's tree is walked only when the scope wants it
     // — a `.cc` query indexes the pack family alone, which is what the

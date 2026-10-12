@@ -132,6 +132,7 @@ impl FileAnalysis {
             key_writes: _key_writes,             // own-file mutation-extension input; resulting shapes surface via `ret`
             reassigned_scalars: _reassigned_scalars, // own-file shape trust gate
             flow_edges: _flow_edges,             // own-file value provenance
+            source_stamp: _source_stamp,         // identity of the input, not a fact about it
             unrowed_attachment_names: _unrowed_attachment_names, // derived residency digest for the consult pre-filter; changes only when the bag/tables it derives from change, so it carries no Surface edge of its own
 
             // ---- Consumer-side / own-file enrichment inputs and local

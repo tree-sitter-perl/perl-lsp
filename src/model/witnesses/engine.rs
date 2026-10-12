@@ -29,6 +29,13 @@
 //! PROVISIONAL, served only while the index has not moved at all, and never
 //! re-verified or persisted. Recomputing it on every ask is what a call
 //! graph full of parameters passed around in circles cannot afford.
+//!
+//! Whole entries outlive the process. A persisted entry restates its
+//! dependencies in terms a later process can check: each file by its
+//! `source_stamp`, each mentions set by its hash, the world by
+//! `world_digest`. A later process adopts the entry on its first miss for
+//! the key when all three still hold, and from then on it is an ordinary
+//! entry.
 
 use super::*;
 
@@ -37,7 +44,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use crate::model::file_analysis::CrossFileLookup;
+use crate::model::file_analysis::{CachedModule, CrossFileLookup};
 
 /// One thing an answer read.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -57,6 +64,19 @@ struct Entry {
     /// nothing in the index has moved (the epoch fast path), never
     /// re-verified, never persisted.
     provisional: bool,
+    /// `world_digest` of the world `world` names; `None` when the index
+    /// does not persist.
+    digest: Option<u64>,
+}
+
+/// An entry as it is persisted: every dependency in a form another process
+/// can check against its own index.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PersistedAnswer {
+    value: Option<InferredType>,
+    world: u64,
+    files: Vec<(PathBuf, u64)>,
+    mentions: Vec<(String, u64)>,
 }
 
 /// Above this many entries the store drops everything and starts over: an
@@ -69,6 +89,12 @@ const ANSWER_STORE_CAP: usize = 16_384;
 #[derive(Default)]
 pub struct AnswerStore {
     entries: Mutex<HashMap<WitnessAttachment, Entry>>,
+    /// Encoded rows not yet persisted; bounded like `entries`.
+    pending: Mutex<Vec<(Vec<u8>, Vec<u8>)>>,
+    /// `mentions_of` per key, valid while `resolution_epoch` stands.
+    mentions: Mutex<HashMap<String, (u64, Arc<Vec<PathBuf>>)>>,
+    /// `uncovered_files` at a `resolution_epoch`.
+    uncovered: Mutex<Option<(u64, Arc<Vec<Arc<CachedModule>>>)>>,
 }
 
 impl AnswerStore {
@@ -79,6 +105,77 @@ impl AnswerStore {
     pub fn len(&self) -> usize {
         self.entries.lock().map(|m| m.len()).unwrap_or(0)
     }
+
+    /// Rows written since the last take, for the caller to persist.
+    pub fn take_pending(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        self.pending.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default()
+    }
+}
+
+/// `e` as a persisted row, encoded when it is computed so its stamps are the
+/// ones it read. `None` for an entry that cannot outlive the process: cut,
+/// unpersisting index, a payload outside the persisted shape, or a file read
+/// with no source stamp.
+fn encode_persisted(idx: &dyn CrossFileLookup, key: &WitnessAttachment, e: &Entry) -> Option<(Vec<u8>, Vec<u8>)> {
+    if e.provisional {
+        return None;
+    }
+    let world = e.digest?;
+    let value = match &*e.value {
+        ReducedValue::Type(t) => Some(t.clone()),
+        ReducedValue::None => None,
+        ReducedValue::FactMap(_) => return None,
+    };
+    let mut files = Vec::new();
+    let mut mentions = Vec::new();
+    for d in e.deps.iter() {
+        match d {
+            Dep::File { path, .. } => files.push((path.clone(), idx.source_stamp(path)?)),
+            Dep::Mentions { key, hash } => mentions.push((key.clone(), *hash)),
+        }
+    }
+    let p = PersistedAnswer { value, world, files, mentions };
+    Some((bincode::serialize(key).ok()?, bincode::serialize(&p).ok()?))
+}
+
+/// Adopt the persisted answer for `key`, when every dependency it records
+/// still holds in `idx`, as an entry stamped at `epoch`.
+fn adopt_persisted(idx: &dyn CrossFileLookup, key: &WitnessAttachment, epoch: u64) -> Option<Entry> {
+    let raw = idx.persisted_answer(&bincode::serialize(key).ok()?)?;
+    let p: PersistedAnswer = bincode::deserialize(&raw).ok()?;
+    let digest = idx.world_digest()?;
+    if p.world != digest {
+        crate::util::ghost_stats::count("engine.persisted_world_moved");
+        return None;
+    }
+    let mut deps = Vec::with_capacity(p.files.len() + p.mentions.len());
+    for (path, stamp) in p.files {
+        if idx.source_stamp(&path) != Some(stamp) {
+            crate::util::ghost_stats::count("engine.persisted_file_moved");
+            return None;
+        }
+        let version = idx.file_version(&path)?;
+        deps.push(Dep::File { path, version });
+    }
+    for (key, hash) in p.mentions {
+        if mentions_hash(&mentions_of(idx, &key)) != hash {
+            crate::util::ghost_stats::count("engine.persisted_mentions_moved");
+            return None;
+        }
+        deps.push(Dep::Mentions { key, hash });
+    }
+    let value = match p.value {
+        Some(t) => ReducedValue::Type(t),
+        None => ReducedValue::None,
+    };
+    Some(Entry {
+        value: Arc::new(value),
+        epoch,
+        world: idx.world_generation(),
+        deps: deps.into(),
+        provisional: false,
+        digest: Some(digest),
+    })
 }
 
 /// One open computation.
@@ -129,21 +226,63 @@ pub fn mentions_hash(paths: &[PathBuf]) -> u64 {
     h.finish()
 }
 
-/// The files the index says mention `key`: its ref rows, plus every
-/// resident file the rows don't cover whose own refs carry the key (never
-/// shredded, so its resident copy still holds its refs). Sorted, so its hash
-/// is a stable `Mentions` dependency.
-pub fn mentions_of(idx: &dyn CrossFileLookup, key: &str) -> Vec<PathBuf> {
-    let mut paths: Vec<PathBuf> = idx.ref_candidate_paths(&[key.to_string()]);
+/// The files the index says mention `key` (`mentions_among`), memoized per
+/// `resolution_epoch`: one verification checks every mentions set its
+/// answer's chase read.
+pub fn mentions_of(idx: &dyn CrossFileLookup, key: &str) -> Arc<Vec<PathBuf>> {
+    let Some(store) = idx.answer_store() else {
+        return Arc::new(mentions_among(idx, key, &uncovered_files(idx)));
+    };
+    let epoch = idx.resolution_epoch();
+    if let Some((at, paths)) = store.mentions.lock().ok().and_then(|m| m.get(key).cloned()) {
+        if at == epoch {
+            return paths;
+        }
+    }
+    let uncovered = match store.uncovered.lock().ok().and_then(|u| u.clone()) {
+        Some((at, files)) if at == epoch => files,
+        _ => {
+            let files = Arc::new(uncovered_files(idx));
+            if let Ok(mut u) = store.uncovered.lock() {
+                *u = Some((epoch, Arc::clone(&files)));
+            }
+            files
+        }
+    };
+    let paths = Arc::new(mentions_among(idx, key, &uncovered));
+    if let Ok(mut m) = store.mentions.lock() {
+        if m.len() >= ANSWER_STORE_CAP {
+            m.clear();
+        }
+        m.insert(key.to_string(), (epoch, Arc::clone(&paths)));
+    }
+    paths
+}
+
+/// Held files the ref rows don't cover (never shredded): their resident
+/// copies are the only record of what they mention.
+fn uncovered_files(idx: &dyn CrossFileLookup) -> Vec<Arc<CachedModule>> {
     let shredded = idx.ref_indexed_paths();
+    let mut files = Vec::new();
     idx.for_each_cached_file(&mut |cached| {
-        // An evicted copy can't say, so it stays a candidate.
-        let mentions = cached.analysis.refs_are_evicted()
-            || !cached.analysis.ref_indices_keyed(key).is_empty();
-        if !shredded.contains(&cached.path) && mentions {
-            paths.push(cached.path.clone());
+        if !shredded.contains(&cached.path) {
+            files.push(Arc::clone(cached));
         }
     });
+    files
+}
+
+/// The mentions relation for `key`: its ref rows plus every uncovered file
+/// whose refs carry it. Sorted, so its hash is a stable `Mentions`
+/// dependency.
+fn mentions_among(idx: &dyn CrossFileLookup, key: &str, uncovered: &[Arc<CachedModule>]) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = idx.ref_candidate_paths(&[key.to_string()]);
+    for cached in uncovered {
+        // An evicted copy can't say, so it stays a candidate.
+        if cached.analysis.refs_are_evicted() || !cached.analysis.ref_indices_keyed(key).is_empty() {
+            paths.push(cached.path.clone());
+        }
+    }
     paths.sort();
     paths.dedup();
     paths
@@ -194,7 +333,16 @@ pub fn answer(
         return v;
     };
     let epoch = idx.resolution_epoch();
-    let found = store.entries.lock().ok().and_then(|m| m.get(key).cloned());
+    let mut found = store.entries.lock().ok().and_then(|m| m.get(key).cloned());
+    if found.is_none() {
+        if let Some(e) = crate::util::ghost_stats::timed("engine.adopt_time", || adopt_persisted(idx, key, epoch)) {
+            crate::util::ghost_stats::count("engine.persisted_adopt");
+            if let Ok(mut m) = store.entries.lock() {
+                m.insert(key.clone(), e.clone());
+            }
+            found = Some(e);
+        }
+    }
     if let Some(e) = found {
         let fresh = e.epoch == epoch
             || (!e.provisional && {
@@ -205,6 +353,15 @@ pub fn answer(
             crate::util::ghost_stats::count("engine.hit");
             for d in e.deps.iter() {
                 note_dep(d.clone());
+            }
+            // A path-dependent value makes everything computed from it
+            // path-dependent too.
+            if e.provisional {
+                FRAMES.with(|f| {
+                    for fr in f.borrow_mut().iter_mut() {
+                        fr.cut = true;
+                    }
+                });
             }
             if e.epoch != epoch {
                 if let Ok(mut m) = store.entries.lock() {
@@ -219,8 +376,9 @@ pub fn answer(
     }
     crate::util::ghost_stats::count("engine.compute");
     let world = idx.world_generation();
+    let digest = idx.world_digest();
     FRAMES.with(|f| f.borrow_mut().push(Frame { key: key.clone(), deps: Vec::new(), cut: false }));
-    let (value, chase_cut) = compute();
+    let (value, chase_cut) = crate::util::ghost_stats::timed("engine.compute_time", compute);
     let Some(Frame { mut deps, cut, .. }) = FRAMES.with(|f| f.borrow_mut().pop()) else {
         return value;
     };
@@ -230,15 +388,29 @@ pub fn answer(
     }
     deps.sort();
     deps.dedup();
+    let entry = Entry { value: Arc::new(value.clone()), epoch, world, deps: deps.into(), provisional, digest };
+    if let Some(row) = encode_persisted(idx, key, &entry) {
+        if let Ok(mut p) = store.pending.lock() {
+            if p.len() < ANSWER_STORE_CAP {
+                p.push(row);
+            }
+        }
+    }
     if let Ok(mut m) = store.entries.lock() {
         if m.len() >= ANSWER_STORE_CAP {
             crate::util::ghost_stats::count("engine.reset");
             m.clear();
         }
-        m.insert(
-            key.clone(),
-            Entry { value: Arc::new(value.clone()), epoch, world, deps: deps.into(), provisional },
-        );
+        m.insert(key.clone(), entry);
     }
     value
+}
+
+/// `raw` with its value replaced, every recorded dependency kept: lets a
+/// test tell an adopted answer from a recomputed one.
+#[cfg(test)]
+pub(crate) fn with_persisted_value(raw: &[u8], value: Option<InferredType>) -> Vec<u8> {
+    let mut p: PersistedAnswer = bincode::deserialize(raw).expect("a persisted row");
+    p.value = value;
+    bincode::serialize(&p).expect("re-encode")
 }

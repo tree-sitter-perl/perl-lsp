@@ -454,6 +454,24 @@ pub trait CrossFileLookup {
         None
     }
 
+    /// A digest of everything `world_generation` guards, recomputable by a
+    /// later process: two indexes with equal digests answer every name
+    /// lookup the same. `None`: this index does not persist answers.
+    fn world_digest(&self) -> Option<u64> {
+        None
+    }
+
+    /// `FileAnalysis::source_stamp` of the analysis held for `path`.
+    fn source_stamp(&self, _path: &std::path::Path) -> Option<u64> {
+        None
+    }
+
+    /// The persisted answer row for an engine key, both in the engine's own
+    /// encoding.
+    fn persisted_answer(&self, _key: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
+
     /// Does ANY file bridge plugin-synthesized entities onto `class`?
     ///
     /// The guard on every conclusion form that encodes "everything before the

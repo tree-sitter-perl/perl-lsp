@@ -285,6 +285,19 @@ impl<'a> Builder<'a> {
                         .clone()
                         .map(|package| RefBinding::Function { package }),
                 );
+                // The ref names the tail token; the call's value (its
+                // `Invoke`) sits on the whole expression. Readers holding the
+                // ref reach the value through this edge.
+                self.bag.push(crate::model::witnesses::Witness {
+                    attachment: crate::model::witnesses::WitnessAttachment::Expression(
+                        crate::model::witnesses::RefIdx((self.refs.len() - 1) as u32),
+                    ),
+                    source: crate::model::witnesses::WitnessSource::Builder("function_call_value".into()),
+                    payload: crate::model::witnesses::WitnessPayload::Edge(
+                        crate::model::witnesses::WitnessAttachment::Expr(node_to_span(node)),
+                    ),
+                    span: ref_span,
+                });
                 // Even-position stringy args → HashKeyAccess refs
                 // owned by `Sub{resolved_package, name}`. Same
                 // mechanism as method-call args; covers

@@ -2325,3 +2325,191 @@ fn a_background_write_lands_until_the_open_doc_lane_has_recorded() {
          — consumers read the buffer, and the disk state is not what they see"
     );
 }
+
+// ---- Long-distance parameter types (`ParamIn`, the answer engine) ----
+
+/// `Greeter::greet`'s `$u`, typed from the index alone.
+fn greet_param_type(greeter: &CachedModule, idx: &ModuleIndex) -> Option<InferredType> {
+    // Row 1 of every Greeter fixture below is `sub greet { ... return $u }`.
+    greeter
+        .analysis
+        .inferred_type_via_bag_ctx("$u", tree_sitter::Point { row: 1, column: 40 }, Some(idx))
+}
+
+const GREETER_METHOD: &str = "package Greeter;\nsub greet { my ($self, $u) = @_;     return $u }\n1;\n";
+const GREETER_FUNCTION: &str = "package Greeter;\nsub greet { my ($u) = @_;            return $u }\n1;\n";
+
+fn index_of(files: &[&Arc<CachedModule>]) -> ModuleIndex {
+    let idx = ModuleIndex::new_for_test();
+    for f in files {
+        idx.register_workspace_module(f.path.to_path_buf(), Arc::clone(&f.analysis));
+    }
+    idx
+}
+
+#[test]
+fn param_type_joins_method_callers() {
+    let greeter = parse_source_to_cached(GREETER_METHOD, "Greeter");
+    let app = parse_source_to_cached(
+        "package App;\nsub run { Greeter->greet(bless({}, 'User')) }\n1;\n",
+        "App",
+    );
+    assert_eq!(
+        greeter.analysis.inferred_type_via_bag("$u", tree_sitter::Point { row: 1, column: 40 }),
+        None,
+        "fixture must not type $u from its own file"
+    );
+    let idx = index_of(&[&greeter, &app]);
+    let t = greet_param_type(&greeter, &idx).expect("the caller's argument types the parameter");
+    assert_eq!(t.class_name().as_deref(), Some("User"));
+}
+
+#[test]
+fn param_type_joins_function_callers() {
+    let greeter = parse_source_to_cached(GREETER_FUNCTION, "Greeter");
+    let app = parse_source_to_cached(
+        "package App;\nsub run { Greeter::greet(bless({}, 'User')) }\n1;\n",
+        "App",
+    );
+    let idx = index_of(&[&greeter, &app]);
+    let t = greet_param_type(&greeter, &idx).expect("a qualified call is a caller");
+    assert_eq!(t.class_name().as_deref(), Some("User"));
+}
+
+#[test]
+fn param_type_callers_that_disagree_answer_nothing() {
+    let greeter = parse_source_to_cached(GREETER_METHOD, "Greeter");
+    let a = parse_source_to_cached(
+        "package A;\nsub run { Greeter->greet(bless({}, 'User')) }\n1;\n",
+        "A",
+    );
+    let b = parse_source_to_cached(
+        "package B;\nsub run { Greeter->greet(bless({}, 'Admin')) }\n1;\n",
+        "B",
+    );
+    let idx = index_of(&[&greeter, &a, &b]);
+    assert_eq!(greet_param_type(&greeter, &idx), None);
+}
+
+/// A subclass receiver dispatches to the parent's method, so it is a caller;
+/// a receiver of an unrelated class calls some other `greet`.
+#[test]
+fn param_type_counts_subclass_receivers_only() {
+    let greeter = parse_source_to_cached(GREETER_METHOD, "Greeter");
+    let kid = parse_source_to_cached(
+        "package Kid;\nuse parent -norequire, 'Greeter';\n1;\n",
+        "Kid",
+    );
+    let other = parse_source_to_cached(
+        "package Other;\nsub greet { 1 }\n1;\n",
+        "Other",
+    );
+    let app = parse_source_to_cached(
+        "package App;\nsub run { Kid->greet(bless({}, 'User')); Other->greet(bless({}, 'Admin')) }\n1;\n",
+        "App",
+    );
+    let idx = index_of(&[&greeter, &kid, &other, &app]);
+    let t = greet_param_type(&greeter, &idx).expect("the subclass call joins");
+    assert_eq!(t.class_name().as_deref(), Some("User"));
+}
+
+/// An edit to a caller's body moves no surface, only the caller's version:
+/// the stored answer must not survive it.
+#[test]
+fn param_type_follows_a_caller_edit() {
+    let greeter = parse_source_to_cached(GREETER_METHOD, "Greeter");
+    let app = parse_source_to_cached(
+        "package App;\nsub run { Greeter->greet(bless({}, 'User')) }\n1;\n",
+        "App",
+    );
+    let idx = index_of(&[&greeter, &app]);
+    assert_eq!(greet_param_type(&greeter, &idx).unwrap().class_name().as_deref(), Some("User"));
+    let edited = parse_source_to_cached(
+        "package App;\nsub run { Greeter->greet(bless({}, 'Admin')) }\n1;\n",
+        "App",
+    );
+    idx.register_workspace_module(edited.path.to_path_buf(), Arc::clone(&edited.analysis));
+    assert_eq!(greet_param_type(&greeter, &idx).unwrap().class_name().as_deref(), Some("Admin"));
+}
+
+/// A new caller in a file the answer never read: only the mentions set moves.
+#[test]
+fn param_type_follows_a_new_caller_file() {
+    let greeter = parse_source_to_cached(GREETER_METHOD, "Greeter");
+    let app = parse_source_to_cached(
+        "package App;\nsub run { Greeter->greet(bless({}, 'User')) }\n1;\n",
+        "App",
+    );
+    let idx = index_of(&[&greeter, &app]);
+    assert!(greet_param_type(&greeter, &idx).is_some());
+    let late = parse_source_to_cached(
+        "package Late;\nsub run { Greeter->greet(bless({}, 'Admin')) }\n1;\n",
+        "Late",
+    );
+    idx.register_workspace_module(late.path.to_path_buf(), Arc::clone(&late.analysis));
+    assert_eq!(greet_param_type(&greeter, &idx), None, "the new caller disagrees");
+}
+
+/// Parameters passed around in a circle terminate, and the caller from
+/// outside the circle still types them.
+#[test]
+fn param_type_cycle_terminates() {
+    let ring = parse_source_to_cached(
+        "package Ring;\nsub a { my ($x) = @_; b($x); return $x }\nsub b { my ($y) = @_; a($y); return $y }\n1;\n",
+        "Ring",
+    );
+    let app = parse_source_to_cached(
+        "package App;\nsub run { Ring::a(bless({}, 'User')) }\n1;\n",
+        "App",
+    );
+    let idx = index_of(&[&ring, &app]);
+    let t = ring
+        .analysis
+        .inferred_type_via_bag_ctx("$x", tree_sitter::Point { row: 1, column: 30 }, Some(&idx))
+        .expect("the outside caller types $x; the cycle's leg is cut");
+    assert_eq!(t.class_name().as_deref(), Some("User"));
+}
+
+/// A persisted answer is adopted while everything it read still holds, and
+/// refused once a file it read has moved.
+#[test]
+fn persisted_param_answer_adopts_only_while_its_reads_hold() {
+    use crate::model::file_analysis::CrossFileLookup;
+    let greeter = parse_source_to_cached(GREETER_METHOD, "Greeter");
+    let app = parse_source_to_cached(
+        "package App;\nsub run { Greeter->greet(bless({}, 'User')) }\n1;\n",
+        "App",
+    );
+    let first = index_of(&[&greeter, &app]);
+    assert!(greet_param_type(&greeter, &first).is_some());
+    let rows = first.answer_store().unwrap().take_pending();
+    assert_eq!(rows.len(), 1, "one whole answer to persist: {rows:?}");
+    // Swap the value so adoption is observable: a recomputation answers User.
+    let marked: std::collections::HashMap<Vec<u8>, Vec<u8>> = rows
+        .iter()
+        .map(|(k, a)| {
+            let t = InferredType::ClassName("Persisted".into());
+            (k.clone(), crate::model::witnesses::engine::with_persisted_value(a, Some(t)))
+        })
+        .collect();
+
+    let same = index_of(&[&greeter, &app]);
+    let _ = same.core.persisted_answers.set(marked.clone());
+    assert_eq!(
+        greet_param_type(&greeter, &same).unwrap().class_name().as_deref(),
+        Some("Persisted"),
+        "an unchanged index adopts the persisted answer"
+    );
+
+    let edited = parse_source_to_cached(
+        "package App;\nsub run { Greeter->greet(bless({}, 'User'));  }\n1;\n",
+        "App",
+    );
+    let moved = index_of(&[&greeter, &edited]);
+    let _ = moved.core.persisted_answers.set(marked);
+    assert_eq!(
+        greet_param_type(&greeter, &moved).unwrap().class_name().as_deref(),
+        Some("User"),
+        "a caller whose source moved refuses the row and recomputes"
+    );
+}

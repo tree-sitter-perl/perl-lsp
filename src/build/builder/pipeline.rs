@@ -703,6 +703,7 @@ fn build_once(
     });
     // Finalize: owner fixup, target stamping, and the base-count seals.
     bphase!("finalize_post_walk", fa.finalize_post_walk());
+    fa.source_stamp = crate::model::file_analysis::source_stamp_of(source);
 
     fa
 }

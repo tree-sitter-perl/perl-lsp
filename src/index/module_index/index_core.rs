@@ -87,6 +87,12 @@ pub(crate) struct IndexCore {
     /// Long-distance answers, verified on read against what they read
     /// (`model::witnesses::engine`).
     pub(crate) answers: crate::model::witnesses::engine::AnswerStore,
+    /// Persisted answer rows, `key → answer` in the engine's encoding, read
+    /// from the store once, on the first lookup after it opens.
+    pub(crate) persisted_answers: std::sync::OnceLock<std::collections::HashMap<Vec<u8>, Vec<u8>>>,
+    /// The world digest and every held file's source stamp, rebuilt when the
+    /// counters that move with either do.
+    pub(crate) world_digest: Mutex<Option<Arc<WorldDigest>>>,
     /// The witness seams' fallback-on-miss enriched retries only pay off
     /// when the process lives long enough to amortize the overlay (each
     /// miss is a whole-analysis deep copy + enrich). Off by default; the
@@ -157,6 +163,8 @@ impl IndexCore {
             gen_counter: std::sync::atomic::AtomicU64::new(1),
             shape_bumps: std::sync::atomic::AtomicU64::new(0),
             answers: crate::model::witnesses::engine::AnswerStore::new(),
+            persisted_answers: std::sync::OnceLock::new(),
+            world_digest: Mutex::new(None),
             long_lived: std::sync::atomic::AtomicBool::new(false),
             bag_cache: Arc::new(std::sync::RwLock::new(None)),
             conclusion_cache: Arc::new(std::sync::RwLock::new(None)),
@@ -379,4 +387,12 @@ pub(crate) fn strip_import_copy_one(
     } else {
         m.clone()
     }
+}
+
+/// `CrossFileLookup::world_digest` and the source stamps it was built from.
+pub(crate) struct WorldDigest {
+    /// `(world_generation, gen_counter, held files)` when built.
+    pub(crate) key: (u64, u64, usize),
+    pub(crate) digest: u64,
+    pub(crate) stamps: std::collections::HashMap<std::path::PathBuf, u64>,
 }

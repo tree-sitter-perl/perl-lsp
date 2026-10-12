@@ -10,7 +10,7 @@ const SCHEMA_VERSION: &str = "10";
 /// Bumped when the builder's analysis output changes shape in a way that
 /// invalidates cached blobs. Unlike `SCHEMA_VERSION`, this does not drop
 /// the table — stale entries are re-resolved lazily with priority.
-pub const EXTRACT_VERSION: i64 = 222;
+pub const EXTRACT_VERSION: i64 = 223;
 
 /// Bumped when the ROW format of the relational ref index changes shape.
 /// Unlike `EXTRACT_VERSION` (which governs the blobs), a mismatch only wipes
@@ -203,6 +203,11 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             version TEXT NOT NULL,
             surface BLOB NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS answers (
+            key             BLOB PRIMARY KEY,
+            extract_version INTEGER NOT NULL,
+            answer          BLOB NOT NULL
+        ) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS idx_modules_path ON modules(path);
         CREATE INDEX IF NOT EXISTS idx_modules_name ON modules(module_name);",
     )?;
@@ -402,7 +407,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 pub fn clear_derived_rows(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "DELETE FROM refs; DELETE FROM syms; DELETE FROM files; DELETE FROM strings; \
-         DELETE FROM stubs; DELETE FROM surfaces;",
+         DELETE FROM stubs; DELETE FROM surfaces; DELETE FROM answers;",
     )?;
     bump_strings_generation(conn)
 }

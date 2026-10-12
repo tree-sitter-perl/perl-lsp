@@ -295,6 +295,68 @@ impl ModuleIndex {
 }
 
 impl ModuleIndex {
+    /// The current world digest, rebuilt when the index moved. Each held
+    /// file contributes its surface fingerprint where the freshness index
+    /// records one — a body edit leaves names standing — and its source
+    /// stamp otherwise.
+    pub(crate) fn world_digest_now(&self) -> Arc<super::index_core::WorldDigest> {
+        use crate::model::file_analysis::CrossFileLookup;
+        let held = self.core.cache.len() + self.all_files.len();
+        let key = (
+            self.world_generation(),
+            self.core.gen_counter.load(std::sync::atomic::Ordering::Relaxed),
+            held,
+        );
+        if let Ok(g) = self.core.world_digest.lock() {
+            if let Some(d) = g.as_ref().filter(|d| d.key == key) {
+                return Arc::clone(d);
+            }
+        }
+        crate::util::ghost_stats::count("engine.world_digest");
+        let mut files: Vec<(std::path::PathBuf, u64)> = Vec::new();
+        self.for_each_cached_file(&mut |cached| {
+            files.push((cached.path.clone(), cached.analysis.source_stamp));
+        });
+        files.sort();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for (path, stamp) in &files {
+            use std::hash::Hash;
+            path.hash(&mut h);
+            self.freshness.fingerprint_of(path).unwrap_or(*stamp).hash(&mut h);
+        }
+        let digest = {
+            use std::hash::Hasher;
+            h.finish()
+        };
+        let stamps = files.into_iter().filter(|(_, s)| *s != 0).collect();
+        let d = Arc::new(super::index_core::WorldDigest { key, digest, stamps });
+        if let Ok(mut g) = self.core.world_digest.lock() {
+            *g = Some(Arc::clone(&d));
+        }
+        d
+    }
+
+    /// A handle that writes the answers computed since the last flush to
+    /// this index's store. Owns what it needs, so a caller can run it at
+    /// process exit without holding the index.
+    pub fn answer_flusher(&self) -> impl FnOnce() + Send + 'static {
+        let core = Arc::clone(&self.core);
+        let root = self.workspace_root();
+        move || {
+            let rows = core.answers.take_pending();
+            if rows.is_empty() {
+                return;
+            }
+            let Some(conn) = crate::index::module_cache::open_cache_db(root.as_deref(), "perl") else {
+                return;
+            };
+            match crate::index::module_cache::save_answers(&conn, &rows) {
+                Ok(()) => crate::util::ghost_stats::count_by("engine.persisted_rows", rows.len() as u64),
+                Err(e) => log::warn!("persisting answers failed: {e}"),
+            }
+        }
+    }
+
     fn whole_ungated(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
         if cached.analysis.is_fully_resident() {
             return cached.analysis.clone();
@@ -370,6 +432,24 @@ impl CrossFileLookup for ModuleIndex {
 
     fn file_version(&self, path: &std::path::Path) -> Option<u64> {
         self.core.registration_gen.get(path).map(|g| *g)
+    }
+
+    fn world_digest(&self) -> Option<u64> {
+        Some(self.world_digest_now().digest)
+    }
+
+    fn source_stamp(&self, path: &std::path::Path) -> Option<u64> {
+        self.world_digest_now().stamps.get(path).copied()
+    }
+
+    fn persisted_answer(&self, key: &[u8]) -> Option<Vec<u8>> {
+        if self.core.persisted_answers.get().is_none() {
+            // Not latched until the store opens: a lookup racing startup
+            // must not pin an empty table for the process's lifetime.
+            let rows = self.with_rows_conn(crate::index::module_cache::load_answers)?;
+            let _ = self.core.persisted_answers.set(rows.into_iter().collect());
+        }
+        self.core.persisted_answers.get()?.get(key).cloned()
     }
 
     fn get_cached(&self, module_name: &str) -> Option<Arc<CachedModule>> {

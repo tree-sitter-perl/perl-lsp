@@ -1429,8 +1429,8 @@ impl ReducerRegistry {
         }
         crate::util::ghost_stats::count("param_in.join");
         let mut joined: Option<InferredType> = None;
-        for path in paths {
-            let Some(cached) = idx.cached_by_path(&path) else { continue };
+        for path in paths.iter() {
+            let Some(cached) = idx.cached_by_path(path) else { continue };
             let full: std::sync::Arc<FileAnalysis> = idx.whole_present(&cached);
             state.pins.push(std::sync::Arc::clone(&full));
             let caller_ctx = BagContext {
@@ -1442,12 +1442,24 @@ impl ReducerRegistry {
             };
             for &ri in full.ref_indices_keyed(&key) {
                 let r = &full.refs()[ri];
-                let (att, method) = match r.kind {
-                    RefKind::MethodCall { .. } => {
-                        (WitnessAttachment::Expression(super::RefIdx(ri as u32)), true)
-                    }
-                    RefKind::FunctionCall { .. } => (WitnessAttachment::Expr(r.span), false),
+                let method = match r.kind {
+                    RefKind::MethodCall { .. } => true,
+                    RefKind::FunctionCall { .. } => false,
                     _ => continue,
+                };
+                // A method call's `Invoke` sits on its ref; a function call's
+                // on the expression its ref's edge names.
+                let at_ref = WitnessAttachment::Expression(super::RefIdx(ri as u32));
+                let att = if method {
+                    at_ref
+                } else {
+                    let Some(target) = full.witnesses.for_attachment(&at_ref).iter().find_map(|w| match &w.payload {
+                        WitnessPayload::Edge(t) => Some(t.clone()),
+                        _ => None,
+                    }) else {
+                        continue;
+                    };
+                    target
                 };
                 let Some((receiver, args)) = full.witnesses.for_attachment(&att).iter().find_map(|w| {
                     match &w.payload {

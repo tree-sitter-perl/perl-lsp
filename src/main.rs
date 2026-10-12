@@ -43,6 +43,7 @@ async fn main() {
     }
 
     // CLI modes — dispatch before starting LSP server
+    let _flush_answers = FlushAnswersOnReturn;
     match args.get(1).map(|s| s.as_str()) {
         Some("--check") => {
             cli_check(&args[2..]);
