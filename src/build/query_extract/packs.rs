@@ -155,6 +155,72 @@ pub struct LangPack {
     pub domain_compare_ops: &'static [&'static str],
 }
 
+impl LangPack {
+    /// Every `&'static str` this pack declares, tagged with the field it
+    /// came from: what the rule #15 tripwires walk.
+    ///
+    /// The destructure names every field, so a new `LangPack` field fails to
+    /// compile here until its strings are declared or it is named as
+    /// holding none. `query_source` is the document itself and `names` is
+    /// the language's spelling seam. A fn is code the reflection cannot see
+    /// into, so a callee name inside one escapes it
+    /// (`docs/adr/pack-vocabulary.md`).
+    #[cfg(test)]
+    pub(crate) fn declared_strings(&self) -> Vec<(&'static str, &'static str)> {
+        let LangPack {
+            query_source: _,
+            names: _,
+            shape_name: _,
+            default_name: _,
+            annot_type: _,
+            module_paths: _,
+            shape_ctor: _,
+            import_call: _,
+            cmd_effects: _,
+            narrow_guard: _,
+            rebind_method: _,
+            implicit_this_members: _,
+            include_path_tokens: _,
+            preprocessor_macros: _,
+            entrypoint_symbols,
+            brace_scoped_members: _,
+            trigger_chars,
+            receiver_names,
+            nested_peel,
+            recv_peel,
+            op_map,
+            simple_var_kinds,
+            member_kinds,
+            skip_kinds,
+            call_kinds,
+            domain_compare_kinds,
+            domain_compare_ops,
+        } = self;
+        let mut out: Vec<(&'static str, &'static str)> = Vec::new();
+        let mut list = |field: &'static str, values: &'static [&'static str]| {
+            out.extend(values.iter().map(|v| (field, *v)));
+        };
+        list("entrypoint_symbols", entrypoint_symbols);
+        list("trigger_chars", trigger_chars);
+        list("receiver_names", receiver_names);
+        list("nested_peel.annot_kinds", nested_peel.annot_kinds);
+        list("recv_peel.annot_kinds", recv_peel.annot_kinds);
+        list("simple_var_kinds", simple_var_kinds);
+        list("member_kinds", member_kinds);
+        list("skip_kinds", skip_kinds);
+        list("call_kinds", call_kinds);
+        list("domain_compare_kinds", domain_compare_kinds);
+        list("domain_compare_ops", domain_compare_ops);
+        out.extend(nested_peel.wrappers.iter().map(|(k, _)| ("nested_peel.wrappers", *k)));
+        out.extend(nested_peel.leaf_to_def.iter().map(|(k, _)| ("nested_peel.leaf_to_def", *k)));
+        out.extend(recv_peel.wrappers.iter().map(|(k, _)| ("recv_peel.wrappers", *k)));
+        out.extend(recv_peel.leaf_to_def.iter().map(|(k, _)| ("recv_peel.leaf_to_def", *k)));
+        out.extend(op_map.iter().map(|(k, _)| ("op_map", *k)));
+        out.retain(|(_, v)| !v.is_empty());
+        out
+    }
+}
+
 /// A declarative peel: descend a wrapper chain tree-sitter's fixed-depth
 /// S-expression queries cannot express, to the leaf, optionally accumulating a
 /// per-level deref stack. ONE combinator the pack parameterizes — `nested_peel`
