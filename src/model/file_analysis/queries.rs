@@ -393,7 +393,9 @@ impl FileAnalysis {
         let Some(_guard) = ResolveGuard::enter(node) else {
             return None;
         };
-        let result = self.method_call_return_type_via_bag_uncached(ref_idx, module_index);
+        let result = crate::model::witnesses::with_stack_headroom(|| {
+            self.method_call_return_type_via_bag_uncached(ref_idx, module_index)
+        });
         ResolveGuard::memo_put(node, result.clone());
         result
     }
@@ -570,7 +572,9 @@ impl FileAnalysis {
         let Some(_guard) = ResolveGuard::enter(node) else {
             return None;
         };
-        let result = self.expr_type_at_span_uncached(span, module_index);
+        let result = crate::model::witnesses::with_stack_headroom(|| {
+            self.expr_type_at_span_uncached(span, module_index)
+        });
         ResolveGuard::memo_put(node, result.clone());
         result
     }

@@ -797,9 +797,10 @@ thread_local! {
         std::cell::RefCell::new(HashMap::new());
 }
 
-/// Depth backstop for a genuinely (non-cyclic) deep chain — the occurs
-/// check is the primary termination guarantee; this only guards the
-/// stack against a pathological linear descent.
+/// Depth budget for a genuinely (non-cyclic) deep chain — the occurs check
+/// is the primary termination guarantee. Not a stack guard: both resolvers
+/// enter through `with_stack_headroom`, so the stack grows past any cap.
+/// A fluent chain of N calls nests 2N deep (call ⇄ receiver expression).
 const RESOLVE_DEPTH_CAP: usize = 256;
 
 /// Entry cap on the stack-scoped memo. A dense workspace's reachable

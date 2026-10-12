@@ -573,19 +573,27 @@ fn is_subclass_of(child: &str, ancestor: &str, ctx: &BagContext) -> bool {
 /// reproduction of the mechanism, which is easy and proves nothing.
 ///
 /// **A budget, not a stack guard.** `query_rec` grows its stack through
-/// `stacker::maybe_grow` (`QUERY_REC_RED_ZONE` / `QUERY_REC_STACK_SEGMENT`),
-/// so how deep a chase can go does not depend on the thread's stack size or
-/// on the build profile's frame size — one value serves release and debug.
+/// [`with_stack_headroom`], so how deep a chase can go does not depend on the
+/// thread's stack size or the build profile — one value serves both.
 const QUERY_REC_DEPTH_CAP: u32 = 512;
 
-/// Headroom `query_rec` keeps before it switches to a fresh stack segment.
-/// One hop (query_rec → body → the next query_rec) costs about 5 KiB in a
-/// debug build and under 1 KiB in release, so this is many hops of margin.
-const QUERY_REC_RED_ZONE: usize = 64 * 1024;
-/// Size of each segment `maybe_grow` maps once the red zone is reached. It is
-/// unmapped when the chase unwinds past it; a larger segment means a deep
-/// chase crosses into a new one less often.
-const QUERY_REC_STACK_SEGMENT: usize = 1024 * 1024;
+/// Headroom a recursive resolver keeps before it switches to a fresh stack
+/// segment. One `query_rec` hop costs about 5 KiB in a debug build and under
+/// 1 KiB in release, so this is many hops of margin.
+const STACK_RED_ZONE: usize = 64 * 1024;
+/// Size of each segment mapped once the red zone is reached. It is unmapped
+/// when the recursion unwinds past it; a larger segment means a deep chase
+/// crosses into a new one less often.
+const STACK_SEGMENT: usize = 1024 * 1024;
+
+/// Runs `f`, first moving onto a fresh stack segment if this thread is within
+/// `STACK_RED_ZONE` of the end of its stack. Every recursive resolver calls
+/// this at its single re-entry point, so its depth cap is a work budget and
+/// not a function of the thread's stack size or the build profile. `f` runs on
+/// the same thread, so thread-locals are unaffected.
+pub(crate) fn with_stack_headroom<R>(f: impl FnOnce() -> R) -> R {
+    stacker::maybe_grow(STACK_RED_ZONE, STACK_SEGMENT, f)
+}
 
 thread_local! {
     /// Set when an edge chase reads an `Expr(span)` attachment — the marker
@@ -752,12 +760,7 @@ impl ReducerRegistry {
         q: &ReducerQuery,
         state: &mut QueryState,
     ) -> std::sync::Arc<ReducedValue> {
-        // Every recursion re-enters here, so this one check covers the whole
-        // chase. The closure runs on the same thread, so the thread-local
-        // depth and truncation counters below are unaffected.
-        stacker::maybe_grow(QUERY_REC_RED_ZONE, QUERY_REC_STACK_SEGMENT, || {
-            self.query_rec_on_stack(bag, q, state)
-        })
+        with_stack_headroom(|| self.query_rec_on_stack(bag, q, state))
     }
 
     fn query_rec_on_stack(
