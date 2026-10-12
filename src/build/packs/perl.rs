@@ -1,7 +1,6 @@
 //! Perl's pack: the query-engine path measured against the native builder.
 
 use crate::build::query_extract::*;
-use crate::model::file_analysis::{InferredType, NameSpellings};
 
 pub fn perl_pack() -> LangPack {
     LangPack {
