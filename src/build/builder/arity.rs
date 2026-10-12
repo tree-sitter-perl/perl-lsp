@@ -423,6 +423,7 @@ pub(super) fn extract_data_section_params(sub_node: Node, source: &[u8]) -> Vec<
                     is_slurpy: matches!(p.kind(), "array" | "hash"),
                     is_invocant: false,
                     binding_site: None,
+                    arg_position: None,
                 });
             }
         }

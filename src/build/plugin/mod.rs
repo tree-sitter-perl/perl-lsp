@@ -222,6 +222,7 @@ impl From<EmittedParam> for ParamInfo {
             is_invocant: p.is_invocant,
             // A plugin-declared signature: nothing in the source binds it.
             binding_site: None,
+            arg_position: None,
         }
     }
 }

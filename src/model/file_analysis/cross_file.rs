@@ -433,6 +433,27 @@ pub trait CrossFileLookup {
         0
     }
 
+    /// The verifying answer store for long-distance answers
+    /// (`model::witnesses::engine`). `None`: answers are recomputed per query.
+    /// A scoped view never shares its inner index's store — its visibility
+    /// differs, so its answers can too.
+    fn answer_store(&self) -> Option<&crate::model::witnesses::engine::AnswerStore> {
+        None
+    }
+
+    /// Moves on every surface-changing write and every structure change (a
+    /// file added or removed, a provider swapped) — everything name lookups
+    /// read. Body-only edits leave it standing.
+    fn world_generation(&self) -> u64 {
+        self.resolution_epoch()
+    }
+
+    /// The registration generation of `path`: moves whenever the file is
+    /// re-registered. `None` for a path the index does not hold.
+    fn file_version(&self, _path: &std::path::Path) -> Option<u64> {
+        None
+    }
+
     /// Does ANY file bridge plugin-synthesized entities onto `class`?
     ///
     /// The guard on every conclusion form that encodes "everything before the

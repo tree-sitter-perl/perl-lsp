@@ -84,6 +84,9 @@ pub(crate) struct IndexCore {
     /// missed bump is silent staleness, so mutators bump even when a gen
     /// mint usually accompanies them.
     pub(crate) shape_bumps: std::sync::atomic::AtomicU64,
+    /// Long-distance answers, verified on read against what they read
+    /// (`model::witnesses::engine`).
+    pub(crate) answers: crate::model::witnesses::engine::AnswerStore,
     /// The witness seams' fallback-on-miss enriched retries only pay off
     /// when the process lives long enough to amortize the overlay (each
     /// miss is a whole-analysis deep copy + enrich). Off by default; the
@@ -153,6 +156,7 @@ impl IndexCore {
             registration_gen: DashMap::new(),
             gen_counter: std::sync::atomic::AtomicU64::new(1),
             shape_bumps: std::sync::atomic::AtomicU64::new(0),
+            answers: crate::model::witnesses::engine::AnswerStore::new(),
             long_lived: std::sync::atomic::AtomicBool::new(false),
             bag_cache: Arc::new(std::sync::RwLock::new(None)),
             conclusion_cache: Arc::new(std::sync::RwLock::new(None)),

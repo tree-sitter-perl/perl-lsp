@@ -28,6 +28,24 @@ use super::*;
 /// is resolving, which is a different question, not a cycle. Every other
 /// attachment ignores the point and keeps it out of the key, so the memo
 /// still collapses their diamonds.
+/// Above this many candidate caller files a `ParamIn` answers nothing: a
+/// parameter of a name every file mentions (`new`) is not worth the sweep.
+const PARAM_IN_MAX_FILES: usize = 64;
+
+/// The attachment an argument list holds at `i`, when nothing before it
+/// spreads (a `Spread` makes every later position unknown).
+fn positional_arg(args: Option<&[CallArg]>, i: u32) -> Option<WitnessAttachment> {
+    let args = args?;
+    for (k, a) in args.iter().enumerate() {
+        match a {
+            CallArg::Spread(_) => return None,
+            CallArg::One(t) if k as u32 == i => return Some(t.clone()),
+            CallArg::One(_) => {}
+        }
+    }
+    None
+}
+
 type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>, Option<Point>);
 type VisitedSet = std::collections::HashSet<VisitedKey>;
 
@@ -1351,7 +1369,148 @@ impl ReducerRegistry {
             }
         }
 
+        if let WitnessAttachment::ParamIn { package, name, index } = q.attachment {
+            if let Some(v) = self.param_in_fallback(q, state, package, name, *index) {
+                return v;
+            }
+        }
+
         ReducedValue::None
+    }
+
+    /// `ParamIn{package, name, index}`: join the argument at `index` over the
+    /// call sites of `name` the index can see. The mentions relation is the
+    /// ref rows (`ref_candidate_paths`), plus every resident file the rows
+    /// don't cover. A method call joins when its receiver is `package` or a
+    /// subclass, or untyped (a may-caller); a function call joins when it
+    /// names `package` or calls the bare name. Agreeing answers fold to one;
+    /// disagreement answers nothing. The join runs as an engine answer on its
+    /// own `QueryState`; a parameter whose callers pass it back to itself
+    /// cuts on the engine's open-key path.
+    fn param_in_fallback(
+        &self,
+        q: &ReducerQuery,
+        _state: &mut QueryState,
+        package: &str,
+        name: &str,
+        index: u32,
+    ) -> Option<ReducedValue> {
+        let ctx = q.context?;
+        let Some(idx) = ctx.module_index else {
+            super::note_bake_exit("param_in", true);
+            return None;
+        };
+        let v = super::engine::answer(idx, q.attachment, || {
+            let mut own = QueryState::new();
+            let v = self.param_in_join(idx, &mut own, package, name, index);
+            (v, own.cuts != 0)
+        });
+        Some(v)
+    }
+
+    fn param_in_join(
+        &self,
+        idx: &dyn crate::model::file_analysis::CrossFileLookup,
+        state: &mut QueryState,
+        package: &str,
+        name: &str,
+        index: u32,
+    ) -> ReducedValue {
+        use crate::model::file_analysis::{FileAnalysis, RefKind};
+        let key = crate::model::conventions::name_match_key(name, &crate::model::conventions::PERL_SPELLINGS);
+        let paths = super::engine::mentions_of(idx, &key);
+        super::engine::note_dep(super::engine::Dep::Mentions {
+            key: key.clone(),
+            hash: super::engine::mentions_hash(&paths),
+        });
+        if paths.len() > PARAM_IN_MAX_FILES {
+            crate::util::ghost_stats::count("param_in.over_budget");
+            return ReducedValue::None;
+        }
+        crate::util::ghost_stats::count("param_in.join");
+        let mut joined: Option<InferredType> = None;
+        for path in paths {
+            let Some(cached) = idx.cached_by_path(&path) else { continue };
+            let full: std::sync::Arc<FileAnalysis> = idx.whole_present(&cached);
+            state.pins.push(std::sync::Arc::clone(&full));
+            let caller_ctx = BagContext {
+                scopes: &full.scopes,
+                package_framework: &full.packages,
+                module_index: Some(idx),
+                package_parents: &full.packages,
+                app_surface_consumers: &full.plugin.app_surface_consumers,
+            };
+            for &ri in full.ref_indices_keyed(&key) {
+                let r = &full.refs()[ri];
+                let (att, method) = match r.kind {
+                    RefKind::MethodCall { .. } => {
+                        (WitnessAttachment::Expression(super::RefIdx(ri as u32)), true)
+                    }
+                    RefKind::FunctionCall { .. } => (WitnessAttachment::Expr(r.span), false),
+                    _ => continue,
+                };
+                let Some((receiver, args)) = full.witnesses.for_attachment(&att).iter().find_map(|w| {
+                    match &w.payload {
+                        WitnessPayload::Invoke { callee: Callee::Method { name: n, .. }, receiver, args }
+                            if method && n == name => Some((receiver.clone(), args.clone())),
+                        WitnessPayload::Invoke { callee: Callee::Sub { package: p, name: n }, args, .. }
+                            if !method && n == name && p.as_deref().map_or(true, |p| p == package) =>
+                        {
+                            Some((None, args.clone()))
+                        }
+                        _ => None,
+                    }
+                }) else {
+                    continue;
+                };
+                let query_in = |this: &Self, att: &WitnessAttachment, state: &mut QueryState| {
+                    let q = ReducerQuery {
+                        attachment: att,
+                        point: None,
+                        framework: FrameworkFact::Plain,
+                        arity_hint: None,
+                        receiver: None,
+                        args: Vec::new(),
+                        context: Some(&caller_ctx),
+                    };
+                    (*this.query_rec(&full.witnesses, &q, state)).clone()
+                };
+                if let Some(recv) = &receiver {
+                    let recv_class = match query_in(self, recv, state) {
+                        ReducedValue::Type(t) => t.class_name().map(str::to_string),
+                        ReducedValue::FactMap(_) | ReducedValue::None => None,
+                    };
+                    if let Some(c) = recv_class {
+                        if c != package
+                            && !crate::model::file_analysis::class_isa(&c, package, &full.packages, Some(idx))
+                        {
+                            continue;
+                        }
+                    }
+                }
+                let value_att = match (method, index) {
+                    (true, 0) => receiver,
+                    (true, i) => positional_arg(args.as_deref(), i - 1),
+                    (false, i) => positional_arg(args.as_deref(), i),
+                };
+                let Some(value_att) = value_att else { continue };
+                match query_in(self, &value_att, state) {
+                    ReducedValue::Type(t) => match &joined {
+                        None => joined = Some(t),
+                        Some(j) if *j == t => {}
+                        Some(_) => {
+                            crate::util::ghost_stats::count("param_in.disagree");
+                            return ReducedValue::None;
+                        }
+                    },
+                    ReducedValue::FactMap(_) | ReducedValue::None => {}
+                }
+            }
+        }
+        match joined {
+            Some(t) => ReducedValue::Type(t),
+            None => ReducedValue::None,
+        }
     }
 
     /// Query `Symbol(sid)` inside another file's bag, as a hop of THIS query:

@@ -973,6 +973,13 @@ pub struct ParamInfo {
     /// value, a plugin-declared signature) — nothing in the source binds it.
     #[serde(default, with = "point_opt_serde")]
     pub binding_site: Option<Point>,
+    /// The `@_` index this parameter binds at sub entry, the invocant
+    /// counting as 0 — the position a caller's argument lands in. Minted
+    /// where the extractor reads the unpacking (rule #11); `None` when
+    /// nothing in the source fixes it (a synthesized or plugin-declared
+    /// parameter).
+    #[serde(default)]
+    pub arg_position: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -360,8 +360,24 @@ impl CrossFileLookup for ModuleIndex {
         self.resolution_epoch_sum()
     }
 
+    fn answer_store(&self) -> Option<&crate::model::witnesses::engine::AnswerStore> {
+        Some(&self.core.answers)
+    }
+
+    fn world_generation(&self) -> u64 {
+        self.core.shape_bumps.load(std::sync::atomic::Ordering::Relaxed) + self.freshness.write_count()
+    }
+
+    fn file_version(&self, path: &std::path::Path) -> Option<u64> {
+        self.core.registration_gen.get(path).map(|g| *g)
+    }
+
     fn get_cached(&self, module_name: &str) -> Option<Arc<CachedModule>> {
-        self.get_cached(module_name)
+        let cached = self.get_cached(module_name);
+        if let Some(c) = &cached {
+            crate::model::witnesses::engine::note_file(self, &c.path);
+        }
+        cached
     }
 
     fn get_cached_scoped(
@@ -374,6 +390,7 @@ impl CrossFileLookup for ModuleIndex {
 
 
     fn whole_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
+        crate::model::witnesses::engine::note_file(self, &cached.path);
         if let Some(v) = self.gate_applied(cached) {
             return v;
         }
@@ -381,6 +398,7 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn symbols_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
+        crate::model::witnesses::engine::note_file(self, &cached.path);
         if let Some(v) = self.gate_applied(cached) {
             return v;
         }
@@ -396,6 +414,7 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn refs_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
+        crate::model::witnesses::engine::note_file(self, &cached.path);
         if let Some(v) = self.gate_applied(cached) {
             return v;
         }
@@ -666,6 +685,7 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn bag_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
+        crate::model::witnesses::engine::note_file(self, &cached.path);
         if let Some(v) = self.gate_applied(cached) {
             return v;
         }

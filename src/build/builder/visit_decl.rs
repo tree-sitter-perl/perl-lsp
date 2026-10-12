@@ -712,6 +712,13 @@ impl<'a> Builder<'a> {
 
         // Extract params
         let mut params = self.extract_params(node);
+        // A `method` has already taken its invocant off `@_`, so what it
+        // unpacks sits one slot later in the caller's argument list.
+        if is_method {
+            for p in params.iter_mut() {
+                p.arg_position = p.arg_position.map(|i| i + 1);
+            }
+        }
 
         // Invocant detection for Perl-native subs:
         //   * `method foo { ... }` (v5.38) is always a method — first
@@ -805,6 +812,8 @@ impl<'a> Builder<'a> {
         // a named param (e.g. `$app` in a `GenericCo::Upgrade::OneTime` doer's
         // `run_upgrade`). Same mechanism as `detect_first_param_type`.
         self.apply_param_type_manifest(&name, &params, node);
+
+        self.emit_param_in_edges(&name, &params);
 
         // Visit children (body, etc.)
         self.queue_children_then(node, |b| { b.pop_scope(); });
@@ -921,6 +930,9 @@ impl<'a> Builder<'a> {
         // Fallback: scan body for shift, @_, and $_[N] patterns
         if let Some(body) = sub_node.child_by_field_name("body") {
             let mut shift_params: Vec<ParamInfo> = Vec::new();
+            // `@_` entries the shifts so far consumed: a later `@_` / `$_[N]`
+            // read starts this far into the entry window.
+            let mut shifted: u32 = 0;
 
             for i in 0..body.named_child_count() {
                 let stmt = match body.named_child(i) {
@@ -945,9 +957,11 @@ impl<'a> Builder<'a> {
                         if let Some(left) = assign.child_by_field_name("left") {
                             let at_params: Vec<ParamInfo> = self.collect_vars_from_decl(left)
                                 .into_iter()
-                                .map(|(name, span)| {
+                                .enumerate()
+                                .map(|(i, (name, span))| {
                                     let is_slurpy = name.starts_with('@') || name.starts_with('%');
-                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false, binding_site: Some(span.start) }
+                                    let arg_position = Some(shifted + i as u32);
+                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false, binding_site: Some(span.start), arg_position }
                                 })
                                 .collect();
                             // Combine any preceding shift params with @_ params
@@ -973,9 +987,11 @@ impl<'a> Builder<'a> {
                         if let Some(left) = assign.child_by_field_name("left") {
                             let list_params: Vec<ParamInfo> = self.collect_vars_from_decl(left)
                                 .into_iter()
-                                .map(|(name, span)| {
+                                .enumerate()
+                                .map(|(i, (name, span))| {
                                     let is_slurpy = name.starts_with('@') || name.starts_with('%');
-                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false, binding_site: Some(span.start) }
+                                    let arg_position = Some(shifted + i as u32);
+                                    ParamInfo { name, default: None, is_slurpy, is_invocant: false, binding_site: Some(span.start), arg_position }
                                 })
                                 .collect();
                             if !list_params.is_empty() {
@@ -998,18 +1014,26 @@ impl<'a> Builder<'a> {
                             is_slurpy: false,
                             is_invocant: false,
                             binding_site,
+                            arg_position: Some(shifted),
                         });
+                        shifted += 1;
                         continue;
                     }
 
                     // Pattern: my $var = $_[N];
                     if let Some(var_name) = self.extract_subscript_param(assign, right) {
+                        let arg_position = right
+                            .child_by_field_name("index")
+                            .filter(|n| n.kind() == "number")
+                            .and_then(|n| n.utf8_text(self.source).ok()?.parse::<u32>().ok())
+                            .map(|n| shifted + n);
                         shift_params.push(ParamInfo {
                             name: var_name,
                             default: None,
                             is_slurpy: false,
                             is_invocant: false,
                             binding_site,
+                            arg_position,
                         });
                         continue;
                     }
@@ -1094,12 +1118,21 @@ impl<'a> Builder<'a> {
 
     pub(super) fn extract_signature_params(&self, sig: Node<'a>) -> Vec<ParamInfo> {
         let mut params = Vec::new();
+        // Every parameter node takes an `@_` slot, named or not.
+        let mut slot: u32 = 0;
         for j in 0..sig.named_child_count() {
             if let Some(param) = sig.named_child(j) {
+                let arg_position = Some(slot);
+                if matches!(
+                    param.kind(),
+                    "mandatory_parameter" | "optional_parameter" | "slurpy_parameter" | "scalar" | "array" | "hash"
+                ) {
+                    slot += 1;
+                }
                 match param.kind() {
                     "mandatory_parameter" => {
                         if let Some(var) = self.first_var_child(param) {
-                            params.push(ParamInfo { name: var, default: None, is_slurpy: false, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { name: var, default: None, is_slurpy: false, is_invocant: false, binding_site: Some(param.start_position()), arg_position });
                         }
                     }
                     "optional_parameter" => {
@@ -1112,18 +1145,18 @@ impl<'a> Builder<'a> {
                             .and_then(|d| d.utf8_text(self.source).ok())
                             .map(|s| s.to_string());
                         if let Some(name) = var {
-                            params.push(ParamInfo { name, default, is_slurpy: false, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { name, default, is_slurpy: false, is_invocant: false, binding_site: Some(param.start_position()), arg_position });
                         }
                     }
                     "slurpy_parameter" => {
                         if let Some(var) = self.first_var_child(param) {
-                            params.push(ParamInfo { name: var, default: None, is_slurpy: true, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { name: var, default: None, is_slurpy: true, is_invocant: false, binding_site: Some(param.start_position()), arg_position });
                         }
                     }
                     "scalar" | "array" | "hash" => {
                         if let Ok(text) = param.utf8_text(self.source) {
                             let is_slurpy = matches!(param.kind(), "array" | "hash");
-                            params.push(ParamInfo { name: text.to_string(), default: None, is_slurpy, is_invocant: false, binding_site: Some(param.start_position()) });
+                            params.push(ParamInfo { name: text.to_string(), default: None, is_slurpy, is_invocant: false, binding_site: Some(param.start_position()), arg_position });
                         }
                     }
                     _ => {}
@@ -1268,6 +1301,36 @@ impl<'a> Builder<'a> {
                     ));
                 }
             }
+        }
+    }
+
+    /// Each positional parameter names the values its callers pass:
+    /// `Variable(param) → Edge(ParamIn{package, sub, position})` at its binding
+    /// site. The local tier only names the question; the index answers it
+    /// from the call sites.
+    fn emit_param_in_edges(&mut self, sub_name: &str, params: &[ParamInfo]) {
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let (qualifier, leaf) =
+            crate::model::conventions::split_qualified(sub_name, &crate::model::conventions::PERL_SPELLINGS);
+        let Some(package) = qualifier.map(str::to_string).or_else(|| self.current_package.clone()) else {
+            return;
+        };
+        let scope = self.current_scope();
+        for p in params {
+            let (Some(index), Some(at)) = (p.arg_position, p.binding_site) else { continue };
+            if p.is_invocant || p.is_slurpy {
+                continue;
+            }
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::Variable { name: p.name.clone(), scope },
+                source: WitnessSource::Builder("param_in".into()),
+                payload: WitnessPayload::Edge(WitnessAttachment::ParamIn {
+                    package: package.clone(),
+                    name: leaf.to_string(),
+                    index,
+                }),
+                span: Span { start: at, end: at },
+            });
         }
     }
 
@@ -1451,6 +1514,7 @@ impl<'a> Builder<'a> {
                                 is_slurpy: false,
                                 is_invocant: false,
                                 binding_site: None,
+                                arg_position: None,
                             }],
                             is_method: true,
                             doc: None,
