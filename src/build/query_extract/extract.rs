@@ -10,9 +10,7 @@ struct Event {
     end_byte: usize,
     start: Point,
     end: Point,
-    /// Capture vocabulary name, e.g. "def.sub", "def.sub.name",
-    /// "scope", "context.package", "ref.call", "import.name".
-    cap: String,
+    cap: Capture,
     text: String,
     /// Query match id — name captures join their parent def through it.
     match_id: usize,
@@ -29,7 +27,7 @@ pub(crate) fn peel<'a>(
     mut node: tree_sitter::Node<'a>,
     spec: &PeelSpec,
     src: &[u8],
-) -> Option<(tree_sitter::Node<'a>, Vec<crate::model::file_analysis::DerefStep>, Option<&'static str>)> {
+) -> Option<(tree_sitter::Node<'a>, Vec<crate::model::file_analysis::DerefStep>, Option<DefKind>)> {
     use crate::model::file_analysis::DerefStep;
     let is_leaf = |k: &str| spec.leaf_to_def.iter().find(|(lk, _)| *lk == k);
     let mut stack = Vec::new();
@@ -61,7 +59,7 @@ pub(crate) fn peel<'a>(
         } else if let Some((_, def_cap)) = is_leaf(node.kind()) {
             // `identifier`→`def.local` (param/local), `field_identifier`→
             // `def.var` (a class member), so a pointer field outlines as a member.
-            return Some((node, stack, Some(def_cap)));
+            return Some((node, stack, Some(*def_cap)));
         } else {
             return None;
         }
@@ -71,12 +69,8 @@ pub(crate) fn peel<'a>(
 
 pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAnalysis, String> {
     let language = tree.language();
-    let query = cached_query(&language, pack.query_source)?;
-    let cap_names: Vec<String> = query
-        .capture_names()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let compiled = cached_query(&language, pack.query_source)?;
+    let query = &compiled.query;
 
     // ---- flatten matches into ordered events ----
     let mut events: Vec<Event> = Vec::new();
@@ -106,7 +100,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         match_counter += 1;
         for c in m.captures {
             let node = c.node;
-            let cap = cap_names[c.index as usize].as_str();
+            let Some(cap) = compiled.captures[c.index as usize] else { continue };
             // `@ool.def`: an out-of-line definition (`Ret Class::method(...) {}`).
             // The one general capture (fires for EVERY function_definition) —
             // peel the declarator to the function declarator, walk its qualified
@@ -118,7 +112,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // pattern owns it. Arbitrary declarator nesting + multi-level
             // qualifiers (which fixed-depth S-queries can't express) work by
             // construction.
-            if cap == "ool.def" {
+            if cap == Capture::OolDef {
                 if let Some((scope_text, leaf)) = node
                     .child_by_field_name("declarator")
                     .and_then(|d| unwrap_to_function_declarator(d, &pack.oolfn))
@@ -135,7 +129,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         end_byte: node.end_byte(),
                         start: node.start_position(),
                         end: node.end_position(),
-                        cap: "def.method".to_string(),
+                        cap: Capture::Def { kind: DefKind::Method, part: DefPart::Node },
                         text: leaf_text.clone(),
                         match_id: match_counter,
                     });
@@ -144,7 +138,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         end_byte: leaf.end_byte(),
                         start: leaf.start_position(),
                         end: leaf.end_position(),
-                        cap: "def.method.name".to_string(),
+                        cap: Capture::Def { kind: DefKind::Method, part: DefPart::Name },
                         text: leaf_text,
                         match_id: match_counter,
                     });
@@ -153,7 +147,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         end_byte: node.end_byte(),
                         start: node.start_position(),
                         end: node.end_position(),
-                        cap: "qualifier".to_string(),
+                        cap: Capture::Qualifier,
                         text: scope_text,
                         match_id: match_counter,
                     });
@@ -165,17 +159,18 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // + the deref stack, then emit the leaf as if the query had
             // captured it directly — downstream join/symbol/witness paths are
             // unchanged, and arbitrary nesting works without enumerating it.
-            if cap == "nested.target" {
-                if let Some((leaf, stack, Some(def_cap))) = peel(node, &pack.nested_peel, source) {
+            if cap == Capture::NestedTarget {
+                if let Some((leaf, stack, Some(def_kind))) = peel(node, &pack.nested_peel, source) {
                     nested_stacks.insert(match_counter, stack);
                     let ltext = leaf.utf8_text(source).unwrap_or("").to_string();
-                    for syn in ["flow.target", def_cap] {
+                    let def = Capture::Def { kind: def_kind, part: DefPart::Node };
+                    for syn in [Capture::Flow(FlowCap::Target), def] {
                         events.push(Event {
                             start_byte: leaf.start_byte(),
                             end_byte: leaf.end_byte(),
                             start: leaf.start_position(),
                             end: leaf.end_position(),
-                            cap: syn.to_string(),
+                            cap: syn,
                             text: ltext.clone(),
                             match_id: match_counter,
                         });
@@ -187,7 +182,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // wrappers (`(*p)`, `(&o)`, `(p)`) to the typed inner where the
             // node is live, so the minted MethodCall ref's invocant_span lands
             // on the inner expression `expr_type_at_span` already types.
-            if cap == "member.recv" {
+            if cap == Capture::Member(MemberCap::Recv) {
                 // op-DX applies only to a bare-variable immediate receiver
                 // (its deref_stack resolves by name); a wrapper/chain doesn't.
                 member_simple.insert(match_counter, pack.simple_var_kinds.contains(&node.kind()));
@@ -199,7 +194,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     end_byte: inner.end_byte(),
                     start: inner.start_position(),
                     end: inner.end_position(),
-                    cap: cap.to_string(),
+                    cap,
                     text: inner.utf8_text(source).unwrap_or("").to_string(),
                     match_id: match_counter,
                 });
@@ -208,7 +203,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // `@arity.args`: a call's argument_list — count its arguments (the
             // named children; the C `...` at a CALL site never appears here).
             // Keyed by the list's start so the callee ref finds it by adjacency.
-            if cap == "arity.args" {
+            if cap == Capture::Arity(ArityCap::Args) {
                 arg_counts_by_start
                     .insert((node.start_position().row, node.start_position().column),
                             node.named_child_count());
@@ -219,7 +214,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // (counts toward `total`, not `required`); a template pack
             // (`variadic_parameter_declaration`) or a C `...` token makes the
             // signature variadic.
-            if cap == "arity.sig" {
+            if cap == Capture::Arity(ArityCap::Sig) {
                 let mut total = 0usize;
                 let mut required = 0usize;
                 let mut variadic = false;
@@ -244,7 +239,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             // `@qualifier` on a templated owner (`Buf<T>::grow`): the class
             // the def joins is the BASE name — peel the `name` field where
             // the node is live (structural, never a string split on `<`).
-            let text = if cap == "qualifier" && pack.qualifier_peel.contains(&node.kind()) {
+            let text = if cap == Capture::Qualifier && pack.qualifier_peel.contains(&node.kind()) {
                 node.child_by_field_name("name")
                     .and_then(|n| n.utf8_text(source).ok())
                     .unwrap_or(node.utf8_text(source).unwrap_or(""))
@@ -257,7 +252,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 end_byte: node.end_byte(),
                 start: node.start_position(),
                 end: node.end_position(),
-                cap: cap.to_string(),
+                cap,
                 text,
                 match_id: match_counter,
             });
@@ -272,12 +267,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         a.start_byte
             .cmp(&b.start_byte)
             .then(b.end_byte.cmp(&a.end_byte))
-            .then(a.cap.starts_with("scope").cmp(&b.cap.starts_with("scope")))
+            .then(matches!(a.cap, Capture::Scope(_)).cmp(&matches!(b.cap, Capture::Scope(_))))
     });
 
     // ---- join def name-captures to their def event ----
     use std::collections::HashMap;
-    let mut names_by_match: HashMap<(usize, String), (String, Point, Point)> = HashMap::new();
+    let mut names_by_match: HashMap<(usize, DefKind), (String, Point, Point)> = HashMap::new();
     // `@qualifier` (a `Class::` on an out-of-line def) and `@rettype` (a
     // method's declared return type) — pre-collected like names because the
     // `@def` event fires before these inner captures.
@@ -295,18 +290,20 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut member_op_raw: HashMap<usize, (crate::model::file_analysis::MemberOp, crate::model::file_analysis::Span)> =
         HashMap::new();
     for e in &events {
-        if let Some(prefix) = e.cap.strip_suffix(".name") {
-            names_by_match
-                .insert((e.match_id, prefix.to_string()), (e.text.clone(), e.start, e.end));
-        }
-        if e.cap == "qualifier" {
-            qualifier_by_match.insert(e.match_id, e.text.clone());
-        }
-        if e.cap == "rettype" {
-            rettype_by_match.insert(e.match_id, e.text.clone());
-        }
-        if e.cap == "sym.attr" {
-            attrs_by_match.entry(e.match_id).or_default().push(e.text.clone());
+        match e.cap {
+            Capture::Def { kind, part: DefPart::Name } => {
+                names_by_match.insert((e.match_id, kind), (e.text.clone(), e.start, e.end));
+            }
+            Capture::Qualifier => {
+                qualifier_by_match.insert(e.match_id, e.text.clone());
+            }
+            Capture::RetType => {
+                rettype_by_match.insert(e.match_id, e.text.clone());
+            }
+            Capture::SymAttr => {
+                attrs_by_match.entry(e.match_id).or_default().push(e.text.clone());
+            }
+            _ => {}
         }
     }
     // `@ns.inline` — an inline namespace's NAME token, fired by a name-only
@@ -316,7 +313,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // gather can lift its members into the enclosing namespace.
     let inline_ns_spans: Vec<(Point, Point)> = events
         .iter()
-        .filter(|e| e.cap == "ns.inline")
+        .filter(|e| e.cap == Capture::NsInline)
         .map(|e| (e.start, e.end))
         .collect();
     // (var name, declaring scope) → its declared-type text, joined per
@@ -354,33 +351,36 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let mut tmpl_param_by_match: HashMap<usize, (String, usize)> = HashMap::new();
     let mut tmpl_owner_by_match: HashMap<usize, String> = HashMap::new();
     for e in &events {
-        if e.cap == "type.annot" {
-            annot_by_match.insert(e.match_id, e.text.clone());
-        }
-        if e.cap == "domain.value" {
-            let v = if is_identifier_text(&e.text) { e.text.clone() } else { String::new() };
-            domain_value_by_match.insert(e.match_id, v);
-        }
-        if e.cap == "alias.name" {
-            alias_name_by_match.insert(e.match_id, e.text.clone());
-        }
-        if e.cap == "alias.of" {
-            alias_of_by_match.insert(e.match_id, e.text.clone());
-        }
-        if e.cap == "macro.alias.name" {
-            macro_alias_name_by_match.insert(e.match_id, e.text.clone());
-        }
-        if e.cap == "macro.alias.of" {
-            macro_alias_of_by_match.insert(e.match_id, e.text.clone());
-        }
-        if e.cap == "spec.primary" {
-            spec_primary_by_match.insert(e.match_id, e.text.clone());
-        }
-        if e.cap == "tmpl.param" {
-            tmpl_param_by_match.insert(e.match_id, (e.text.clone(), e.start_byte));
-        }
-        if e.cap == "tmpl.owner" {
-            tmpl_owner_by_match.insert(e.match_id, e.text.clone());
+        match e.cap {
+            Capture::TypeAnnot => {
+                annot_by_match.insert(e.match_id, e.text.clone());
+            }
+            Capture::Domain(DomainCap::Value) => {
+                let v = if is_identifier_text(&e.text) { e.text.clone() } else { String::new() };
+                domain_value_by_match.insert(e.match_id, v);
+            }
+            Capture::Alias(AliasPart::Name) => {
+                alias_name_by_match.insert(e.match_id, e.text.clone());
+            }
+            Capture::Alias(AliasPart::Of) => {
+                alias_of_by_match.insert(e.match_id, e.text.clone());
+            }
+            Capture::MacroAlias(AliasPart::Name) => {
+                macro_alias_name_by_match.insert(e.match_id, e.text.clone());
+            }
+            Capture::MacroAlias(AliasPart::Of) => {
+                macro_alias_of_by_match.insert(e.match_id, e.text.clone());
+            }
+            Capture::SpecPrimary => {
+                spec_primary_by_match.insert(e.match_id, e.text.clone());
+            }
+            Capture::Tmpl(TmplCap::Param) => {
+                tmpl_param_by_match.insert(e.match_id, (e.text.clone(), e.start_byte));
+            }
+            Capture::Tmpl(TmplCap::Owner) => {
+                tmpl_owner_by_match.insert(e.match_id, e.text.clone());
+            }
+            _ => {}
         }
     }
     let mut annot_text_by_var: HashMap<(String, crate::model::file_analysis::ScopeId), String> =
@@ -398,7 +398,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             .iter()
             .filter_map(|(mid, (param, pos))| {
                 let owner = tmpl_owner_by_match.get(mid)?;
-                Some(((pack.shape_name)("tmpl.owner", owner), param.clone(), *pos))
+                Some(((pack.shape_name)(owner), param.clone(), *pos))
             })
             .collect();
         rows.sort_by_key(|&(_, _, pos)| pos);
@@ -478,7 +478,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // scope start; defer such contexts to the scope push.
     let mut scope_start_by_match: HashMap<usize, usize> = HashMap::new();
     for e in &events {
-        if e.cap.starts_with("scope") {
+        if matches!(e.cap, Capture::Scope(_)) {
             scope_start_by_match.entry(e.match_id).or_insert(e.start_byte);
         }
     }
@@ -489,7 +489,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // is pushed we recover the guard's var/type/token by block position.
     let mut narrow_block_start: HashMap<usize, usize> = HashMap::new();
     for e in &events {
-        if e.cap == "narrow.block" {
+        if e.cap == Capture::Narrow(NarrowCap::Block) {
             narrow_block_start.entry(e.start_byte).or_insert(e.match_id);
         }
     }
@@ -497,21 +497,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     // a `std::move` whose call sits inside one is a type-trait, not a move.
     let unevaluated: Vec<(usize, usize)> = events
         .iter()
-        .filter(|e| e.cap == "unevaluated")
+        .filter(|e| e.cap == Capture::Unevaluated)
         .map(|e| (e.start_byte, e.end_byte))
         .collect();
     // Control-flow construct spans (`@guard.region`): the use-after-move check
     // reads these to decide whether a move is straight-line in its scope.
     out.control_regions = events
         .iter()
-        .filter(|e| e.cap == "guard.region")
+        .filter(|e| e.cap == Capture::GuardRegion)
         .map(|e| Span { start: e.start, end: e.end })
         .collect();
     // Parameter-list spans (`@param.region`): the use-after-move check reads
     // these to tell a moved parameter (not flagged) from a moved local.
     out.param_regions = events
         .iter()
-        .filter(|e| e.cap == "param.region")
+        .filter(|e| e.cap == Capture::ParamRegion)
         .map(|e| Span { start: e.start, end: e.end })
         .collect();
 
@@ -526,22 +526,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         }
         let cur_scope = scope_stack.last().unwrap().1;
         let package: Option<String> = context_stack.last().map(|(_, p)| p.clone());
-        match e.cap.as_str() {
+        match e.cap {
             // `@scope` = a plain lexical Block; `@scope.sub` = sub-body
             // content (function bodies, prototype signatures, explicit
             // instantiations, requires-expressions) — the kind
             // `scope_within_sub_body` reads to shield params/locals from the
             // outline and the class-content lane. Pack subs carry no name on
             // the scope (the Symbol holds identity).
-            "scope" | "scope.sub" => {
+            Capture::Scope(scope_cap) => {
                 let id = ScopeId(out.scopes.len() as u32);
                 out.scopes.push(Scope {
                     id,
                     parent: Some(cur_scope),
-                    kind: if e.cap == "scope.sub" {
-                        ScopeKind::Sub { name: String::new() }
-                    } else {
-                        ScopeKind::Block
+                    kind: match scope_cap {
+                        ScopeCap::Sub => ScopeKind::Sub { name: String::new() },
+                        ScopeCap::Block => ScopeKind::Block,
                     },
                     span: Span { start: e.start, end: e.end },
                     package: package.clone(),
@@ -571,7 +570,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 if let Some((nmid, var)) =
                     narrow_mid.and_then(|nmid| narrow_var.get(&nmid).map(|v| (nmid, v.clone())))
                 {
-                    let subject = (pack.shape_name)("ref.var", &var);
+                    let subject = (pack.shape_name)(&var);
                     // Type text: the guard's own `@narrow.type` when it names one
                     // (`dynamic_cast<Derived*>`), else the subject's declared type
                     // (the optional-engagement form peels `T` from it). The guard
@@ -600,25 +599,25 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     }
                 }
             }
-            "narrow.var" => {
+            Capture::Narrow(NarrowCap::Var) => {
                 narrow_var.insert(e.match_id, e.text.clone());
             }
-            "narrow.type" => {
+            Capture::Narrow(NarrowCap::Type) => {
                 narrow_type.insert(e.match_id, e.text.clone());
             }
-            "narrow.guard" => {
+            Capture::Narrow(NarrowCap::Guard) => {
                 narrow_guard.insert(e.match_id, e.text.clone());
             }
-            "move.scope" => {
+            Capture::Move(MoveCap::Scope) => {
                 move_scope_txt.insert(e.match_id, e.text.clone());
             }
-            "move.name" => {
+            Capture::Move(MoveCap::Name) => {
                 move_name_txt.insert(e.match_id, e.text.clone());
             }
-            "move.var" => {
+            Capture::Move(MoveCap::Var) => {
                 move_var_txt.insert(e.match_id, e.text.clone());
             }
-            "move.call" => {
+            Capture::Move(MoveCap::Call) => {
                 // Drop moves inside an unevaluated operand — they never execute,
                 // so nothing is moved-from (rule #10: the property is "does this
                 // move run", asked of the region, not a shape-branch downstream).
@@ -630,11 +629,11 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         .insert(e.match_id, (Span { start: e.start, end: e.end }, cur_scope));
                 }
             }
-            cap if cap.starts_with("context.") => {
+            Capture::Context(_) => {
                 // Shape the context like a def name (cpp canonicalizes a
                 // spec's template spelling) so members' `package` matches
                 // the container Symbol's identity exactly.
-                let text = (pack.shape_name)(&e.cap, &e.text);
+                let text = (pack.shape_name)(&e.text);
                 // If this match's `@scope` starts AFTER this context, the
                 // context belongs to that (not-yet-pushed) body — defer it
                 // so it registers at the body depth and pops with the block.
@@ -652,27 +651,26 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     context_stack.push((scope_stack.len(), e.text.clone()));
                 }
             }
-            "parent" => {
+            Capture::Parent => {
                 // `@parent` (a base class) pairs with the `@def.class.name`
                 // in the same match — record the inheritance edge.
                 if let Some((child, _, _)) =
-                    names_by_match.get(&(e.match_id, "def.class".to_string()))
+                    names_by_match.get(&(e.match_id, DefKind::Class))
                 {
                     // Shaped like the child's def name (cpp canonicalizes a
                     // template-spelled base) so the edge joins the identity
                     // the target class was filed under.
                     out.parents
-                        .push((child.clone(), (pack.shape_name)("parent", &e.text)));
+                        .push((child.clone(), (pack.shape_name)(&e.text)));
                 }
             }
-            cap if cap.starts_with("def.") && !cap.ends_with(".name") => {
-                let kind = cap.strip_prefix("def.").unwrap().to_string();
+            Capture::Def { kind, part: DefPart::Node } => {
                 let (name, name_start, name_end, defaulted) = names_by_match
-                    .get(&(e.match_id, e.cap.clone()))
+                    .get(&(e.match_id, kind))
                     .cloned()
                     .map(|(n, s, en)| (n, s, en, false))
                     .or_else(|| {
-                        (pack.default_name)(&kind)
+                        (pack.default_name)(kind)
                             .map(|n| (n.to_string(), e.start, e.start, true))
                     })
                     .unwrap_or((e.text.clone(), e.start, e.end, false));
@@ -684,12 +682,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     .get(&e.match_id)
                     .map(|q| q.rsplit("::").next().unwrap_or(q).to_string())
                     .or_else(|| package.clone());
-                let shaped = (pack.shape_name)(&format!("def.{kind}"), &name);
+                let shaped = (pack.shape_name)(&name);
                 // A class-spec def carries its primary's name — the
                 // (spec, primary) family edge `Specializes` derives from.
                 if let Some(primary) = spec_primary_by_match.get(&e.match_id) {
                     out.specializations
-                        .push((shaped.clone(), (pack.shape_name)("spec.primary", primary)));
+                        .push((shaped.clone(), (pack.shape_name)(primary)));
                 }
                 out.symbols.push(SkelSymbol {
                     name: shaped,
@@ -720,20 +718,20 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     qualifier_owned: qualifier_by_match.contains_key(&e.match_id),
                 });
             }
-            "ref.label" => {
+            Capture::Ref(RefKind::Label) => {
                 out.label_refs.push((
-                    (pack.shape_name)("def.label", &e.text),
+                    (pack.shape_name)(&e.text),
                     cur_scope,
                     Span { start: e.start, end: e.end },
                 ));
             }
-            "member.recv" => {
+            Capture::Member(MemberCap::Recv) => {
                 member_recv.insert(
                     e.match_id,
                     (crate::model::file_analysis::Span { start: e.start, end: e.end }, e.text.clone()),
                 );
             }
-            "member.op" => {
+            Capture::Member(MemberCap::Op) => {
                 // Map the operator token's KIND (== its text, an anonymous
                 // token) to a MemberOp via the pack's open op_map. Unmapped
                 // (`.*`) → no entry → no op-DX. No source-text re-decision.
@@ -744,14 +742,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     );
                 }
             }
-            cap if cap.starts_with("ref.") => {
+            Capture::Ref(ref_kind) => {
                 // Generic suppression: a "reference" inside a def's own
                 // header is the declaration, not a use. `ref.type` is exempt:
                 // a prototype's RETURN type is the def node's first token
                 // (`Widget make_widget();` starts at `Widget`), which is a
                 // genuine use — its decl-name overlap is suppressed precisely
                 // (exact selection-span match) in `into_file_analysis`.
-                let inside_def = e.cap != "ref.type"
+                let inside_def = ref_kind != RefKind::Type
                     && def_name_spans
                         .iter()
                         .any(|&(s, en)| e.start_byte >= s && e.end_byte <= en && {
@@ -773,21 +771,21 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     // window (and the narrowing cutoff) end there, sparing the
                     // receiver read itself. The pack owns which method names
                     // rebind (cpp vocab, like its op_map).
-                    if e.cap == "ref.member"
+                    if ref_kind == RefKind::Member
                         && (pack.rebind_method)(&e.text)
                         && member_simple.get(&e.match_id).copied().unwrap_or(false)
                     {
                         if let Some((recv_span, recv_text)) = member_recv.get(&e.match_id) {
                             flow_rebinds.push((
-                                (pack.shape_name)("def.var", recv_text),
+                                (pack.shape_name)(recv_text),
                                 cur_scope,
                                 recv_span.start,
                             ));
                         }
                     }
                     out.refs.push(SkelRef {
-                        kind: e.cap.strip_prefix("ref.").unwrap().to_string(),
-                        name: (pack.shape_name)(&e.cap, &e.text),
+                        kind: ref_kind,
+                        name: (pack.shape_name)(&e.text),
                         start: e.start,
                         end: e.end,
                         scope: cur_scope,
@@ -796,31 +794,28 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                         // A call ref's arg list opens right where its callee /
                         // method token ends; plain (uncalled) member/type refs
                         // have no adjacent arg list and stay `None`.
-                        arg_count: matches!(e.cap.as_str(), "ref.call" | "ref.qcall" | "ref.member")
+                        arg_count: matches!(ref_kind, RefKind::Call | RefKind::QCall | RefKind::Member)
                             .then(|| arg_counts_by_start.get(&(e.end.row, e.end.column)).copied())
                             .flatten(),
                     });
                 }
             }
-            "import.name" => {
+            Capture::Import(ImportCap::Name) => {
                 out.import_sites
                     .push((e.text.clone(), Span { start: e.start, end: e.end }));
                 out.imports.push(e.text.clone());
             }
-            cap if cap.starts_with("expr.lit.") => {
-                let suffix = cap.strip_prefix("expr.lit.").unwrap();
-                if let Some(t) = lit_type(suffix) {
-                    let span = Span { start: e.start, end: e.end };
-                    lit_spans.push((e.start_byte, e.end_byte, span));
-                    out.witnesses.push(crate::model::witnesses::Witness {
-                        attachment: crate::model::witnesses::WitnessAttachment::Expr(span),
-                        source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
-                        payload: crate::model::witnesses::WitnessPayload::InferredType(t),
-                        span,
-                    });
-                }
+            Capture::Expr(ExprCap::Lit(lit)) => {
+                let span = Span { start: e.start, end: e.end };
+                lit_spans.push((e.start_byte, e.end_byte, span));
+                out.witnesses.push(crate::model::witnesses::Witness {
+                    attachment: crate::model::witnesses::WitnessAttachment::Expr(span),
+                    source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
+                    payload: crate::model::witnesses::WitnessPayload::InferredType(lit.value_type()),
+                    span,
+                });
             }
-            "expr.read.var" => {
+            Capture::Expr(ExprCap::ReadVar) => {
                 // a variable READ is an edge: Expr(span) resolves to
                 // whatever the Variable resolves to — same shape the
                 // builder's emit_expr_witness uses.
@@ -828,7 +823,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // …and a candidate local-var reference, resolved to its
                 // declaration in into_file_analysis (goto-def + hover).
                 out.var_reads.push((
-                    (pack.shape_name)("ref.var", &e.text),
+                    (pack.shape_name)(&e.text),
                     cur_scope,
                     span,
                 ));
@@ -837,14 +832,14 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     source: crate::model::witnesses::WitnessSource::Builder("skeleton".into()),
                     payload: crate::model::witnesses::WitnessPayload::Edge(
                         crate::model::witnesses::WitnessAttachment::Variable {
-                            name: (pack.shape_name)("ref.var", &e.text),
+                            name: (pack.shape_name)(&e.text),
                             scope: cur_scope,
                         },
                     ),
                     span,
                 });
             }
-            "expr.return.value" => {
+            Capture::Expr(ExprCap::ReturnValue) => {
                 // The returned expression's own general-rule witness (literal
                 // / var-read / member / call — whichever matched this same
                 // node) already carries its type; this just records the site
@@ -854,10 +849,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 out.return_sites
                     .push((cur_scope, Span { start: e.start, end: e.end }));
             }
-            "flow.target" => {
+            Capture::Flow(FlowCap::Target) => {
                 flow_targets.insert(
                     e.match_id,
-                    ((pack.shape_name)("def.var", &e.text), cur_scope, e.start),
+                    ((pack.shape_name)(&e.text), cur_scope, e.start),
                 );
                 // Record the declared-type text keyed by (var, DECLARING scope)
                 // for the token-less optional-engagement narrowing. cur_scope is
@@ -865,15 +860,15 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // half was pre-collected (it precedes the declarator in source).
                 if let Some(annot) = annot_by_match.get(&e.match_id) {
                     annot_text_by_var.insert(
-                        ((pack.shape_name)("ref.var", &e.text), cur_scope),
+                        ((pack.shape_name)(&e.text), cur_scope),
                         annot.clone(),
                     );
                 }
             }
-            "flow.rebind" => {
-                flow_rebinds.push(((pack.shape_name)("def.var", &e.text), cur_scope, e.start));
+            Capture::Flow(FlowCap::Rebind) => {
+                flow_rebinds.push(((pack.shape_name)(&e.text), cur_scope, e.start));
             }
-            "anonagg.member" => {
+            Capture::AnonAggMember => {
                 // A field typed by an anonymous aggregate: its members are
                 // flattened onto the enclosing named container, so the field's
                 // own type IS that container (the anon hop is identity) —
@@ -882,7 +877,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 if let Some(owner) = &package {
                     out.witnesses.push(crate::model::witnesses::Witness {
                         attachment: crate::model::witnesses::WitnessAttachment::Variable {
-                            name: (pack.shape_name)("def.var", &e.text),
+                            name: (pack.shape_name)(&e.text),
                             scope: cur_scope,
                         },
                         source: crate::model::witnesses::WitnessSource::Builder(
@@ -895,81 +890,74 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                     });
                 }
             }
-            "flow.source" => {
+            Capture::Flow(FlowCap::Source) => {
                 flow_sources.insert(e.match_id, Span { start: e.start, end: e.end });
             }
-            "type.annot" => {
+            Capture::TypeAnnot => {
                 annots.insert(e.match_id, e.text.clone());
             }
-            "domain.slot" => {
+            Capture::Domain(DomainCap::Slot) => {
                 // A field slot used against a typed value — one domain-typing
                 // site. The value is joined by match_id; its enum resolves
                 // cross-file at query time. The span is the SLOT's, so a
                 // find-references on the enum surfaces the field's own uses.
                 if let Some(value) = domain_value_by_match.get(&e.match_id) {
                     out.domain_sites.push(crate::model::file_analysis::DomainSite {
-                        slot: (pack.shape_name)("ref.member", &e.text),
+                        slot: (pack.shape_name)(&e.text),
                         value: value.clone(),
                         slot_span: Span { start: e.start, end: e.end },
                     });
                 }
             }
-            "expr.shape" => {
+            Capture::Expr(ExprCap::Shape) => {
                 shape_spans.push((e.start_byte, e.end_byte, Span { start: e.start, end: e.end }));
             }
-            "shape.ctor" => {
+            Capture::Shape(ShapeCap::Ctor) => {
                 // belongs to the smallest enclosing expr.shape; matches
                 // share the call node so byte keys line up
                 shape_ctors
-                    .entry(byte_range_of(&events, e.match_id, "expr.shape").unwrap_or((0, 0)))
+                    .entry(byte_range_of(&events, e.match_id, Capture::Expr(ExprCap::Shape)).unwrap_or((0, 0)))
                     .or_insert_with(|| e.text.clone());
             }
-            "shape.key" => {
-                if let Some(range) = byte_range_of(&events, e.match_id, "expr.shape") {
+            Capture::Shape(ShapeCap::Key) => {
+                if let Some(range) = byte_range_of(&events, e.match_id, Capture::Expr(ExprCap::Shape)) {
                     shape_keys.push((range.0, range.1, e.text.clone()));
                 }
             }
-            "cmd" => {
+            Capture::Cmd(CmdCap::Name) => {
                 cmd_names.insert(
                     e.match_id,
                     (e.text.clone(), Span { start: e.start, end: e.end }, cur_scope),
                 );
             }
-            "cmd.arg" => {
+            Capture::Cmd(CmdCap::Arg) => {
                 cmd_args
                     .entry(e.match_id)
                     .or_default()
                     .push((e.text.clone(), Span { start: e.start, end: e.end }));
             }
-            "import.fn" => {
+            Capture::Import(ImportCap::Fn) => {
                 import_fns.insert(e.match_id, e.text.clone());
             }
-            "import.arg" => {
+            Capture::Import(ImportCap::Arg) => {
                 import_args.insert(e.match_id, e.text.clone());
             }
-            cap if cap.starts_with("obs.") => {
+            Capture::Obs(obs) => {
                 // Usage-site evidence: a mono-typed operator observes
                 // its operand. Same Observation payloads the Perl
                 // walker emits; the fold is the production one.
-                let obs = match cap.strip_prefix("obs.").unwrap() {
-                    "numeric" => Some(crate::model::witnesses::TypeObservation::NumericUse),
-                    "string" => Some(crate::model::witnesses::TypeObservation::StringUse),
-                    _ => None,
-                };
-                if let Some(o) = obs {
-                    let span = Span { start: e.start, end: e.end };
-                    out.witnesses.push(crate::model::witnesses::Witness {
-                        attachment: crate::model::witnesses::WitnessAttachment::Variable {
-                            name: (pack.shape_name)("ref.var", &e.text),
-                            scope: cur_scope,
-                        },
-                        source: crate::model::witnesses::WitnessSource::Builder("skeleton-obs".into()),
-                        payload: crate::model::witnesses::WitnessPayload::Observation(o),
-                        span,
-                    });
-                }
+                let span = Span { start: e.start, end: e.end };
+                out.witnesses.push(crate::model::witnesses::Witness {
+                    attachment: crate::model::witnesses::WitnessAttachment::Variable {
+                        name: (pack.shape_name)(&e.text),
+                        scope: cur_scope,
+                    },
+                    source: crate::model::witnesses::WitnessSource::Builder("skeleton-obs".into()),
+                    payload: crate::model::witnesses::WitnessPayload::Observation(obs.observation()),
+                    span,
+                });
             }
-            "expr.call" => {
+            Capture::Expr(ExprCap::Call) => {
                 // A call's VALUE is the callee's own resolution — deferred to
                 // `into_file_analysis`, where the symbol table is known: a
                 // `Class` callee is a functional cast / constructor, a callable
@@ -980,7 +968,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 // guess). `docs/adr/macro-handling.md`.
                 let callee = events
                     .iter()
-                    .find(|x| x.match_id == e.match_id && x.cap == "ref.call")
+                    .find(|x| x.match_id == e.match_id && x.cap == Capture::Ref(RefKind::Call))
                     .map(|x| x.text.clone());
                 if let Some(callee) = callee {
                     let span = Span { start: e.start, end: e.end };
@@ -996,7 +984,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     if !inline_ns_spans.is_empty() {
         let same = |a: Point, b: Point| a.row == b.row && a.column == b.column;
         for s in out.symbols.iter_mut() {
-            if s.kind == "package"
+            if s.kind == DefKind::Package
                 && inline_ns_spans
                     .iter()
                     .any(|&(st, en)| same(st, s.name_start) && same(en, s.name_end))
@@ -1062,7 +1050,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 }
                 Some(&j) => {
                     let (gen_i, gen_j) =
-                        (out.symbols[i].kind == "var", out.symbols[j].kind == "var");
+                        (out.symbols[i].kind == DefKind::Var, out.symbols[j].kind == DefKind::Var);
                     let upgrade_ret = out.symbols[i].kind == out.symbols[j].kind
                         && out.symbols[i].return_type.is_some()
                         && out.symbols[j].return_type.is_none();
@@ -1085,7 +1073,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         // every invocation identifier is a call ref (user functions
         // rename through it; builtin names match no defs, harmlessly)
         out.refs.push(SkelRef {
-            kind: "call".into(),
+            kind: RefKind::Call,
             name: cmd.clone(),
             start: cmd_span.start,
             end: cmd_span.end,
@@ -1099,7 +1087,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                 CmdEffect::Def { kind, name_arg } => {
                     if let Some((name, span)) = args.get(name_arg) {
                         out.symbols.push(SkelSymbol {
-                            kind: kind.to_string(),
+                            kind,
                             name: name.clone(),
                             start: cmd_span.start,
                             end: span.end,
@@ -1121,7 +1109,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
                             !name.is_empty() && name.chars().all(|c| c.is_ascii_uppercase() || c == '_');
                         if !is_keyword && !name.contains("${") {
                             out.refs.push(SkelRef {
-                                kind: "call".into(),
+                                kind: RefKind::Call,
                                 name: name.clone(),
                                 start: span.start,
                                 end: span.end,
@@ -1216,7 +1204,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let field_scope_span: std::collections::HashMap<(String, ScopeId), Span> = out
         .symbols
         .iter()
-        .filter(|s| s.kind == "field")
+        .filter(|s| s.kind == DefKind::Field)
         .filter_map(|s| {
             out.scopes
                 .get(s.scope.0 as usize)
@@ -1262,7 +1250,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         if let Some(src_span) = flow_sources.get(mid) {
             // Narrow onto the outermost literal the rhs wraps, when the
             // rhs node itself carries no witness (paren wrappers).
-            let src_bytes = byte_range_of(&events, *mid, "flow.source");
+            let src_bytes = byte_range_of(&events, *mid, Capture::Flow(FlowCap::Source));
             let target_span = lit_spans
                 .iter()
                 .filter(|&&(s, en, _)| {
@@ -1332,7 +1320,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             && move_name_txt.get(mid).map(String::as_str) == Some("move")
         {
             if let Some(v) = move_var_txt.get(mid) {
-                out.moved_from.push(((pack.shape_name)("ref.var", v), *span, *scope));
+                out.moved_from.push(((pack.shape_name)(v), *span, *scope));
             }
         }
     }
@@ -1389,7 +1377,7 @@ fn is_identifier_text(s: &str) -> bool {
         && s.bytes().all(|b| b == b'_' || b.is_ascii_alphanumeric())
 }
 
-fn byte_range_of(events: &[Event], match_id: usize, cap: &str) -> Option<(usize, usize)> {
+fn byte_range_of(events: &[Event], match_id: usize, cap: Capture) -> Option<(usize, usize)> {
     events
         .iter()
         .find(|e| e.match_id == match_id && e.cap == cap)
