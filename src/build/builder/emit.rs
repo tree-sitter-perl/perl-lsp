@@ -40,6 +40,29 @@ impl<'a> Builder<'a> {
         (!elems.is_empty()).then(|| InferredType::Sequence(elems))
     }
 
+    /// A list literal's value: its `Sequence` when every element types here,
+    /// else a `Tuple` of the elements, typed where the index is in hand
+    /// (`return ($param, 3)`). A flattening element makes the positions
+    /// unknown: nothing.
+    fn list_literal_payload(&mut self, node: Node<'a>) -> Option<crate::model::witnesses::WitnessPayload> {
+        use crate::model::witnesses::{WitnessAttachment, WitnessPayload};
+        if let Some(t) = self.list_literal_type(node) {
+            return Some(WitnessPayload::InferredType(t));
+        }
+        let mut flat: Vec<Node<'a>> = Vec::new();
+        crate::cst::flatten_list(node, &mut flat);
+        let named: Vec<Node<'a>> = flat.into_iter().filter(|n| n.is_named()).collect();
+        if named.is_empty() || named.iter().any(|n| crate::cst::is_flattening(*n)) {
+            return None;
+        }
+        // `list_literal_type` stops at the first element it can't type, so
+        // the ones after it may not carry their witness yet.
+        for n in &named {
+            self.emit_expr_witness(*n);
+        }
+        Some(WitnessPayload::Tuple(named.into_iter().map(|n| WitnessAttachment::Expr(node_to_span(n))).collect()))
+    }
+
     pub(super) fn hash_literal_type(&mut self, node: Node<'a>) -> InferredType {
         // A spread occupies ONE list slot but flattens to an even count
         // at runtime, so pairing must skip it as a unit — `pair_nodes`'
@@ -190,7 +213,7 @@ impl<'a> Builder<'a> {
             // parens are their own node, so the same tuple arrives either
             // spelling; a group around ONE non-list value is transparent
             // and carries that value's type through an edge.
-            "list_expression" => self.list_literal_type(node).map(WitnessPayload::InferredType),
+            "list_expression" => self.list_literal_payload(node),
             "parenthesized_expression" => {
                 let named: Vec<Node<'a>> = crate::cst::NodeExt::named(&node).collect();
                 match named.as_slice() {
@@ -198,7 +221,7 @@ impl<'a> Builder<'a> {
                         self.emit_expr_witness(*only);
                         Some(WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(*only))))
                     }
-                    _ => self.list_literal_type(node).map(WitnessPayload::InferredType),
+                    _ => self.list_literal_payload(node),
                 }
             }
             "quoted_regexp" => Some(WitnessPayload::InferredType(InferredType::Regexp)),

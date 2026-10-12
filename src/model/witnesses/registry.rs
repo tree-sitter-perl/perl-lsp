@@ -1576,6 +1576,9 @@ impl ReducerRegistry {
         // name every file mentions (`new`) sweeps the index. A caller whose
         // receiver is untyped and unnamed is left out of it. A positional
         // join sweeps every mention: the first unrelated disagreement ends it.
+        // TODO(caller-narrowing): narrowing positional joins too drops real
+        // callers whose receiver is untyped in a file that never names the
+        // family (Catalyst's `$c` reaches `_parse_attrs` that way).
         if method && matches!(want, ArgWant::PairsFrom(_)) {
             let family = super::engine::class_family_mentions(idx, package);
             paths.retain(|p| family.contains(p));
