@@ -432,9 +432,9 @@ impl FileAnalysis {
         let mut local_memo: std::collections::HashMap<String, bool> =
             std::collections::HashMap::new();
         // Without an index every resolution below reads only `self`, which
-        // the collect loop borrows immutably, so a receiver chain resolved
-        // for one ref is reused by the next instead of re-chased.
-        let _pass = module_index.is_none().then(super::ResolvePass::open).flatten();
+        // the pass borrows immutably until the collect loop ends, so a
+        // receiver chain resolved for one ref is reused by the next.
+        let _pass = super::ResolvePass::open(self, module_index);
         let mut stamped: Vec<(usize, Option<MethodTarget>)> = Vec::new();
         // Narrowest spans first, so an inner chain hop is answered before
         // the call wrapping it. The answer is the same in any order, but an
@@ -750,6 +750,7 @@ impl FileAnalysis {
             }
             stamped.push((i, target));
         }
+        drop(_pass);
         for (i, target) in stamped {
             // Monotone: a re-stamp that can't re-derive the invocant class must
             // not ERASE an authoritative freeze. Witnesses only accrue (finalize

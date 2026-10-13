@@ -805,23 +805,27 @@ thread_local! {
 
 /// Keeps path-independent resolve answers across top-level resolutions for
 /// as long as it lives. Only sound while every FileAnalysis the resolutions
-/// can reach is immutable and alive, which is why the one opener is a pass
-/// over a single analysis with no index (`stamp_method_call_targets(None)`).
-pub(crate) struct ResolvePass;
+/// can reach is immutable and alive, so it borrows the one analysis it
+/// serves and refuses to open when an index could reach others.
+pub(crate) struct ResolvePass<'a>(std::marker::PhantomData<&'a FileAnalysis>);
 
-impl ResolvePass {
-    /// `None` when the build memos are off (`build_memos_disabled`): every
-    /// top-level resolution then starts from an empty memo.
-    pub(crate) fn open() -> Option<Self> {
-        if crate::model::witnesses::build_memos_disabled() {
+impl<'a> ResolvePass<'a> {
+    /// `None` when `module_index` is present, or when the build memos are
+    /// off (`build_memos_disabled`): every top-level resolution then starts
+    /// from an empty memo.
+    pub(crate) fn open(
+        _analysis: &'a FileAnalysis,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<Self> {
+        if module_index.is_some() || crate::model::witnesses::build_memos_disabled() {
             return None;
         }
         RESOLVE_PASSES.with(|p| p.set(p.get() + 1));
-        Some(ResolvePass)
+        Some(ResolvePass(std::marker::PhantomData))
     }
 }
 
-impl Drop for ResolvePass {
+impl Drop for ResolvePass<'_> {
     fn drop(&mut self) {
         let left = RESOLVE_PASSES.with(|p| {
             p.set(p.get() - 1);
