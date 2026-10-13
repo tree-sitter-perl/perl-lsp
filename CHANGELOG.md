@@ -26,6 +26,18 @@ crate / VS Code extension versions.
   can't name (`$m = $self->pick`) clears it. `our @ISA` and
   `use constant` are per package, so in a file with several packages each
   one gets its own parents instead of every earlier package's.
+- **An assignment's left side is not part of its value.** `our @ISA =
+  (...)` listed the package itself among its parents, so method lookup
+  could reach a sibling's definition ahead of the real parent;
+  `@Other::EXPORT_OK = qw(x)` recorded a re-export from `Other`; and
+  `@names = qw(alpha); @names = qw(beta)` folded to both lists, so a glob
+  loop over it installed both sets of subs. Each now reads only the
+  right-hand side.
+- **A very long fluent chain no longer overflows the stack.** Typing
+  `P->new->step->step->…` recursed once per hop with nothing growing the
+  stack, so a long enough chain could crash the server; deep chases now
+  map more stack as they go, and the depth limit is a work budget that
+  degrades to no answer.
 - **`shift` consumes `@_`; only the first read is the invocant.** A second
   `shift`, a `$_[0]` after shifts, a `shift` inside a callback, and
   `my $x = shift` in a plain helper all used to type as the enclosing
@@ -111,6 +123,25 @@ crate / VS Code extension versions.
   defaults flow to nested routes, so goto-def on `->to('#list')` reaches
   the inherited controller's action, and hover shows
   `Mojolicious::Routes::Route<controller=alerts, section=admin>`.
+
+### Diagnostics
+
+- **`AUTOLOAD` no longer satisfies a role's `requires`.** Role::Tiny and
+  Moose check `requires` with `can()`, which an `AUTOLOAD` never answers,
+  so a composer that relies on one fails at load time;
+  `role-requires-unfulfilled` now says so instead of staying silent.
+
+### Performance
+
+- **Parallel `--check` stops queuing on the cache.** FHEM on 20 threads:
+  58 s → 22 s. Packages that compose no role with `requires` skip the
+  ancestry check entirely, and cache readers no longer contend on
+  SQLite's process-wide locks.
+- **Long fluent chains build in linear time.** Each call in a chain used
+  to re-type its whole receiver chain in three build passes; answers are
+  now shared across a build. A sub with many `return`s also queries its
+  return type once rather than once per arm (FHEM's `SMAInverter`: 52
+  returns, 11–33× less walking per query).
 
 ### Scoping
 
