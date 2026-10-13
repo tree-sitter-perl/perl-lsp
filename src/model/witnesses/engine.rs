@@ -330,9 +330,20 @@ pub struct AnswerStore {
     /// and drops every `Calls` set; the verdicts let the rebuild re-read
     /// only the files that changed, not every file mentioning the name.
     call_verdicts: Mutex<Budgeted<HashMap<(String, PathBuf), (u64, bool)>>>,
+    /// Writes the pending rows out, installed by the index that owns the
+    /// store. Called when the pending buffer fills, so a burst of answers
+    /// (an open's first diagnostics) persists whole instead of dropping
+    /// whatever overflows before the next timed flush.
+    flusher: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl AnswerStore {
+    pub fn set_flusher(&self, f: Arc<dyn Fn() + Send + Sync>) {
+        if let Ok(mut g) = self.flusher.lock() {
+            *g = Some(f);
+        }
+    }
+
     pub fn new() -> AnswerStore {
         AnswerStore::default()
     }
@@ -434,8 +445,24 @@ fn adopt_persisted(idx: &dyn CrossFileLookup, key: &EngineKey, epoch: u64) -> Op
             kids_hold = false;
             break;
         };
-        if value_hash(&answer(idx, &kid)) != Some(*hash) {
+        let now = answer(idx, &kid);
+        if value_hash(&now) != Some(*hash) {
             crate::util::ghost_stats::count("engine.persisted_kid_moved");
+            if crate::util::ghost_stats::probe("kid_moved") {
+                let was = encode_key(&kid)
+                    .and_then(|k| idx.persisted_node(&k))
+                    .and_then(|n| bincode::deserialize::<PersistedValue>(&n.value).ok());
+                let cand = |v: EngineValue| value_hash(&v);
+                let guess = [
+                    ("nothing", cand(EngineValue::NOTHING)),
+                    ("disagree", cand(EngineValue::Disagree)),
+                    ("unknown", cand(EngineValue::Value(ReducedValue::Type(crate::model::file_analysis::InferredType::Unknown)))),
+                ]
+                .into_iter()
+                .find(|(_, h)| *h == Some(*hash))
+                .map(|(n, _)| n);
+                eprintln!("[kid_moved] {kid:?}\n  node {}\n  recorded-as {guess:?}\n  now {now:?}", if was.is_some() { "present" } else { "absent" });
+            }
             kids_hold = false;
             break;
         }
@@ -1147,13 +1174,24 @@ fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey, check: Check) -> 
     });
     let mut rounds = 0;
     let (value, moved) = loop {
-        let v = crate::util::ghost_stats::timed("engine.compute_time", || super::registry::compute_engine_key(idx, key));
+        let mut v = crate::util::ghost_stats::timed("engine.compute_time", || super::registry::compute_engine_key(idx, key));
         let (inner, moved) = FRAMES.with(|f| {
             let mut frames = f.borrow_mut();
             let fr = &mut frames[depth];
+            // A head's assumption only climbs: each round's value is joined
+            // onto the last, so a computation that answers nothing under one
+            // assumption and a type under the other settles at their join
+            // instead of alternating until the round cap, where the value
+            // left would depend on which key the cycle was entered through.
             let own_moved = fr.is_head
-                && ASSUMED.with(|a| a.borrow_mut().insert(key.clone(), v.clone()))
-                    .map_or(v != EngineValue::NOTHING, |prev| prev != v);
+                && ASSUMED.with(|a| {
+                    let mut a = a.borrow_mut();
+                    if let Some(prev) = a.get(key) {
+                        v = super::registry::widen(idx, prev, &v);
+                    }
+                    a.insert(key.clone(), v.clone())
+                })
+                .map_or(v != EngineValue::NOTHING, |prev| prev != v);
             let moved = own_moved || fr.changed;
             fr.is_head = false;
             fr.changed = false;
@@ -1166,6 +1204,9 @@ fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey, check: Check) -> 
         }
         next_round(members_mark);
         rounds += 1;
+        if crate::util::ghost_stats::probe("fixpoint") {
+            eprintln!("[fixpoint] depth {depth} round {rounds} {key:?}\n  = {v:?}");
+        }
         crate::util::ghost_stats::count("engine.fixpoint_round");
         if rounds >= MAX_FIXPOINT_ROUNDS {
             crate::util::ghost_stats::count("engine.fixpoint_unsettled");
@@ -1194,6 +1235,7 @@ fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey, check: Check) -> 
     if provisional {
         crate::util::ghost_stats::count("engine.provisional");
     }
+    let mut settled = None;
     if let Some(store) = store {
         let mut deps: Vec<Dep> = deps.into_iter().collect();
         deps.sort();
@@ -1218,7 +1260,7 @@ fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey, check: Check) -> 
         if provisional {
             MEMBERS.with(|m| m.borrow_mut().push(Member { key: key.clone(), entry, reads_open }));
         } else {
-            store_entry(idx, store, key, entry);
+            settled = Some(entry);
         }
     }
     let unsettled = UNSETTLED.with(|u| u.get());
@@ -1248,6 +1290,11 @@ fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey, check: Check) -> 
         UNSETTLED.with(|u| u.set(unsettled_before));
     } else {
         UNSETTLED.with(|u| u.set(unsettled_before || unsettled));
+    }
+    // Stored after its members: the node it persists names them as children,
+    // and a child the store does not hold yet keeps the node from persisting.
+    if let (Some(store), Some(entry)) = (store, settled) {
+        store_entry(idx, store, key, entry);
     }
     if depth == 0 {
         ASSUMED.with(|a| a.borrow_mut().clear());
@@ -1294,12 +1341,24 @@ fn push_pending(store: &AnswerStore, row: (Vec<u8>, PersistedNode)) {
         + node.value.len()
         + node.reads.iter().map(|r| std::mem::size_of::<PersistedRead>() + r.to_row().map_or(0, |row| row.1.len())).sum::<usize>()
         + node.kids.iter().map(|(k, _)| std::mem::size_of::<(Vec<u8>, u64)>() + k.len()).sum::<usize>();
-    if let Ok(mut p) = store.pending.lock() {
+    let try_push = |row: (Vec<u8>, PersistedNode)| -> Option<(Vec<u8>, PersistedNode)> {
+        let mut p = store.pending.lock().ok()?;
         if p.bytes + bytes <= PENDING_BYTE_CAP {
             p.map.push(row);
             p.bytes += bytes;
+            None
         } else {
-            crate::util::ghost_stats::count("engine.pending_full");
+            Some(row)
+        }
+    };
+    let Some(row) = try_push(row) else { return };
+    crate::util::ghost_stats::count("engine.pending_full");
+    let flusher = store.flusher.lock().ok().and_then(|g| g.clone());
+    if let Some(flush) = flusher {
+        crate::util::ghost_stats::count("engine.pending_flush");
+        flush();
+        if try_push(row).is_some() {
+            crate::util::ghost_stats::count("engine.pending_dropped");
         }
     }
 }

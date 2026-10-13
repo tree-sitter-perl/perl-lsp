@@ -50,6 +50,14 @@ impl ModuleIndex {
         self.core.workspace_root.condvar.notify_one();
         drop(guard);
         self.core.world_bumps.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Weak: the store lives inside the core it would otherwise keep alive.
+        let core = Arc::downgrade(&self.core);
+        let flush_root = root.map(String::from);
+        self.core.answers.set_flusher(Arc::new(move || {
+            if let Some(core) = core.upgrade() {
+                super::lookup::flush_answers_into(&core, flush_root.as_deref());
+            }
+        }));
         // The hub's relational-ref-index reader: the SAME cache key the
         // resolver thread writes under (both spell it as this root string),
         // so retrieval and shred always address one DB.

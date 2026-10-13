@@ -1083,7 +1083,7 @@ mod member_prefilter_tests {
     }
 }
 
-fn flush_answers_into(core: &super::index_core::IndexCore, root: Option<&str>) {
+pub(super) fn flush_answers_into(core: &super::index_core::IndexCore, root: Option<&str>) {
     let rows = core.answers.take_pending();
     if rows.is_empty() {
         return;

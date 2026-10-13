@@ -1629,7 +1629,7 @@ impl ReducerRegistry {
             let t = match part {
                 EngineValue::Value(ReducedValue::Type(t)) => t,
                 EngineValue::Value(ReducedValue::FactMap(_) | ReducedValue::None) => continue,
-                EngineValue::Disagree => return EngineValue::NOTHING,
+                EngineValue::Disagree => return EngineValue::Disagree,
             };
             joined = match joined {
                 None => Some(t),
@@ -1637,7 +1637,7 @@ impl ReducerRegistry {
                     Some(u) => Some(u),
                     None => {
                         crate::util::ghost_stats::count("param_in.disagree");
-                        return EngineValue::NOTHING;
+                        return EngineValue::Disagree;
                     }
                 },
             };
@@ -3498,6 +3498,30 @@ mod consult_prefilter_tests;
 
 /// The computation behind each engine key: the key and the index are all it
 /// reads, each on a fresh query state.
+/// The least value above both `prev` and `next` on the engine's lattice:
+/// nothing below every type, a disagreement above them, two types at their
+/// cross-file join (a disagreement when they have none).
+pub(super) fn widen(
+    idx: &dyn crate::model::file_analysis::CrossFileLookup,
+    prev: &EngineValue,
+    next: &EngineValue,
+) -> EngineValue {
+    match (prev, next) {
+        (EngineValue::Disagree, _) | (_, EngineValue::Disagree) => EngineValue::Disagree,
+        (EngineValue::Value(ReducedValue::None), v) | (v, EngineValue::Value(ReducedValue::None)) => v.clone(),
+        (EngineValue::Value(ReducedValue::Type(a)), EngineValue::Value(ReducedValue::Type(b))) => {
+            let no_local: std::collections::HashMap<String, crate::model::file_analysis::PackageFacts> =
+                std::collections::HashMap::new();
+            match crate::model::file_analysis::join(a, b, &CallerOrder { local: &no_local, idx }) {
+                Some(t) => EngineValue::Value(ReducedValue::Type(t)),
+                None => EngineValue::Disagree,
+            }
+        }
+        // A fact map has no order; the latest round stands.
+        (_, v) => v.clone(),
+    }
+}
+
 pub(super) fn compute_engine_key(
     idx: &dyn crate::model::file_analysis::CrossFileLookup,
     key: &EngineKey,
