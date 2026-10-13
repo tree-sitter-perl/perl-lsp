@@ -1122,14 +1122,12 @@ impl<'a> Builder<'a> {
             let lhs_text = lhs_var.as_str();
             if lhs_text == "@ISA" {
                 if let Some(ref pkg) = self.current_package {
-                    // child_by_field_name("right") returns `(` paren, not the list.
-                    // Iterate named children to find list_expression/quoted_word_list.
-                    let mut parents = Vec::new();
-                    for i in 0..node.named_child_count() {
-                        if let Some(child) = node.named_child(i) {
-                            parents.extend(self.extract_string_names(child));
-                        }
-                    }
+                    // The right-hand side only: the left `@ISA` folds through
+                    // the constant table to an earlier package's parents.
+                    let parents = self
+                        .assignment_rhs(node)
+                        .map(|rhs| self.extract_string_names(rhs))
+                        .unwrap_or_default();
                     if !parents.is_empty() {
                         // @ISA = replaces (not appends)
                         self.package_parents.replace(pkg.clone(), parents);
@@ -1166,14 +1164,12 @@ impl<'a> Builder<'a> {
             };
             if let Some(export_var) = var_name {
                 let mut names = Vec::new();
-                for i in 0..node.named_child_count() {
-                    if let Some(child) = node.named_child(i) {
-                        names.extend(self.extract_string_names(child));
-                        self.record_export_member_sites(child);
-                        // Form 1: `@EXPORT = ( 'own', @Other::EXPORT )` — any
-                        // qualified export-var deref in the RHS is a re-export edge.
-                        self.record_static_splice_reexports(child);
-                    }
+                if let Some(rhs) = self.assignment_rhs(node) {
+                    names.extend(self.extract_string_names(rhs));
+                    self.record_export_member_sites(rhs);
+                    // Form 1: `@EXPORT = ( 'own', @Other::EXPORT )` — any
+                    // qualified export-var deref in the RHS is a re-export edge.
+                    self.record_static_splice_reexports(rhs);
                 }
                 // Union, not clobber: runtime-exporter discovery (`:Export`
                 // attrs, Sub::Exporter / Exporter::Declare setup) may have

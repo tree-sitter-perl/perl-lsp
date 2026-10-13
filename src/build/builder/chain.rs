@@ -25,6 +25,12 @@ impl<'a> Builder<'a> {
     ///   - `get_foo()->bar()` outer's invocant                 → bag query Symbol(get_foo, arity)
     /// `@`/`%` containers and unrecognized kinds return `None`.
     pub(super) fn invocant_type_at_node(&self, node: Node<'a>) -> Option<InferredType> {
+        // Recurses once per hop down an invocant chain, so a long fluent
+        // chain is as deep as it is long.
+        crate::model::witnesses::with_stack_headroom(|| self.invocant_type_at_node_on_stack(node))
+    }
+
+    fn invocant_type_at_node_on_stack(&self, node: Node<'a>) -> Option<InferredType> {
         match node.kind() {
             "method_call_expression" => {
                 // Constructor pattern is closed under syntax — bake
