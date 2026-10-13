@@ -586,6 +586,9 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
     // and size the rehydration LRU to the corpus — the sweep's working set
     // by construction (`cache_policy::sweep_bag_cache_cap`).
     let _retrieval = resolve::RetrievalMemoGuard::open();
+    // Every walk's ancestry prefilter re-asks the same row probes, each under
+    // SQLite's process-global mutexes — memoized for the sweep (#195).
+    let _probes = crate::index::module_index::SweepProbeGuard::open();
     // Every index the sweep rehydrates through: the Perl hub AND each
     // pack-language sub-index (its own LRU over its own DB).
     if let Some(cap) = idx.size_bag_cache_for_sweep() {
