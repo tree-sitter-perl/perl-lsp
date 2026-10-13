@@ -33,11 +33,9 @@ crate / VS Code extension versions.
   `@names = qw(alpha); @names = qw(beta)` folded to both lists, so a glob
   loop over it installed both sets of subs. Each now reads only the
   right-hand side.
-- **A very long fluent chain no longer overflows the stack.** Typing
-  `P->new->step->step->…` recursed once per hop with nothing growing the
-  stack, so a long enough chain could crash the server; deep chases now
-  map more stack as they go, and the depth limit is a work budget that
-  degrades to no answer.
+- **A very long fluent chain no longer crashes the server.**
+  `P->new->step->step->…` with a few hundred steps could overflow the
+  stack; past the depth limit it now just gets no type.
 - **`shift` consumes `@_`; only the first read is the invocant.** A second
   `shift`, a `$_[0]` after shifts, a `shift` inside a callback, and
   `my $x = shift` in a plain helper all used to type as the enclosing
@@ -133,15 +131,16 @@ crate / VS Code extension versions.
 
 ### Performance
 
-- **Parallel `--check` stops queuing on the cache.** FHEM on 20 threads:
-  58 s → 22 s. Packages that compose no role with `requires` skip the
-  ancestry check entirely, and cache readers no longer contend on
-  SQLite's process-wide locks.
-- **Long fluent chains build in linear time.** Each call in a chain used
-  to re-type its whole receiver chain in three build passes; answers are
-  now shared across a build. A sub with many `return`s also queries its
-  return type once rather than once per arm (FHEM's `SMAInverter`: 52
-  returns, 11–33× less walking per query).
+- **`--check` and `--heatmap` scale across cores on large projects.**
+  FHEM `--check` on 20 threads: 58 s → 22 s, with the same diagnostics;
+  heatmap reports are unchanged.
+- **Files with long fluent chains or many `return`s build faster.** A
+  chain of calls no longer costs time quadratic in its length.
+
+### Python (alpha)
+
+- **Goto-def on `obj.m()` reaches the method.** A method call through a
+  receiver used to find nothing; `obj.m` without a call stays a value read.
 
 ### Scoping
 
