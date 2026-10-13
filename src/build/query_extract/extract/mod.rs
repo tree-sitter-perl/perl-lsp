@@ -141,6 +141,9 @@ fn record_matches<'t>(
     let mut match_counter = 0usize;
     let cap_of = |c: &tree_sitter::QueryCapture| compiled.captures[c.index as usize];
     while let Some(m) = matches.next() {
+        if !crate::build::query_predicates::admits(&compiled.query, m, root) {
+            continue;
+        }
         match_counter += 1;
         let from = m.captures.iter().find_map(|c| match cap_of(c) {
             Some(Capture::LinkFrom(walk)) => Some((walk, c.node)),
@@ -257,8 +260,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             Family::Defs => defs::collect(&mut st, e),
             Family::Flow => flow::collect(&mut st, e),
             Family::Narrowing => narrowing::collect(&mut st, e),
-            Family::Refs => members::collect_called(&mut st, e),
-            Family::Members | Family::Commands | Family::Imports | Family::Links => {}
+            Family::Refs | Family::Members | Family::Commands | Family::Imports | Family::Links => {}
         }
     }
 

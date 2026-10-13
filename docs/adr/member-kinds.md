@@ -19,8 +19,9 @@ registry partitions on, and no per-pack strictness flag.
   `FieldAccess` it lands on the field symbol. The pack document states
   the kind: `@ref.member.value` is a read, `@ref.member.call` a call
   whose pattern also captures its argument list (`@arity.args`, joined by
-  match). A query cannot exclude a called member from the value pattern,
-  so both fire at that token and the call wins.
+  match). The value pattern excludes the callee with
+  `#not-has-parent? call_expression` (`capture-vocabulary.md`), so the
+  two never fire at one token.
 - **Attachment.** A field's value edge is `Field{owner, name} →
   Edge(Variable{decl})`, pushed per field declaration by the pack
   extractor. `Field{owner, name}` is the storage slot's project-wide
