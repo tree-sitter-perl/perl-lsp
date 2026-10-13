@@ -28,9 +28,6 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         return;
     }
     let m = &st.members;
-    if ref_kind == RefKind::MemberValue && m.called_members.contains(&(e.start_byte, e.end_byte)) {
-        return;
-    }
     let simple = m.member_simple.get(&e.match_id).copied().unwrap_or(false);
     let member_op = simple.then(|| m.op_of(e.match_id)).flatten();
     let arg_count = m.arg_counts_by_match.get(&e.match_id).copied();

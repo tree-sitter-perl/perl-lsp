@@ -694,13 +694,14 @@
 ; the invocant, carried (span+text) for query-time typing via
 ; expr_type_at_span. A read mints FieldAccess; a called member
 ; (`recv.f(...)`) mints the same MethodCall ref core resolves for Perl
-; `$obj->m`, so goto-def / hover / references / rename flow from it. A query
-; cannot exclude a called member from the value pattern (no negated parents),
-; so both fire at that token and the call wins.
-(field_expression
+; `$obj->m`, so goto-def / hover / references / rename flow from it. A
+; call_expression's only children are its callee and its argument_list, so a
+; field_expression whose parent is a call is the callee.
+((field_expression
   argument: (_) @member.recv
   operator: _ @member.op
-  field: (field_identifier) @ref.member.value)
+  field: (field_identifier) @ref.member.value) @_fe
+ (#not-has-parent? @_fe call_expression))
 (call_expression
   function: (field_expression
     argument: (_) @member.recv

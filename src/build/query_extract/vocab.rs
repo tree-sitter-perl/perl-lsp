@@ -68,9 +68,7 @@ spelled! {
         /// A member token READ as a value (`recv.field` / `recv->field`);
         /// joins `@member.recv` by match.
         MemberValue = "member.value",
-        /// A member token CALLED (`recv.f(…)`). A query cannot exclude a
-        /// called member from the value pattern, so both fire at that token
-        /// and the call wins.
+        /// A member token CALLED (`recv.f(…)`).
         MemberCall = "member.call",
         /// A type-position name.
         Type = "type",
