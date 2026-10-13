@@ -52,13 +52,19 @@ fresh AS (
   FROM named WHERE metric IS NOT NULL
   GROUP BY ALL
   UNION ALL
-  -- per-file build time is pooled across reps, one distribution per
-  -- corpus/phase, exactly as the seeder pools it
-  SELECT corpus, phase, unnest(['file_build_ms', 'file_build_ms.p99', 'file_build_ms.max']),
-         unnest([median(value), quantile_disc(value, 0.99), max(value)]),
-         max(value)-min(value), count(*)
-  FROM latest WHERE kind='file_build'
-  GROUP BY corpus, phase
+  -- per-file build stats are taken per rep, then folded across reps like
+  -- every other KPI (seed-baselines.py says why); p99 is the seeder's index
+  SELECT corpus, phase, metric, median(v), max(v)-min(v), count(*)
+  FROM (
+    SELECT corpus, phase,
+           unnest(['file_build_ms', 'file_build_ms.p99', 'file_build_ms.max']) AS metric,
+           unnest([median(value),
+                   list_sort(list(value))[least(count(*), floor(count(*) * 0.99)::BIGINT + 1)],
+                   max(value)]) AS v
+    FROM latest WHERE kind='file_build'
+    GROUP BY corpus, phase, rep
+  )
+  GROUP BY corpus, phase, metric
 )
 SELECT f.corpus, f.phase, f.metric,
        b.value AS baseline, round(f.value,1) AS fresh,
