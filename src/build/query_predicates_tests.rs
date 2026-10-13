@@ -7,7 +7,7 @@ fn perl() -> Language {
     ts_parser_perl::LANGUAGE.into()
 }
 
-/// The scalar names an admitted match captured, in document order.
+/// What `@s` holds in each admitted match, in document order.
 fn admitted(query_src: &str) -> Vec<String> {
     let lang = perl();
     let query = Query::new(&lang, query_src).expect("query compiles");
@@ -21,7 +21,12 @@ fn admitted(query_src: &str) -> Vec<String> {
     let mut it = cursor.matches(&query, root, SRC.as_bytes());
     while let Some(m) = it.next() {
         if admits(&query, m, root) {
-            out.extend(m.captures.iter().map(|c| c.node.utf8_text(SRC.as_bytes()).unwrap().to_string()));
+            out.extend(
+                m.captures
+                    .iter()
+                    .filter(|c| query.capture_names()[c.index as usize] == "s")
+                    .map(|c| c.node.utf8_text(SRC.as_bytes()).unwrap().to_string()),
+            );
         }
     }
     out
