@@ -377,6 +377,12 @@
 (pointer_declarator declarator: (field_identifier) @deref.leaf.field)
 (reference_declarator . (identifier) @deref.leaf.local)
 (reference_declarator . (field_identifier) @deref.leaf.field)
+; Grouping parens and a function pointer's function declarator add no step:
+; `int (*read)(char *)` peels to one pointer level over the field `read`.
+(function_declarator declarator: (_) @link.inner) @link.from.deref
+(parenthesized_declarator . (_) @link.inner) @link.from.deref
+(function_declarator) @deref.pass
+(parenthesized_declarator) @deref.pass
 (function_definition
   declarator: (pointer_declarator
     declarator: (function_declarator
@@ -648,6 +654,14 @@
 (field_declaration
   type: (_) @type.annot
   declarator: [(pointer_declarator) (reference_declarator)] @nested.target)
+; a function-POINTER data member (`int (*read)(char *);`): a stored slot
+; whose value is called. The parenthesized declarator is what tells it from
+; a method prototype (`int read();`). `ops->read(buf)` reaches the slot
+; because a class keeps one member namespace.
+(field_declaration
+  type: (_) @type.annot
+  declarator: (function_declarator
+    declarator: (parenthesized_declarator)) @nested.target)
 
 ; ---- C goto labels: `done:` is a nav target, `goto done;` jumps to it.
 ; The def is an unpackaged Variable symbol (outline-hidden, like a local);

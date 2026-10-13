@@ -42,6 +42,10 @@ once and marks what it is:
   qualifiers and const-correctness diagnostics needn't reshape the type;
 - `@deref.leaf.<kind>` — the bottom, whose suffix names the def it mints
   (`@deref.leaf.field` → a member, `@deref.leaf.local` → a local).
+- `@deref.pass` — a level the walk descends without a step of its own
+  (cpp: the grouping `parenthesized_declarator` and a function pointer's
+  `function_declarator`, so `int (*read)(char *)` is one pointer over the
+  field `read`).
 
 A tree the extractor never saw (the member-block reparse of a macro body) is
 read the same way: `DeclaratorPeel::of_tree` runs the document over it and

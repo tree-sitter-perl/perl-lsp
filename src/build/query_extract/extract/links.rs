@@ -111,6 +111,10 @@ impl<'t> Links<'t> {
                 Some(Mark::Leaf(def)) => return Some(Peeled { leaf: node, stack, def: *def }),
                 Some(Mark::Level(DerefCap::Pointer)) => DerefKind::Pointer,
                 Some(Mark::Level(DerefCap::Ref)) => DerefKind::Reference,
+                Some(Mark::Level(DerefCap::Pass)) => {
+                    node = self.get(LinkWalk::Deref, node, LinkCap::Inner)?;
+                    continue;
+                }
                 _ => return None,
             };
             let mut cur = node.walk();

@@ -237,6 +237,9 @@ spelled! {
         Ref = "ref",
         /// A cv-qualifier on the level that is its parent (`* const`).
         Annot = "annot",
+        /// A level the walk descends without a step of its own: grouping
+        /// parens, a function pointer's function declarator.
+        Pass = "pass",
     }
 }
 
