@@ -43,7 +43,7 @@ pub(super) fn flatten_recv(
     // op-DX applies only to a bare-variable immediate receiver
     // (its deref_stack resolves by name); a wrapper/chain doesn't.
     members.member_simple.insert(match_id, pack.simple_var_kinds.contains(&node.kind()));
-    let inner = peel(node, &pack.recv_peel, source).map(|(leaf, _, _)| leaf).unwrap_or(node);
+    let inner = peel_receiver(node, pack.recv_peel);
     let text = inner.utf8_text(source).unwrap_or("").to_string();
     events.push(Event::at(inner, Capture::Member(MemberCap::Recv), text, match_id));
 }
@@ -105,4 +105,21 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
 
 pub(super) fn finish(st: &mut ExtractState) {
     st.out.param_sigs = std::mem::take(&mut st.members.param_sigs);
+}
+
+/// Drop transparent receiver wrappers (`(*p)` → `p`) through each one's
+/// first named child; the node itself when it is not a wrapper, or when a
+/// wrapper has no named child.
+fn peel_receiver<'a>(node: tree_sitter::Node<'a>, wrappers: &[&str]) -> tree_sitter::Node<'a> {
+    let mut inner = node;
+    for _ in 0..32 {
+        if !wrappers.contains(&inner.kind()) {
+            return inner;
+        }
+        match inner.named_child(0) {
+            Some(ch) => inner = ch,
+            None => return node,
+        }
+    }
+    node
 }

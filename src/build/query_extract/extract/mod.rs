@@ -95,7 +95,7 @@ fn family(cap: Capture) -> Family {
         }
         C::Cmd(_) => Family::Commands,
         C::Import(_) => Family::Imports,
-        C::LinkFrom(_) | C::Link(_) => Family::Links,
+        C::LinkFrom(_) | C::Link(_) | C::Deref(_) | C::DerefLeaf(_) => Family::Links,
     }
 }
 
@@ -124,55 +124,63 @@ struct ExtractState<'p> {
     imports: imports::State,
 }
 
-/// Flatten a wrapper chain — the recursion tree-sitter's fixed-depth queries
-/// cannot express — to its leaf, recording a `DerefStep` per level when
-/// `spec.record_stack`. A non-empty `leaf_to_def` REQUIRES the leaf to match
-/// (returns its def kind); an empty one accepts ANY leaf and mints nothing
-/// (the receiver peel — the leaf is an invocant). Outermost level first
-/// (left-to-right display order, `Box*&` → `[Pointer, Reference]`). Depth-
-/// capped. The ONE peel: `nested_peel` and `recv_peel` are both this.
-pub(crate) fn peel<'a>(
-    mut node: tree_sitter::Node<'a>,
-    spec: &PeelSpec,
-    src: &[u8],
-) -> Option<(tree_sitter::Node<'a>, Vec<crate::model::file_analysis::DerefStep>, Option<DefKind>)> {
-    use crate::model::file_analysis::DerefStep;
-    let is_leaf = |k: &str| spec.leaf_to_def.iter().find(|(lk, _)| *lk == k);
-    let mut stack = Vec::new();
-    for _ in 0..32 {
-        if let Some((_, dk)) = spec.wrappers.iter().find(|(k, _)| *k == node.kind()) {
-            let mut annotations = Vec::new();
-            let mut inner = None;
-            let mut cur = node.walk();
-            for ch in node.children(&mut cur) {
-                if spec.annot_kinds.contains(&ch.kind()) {
-                    if let Ok(t) = ch.utf8_text(src) {
-                        annotations.push(t.to_string());
+/// Run the document over `root`. Links and `@deref` marks are recorded
+/// first, because a level inside a definition is matched after the
+/// definition, so every link must be in before any capture reads them;
+/// every other capture comes back with its match id.
+#[allow(clippy::type_complexity)]
+fn record_matches<'t>(
+    compiled: &CompiledPack,
+    root: tree_sitter::Node<'t>,
+    source: &[u8],
+) -> (links::Links<'t>, Vec<(tree_sitter::Node<'t>, Capture, usize)>) {
+    let mut links = links::Links::default();
+    let mut captured = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&compiled.query, root, source);
+    let mut match_counter = 0usize;
+    let cap_of = |c: &tree_sitter::QueryCapture| compiled.captures[c.index as usize];
+    while let Some(m) = matches.next() {
+        match_counter += 1;
+        let from = m.captures.iter().find_map(|c| match cap_of(c) {
+            Some(Capture::LinkFrom(walk)) => Some((walk, c.node)),
+            _ => None,
+        });
+        for c in m.captures {
+            match cap_of(c) {
+                None | Some(Capture::LinkFrom(_)) => {}
+                Some(Capture::Link(rel)) => {
+                    if let Some((walk, from)) = from {
+                        links.record(walk, from, rel, c.node);
                     }
-                } else if inner.is_none()
-                    && (spec.wrappers.iter().any(|(k, _)| *k == ch.kind())
-                        || is_leaf(ch.kind()).is_some()
-                        || (spec.leaf_to_def.is_empty() && ch.is_named()))
-                {
-                    inner = Some(ch);
                 }
+                Some(Capture::Deref(level)) => links.mark_level(c.node, level),
+                Some(Capture::DerefLeaf(def)) => links.mark_leaf(c.node, def),
+                Some(cap) => captured.push((c.node, cap, match_counter)),
             }
-            if spec.record_stack {
-                stack.push(DerefStep { kind: *dk, annotations });
-            }
-            node = inner?;
-        } else if spec.leaf_to_def.is_empty() {
-            // receiver peel: the leaf is an invocant of any shape, no def minted.
-            return Some((node, stack, None));
-        } else if let Some((_, def_kind)) = is_leaf(node.kind()) {
-            // `identifier`→`Local` (param/local), `field_identifier`→
-            // `Field` (a class member), so a pointer field outlines as a member.
-            return Some((node, stack, Some(*def_kind)));
-        } else {
-            return None;
         }
     }
-    None
+    (links, captured)
+}
+
+/// The `deref` walk over a tree the extractor never saw (a macro body
+/// reparsed on its own): the pack's document runs over the tree once, and
+/// each declarator is peeled by the same walk extraction uses, so a field
+/// reads the same however it was written.
+pub struct DeclaratorPeel<'t>(links::Links<'t>);
+
+impl<'t> DeclaratorPeel<'t> {
+    pub fn of_tree(tree: &'t Tree, source: &[u8], pack: &LangPack) -> Self {
+        match cached_query(&tree.language(), pack.query_source) {
+            Ok(compiled) => DeclaratorPeel(record_matches(compiled, tree.root_node(), source).0),
+            Err(_) => DeclaratorPeel(links::Links::default()),
+        }
+    }
+
+    /// The declarator's deref stack; empty when the chain reaches no leaf.
+    pub fn stack(&self, declarator: tree_sitter::Node<'t>, source: &[u8]) -> Vec<crate::model::file_analysis::DerefStep> {
+        self.0.peel_declarator(declarator, source).map(|p| p.stack).unwrap_or_default()
+    }
 }
 
 pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAnalysis, String> {
@@ -208,32 +216,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     };
 
     // ---- flatten matches into ordered events ----
-    // Links first: a level inside a definition is matched after the
-    // definition, so every link must be in before any capture reads them.
-    let mut links = links::Links::default();
-    let mut captured: Vec<(tree_sitter::Node, Capture, usize)> = Vec::new();
-    let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&compiled.query, root, source);
-    let mut match_counter = 0usize;
-    let cap_of = |c: &tree_sitter::QueryCapture| compiled.captures[c.index as usize];
-    while let Some(m) = matches.next() {
-        match_counter += 1;
-        let from = m.captures.iter().find_map(|c| match cap_of(c) {
-            Some(Capture::LinkFrom(walk)) => Some((walk, c.node)),
-            _ => None,
-        });
-        for c in m.captures {
-            match cap_of(c) {
-                None | Some(Capture::LinkFrom(_)) => {}
-                Some(Capture::Link(rel)) => {
-                    if let Some((walk, from)) = from {
-                        links.record(walk, from, rel, c.node);
-                    }
-                }
-                Some(cap) => captured.push((c.node, cap, match_counter)),
-            }
-        }
-    }
+    let (links, captured) = record_matches(compiled, root, source);
     // A capture whose meaning needs its LIVE node (a declarator to peel, an
     // argument list to count) is read here, where the node is in hand;
     // everything else becomes an event carrying its text.
@@ -242,7 +225,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         match cap {
             Capture::OolDef => defs::flatten_ool_def(node, &links, source, match_id, &mut events),
             Capture::NestedTarget => {
-                defs::flatten_nested(&mut st.defs, node, pack, source, match_id, &mut events)
+                defs::flatten_nested(&mut st.defs, node, &links, source, match_id, &mut events)
             }
             Capture::Member(MemberCap::Recv) => {
                 members::flatten_recv(&mut st.members, node, pack, source, match_id, &mut events)

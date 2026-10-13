@@ -193,6 +193,8 @@ spelled! {
         Ool = "ool",
         /// A `@qualifier` owner, to the base name a templated owner files under.
         Qualifier = "qualifier",
+        /// A `@nested.target` declarator chain, level by level to its leaf.
+        Deref = "deref",
     }
 }
 
@@ -202,6 +204,7 @@ impl LinkWalk {
         match self {
             LinkWalk::Ool => Capture::OolDef,
             LinkWalk::Qualifier => Capture::Qualifier,
+            LinkWalk::Deref => Capture::NestedTarget,
         }
     }
 }
@@ -221,6 +224,19 @@ spelled! {
         Name = "name",
         /// A templated name's base name (`Buf` in `Buf<T>`).
         Base = "base",
+    }
+}
+
+spelled! {
+    /// What one level of a `deref` walk is: the document marks the level node
+    /// (or, for a qualifier, its child), and the walk reads the marks.
+    pub enum DerefCap {
+        /// A pointer level (`*p`).
+        Pointer = "pointer",
+        /// A reference level (`&r`).
+        Ref = "ref",
+        /// A cv-qualifier on the level that is its parent (`* const`).
+        Annot = "annot",
     }
 }
 
@@ -277,6 +293,10 @@ pub enum Capture {
     AnonAggMember,
     /// The node a pattern's links start from, and the walk they belong to.
     LinkFrom(LinkWalk),
+    /// One level of a declarator chain, as the `deref` walk reads it.
+    Deref(DerefCap),
+    /// A declarator chain's leaf; the suffix names the def the leaf mints.
+    DerefLeaf(DefKind),
     Link(LinkCap),
 }
 
@@ -339,6 +359,8 @@ impl Capture {
             ["ns", "inline"] => C::NsInline,
             ["anonagg", "member"] => C::AnonAggMember,
             ["link", "from", w] => C::LinkFrom(LinkWalk::parse(w)?),
+            ["deref", "leaf", k] => C::DerefLeaf(DefKind::parse(k)?),
+            ["deref", k] => C::Deref(DerefCap::parse(k)?),
             ["link", k] => C::Link(LinkCap::parse(k)?),
             _ => return None,
         })
@@ -390,6 +412,8 @@ impl fmt::Display for Capture {
             C::NsInline => f.write_str("ns.inline"),
             C::AnonAggMember => f.write_str("anonagg.member"),
             C::LinkFrom(w) => write!(f, "link.from.{w}"),
+            C::Deref(k) => write!(f, "deref.{k}"),
+            C::DerefLeaf(k) => write!(f, "deref.leaf.{k}"),
             C::Link(k) => write!(f, "link.{k}"),
         }
     }

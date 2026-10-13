@@ -362,6 +362,21 @@
 ; The `qualifier` walk, rooted at each `@qualifier`: a templated owner to the
 ; base name it files under.
 (template_type name: (_) @link.base) @link.from.qualifier
+; The `deref` walk, rooted at each `@nested.target`: a pointer or reference
+; declarator links to its operand, and the marks say what each level is. A
+; level contributes a pointer or reference step, a cv-qualifier among its
+; children rides onto that step, and the leaf's suffix names the def it mints,
+; so a pointer member outlines as a field and a pointer local as a local
+; (`Box** a`, `char* const& b`, at any depth).
+(pointer_declarator declarator: (_) @link.inner) @link.from.deref
+(reference_declarator . (_) @link.inner) @link.from.deref
+(pointer_declarator) @deref.pointer
+(reference_declarator) @deref.ref
+(pointer_declarator (type_qualifier) @deref.annot)
+(pointer_declarator declarator: (identifier) @deref.leaf.local)
+(pointer_declarator declarator: (field_identifier) @deref.leaf.field)
+(reference_declarator . (identifier) @deref.leaf.local)
+(reference_declarator . (field_identifier) @deref.leaf.field)
 (function_definition
   declarator: (pointer_declarator
     declarator: (function_declarator
@@ -628,8 +643,8 @@
   type: (_) @type.annot
   declarator: (field_identifier) @flow.target)
 ; pointer / reference data members of any depth (`Box* inner;`, `Node** next;`).
-; The leaf is a field_identifier, so core mints a @def.var (a class member),
-; not a @def.local — `peel_nested`'s leaf→def-capture map handles that.
+; The leaf is a field_identifier, so the `deref` walk's leaf mark mints a
+; @def.field (a class member), not a @def.local.
 (field_declaration
   type: (_) @type.annot
   declarator: [(pointer_declarator) (reference_declarator)] @nested.target)
@@ -733,7 +748,7 @@
 
 ; pointer / reference locals of ANY depth, bare and initialized — `T* p;`,
 ; `T** pp;`, `T& r = x;`, `if (Derived* d = dynamic_cast<...>(b))`. The
-; @nested.target chain is unravelled by core (see params). The init form also
+; @nested.target chain is unravelled by the `deref` walk (see params). The init form also
 ; carries @flow.source so the initializer's type flows to the leaf.
 (declaration
   (storage_class_specifier)? @sym.attr
@@ -752,7 +767,7 @@
   type: (_) @type.annot
   declarator: (identifier) @flow.target @def.local)
 ; pointer / reference parameters of ANY depth — `Handle* h`, `OP** op_p`,
-; `char**** x`, `Box*& rp`. One @nested.target capture; core (`peel_nested`)
+; `char**** x`, `Box*& rp`. One @nested.target capture; the `deref` walk
 ; unravels the declarator chain to the leaf identifier + the deref stack
 ; (arbitrary depth, cv-qualifiers per level), emitting the leaf as a synthetic
 ; @flow.target/@def.local. The plain-value form above has no chain.

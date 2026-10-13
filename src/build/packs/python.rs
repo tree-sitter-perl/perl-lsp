@@ -31,13 +31,7 @@ pub fn python_pack() -> LangPack {
         brace_scoped_members: false,
         trigger_chars: &["."],
         receiver_names: &["self", "cls"],
-        nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
-        recv_peel: PeelSpec {
-            wrappers: &[("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer)],
-            annot_kinds: &[],
-            leaf_to_def: &[],
-            record_stack: false,
-        },
+        recv_peel: &["parenthesized_expression"],
         // Python has one member operator (`.`), so no op-DX (op_map empty).
         op_map: &[],
         simple_var_kinds: &["identifier"],

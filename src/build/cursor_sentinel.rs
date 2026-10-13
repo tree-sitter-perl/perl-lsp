@@ -482,7 +482,7 @@ fn resolve_node_type(
     // Transparent wrappers — `(expr)`, `*p`, `&obj` — denote the same class
     // as their operand (pointer-/reference-ness dropped). Peel and recurse so
     // `(*p).m` / `(&o)->m` reach the members `p->m` does.
-    if cfg.recv_peel.wrappers.iter().any(|(k, _)| *k == node.kind()) {
+    if cfg.recv_peel.contains(&node.kind()) {
         return resolve_node_type(node.named_child(0)?, cfg, src, analysis, module_index);
     }
     // Implicit-`this` member receiver: a bare identifier (`iter_->`, `mem_->`,

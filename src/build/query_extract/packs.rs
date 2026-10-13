@@ -84,15 +84,10 @@ pub struct LangPack {
     /// semantics → the pack owns it (NOT core `conventions.rs`, which is
     /// Perl's `$self`/`$class`).
     pub receiver_names: &'static [&'static str],
-    /// The pointer/reference DECLARATOR peel: a `@nested.target` chain
-    /// flattened to its leaf + per-level deref stack — `Box**`, `char****`,
-    /// `Box* const&`. THE recursion S-queries can't express (unbounded depth);
-    /// the pack declares the grammar, the generic `peel` walks it.
-    pub nested_peel: PeelSpec,
-    /// The member-access RECEIVER peel: transparent expression wrappers
-    /// (`(*p)`, `(&o)`, `(p)` → `p`) dropped so the invocant types via the
-    /// inner. The SAME `peel`, no stack, any leaf.
-    pub recv_peel: PeelSpec,
+    /// The member-access RECEIVER peel: transparent expression wrapper kinds
+    /// (`(*p)`, `(&o)`, `(p)` → `p`) dropped, through their first named
+    /// child, so the invocant types via the inner.
+    pub recv_peel: &'static [&'static str],
     /// Member-access node kinds (`receiver OP member`) — extraction records
     /// each site (simple-variable receiver, operator token span, `->` vs
     /// `.`) for the operator-DX consumer (`p.` on a `Box*` should be `->`).
@@ -156,7 +151,6 @@ impl LangPack {
             brace_scoped_members: _,
             trigger_chars,
             receiver_names,
-            nested_peel,
             recv_peel,
             op_map,
             simple_var_kinds,
@@ -173,43 +167,17 @@ impl LangPack {
         list("entrypoint_symbols", entrypoint_symbols);
         list("trigger_chars", trigger_chars);
         list("receiver_names", receiver_names);
-        list("nested_peel.annot_kinds", nested_peel.annot_kinds);
-        list("recv_peel.annot_kinds", recv_peel.annot_kinds);
+        list("recv_peel", recv_peel);
         list("simple_var_kinds", simple_var_kinds);
         list("member_kinds", member_kinds);
         list("skip_kinds", skip_kinds);
         list("call_kinds", call_kinds);
         list("domain_compare_kinds", domain_compare_kinds);
         list("domain_compare_ops", domain_compare_ops);
-        out.extend(nested_peel.wrappers.iter().map(|(k, _)| ("nested_peel.wrappers", *k)));
-        out.extend(nested_peel.leaf_to_def.iter().map(|(k, _)| ("nested_peel.leaf_to_def", *k)));
-        out.extend(recv_peel.wrappers.iter().map(|(k, _)| ("recv_peel.wrappers", *k)));
-        out.extend(recv_peel.leaf_to_def.iter().map(|(k, _)| ("recv_peel.leaf_to_def", *k)));
         out.extend(op_map.iter().map(|(k, _)| ("op_map", *k)));
         out.retain(|(_, v)| !v.is_empty());
         out
     }
-}
-
-/// A declarative peel: descend a wrapper chain tree-sitter's fixed-depth
-/// S-expression queries cannot express, to the leaf, optionally accumulating a
-/// per-level deref stack. ONE combinator the pack parameterizes — `nested_peel`
-/// (declarators, stack, leaf→def) and `recv_peel` (expr wrappers, no stack, any
-/// leaf) are both instances of it. Empty `wrappers` = the capture is absent.
-#[derive(Clone, Copy)]
-pub struct PeelSpec {
-    /// Wrapper node kinds → the `DerefKind` each contributes (only consulted
-    /// when `record_stack`; a placeholder otherwise).
-    pub wrappers: &'static [(&'static str, crate::model::file_analysis::DerefKind)],
-    /// Per-level annotation node kinds (cv-qualifiers) collected onto a step.
-    pub annot_kinds: &'static [&'static str],
-    /// Leaf node kind → the def kind the synthetic leaf event mints
-    /// (`identifier`→`Local`, `field_identifier`→`Field`). EMPTY = accept
-    /// ANY leaf and mint no def (the receiver-peel case — the leaf is an
-    /// invocant, not a declaration).
-    pub leaf_to_def: &'static [(&'static str, DefKind)],
-    /// Accumulate the per-level `DerefStep` stack (pointer depth) vs descend only.
-    pub record_stack: bool,
 }
 
 /// Translate a member's declared return type into the deferred

@@ -11,8 +11,26 @@ use super::*;
 use std::collections::HashMap;
 
 #[derive(Default)]
-pub(super) struct Links<'t> {
+pub(crate) struct Links<'t> {
     to: HashMap<(LinkWalk, usize, LinkCap), tree_sitter::Node<'t>>,
+    /// What the document says a `deref` level or leaf is, by node id.
+    marks: HashMap<usize, Mark>,
+}
+
+/// A `@deref.*` capture on one node.
+#[derive(Clone, Copy)]
+enum Mark {
+    Level(DerefCap),
+    Leaf(DefKind),
+}
+
+/// A declarator chain read to its end: the name token, one step per level
+/// (outermost first, `Box*&` → `[Pointer, Reference]`), and the def the
+/// leaf mints.
+pub(crate) struct Peeled<'t> {
+    pub(crate) leaf: tree_sitter::Node<'t>,
+    pub(crate) stack: Vec<crate::model::file_analysis::DerefStep>,
+    pub(crate) def: DefKind,
 }
 
 impl<'t> Links<'t> {
@@ -24,6 +42,14 @@ impl<'t> Links<'t> {
         to: tree_sitter::Node<'t>,
     ) {
         self.to.insert((walk, from.id(), rel), to);
+    }
+
+    pub(super) fn mark_level(&mut self, node: tree_sitter::Node<'t>, cap: DerefCap) {
+        self.marks.insert(node.id(), Mark::Level(cap));
+    }
+
+    pub(super) fn mark_leaf(&mut self, node: tree_sitter::Node<'t>, def: DefKind) {
+        self.marks.insert(node.id(), Mark::Leaf(def));
     }
 
     fn get(&self, walk: LinkWalk, node: tree_sitter::Node<'t>, rel: LinkCap) -> Option<tree_sitter::Node<'t>> {
@@ -70,5 +96,32 @@ impl<'t> Links<'t> {
             node = name;
         }
         Some((owner, node))
+    }
+
+    /// The `deref` walk: a declarator chain from its `@nested.target` to the
+    /// leaf the document marked, one step per pointer or reference level,
+    /// each carrying the cv-qualifiers marked among its children. `None` when
+    /// the chain reaches no marked leaf, which mints nothing rather than a
+    /// half-read shape.
+    pub(crate) fn peel_declarator(&self, mut node: tree_sitter::Node<'t>, src: &[u8]) -> Option<Peeled<'t>> {
+        use crate::model::file_analysis::{DerefKind, DerefStep};
+        let mut stack = Vec::new();
+        for _ in 0..32 {
+            let kind = match self.marks.get(&node.id()) {
+                Some(Mark::Leaf(def)) => return Some(Peeled { leaf: node, stack, def: *def }),
+                Some(Mark::Level(DerefCap::Pointer)) => DerefKind::Pointer,
+                Some(Mark::Level(DerefCap::Ref)) => DerefKind::Reference,
+                _ => return None,
+            };
+            let mut cur = node.walk();
+            let annotations = node
+                .children(&mut cur)
+                .filter(|ch| matches!(self.marks.get(&ch.id()), Some(Mark::Level(DerefCap::Annot))))
+                .filter_map(|ch| ch.utf8_text(src).ok().map(str::to_string))
+                .collect();
+            stack.push(DerefStep { kind, annotations });
+            node = self.get(LinkWalk::Deref, node, LinkCap::Inner)?;
+        }
+        None
     }
 }

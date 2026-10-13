@@ -1617,8 +1617,6 @@ fn pack_fields_name_no_grammar_shapes() {
     const CURSOR: &str = "moves when the cursor reads the document: which nodes are \
          members, calls, bare variables, strings and comparisons is answered by the patterns \
          that capture them";
-    const DECLARATORS: &str = "moves when cpp declarators come from the document: \
-         one capture per declarator level";
     const MEMBER_OPS: &str = "moves with cpp/python receivers and member operators: \
          the operator written is a capture suffix";
     const RECEIVERS: &str = "moves with cpp/python receivers: a receiver is a flag \
@@ -1629,18 +1627,15 @@ fn pack_fields_name_no_grammar_shapes() {
         ("cpp", "domain_compare_kinds", 1, CURSOR),
         ("cpp", "domain_compare_ops", 2, CURSOR),
         ("cpp", "member_kinds", 1, CURSOR),
-        ("cpp", "nested_peel.annot_kinds", 1, DECLARATORS),
-        ("cpp", "nested_peel.leaf_to_def", 2, DECLARATORS),
-        ("cpp", "nested_peel.wrappers", 2, DECLARATORS),
         ("cpp", "op_map", 2, MEMBER_OPS),
         ("cpp", "receiver_names", 1, RECEIVERS),
-        ("cpp", "recv_peel.wrappers", 2, CURSOR),
+        ("cpp", "recv_peel", 2, CURSOR),
         ("cpp", "simple_var_kinds", 1, CURSOR),
         ("cpp", "skip_kinds", 4, CURSOR),
         ("cpp", "trigger_chars", 3, TRIGGERS),
         ("python", "call_kinds", 1, CURSOR),
         ("python", "member_kinds", 1, CURSOR),
-        ("python", "recv_peel.wrappers", 1, CURSOR),
+        ("python", "recv_peel", 1, CURSOR),
         ("python", "simple_var_kinds", 1, CURSOR),
         ("python", "skip_kinds", 4, CURSOR),
         ("python", "trigger_chars", 1, TRIGGERS),

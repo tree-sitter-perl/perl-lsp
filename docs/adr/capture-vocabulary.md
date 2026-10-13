@@ -86,8 +86,10 @@ pattern per depth would silently miss the next depth.
 So the document states each level once, as a link: `@link.from.<walk>` on
 a node and `@link.<rel>` on the node one level away, by a closed set of
 relations (`inner`, `declares`, `scope`, `name`, `base`). The `<walk>` suffix
-names the walk the link belongs to, from a closed set (`ool`, `qualifier`),
-and each walk has a root capture (`@ool.def`, `@qualifier`). The driver
+names the walk the link belongs to, from a closed set (`ool`, `qualifier`,
+`deref`), and each walk has a root capture (`@ool.def`, `@qualifier`,
+`@nested.target`). The `deref` walk also reads `@deref.*` marks, which say
+what a level is rather than where it leads (`docs/adr/pointer-stack.md`). The driver
 records every link while it flattens the matches, keyed by walk and node id.
 A walk starts at its root's node and follows only its own links
 (`extract/links.rs`), so two walks never read each other's edges, and a

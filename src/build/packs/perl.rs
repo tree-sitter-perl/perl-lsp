@@ -25,8 +25,7 @@ pub fn perl_pack() -> LangPack {
         // `PerlDriver::caps`, and this pack is never registered.
         trigger_chars: &[],
         receiver_names: &[],
-        nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
-        recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
+        recv_peel: &[],
         op_map: &[],
         simple_var_kinds: &[],
         member_kinds: &[],

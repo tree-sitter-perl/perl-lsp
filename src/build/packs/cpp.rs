@@ -99,17 +99,7 @@ pub fn cpp_pack() -> LangPack {
         // grammar's own distinction from a plain `identifier` local), so
         // `Field` matches the plain (non-pointer) field pattern above.
         // Shared with the member-block synth lane (rule #10).
-        nested_peel: C_FIELD_DECL_PEEL,
-        // DerefKind placeholder — record_stack false, so it's never read.
-        recv_peel: PeelSpec {
-            wrappers: &[
-                ("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer),
-                ("pointer_expression", crate::model::file_analysis::DerefKind::Pointer),
-            ],
-            annot_kinds: &[],
-            leaf_to_def: &[],
-            record_stack: false,
-        },
+        recv_peel: &["parenthesized_expression", "pointer_expression"],
         op_map: &[
             ("->", crate::model::file_analysis::MemberOp::Arrow),
             (".", crate::model::file_analysis::MemberOp::Dot),
@@ -122,22 +112,6 @@ pub fn cpp_pack() -> LangPack {
         domain_compare_ops: &["==", "!="],
     }
 }
-
-/// The declarator peel for C/C++ struct fields and locals: pointer/reference
-/// wrappers, `field_identifier`/`identifier` leaves, recording the deref stack.
-/// The cpp pack's `nested_peel` AND the member-block synth lane
-/// (`cpp_reparse::synth_base`) both peel through this, so a pointer field's
-/// `*`s are extracted by ONE walker whether the field was written plainly or
-/// pasted from a `#define BASEOP` body (rule #10 — no second deref walker).
-pub(crate) const C_FIELD_DECL_PEEL: PeelSpec = PeelSpec {
-    wrappers: &[
-        ("pointer_declarator", crate::model::file_analysis::DerefKind::Pointer),
-        ("reference_declarator", crate::model::file_analysis::DerefKind::Reference),
-    ],
-    annot_kinds: &["type_qualifier"],
-    leaf_to_def: &[("identifier", DefKind::Local), ("field_identifier", DefKind::Field)],
-    record_stack: true,
-};
 
 /// Peel `T` out of a `std::optional<T>` declared-type text, unqualified
 /// (matching how `annot_type` keys classes by their last `::` segment). `None`

@@ -88,15 +88,15 @@ pub(super) fn flatten_ool_def(
 pub(super) fn flatten_nested(
     defs: &mut State,
     node: tree_sitter::Node<'_>,
-    pack: &LangPack,
+    links: &super::links::Links<'_>,
     source: &[u8],
     match_id: usize,
     events: &mut Vec<Event>,
 ) {
-    if let Some((leaf, stack, Some(def_kind))) = peel(node, &pack.nested_peel, source) {
+    if let Some(super::links::Peeled { leaf, stack, def }) = links.peel_declarator(node, source) {
         defs.nested_stacks.insert(match_id, stack);
         let ltext = leaf.utf8_text(source).unwrap_or("").to_string();
-        let def = Capture::Def { kind: def_kind, part: DefPart::Node };
+        let def = Capture::Def { kind: def, part: DefPart::Node };
         for syn in [Capture::Flow(FlowCap::Target), def] {
             events.push(Event::at(leaf, syn, ltext.clone(), match_id));
         }

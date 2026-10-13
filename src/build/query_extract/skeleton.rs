@@ -19,8 +19,8 @@ pub struct SkelSymbol {
     /// Declared return type (`@rettype`), for methods/functions — drives
     /// method-return resolution + chaining through PackageSymbol.
     pub return_type: Option<InferredType>,
-    /// Pointer/reference declarator stack, unravelled by `peel_nested` from
-    /// a `@nested.target` capture (empty otherwise). Flows to `Symbol.deref_stack`.
+    /// Pointer/reference declarator stack, unravelled by the `deref` walk
+    /// from a `@nested.target` capture (empty otherwise). Flows to `Symbol.deref_stack`.
     pub deref_stack: Vec<crate::model::file_analysis::DerefStep>,
     /// Structural markers carried onto `Symbol.attributes`: "anonymous" when
     /// the name came from the pack's `default_name` (not addressable by name —

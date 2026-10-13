@@ -1070,6 +1070,56 @@ fn cpp_skel(src: &str) -> SkeletonAnalysis {
     extract(&tree, src.as_bytes(), &cpp_pack()).unwrap()
 }
 
+/// The `deref` walk, spelling by spelling: the per-level stack a pointer /
+/// reference chain flattens to, each level carrying its own cv-qualifiers,
+/// and the same chain reading the same whether it declares a member or a
+/// local, initialized or not.
+#[test]
+fn cpp_declarator_peel_stacks_every_spelling() {
+    use crate::model::file_analysis::DerefKind::{Pointer, Reference};
+    let src = "\
+struct S {
+  Box** a;
+  char* const& b;
+  Box* const& c;
+  Node*** d;
+};
+void f() {
+  Box** x;
+  char* const& y = q;
+}
+";
+    let skel = cpp_skel(src);
+    let stack = |name: &str| -> Vec<(crate::model::file_analysis::DerefKind, Vec<String>)> {
+        skel.symbols
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} is extracted"))
+            .deref_stack
+            .iter()
+            .map(|st| (st.kind, st.annotations.clone()))
+            .collect()
+    };
+    let plain = |k| (k, Vec::<String>::new());
+    let cnst = |k| (k, vec!["const".to_string()]);
+    assert_eq!(stack("a"), vec![plain(Pointer), plain(Pointer)], "Box**");
+    assert_eq!(stack("b"), vec![cnst(Pointer), plain(Reference)], "char* const&");
+    assert_eq!(stack("c"), vec![cnst(Pointer), plain(Reference)], "Box* const&");
+    assert_eq!(stack("d"), vec![plain(Pointer); 3], "Node***");
+    assert_eq!(stack("x"), vec![plain(Pointer), plain(Pointer)], "a local reads the same");
+    assert_eq!(stack("y"), vec![cnst(Pointer), plain(Reference)], "an initialized local too");
+}
+
+/// A pointer member is minted as a field and a pointer local as a local:
+/// the leaf mark's suffix names the def.
+#[test]
+fn cpp_declarator_leaf_names_its_def() {
+    let skel = cpp_skel("struct S { Box* m; };\nvoid f() { Box* l; }\n");
+    let kind = |name: &str| skel.symbols.iter().find(|s| s.name == name).map(|s| s.kind);
+    assert_eq!(kind("m"), Some(DefKind::Field));
+    assert_eq!(kind("l"), Some(DefKind::Local));
+}
+
 #[test]
 fn cpp_tier1_extraction_report() {
     use cpp_obstacle::SAMPLES;
