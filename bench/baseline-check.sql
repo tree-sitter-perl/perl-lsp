@@ -6,31 +6,59 @@
 -- delta smaller than the noise you measured is the noise. Baselines from a
 -- dirty tree are surfaced, not hidden: you can compare against one, but the
 -- report says so.
+--
+-- The metric names below MUST spell exactly what seed-baselines.py writes: a
+-- name that differs on one side drops out of the join silently, and the
+-- report just looks shorter.
 
 .mode box
 
-WITH base AS (
+WITH base_rows AS (
+  -- insertion order is preserved on a single-file scan, so seq is the line
+  SELECT *, row_number() OVER () AS seq
+  FROM read_json_auto('bench/baselines.jsonl')
+),
+base AS (
   -- The NEWEST baseline row per KPI is the promise; older rows are history
   -- (a reseed appends, it never rewrites), and joining all of them would
-  -- report every metric once per generation.
-  SELECT * FROM read_json_auto('bench/baselines.jsonl')
-  QUALIFY row_number() OVER (PARTITION BY corpus, phase, metric ORDER BY date DESC) = 1
+  -- report every metric once per generation. A same-day reseed is broken by
+  -- line order: the later append wins.
+  SELECT * FROM base_rows
+  QUALIFY row_number() OVER (PARTITION BY corpus, phase, metric
+                             ORDER BY date DESC, seq DESC) = 1
 ),
-fresh AS (
-  SELECT r.sha, r.ts, m.corpus, m.phase,
-         CASE
-           WHEN m.kind='timing' AND m.name='check.wall' THEN 'check.wall_ms'
-           WHEN m.kind='rss'    AND m.name='peak'       THEN 'check.peak_rss_mb'
-           WHEN m.kind='startup'                        THEN 'editor.' || m.name || '_ms'
-           WHEN m.kind='verb_ms'                        THEN 'editor.verb.' || m.name || '_ms'
-           WHEN m.kind='diag_push_ms'                   THEN 'editor.diag_push_ms'
-         END AS metric,
-         median(m.value) AS value,
-         max(m.value)-min(m.value) AS spread, count(*) AS n
+latest AS (
+  SELECT m.*, r.sha, r.ts
   FROM measurements m JOIN runs r USING (run_id)
   WHERE r.ts = (SELECT max(ts) FROM runs)
+),
+named AS (
+  SELECT corpus, phase, value,
+         CASE
+           WHEN kind='timing' AND name='check.wall' THEN 'check.wall_ms'
+           WHEN kind='rss'    AND name='peak'       THEN 'check.peak_rss_mb'
+           WHEN kind='startup'                      THEN 'editor.' || name || '_ms'
+           -- keyed by scenario step: the same verb at two points of a
+           -- scenario is two promises (seed-baselines.py says why)
+           WHEN kind='verb_ms'      THEN 'editor.verb.' || name || '.' || coalesce(tag, name) || '_ms'
+           WHEN kind='diag_push_ms' THEN 'editor.diag_push.' || name || '_ms'
+           WHEN kind='server_rss' AND name='end'    THEN 'editor.rss_end_mb'
+         END AS metric
+  FROM latest
+),
+fresh AS (
+  SELECT corpus, phase, metric, median(value) AS value,
+         max(value)-min(value) AS spread, count(*) AS n
+  FROM named WHERE metric IS NOT NULL
   GROUP BY ALL
-  HAVING metric IS NOT NULL
+  UNION ALL
+  -- per-file build time is pooled across reps, one distribution per
+  -- corpus/phase, exactly as the seeder pools it
+  SELECT corpus, phase, unnest(['file_build_ms', 'file_build_ms.p99', 'file_build_ms.max']),
+         unnest([median(value), quantile_disc(value, 0.99), max(value)]),
+         max(value)-min(value), count(*)
+  FROM latest WHERE kind='file_build'
+  GROUP BY corpus, phase
 )
 SELECT f.corpus, f.phase, f.metric,
        b.value AS baseline, round(f.value,1) AS fresh,
