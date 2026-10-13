@@ -22,6 +22,7 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     namespace_sep: Some(std::borrow::Cow::Borrowed("::")),
     sigils: std::borrow::Cow::Borrowed(&['$', '@', '%']),
     class_spelling: ClassSpelling::Identity,
+    root_package: Some(std::borrow::Cow::Borrowed("main")),
 };
 
 /// Split a possibly-qualified name into `(Option<package>, basename)`.
@@ -67,6 +68,21 @@ pub fn name_match_key(name: &str, names: &NameSpellings) -> String {
         }
     }
     split_qualified(name, names).1.to_string()
+}
+
+/// Split a sigil-led qualified variable into the package it names and the
+/// sigil-bearing basename that keys its declaring symbol (`$Foo::Bar::x` →
+/// `("Foo::Bar", "$x")`). An empty qualifier names the language's root
+/// package (`$::x` → `("main", "$x")`). `None` for an unqualified or
+/// sigil-less name.
+pub fn split_qualified_var<'a>(name: &'a str, names: &'a NameSpellings) -> Option<(&'a str, String)> {
+    let mut chars = name.chars();
+    let sigil = chars.next()?;
+    if !names.is_sigil(sigil) {
+        return None;
+    }
+    let (pkg, base) = split_qualified(chars.as_str(), names);
+    pkg.map(|p| (names.qualifier_package(p), format!("{sigil}{base}")))
 }
 
 /// Conventional invocant variable names — `sub f { my ($self) = @_ }` and
@@ -438,10 +454,16 @@ mod tests {
             namespace_sep: Some(std::borrow::Cow::Borrowed("\\")),
             sigils: std::borrow::Cow::Borrowed(&['$']),
             class_spelling: ClassSpelling::UseMap,
+            root_package: None,
         };
         assert_eq!(super::split_qualified("App\\Models\\User", &php), (Some("App\\Models"), "User"));
         assert_eq!(super::name_match_key("App\\Models\\User", &php), "User");
         assert_eq!(super::name_match_key("$App\\x", &php), "$x");
+        // An empty qualifier stays empty where the language names no root.
+        assert_eq!(super::split_qualified_var("$\\x", &php), Some(("", "$x".to_string())));
+        assert_eq!(super::split_qualified_var("$::x", &PERL_SPELLINGS), Some(("main", "$x".to_string())));
+        assert_eq!(super::split_qualified_var("@Foo::Bar::l", &PERL_SPELLINGS), Some(("Foo::Bar", "@l".to_string())));
+        assert_eq!(super::split_qualified_var("$x", &PERL_SPELLINGS), None);
         assert!(is_bareword_class_name("App\\Support\\Str", &php));
         assert!(is_bareword_class_name("\\A\\F", &php), "an absolute spelling is a class token");
         assert!(!is_bareword_class_name("(new Coll([1]))", &php));
