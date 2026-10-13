@@ -26,7 +26,7 @@ shape (rule #10 — never a module allowlist):
 
 2. **Loop-push** — `for my $m (qw(A B)) { push @EXPORT, @{"${m}::EXPORT"} }`.
    Reuses the loop-list constant fold: the list resolves statically (literal
-   `qw`/list, or a same-file `my @mods = (...)` chased via `constant_strings`)
+   `qw`/list, or a same-file `my @mods = (...)` chased via the constant table, `build/builder/consts.rs`)
    → edge per module. `body_has_symbolic_export_push` confirms the
    `push @EXPORT, @{"${var}::EXPORT"}` pattern by shape. Dynamic/unresolvable
    list → no edge (honest; real Test::Most line 166 uses `keys %hash` and is

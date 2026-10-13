@@ -30,7 +30,7 @@ def main():
         note = sys.argv[sys.argv.index("--note") + 1]
     run = None
     vals = defaultdict(list)          # (corpus, phase, metric) -> samples
-    files = defaultdict(list)         # (corpus, phase) -> per-file build ms
+    files = defaultdict(list)         # (corpus, phase, rep) -> per-file build ms
     for line in open(path):
         r = json.loads(line)
         if r.get("t") == "run":
@@ -44,7 +44,7 @@ def main():
         elif k == "rss" and r["name"] == "peak":
             vals[(c, p, "check.peak_rss_mb")].append(r["value"])
         elif k == "file_build":
-            files[(c, p)].append(r["value"])
+            files[(c, p, r["rep"])].append(r["value"])
         elif k == "startup":
             vals[(c, p, f"editor.{r['name']}_ms")].append(r["value"])
         elif k == "verb_ms":
@@ -61,25 +61,33 @@ def main():
     assert run, "no run line in input"
 
     out = []
-    def row(corpus, phase, metric, samples, stat="median"):
+    def row(corpus, phase, metric, samples):
         if not samples:
             return
-        v = {"median": st.median(samples),
-             "p99": sorted(samples)[min(len(samples) - 1, int(len(samples) * 0.99))],
-             "max": max(samples)}[stat]
         out.append({
             "date": run["ts"][:10], "sha": run["sha"], "dirty": run.get("dirty"),
             "host": run.get("host"), "corpus": corpus, "phase": phase,
-            "metric": metric if stat == "median" else f"{metric}.{stat}",
-            "value": round(v, 2), "n": len(samples),
+            "metric": metric,
+            "value": round(st.median(samples), 2), "n": len(samples),
             "spread": round(max(samples) - min(samples), 2),
             "note": note,
         })
     for (c, p, mname), samples in sorted(vals.items()):
         row(c, p, mname, samples)
-    for (c, p), samples in sorted(files.items()):
-        for stat in ("median", "p99", "max"):
-            row(c, p, "file_build_ms", samples, stat)
+    # Each distribution stat is taken PER REP, and the baseline is the median
+    # of those with the spread across reps — the same run-to-run noise every
+    # other KPI carries. Pooled across reps, the spread would be the
+    # slowest-minus-fastest FILE, which no regression could ever clear.
+    # baseline-check.sql spells the same stats; change them together.
+    stats = {"": st.median,
+             ".p99": lambda xs: sorted(xs)[min(len(xs) - 1, int(len(xs) * 0.99))],
+             ".max": max}
+    per_rep = defaultdict(list)       # (corpus, phase, metric) -> one value per rep
+    for (c, p, _rep), samples in sorted(files.items()):
+        for suffix, f in stats.items():
+            per_rep[(c, p, f"file_build_ms{suffix}")].append(f(samples))
+    for (c, p, mname), samples in sorted(per_rep.items()):
+        row(c, p, mname, samples)
 
     with open("bench/baselines.jsonl", "a") as f:
         for r in out:

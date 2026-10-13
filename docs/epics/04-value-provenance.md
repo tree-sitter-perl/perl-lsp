@@ -71,7 +71,7 @@ move on to Phases C/D. Do not leave it dormant for a third time.
 | Moo `is => 'ro'` knowledge | `frameworks/moo.rhai` | the plugin owns the vocabulary; core sees classified pairs |
 | Hash-literal shape builder | `build/builder/` | `grep -rn 'fn visit_anon_hash\|hash_literal' src/build/builder/` |
 | `HashKeyOwner` enum | `model/file_analysis/core_types.rs` | `grep -rn 'enum HashKeyOwner' src/`; index rebuild in `rebuild_enrichment_indices` |
-| Constant folding for string lists | `build/builder/` | `grep -rn 'declared_constants\|constant_strings' src/build/builder/` |
+| Constant folding for string lists | `build/builder/` | `grep -rn 'declared_constants\|resolve_constant_strings' src/build/builder/` |
 | Arity-hint threading (the 5a pattern) | `model/witnesses/query.rs` | `grep -rn 'arity_hint' src/model/witnesses/ \| head` |
 
 ## Non-goals
