@@ -279,13 +279,13 @@ impl<'a> Builder<'a> {
                 if let Some(stripped) = name.strip_prefix('&') {
                     // `&$fn()` syntax — same deal.
                     if stripped.starts_with('$') {
-                        return self.resolve_constant_strings(stripped, node.start_position())
+                        return self.resolve_constant_strings(stripped, node)
                             .and_then(|names| names.into_iter().next());
                     }
                     return Some(stripped.to_string());
                 }
                 if name.starts_with('$') {
-                    return self.resolve_constant_strings(&name, node.start_position())
+                    return self.resolve_constant_strings(&name, node)
                         .and_then(|names| names.into_iter().next());
                 }
                 Some(name)

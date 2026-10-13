@@ -523,7 +523,7 @@ impl<'a> Builder<'a> {
             "scalar" => {
                 self.emit_expr_witness(inv);
                 let key = crate::cst::canonical_var_name(inv, self.source);
-                if let Some([class]) = self.resolve_constant_strings(key.as_deref().unwrap_or(text), inv.start_position()).as_deref() {
+                if let Some([class]) = self.resolve_constant_strings(key.as_deref().unwrap_or(text), inv).as_deref() {
                     push_class(self, class.clone());
                 }
             }

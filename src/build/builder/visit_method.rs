@@ -148,12 +148,12 @@ impl<'a> Builder<'a> {
                 // dispatched method may still be invisible to the static graph.
                 // The heatmap's dead-code pass reads this as a soundness gate.
                 self.dynamic_dispatch_sites = self.dynamic_dispatch_sites.saturating_add(1);
-                if let Some(resolved) = self.resolve_constant_strings(name, node.start_position()) {
+                if let Some(resolved) = self.resolve_constant_strings(name, node) {
                     // The call token is the `$m` read, not a name literal — its
                     // rewrite target is the source string the fold came from. Only
                     // a single-literal binding has one unambiguous source span.
                     let folded_src = (resolved.len() == 1)
-                        .then(|| self.constant_string_source(name, node.start_position()))
+                        .then(|| self.constant_string_source(name, node))
                         .flatten();
                     for rname in resolved {
                         let idx = self.refs.len();
@@ -702,7 +702,7 @@ impl<'a> Builder<'a> {
             return None;
         }
         let var_text = arg_node.utf8_text(self.source).ok()?;
-        let folded = self.resolve_constant_strings(var_text, arg_node.start_position())?;
+        let folded = self.resolve_constant_strings(var_text, arg_node)?;
         // Single-value fold only — multi-value (loop variable that
         // takes several strings) doesn't have a single row class to
         // emit. Future sum-types work could lift this.

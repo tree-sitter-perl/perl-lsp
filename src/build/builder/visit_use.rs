@@ -522,7 +522,7 @@ impl<'a> Builder<'a> {
             }
         }
         if let Some((n, name_node)) = name {
-            self.write_constant(&n, list.end_position(), Some(pair_values));
+            self.write_constant(&n, list, Some(pair_values));
             self.register_constant_symbol(&n, name_node);
         }
     }
@@ -542,7 +542,7 @@ impl<'a> Builder<'a> {
         }
         for (name, name_node, values) in decls {
             self.register_constant_symbol(&name, name_node);
-            self.write_constant(&name, hash.end_position(), Some(values));
+            self.write_constant(&name, hash, Some(values));
         }
     }
 
@@ -717,7 +717,7 @@ impl<'a> Builder<'a> {
     pub(super) fn extract_string_list(&self, node: Node<'a>) -> Vec<(String, Span)> {
         crate::cst::string_list(node, self.source, &mut |n| {
             let Ok(text) = n.utf8_text(self.source) else { return vec![] };
-            let Some(values) = self.resolve_constant_strings(text, n.start_position()) else { return vec![] };
+            let Some(values) = self.resolve_constant_strings(text, n) else { return vec![] };
             let span = node_to_span(n);
             values.into_iter().map(|v| (v, span)).collect()
         })
@@ -739,7 +739,7 @@ impl<'a> Builder<'a> {
             }
             // plain bareword / @array: a genuine value — fold via constants.
             let Ok(text) = n.utf8_text(self.source) else { return vec![] };
-            let Some(values) = self.resolve_constant_strings(text, n.start_position()) else { return vec![] };
+            let Some(values) = self.resolve_constant_strings(text, n) else { return vec![] };
             let span = node_to_span(n);
             values.into_iter().map(|v| (v, span)).collect()
         })
@@ -921,7 +921,7 @@ impl<'a> Builder<'a> {
                     Some(bare) if !bare.is_empty() => format!("${bare}"),
                     _ => return vec![],
                 };
-                match self.resolve_constant_strings(&key, var_node.start_position()) {
+                match self.resolve_constant_strings(&key, var_node) {
                     Some(values) if !values.is_empty() => segments.push(values),
                     _ => return vec![],
                 }
@@ -1218,7 +1218,7 @@ impl<'a> Builder<'a> {
                 if lhs_text.starts_with('$') {
                     self.fold_compound_constant_string(lhs_text, node);
                 } else if lhs_text.starts_with('@') {
-                    self.write_constant(lhs_text, node.end_position(), None);
+                    self.write_constant(lhs_text, node, None);
                 }
             } else if !lhs_text.is_empty() {
                 const_writes.push((lhs_var.clone(), self.plain_write_fold(lhs_text, node)));
@@ -1238,7 +1238,7 @@ impl<'a> Builder<'a> {
                 self.visit_variable_decl(left);
             }
             for (var, fold) in std::mem::take(&mut const_writes) {
-                let at = node.end_position();
+                let at = node;
                 match fold {
                     ConstFold::Literal(text, span) => self.write_constant_literal(&var, at, text, span),
                     ConstFold::Values(values) => self.write_constant(&var, at, values),
@@ -1286,7 +1286,7 @@ impl<'a> Builder<'a> {
                 if tails.is_empty() {
                     return None;
                 }
-                let heads = self.resolve_constant_strings(var, node.start_position())?;
+                let heads = self.resolve_constant_strings(var, node)?;
                 Some(
                     heads
                         .iter()
@@ -1295,7 +1295,7 @@ impl<'a> Builder<'a> {
                 )
             })
             .flatten();
-        self.write_constant(var, node.end_position(), appended);
+        self.write_constant(var, node, appended);
     }
 
     /// The fold a plain `VAR = RHS` binds: a scalar takes one string literal

@@ -697,11 +697,11 @@ impl<'a> Builder<'a> {
             // `use constant EXTRA => 'Gizmos'`). Falls back to the raw
             // token when it names no constant.
             "bareword" => self
-                .resolve_constant_strings(&text, arg.start_position())
+                .resolve_constant_strings(&text, arg)
                 .and_then(|f| f.into_iter().next())
                 .or_else(|| Some(text.clone())),
             "scalar" | "array" | "hash" => {
-                self.resolve_constant_strings(&text, arg.start_position()).and_then(|f| f.into_iter().next())
+                self.resolve_constant_strings(&text, arg).and_then(|f| f.into_iter().next())
             }
             _ => None,
         };

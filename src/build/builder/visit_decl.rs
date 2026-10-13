@@ -1558,7 +1558,7 @@ impl<'a> Builder<'a> {
                             }
                         }
                     }
-                    self.write_constant(&var_name, list_node.end_position(), Some(values));
+                    self.write_constant(&var_name, list_node, Some(values));
                 }
 
                 self.queue_children_then(node, |b| { b.pop_scope(); });
@@ -1599,9 +1599,7 @@ impl<'a> Builder<'a> {
         // Bound from the statement's start (EXPR precedes LIST in the
         // source) to its end, where the outer topic resumes.
         if !topic_values.is_empty() {
-            let saved = self.resolve_constant_strings("$_", node.start_position());
-            self.write_constant("$_", node.start_position(), Some(topic_values));
-            self.write_constant("$_", node.end_position(), saved);
+            self.with_topic(node, topic_values);
         }
         self.queue_children(node);
     }

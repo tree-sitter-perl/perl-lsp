@@ -117,26 +117,35 @@ impl<'a> Builder<'a> {
         self.consts.visible(&self.const_key(name, at), at)
     }
 
-    /// The constant string values `name` holds at `at`.
-    pub(super) fn resolve_constant_strings(&self, name: &str, at: Point) -> Option<Vec<String>> {
-        self.visible_constant(name, at)?.values.clone()
+    /// The constant string values `name` holds where `read` is.
+    pub(super) fn resolve_constant_strings(&self, name: &str, read: Node<'_>) -> Option<Vec<String>> {
+        self.visible_constant(name, read.start_position())?.values.clone()
     }
 
-    /// The source literal of a single-literal fold of `name` at `at`.
-    pub(super) fn constant_string_source(&self, name: &str, at: Point) -> Option<Span> {
-        self.visible_constant(name, at)?.source
+    /// The source literal of a single-literal fold of `name` where `read` is.
+    pub(super) fn constant_string_source(&self, name: &str, read: Node<'_>) -> Option<Span> {
+        self.visible_constant(name, read.start_position())?.source
     }
 
-    /// The one write: from `at` on, `name` folds to `values`. `None` (or
-    /// an empty list) is a write the fold can't name, which clears it.
-    pub(super) fn write_constant(&mut self, name: &str, at: Point, values: Option<Vec<String>>) {
-        self.push_constant(name, at, values, None);
+    /// The one write: after `write` (the node the write belongs to), `name`
+    /// folds to `values`. `None` (or an empty list) is a write the fold
+    /// can't name, which clears it.
+    pub(super) fn write_constant(&mut self, name: &str, write: Node<'_>, values: Option<Vec<String>>) {
+        self.push_constant(name, write.end_position(), values, None);
     }
 
     /// `write_constant` for a scalar bound to exactly one string literal,
     /// keeping the literal's span for rename.
-    pub(super) fn write_constant_literal(&mut self, name: &str, at: Point, value: String, source: Span) {
-        self.push_constant(name, at, Some(vec![value]), Some(source));
+    pub(super) fn write_constant_literal(&mut self, name: &str, write: Node<'_>, value: String, source: Span) {
+        self.push_constant(name, write.end_position(), Some(vec![value]), Some(source));
+    }
+
+    /// Bind the topic `$_` to `values` for the extent of `node`; the outer
+    /// topic resumes at its end.
+    pub(super) fn with_topic(&mut self, node: Node<'_>, values: Vec<String>) {
+        let outer = self.resolve_constant_strings("$_", node);
+        self.push_constant("$_", node.start_position(), Some(values), None);
+        self.push_constant("$_", node.end_position(), outer, None);
     }
 
     fn push_constant(&mut self, name: &str, at: Point, values: Option<Vec<String>>, source: Option<Span>) {
