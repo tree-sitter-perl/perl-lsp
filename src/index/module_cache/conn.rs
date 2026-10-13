@@ -81,6 +81,32 @@ fn apply_pragmas(conn: &Connection, busy: std::time::Duration) {
     let _ = conn.busy_timeout(busy);
 }
 
+/// THE open: every cache connection goes through here, so the process-wide
+/// SQLite config below is in force before SQLite initializes on first open
+/// (`sqlite3_config` is refused once it has).
+fn open_db(path: &std::path::Path, flags: rusqlite::OpenFlags) -> rusqlite::Result<Connection> {
+    static CONFIG: std::sync::Once = std::sync::Once::new();
+    CONFIG.call_once(|| {
+        // Memory statistics take one process-global mutex on every SQLite
+        // malloc and free; with many reader connections that mutex is
+        // contended, and nothing here reads the statistics or sets a heap
+        // limit (the only consumers). Refused (SQLITE_MISUSE) if SQLite was
+        // already initialized elsewhere — then it only loses the speedup.
+        // SAFETY: called before any connection opens, with the argument type
+        // SQLITE_CONFIG_MEMSTATUS documents (one int).
+        let rc = unsafe {
+            rusqlite::ffi::sqlite3_config(
+                rusqlite::ffi::SQLITE_CONFIG_MEMSTATUS,
+                0 as std::os::raw::c_int,
+            )
+        };
+        if rc != rusqlite::ffi::SQLITE_OK {
+            log::debug!("sqlite3_config(MEMSTATUS, 0) refused: {rc}");
+        }
+    });
+    Connection::open_with_flags(path, flags)
+}
+
 /// the real body rather than a parallel one.
 pub(super) fn open_cache_db_at(
     dir: &std::path::Path,
@@ -91,7 +117,7 @@ pub(super) fn open_cache_db_at(
     let db_path = db_path_for(dir, lang);
     log::info!("Module cache: {:?}", db_path);
 
-    match Connection::open(&db_path) {
+    match open_db(&db_path, rusqlite::OpenFlags::default()) {
         Ok(conn) => {
             apply_pragmas(&conn, busy);
             match init_schema(&conn) {
@@ -113,7 +139,7 @@ pub(super) fn open_cache_db_at(
                     log::warn!("Cache DB schema init failed: {}. Recreating.", e);
                     drop(conn);
                     let _ = std::fs::remove_file(&db_path);
-                    let conn = Connection::open(&db_path).ok()?;
+                    let conn = open_db(&db_path, rusqlite::OpenFlags::default()).ok()?;
                     apply_pragmas(&conn, busy);
                     init_schema(&conn).ok()?;
                     Some(conn)
@@ -235,7 +261,7 @@ pub fn open_reader_retrying(db_path: &std::path::Path) -> Result<Connection, Str
 /// Read-only open of an explicit DB file. Path-taking so the rehydration
 /// logic is unit-testable without the cache-dir plumbing.
 pub fn open_readonly_at(db_path: &std::path::Path) -> Result<Connection, String> {
-    let conn = Connection::open_with_flags(
+    let conn = open_db(
         db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
@@ -253,7 +279,7 @@ pub fn open_readonly_at(db_path: &std::path::Path) -> Result<Connection, String>
 /// waits the writer out — so the blob that is on disk the whole time stays
 /// reachable. The captured cause of the strict-residency crash.
 pub fn open_rw_shared_at(db_path: &std::path::Path) -> Option<Connection> {
-    let conn = Connection::open_with_flags(
+    let conn = open_db(
         db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
@@ -288,6 +314,23 @@ pub fn open_cache_db_readonly(_workspace_root: Option<&str>, _lang: &str) -> Opt
 /// their peak overlap and reuse it from then on.
 pub struct RetainedReader {
     pool: std::sync::Mutex<Vec<(Connection, u64)>>,
+    /// How stale a checked-out connection's inode verdict may be. The
+    /// recheck is a `stat` of the DB path, and a `--check` sweep checks out
+    /// millions of times: per checkout it was 1.2M syscalls on one corpus.
+    /// The unlinks it detects come from ANOTHER process (`--clear-cache`), so
+    /// a bounded lag costs one late reopen, never a wrong answer in this one.
+    recheck_every: std::time::Duration,
+    /// Process-relative millis of the last inode recheck (0 = never).
+    last_recheck_ms: std::sync::atomic::AtomicU64,
+}
+
+/// See `RetainedReader::recheck_every`.
+const INODE_RECHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+fn process_millis() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    // +1 so a recheck at the very start never reads as "never".
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64 + 1
 }
 
 impl Default for RetainedReader {
@@ -298,7 +341,29 @@ impl Default for RetainedReader {
 
 impl RetainedReader {
     pub fn new() -> Self {
-        RetainedReader { pool: std::sync::Mutex::new(Vec::new()) }
+        Self::with_recheck_every(INODE_RECHECK_EVERY)
+    }
+
+    fn with_recheck_every(recheck_every: std::time::Duration) -> Self {
+        RetainedReader {
+            pool: std::sync::Mutex::new(Vec::new()),
+            recheck_every,
+            last_recheck_ms: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Is a recheck due? Claims the slot, so concurrent checkouts in one
+    /// window stat once between them.
+    fn recheck_due(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        let now = process_millis();
+        let last = self.last_recheck_ms.load(Ordering::Relaxed);
+        if last != 0 && now.saturating_sub(last) < self.recheck_every.as_millis() as u64 {
+            return false;
+        }
+        self.last_recheck_ms
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
     }
 
     fn db_ino(conn: &Connection) -> u64 {
@@ -338,12 +403,18 @@ impl RetainedReader {
         // Poison-proof: the pool is a pure cache — a panic in an earlier
         // holder must not permanently disable retrieval (a connection
         // checked out by a panicking caller is simply never returned).
-        let mut held = self.pool.lock().unwrap_or_else(|p| p.into_inner()).pop();
-        if let Some((conn, ino)) = held.as_ref() {
-            if Self::db_ino(conn) != *ino {
-                held = None; // file unlinked/recreated — reopen below
+        let held = {
+            let mut pool = self.pool.lock().unwrap_or_else(|p| p.into_inner());
+            if self.recheck_due() {
+                // One stat answers for the whole pool: every connection names
+                // the same path. A file unlinked/recreated underneath drops
+                // each connection opened on the old inode.
+                if let Some(current) = pool.last().map(|(c, _)| Self::db_ino(c)) {
+                    pool.retain(|(_, ino)| *ino == current);
+                }
             }
-        }
+            pool.pop()
+        };
         let (conn, ino) = match held {
             Some(h) => h,
             None => {
@@ -372,7 +443,7 @@ mod retained_reader_tests {
         let db = dir.join("t.db");
         super::Connection::open(&db).unwrap().execute_batch("CREATE TABLE t(x)").unwrap();
 
-        let rr = RetainedReader::new();
+        let rr = RetainedReader::with_recheck_every(std::time::Duration::ZERO);
         let opens = std::cell::Cell::new(0u32);
         let opener = || {
             opens.set(opens.get() + 1);
