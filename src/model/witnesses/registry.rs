@@ -796,19 +796,21 @@ impl ReducerRegistry {
         // as a conclusion if what it points at is too, transitively — so an
         // `Observation` anywhere in the walk is what would make the layer
         // genuinely open.
-        for w in bag.for_attachment(&q.attachment) {
-            crate::util::ghost_stats::count(match &w.payload {
-                WitnessPayload::Observation(_) => "hop.OBSERVATION",
-                WitnessPayload::InferredType(_) => "hop.inferred_type",
-                WitnessPayload::Edge(_) => "hop.edge",
-                WitnessPayload::Invoke { .. } => "hop.invoke",
-                WitnessPayload::ReturnExpr(_) => "hop.return_expr",
-                WitnessPayload::Fact { .. } => "hop.fact",
-                WitnessPayload::Derivation => "hop.derivation",
-                WitnessPayload::Custom { .. } => "hop.custom",
-                WitnessPayload::Projected { .. } => "hop.projected",
-                _ => "hop.other",
-            });
+        if crate::util::ghost_stats::enabled() {
+            for w in bag.iter_attachment(&q.attachment) {
+                crate::util::ghost_stats::count(match &w.payload {
+                    WitnessPayload::Observation(_) => "hop.OBSERVATION",
+                    WitnessPayload::InferredType(_) => "hop.inferred_type",
+                    WitnessPayload::Edge(_) => "hop.edge",
+                    WitnessPayload::Invoke { .. } => "hop.invoke",
+                    WitnessPayload::ReturnExpr(_) => "hop.return_expr",
+                    WitnessPayload::Fact { .. } => "hop.fact",
+                    WitnessPayload::Derivation => "hop.derivation",
+                    WitnessPayload::Custom { .. } => "hop.custom",
+                    WitnessPayload::Projected { .. } => "hop.projected",
+                    _ => "hop.other",
+                });
+            }
         }
         if matches!(q.attachment, WitnessAttachment::Expr(_)) {
             TOUCHED_EXPR.with(|c| c.set(true));
@@ -818,19 +820,21 @@ impl ReducerRegistry {
             // one — "returns its invocant", a function of the query rather
             // than a value). If they are spread across everything, the
             // derivation is genuinely open and no conclusion layer closes it.
-            for w in bag.for_attachment(&q.attachment) {
-                crate::util::ghost_stats::count(match &w.payload {
-                    WitnessPayload::InferredType(_) => "expr_hop.inferred_type",
-                    WitnessPayload::Observation(_) => "expr_hop.observation",
-                    WitnessPayload::Edge(_) => "expr_hop.edge",
-                    WitnessPayload::Invoke { .. } => "expr_hop.invoke",
-                    WitnessPayload::ReturnExpr(_) => "expr_hop.return_expr",
-                    WitnessPayload::Fact { .. } => "expr_hop.fact",
-                    WitnessPayload::Derivation => "expr_hop.derivation",
-                    WitnessPayload::Custom { .. } => "expr_hop.custom",
-                    WitnessPayload::Projected { .. } => "expr_hop.projected",
-                    _ => "expr_hop.other",
-                });
+            if crate::util::ghost_stats::enabled() {
+                for w in bag.iter_attachment(&q.attachment) {
+                    crate::util::ghost_stats::count(match &w.payload {
+                        WitnessPayload::InferredType(_) => "expr_hop.inferred_type",
+                        WitnessPayload::Observation(_) => "expr_hop.observation",
+                        WitnessPayload::Edge(_) => "expr_hop.edge",
+                        WitnessPayload::Invoke { .. } => "expr_hop.invoke",
+                        WitnessPayload::ReturnExpr(_) => "expr_hop.return_expr",
+                        WitnessPayload::Fact { .. } => "expr_hop.fact",
+                        WitnessPayload::Derivation => "expr_hop.derivation",
+                        WitnessPayload::Custom { .. } => "expr_hop.custom",
+                        WitnessPayload::Projected { .. } => "expr_hop.projected",
+                        _ => "expr_hop.other",
+                    });
+                }
             }
         }
         let depth = QUERY_REC_DEPTH.with(|c| {
