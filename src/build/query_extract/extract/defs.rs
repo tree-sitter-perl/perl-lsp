@@ -55,29 +55,20 @@ impl State {
     }
 }
 
-/// `@ool.def`: an out-of-line definition (`Ret Class::method(...) {}`).
-/// The one general capture (fires for EVERY function_definition) — peel the
-/// declarator to the function declarator, walk its qualified name to the
-/// leaf + owning class, and synthesize the `def.method` / `def.method.name` /
-/// `qualifier` events downstream extraction consumes — the same vocabulary
-/// the narrow per-shape patterns emit for the shapes they own. A
-/// non-qualified declarator (free function / in-class method) yields nothing
-/// here — its own pattern owns it. Arbitrary declarator nesting + multi-level
-/// qualifiers (which fixed-depth S-queries can't express) work by
-/// construction.
+/// `@ool.def`: a function definition whose declared name may be qualified
+/// (`Ret Class::method(...) {}`). When it is, synthesize the `def.method` /
+/// `def.method.name` / `qualifier` events the per-shape patterns emit for the
+/// shapes they own; an unqualified one yields nothing here, because its own
+/// pattern owns it. The links reach any declarator depth and any number of
+/// qualifiers.
 pub(super) fn flatten_ool_def(
     node: tree_sitter::Node<'_>,
-    pack: &LangPack,
+    links: &super::links::Links<'_>,
     source: &[u8],
     match_id: usize,
     events: &mut Vec<Event>,
 ) {
-    let Some((scope_text, leaf)) = node
-        .child_by_field_name("declarator")
-        .and_then(|d| unwrap_to_function_declarator(d, &pack.oolfn))
-        .and_then(|fd| fd.child_by_field_name("declarator"))
-        .and_then(|q| walk_qualifier_chain(q, pack.oolfn.qualified_name, pack.qualifier_peel, source))
-    else {
+    let Some((owner, leaf)) = links.qualified_def(node, source) else {
         return;
     };
     let leaf_text = leaf.utf8_text(source).unwrap_or("").to_string();
@@ -86,7 +77,7 @@ pub(super) fn flatten_ool_def(
     let method = |part| Capture::Def { kind: DefKind::Method, part };
     events.push(Event::at(node, method(DefPart::Node), leaf_text.clone(), match_id));
     events.push(Event::at(leaf, method(DefPart::Name), leaf_text, match_id));
-    events.push(Event::at(node, Capture::Qualifier, scope_text, match_id));
+    events.push(Event::at(node, Capture::Qualifier, owner, match_id));
 }
 
 /// `@nested.target`: a pointer/reference declarator CHAIN of any depth.
@@ -109,20 +100,6 @@ pub(super) fn flatten_nested(
         for syn in [Capture::Flow(FlowCap::Target), def] {
             events.push(Event::at(leaf, syn, ltext.clone(), match_id));
         }
-    }
-}
-
-/// `@qualifier` on a templated owner (`Buf<T>::grow`): the class the def
-/// joins is the BASE name — peel the `name` field where the node is live
-/// (structural, never a string split on `<`).
-pub(super) fn qualifier_text(node: tree_sitter::Node<'_>, pack: &LangPack, source: &[u8]) -> String {
-    if pack.qualifier_peel.contains(&node.kind()) {
-        node.child_by_field_name("name")
-            .and_then(|n| n.utf8_text(source).ok())
-            .unwrap_or(node.utf8_text(source).unwrap_or(""))
-            .to_string()
-    } else {
-        node.utf8_text(source).unwrap_or("").to_string()
     }
 }
 
@@ -179,14 +156,9 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         .or_else(|| (pack.default_name)(kind).map(|n| (n.to_string(), e.start, e.start, true)))
         .unwrap_or((e.text.clone(), e.start, e.end, false));
     d.def_name_spans.push((e.start_byte, e.end_byte));
-    // An out-of-line def's `Class::` qualifier names its owner
-    // (the LAST `::` segment, the unqualified class the engine
-    // keys by) — override the enclosing-namespace context.
-    let pkg = d
-        .qualifier_by_match
-        .get(&e.match_id)
-        .map(|q| q.rsplit("::").next().unwrap_or(q).to_string())
-        .or_else(|| st.package.clone());
+    // An out-of-line def's qualifier names its owning class (the innermost
+    // scope), overriding the enclosing-namespace context.
+    let pkg = d.qualifier_by_match.get(&e.match_id).cloned().or_else(|| st.package.clone());
     let shaped = (pack.shape_name)(&name);
     // A class-spec def carries its primary's name — the
     // (spec, primary) family edge `Specializes` derives from.

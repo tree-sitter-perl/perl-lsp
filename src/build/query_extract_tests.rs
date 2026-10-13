@@ -4,6 +4,7 @@
 //! `cargo test query_skeleton -- --nocapture`.
 
 use super::*;
+use crate::build::packs::*;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -648,6 +649,26 @@ fn r_data_frame_columns_are_static_keys() {
     }
 }
 
+/// Which callees construct a keyed value and which import is the
+/// document's word: a named argument to any other call is no key, and a
+/// call of any other name imports nothing.
+#[test]
+fn r_only_the_named_constructors_and_importers_count() {
+    let src = "library(\"dplyr\")\nhelper(pkg)\nopts <- configure(width = 3)\nl <- list(width = 3)\n";
+    let (fa, imports, _) = r_fa(src);
+    assert_eq!(imports, vec!["dplyr"], "a quoted library name imports; helper() does not");
+    let end = tree_sitter::Point { row: 4, column: 0 };
+    use crate::model::file_analysis::InferredType;
+    assert!(
+        matches!(fa.inferred_type_via_bag("l", end), Some(InferredType::HashWithKeys { .. })),
+        "list() constructs a keyed value"
+    );
+    assert!(
+        !matches!(fa.inferred_type_via_bag("opts", end), Some(InferredType::HashWithKeys { .. })),
+        "configure() is no constructor"
+    );
+}
+
 #[test]
 fn r_cross_file_refs_and_workspace_rename() {
     // util.R defines fetch_data; analysis.R sources it and calls it.
@@ -752,6 +773,35 @@ fn cmake_outline_targets_vars_and_interpolated_refs() {
     assert!(skel.refs.iter().any(|r| r.kind == RefKind::Call && r.name == "widgets"));
     assert!(skel.refs.iter().any(|r| r.kind == RefKind::Call && r.name == "core"));
     assert!(!skel.refs.iter().any(|r| r.name == "PRIVATE"));
+}
+
+/// CMake command names are case-insensitive, so the family patterns are
+/// too: `SET` and `Add_Library` declare what their lower-case spellings do.
+#[test]
+fn cmake_command_families_match_however_the_command_is_cased() {
+    let skel = cmake_skel(
+        "SET(MY_FLAG ON)\nAdd_Library(widgets STATIC a.c)\nTARGET_LINK_LIBRARIES(widgets PUBLIC core)\nINCLUDE(util.cmake)\n",
+    );
+    let defs: Vec<(DefKind, String)> = skel.symbols.iter().map(|s| (s.kind, s.name.clone())).collect();
+    assert!(defs.contains(&(DefKind::Var, "MY_FLAG".into())), "{defs:?}");
+    assert!(defs.contains(&(DefKind::Sub, "widgets".into())), "{defs:?}");
+    assert!(skel.refs.iter().any(|r| r.kind == RefKind::Call && r.name == "core"));
+    assert!(!skel.refs.iter().any(|r| r.name == "PUBLIC"));
+    assert_eq!(skel.imports, vec!["util.cmake"]);
+}
+
+/// A command family's def spans the whole command, so the name it declares
+/// sits inside its range; an interpolated argument names no target.
+#[test]
+fn cmake_a_command_def_spans_its_command() {
+    let skel = cmake_skel("set(MY_FLAG ON)\ntarget_sources(app PRIVATE ${GEN} main.c)\n");
+    let flag = skel.symbols.iter().find(|s| s.name == "MY_FLAG").expect("the set def");
+    assert_eq!((flag.start.column, flag.end.column), (0, 15), "the def is `set(MY_FLAG ON)`");
+    assert_eq!((flag.name_start.column, flag.name_end.column), (4, 11));
+    let calls: Vec<&str> =
+        skel.refs.iter().filter(|r| r.kind == RefKind::Call).map(|r| r.name.as_str()).collect();
+    assert!(calls.contains(&"app") && calls.contains(&"main.c"), "{calls:?}");
+    assert!(!calls.iter().any(|c| c.contains("${")), "{calls:?}");
 }
 
 // ---- C++ obstacle course: measure macro-induced parse damage ----

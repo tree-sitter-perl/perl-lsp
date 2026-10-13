@@ -129,9 +129,8 @@ module conventions) and they are what makes a pack language feel
 Design constraints, from the existing system:
 
 - **Every pack predicate already written is trivially rhai**
-  (`ctor_class`, `module_paths`, `cmd_effects`, `annot_type`,
-  `shape_ctor`, `import_call`), and the rhai host with fingerprinted
-  cache invalidation already ships. The distance is smaller than it
+  (`ctor_class`, `module_paths`, `annot_type`), and the rhai host with
+  fingerprinted cache invalidation already ships. The distance is smaller than it
   looks.
 - **`EmitAction` is the shared vocabulary** and must stay shared. A
   framework tier that mints a second action vocabulary for pack

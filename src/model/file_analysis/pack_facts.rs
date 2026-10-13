@@ -20,28 +20,6 @@ pub struct PackFacts {
     /// lives in `conventions.rs`, so this stays empty there.
     #[serde(default)]
     pub receiver_names: Vec<String>,
-    /// Variables the runtime binds without a declaration (php `$this`,
-    /// superglobals) — the undefined-variable lane's silence list.
-    #[serde(default)]
-    pub implicit_variables: Vec<String>,
-    /// The language's throwaway binding names (php `$_`) — written to be
-    /// discarded, so the unused-variable lane never reports them.
-    #[serde(default)]
-    pub throwaway_names: Vec<String>,
-    /// Methods whose presence makes a class answer any member name (php
-    /// `__call`/`__get`) — the undefined-member lanes stay silent on it.
-    #[serde(default)]
-    pub catch_all_methods: Vec<String>,
-    /// The member name that is the class-name literal (php `Foo::class`).
-    #[serde(default)]
-    pub class_literal_member: String,
-    /// Type names are capitalized by convention (an import row with a
-    /// lowercase leaf names a function or constant).
-    #[serde(default)]
-    pub types_are_capitalized: bool,
-    /// Members every enum carries by language rule.
-    #[serde(default)]
-    pub enum_members: Vec<String>,
     /// Whole import-statement spans, in file order.
     #[serde(default)]
     pub import_rows: Vec<Span>,
@@ -49,41 +27,19 @@ pub struct PackFacts {
     /// empty when the language has no import quick-fix.
     #[serde(default)]
     pub import_template: String,
-    /// The pack's stub template for an unimplemented contract (`{}` = the
-    /// declarator); empty = no quick-fix.
-    #[serde(default)]
-    pub contract_stub: String,
-    /// The pack's native return-annotation template (`": {}"`); empty = none.
-    #[serde(default)]
-    pub return_annotation_template: String,
     /// Engine type name → native spelling a declaration is written with.
     #[serde(default)]
     pub native_type_spellings: Vec<(String, String)>,
-    /// The sigil a static property is spelled with after the scope operator.
-    #[serde(default)]
-    pub static_property_sigil: String,
-    /// rail → how the undefined-name lane phrases a miss on it (`"event"`
-    /// → `No listener for event`); default `Undefined <rail>`.
-    #[serde(default)]
-    pub rail_labels: Vec<(String, String)>,
-    /// Rails whose miss is a hint: their definitions are partly
-    /// runtime-only, so an unmatched name is a lead, not an error.
-    #[serde(default)]
-    pub rail_hints: Vec<String>,
     /// Rails whose names are CLASS identities (the rail document's
     /// `names_are: class` — Laravel's event bus). Per-overlay data the
-    /// file carries, like `rail_labels`: which overlays load is a property
-    /// of the workspace, not of the language, so it is not a language
-    /// convention reached by id. Read through `HandlerOwner::names_are`.
+    /// file carries: which overlays load is a property of the workspace,
+    /// not of the language, so it is not a language convention reached by
+    /// id. Read through `HandlerOwner::names_are`.
     #[serde(default)]
     pub class_named_rails: Vec<String>,
     /// The last row of the file preamble (open tag, `declare` rows).
     #[serde(default)]
     pub preamble_end: Option<usize>,
-    /// Import rows bind names the file spells (php), so a row nothing
-    /// spells is unused; false for text-splicing includes.
-    #[serde(default)]
-    pub imports_bind_names: bool,
     /// A member declaration belongs only to its enclosing container (no
     /// cross-package installs): contract provision is package-attributed.
     #[serde(default)]
@@ -100,14 +56,6 @@ pub struct PackFacts {
     /// through. Empty for Perl — the engine's tags ARE its vocabulary.
     #[serde(default)]
     pub type_display: Vec<(String, String)>,
-
-    /// The language's constructor-method names (php `__construct`), from
-    /// the LangPack — the identity lane marks a Method target with one of
-    /// these names as `ctor_of` its class, admitting construction sites
-    /// into its references. Empty for Perl (`new` is a convention, not a
-    /// keyword — `is_constructor_name` serves the ranking lanes instead).
-    #[serde(default)]
-    pub constructor_names: Vec<String>,
 
     /// Template-specialization family edges: canonical spec spelling
     /// (`formatter<int, char>`) → primary base name (`formatter`). NOT an
@@ -263,22 +211,11 @@ impl PackFacts {
         h.misc += map_str_vec(&self.template_params)
             + mcap(&self.specializes)
             + vcap(&self.receiver_names)
-            + vcap(&self.implicit_variables)
-            + vcap(&self.throwaway_names)
-            + vcap(&self.catch_all_methods)
-            + self.class_literal_member.capacity()
-            + vcap(&self.enum_members)
             + vcap(&self.import_rows)
             + self.import_template.capacity()
-            + self.contract_stub.capacity()
-            + self.return_annotation_template.capacity()
             + vcap(&self.native_type_spellings)
-            + self.static_property_sigil.capacity()
-            + self.rail_labels.iter().map(|(a, b)| a.capacity() + b.capacity()).sum::<usize>()
-            + self.rail_hints.iter().map(|a| a.capacity()).sum::<usize>()
             + self.class_named_rails.iter().map(|a| a.capacity()).sum::<usize>()
             + vcap(&self.doc_mentions)
-            + vcap(&self.type_display)
-            + vcap(&self.constructor_names);
+            + vcap(&self.type_display);
     }
 }
