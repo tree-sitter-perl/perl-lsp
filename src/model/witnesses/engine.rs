@@ -509,6 +509,8 @@ thread_local! {
     /// A cycle under the innermost settling frame gave up unsettled: its
     /// round's values read assumptions that never held.
     static UNSETTLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Open `capture` calls, outermost first.
+    static CAPTURES: RefCell<Vec<Capture>> = const { RefCell::new(Vec::new()) };
     /// Stored answers being checked (`verify`), outermost first.
     static VERIFYING: RefCell<Vec<EngineKey>> = const { RefCell::new(Vec::new()) };
     /// Depth of `untracked` scopes: reads inside one belong to a relation
@@ -561,20 +563,116 @@ pub fn note_dep(dep: Dep) {
     if UNTRACKED.with(|u| u.get()) > 0 {
         return;
     }
-    FRAMES.with(|f| {
-        if let Some(frame) = f.borrow_mut().last_mut() {
-            frame.deps.insert(dep);
+    let depth = FRAMES.with(|f| {
+        let mut frames = f.borrow_mut();
+        let depth = frames.len();
+        if let Some(frame) = frames.last_mut() {
+            frame.deps.insert(dep.clone());
+        }
+        depth
+    });
+    CAPTURES.with(|c| {
+        for cap in c.borrow_mut().iter_mut().filter(|cap| cap.depth == depth) {
+            cap.deps.insert(dep.clone());
         }
     });
 }
 
 /// Record that the innermost open frame consulted engine answer `key`.
 fn note_child(key: &EngineKey, changed: u64) {
-    FRAMES.with(|f| {
-        if let Some(frame) = f.borrow_mut().last_mut() {
+    let depth = FRAMES.with(|f| {
+        let mut frames = f.borrow_mut();
+        let depth = frames.len();
+        if let Some(frame) = frames.last_mut() {
             frame.children.insert(key.clone(), changed);
         }
+        depth
     });
+    CAPTURES.with(|c| {
+        for cap in c.borrow_mut().iter_mut().filter(|cap| cap.depth == depth) {
+            cap.children.push((key.clone(), changed));
+        }
+    });
+}
+
+/// What a computation recorded, kept by a memo beside its value so a later
+/// hit records it again (`replay`). A memo that served a value without its
+/// reads would hide them from the engine answer that hit it.
+#[derive(Debug, Default)]
+pub struct Captured {
+    deps: std::collections::BTreeSet<Dep>,
+    children: Vec<(EngineKey, u64)>,
+}
+
+struct Capture {
+    /// The frame depth the capture opened at: reads made there are its
+    /// own; deeper frames reach it through their child edge.
+    depth: usize,
+    deps: std::collections::BTreeSet<Dep>,
+    children: Vec<(EngineKey, u64)>,
+}
+
+/// Captures what the open engine computation records from here until the
+/// guard drops, for a memo to keep beside the value it is about to compute.
+/// Opened on a memo miss; scoped to the miss so captures nest in call order.
+pub(crate) struct CaptureGuard {
+    /// Index into `CAPTURES`; `None` when nothing would be recorded.
+    slot: Option<usize>,
+}
+
+impl CaptureGuard {
+    pub(crate) fn open() -> CaptureGuard {
+        if !any_frame_open() {
+            return CaptureGuard { slot: None };
+        }
+        let depth = FRAMES.with(|fr| fr.borrow().len());
+        let slot = CAPTURES.with(|c| {
+            let mut caps = c.borrow_mut();
+            caps.push(Capture { depth, deps: Default::default(), children: Vec::new() });
+            caps.len() - 1
+        });
+        CaptureGuard { slot: Some(slot) }
+    }
+
+    /// What was recorded so far. `None` when no computation was open: a
+    /// memo storing that value must not replay it as having read nothing,
+    /// so absent means "unknown" and a hit inside a computation recomputes.
+    pub(crate) fn captured(&self) -> Option<Arc<Captured>> {
+        let slot = self.slot?;
+        CAPTURES.with(|c| {
+            let caps = c.borrow();
+            let cap = &caps[slot];
+            Some(Arc::new(Captured { deps: cap.deps.clone(), children: cap.children.clone() }))
+        })
+    }
+}
+
+impl Drop for CaptureGuard {
+    fn drop(&mut self) {
+        if let Some(slot) = self.slot {
+            CAPTURES.with(|c| {
+                let mut caps = c.borrow_mut();
+                debug_assert_eq!(caps.len(), slot + 1, "captures close in the order they opened");
+                caps.truncate(slot);
+            });
+        }
+    }
+}
+
+/// Record a memo hit's captured reads into the open computation. `false`
+/// when one is open and the memo has no capture: the caller recomputes.
+pub(crate) fn replay(captured: Option<&Captured>) -> bool {
+    if !any_frame_open() {
+        return true;
+    }
+    let Some(c) = captured else { return false };
+    for d in &c.deps {
+        note_dep(d.clone());
+    }
+    for (k, changed) in &c.children {
+        note_child(k, *changed);
+    }
+    true
 }
 
 /// Is a join of the same sub's arguments, at an earlier position, already
@@ -1189,4 +1287,84 @@ pub(crate) fn with_persisted_value(node: &PersistedNode, value: Option<InferredT
 #[cfg(test)]
 pub(crate) fn decode_key(bytes: &[u8]) -> Option<EngineKey> {
     bincode::deserialize(bytes).ok()
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    fn key(name: &str) -> EngineKey {
+        EngineKey::Join(JoinKey {
+            package: "P".into(),
+            name: name.into(),
+            method: false,
+            want: JoinWant::At(0),
+        })
+    }
+
+    fn file_dep(p: &str) -> Dep {
+        Dep::File { path: PathBuf::from(p), version: 1 }
+    }
+
+    fn open(name: &str) {
+        FRAMES.with(|f| f.borrow_mut().push(Frame::open(key(name), 0, false)));
+    }
+
+    fn close() -> Frame {
+        FRAMES.with(|f| f.borrow_mut().pop()).expect("an open frame")
+    }
+
+    /// A memo hit in a later computation records what the miss read: the
+    /// provider file and the engine answer consulted beneath it.
+    #[test]
+    fn a_memo_hit_records_what_its_miss_read() {
+        open("first");
+        let captured = {
+            let guard = CaptureGuard::open();
+            note_dep(file_dep("/provider.pm"));
+            note_child(&key("child"), 7);
+            guard.captured()
+        };
+        note_dep(file_dep("/after.pm"));
+        let first = close();
+        assert!(first.deps.contains(&file_dep("/provider.pm")), "the capture does not swallow the frame's read");
+        let captured = captured.expect("a computation was open");
+        assert!(!captured.deps.contains(&file_dep("/after.pm")), "a read after the guard closed is not the memo's");
+
+        open("second");
+        assert!(replay(Some(&captured)));
+        let second = close();
+        assert!(second.deps.contains(&file_dep("/provider.pm")));
+        assert_eq!(second.children.get(&key("child")), Some(&7));
+    }
+
+    /// A value memoized outside any computation read things nobody
+    /// recorded: inside one, the hit must recompute, not replay nothing.
+    #[test]
+    fn a_capture_from_outside_a_computation_cannot_be_replayed_inside_one() {
+        let guard = CaptureGuard::open();
+        assert!(guard.captured().is_none());
+        drop(guard);
+        assert!(replay(None), "outside a computation there is nothing to record");
+        open("inside");
+        assert!(!replay(None));
+        close();
+    }
+
+    /// A read inside a nested engine frame belongs to that frame; the
+    /// capture reaches it through the child edge the nested answer leaves.
+    #[test]
+    fn a_nested_frame_read_belongs_to_the_nested_frame() {
+        open("outer");
+        let guard = CaptureGuard::open();
+        open("inner");
+        note_dep(file_dep("/deep.pm"));
+        close();
+        note_child(&key("inner"), 3);
+        let captured = guard.captured().expect("open");
+        drop(guard);
+        close();
+        assert!(!captured.deps.contains(&file_dep("/deep.pm")));
+        assert!(captured.children.contains(&(key("inner"), 3)));
+    }
 }

@@ -523,7 +523,10 @@ impl CrossFileLookup for ModuleIndex {
         &self,
         path: &std::path::Path,
         key: &crate::model::witnesses::ConsultVerdictKey,
-    ) -> Option<Arc<crate::model::witnesses::ReducedValue>> {
+    ) -> Option<(
+        Arc<crate::model::witnesses::ReducedValue>,
+        Option<Arc<crate::model::witnesses::engine::Captured>>,
+    )> {
         let guard = super::registration::sweep_answers_read()?;
         let sa = guard.as_ref()?;
         let stamp = self.core.shape_bumps.load(std::sync::atomic::Ordering::Relaxed);
@@ -548,13 +551,14 @@ impl CrossFileLookup for ModuleIndex {
         path: &std::path::Path,
         key: &crate::model::witnesses::ConsultVerdictKey,
         value: &crate::model::witnesses::ReducedValue,
+        captured: Option<Arc<crate::model::witnesses::engine::Captured>>,
     ) {
         if let Some(guard) = super::registration::sweep_answers_read() {
             if let Some(sa) = guard.as_ref() {
                 let stamp =
                     self.core.shape_bumps.load(std::sync::atomic::Ordering::Relaxed);
                 if sa.stamp_load() == stamp {
-                    sa.insert(path, key, value);
+                    sa.insert(path, key, value, captured);
                     crate::util::ghost_stats::count("sweepans.store");
                 }
             }
@@ -685,6 +689,7 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn surface_fingerprint_of(&self, path: &std::path::Path) -> Option<u64> {
+        crate::model::witnesses::engine::note_file(self, path);
         self.freshness.fingerprint_of(path)
     }
 
@@ -708,6 +713,7 @@ impl CrossFileLookup for ModuleIndex {
         path: &std::path::Path,
     ) -> Option<std::sync::Arc<crate::model::witnesses::ConclusionMap>> {
         use crate::index::conclusion_cache::Cached;
+        crate::model::witnesses::engine::note_file(self, path);
         // The Arc, not a clone of what it holds. Handing back an owned map
         // deep-copies a ~72-entry HashMap per consult, and the consult path
         // runs this tens of thousands of times per check — measured at a

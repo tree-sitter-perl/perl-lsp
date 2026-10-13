@@ -40,6 +40,7 @@ use std::sync::Arc;
 
 use crate::model::file_analysis::{CachedModule, CrossFileLookup};
 use crate::model::witnesses::tracked::Tracked;
+use crate::model::witnesses::engine::{self, Captured};
 
 /// `candidate_answer` memoizes the candidate's WHOLE contribution, which is
 /// what the caller consumes as one unit.
@@ -104,7 +105,7 @@ struct SessionState {
     /// exists to delete.
     conclusion_generation: Option<i64>,
     paths: HashMap<PathBuf, u32>,
-    memo: HashMap<CandidateKey, Arc<ReducedValue>>,
+    memo: HashMap<CandidateKey, (Arc<ReducedValue>, Option<Arc<Captured>>)>,
     /// `visible_def_candidates` is a clone + sort of the whole candidate
     /// vec per call; one walk asks for the same class millions of times.
     /// With the relation's dependency hash, replayed on a hit: a hit inside
@@ -365,14 +366,36 @@ pub(super) fn candidate_answer(
     with_session(idx, |st| {
         let id = *st.paths.get(path)?;
         let key = candidate_key(id, q);
-        let hit = st.memo.get(&key).map(Arc::clone);
-        if hit.is_some() {
-            st.stats.hits += 1;
-            crate::util::ghost_stats::count("session.memo_hit");
-        }
-        hit
+        let (value, captured) = st.memo.get(&key)?;
+        st.stats.hits += 1;
+        crate::util::ghost_stats::count("session.memo_hit");
+        Some((Arc::clone(value), captured.clone()))
     })
     .flatten()
+    .and_then(|(value, captured)| replayed(value, captured.as_deref()))
+}
+
+/// A memo hit, its captured reads recorded into the open engine
+/// computation; `None` when it has none to record and one is open.
+fn replayed(value: Arc<ReducedValue>, captured: Option<&Captured>) -> Option<Arc<ReducedValue>> {
+    if engine::replay(captured) {
+        Some(value)
+    } else {
+        crate::util::ghost_stats::count("session.memo_unreplayable");
+        None
+    }
+}
+
+/// The sweep tier's verdict for `path`, replayed like a session hit, with
+/// its capture for the session memo to keep.
+pub(super) fn sweep_answer(
+    idx: &dyn CrossFileLookup,
+    path: &Path,
+    key: &super::ConsultVerdictKey,
+) -> Option<(Arc<ReducedValue>, Option<Arc<Captured>>)> {
+    let (value, captured) = idx.sweep_consult_answer(path, key)?;
+    let value = replayed(value, captured.as_deref())?;
+    Some((value, captured))
 }
 
 /// Remember a candidate's contribution.
@@ -391,11 +414,12 @@ pub(super) fn remember_candidate_answer(
     path: &Path,
     q: &ReducerQuery,
     value: &ReducedValue,
+    captured: Option<Arc<Captured>>,
 ) {
     with_session(idx, |st| {
         let id = st.intern(path);
         let key = candidate_key(id, q);
-        st.memo.insert(key, Arc::new(value.clone()));
+        st.memo.insert(key, (Arc::new(value.clone()), captured));
         crate::util::ghost_stats::count("session.memo_store");
     });
 }

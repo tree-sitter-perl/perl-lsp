@@ -727,7 +727,10 @@ pub trait CrossFileLookup {
         &self,
         path: &std::path::Path,
         key: &crate::model::witnesses::ConsultVerdictKey,
-    ) -> Option<std::sync::Arc<crate::model::witnesses::ReducedValue>> {
+    ) -> Option<(
+        std::sync::Arc<crate::model::witnesses::ReducedValue>,
+        Option<std::sync::Arc<crate::model::witnesses::engine::Captured>>,
+    )> {
         let _ = (path, key);
         None
     }
@@ -737,8 +740,9 @@ pub trait CrossFileLookup {
         path: &std::path::Path,
         key: &crate::model::witnesses::ConsultVerdictKey,
         value: &crate::model::witnesses::ReducedValue,
+        captured: Option<std::sync::Arc<crate::model::witnesses::engine::Captured>>,
     ) {
-        let _ = (path, key, value);
+        let _ = (path, key, value, captured);
     }
     /// May `cached`'s file declare a member named `name` attributed to
     /// package `class`? The rows-backed pre-filter for the ancestor walk's

@@ -52,9 +52,15 @@ pub(super) struct SweepAnswers {
     stamp: std::sync::atomic::AtomicU64,
     map: DashMap<
         (std::path::PathBuf, crate::model::witnesses::ConsultVerdictKey),
-        Arc<crate::model::witnesses::ReducedValue>,
+        SweepVerdict,
     >,
 }
+
+/// A verdict with what its computation recorded (`engine::CaptureGuard`).
+pub(super) type SweepVerdict = (
+    Arc<crate::model::witnesses::ReducedValue>,
+    Option<Arc<crate::model::witnesses::engine::Captured>>,
+);
 
 static SWEEP_ANSWERS: std::sync::RwLock<Option<SweepAnswers>> = std::sync::RwLock::new(None);
 
@@ -74,19 +80,20 @@ impl SweepAnswers {
         &self,
         path: &std::path::Path,
         key: &crate::model::witnesses::ConsultVerdictKey,
-    ) -> Option<Arc<crate::model::witnesses::ReducedValue>> {
+    ) -> Option<SweepVerdict> {
         self.map
             .get(&(path.to_path_buf(), key.clone()))
-            .map(|e| Arc::clone(e.value()))
+            .map(|e| e.value().clone())
     }
     pub(super) fn insert(
         &self,
         path: &std::path::Path,
         key: &crate::model::witnesses::ConsultVerdictKey,
         value: &crate::model::witnesses::ReducedValue,
+        captured: Option<Arc<crate::model::witnesses::engine::Captured>>,
     ) {
         self.map
-            .insert((path.to_path_buf(), key.clone()), Arc::new(value.clone()));
+            .insert((path.to_path_buf(), key.clone()), (Arc::new(value.clone()), captured));
     }
 }
 

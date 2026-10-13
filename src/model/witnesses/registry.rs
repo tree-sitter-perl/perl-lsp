@@ -1273,17 +1273,20 @@ impl ReducerRegistry {
                         }
                         // The sweep tier, behind the session memo — a verdict
                         // another file's build already derived this sweep.
-                        if let Some(hit) =
-                            idx.sweep_consult_answer(&cached.path, &verdict_key)
+                        if let Some((hit, captured)) =
+                            super::session::sweep_answer(idx, &cached.path, &verdict_key)
                         {
                             super::session::remember_candidate_answer(
-                                idx, &cached.path, &memo_q, &hit,
+                                idx, &cached.path, &memo_q, &hit, captured,
                             );
                             if *hit != ReducedValue::None {
                                 return (*hit).clone();
                             }
                             continue;
                         }
+                        // Both memo tiers missed: what this candidate's
+                        // verdict reads is captured for them to replay.
+                        let capture = super::engine::CaptureGuard::open();
                         // The rows-backed pre-filter — same placement and
                         // memoized-skip discipline as the primary's (see
                         // `moc_cross_file_primary`); the un-attributed
@@ -1298,12 +1301,12 @@ impl ReducerRegistry {
                                     idx,
                                     &cached.path,
                                     &memo_q,
-                                    &ReducedValue::None,
+                                    &ReducedValue::None, capture.captured(),
                                 );
                                 idx.remember_sweep_consult(
                                     &cached.path,
                                     &verdict_key,
-                                    &ReducedValue::None,
+                                    &ReducedValue::None, capture.captured(),
                                 );
                                 continue;
                             }
@@ -1362,19 +1365,19 @@ impl ReducerRegistry {
                                     );
                                 }
                                 super::session::remember_candidate_answer(
-                                    idx, &cached.path, &memo_q, &v,
+                                    idx, &cached.path, &memo_q, &v, capture.captured(),
                                 );
-                                idx.remember_sweep_consult(&cached.path, &verdict_key, &v);
+                                idx.remember_sweep_consult(&cached.path, &verdict_key, &v, capture.captured());
                                 return v;
                             }
                             super::session::remember_candidate_answer(
                                 idx,
                                 &cached.path,
                                 &memo_q,
-                                &ReducedValue::None,
+                                &ReducedValue::None, capture.captured(),
                             );
                             idx.remember_sweep_consult(
-                                &cached.path, &verdict_key, &ReducedValue::None,
+                                &cached.path, &verdict_key, &ReducedValue::None, capture.captured(),
                             );
                         }
                     }
@@ -1810,6 +1813,9 @@ impl ReducerRegistry {
                     }
                     continue;
                 }
+                // The memo missed: what this candidate's verdict reads is
+                // captured for it to replay.
+                let capture = super::engine::CaptureGuard::open();
                 crate::util::ghost_stats::count("mocsite.imported_sub");
                 let full = idx.bag_present(cached);
                 let Some(sym) = full.symbols().iter().find(|s| {
@@ -1824,7 +1830,7 @@ impl ReducerRegistry {
                         idx,
                         &cached.path,
                         &memo_q,
-                        &ReducedValue::None,
+                        &ReducedValue::None, capture.captured(),
                     );
                     continue;
                 };
@@ -1833,7 +1839,7 @@ impl ReducerRegistry {
                 // A cut answer depends on the path it was reached from; only a
                 // whole one may outlive this query.
                 if state.cuts == cuts_before {
-                    super::session::remember_candidate_answer(idx, &cached.path, &memo_q, &v);
+                    super::session::remember_candidate_answer(idx, &cached.path, &memo_q, &v, capture.captured());
                 }
                 if v != ReducedValue::None {
                     return Some(v);
@@ -2087,13 +2093,16 @@ impl ReducerRegistry {
             }
             // The sweep tier, behind the (cheaper) session memo: a verdict
             // another file's build already derived this sweep.
-            if let Some(hit) = idx.sweep_consult_answer(&cached.path, &verdict_key) {
-                super::session::remember_candidate_answer(idx, &cached.path, &memo_q, &hit);
+            if let Some((hit, captured)) = super::session::sweep_answer(idx, &cached.path, &verdict_key) {
+                super::session::remember_candidate_answer(idx, &cached.path, &memo_q, &hit, captured);
                 if *hit != ReducedValue::None {
                     return Some((*hit).clone());
                 }
                 continue;
             }
+            // Both memo tiers missed: what this candidate's verdict reads is
+            // captured for them to replay.
+            let capture = super::engine::CaptureGuard::open();
             // The rows-backed pre-filter, behind both memo tiers (their hit
             // is cheaper) and ahead of the budget spend (a skip is not a
             // consult). A skip is remembered as the `None` verdict it
@@ -2109,12 +2118,12 @@ impl ReducerRegistry {
                         idx,
                         &cached.path,
                         &memo_q,
-                        &ReducedValue::None,
+                        &ReducedValue::None, capture.captured(),
                     );
                     idx.remember_sweep_consult(
                         &cached.path,
                         &verdict_key,
-                        &ReducedValue::None,
+                        &ReducedValue::None, capture.captured(),
                     );
                     continue;
                 }
@@ -2174,9 +2183,9 @@ impl ReducerRegistry {
                             // baked hit is cheap but not free, and
                             // the memo is the tier above it.
                             super::session::remember_candidate_answer(
-                                idx, &cached.path, &memo_q, &v,
+                                idx, &cached.path, &memo_q, &v, capture.captured(),
                             );
-                            idx.remember_sweep_consult(&cached.path, &verdict_key, &v);
+                            idx.remember_sweep_consult(&cached.path, &verdict_key, &v, capture.captured());
                             return Some(v);
                         }
                         // ABSENT. The spec lets this mean a proven
@@ -2279,10 +2288,10 @@ impl ReducerRegistry {
                                     idx,
                                     &cached.path,
                                     &memo_q,
-                                    &ReducedValue::None,
+                                    &ReducedValue::None, capture.captured(),
                                 );
                                 idx.remember_sweep_consult(
-                                    &cached.path, &verdict_key, &ReducedValue::None,
+                                    &cached.path, &verdict_key, &ReducedValue::None, capture.captured(),
                                 );
                                 continue;
                             }
@@ -2335,10 +2344,10 @@ impl ReducerRegistry {
                                     } else {
                                         let v = ReducedValue::Type(t);
                                         super::session::remember_candidate_answer(
-                                            idx, &cached.path, &memo_q, &v,
+                                            idx, &cached.path, &memo_q, &v, capture.captured(),
                                         );
                                         idx.remember_sweep_consult(
-                                            &cached.path, &verdict_key, &v,
+                                            &cached.path, &verdict_key, &v, capture.captured(),
                                         );
                                         return Some(v);
                                     }
@@ -2477,9 +2486,9 @@ impl ReducerRegistry {
                     idx,
                     &cached.path,
                     &memo_q,
-                    &ReducedValue::None,
+                    &ReducedValue::None, capture.captured(),
                 );
-                idx.remember_sweep_consult(&cached.path, &verdict_key, &ReducedValue::None);
+                idx.remember_sweep_consult(&cached.path, &verdict_key, &ReducedValue::None, capture.captured());
                 continue;
             }
             crate::util::ghost_stats::count("moc.provider_fetched");
@@ -2636,8 +2645,8 @@ impl ReducerRegistry {
                 );
                 debug_assert!(false, "consult pre-filter hid an answer; see log");
             }
-            super::session::remember_candidate_answer(idx, &cached.path, &memo_q, &v);
-            idx.remember_sweep_consult(&cached.path, &verdict_key, &v);
+            super::session::remember_candidate_answer(idx, &cached.path, &memo_q, &v, capture.captured());
+            idx.remember_sweep_consult(&cached.path, &verdict_key, &v, capture.captured());
             if v != ReducedValue::None {
                 return Some(v);
             }
