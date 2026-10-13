@@ -1340,9 +1340,14 @@ impl ReducerRegistry {
                             };
                         crate::util::ghost_stats::count("moc.provider_fetched");
                         crate::util::ghost_stats::count("mocsite.slot_type");
-                        let full = idx.bag_present(&cached);
+                        // Untracked: the copy only tells whether the candidate
+                        // is this very bag; its answer is read through the
+                        // consult key, which records the file itself.
+                        let full = super::engine::untracked(|| idx.bag_present(&cached));
                         if !std::ptr::eq(bag, &full.witnesses) {
-                            let v = attempt(&full, state);
+                            let v = self
+                                .consult_by_key(idx, cached, q, None)
+                                .unwrap_or_else(|| attempt(&full, state));
                             crate::util::ghost_stats::count(if v == ReducedValue::None {
                                 "moc.provider_no_answer"
                             } else {
@@ -1644,6 +1649,59 @@ impl ReducerRegistry {
     /// each call site of the sub in `file`, folded. A method call counts when
     /// its receiver is the package or a subclass, or untyped (a may-caller);
     /// a function call when it names the package or calls the bare name.
+    /// A candidate's verdict on `q` through its consult key; `None` when
+    /// the index keeps no answers (a scoped view), where the caller chases
+    /// it inline.
+    fn consult_by_key(
+        &self,
+        idx: &dyn crate::model::file_analysis::CrossFileLookup,
+        cached: &std::sync::Arc<crate::model::file_analysis::CachedModule>,
+        q: &ReducerQuery,
+        arity: Option<u32>,
+    ) -> Option<ReducedValue> {
+        idx.answer_store()?;
+        let key = EngineKey::Consult(super::engine::ConsultKey {
+            file: cached.path.clone(),
+            attachment: q.attachment.clone(),
+            framework: q.framework,
+            arity,
+            receiver: q.receiver.clone(),
+            args: q.args.clone(),
+        });
+        Some(super::engine::answer(idx, &key).reduced())
+    }
+
+    /// `EngineKey::Consult`: the candidate's bag asked the query on its own
+    /// context, with a cycle guard of its own: what it answers cannot
+    /// depend on the path that asked it.
+    pub(super) fn consult(
+        &self,
+        idx: &dyn crate::model::file_analysis::CrossFileLookup,
+        c: &super::engine::ConsultKey,
+    ) -> ReducedValue {
+        let Some(cached) = idx.cached_by_path(&c.file).read() else {
+            return ReducedValue::None;
+        };
+        let full = idx.bag_present(&cached);
+        let ctx = BagContext {
+            scopes: &full.scopes,
+            package_framework: &full.packages,
+            module_index: Some(idx),
+            package_parents: &full.packages,
+            app_surface_consumers: &full.plugin.app_surface_consumers,
+        };
+        let q = ReducerQuery {
+            attachment: &c.attachment,
+            point: None,
+            framework: c.framework,
+            arity_hint: c.arity,
+            receiver: c.receiver.clone(),
+            args: c.args.clone(),
+            context: Some(&ctx),
+        };
+        (*self.query_rec(&full.witnesses, &q, &mut QueryState::new())).clone()
+    }
+
     pub(super) fn param_contribution(
         &self,
         idx: &dyn crate::model::file_analysis::CrossFileLookup,
@@ -2515,8 +2573,10 @@ impl ReducerRegistry {
             // below asks "did the cap fire during THIS chase"
             // rather than "has it ever fired on this thread".
             let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
-            let full = crate::util::ghost_stats::timed(
-                "consult.bag_present", || idx.bag_present(cached));
+            let full = crate::util::ghost_stats::timed("consult.bag_present", || {
+                // Untracked for the same reason as the slot consult's.
+                super::engine::untracked(|| idx.bag_present(cached))
+            });
             if std::ptr::eq(bag, &full.witnesses) {
                 // Self: the reducers above already tried this bag.
                 // Not an answer about the candidate, so nothing to
@@ -2525,7 +2585,10 @@ impl ReducerRegistry {
             }
             let v = {
                 let v = crate::util::ghost_stats::timed(
-                    "consult.attempt", || attempt(&full, state));
+                    "consult.attempt", || {
+                        self.consult_by_key(idx, cached, q, q.arity_hint)
+                            .unwrap_or_else(|| attempt(&full, state))
+                    });
                 crate::util::ghost_stats::count(if v == ReducedValue::None {
                     "moc.provider_no_answer"
                 } else {
@@ -3443,6 +3506,7 @@ pub(super) fn compute_engine_key(
     match key {
         EngineKey::Join(join) => reg.param_in_join(idx, join),
         EngineKey::Contribution { join, file } => reg.param_contribution(idx, join, file),
+        EngineKey::Consult(c) => EngineValue::Value(reg.consult(idx, c)),
         EngineKey::CallbackProviders { package, name, param, index } => {
             let att = WitnessAttachment::CallbackIn {
                 package: package.clone(),

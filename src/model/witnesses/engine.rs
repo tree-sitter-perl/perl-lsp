@@ -109,6 +109,23 @@ pub enum EngineKey {
     Contribution { join: JoinKey, file: PathBuf },
     /// A callback parameter, asked of the files declaring its member's class.
     CallbackProviders { package: String, name: String, param: u32, index: u32 },
+    /// One candidate file's answer to a cross-file query.
+    Consult(ConsultKey),
+}
+
+/// What a chase asks of one candidate file: the query, point-free (a
+/// consumer's point means nothing against the candidate's spans), asked of
+/// that file's bag. As a key of its own, one candidate's verdict is
+/// computed once for every computation that asks it, and an edit to the
+/// candidate recomputes only its own verdicts.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ConsultKey {
+    pub file: PathBuf,
+    pub attachment: WitnessAttachment,
+    pub framework: FrameworkFact,
+    pub arity: Option<u32>,
+    pub receiver: Option<InferredType>,
+    pub args: Vec<InferredType>,
 }
 
 /// An engine answer.
@@ -703,7 +720,7 @@ pub fn deeper_position_of_open_join(key: &JoinKey) -> bool {
         f.borrow().iter().any(|frame| {
             let open = match &frame.key {
                 EngineKey::Join(j) | EngineKey::Contribution { join: j, .. } => j,
-                EngineKey::CallbackProviders { .. } => return false,
+                EngineKey::CallbackProviders { .. } | EngineKey::Consult(_) => return false,
             };
             open.package == key.package
                 && open.name == key.name

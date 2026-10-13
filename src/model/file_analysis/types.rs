@@ -55,6 +55,12 @@ impl PartialEq for SharedKeys {
     }
 }
 
+impl std::hash::Hash for SharedKeys {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.0.hash(h);
+    }
+}
+
 impl Serialize for SharedKeys {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         self.0.serialize(s)
@@ -83,7 +89,7 @@ pub struct Mark {
     pub value: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InferredType {
     /// `$p = Point->new(...)` — variable is an instance of ClassName.
     ClassName(String),
@@ -240,7 +246,7 @@ pub enum InferredType {
 /// **Match invariant: never `_ => …` arms.** Every consumer
 /// explicitly handles every variant. The compiler enforces this
 /// when the (deferred) `Plugin` escape hatch lands.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ParametricType {
     /// DBIC `$schema->resultset('Foo')` shape. `base` is the
     /// resolved resultset class (default
