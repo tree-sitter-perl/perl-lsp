@@ -911,7 +911,7 @@ impl SkeletonAnalysis {
                     // `recv.field` / `recv->field`: a value read. The
                     // invocant types query-time via
                     // `expr_type_at_span(invocant_span)`.
-                    SkelRefKind::Member => {
+                    SkelRefKind::MemberValue => {
                         let (inv_span, inv_text) = r.invocant.clone()?;
                         RefKind::FieldAccess {
                             invocant: crate::model::conventions::Invocant::assume_canonical(inv_text),

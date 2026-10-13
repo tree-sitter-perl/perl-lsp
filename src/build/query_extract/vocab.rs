@@ -65,10 +65,12 @@ spelled! {
         /// A `::`-qualified call (`fmt::format_to(...)`).
         QCall = "qcall",
         Method = "method",
-        /// `recv.field` / `recv->field`; joins `@member.recv` by match.
-        Member = "member",
-        /// A member token the document says is CALLED (`recv.f(…)`); at the
-        /// same token it wins over `@ref.member`, which fires there too.
+        /// A member token READ as a value (`recv.field` / `recv->field`);
+        /// joins `@member.recv` by match.
+        MemberValue = "member.value",
+        /// A member token CALLED (`recv.f(…)`). A query cannot exclude a
+        /// called member from the value pattern, so both fire at that token
+        /// and the call wins.
         MemberCall = "member.call",
         /// A type-position name.
         Type = "type",
@@ -349,8 +351,7 @@ impl Capture {
         Some(match segs.as_slice() {
             ["def", k] => C::Def { kind: DefKind::parse(k)?, part: DefPart::Node },
             ["def", k, "name"] => C::Def { kind: DefKind::parse(k)?, part: DefPart::Name },
-            ["ref", "member", "call"] => C::Ref(RefKind::MemberCall),
-            ["ref", k] => C::Ref(RefKind::parse(k)?),
+            ["ref", rest @ ..] => C::Ref(RefKind::parse(&rest.join("."))?),
             ["scope"] => C::Scope(ScopeCap::Block),
             ["scope", "sub", "implicit_receiver"] => C::Scope(ScopeCap::SubImplicitReceiver),
             ["scope", k] if !k.is_empty() => C::Scope(ScopeCap::parse(k)?),
