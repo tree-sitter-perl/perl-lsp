@@ -774,12 +774,6 @@ pub(super) fn collect_package_var(
         start: tree_sitter::Point::new(s.end.row, s.end.column.saturating_sub(base_len)),
         end: s.end,
     };
-    // `$::x` / `$main::x` / a `main`-package `our $x` all name the same global;
-    // `qualified_var_target` yields an empty package for the leading-`::`
-    // spelling, so normalize it to the `main` the decl carries.
-    fn norm(p: &str) -> &str {
-        if p.is_empty() { "main" } else { p }
-    }
     let is_our_decl = |id: crate::model::file_analysis::SymbolId| {
         let s = analysis.symbol(id);
         matches!(&s.detail, SymbolDetail::Variable { decl_kind: DeclKind::Our, .. })
@@ -807,7 +801,7 @@ pub(super) fn collect_package_var(
         if let Some((qpkg, qname)) = r.qualified_var_target(analysis.names()) {
             // Qualified `$Pkg::var` (the sigil is canonicalized to the declared
             // one, so `@arr` element reads `$Pkg::arr[0]` still match `@arr`).
-            if norm(qpkg) == package && qname == name {
+            if qpkg == package && qname == name {
                 out.push(RefLocation {
                     key: key.clone(),
                     span: tail(r.span),

@@ -83,6 +83,10 @@ ignore = "0.4"
 log = "0.4"
 env_logger = "0.11"
 rhai = { version = "1.23", features = ["sync", "serde"] }
+# Grows the stack onto a fresh segment when a witness-query chase nears the
+# end of it, so recursion depth is a budget (`QUERY_REC_DEPTH_CAP`), not a
+# function of the thread's stack size and the build profile's frame size.
+stacker = "0.1"
 # Pack grammars — optional, runtime deps under their language feature.
 # (Also dev-deps below so the spike tests always have them.)
 tree-sitter-cpp = { version = "0.23", optional = true }

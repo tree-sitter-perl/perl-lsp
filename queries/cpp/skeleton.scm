@@ -340,18 +340,25 @@
 (function_definition !type) @ool.def
 
 ; ---- links: one level each, which the driver chains to any depth (no
-; fixed-depth pattern reaches `Foo**& A::B::m()`). A declarator wrapper links
-; to its operand, a definition and a function declarator to what they declare,
-; a qualified name to its scope and name, and a templated owner (`Buf<T>::grow`)
+; fixed-depth pattern reaches `Foo**& A::B::m()`). `@link.from.<walk>` names
+; the walk a link belongs to; a walk starts at its root capture and reads only
+; its own links.
+;
+; The `ool` walk, rooted at `@ool.def` above: a definition and a function
+; declarator link to what they declare, a declarator wrapper to its operand, a
+; qualified name to its scope and name, and a templated owner (`Buf<T>::grow`)
 ; to the base name it files under. ----
-(function_definition declarator: (_) @link.declares) @link.from
-(function_declarator declarator: (_) @link.declares) @link.from
-(pointer_declarator declarator: (_) @link.inner) @link.from
-(reference_declarator . (_) @link.inner) @link.from
-(parenthesized_declarator . (_) @link.inner) @link.from
-(qualified_identifier scope: (_) @link.scope) @link.from
-(qualified_identifier name: (_) @link.name) @link.from
-(template_type name: (_) @link.base) @link.from
+(function_definition declarator: (_) @link.declares) @link.from.ool
+(function_declarator declarator: (_) @link.declares) @link.from.ool
+(pointer_declarator declarator: (_) @link.inner) @link.from.ool
+(reference_declarator . (_) @link.inner) @link.from.ool
+(parenthesized_declarator . (_) @link.inner) @link.from.ool
+(qualified_identifier scope: (_) @link.scope) @link.from.ool
+(qualified_identifier name: (_) @link.name) @link.from.ool
+(template_type name: (_) @link.base) @link.from.ool
+; The `qualifier` walk, rooted at each `@qualifier`: a templated owner to the
+; base name it files under.
+(template_type name: (_) @link.base) @link.from.qualifier
 (function_definition
   declarator: (pointer_declarator
     declarator: (function_declarator

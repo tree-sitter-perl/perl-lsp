@@ -85,7 +85,7 @@ pub struct ArgInfo {
     /// Raw source text of the argument node.
     pub text: String,
     /// Constant-folded string if the arg is a literal/bareword or resolves
-    /// through `constant_strings`. `None` means "runtime/unknown".
+    /// through the constant table. `None` means "runtime/unknown".
     /// Multi-valued folds (a loop variable over `qw(...)`, the postfix
     /// `for` topic) surface their FIRST value here for back-compat;
     /// `string_values` carries them all.
@@ -671,7 +671,7 @@ pub enum EmitAction {
     /// **Known limitation: `use constant`.** `accumulate_use_constant`
     /// reads the value side of the fat-comma pair from the CST. A
     /// synthetic `SyntheticUse { module: "constant", ... }` has no
-    /// source to scan, so `constant_strings` does NOT get populated —
+    /// source to scan, so the constant table does NOT get populated —
     /// the rest of the use-handling (Module symbol, package_uses,
     /// Import entry, plugin re-dispatch) still runs. Kit plugins
     /// that need to inject constants should request a dedicated
@@ -765,7 +765,7 @@ pub struct CaptureData {
     pub text: String,
     pub span: Span,
     /// Projection `str` — constant-folded string value (literals,
-    /// barewords, `constant_strings`-resolved vars).
+    /// barewords, constant-table-resolved vars).
     #[serde(rename = "str", default)]
     pub string_value: Option<String>,
     /// Projection `strs` — every fold candidate (loop/`qw` fan-out).

@@ -137,6 +137,19 @@ fn fq_scalar_read_resolves_same_file() {
 }
 
 #[test]
+fn root_qualified_read_resolves_to_main() {
+    // `$::x` is `$main::x`: it binds to `main`'s `our $x`.
+    let fa = build_fa("our $x = 1;\npackage Other;\nmy $a = $::x;\n");
+    let decl = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "$x" && s.package.as_deref() == Some("main"))
+        .expect("our $x in main should be a symbol");
+    let read = fa.refs().iter().find(|r| r.target_name == "$::x").expect("$::x should emit a Variable ref");
+    assert_eq!(read.resolved_symbol(), Some(decl.id));
+}
+
+#[test]
 fn fq_array_read_resolves_same_file() {
     let src = "package Pkg;\nour @arr = (1, 2);\npackage Main;\nmy @b = @Pkg::arr;\n";
     let fa = build_fa(src);
@@ -1141,7 +1154,7 @@ fn multiple_name_form_use_constants_each_register() {
     // Several separate NAME-form `use constant` statements in one package:
     // each declares its own package-global sub. The use-dedup key carries the
     // statement span, so identical work identity at different spans (the
-    // constant name isn't folded into `constant_strings` when `imports` is
+    // constant name isn't folded into the constant table when `imports` is
     // extracted, so it's empty for all of them) no longer collapses past the
     // first.
     let src = r#"package Foo;
@@ -1269,4 +1282,41 @@ fn shift_invocant_typed_like_at_underscore() {
         build_fa("package W;\nsub go { 1 }\nsub f { my ($self) = @_; $self->go(); }\n");
     assert!(is_class_w(&shift_fa), "shift-extracted $self must type as ClassName(W)");
     assert!(is_class_w(&at_fa), "@_-extracted $self must type as ClassName(W)");
+}
+
+/// A qualified export var on the LEFT is the variable being assigned, not a
+/// splice of another package's exports: `@Other::EXPORT_OK = qw(x)` adds no
+/// re-export edge to `Other`.
+#[test]
+fn an_assigned_qualified_export_var_is_not_a_reexport() {
+    let fa = build_fa("package Mine;\n@Other::EXPORT_OK = qw(x);\n1;\n");
+    assert!(
+        fa.reexport_modules.is_empty(),
+        "the LHS names the target, not a source: {:?}",
+        fa.reexport_modules
+    );
+}
+
+/// The RHS splice still is one.
+#[test]
+fn a_spliced_qualified_export_var_is_a_reexport() {
+    let fa = build_fa("package Mine;\nour @EXPORT_OK = ('own', @Other::EXPORT_OK);\n1;\n");
+    assert_eq!(fa.reexport_modules, vec!["Other".to_string()]);
+}
+
+/// Reassigning an array replaces its folded value: the left `@names` is not
+/// read as a value, so the loop installs only the second list's names.
+#[test]
+fn reassigning_an_array_replaces_its_folded_names() {
+    let fa = build_fa(
+        "package Gen;\nour @names = qw(alpha);\n@names = qw(beta);\nfor my $m (@names) { no strict 'refs'; *{$m} = sub { 1 }; }\n1;\n",
+    );
+    let subs: Vec<&str> = fa
+        .symbols()
+        .iter()
+        .filter(|s| matches!(s.kind, SymKind::Sub))
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(subs.contains(&"beta"), "the reassigned name is installed: {subs:?}");
+    assert!(!subs.contains(&"alpha"), "the replaced name is not: {subs:?}");
 }

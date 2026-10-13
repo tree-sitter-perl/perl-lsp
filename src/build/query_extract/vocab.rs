@@ -182,11 +182,32 @@ spelled! {
 }
 
 spelled! {
+    /// The walk a link belongs to, named by its `@link.from.<walk>` suffix.
+    /// A walk starts at its root capture and follows only its own links, so
+    /// two walks never read each other's edges.
+    pub enum LinkWalk {
+        /// An out-of-line definition's declarator, down to its qualified name.
+        Ool = "ool",
+        /// A `@qualifier` owner, to the base name a templated owner files under.
+        Qualifier = "qualifier",
+    }
+}
+
+impl LinkWalk {
+    /// The capture a walk starts from.
+    pub fn root(self) -> Capture {
+        match self {
+            LinkWalk::Ool => Capture::OolDef,
+            LinkWalk::Qualifier => Capture::Qualifier,
+        }
+    }
+}
+
+spelled! {
     /// One level of structure the query states and the driver chains to any
-    /// depth: `@link.from` is the node, each other capture in the match is
+    /// depth: the match's `@link.from.<walk>` is the node, each `@link.<rel>`
     /// the node it links to by that relation.
     pub enum LinkCap {
-        From = "from",
         /// A transparent wrapper's operand (`*p`, `&r`, `(d)` declarators).
         Inner = "inner",
         /// What a definition or function declarator declares.
@@ -251,6 +272,8 @@ pub enum Capture {
     NsInline,
     /// A field typed by an anonymous aggregate.
     AnonAggMember,
+    /// The node a pattern's links start from, and the walk they belong to.
+    LinkFrom(LinkWalk),
     Link(LinkCap),
 }
 
@@ -312,6 +335,7 @@ impl Capture {
             ["spec", "primary"] => C::SpecPrimary,
             ["ns", "inline"] => C::NsInline,
             ["anonagg", "member"] => C::AnonAggMember,
+            ["link", "from", w] => C::LinkFrom(LinkWalk::parse(w)?),
             ["link", k] => C::Link(LinkCap::parse(k)?),
             _ => return None,
         })
@@ -362,6 +386,7 @@ impl fmt::Display for Capture {
             C::SpecPrimary => f.write_str("spec.primary"),
             C::NsInline => f.write_str("ns.inline"),
             C::AnonAggMember => f.write_str("anonagg.member"),
+            C::LinkFrom(w) => write!(f, "link.from.{w}"),
             C::Link(k) => write!(f, "link.{k}"),
         }
     }
@@ -377,10 +402,22 @@ pub(super) fn capture_table(names: &[&str]) -> Result<Vec<Option<Capture>>, Unkn
         .collect()
 }
 
-/// A `@link.<rel>` names a node one level from its match's `@link.from`,
-/// so a pattern that links captures exactly one `from`. Checked per pattern
-/// when the query compiles; returns the offending pattern's start byte.
-pub(super) fn check_links(query: &tree_sitter::Query, captures: &[Option<Capture>]) -> Result<(), usize> {
+/// Why a query document's links are malformed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum LinkError {
+    /// A pattern with a `@link.<rel>` lacks exactly one `@link.from.<walk>`,
+    /// or one with a `from` links nothing. Carries the pattern's start byte.
+    Pattern(usize),
+    /// The document links for a walk whose root capture it never uses, so
+    /// nothing would read those links.
+    Unrooted(LinkWalk),
+}
+
+/// A `@link.<rel>` names a node one level from its match's `@link.from.<walk>`,
+/// so a pattern that links captures exactly one `from`, and a walk the
+/// document links for must have its root in the document. Checked when the
+/// query compiles.
+pub(super) fn check_links(query: &tree_sitter::Query, captures: &[Option<Capture>]) -> Result<(), LinkError> {
     use tree_sitter::CaptureQuantifier as Q;
     for p in 0..query.pattern_count() {
         let present: Vec<(Capture, Q)> = captures
@@ -388,11 +425,19 @@ pub(super) fn check_links(query: &tree_sitter::Query, captures: &[Option<Capture
             .zip(query.capture_quantifiers(p))
             .filter_map(|(c, q)| c.filter(|_| *q != Q::Zero).map(|c| (c, *q)))
             .collect();
-        let links = present.iter().any(|(c, _)| matches!(c, Capture::Link(r) if *r != LinkCap::From));
+        let links = present.iter().any(|(c, _)| matches!(c, Capture::Link(_)));
         let froms: Vec<Q> =
-            present.iter().filter(|(c, _)| *c == Capture::Link(LinkCap::From)).map(|(_, q)| *q).collect();
-        if links && froms != [Q::One] {
-            return Err(query.start_byte_for_pattern(p));
+            present.iter().filter(|(c, _)| matches!(c, Capture::LinkFrom(_))).map(|(_, q)| *q).collect();
+        if (links && froms != [Q::One]) || (!links && !froms.is_empty()) {
+            return Err(LinkError::Pattern(query.start_byte_for_pattern(p)));
+        }
+    }
+    for walk in captures.iter().flatten().filter_map(|c| match c {
+        Capture::LinkFrom(w) => Some(*w),
+        _ => None,
+    }) {
+        if !captures.contains(&Some(walk.root())) {
+            return Err(LinkError::Unrooted(walk));
         }
     }
     Ok(())
