@@ -132,6 +132,25 @@ fn positional_arg(args: Option<&[CallArg]>, i: u32) -> Option<WitnessAttachment>
 type VisitedKey = (usize, WitnessAttachment, Option<String>, Option<u32>, Option<Point>);
 type VisitedSet = std::collections::HashSet<VisitedKey>;
 
+/// Whether a consult candidate is the file whose bag is being chased. The
+/// query's origin answers by path; only an origin-less query (a root read
+/// with no file identity) pays a bag fetch to compare identities.
+fn consults_self(
+    bag: &WitnessBag,
+    q: &ReducerQuery,
+    idx: &dyn crate::model::file_analysis::CrossFileLookup,
+    cached: &std::sync::Arc<crate::model::file_analysis::CachedModule>,
+) -> bool {
+    match q.context.and_then(|c| c.origin) {
+        Some(origin) => origin == cached.path.as_path(),
+        None => {
+            crate::util::ghost_stats::count("consult.self_fetch");
+            let full = super::engine::untracked(|| idx.bag_present(cached));
+            std::ptr::eq(bag, &full.witnesses)
+        }
+    }
+}
+
 fn visited_key(bag: &WitnessBag, q: &ReducerQuery) -> VisitedKey {
     let point = match q.attachment {
         WitnessAttachment::Variable { .. } => q.point,
@@ -1320,6 +1339,7 @@ impl ReducerRegistry {
                                     module_index: Some(idx),
                                     package_parents: &full.packages,
                                     app_surface_consumers: &full.plugin.app_surface_consumers,
+                                    origin: Some(&cached.path),
                                 };
                                 let sub_q = ReducerQuery {
                                     attachment: q.attachment,
@@ -1343,11 +1363,13 @@ impl ReducerRegistry {
                         // Untracked: the copy only tells whether the candidate
                         // is this very bag; its answer is read through the
                         // consult key, which records the file itself.
-                        let full = super::engine::untracked(|| idx.bag_present(&cached));
-                        if !std::ptr::eq(bag, &full.witnesses) {
+                        if !consults_self(bag, q, idx, &cached) {
                             let v = self
                                 .consult_by_key(idx, cached, q, None)
-                                .unwrap_or_else(|| attempt(&full, state));
+                                .unwrap_or_else(|| {
+                                    let full = super::engine::untracked(|| idx.bag_present(&cached));
+                                    attempt(&full, state)
+                                });
                             crate::util::ghost_stats::count(if v == ReducedValue::None {
                                 "moc.provider_no_answer"
                             } else {
@@ -1432,14 +1454,15 @@ impl ReducerRegistry {
                     for cached in idx.visible_def_candidates(name).read() {
                         crate::util::ghost_stats::count("moc.provider_fetched");
                         crate::util::ghost_stats::count("mocsite.type_name");
-                        let full = idx.bag_present(&cached);
-                        if !std::ptr::eq(bag, &full.witnesses) {
+                        if !consults_self(bag, q, idx, &cached) {
+                            let full = idx.bag_present(&cached);
                             let cached_ctx = BagContext {
                                 scopes: &full.scopes,
                                 package_framework: &full.packages,
                                 module_index: Some(idx),
                                 package_parents: &full.packages,
                                 app_surface_consumers: &full.plugin.app_surface_consumers,
+                                origin: Some(&cached.path),
                             };
                             let sub_q = ReducerQuery {
                                 attachment: q.attachment,
@@ -1688,6 +1711,7 @@ impl ReducerRegistry {
             module_index: Some(idx),
             package_parents: &full.packages,
             app_surface_consumers: &full.plugin.app_surface_consumers,
+            origin: Some(&c.file),
         };
         let q = ReducerQuery {
             attachment: &c.attachment,
@@ -1711,14 +1735,14 @@ impl ReducerRegistry {
         join: &JoinKey,
         file: &std::path::Path,
     ) -> EngineValue {
-        let Some(cached) = super::engine::caller_view(idx, file) else { return EngineValue::NOTHING };
+        let Some(cached) = crate::util::ghost_stats::timed("contrib.caller_view", || super::engine::caller_view(idx, file)) else { return EngineValue::NOTHING };
         let key = crate::model::conventions::name_match_key(&join.name, &crate::model::conventions::PERL_SPELLINGS);
-        let mut read = idx.caller_slice(&cached, &key);
+        let mut read = crate::util::ghost_stats::timed("contrib.slice_read", || idx.caller_slice(&cached, &key));
         // A read the cut left out widens the cut and asks again; each round
         // adds what the last one minted, so a few rounds reach every read.
         let mut rounds = 0;
         let value = loop {
-            let value = self.contribution_in(idx, join, &read);
+            let value = crate::util::ghost_stats::timed("contrib.query", || self.contribution_in(idx, join, &read, file));
             let misses = super::take_cut_misses(read.slice.witnesses.generation());
             if misses.is_empty() {
                 break value;
@@ -1727,14 +1751,14 @@ impl ReducerRegistry {
             if rounds > 8 {
                 crate::util::ghost_stats::count("caller_slice.widen_gave_up");
                 let whole = super::engine::caller_view_whole(idx, file, &key);
-                break whole.map_or(value, |w| self.contribution_in(idx, join, &w));
+                break whole.map_or(value, |w| self.contribution_in(idx, join, &w, file));
             }
-            read = idx.widen_caller_slice(&cached, &key, &read, misses);
+            read = crate::util::ghost_stats::timed("contrib.widen", || idx.widen_caller_slice(&cached, &key, &read, misses));
         };
         if slice_equiv() {
             let whole = super::engine::untracked(|| super::engine::caller_view_whole(idx, file, &key));
             if let Some(whole) = whole {
-                let control = self.contribution_in(idx, join, &whole);
+                let control = self.contribution_in(idx, join, &whole, file);
                 if control != value {
                     crate::util::ghost_stats::count("caller_slice.equiv_mismatch");
                     eprintln!(
@@ -1757,6 +1781,7 @@ impl ReducerRegistry {
         idx: &dyn crate::model::file_analysis::CrossFileLookup,
         join: &JoinKey,
         read: &super::caller_slice::CallerRead,
+        origin: &std::path::Path,
     ) -> EngineValue {
         let (package, name) = (join.package.as_str(), join.name.as_str());
         let (frame, full) = (&*read.frame, &*read.slice);
@@ -1769,6 +1794,7 @@ impl ReducerRegistry {
             module_index: Some(idx),
             package_parents: &frame.packages,
             app_surface_consumers: &frame.app_surface_consumers,
+            origin: Some(origin),
         };
         let mut joined: Option<InferredType> = None;
         for &(ri, method) in &full.calls {
@@ -1864,6 +1890,7 @@ impl ReducerRegistry {
             module_index: Some(idx),
             package_parents: &full.packages,
             app_surface_consumers: &full.plugin.app_surface_consumers,
+            origin: None,
         };
         let att = WitnessAttachment::Symbol(sid);
         let sub_q = ReducerQuery {
@@ -2085,6 +2112,7 @@ impl ReducerRegistry {
                 module_index: Some(idx),
                 package_parents: &full.packages,
                 app_surface_consumers: &full.plugin.app_surface_consumers,
+                origin: Some(&cached.path),
             };
             let sub_q = ReducerQuery {
                 attachment,
@@ -2159,6 +2187,7 @@ impl ReducerRegistry {
                         module_index: Some(idx),
                         package_parents: &full.packages,
                         app_surface_consumers: &full.plugin.app_surface_consumers,
+                        origin: Some(&cached.path),
                     };
                     let sub_q = ReducerQuery {
                         attachment: q.attachment,
@@ -2544,6 +2573,7 @@ impl ReducerRegistry {
                         module_index: None,
                         package_parents: &full.packages,
                         app_surface_consumers: &full.plugin.app_surface_consumers,
+                        origin: None,
                     };
                     let sub_q = ReducerQuery {
                         attachment: q.attachment,
@@ -2615,11 +2645,7 @@ impl ReducerRegistry {
             // below asks "did the cap fire during THIS chase"
             // rather than "has it ever fired on this thread".
             let truncations_before = QUERY_REC_TRUNCATIONS.with(|c| c.get());
-            let full = crate::util::ghost_stats::timed("consult.bag_present", || {
-                // Untracked for the same reason as the slot consult's.
-                super::engine::untracked(|| idx.bag_present(cached))
-            });
-            if std::ptr::eq(bag, &full.witnesses) {
+            if consults_self(bag, q, idx, cached) {
                 // Self: the reducers above already tried this bag.
                 // Not an answer about the candidate, so nothing to
                 // remember either.
@@ -2629,7 +2655,13 @@ impl ReducerRegistry {
                 let v = crate::util::ghost_stats::timed(
                     "consult.attempt", || {
                         self.consult_by_key(idx, cached, q, q.arity_hint)
-                            .unwrap_or_else(|| attempt(&full, state))
+                            .unwrap_or_else(|| {
+                                let full = crate::util::ghost_stats::timed("consult.bag_present", || {
+                                    // Untracked: the consult key records the file.
+                                    super::engine::untracked(|| idx.bag_present(cached))
+                                });
+                                attempt(&full, state)
+                            })
                     });
                 crate::util::ghost_stats::count(if v == ReducedValue::None {
                     "moc.provider_no_answer"
@@ -2689,6 +2721,7 @@ impl ReducerRegistry {
                     // filtered the targets included the key being
                     // chased, so it matched every time. A
                     // classifier that cannot fail is not one.
+                    let full = super::engine::untracked(|| idx.bag_present(cached));
                     let candidate_key = visited_key(&full.witnesses, q);
                     let excused = if truncations_before
                         != QUERY_REC_TRUNCATIONS.with(|c| c.get())

@@ -58,6 +58,10 @@ pub struct BagContext<'a> {
     /// parent via `parents_of`, matching the FA-side ancestor walks.
     /// Empty for in-file callers that don't carry consumer state.
     pub app_surface_consumers: &'a [String],
+    /// The file whose bag this context reads, when the reader knows it:
+    /// lets a candidate walk tell "this very file" by path instead of by
+    /// fetching the candidate's bag to compare.
+    pub origin: Option<&'a std::path::Path>,
 }
 
 impl crate::model::file_analysis::ClassOrder for BagContext<'_> {
