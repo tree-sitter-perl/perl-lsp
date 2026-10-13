@@ -28,6 +28,9 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         return;
     }
     let m = &st.members;
+    if ref_kind == RefKind::Member && m.called_members.contains(&(e.start_byte, e.end_byte)) {
+        return;
+    }
     let simple = m.member_simple.get(&e.match_id).copied().unwrap_or(false);
     let member_op = simple.then(|| m.member_op_raw.get(&e.match_id).copied()).flatten();
     // Reset-via-method: a rebinding method call on a simple-var
@@ -37,16 +40,12 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     // window (and the narrowing cutoff) end there, sparing the
     // receiver read itself. The pack owns which method names
     // rebind (cpp vocab, like its op_map).
-    if ref_kind == RefKind::Member && (pack.rebind_method)(&e.text) && simple {
+    if ref_kind == RefKind::MemberCall && (pack.rebind_method)(&e.text) && simple {
         if let Some((recv_span, recv_text)) = m.member_recv.get(&e.match_id) {
             st.flow.flow_rebinds.push(((pack.shape_name)(recv_text), st.cur_scope, recv_span.start));
         }
     }
-    // A call ref's arg list opens right where its callee / method token
-    // ends; plain (uncalled) member/type refs have no adjacent arg list.
-    let arg_count = matches!(ref_kind, RefKind::Call | RefKind::QCall | RefKind::Member)
-        .then(|| m.arg_counts_by_start.get(&(e.end.row, e.end.column)).copied())
-        .flatten();
+    let arg_count = m.arg_counts_by_match.get(&e.match_id).copied();
     st.out.refs.push(SkelRef {
         kind: ref_kind,
         name: (pack.shape_name)(&e.text),
@@ -56,7 +55,5 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         invocant: m.member_recv.get(&e.match_id).cloned(),
         member_op,
         arg_count,
-        // A member token with no argument list beside it reads a value.
-        value_read: ref_kind == RefKind::Member && arg_count.is_none(),
     });
 }
