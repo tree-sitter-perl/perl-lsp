@@ -1270,3 +1270,40 @@ fn shift_invocant_typed_like_at_underscore() {
     assert!(is_class_w(&shift_fa), "shift-extracted $self must type as ClassName(W)");
     assert!(is_class_w(&at_fa), "@_-extracted $self must type as ClassName(W)");
 }
+
+/// A qualified export var on the LEFT is the variable being assigned, not a
+/// splice of another package's exports: `@Other::EXPORT_OK = qw(x)` adds no
+/// re-export edge to `Other`.
+#[test]
+fn an_assigned_qualified_export_var_is_not_a_reexport() {
+    let fa = build_fa("package Mine;\n@Other::EXPORT_OK = qw(x);\n1;\n");
+    assert!(
+        fa.reexport_modules.is_empty(),
+        "the LHS names the target, not a source: {:?}",
+        fa.reexport_modules
+    );
+}
+
+/// The RHS splice still is one.
+#[test]
+fn a_spliced_qualified_export_var_is_a_reexport() {
+    let fa = build_fa("package Mine;\nour @EXPORT_OK = ('own', @Other::EXPORT_OK);\n1;\n");
+    assert_eq!(fa.reexport_modules, vec!["Other".to_string()]);
+}
+
+/// Reassigning an array replaces its folded value: the left `@names` is not
+/// read as a value, so the loop installs only the second list's names.
+#[test]
+fn reassigning_an_array_replaces_its_folded_names() {
+    let fa = build_fa(
+        "package Gen;\nour @names = qw(alpha);\n@names = qw(beta);\nfor my $m (@names) { no strict 'refs'; *{$m} = sub { 1 }; }\n1;\n",
+    );
+    let subs: Vec<&str> = fa
+        .symbols()
+        .iter()
+        .filter(|s| matches!(s.kind, SymKind::Sub))
+        .map(|s| s.name.as_str())
+        .collect();
+    assert!(subs.contains(&"beta"), "the reassigned name is installed: {subs:?}");
+    assert!(!subs.contains(&"alpha"), "the replaced name is not: {subs:?}");
+}
