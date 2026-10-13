@@ -79,7 +79,7 @@ fn arc_of(pack: &ModuleIndex, path: &Path) -> usize {
     let mut found = None;
     pack.for_each_registered_file(&mut |cm| {
         if cm.path == path {
-            found = Some(Arc::as_ptr(&cm.analysis) as usize);
+            found = Some(Arc::as_ptr(&cm.analysis()) as usize);
         }
     });
     found.expect("registered")
@@ -297,7 +297,7 @@ fn registered(pack: &ModuleIndex, path: &Path) -> Arc<FileAnalysis> {
     let mut found = None;
     pack.for_each_registered_file(&mut |cm| {
         if cm.path == canon {
-            found = Some(Arc::clone(&cm.analysis));
+            found = Some(Arc::clone(&cm.analysis()));
         }
     });
     found.expect("registered")

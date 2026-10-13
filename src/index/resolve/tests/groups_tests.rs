@@ -2,6 +2,8 @@
 //! implementations verb (incl. the cpp pack_symmetry lanes).
 
 use super::*;
+#[allow(unused_imports)]
+use crate::index::sealed::Unsealed;
 
 // ---- resolve_symbol: the single cursor→target entry point ----
 
@@ -1658,7 +1660,7 @@ mod pack_symmetry {
         assert!(origin.path.ends_with("use.c"));
         let cs = resolve(
             &store,
-            &origin.analysis,
+            &origin.analysis(),
             FileKey::Path(PathBuf::from("/fake/vis/use.c")),
             tree_sitter::Point { row: 1, column: 16 }, // on OP_VIS_A
             Some(&idx),
@@ -1708,7 +1710,7 @@ mod pack_symmetry {
         assert!(origin2.path.ends_with("use2.c"));
         let cs2 = resolve(
             &store,
-            &origin2.analysis,
+            &origin2.analysis(),
             FileKey::Path(PathBuf::from("/fake/vis/use2.c")),
             tree_sitter::Point { row: 1, column: 16 },
             Some(&idx),
@@ -1774,7 +1776,7 @@ mod pack_symmetry {
         assert!(origin.path.ends_with("state.h"));
         let cs = resolve(
             &store,
-            &origin.analysis,
+            &origin.analysis(),
             FileKey::Path(PathBuf::from("/fake/dd/state.h")),
             tree_sitter::Point { row: 0, column: 18 }, // on `g_state`
             Some(&idx),
@@ -1835,7 +1837,7 @@ mod pack_symmetry {
         assert!(origin.path.ends_with("writer.cc"));
         let cs = resolve(
             &store,
-            &origin.analysis,
+            &origin.analysis(),
             FileKey::Path(PathBuf::from("/fake/mt/writer.cc")),
             tree_sitter::Point { row: 1, column: 12 }, // on `Add`
             Some(&idx),
@@ -1863,7 +1865,7 @@ mod pack_symmetry {
         assert!(hdr_origin.path.ends_with("memtable.h"));
         let cs2 = resolve(
             &store,
-            &hdr_origin.analysis,
+            &hdr_origin.analysis(),
             FileKey::Path(PathBuf::from("/fake/mt/memtable.h")),
             tree_sitter::Point { row: 1, column: 7 }, // on `Add` in the decl
             Some(&idx),
@@ -1914,7 +1916,7 @@ mod pack_symmetry {
         assert!(origin.path.ends_with("lib.c"));
         let cs = resolve(
             &store,
-            &origin.analysis,
+            &origin.analysis(),
             FileKey::Path(PathBuf::from("/fake/inc/lib.c")),
             tree_sitter::Point { row: 0, column: 4 }, // on the def's name
             Some(&idx),
@@ -1967,7 +1969,7 @@ mod pack_symmetry {
         let origin = idx.get_cached("f").expect("use.c registered by its fn name");
         let cs = resolve(
             &store,
-            &origin.analysis,
+            &origin.analysis(),
             FileKey::Path(dir.join("use.c")),
             tree_sitter::Point { row: 1, column: 16 }, // on OP_HOV_A
             Some(&idx),
@@ -1987,7 +1989,7 @@ mod pack_symmetry {
         // NEITHER: a token-less position answers no verb.
         let cs_blank = resolve(
             &store,
-            &origin.analysis,
+            &origin.analysis(),
             FileKey::Path(dir.join("use.c")),
             tree_sitter::Point { row: 2, column: 0 }, // the closing `}` line
             Some(&idx),

@@ -481,7 +481,7 @@ fn get_cached_scoped_prefers_reachable_same_name_class() {
 
     let has = |m: &Option<Arc<CachedModule>>, name: &str| {
         m.as_ref()
-            .is_some_and(|c| c.analysis.symbols().iter().any(|s| s.name == name))
+            .is_some_and(|c| c.analysis().symbols().iter().any(|s| s.name == name))
     };
     let scope = |p: &str| -> HashSet<String> { [p.to_string()].into_iter().collect() };
 
@@ -557,7 +557,7 @@ fn unregister_file_removes_defs_and_repicks_winner() {
 
     let has = |m: &Option<Arc<CachedModule>>, name: &str| {
         m.as_ref()
-            .is_some_and(|c| c.analysis.symbols().iter().any(|s| s.name == name))
+            .is_some_and(|c| c.analysis().symbols().iter().any(|s| s.name == name))
     };
     // a.cpp holds the winner slot (smallest path).
     assert!(has(&idx.get_cached("Box"), "a_only"));
