@@ -306,6 +306,8 @@ struct Builder<'a> {
     pod_texts: Vec<String>,
     /// Parent classes for each package (from use parent/base, @ISA, class :isa).
     package_parents: crate::model::file_analysis::PackageParents,
+    /// `invocant_type_at_node` answers by CST node; see `InvocantMemo`.
+    invocant_memo: std::cell::RefCell<chain::InvocantMemo>,
     /// Modules the current package has `use`d, in source order. Used by
     /// `PluginRegistry::applicable` for `Trigger::UsesModule` matching.
     package_uses: std::collections::HashMap<String, Vec<String>>,

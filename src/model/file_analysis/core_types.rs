@@ -205,6 +205,14 @@ impl Span {
         (self.start.row, self.start.column) <= (other.start.row, other.start.column)
             && (other.end.row, other.end.column) <= (self.end.row, self.end.column)
     }
+
+    /// Sort key that puts a span before any span enclosing it. Passes that
+    /// visit nested calls inner-first sort on it, so each outer call finds
+    /// its receiver already answered.
+    pub fn nesting_key(&self) -> (usize, usize) {
+        let rows = self.end.row - self.start.row;
+        (rows, if rows == 0 { self.end.column - self.start.column } else { self.end.column })
+    }
 }
 
 /// How a language spells names: the separator its qualified names split on

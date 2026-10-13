@@ -303,6 +303,7 @@ fn build_once(
         method_call_bindings: Vec::new(),
         pod_texts: Vec::new(),
         package_parents: Default::default(),
+        invocant_memo: Default::default(),
         package_uses: std::collections::HashMap::new(),
         use_dedup: std::collections::HashSet::new(),
         dispatch_dedup: std::collections::HashSet::new(),

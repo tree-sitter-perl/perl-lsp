@@ -150,14 +150,20 @@ impl FoldMemoScope {
     /// `PERL_LSP_NO_FOLD_MEMO=1` leaves the scope closed: the A/B control,
     /// and the check that the memo changes no answer.
     pub(crate) fn enter() -> Self {
-        static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let disabled = *DISABLED.get_or_init(|| std::env::var_os("PERL_LSP_NO_FOLD_MEMO").is_some());
-        #[cfg(test)]
-        let disabled = disabled || FOLD_MEMO_FORCED_OFF.with(|c| c.get());
-        let fresh = (!disabled).then(FoldMemo::default);
+        let fresh = (!build_memos_disabled()).then(FoldMemo::default);
         let outer = FOLD_MEMO.with(|m| std::mem::replace(&mut *m.borrow_mut(), fresh));
         FoldMemoScope { outer }
     }
+}
+
+/// `PERL_LSP_NO_FOLD_MEMO=1` (or `without_fold_memo` in tests) turns off
+/// every memo that shares answers across a build's queries, as one switch.
+pub(crate) fn build_memos_disabled() -> bool {
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let disabled = *DISABLED.get_or_init(|| std::env::var_os("PERL_LSP_NO_FOLD_MEMO").is_some());
+    #[cfg(test)]
+    let disabled = disabled || FOLD_MEMO_FORCED_OFF.with(|c| c.get());
+    disabled
 }
 
 #[cfg(test)]
@@ -187,6 +193,12 @@ impl Drop for FoldMemoScope {
         let outer = self.outer.take();
         FOLD_MEMO.with(|m| *m.borrow_mut() = outer);
     }
+}
+
+/// True while a `FoldMemoScope` is open with the memo on. Build-time memos
+/// that live beside it ride the same scope, kill switch and equivalence net.
+pub(crate) fn fold_memo_open() -> bool {
+    FOLD_MEMO.with(|m| m.borrow().is_some())
 }
 
 /// Answer `q` from the fold memo, or hand back the generations and key to
@@ -609,6 +621,13 @@ thread_local! {
     /// across a region — an absolute count would be sticky for the rest of the
     /// process once any chase anywhere truncated.
     static QUERY_REC_TRUNCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times `QUERY_REC_DEPTH_CAP` has fired on this thread. Read as a
+/// difference across a region: a rise means an answer computed inside it
+/// depended on how deep the region was entered.
+pub(crate) fn query_rec_truncations() -> u64 {
+    QUERY_REC_TRUNCATIONS.with(|c| c.get())
 }
 
 #[derive(Default)]

@@ -1356,8 +1356,14 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        for (span, node) in pending {
-            let Some(ty) = self.invocant_type_at_node(node) else { continue };
+        // Type every invocant before recording any: a push moves the bag's
+        // generation and empties the invocant memo, so interleaving them
+        // would re-type each chain's prefix once per call in it.
+        let typed: Vec<(Span, InferredType)> = pending
+            .into_iter()
+            .filter_map(|(span, node)| Some((span, self.invocant_type_at_node(node)?)))
+            .collect();
+        for (span, ty) in typed {
             self.bag.push(Witness {
                 attachment: WitnessAttachment::Expr(span),
                 source: WitnessSource::Builder("invocant_expr".into()),
