@@ -117,6 +117,8 @@ crate / VS Code extension versions.
 - **A bare block is a lexical scope.** A `my` inside `{ ... }` used to
   shadow the outer declaration past the closing brace, so goto-def,
   rename, and references on the outer variable followed the wrong one.
+- **`$::x` is `$main::x`.** A root-qualified read now binds to `main`'s
+  `our $x`, and goto-def on it looks in `main` rather than an empty package.
 
 ### Completion
 

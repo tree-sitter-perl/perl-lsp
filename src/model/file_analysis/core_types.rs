@@ -227,6 +227,9 @@ pub struct NameSpellings {
     pub sigils: std::borrow::Cow<'static, [char]>,
     /// What a written class spelling denotes.
     pub class_spelling: ClassSpelling,
+    /// The package an empty qualifier names (Perl's `$::x` is `$main::x`);
+    /// `None` keeps the empty qualifier as written.
+    pub root_package: Option<std::borrow::Cow<'static, str>>,
 }
 
 /// What a class spelling written in a file denotes — the capability the
@@ -250,6 +253,7 @@ impl NameSpellings {
         namespace_sep: None,
         sigils: std::borrow::Cow::Borrowed(&[]),
         class_spelling: ClassSpelling::Identity,
+        root_package: None,
     };
 
     /// A language with a namespace separator, no sigils, and spellings
@@ -260,6 +264,7 @@ impl NameSpellings {
             namespace_sep: Some(std::borrow::Cow::Borrowed(sep)),
             sigils: std::borrow::Cow::Borrowed(&[]),
             class_spelling: ClassSpelling::Identity,
+            root_package: None,
         }
     }
 
@@ -279,6 +284,15 @@ impl NameSpellings {
 
     pub fn is_sigil(&self, c: char) -> bool {
         self.sigils.contains(&c)
+    }
+
+    /// The package a written qualifier names: an empty one (a leading
+    /// separator) is the root package, when the language declares one.
+    pub fn qualifier_package<'a>(&'a self, qualifier: &'a str) -> &'a str {
+        match (qualifier.is_empty(), self.root_package.as_deref()) {
+            (true, Some(root)) => root,
+            _ => qualifier,
+        }
     }
 }
 
@@ -1074,21 +1088,11 @@ impl Ref {
     }
 
     /// For a fully-qualified variable read (`$Foo::Bar::x`, `@Pkg::arr`,
-    /// `%Pkg::h`) return `(package, sigil+basename)` — the package the
-    /// global lives in, paired with the sigil-bearing bare name that keys
-    /// the declaring symbol (`("Foo::Bar", "$x")`). `None` for unqualified
-    /// reads (those resolve lexically via the `Symbol` binding). The sigil rides
-    /// the basename because variable symbols are keyed with their sigil
-    /// (`$x`, `@arr`, `%h`); a leading-`::` `main::` spelling yields an
-    /// empty-string package, matching how package-globals in `main` key.
-    pub fn qualified_var_target(&self, names: &NameSpellings) -> Option<(&str, String)> {
-        let mut chars = self.target_name.chars();
-        let sigil = chars.next()?;
-        if !names.is_sigil(sigil) {
-            return None;
-        }
-        let (pkg, base) = split_qualified(chars.as_str(), names);
-        pkg.map(|p| (p, format!("{sigil}{base}")))
+    /// `%Pkg::h`) return `(package, sigil+basename)`: see
+    /// `split_qualified_var`. `None` for unqualified reads (those resolve
+    /// lexically via the `Symbol` binding).
+    pub fn qualified_var_target<'a>(&'a self, names: &'a NameSpellings) -> Option<(&'a str, String)> {
+        crate::model::conventions::split_qualified_var(&self.target_name, names)
     }
 }
 
