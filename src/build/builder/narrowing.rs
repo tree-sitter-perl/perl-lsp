@@ -329,7 +329,7 @@ impl<'a> Builder<'a> {
             return None;
         }
         let key = crate::cst::canonical_var_name(arg, self.source)?;
-        match self.resolve_constant_strings(&key, 0).as_deref() {
+        match self.resolve_constant_strings(&key, arg).as_deref() {
             Some([class]) => Some(class.clone()),
             _ => None,
         }

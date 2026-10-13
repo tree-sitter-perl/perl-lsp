@@ -177,6 +177,9 @@ impl<'a> Builder<'a> {
     ) -> SymbolId {
         let id = SymbolId(self.next_symbol_id);
         self.next_symbol_id += 1;
+        if matches!(kind, SymKind::Variable | SymKind::Field) {
+            self.var_decls.entry((self.current_scope(), name.clone())).or_default().push(id);
+        }
         // Every symbol attaches to the current lexical scope. Package
         // context lives separately in `package_ranges`; the variable
         // resolver gates `our` decls by package match at lookup time

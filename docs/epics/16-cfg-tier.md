@@ -207,6 +207,9 @@ dormancy, and the honest boundary (no interprocedural effects).
 - **Dense basic blocks, per-block bitvectors, a second worklist.** The
   brief rejects option B explicitly.
 - **A `BlockId` consumer key.** Ever.
+- **Constant folds as values** (literal sets on `Place`s, joined by
+  `JoinFold`): `docs/prompt-value-lane.md`, a consumer of Phases B and
+  C. Phases B and C must not grow fold-specific machinery for it.
 - Loop fixpoint precision — v2, via the existing
   `fold_to_fixed_point` driver, once v1 is honest.
 
