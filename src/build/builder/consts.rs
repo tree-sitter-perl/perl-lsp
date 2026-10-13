@@ -9,7 +9,7 @@
 //! write in source order, with no branch or loop joins.
 
 use super::*;
-use crate::model::conventions::{split_qualified, strip_variable_sigils, PERL_SPELLINGS};
+use crate::model::conventions::{name_match_key, split_qualified, split_qualified_var, PERL_SPELLINGS};
 
 /// What a folded name denotes. Built only by `Builder::const_key`, so a
 /// raw spelling can never key the table.
@@ -20,13 +20,6 @@ enum ConstKey {
     /// A package variable or `use constant` name: `(package, sigil+name)`.
     /// `our @ISA` under `package B` and `@B::ISA` are the same key.
     Package(String, String),
-}
-
-/// The spelling every key of a name shares (`$Foo::x` and `$x` → `$x`).
-fn base_spelling(name: &str) -> String {
-    let bare = strip_variable_sigils(name);
-    let sigil = &name[..name.len() - bare.len()];
-    format!("{sigil}{}", split_qualified(bare, &PERL_SPELLINGS).1)
 }
 
 struct Write {
@@ -70,15 +63,14 @@ impl<'a> Builder<'a> {
     /// undeclared name, a qualified name and a bareword constant are
     /// package entries.
     fn const_key(&self, name: &str, at: Point) -> ConstKey {
-        let bare = strip_variable_sigils(name);
-        let sigil = &name[..name.len() - bare.len()];
-        if let (Some(pkg), base) = split_qualified(bare, &PERL_SPELLINGS) {
-            // `$::x` is `$main::x`.
-            let pkg = if pkg.is_empty() { "main" } else { pkg };
-            return ConstKey::Package(pkg.to_string(), format!("{sigil}{base}"));
+        if let Some((pkg, base)) = split_qualified_var(name, &PERL_SPELLINGS) {
+            return ConstKey::Package(pkg.to_string(), base);
+        }
+        if let (Some(pkg), base) = split_qualified(name, &PERL_SPELLINGS) {
+            return ConstKey::Package(PERL_SPELLINGS.qualifier_package(pkg).to_string(), base.to_string());
         }
         let use_pkg = self.package_at_pos(at);
-        if !sigil.is_empty() {
+        if name.starts_with(|c| PERL_SPELLINGS.is_sigil(c)) {
             if let Some(sym) = self.visible_variable_decl(name, at, use_pkg) {
                 let sym = &self.symbols[sym.0 as usize];
                 return match super::fold::our_gate(sym) {
@@ -111,7 +103,7 @@ impl<'a> Builder<'a> {
     }
 
     fn visible_constant(&self, name: &str, at: Point) -> Option<&Write> {
-        if !self.consts.written.contains(&base_spelling(name)) {
+        if !self.consts.written.contains(&name_match_key(name, &PERL_SPELLINGS)) {
             return None;
         }
         self.consts.visible(&self.const_key(name, at), at)
@@ -150,7 +142,7 @@ impl<'a> Builder<'a> {
 
     fn push_constant(&mut self, name: &str, at: Point, values: Option<Vec<String>>, source: Option<Span>) {
         let values = values.filter(|v| !v.is_empty());
-        let spelling = base_spelling(name);
+        let spelling = name_match_key(name, &PERL_SPELLINGS);
         if values.is_some() {
             self.consts.written.insert(spelling);
         } else if !self.consts.written.contains(&spelling) {

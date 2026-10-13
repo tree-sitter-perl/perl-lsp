@@ -1292,14 +1292,11 @@ impl FileAnalysis {
     /// `$Pkg::var`, so renaming it is a cross-file refactor, where a lexical
     /// `my` stays the single-file `Local` path.
     pub fn package_var_at(&self, point: Point) -> Option<(String, String)> {
-        // `$::x` / `$main::x` both name the `main` global; the `our` decl's
-        // package is "main", so normalize the empty (leading-`::`) spelling.
-        let norm = |p: &str| if p.is_empty() { "main".to_string() } else { p.to_string() };
         if let Some(r) = self.ref_at(point) {
             if matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess) {
                 // Qualified `$Pkg::var` — the package is explicit in the token.
                 if let Some((pkg, name)) = r.qualified_var_target(self.names()) {
-                    return Some((norm(pkg), name));
+                    return Some((pkg.to_string(), name));
                 }
                 // Unqualified — a package var only if it resolves to an `our`.
                 let sym = r
@@ -1308,14 +1305,14 @@ impl FileAnalysis {
                     .or_else(|| self.resolve_variable(&r.target_name, point));
                 if let Some(s) = sym {
                     if let SymbolDetail::Variable { decl_kind: DeclKind::Our, .. } = s.detail {
-                        return Some((norm(s.package.as_deref()?), s.name.clone()));
+                        return Some((s.package.clone()?, s.name.clone()));
                     }
                 }
             }
         }
         if let Some(s) = self.symbol_at(point) {
             if let SymbolDetail::Variable { decl_kind: DeclKind::Our, .. } = s.detail {
-                return Some((norm(s.package.as_deref()?), s.name.clone()));
+                return Some((s.package.clone()?, s.name.clone()));
             }
         }
         None
