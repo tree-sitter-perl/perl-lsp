@@ -120,6 +120,16 @@ unsigned short`). Abstraction for inference, concrete leaf for the human.
   ranking (fixes win32-wins).
 - **See-through** — a direct-delegation wrapper's goto-def reaches the delegate
   (`SvREFCNT_inc → Perl_SvREFCNT_inc`) via a delegation value-witness.
+  The backward half is minted at the use: the build resolves each used
+  macro name's transitive delegate chain through the file's own `#define`s
+  and its gathered include closure (every config variant counts —
+  `Macro::variant_delegates`) and stores it on the `RefTable`
+  (`delegations`). The use is indexed and row-shredded under each
+  delegate's key, so references on `Perl_SvREFCNT_inc` find `SvREFCNT_inc(x)`
+  through the ordinary key bucket, with no query-time macro scan and no
+  query-time visibility check — the file's own preprocessor view already
+  decided it. Freshness rides the Surface: macro bodies are on it, so a
+  header edit that changes a delegate re-analyzes its includers.
 
 ### Resolution visibility = the include-closure lie (generalizes beyond macros)
 
