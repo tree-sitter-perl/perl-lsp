@@ -1625,7 +1625,10 @@ impl ReducerRegistry {
         let order = CallerOrder { local: &no_local, idx };
         let mut joined: Option<InferredType> = None;
         for path in paths {
-            let part = super::engine::answer(idx, &EngineKey::Contribution { join: join.clone(), file: path });
+            let part = super::engine::answer(idx, &EngineKey::Contribution { join: join.clone(), file: path.clone() });
+            if crate::util::ghost_stats::probe("join_parts") {
+                eprintln!("[join_part] {}::{} {:?} <- {} = {part:?}", join.package, join.name, join.want, path.display());
+            }
             let t = match part {
                 EngineValue::Value(ReducedValue::Type(t)) => t,
                 EngineValue::Value(ReducedValue::FactMap(_) | ReducedValue::None) => continue,

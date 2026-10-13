@@ -1161,6 +1161,10 @@ fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey, check: Check) -> 
         }
     }
     crate::util::ghost_stats::count("engine.compute");
+    if crate::util::ghost_stats::probe("compute") {
+        let depth = FRAMES.with(|f| f.borrow().len());
+        eprintln!("[compute] {depth} {key:?}");
+    }
     #[cfg(test)]
     COMPUTED.with(|c| c.borrow_mut().push(key.clone()));
     let world = idx.world_generation();
