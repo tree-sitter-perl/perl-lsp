@@ -431,8 +431,21 @@ impl FileAnalysis {
         });
         let mut local_memo: std::collections::HashMap<String, bool> =
             std::collections::HashMap::new();
+        // Without an index every resolution below reads only `self`, which
+        // the collect loop borrows immutably, so a receiver chain resolved
+        // for one ref is reused by the next instead of re-chased.
+        let _pass = module_index.is_none().then(super::ResolvePass::open).flatten();
         let mut stamped: Vec<(usize, Option<MethodTarget>)> = Vec::new();
-        for (i, r) in self.refs.iter().enumerate() {
+        // Narrowest spans first, so an inner chain hop is answered before
+        // the call wrapping it. The answer is the same in any order, but an
+        // outer-first chase down a long chain hits RESOLVE_DEPTH_CAP, and a
+        // capped answer can't be shared; inner-first keeps every chase one
+        // hop deep. Ties keep source order (stable sort).
+        let mut order: Vec<usize> = (0..self.refs.len()).collect();
+        if _pass.is_some() {
+            order.sort_by_key(|&i| self.refs[i].span.nesting_key());
+        }
+        for (i, r) in order.into_iter().map(|i| (i, &self.refs[i])) {
             // A plugin-bridged invocant must NEVER freeze as a class:
             // its resolution needs the index + the owning plugin, absent
             // at build time. Leaving the edge `None` makes `refs_to` /
