@@ -67,6 +67,9 @@ spelled! {
         Method = "method",
         /// `recv.field` / `recv->field`; joins `@member.recv` by match.
         Member = "member",
+        /// A member token the document says is CALLED (`recv.f(…)`); at the
+        /// same token it wins over `@ref.member`, which fires there too.
+        MemberCall = "member.call",
         /// A type-position name.
         Type = "type",
         Var = "var",
@@ -346,6 +349,7 @@ impl Capture {
         Some(match segs.as_slice() {
             ["def", k] => C::Def { kind: DefKind::parse(k)?, part: DefPart::Node },
             ["def", k, "name"] => C::Def { kind: DefKind::parse(k)?, part: DefPart::Name },
+            ["ref", "member", "call"] => C::Ref(RefKind::MemberCall),
             ["ref", k] => C::Ref(RefKind::parse(k)?),
             ["scope"] => C::Scope(ScopeCap::Block),
             ["scope", "sub", "implicit_receiver"] => C::Scope(ScopeCap::SubImplicitReceiver),

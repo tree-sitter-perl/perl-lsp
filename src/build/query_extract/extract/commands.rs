@@ -39,7 +39,6 @@ pub(super) fn finish(st: &mut ExtractState) {
             invocant: None,
             member_op: None,
             arg_count: Some(c.cmd_args.get(mid).copied().unwrap_or(0)),
-            value_read: false,
         });
     }
 }
