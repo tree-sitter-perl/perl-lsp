@@ -83,14 +83,19 @@ without bound, such as a declarator wrapped any number of times
 (`Foo**& f()`) or a name qualified any number of times (`A::B::m`). One
 pattern per depth would silently miss the next depth.
 
-So the document states each level once, as a link: `@link.from` on a node
-and `@link.<rel>` on the node one level away, by a closed set of relations
-(`inner`, `declares`, `scope`, `name`, `base`). The driver records every
-link while it flattens the matches, keyed by node id, and a family that
-needs a chain follows the links (`extract/links.rs`). Rust reads no node
-kind and no field to do it; which node links to which is the document's
-statement. A pattern with a link but no single `@link.from` fails the
-compile.
+So the document states each level once, as a link: `@link.from.<walk>` on
+a node and `@link.<rel>` on the node one level away, by a closed set of
+relations (`inner`, `declares`, `scope`, `name`, `base`). The `<walk>` suffix
+names the walk the link belongs to, from a closed set (`ool`, `qualifier`),
+and each walk has a root capture (`@ool.def`, `@qualifier`). The driver
+records every link while it flattens the matches, keyed by walk and node id.
+A walk starts at its root's node and follows only its own links
+(`extract/links.rs`), so two walks never read each other's edges, and a
+reader of the document sees which construct each link serves. Rust reads no
+node kind and no field to do it; which node links to which is the
+document's statement. The compile fails on a pattern with a link but no
+single `@link.from.<walk>`, a `from` with no link, or a walk whose root
+capture the document never uses.
 
 ## Consequences
 

@@ -3,6 +3,40 @@
 
 use super::*;
 
+/// `invocant_type_at_node` answers by CST node, for one state of everything
+/// the typer reads that a post-walk pass can change: the bag, the parent
+/// graph and the symbol table. Any change empties it, so it holds at most
+/// one answer per node. Open only beside the fold memo (`fold_memo_open`).
+#[derive(Default)]
+pub(super) struct InvocantMemo {
+    stamp: (u64, u64, usize),
+    answers: std::collections::HashMap<usize, Option<InferredType>>,
+}
+
+impl InvocantMemo {
+    fn get(&mut self, stamp: (u64, u64, usize), node: usize) -> Option<Option<InferredType>> {
+        if self.stamp != stamp {
+            self.stamp = stamp;
+            self.answers.clear();
+            crate::util::ghost_stats::count("invocant_memo.reset");
+            return None;
+        }
+        let hit = self.answers.get(&node).cloned();
+        crate::util::ghost_stats::count(if hit.is_some() {
+            "invocant_memo.hit"
+        } else {
+            "invocant_memo.miss"
+        });
+        hit
+    }
+
+    fn put(&mut self, stamp: (u64, u64, usize), node: usize, ty: Option<InferredType>) {
+        if self.stamp == stamp {
+            self.answers.insert(node, ty);
+        }
+    }
+}
+
 impl<'a> Builder<'a> {
     /// Type any expression node in invocant position. Single
     /// kind-dispatch shared between `resolve_invocant_class_tree`
@@ -25,6 +59,28 @@ impl<'a> Builder<'a> {
     ///   - `get_foo()->bar()` outer's invocant                 → bag query Symbol(get_foo, arity)
     /// `@`/`%` containers and unrecognized kinds return `None`.
     pub(super) fn invocant_type_at_node(&self, node: Node<'a>) -> Option<InferredType> {
+        // Each call re-types its receiver chain, so every pass over a
+        // chain's calls would be quadratic without the memo.
+        let memo = crate::model::witnesses::fold_memo_open().then(|| {
+            (self.bag.generation(), self.package_parents.generation(), self.symbols.len())
+        });
+        if let Some(stamp) = memo {
+            if let Some(hit) = self.invocant_memo.borrow_mut().get(stamp, node.id()) {
+                return hit;
+            }
+        }
+        // Recurses once per hop down an invocant chain, so a long fluent
+        // chain is as deep as it is long.
+        let ty = crate::model::witnesses::with_stack_headroom(|| {
+            self.invocant_type_at_node_on_stack(node)
+        });
+        if let Some(stamp) = memo {
+            self.invocant_memo.borrow_mut().put(stamp, node.id(), ty.clone());
+        }
+        ty
+    }
+
+    fn invocant_type_at_node_on_stack(&self, node: Node<'a>) -> Option<InferredType> {
         match node.kind() {
             "method_call_expression" => {
                 // Constructor pattern is closed under syntax — bake
@@ -194,7 +250,7 @@ impl<'a> Builder<'a> {
                 // `String`.
                 let canonical = crate::cst::canonical_var_name(node, self.source);
                 let fold_key = canonical.as_deref().unwrap_or(text);
-                if let Some([class]) = self.resolve_constant_strings(fold_key, 0).as_deref() {
+                if let Some([class]) = self.resolve_constant_strings(fold_key, node).as_deref() {
                     return Some(InferredType::ClassName(class.clone()));
                 }
                 // The bag is canonical at every phase, walk-time

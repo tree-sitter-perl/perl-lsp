@@ -989,25 +989,15 @@ fn query_memo_keeps_inherited_receiver_per_child_in_one_query() {
     );
 }
 
-/// A chase deeper than the cap DEGRADES; it does not abort the process.
-///
-/// `QUERY_REC_DEPTH_CAP`'s whole job is "return `None` to avoid stack
-/// overflow", and it was not doing it in every build. Measured on a 2 MiB
-/// stack (the tokio blocking-pool / rayon worker size): a debug build
-/// overflowed inside `query_rec` between 400 and 512 hops — UNDER the 512
-/// cap — so the backstop never fired and the process aborted. A stack
-/// overflow is not a catchable panic, so that is a `cargo test` that dies
-/// rather than fails.
-///
-/// 600 `@ISA` hops is above the old debug ceiling and above both caps.
-/// Base-verify by restoring a single 512 cap: this aborts.
-#[test]
-fn a_chase_past_the_depth_cap_degrades_instead_of_aborting() {
-    const HOPS: usize = 600;
-    let src = isa_chain(HOPS);
-    // Explicitly 2 MiB: the harness's own thread size is not what this pins.
-    let answer = std::thread::Builder::new()
-        .stack_size(2 * 1024 * 1024)
+/// A stack far smaller than any chase here needs: 256 KiB holds roughly 50
+/// debug-build hops of raw recursion. Every test below runs on it, so what they
+/// pin is that `query_rec` grows its own stack, not how big this thread's is.
+const SMALL_STACK: usize = 256 * 1024;
+
+fn method_return_on_small_stack(hops: usize) -> Option<InferredType> {
+    let src = isa_chain(hops);
+    std::thread::Builder::new()
+        .stack_size(SMALL_STACK)
         .spawn(move || {
             let mut p = tree_sitter::Parser::new();
             p.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
@@ -1017,10 +1007,16 @@ fn a_chase_past_the_depth_cap_degrades_instead_of_aborting() {
         })
         .expect("spawn")
         .join()
-        .expect("the depth cap must fire before the stack does");
+        .expect("the chase must not overflow the stack")
+}
 
-    // Truncated, which is the honest outcome for a chase past the cap. The
-    // point of the test is that we reached this line at all.
+/// A chase past `QUERY_REC_DEPTH_CAP` stops at the budget and answers `None`.
+/// A stack overflow is not a catchable panic, so reaching the assertion at all
+/// is half of what this pins.
+#[test]
+fn a_chase_past_the_depth_cap_degrades_instead_of_aborting() {
+    const HOPS: usize = 600;
+    let answer = method_return_on_small_stack(HOPS);
     assert!(
         answer.is_none(),
         "a {HOPS}-hop chase is past the cap, so a truncated answer is expected; \
@@ -1028,18 +1024,14 @@ fn a_chase_past_the_depth_cap_degrades_instead_of_aborting() {
     );
 }
 
-/// Control: a chain well under the cap still resolves, so the test above
-/// pins the cap's behaviour rather than a walk that never worked.
+/// A chase just under the cap resolves, on a stack it would overflow without
+/// growing — in both build profiles. Base-verify by calling
+/// `query_rec_on_stack` directly from `query_rec`: this aborts.
 #[test]
-fn a_chase_within_the_depth_cap_still_resolves() {
-    let src = isa_chain(100);
-    let mut p = tree_sitter::Parser::new();
-    p.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
-    let tree = p.parse(&src, None).unwrap();
-    let fa = crate::build::builder::build(&tree, src.as_bytes());
+fn a_chase_deeper_than_the_stack_resolves_within_the_cap() {
     assert!(
-        fa.find_method_return_type("C0", "target", None, None).is_some(),
-        "a 100-hop chain is well within the cap and must still resolve"
+        method_return_on_small_stack(480).is_some(),
+        "a 480-hop chain is within the cap and must resolve however small the stack"
     );
 }
 
