@@ -108,6 +108,14 @@ pub struct Scope {
     /// question — so neither is a span scan. `None` for every other scope.
     #[serde(default)]
     pub owner: Option<SymbolId>,
+    /// A bare name in this scope may leave the member receiver unwritten:
+    /// the language's rule, stated by the capture that mints the scope
+    /// (`@scope.sub.implicit_receiver`). The chain carries it, so a block or
+    /// lambda nested in such a body elides too. Whether a class is there is
+    /// resolution: a free function's body carries the flag and its owner
+    /// names no package, so nothing binds.
+    #[serde(default)]
+    pub implicit_receiver: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -66,13 +66,6 @@ marked otherwise; the drain re-derived each rationale against current code.
   (spaces over comment bytes, newlines kept) so byte offsets stay in
   original coordinates for member positioning. Not a merge target.
   [re-ratified 2026-07-17]
-- **Two "enclosing class" notions in `emit_return_fuel`**: the implicit-
-  field half reads the ref's own `scope.package`; the sibling-CALL half
-  walks up to the enclosing method SYMBOL's package (so out-of-line bodies,
-  whose body scope carries no package, still resolve). Deliberately
-  different robustness; unifying is a behavior change, not a cleanup
-  (out-of-line bodies would gain implicit-field edges). [re-ratified
-  2026-07-17]
 - **Two domain/type completion rankers** (`backend::rank_domain_members`
   for pack enum members vs `symbols::rank_candidates_by_expected_type` for
   Perl scope vars): different item types (`CompletionItem` vs
@@ -242,7 +235,7 @@ marked otherwise; the drain re-derived each rationale against current code.
   headers that surface as bare identifiers) must be **calibrated against the
   macro-heavy real substrate** (spdlog/fmt/onednn), the same bar
   use-after-move cleared. Default-off + opt-in + pack-capability gate
-  (declared like `implicit_this_members`, never `lang == cpp`) is understood;
+  (stated by the document, never `lang == cpp`) is understood;
   only the valve + its calibration remain. `docs/adr/narrowing-diagnostics.md`.
 - **PR #100** re-extraction onto the projection engine (user closes or
   reworks; the `projection.rs` PoC now rests in git history — the design

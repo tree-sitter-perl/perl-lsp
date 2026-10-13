@@ -35,7 +35,8 @@ impl FileAnalysis {
             }
             cur = sc.parent;
         }
-        // A pack scope carries no owner yet: the span walk answers there.
+        // A body the document mints as a plain block (R) or on another node
+        // than its callable carries no owner: the span walk answers there.
         self.symbols
             .iter()
             .filter(|s| {

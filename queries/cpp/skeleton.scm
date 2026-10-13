@@ -410,8 +410,10 @@
 ; `@scope.sub` (not plain `@scope`): a function's params/locals are
 ; sub-body content — `scope_within_sub_body` shields them from the outline
 ; and keeps them out of the class-content lane a sticky class package
-; would otherwise drag them into.
-(function_definition) @scope.sub
+; would otherwise drag them into. `.implicit_receiver`: a body elides the
+; member receiver for reads AND sibling calls (`return inner_;`, `grow()`),
+; since C++ name lookup finds the member before any free function.
+(function_definition) @scope.sub.implicit_receiver
 
 ; ---- top-level / namespaced function prototypes (the bulk of any
 ; header file) — a `declaration`, not a `function_definition`. A
@@ -529,9 +531,9 @@
 ; (`T& operator[](...) { ... }`, `T* operator->() { ... }`): the return
 ; wrapper nests the function_declarator, exactly like the field-decl operator
 ; forms above. Without these the inline body's method symbol is never minted,
-; so the implicit-`this` sibling-pin's enclosing-class lookup (which joins a
-; body scope to its owning method SYMBOL) dead-ends and a bare sibling call
-; inside the operator body resolves nowhere.
+; so the implicit receiver's enclosing class (the body scope's owning method
+; SYMBOL) is missing and a bare sibling call inside the operator body
+; resolves nowhere.
 (function_definition
   type: (_) @rettype
   declarator: (reference_declarator

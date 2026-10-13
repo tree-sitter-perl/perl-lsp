@@ -198,6 +198,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         span: Span { start: root.start_position(), end: root.end_position() },
         package: None,
         owner: None,
+        implicit_receiver: false,
     });
     let mut st = ExtractState {
         pack,

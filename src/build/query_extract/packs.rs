@@ -42,15 +42,6 @@ pub struct LangPack {
     /// "which guard means which refinement" (rule #10); core just scopes
     /// the witness to the block.
     pub narrow_guard: fn(guard: Option<&str>, type_text: &str) -> Option<InferredType>,
-    /// Can a bare, receiver-less identifier resolve through an implicit
-    /// `this->` — both a field read (`return inner_;` = `this->inner_`) AND a
-    /// sibling method call (`foo()` = `this->foo()`)? True for C/C++ (the
-    /// receiver is elided for both members and methods); false for Python/R
-    /// (the receiver is mandatory for both). One language fact, not two: no
-    /// language elides fields but not methods. Gates the member-access half of
-    /// `language_driver::emit_return_fuel` — asked of the pack, never a
-    /// language-name branch.
-    pub implicit_this_members: bool,
     /// Symbols the runtime enters from OUTSIDE the source graph (C/C++
     /// `main`: reached through the ABI, never a source call site) — a
     /// zero-fan-in callable with one of these names is alive by contract.
@@ -123,7 +114,6 @@ impl LangPack {
             annot_type: _,
             module_paths: _,
             narrow_guard: _,
-            implicit_this_members: _,
             entrypoint_symbols,
             brace_scoped_members: _,
             trigger_chars,

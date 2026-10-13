@@ -17,7 +17,6 @@ pub fn perl_pack() -> LangPack {
         annot_type: |_| None,
         module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
         narrow_guard: |_, _| None,
-        implicit_this_members: false,
         entrypoint_symbols: &[],
         brace_scoped_members: false,
         // Nothing reads them: Perl's trigger characters come from

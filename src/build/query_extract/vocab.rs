@@ -82,6 +82,8 @@ spelled! {
         Block = "",
         /// Sub-body content (function bodies, prototype signatures).
         Sub = "sub",
+        /// A sub body whose bare names may elide the member receiver.
+        SubImplicitReceiver = "sub.implicit_receiver",
     }
 }
 
@@ -346,6 +348,7 @@ impl Capture {
             ["def", k, "name"] => C::Def { kind: DefKind::parse(k)?, part: DefPart::Name },
             ["ref", k] => C::Ref(RefKind::parse(k)?),
             ["scope"] => C::Scope(ScopeCap::Block),
+            ["scope", "sub", "implicit_receiver"] => C::Scope(ScopeCap::SubImplicitReceiver),
             ["scope", k] if !k.is_empty() => C::Scope(ScopeCap::parse(k)?),
             ["context", k] => C::Context(ContextKind::parse(k)?),
             ["parent"] => C::Parent,

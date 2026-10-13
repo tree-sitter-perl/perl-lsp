@@ -89,9 +89,8 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
             // The returned expression's own general-rule witness (literal
             // / var-read / member / call — whichever matched this same
             // node) already carries its type; this just records the site
-            // (scope + span) so `emit_return_fuel` (language_driver.rs,
-            // phase 7) can chain the enclosing function's `Symbol` onto it
-            // when undeclared.
+            // (scope + span) so `into_file_analysis` can chain the enclosing
+            // function's `Symbol` onto it when undeclared.
             out.return_sites.push((cur_scope, e.span()));
         }
         Capture::Flow(FlowCap::Target) => {

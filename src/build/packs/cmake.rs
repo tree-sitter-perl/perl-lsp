@@ -20,7 +20,6 @@ pub fn cmake_pack() -> LangPack {
             }
         },
         narrow_guard: |_, _| None,
-        implicit_this_members: false,
         entrypoint_symbols: &[],
         brace_scoped_members: false,
         trigger_chars: &["{", "("],

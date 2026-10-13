@@ -83,8 +83,8 @@ the fields the pack lane carries per file.
   document, never kept as a pack bool beside it: `#include`-style path
   tokens are the document minting `@import.path`, a preprocessor is it
   minting `@def.macro` (`LanguageRegistry::document_mints`). The bools
-  left (`implicit_this_members`, `brace_scoped_members`) hold no strings
-  and are not counted; each is a statement the document can make about
-  itself.
+  left (`brace_scoped_members`) hold no strings and are not counted; each
+  is a statement the document can make about itself, as receiver elision
+  already is (`@scope.sub.implicit_receiver`).
 - The allowlists today are the cursor sentinel's node-kind tables, cpp's
   receiver peel, and cpp's `main` entry point.

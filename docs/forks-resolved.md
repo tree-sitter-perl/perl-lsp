@@ -144,6 +144,9 @@ when, why), not the contract.
   its own block, so it just reads a different flag.
 - **Ratification (veesh):** one flag for both, confirmed; the rename to a
   member-scoped name landed (`implicit_this_members`).
+- **Now:** the fact is a scope the document marks
+  (`@scope.sub.implicit_receiver`), still one fact for fields and calls;
+  the pack bool is gone.
 
 ## Sibling-call vs. same-named free function ranking — 2026-07-05 — RESOLVED (Family Q, 2026-07-05)
 - **Context:** same slice. When a method body calls `foo()` and BOTH a

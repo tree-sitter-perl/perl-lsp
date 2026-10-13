@@ -17,7 +17,6 @@ pub fn r_pack() -> LangPack {
         // would consult .libPaths() — not modeled here).
         module_paths: |m| vec![m.to_string()],
         narrow_guard: |_, _| None,
-        implicit_this_members: false,
         entrypoint_symbols: &[],
         brace_scoped_members: false,
         trigger_chars: &["$", "@", ":"],

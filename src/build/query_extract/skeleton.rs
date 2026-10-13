@@ -159,9 +159,8 @@ pub struct SkeletonAnalysis {
     /// `return EXPR;` sites (`@expr.return.value`): (enclosing scope, the
     /// returned expression's span). Purely structural — this tier doesn't
     /// know what a `return` MEANS for any given language; the interpretation
-    /// (join to an owning function, decide whether it needs implicit-return
-    /// fuel) is cpp-specific and lives in `language_driver.rs`'s post-
-    /// extraction pipeline (`emit_return_fuel`).
+    /// (join to the owning callable, chain it when the callable declares no
+    /// return) is `into_file_analysis`'s.
     pub return_sites: Vec<(crate::model::file_analysis::ScopeId, Span)>,
     /// Callable parameter arities keyed by parameter_list span (`@arity.sig`).
     /// Associated to def symbols by span containment in `into_file_analysis`.
@@ -1082,6 +1081,130 @@ impl SkeletonAnalysis {
                         )),
                         folded_from: None,
                         arg_count: None,
+                    });
+                }
+            }
+        }
+        // A callable's body scope names the callable (`Scope::owner`). The
+        // document mints `@scope.sub` and `@def.sub` / `@def.method` on the
+        // same `function_definition` node, so the spans are equal; a shape
+        // that declares on another node keeps no owner.
+        {
+            let by_span: std::collections::HashMap<(Point, Point), SymbolId> = symbols
+                .iter()
+                .rev()
+                .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method))
+                .map(|s| ((s.span.start, s.span.end), s.id))
+                .collect();
+            for sc in &mut self.scopes {
+                if matches!(sc.kind, crate::model::file_analysis::ScopeKind::Sub { .. }) {
+                    sc.owner = by_span.get(&(sc.span.start, sc.span.end)).copied();
+                }
+            }
+        }
+        // Implicit receiver: where the document says a body elides it, a bare
+        // name is a member of the class the body belongs to. That class is
+        // the package of the eliding scope's owner, in-class and out-of-line
+        // alike: a `void Buf<T>::reserve(…)` body is lexically at file scope,
+        // and only the method symbol carries `Buf`.
+        //
+        // This and the return arms below are pushed before
+        // `finalize_post_walk` seals the enrichment baseline; above it, the
+        // first enrichment truncates them away.
+        {
+            use crate::model::file_analysis::{RefKind, ScopeId};
+            use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
+            let scopes = &self.scopes;
+            let implicit_class = |scope: ScopeId| -> Option<&str> {
+                std::iter::successors(Some(scope), |sc| scope_parent.get(sc).copied().flatten())
+                    .find(|sc| scopes[sc.0 as usize].implicit_receiver)
+                    .and_then(|sc| scopes[sc.0 as usize].owner)
+                    .and_then(|sid| symbols.get(sid.0 as usize))
+                    .and_then(|s| s.package.as_deref())
+            };
+            let mut fields: std::collections::HashMap<(&str, &str), (ScopeId, SymbolId)> = Default::default();
+            let mut methods: std::collections::HashSet<(&str, &str)> = Default::default();
+            for s in &symbols {
+                let Some(pkg) = s.package.as_deref() else { continue };
+                match s.kind {
+                    SymKind::Field => {
+                        fields.entry((pkg, s.name.as_str())).or_insert((s.scope, s.id));
+                    }
+                    SymKind::Method => {
+                        methods.insert((pkg, s.name.as_str()));
+                    }
+                    _ => {}
+                }
+            }
+            let mut field_reads: Vec<(usize, SymbolId, ScopeId)> = Vec::new();
+            let mut sibling_calls: Vec<(usize, String)> = Vec::new();
+            for (i, r) in refs.iter().enumerate() {
+                if matches!(r.kind, RefKind::Variable) && r.resolved_symbol().is_none() {
+                    let Some(class) = implicit_class(r.scope) else { continue };
+                    if let Some(&(fscope, fsym)) = fields.get(&(class, r.target_name.as_str())) {
+                        field_reads.push((i, fsym, fscope));
+                    }
+                } else if matches!(r.kind, RefKind::FunctionCall) && r.binding.is_none() {
+                    let Some(class) = implicit_class(r.scope) else { continue };
+                    if methods.contains(&(class, r.target_name.as_str())) {
+                        sibling_calls.push((i, class.to_string()));
+                    }
+                }
+            }
+            for (i, fsym, fscope) in field_reads {
+                // The binding answers goto-def / references / rename; the edge
+                // onto the field's own `Variable` types the read. One without
+                // the other is the projection disagreement the consistency
+                // net flags as I4.
+                refs[i].bind_symbol(fsym);
+                bag.push(Witness {
+                    attachment: WA::Expr(refs[i].span),
+                    source: WitnessSource::Builder("implicit_field_read".into()),
+                    payload: WP::Edge(WA::Variable { name: refs[i].target_name.clone(), scope: fscope }),
+                    span: refs[i].span,
+                });
+            }
+            // A bare sibling call pinned to the class resolves through the same
+            // package-scoped callable lookup a qualified `Class::foo()` uses. A
+            // name no member answers stays free.
+            for (i, class) in sibling_calls {
+                refs[i].bind_function_package(class);
+            }
+        }
+        // Implicit return: a callable whose syntax declares no return takes
+        // its type from what it returns. `return_sites` is the extractor's
+        // language-blind record (enclosing scope, returned expression); each
+        // site becomes an arm of the nearest owning callable.
+        {
+            use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
+            // Decided once per callable, from the bag as the declarations left
+            // it: this loop writes the very `Symbol` witnesses a live check
+            // would read, so the first arm would block every later one.
+            let mut undeclared: std::collections::HashMap<SymbolId, bool> = Default::default();
+            for (ret_scope, ret_span) in &self.return_sites {
+                let owner = std::iter::successors(Some(*ret_scope), |sc| scope_parent.get(sc).copied().flatten())
+                    .find_map(|sc| self.scopes.get(sc.0 as usize).and_then(|s| s.owner));
+                let Some(sid) = owner else { continue };
+                let first = !undeclared.contains_key(&sid);
+                let open = *undeclared
+                    .entry(sid)
+                    .or_insert_with(|| bag.for_attachment(&WA::Symbol(sid)).is_empty());
+                if !open {
+                    continue;
+                }
+                bag.push(Witness {
+                    attachment: WA::SymbolReturnArm(sid),
+                    source: WitnessSource::Builder("return_arm".into()),
+                    payload: WP::Edge(WA::Expr(*ret_span)),
+                    span: *ret_span,
+                });
+                // One chain edge per callable; its arms accumulate under it.
+                if first {
+                    bag.push(Witness {
+                        attachment: WA::Symbol(sid),
+                        source: WitnessSource::Builder("return_arm_chain".into()),
+                        payload: WP::Edge(WA::SymbolReturnArm(sid)),
+                        span: *ret_span,
                     });
                 }
             }
