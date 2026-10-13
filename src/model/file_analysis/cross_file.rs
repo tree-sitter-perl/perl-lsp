@@ -5,17 +5,33 @@ use super::*;
 
 // ---- Cross-file lookup capability ----
 
-/// A module in the cache — its filesystem path plus the full FileAnalysis of
-/// its source. Shared by reference-count so async handlers don't deep-copy.
-#[derive(Debug)]
+/// A module in the cache — its filesystem path plus the analysis of its
+/// source, SEALED. The model reads a module only through the index's read
+/// seams (`CrossFileLookup::bag_present` and its siblings), which record the
+/// read on the engine answer being computed; the held value is a type only
+/// the index can name (`index::sealed`), and the layer DAG keeps the model
+/// from importing it. A read the engine cannot see is a dependency an
+/// answer silently lacks.
 pub struct CachedModule {
     pub path: std::path::PathBuf,
-    pub analysis: std::sync::Arc<FileAnalysis>,
+    held: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+}
+
+impl std::fmt::Debug for CachedModule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedModule").field("path", &self.path).finish_non_exhaustive()
+    }
 }
 
 impl CachedModule {
-    pub fn new(path: std::path::PathBuf, analysis: std::sync::Arc<FileAnalysis>) -> Self {
-        CachedModule { path, analysis }
+    /// A module around a value the index minted; see `index::sealed`.
+    pub fn sealed(path: std::path::PathBuf, held: std::sync::Arc<dyn std::any::Any + Send + Sync>) -> Self {
+        CachedModule { path, held }
+    }
+
+    /// The sealed value, for the index to open.
+    pub fn held(&self) -> &(dyn std::any::Any + Send + Sync) {
+        &*self.held
     }
 
     // Symbol/bag readers deliberately do NOT live on CachedModule: an index
@@ -535,6 +551,11 @@ pub trait CrossFileLookup {
     ) {
     }
 
+    /// The resident copy of `cached`, recorded as read: the lanes no
+    /// residency strips (package facts, exports, pack and plugin facts).
+    /// Every other view rehydrates the axis it names.
+    fn facts_present(&self, cached: &std::sync::Arc<CachedModule>) -> std::sync::Arc<FileAnalysis>;
+
     /// This file's baked conclusions, if the store has them at the reader's
     /// pinned generation.
     ///
@@ -646,7 +667,7 @@ pub trait CrossFileLookup {
         &self,
         cached: &std::sync::Arc<CachedModule>,
     ) -> std::sync::Arc<FileAnalysis> {
-        cached.analysis.clone()
+        self.facts_present(cached)
     }
     /// A cached module's analysis whole on EVERY evictable axis — bag, refs,
     /// AND symbols present. Consumers that read more than one axis from the
@@ -659,7 +680,7 @@ pub trait CrossFileLookup {
         &self,
         cached: &std::sync::Arc<CachedModule>,
     ) -> std::sync::Arc<FileAnalysis> {
-        cached.analysis.clone()
+        self.facts_present(cached)
     }
     /// The SYMBOLS-axis view: the resident copy whenever its symbols
     /// survived eviction, rehydrated otherwise. The @INC strip is
@@ -806,7 +827,7 @@ pub trait CrossFileLookup {
     fn parents_cached(&self, module_name: &str) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for c in self.visible_def_candidates(module_name) {
-            for p in c.analysis.declared_parents(module_name) {
+            for p in self.facts_present(&c).declared_parents(module_name) {
                 if !out.iter().any(|x| x == p) {
                     out.push(p.clone());
                 }
@@ -1382,7 +1403,7 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
                         self.visible.contains(p.as_ref())
                             || self_str
                                 .as_ref()
-                                .is_some_and(|sp| c.analysis.pack.include_closure.contains(sp))
+                                .is_some_and(|sp| self.inner.facts_present(c).pack.include_closure.contains(sp))
                     })
                     .collect();
                 if out.is_empty() {
@@ -1422,6 +1443,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
         // hit the trait default and read the evicted bag — silent Slice-2
         // type regressions while goto/refs stay green.
         self.inner.bag_present(cached)
+    }
+    fn facts_present(&self, cached: &std::sync::Arc<CachedModule>) -> std::sync::Arc<FileAnalysis> {
+        self.inner.facts_present(cached)
     }
     fn whole_present(
         &self,

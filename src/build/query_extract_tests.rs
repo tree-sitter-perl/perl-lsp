@@ -373,7 +373,7 @@ fn resolve_imports_with_pack(
             let fa = extract(&tree, source.as_bytes(), pack)?.into_file_analysis();
             idx.insert_cache(
                 module,
-                Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+                Some(std::sync::Arc::new(crate::index::sealed::cached_module(
                     path,
                     std::sync::Arc::new(fa),
                 ))),

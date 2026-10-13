@@ -1,6 +1,7 @@
 //! The FileAnalysis blob codec (bincode+zstd), the stamp currencies
 //! (file / mtime-nanos / closure), keyed single-file rehydration with
 //! WAL-race recovery, and the blob-row writers.
+use crate::index::sealed::Unsealed;
 
 use super::*;
 
@@ -807,11 +808,11 @@ pub fn save_to_db(
             // Degraded analyses (parse/extract failure, skipped gather) must
             // not be persisted: the row would validate on the source file's
             // stamp alone and re-serve the degraded blob every session (H8).
-            if cached.analysis.degraded {
+            if cached.analysis().degraded {
                 return false;
             }
             let (mtime, size) = file_stamp(&cached.path).unwrap_or((0, 0));
-            let blob = encode_analysis(&cached.analysis);
+            let blob = encode_analysis(&cached.analysis());
             if blob.is_none() {
                 // Encode failure: leave the PREVIOUS row intact — replacing
                 // it with a NULL blob would destroy a good generation and
@@ -823,7 +824,7 @@ pub fn save_to_db(
                 return false;
             }
             let deps = closure_stamp(
-                &cached.analysis.pack.include_closure,
+                &cached.analysis().pack.include_closure,
                 &mut std::collections::HashMap::new(),
             );
             (cached.path.to_string_lossy().to_string(), mtime, size, blob, deps)

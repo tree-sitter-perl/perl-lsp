@@ -239,7 +239,7 @@ pub(crate) fn cli_refs_parity(root: &str, sample: Option<usize>) {
         .map(|e| {
             // Workspace copies may be refs-evicted; fan-out scans + set
             // minting read refs, so take the refs-present view.
-            let cm = std::sync::Arc::new(file_analysis::CachedModule::new(
+            let cm = std::sync::Arc::new(crate::index::sealed::cached_module(
                 e.key().clone(),
                 std::sync::Arc::clone(e.value()),
             ));
@@ -528,7 +528,7 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
         .map(|e| {
             // Workspace copies may be refs-evicted; fan-out scans + set
             // minting read refs, so take the refs-present view.
-            let cm = std::sync::Arc::new(file_analysis::CachedModule::new(
+            let cm = std::sync::Arc::new(crate::index::sealed::cached_module(
                 e.key().clone(),
                 std::sync::Arc::clone(e.value()),
             ));

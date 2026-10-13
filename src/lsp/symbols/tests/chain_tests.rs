@@ -1,5 +1,6 @@
 //! data-printer plugin intelligence, witness-bag chain typing, chain completion,
 //! and cross-file helper/goto resolution.
+use crate::index::sealed::Unsealed;
 
 use super::*;
 
@@ -11,7 +12,7 @@ use super::*;
 /// module to expose subs under a specific name like `Data::Printer`.
 fn cached_under(name: &str, source: &str) -> std::sync::Arc<crate::index::module_index::CachedModule> {
     let analysis = parse_analysis(source);
-    std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+    std::sync::Arc::new(crate::index::sealed::cached_module(
         std::path::PathBuf::from(format!("/fake/{}.pm", name.replace("::", "/"))),
         std::sync::Arc::new(analysis),
     ))
@@ -682,7 +683,7 @@ fn test_demo_chain_empirical_truth_table() {
     // chain's path.
     let route_cached = idx.get_cached("Mojolicious::Routes::Route").unwrap();
     let inspect = |name: &str| -> Option<InferredType> {
-        for sym in route_cached.analysis.symbols() {
+        for sym in route_cached.analysis().symbols() {
             if sym.name != name {
                 continue;
             }
@@ -693,7 +694,7 @@ fn test_demo_chain_empirical_truth_table() {
                 continue;
             }
             if matches!(&sym.detail, crate::model::file_analysis::SymbolDetail::Sub { .. }) {
-                return route_cached.analysis.symbol_return_type_via_bag(sym.id, None);
+                return route_cached.analysis().symbol_return_type_via_bag(sym.id, None);
             }
         }
         None

@@ -1213,7 +1213,7 @@ fn sweep_one_file(
     // after-the-fact report, so the warning has to come from a watchdog
     // while the unit is still held.
     crate::util::timings::set_current_file(Some(path));
-    let cached = std::sync::Arc::new(file_analysis::CachedModule::new(
+    let cached = std::sync::Arc::new(crate::index::sealed::cached_module(
         path.to_path_buf(),
         std::sync::Arc::clone(fa),
     ));
@@ -1514,7 +1514,7 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
     // real difference into noise, and noise into a real difference.
     let mut matches: Vec<(String, Arc<file_analysis::CachedModule>)> = Vec::new();
     for entry in ws.workspace_raw().iter() {
-        let cm = std::sync::Arc::new(file_analysis::CachedModule::new(
+        let cm = std::sync::Arc::new(crate::index::sealed::cached_module(
             entry.key().clone(),
             std::sync::Arc::clone(entry.value()),
         ));

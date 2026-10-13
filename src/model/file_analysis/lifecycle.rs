@@ -940,7 +940,7 @@ impl FileAnalysis {
         module_index.for_each_reexport_module(
             self.reexport_modules.to_vec(),
             &mut |cached| {
-                let a = &cached.analysis;
+                let a = module_index.facts_present(cached);
                 for n in &a.export {
                     if !default_set.contains(n) {
                         default_set.push(n.clone());

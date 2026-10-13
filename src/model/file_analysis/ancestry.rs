@@ -892,7 +892,7 @@ impl FileAnalysis {
                     // parent edge (packages lane — never evicted).
                     idx.visible_def_candidates(cls)
                         .iter()
-                        .any(|c| c.analysis.has_dynamic_parents(cls))
+                        .any(|c| idx.facts_present(c).has_dynamic_parents(cls))
                 });
             if dynamic_here {
                 incomplete = true;

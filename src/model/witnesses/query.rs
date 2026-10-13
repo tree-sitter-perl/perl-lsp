@@ -151,7 +151,7 @@ pub fn query_sub_return_type(
                     // never pays a bag decode.
                     let reachable = match &scope {
                         Some((self_str, visible)) => visible.contains(p.as_ref())
-                            || cached.analysis.pack.include_closure.contains(self_str),
+                            || idx.facts_present(&cached).pack.include_closure.contains(self_str),
                         None => true,
                     };
                     if !reachable {

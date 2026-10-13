@@ -1002,7 +1002,8 @@ impl FileAnalysis {
         // A split exporter's surface lives across its candidate files.
         for import in self.imports.iter().rev() {
             for cached in idx.visible_def_candidates(&import.module_name) {
-                let surface = cached.analysis.export_surface_with_index(idx);
+                let fa = idx.facts_present(&cached);
+                let surface = fa.export_surface_with_index(idx);
                 if imported_names(import, &surface)
                     .iter()
                     .any(|(local, _)| local.as_str() == name)

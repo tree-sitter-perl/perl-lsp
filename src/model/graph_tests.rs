@@ -10,7 +10,7 @@ fn parse(source: &str) -> FileAnalysis {
 fn cache(idx: &crate::index::module_index::ModuleIndex, name: &str, src: &str) {
     idx.insert_cache(
         name,
-        Some(Arc::new(crate::model::file_analysis::CachedModule::new(
+        Some(Arc::new(crate::index::sealed::cached_module(
             std::path::PathBuf::from(format!("/fake/g/{}.pm", name.replace("::", "/"))),
             Arc::new(parse(src)),
         ))),

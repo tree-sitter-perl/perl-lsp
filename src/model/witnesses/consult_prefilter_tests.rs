@@ -9,6 +9,7 @@ use super::sweep_candidate_may_answer;
 use crate::model::file_analysis::{CachedModule, CrossFileLookup, FileAnalysis};
 use std::path::PathBuf;
 use std::sync::Arc;
+use crate::index::sealed::Unsealed;
 
 fn build(src: &str) -> FileAnalysis {
     let mut parser = crate::build::builder::create_parser();
@@ -17,7 +18,7 @@ fn build(src: &str) -> FileAnalysis {
 }
 
 fn module(src: &str) -> Arc<CachedModule> {
-    Arc::new(CachedModule::new(PathBuf::from("/t/mod.pm"), Arc::new(build(src))))
+    Arc::new(crate::index::sealed::cached_module(PathBuf::from("/t/mod.pm"), Arc::new(build(src))))
 }
 
 /// A lookup whose rows half answers a FIXED verdict, so each test can pin
@@ -25,6 +26,9 @@ fn module(src: &str) -> Arc<CachedModule> {
 struct RowsSay(bool);
 
 impl CrossFileLookup for RowsSay {
+    fn facts_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
+        Arc::clone(cached.analysis())
+    }
     fn get_cached(&self, _m: &str) -> Option<Arc<CachedModule>> {
         None
     }
@@ -103,7 +107,7 @@ fn declared_parents_fail_open_over_provably_absent_rows() {
     // its bag holds nothing for the name — a parent may answer.
     let cached = module("package main;\nuse parent -norequire, 'Base';\n");
     assert!(
-        !cached.analysis.declared_parents("main").is_empty(),
+        !cached.analysis().declared_parents("main").is_empty(),
         "fixture must actually declare a parent"
     );
     assert!(sweep_candidate_may_answer(
@@ -119,7 +123,7 @@ fn declared_parents_fail_open_over_provably_absent_rows() {
 fn the_unrowed_residue_fails_open_over_provably_absent_rows() {
     let mut fa = build("package main;\nsub other { 1 }\n");
     fa.unrowed_attachment_names = vec!["ghost_sub".to_string()];
-    let cached = Arc::new(CachedModule::new(PathBuf::from("/t/mod.pm"), Arc::new(fa)));
+    let cached = Arc::new(crate::index::sealed::cached_module(PathBuf::from("/t/mod.pm"), Arc::new(fa)));
     assert!(sweep_candidate_may_answer(
         &RowsSay(false),
         &cached,
@@ -141,7 +145,7 @@ fn the_unrowed_residue_fails_open_over_provably_absent_rows() {
 fn an_app_surface_consumer_class_fails_open() {
     let mut fa = build("package main;\nsub other { 1 }\n");
     fa.plugin.app_surface_consumers.push("main".to_string());
-    let cached = Arc::new(CachedModule::new(PathBuf::from("/t/mod.pm"), Arc::new(fa)));
+    let cached = Arc::new(crate::index::sealed::cached_module(PathBuf::from("/t/mod.pm"), Arc::new(fa)));
     assert!(sweep_candidate_may_answer(
         &RowsSay(false),
         &cached,

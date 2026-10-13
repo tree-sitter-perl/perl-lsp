@@ -1,5 +1,6 @@
 //! The CLI machinery behind the `perl-lsp --…` modes: one-shot startup
 //! helpers, usage text, and the utility commands `main()` dispatches to.
+use crate::index::sealed::Unsealed;
 
 use crate::build::{language_driver, plugin};
 use crate::index::{document, file_store, module_cache, module_index, module_resolver, resolve};
@@ -442,7 +443,7 @@ fn cli_full_startup(
             // Every provider's re-export edges: a shadowed twin can name a
             // producer the winner never mentions.
             for cached in &providers {
-                for re in &cached.analysis.reexport_modules {
+                for re in &cached.analysis().reexport_modules {
                     if queued.insert(re.clone()) {
                         queue.push_back(re.clone());
                     }

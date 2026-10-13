@@ -28,7 +28,7 @@ pub(super) fn fake_cached(
         source.push_str(&format!("sub {} {{}}\n", n));
     }
     source.push_str("1;\n");
-    std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+    std::sync::Arc::new(crate::index::sealed::cached_module(
         std::path::PathBuf::from(path),
         std::sync::Arc::new(parse_analysis(&source)),
     ))
@@ -350,7 +350,7 @@ fn cached_class(module: &str, methods: &[&str]) -> std::sync::Arc<crate::index::
         src.push_str(&format!("sub {} {{}}\n", m));
     }
     src.push_str("1;\n");
-    std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+    std::sync::Arc::new(crate::index::sealed::cached_module(
         std::path::PathBuf::from(format!("/fake/{}.pm", module.replace("::", "/"))),
         std::sync::Arc::new(parse_analysis(&src)),
     ))

@@ -153,7 +153,7 @@ impl ClosednessCertificate {
         for c in cands.iter() {
             // A declared-dynamic parent list means the ancestry walk cannot
             // know the closure at all — no fingerprint would make that safe.
-            if c.analysis.has_dynamic_parents(name) {
+            if idx.facts_present(c).has_dynamic_parents(name) {
                 crate::util::ghost_stats::count("closed.decline_dynamic_parents");
                 return None;
             }

@@ -1,5 +1,6 @@
 //! The `definitions()` projection and its ranking helpers (member/overload
 //! def locations, preferred-definition laddering).
+use crate::index::sealed::Unsealed;
 use super::*;
 
 impl<'a> CandidateSet<'a> {
@@ -49,7 +50,7 @@ impl<'a> CandidateSet<'a> {
         let connected = |cached: &crate::model::file_analysis::CachedModule| {
             let p = cached.path.to_string_lossy();
             visible.contains(p.as_ref())
-                || cached.analysis.pack.include_closure.contains(&self_str)
+                || cached.analysis().pack.include_closure.contains(&self_str)
         };
         // Name-indexed def candidates first (a File-scope member the index
         // registered) — the cheap subset, path-sorted for determinism.
@@ -202,8 +203,8 @@ impl<'a> CandidateSet<'a> {
                     let p = cached.path.to_string_lossy();
                     cached.path != decl_path
                         && (visible.contains(p.as_ref())
-                            || cached.analysis.pack.include_closure.contains(&self_str)
-                            || cached.analysis.pack.include_closure.contains(&decl_str))
+                            || cached.analysis().pack.include_closure.contains(&self_str)
+                            || cached.analysis().pack.include_closure.contains(&decl_str))
                 };
                 let mut cands = idx.def_candidates(&sym.name);
                 cands.sort_by(|a, b| a.path.cmp(&b.path));
@@ -424,7 +425,7 @@ impl<'a> CandidateSet<'a> {
                 }
                 let p = cached.path.to_string_lossy().into_owned();
                 let connected = visible.contains(&p)
-                    || cached.analysis.pack.include_closure.contains(&self_str);
+                    || cached.analysis().pack.include_closure.contains(&self_str);
                 if !connected {
                     continue;
                 }

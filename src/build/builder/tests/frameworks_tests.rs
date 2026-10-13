@@ -1306,7 +1306,7 @@ fn test_export_ok_resolves_cross_file() {
     idx.set_workspace_root(None);
     idx.insert_cache(
         "Data::Fetcher",
-        Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+        Some(std::sync::Arc::new(crate::index::sealed::cached_module(
             PathBuf::from("/fake/Data/Fetcher.pm"),
             std::sync::Arc::new(provider_fa),
         ))),

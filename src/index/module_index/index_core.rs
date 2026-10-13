@@ -6,6 +6,7 @@
 //! operation cannot diverge per entry path (the drift class where an
 //! @INC-resolved module fed `edges` but never `loader_config_shapes`
 //! because the thread held loose Arcs without the shapes map).
+use crate::index::sealed::Unsealed;
 
 use super::*;
 
@@ -269,8 +270,8 @@ impl IndexCore {
                     bc.invalidate(&m.path);
                 }
                 self.mint_registration_gen(&m.path);
-                self.edges.feed(module_name, &m.path, &m.analysis);
-                self.push_loader_shapes(module_name, &m.analysis);
+                self.edges.feed(module_name, &m.path, &m.analysis());
+                self.push_loader_shapes(module_name, &m.analysis());
             }
         } else if matches!(self.cache.get(module_name).as_deref(), Some(Some(_))) {
             return None;
@@ -373,7 +374,7 @@ impl IndexCore {
         self.edges.clear();
         for entry in self.cache.iter() {
             if let Some(ref cached) = *entry.value() {
-                self.edges.feed(entry.key(), &cached.path, &cached.analysis);
+                self.edges.feed(entry.key(), &cached.path, &cached.analysis());
             }
         }
     }
@@ -391,10 +392,10 @@ pub(crate) fn strip_import_copy_one(
     persisted: bool,
     strip: bool,
 ) -> Arc<CachedModule> {
-    if persisted && strip && !m.analysis.degraded {
-        let mut fa = (*m.analysis).clone();
+    if persisted && strip && !m.analysis().degraded {
+        let mut fa = (**m.analysis()).clone();
         fa.evict_to(crate::model::file_analysis::Residency::RowsOnly);
-        Arc::new(CachedModule::new(m.path.clone(), Arc::new(fa)))
+        Arc::new(crate::index::sealed::cached_module(m.path.clone(), Arc::new(fa)))
     } else {
         m.clone()
     }

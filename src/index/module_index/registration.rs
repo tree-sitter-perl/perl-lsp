@@ -1,5 +1,6 @@
 //! Registration front doors: cache/workspace/pack registration, surface
 //! freshness, the enrichment overlay, residency/rehydration, and eviction.
+use crate::index::sealed::Unsealed;
 
 use super::*;
 
@@ -314,7 +315,7 @@ impl ModuleIndex {
         let path = std::fs::canonicalize(&path).unwrap_or(path);
         self.bump_registration_gen(&path);
         let sd = self.record_and_dirty(&path, &analysis, SurfaceWrite::Background);
-        let cached = Arc::new(CachedModule::new(path, analysis.clone()));
+        let cached = Arc::new(crate::index::sealed::cached_module(path, analysis.clone()));
         // Path-keyed registry first: the relational retrieval resolves
         // candidate paths through `cached_by_path`, and packageless files
         // (Mojolicious::Lite entrypoints) exist ONLY here.
@@ -387,7 +388,7 @@ impl ModuleIndex {
             .unwrap_or_default();
         self.core.edges.purge_module(name);
         for c in &cands {
-            self.core.edges.feed(name, &c.path, &c.analysis);
+            self.core.edges.feed(name, &c.path, &c.analysis());
         }
         if cands.is_empty() {
             if self.workspace_modules.remove(name).is_some() {
@@ -613,7 +614,7 @@ impl ModuleIndex {
     pub fn set_open_caller(&self, path: &std::path::Path, analysis: Arc<FileAnalysis>) {
         let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let n = self.core.open_bumps.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        let cached = Arc::new(CachedModule::new(canon.clone(), analysis));
+        let cached = Arc::new(crate::index::sealed::cached_module(canon.clone(), analysis));
         self.core.open_callers.insert(canon, (super::OPEN_VERSION_BIT | n, cached));
     }
 
@@ -663,7 +664,7 @@ impl ModuleIndex {
         let WorkspaceRegistrationParts { arc, names, surface: _ } = parts;
         let path = std::fs::canonicalize(&path).unwrap_or(path);
         self.bump_registration_gen(&path);
-        let cached = Arc::new(CachedModule::new(path, arc));
+        let cached = Arc::new(crate::index::sealed::cached_module(path, arc));
         self.all_files.insert(cached.path.clone(), cached.clone());
         self.adopt_workspace_candidate(cached, names);
     }
@@ -1085,7 +1086,7 @@ impl ModuleIndex {
                 cached.path
             );
         }
-        cached.analysis.clone()
+        cached.analysis().clone()
     }
 
     /// A whole copy of `path` from the SIBLING tier that owns it — the
@@ -1130,7 +1131,7 @@ impl ModuleIndex {
         if let Some(rec) = self.registered_names.get(&m.path) {
             return rec.iter().any(|(n, is_class)| n == name && *is_class);
         }
-        m.analysis
+        m.analysis()
             .symbols()
             .iter()
             .any(|s| matches!(s.kind, SymKind::Class) && s.name == name)
@@ -1306,7 +1307,7 @@ impl ModuleIndex {
         let specializes = &specializes;
         let path = std::fs::canonicalize(&path).unwrap_or(path);
         self.bump_registration_gen(&path);
-        let cached = Arc::new(CachedModule::new(path, analysis.clone()));
+        let cached = Arc::new(crate::index::sealed::cached_module(path, analysis.clone()));
         // The registration record FIRST — before all_files/all_defs/cache
         // publish this (possibly symbol-stripped) copy: a concurrent
         // registration's tie-break consults the record via
@@ -1469,7 +1470,7 @@ impl ModuleIndex {
     pub fn count_fully_resident(&self) -> usize {
         let mut n = 0usize;
         self.for_each_registered_file(&mut |cm| {
-            if cm.analysis.is_fully_resident() {
+            if cm.analysis().is_fully_resident() {
                 n += 1;
             }
         });
@@ -1493,7 +1494,7 @@ impl ModuleIndex {
         for entry in self.pack_indexes.iter() {
             entry
                 .value()
-                .for_each_registered_file(&mut |cached| f(&cached.path, &cached.analysis));
+                .for_each_registered_file(&mut |cached| f(&cached.path, &cached.analysis()));
         }
     }
 
@@ -1512,7 +1513,7 @@ impl ModuleIndex {
         // `modules_with_symbol` to a reopened package's other files.
         for entry in self.core.all_defs.iter() {
             for c in entry.value().iter() {
-                self.core.edges.feed(entry.key(), &c.path, &c.analysis);
+                self.core.edges.feed(entry.key(), &c.path, &c.analysis());
             }
         }
     }

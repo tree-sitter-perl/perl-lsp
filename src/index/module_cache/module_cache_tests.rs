@@ -1,3 +1,4 @@
+use crate::index::sealed::Unsealed;
 use super::*;
 use rusqlite::Connection;
 
@@ -15,7 +16,7 @@ fn parse_source_to_cached(source: &str, path: &std::path::Path) -> Arc<CachedMod
         .unwrap();
     let tree = parser.parse(source, None).unwrap();
     let fa = crate::build::builder::build(&tree, source.as_bytes());
-    Arc::new(CachedModule::new(path.to_path_buf(), Arc::new(fa)))
+    Arc::new(crate::index::sealed::cached_module(path.to_path_buf(), Arc::new(fa)))
 }
 
 /// Slice-2: `load_one` decodes a single persisted analysis BY PATH with its
@@ -31,7 +32,7 @@ fn load_one_rehydrates_full_bag() {
     let source = std::fs::read_to_string(&pm).unwrap();
     let cached = parse_source_to_cached(&source, &pm);
     // Sanity: the freshly built analysis has a populated bag.
-    assert!(!cached.analysis.witnesses.is_empty());
+    assert!(!cached.analysis().witnesses.is_empty());
     save_to_db(&conn, &pm.to_string_lossy(), &Some(cached.clone()), "workspace");
 
     let loaded = load_one(&conn, &pm.to_string_lossy()).expect("row should decode");
@@ -40,7 +41,7 @@ fn load_one_rehydrates_full_bag() {
         !loaded.witnesses.is_empty(),
         "load_one must return the full bag, not an evicted one"
     );
-    assert_eq!(loaded.witnesses.len(), cached.analysis.witnesses.len());
+    assert_eq!(loaded.witnesses.len(), cached.analysis().witnesses.len());
     // A path with no row yields None (miss → caller degrades to bag-less).
     assert!(load_one(&conn, "/no/such/path.pm").is_none());
 
@@ -66,8 +67,8 @@ fn test_db_save_and_load_roundtrip() {
 
     let loaded = cache.get("TestModule").unwrap();
     let loaded = loaded.as_ref().unwrap();
-    assert_eq!(loaded.analysis.export, vec!["foo", "bar"]);
-    assert_eq!(loaded.analysis.export_ok, vec!["baz"]);
+    assert_eq!(loaded.analysis().export, vec!["foo", "bar"]);
+    assert_eq!(loaded.analysis().export_ok, vec!["baz"]);
 
     let _ = std::fs::remove_file(&pm);
 }
@@ -142,7 +143,7 @@ fn test_db_plugin_namespaces_roundtrip() {
 
     let source = std::fs::read_to_string(&pm).unwrap();
     let cached = Some(parse_source_to_cached(&source, &pm));
-    let original_ns_count = cached.as_ref().unwrap().analysis.plugin.namespaces.len();
+    let original_ns_count = cached.as_ref().unwrap().analysis().plugin.namespaces.len();
     assert!(
         original_ns_count > 0,
         "sanity: fixture must produce at least one PluginNamespace"
@@ -158,7 +159,7 @@ fn test_db_plugin_namespaces_roundtrip() {
 
     let loaded = cache.get("TestMojoApp").unwrap();
     let loaded = loaded.as_ref().unwrap();
-    let loaded_ns = &loaded.analysis.plugin.namespaces;
+    let loaded_ns = &loaded.analysis().plugin.namespaces;
     assert_eq!(
         loaded_ns.len(),
         original_ns_count,
@@ -354,8 +355,8 @@ fn test_full_file_analysis_survives_roundtrip() {
 
     let source = std::fs::read_to_string(&pm).unwrap();
     let cached = parse_source_to_cached(&source, &pm);
-    let original_refs_count = cached.analysis.refs().len();
-    let original_packages = cached.analysis.packages.clone();
+    let original_refs_count = cached.analysis().refs().len();
+    let original_packages = cached.analysis().packages.clone();
     save_to_db(&conn, "Fidelity", &Some(Arc::clone(&cached)), "import");
 
     let cache: DashMap<String, Option<Arc<CachedModule>>> = DashMap::new();
@@ -366,12 +367,12 @@ fn test_full_file_analysis_survives_roundtrip() {
     let loaded = cache.get("Fidelity").unwrap();
     let loaded = loaded.as_ref().unwrap();
     assert_eq!(
-        loaded.analysis.refs().len(),
+        loaded.analysis().refs().len(),
         original_refs_count,
         "refs survive roundtrip"
     );
     assert_eq!(
-        loaded.analysis.packages, original_packages,
+        loaded.analysis().packages, original_packages,
         "per-package facts survive"
     );
 
@@ -436,7 +437,7 @@ fn header_change_invalidates_consumer_row_via_deps_stamp() {
     let mut fa = crate::build::builder::build(&tree, source.as_bytes());
     fa.pack.include_closure =
         crate::model::file_analysis::path_intern::ClosureList::from_iter(std::iter::once(hdr_canon.as_str()));
-    let cached = Some(Arc::new(CachedModule::new(pm.clone(), Arc::new(fa))));
+    let cached = Some(Arc::new(crate::index::sealed::cached_module(pm.clone(), Arc::new(fa))));
     // warm_cache serves the 'import' tier ('workspace' rows stream through
     // warm_cache_streaming); the deps_stamp semantics under test are
     // source-independent.
@@ -475,7 +476,7 @@ fn degraded_analysis_is_not_persisted() {
     let tree = parser.parse(&source, None).unwrap();
     let mut fa = crate::build::builder::build(&tree, source.as_bytes());
     fa.degraded = true;
-    let cached = Some(Arc::new(CachedModule::new(pm.clone(), Arc::new(fa))));
+    let cached = Some(Arc::new(crate::index::sealed::cached_module(pm.clone(), Arc::new(fa))));
     save_to_db(&conn, "Degraded", &cached, "workspace");
 
     let rows: i64 = conn
@@ -520,7 +521,7 @@ fn shred_ref_rows_roundtrip() {
     let path_str = pm.to_string_lossy().to_string();
 
     assert!(!has_ref_rows(&conn, &path_str));
-    let seeds: Vec<_> = cached.analysis.ref_row_seeds();
+    let seeds: Vec<_> = cached.analysis().ref_row_seeds();
     assert!(!seeds.is_empty(), "call sites must produce row seeds");
     shred_derived_rows(&conn, &path_str, "workspace", &seeds, &[]).unwrap();
     assert!(has_ref_rows(&conn, &path_str));
@@ -565,8 +566,8 @@ fn shred_sym_rows_same_generation() {
     let cached = parse_source_to_cached(source, &pm);
     let path_str = pm.to_string_lossy().to_string();
 
-    let seeds: Vec<_> = cached.analysis.ref_row_seeds();
-    let sym_seeds = cached.analysis.sym_row_seeds();
+    let seeds: Vec<_> = cached.analysis().ref_row_seeds();
+    let sym_seeds = cached.analysis().sym_row_seeds();
     assert!(
         sym_seeds.iter().any(|s| s.name == "helper"),
         "sub symbols must project into row seeds; got {:?}",
@@ -615,8 +616,8 @@ fn sym_member_probe_is_three_valued() {
         &conn,
         &path_str,
         "workspace",
-        &cached.analysis.ref_row_seeds(),
-        &cached.analysis.sym_row_seeds(),
+        &cached.analysis().ref_row_seeds(),
+        &cached.analysis().sym_row_seeds(),
     )
     .unwrap();
 
@@ -659,8 +660,8 @@ fn row_probes_match_the_match_key_spelling() {
         &conn,
         &path_str,
         "workspace",
-        &cached.analysis.ref_row_seeds(),
-        &cached.analysis.sym_row_seeds(),
+        &cached.analysis().ref_row_seeds(),
+        &cached.analysis().sym_row_seeds(),
     )
     .unwrap();
 
@@ -710,8 +711,8 @@ fn row_probes_plan_as_index_point_lookups() {
         &conn,
         &path_str,
         "workspace",
-        &cached.analysis.ref_row_seeds(),
-        &cached.analysis.sym_row_seeds(),
+        &cached.analysis().ref_row_seeds(),
+        &cached.analysis().sym_row_seeds(),
     )
     .unwrap();
 
@@ -786,7 +787,7 @@ fn flag_exported_minted_from_exports_source() {
         sub gamma { 3 }\n1;\n";
     std::fs::write(&pm, src).unwrap();
     let cached = parse_source_to_cached(src, &pm);
-    let seeds = cached.analysis.sym_row_seeds();
+    let seeds = cached.analysis().sym_row_seeds();
     let exported = |name: &str| {
         seeds
             .iter()
@@ -797,9 +798,9 @@ fn flag_exported_minted_from_exports_source() {
     assert_eq!(exported("beta"), Some(true), "@EXPORT_OK member is flagged");
     assert_eq!(exported("gamma"), Some(false), "non-exported sub is not flagged");
     // The flag must never diverge from the source it is baked from.
-    assert!(cached.analysis.exports_name("alpha"));
-    assert!(cached.analysis.exports_name("beta"));
-    assert!(!cached.analysis.exports_name("gamma"));
+    assert!(cached.analysis().exports_name("alpha"));
+    assert!(cached.analysis().exports_name("beta"));
+    assert!(!cached.analysis().exports_name("gamma"));
     let _ = std::fs::remove_file(&pm);
 }
 
@@ -824,8 +825,8 @@ fn unused_exports_view() {
     std::fs::write(&prod, prod_src).unwrap();
     let prod_cached = parse_source_to_cached(prod_src, &prod);
     let prod_path = prod.to_string_lossy().to_string();
-    let prod_refs: Vec<_> = prod_cached.analysis.ref_row_seeds();
-    let prod_syms = prod_cached.analysis.sym_row_seeds();
+    let prod_refs: Vec<_> = prod_cached.analysis().ref_row_seeds();
+    let prod_syms = prod_cached.analysis().sym_row_seeds();
     shred_derived_rows(&conn, &prod_path, "workspace", &prod_refs, &prod_syms).unwrap();
 
     // Consumer in ANOTHER file references `used`.
@@ -836,8 +837,8 @@ fn unused_exports_view() {
     std::fs::write(&cons, cons_src).unwrap();
     let cons_cached = parse_source_to_cached(cons_src, &cons);
     let cons_path = cons.to_string_lossy().to_string();
-    let cons_refs: Vec<_> = cons_cached.analysis.ref_row_seeds();
-    let cons_syms = cons_cached.analysis.sym_row_seeds();
+    let cons_refs: Vec<_> = cons_cached.analysis().ref_row_seeds();
+    let cons_syms = cons_cached.analysis().sym_row_seeds();
     shred_derived_rows(&conn, &cons_path, "workspace", &cons_refs, &cons_syms).unwrap();
 
     let dead: std::collections::HashSet<String> =
@@ -876,7 +877,7 @@ fn unused_exports_view_cross_file_candidate_suppresses() {
     std::fs::write(&prod, prod_src).unwrap();
     let prod_cached = parse_source_to_cached(prod_src, &prod);
     let prod_path = prod.to_string_lossy().to_string();
-    let prod_syms = prod_cached.analysis.sym_row_seeds();
+    let prod_syms = prod_cached.analysis().sym_row_seeds();
     // Producer has no ref rows of its own.
     shred_derived_rows(&conn, &prod_path, "workspace", &[], &prod_syms).unwrap();
 
@@ -891,7 +892,7 @@ fn unused_exports_view_cross_file_candidate_suppresses() {
     std::fs::write(&cons, cons_src).unwrap();
     let cons_cached = parse_source_to_cached(cons_src, &cons);
     let cons_path = cons.to_string_lossy().to_string();
-    let cons_refs: Vec<_> = cons_cached.analysis.ref_row_seeds();
+    let cons_refs: Vec<_> = cons_cached.analysis().ref_row_seeds();
     assert!(
         cons_refs.iter().any(|s| s.key == "widget"),
         "consumer must produce a `widget` candidate row"
@@ -917,7 +918,7 @@ fn names_with_ref_rows_is_the_distinct_key_set() {
     let src = "package UE::Names;\nsub helper { 1 }\nsub go { helper(); }\n1;\n";
     std::fs::write(&pm, src).unwrap();
     let cached = parse_source_to_cached(src, &pm);
-    let refs: Vec<_> = cached.analysis.ref_row_seeds();
+    let refs: Vec<_> = cached.analysis().ref_row_seeds();
     shred_derived_rows(&conn, &pm.to_string_lossy(), "workspace", &refs, &[]).unwrap();
 
     let names = names_with_ref_rows(&conn);
@@ -936,7 +937,7 @@ fn ref_row_seed_match_keys() {
     let pm = dir.join("TestModule_keys.pm");
     std::fs::write(&pm, source).unwrap();
     let cached = parse_source_to_cached(source, &pm);
-    let keys: Vec<String> = cached.analysis.refs().iter().map(|r| r.match_key(cached.analysis.names())).collect();
+    let keys: Vec<String> = cached.analysis().refs().iter().map(|r| r.match_key(cached.analysis().names())).collect();
     assert!(
         keys.iter().any(|k| k == "baz"),
         "qualified call keys by bare tail; got {keys:?}"
@@ -1061,7 +1062,7 @@ fn warm_stub_roundtrip_and_lane_selection() {
 
     // Build the stub halves the way the fresh worker does: feed + surface
     // from the WHOLE analysis, skeleton stripped.
-    let whole = (*cached.analysis).clone();
+    let whole = (**cached.analysis()).clone();
     let feed = vec![("go".to_string(), false)];
     let specs: Vec<(String, String)> = Vec::new();
     let surface = crate::model::surface::Surface::project(&whole);
@@ -1167,7 +1168,7 @@ fn refresh_deps_stamp_revalidates_consumer_rows() {
 
     // A consumer row whose closure contains the header.
     let cached = parse_source_to_cached("1;\n", &consumer);
-    let mut fa = (*cached.analysis).clone();
+    let mut fa = (**cached.analysis()).clone();
     fa.pack.include_closure = crate::model::file_analysis::path_intern::ClosureList::from_iter(
         [header.to_string_lossy()].iter().map(|s| s.as_ref()),
     );
@@ -1239,7 +1240,7 @@ fn readonly_open_failure_recovers_through_read_write() {
     )
     .expect("RW fallback must recover the row a failed read-only open couldn't reach");
     assert!(!recovered.bag_is_evicted());
-    assert_eq!(recovered.witnesses.len(), cached.analysis.witnesses.len());
+    assert_eq!(recovered.witnesses.len(), cached.analysis().witnesses.len());
 
     // Read-only "open failed" AND no RW recovery conn → honest OpenerFailed,
     // NOT a fabricated presence: the strict tripwire must still fire on a
@@ -1334,7 +1335,7 @@ fn ref_rows_dedup_per_file_and_not_across_files() {
         let p = dir.join(name);
         std::fs::write(&p, body).unwrap();
         let cached = parse_source_to_cached(body, &p);
-        (p.to_string_lossy().to_string(), cached.analysis.ref_row_seeds())
+        (p.to_string_lossy().to_string(), cached.analysis().ref_row_seeds())
     };
     // `helper` mentioned many times in one file, and once in another.
     let (a_path, a_seeds) = mk(
@@ -1378,7 +1379,7 @@ fn wiping_the_strings_table_does_not_leave_dangling_name_ids() {
     let src = "package D;\nsub helper { 1 }\nsub go { helper(); }\n1;\n";
     std::fs::write(&p, src).unwrap();
     let path_str = p.to_string_lossy().to_string();
-    let seeds = parse_source_to_cached(src, &p).analysis.ref_row_seeds();
+    let seeds = parse_source_to_cached(src, &p).analysis().ref_row_seeds();
 
     shred_derived_rows(&conn, &path_str, "workspace", &seeds, &[]).unwrap();
     assert_eq!(ref_candidate_files(&conn, &["helper".to_string()]), vec![path_str.clone()]);
@@ -1423,8 +1424,8 @@ fn the_intern_memo_stays_bounded_and_correct_past_its_cap() {
             &conn,
             &path_str,
             "workspace",
-            &cached.analysis.ref_row_seeds(),
-            &cached.analysis.sym_row_seeds(),
+            &cached.analysis().ref_row_seeds(),
+            &cached.analysis().sym_row_seeds(),
         )
         .unwrap();
     }
@@ -1459,8 +1460,8 @@ fn a_qualified_symbols_declaring_file_is_a_ref_candidate() {
         &conn,
         &path_str,
         "workspace",
-        &cached.analysis.ref_row_seeds(),
-        &cached.analysis.sym_row_seeds(),
+        &cached.analysis().ref_row_seeds(),
+        &cached.analysis().sym_row_seeds(),
     )
     .unwrap();
 
@@ -1549,8 +1550,8 @@ fn gc_reclaims_orphaned_strings_and_keeps_live_ones() {
         let cached = parse_source_to_cached(src, &p);
         shred_derived_rows(
             &conn, &ps, "workspace",
-            &cached.analysis.ref_row_seeds(),
-            &cached.analysis.sym_row_seeds(),
+            &cached.analysis().ref_row_seeds(),
+            &cached.analysis().sym_row_seeds(),
         ).unwrap();
         ps
     };
@@ -1595,8 +1596,8 @@ fn a_gc_invalidates_the_writer_intern_memo() {
         let cached = parse_source_to_cached(src, &p);
         shred_derived_rows(
             &conn, &ps, "workspace",
-            &cached.analysis.ref_row_seeds(),
-            &cached.analysis.sym_row_seeds(),
+            &cached.analysis().ref_row_seeds(),
+            &cached.analysis().sym_row_seeds(),
         ).unwrap();
         ps
     };
@@ -1632,12 +1633,12 @@ fn a_deleted_files_rows_are_collectable() {
     let cached = parse_source_to_cached(src, &p);
     shred_derived_rows(
         &conn, &path_str, "workspace",
-        &cached.analysis.ref_row_seeds(),
-        &cached.analysis.sym_row_seeds(),
+        &cached.analysis().ref_row_seeds(),
+        &cached.analysis().sym_row_seeds(),
     ).unwrap();
     // Stamp the row to the file as it is on disk, so the scan would admit it.
     let (mtime, size) = file_stamp(&p).expect("stamp");
-    let enc = encode_analysis(&cached.analysis).expect("encode");
+    let enc = encode_analysis(&cached.analysis()).expect("encode");
     conn.execute(
         "INSERT OR REPLACE INTO modules
            (module_name, path, mtime_secs, file_size, source, analysis, bag, extract_version, deps_stamp)
@@ -1713,10 +1714,10 @@ fn rows_only_read_is_marked_evicted_not_empty() {
     std::fs::write(&pm, "package A;\nsub f { return 'x' }\n1;\n").unwrap();
     let cached = parse_source_to_cached(&std::fs::read_to_string(&pm).unwrap(), &pm);
     assert!(
-        !cached.analysis.witnesses.is_empty(),
+        !cached.analysis().witnesses.is_empty(),
         "fixture must carry witnesses or neither assertion below means anything"
     );
-    let n = cached.analysis.witnesses.len();
+    let n = cached.analysis().witnesses.len();
     let pm_str = pm.to_string_lossy().into_owned();
     save_to_db(&conn, &pm_str, &Some(cached), "workspace");
 
@@ -1756,7 +1757,7 @@ fn pre_split_rows_are_filtered_not_guessed() {
     // A row in the OLD shape: whole analysis (bag inline) in `analysis`,
     // NULL `bag`, and the extract_version that shipped before the split.
     let whole_blob = {
-        let bin = bincode::serialize(&*cached.analysis).expect("bincode");
+        let bin = bincode::serialize(&**cached.analysis()).expect("bincode");
         zstd::encode_all(bin.as_slice(), 3).expect("zstd")
     };
     conn.execute(
@@ -2190,7 +2191,7 @@ fn the_persisted_surface_is_the_cold_projection() {
         path,
     );
     let whole_fp = crate::model::surface::surface_fingerprint(
-        &crate::model::surface::Surface::project(&cached.analysis),
+        &crate::model::surface::Surface::project(&cached.analysis()),
     );
     assert!(save_to_db(&conn, "My::App", &Some(cached.clone()), "workspace"));
 
@@ -2202,7 +2203,7 @@ fn the_persisted_surface_is_the_cold_projection() {
     );
 
     // And it is NOT what a warm reader would have produced on its own.
-    let mut stripped = (*cached.analysis).clone();
+    let mut stripped = (**cached.analysis()).clone();
     stripped.evict_witness_bag();
     assert_ne!(
         crate::model::surface::surface_fingerprint(&crate::model::surface::Surface::project(
@@ -2263,7 +2264,7 @@ fn a_surface_from_another_projection_version_reads_absent_and_is_repaired() {
     assert_eq!(
         crate::model::surface::surface_fingerprint(&repaired),
         crate::model::surface::surface_fingerprint(&crate::model::surface::Surface::project(
-            &cached.analysis
+            &cached.analysis()
         )),
         "the repaired surface is not the cold projection"
     );

@@ -1,5 +1,6 @@
 //! The @INC tier: path discovery, module-file location, and the
 //! in-process parse with its parent-fallback memo.
+use crate::index::sealed::Unsealed;
 
 use super::*;
 
@@ -170,11 +171,11 @@ fn parse_one_provider(
                 resolve_and_parse_inner(inc_paths, parent, parser, visiting, memo)
                     .and_then(|p| p.into_iter().next());
             if let Some(parent_cached) = parent_primary {
-                if !parent_cached.analysis.export.is_empty()
-                    || !parent_cached.analysis.export_ok.is_empty()
+                if !parent_cached.analysis().export.is_empty()
+                    || !parent_cached.analysis().export_ok.is_empty()
                 {
-                    analysis.export = parent_cached.analysis.export.clone();
-                    analysis.export_ok = parent_cached.analysis.export_ok.clone();
+                    analysis.export = parent_cached.analysis().export.clone();
+                    analysis.export_ok = parent_cached.analysis().export_ok.clone();
                     break;
                 }
             }
@@ -182,7 +183,7 @@ fn parse_one_provider(
     }
 
     let symbols = analysis.symbols().len();
-    let result = Arc::new(CachedModule::new(path, Arc::new(analysis)));
+    let result = Arc::new(crate::index::sealed::cached_module(path, Arc::new(analysis)));
     if let Some(start) = bench_start {
         eprintln!("bench\t{}\t{}\t{}\t{}", module_name, start.elapsed().as_micros(), symbols, bytes);
     }

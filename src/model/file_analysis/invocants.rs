@@ -270,7 +270,7 @@ impl FileAnalysis {
                 let params = idx
                     .visible_def_candidates(&module)
                     .iter()
-                    .find_map(|c| c.analysis.pack.template_params.get(&spec).cloned());
+                    .find_map(|c| idx.facts_present(c).pack.template_params.get(&spec).cloned());
                 push_cand(&spec, params.as_ref(), &mut cands);
             }
         }
@@ -302,7 +302,7 @@ impl FileAnalysis {
             if let Some(p) = idx
                 .visible_def_candidates(class)
                 .iter()
-                .find_map(|c| c.analysis.pack.template_params.get(class).cloned())
+                .find_map(|c| idx.facts_present(c).pack.template_params.get(class).cloned())
             {
                 return p;
             }
@@ -514,7 +514,7 @@ impl FileAnalysis {
         mi.for_each_cached(&mut |name, cached| {
             let basename = name.rsplit("::").next().unwrap_or(name);
             let hits = basename == cn
-                || cached.analysis.dbic_source_name.as_deref() == Some(cn.as_str());
+                || mi.facts_present(cached).dbic_source_name.as_deref() == Some(cn.as_str());
             if hits && Self::class_is_dbic_result(name, mi) {
                 candidates.push(name.to_string());
             }
@@ -1146,15 +1146,14 @@ impl FileAnalysis {
                 let declared = candidates
                     .iter()
                     .find(|cached| idx.symbols_present(cached).find_type_decl(c).is_some())?;
-                return declared
-                    .analysis
-                    .is_role_package(c)
-                    .then(|| declared.analysis.role_requires(c).to_vec());
+                let fa = idx.facts_present(declared);
+                return fa.is_role_package(c).then(|| fa.role_requires(c).to_vec());
             }
             candidates
                 .iter()
-                .find(|cached| cached.analysis.is_role_package(c))
-                .map(|cached| cached.analysis.role_requires(c).to_vec())
+                .map(|cached| idx.facts_present(cached))
+                .find(|fa| fa.is_role_package(c))
+                .map(|fa| fa.role_requires(c).to_vec())
         };
 
         let mut out: Vec<UnfulfilledRequire> = Vec::new();

@@ -1,6 +1,7 @@
 //! The per-file collection machinery under the walks: `collect_from_analysis`,
 //! target matching (`symbol_defines_target`), `references_mask_for`, and the
 //! raw-word / pack def-path helpers.
+use crate::index::sealed::Unsealed;
 use super::*;
 
 /// The identifier under `point` in `source`, or `None` if the cursor is not
@@ -235,7 +236,7 @@ pub(crate) fn ranked_macro_variants(
     // a file that lost every name tie.
     module_index.for_each_cached_file(&mut |cached| {
         let file_key = FileKey::Path(cached.path.clone());
-        for m in &cached.analysis.pack.macro_defs {
+        for m in &cached.analysis().pack.macro_defs {
             note(m, &mut defined, &mut universe);
             if m.name == word {
                 push(m, &file_key, &mut sites);
@@ -393,7 +394,7 @@ pub(super) fn names_visible_macro(
         || idx.is_some_and(|i| {
             i.def_candidates(name)
                 .iter()
-                .any(|c| c.analysis.names_macro_def(name, None))
+                .any(|c| c.analysis().names_macro_def(name, None))
         })
 }
 
@@ -452,9 +453,9 @@ pub(super) fn pack_def_paths(
         // them one identity. Non-macro values (globals, statics) stay
         // closure-strict: two unrelated `static int counter` TUs are two
         // targets.
-        if c.analysis.names_macro_def(name, None)
+        if c.analysis().names_macro_def(name, None)
             || visible.contains(&p)
-            || c.analysis.pack.include_closure.contains(&self_str)
+            || c.analysis().pack.include_closure.contains(&self_str)
         {
             out.push(p);
         }
@@ -684,7 +685,7 @@ pub fn references_mask_for(
                 if !arc.symbols_are_evicted() {
                     continue; // the resident scan already judged it
                 }
-                let cm = std::sync::Arc::new(crate::model::file_analysis::CachedModule::new(
+                let cm = std::sync::Arc::new(crate::index::sealed::cached_module(
                     path.clone(),
                     arc,
                 ));
@@ -728,7 +729,7 @@ pub fn references_mask_for(
                     if !arc.symbols_are_evicted() {
                         continue;
                     }
-                    let cm = std::sync::Arc::new(crate::model::file_analysis::CachedModule::new(
+                    let cm = std::sync::Arc::new(crate::index::sealed::cached_module(
                         path.clone(),
                         arc,
                     ));

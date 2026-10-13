@@ -1,6 +1,7 @@
 //! Residency policy (eviction switch, strict mode, the tripwire) and
 //! persistence: per-module generation save, the stamp-guarded analyze
 //! protocol, and the shared batched persist-writer harness.
+use crate::index::sealed::Unsealed;
 
 use super::*;
 
@@ -80,7 +81,7 @@ fn save_one_provider(
     if let Some(m) = result {
         // A bag-evicted copy IS the already-persisted generation —
         // re-encoding it would overwrite the good blob with a bagless one.
-        if m.analysis.bag_is_evicted() {
+        if m.analysis().bag_is_evicted() {
             return true;
         }
     }
@@ -92,9 +93,9 @@ fn save_one_provider(
         return false;
     }
     if let Some(m) = result {
-        if !m.analysis.degraded {
-            let seeds: Vec<_> = m.analysis.ref_row_seeds();
-            let sym_seeds = m.analysis.sym_row_seeds();
+        if !m.analysis().degraded {
+            let seeds: Vec<_> = m.analysis().ref_row_seeds();
+            let sym_seeds = m.analysis().sym_row_seeds();
             if let Err(e) = module_cache::shred_derived_rows(
                 conn,
                 &m.path.to_string_lossy(),

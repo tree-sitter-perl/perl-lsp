@@ -7,6 +7,7 @@ use crate::model::file_analysis::{CachedModule, CrossFileLookup, FileAnalysis};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use crate::index::sealed::Unsealed;
 
 fn build(src: &str) -> FileAnalysis {
     let mut parser = crate::build::builder::create_parser();
@@ -32,7 +33,7 @@ impl World {
     fn provide(&mut self, class: &str, path: &str, src: &str, fp: u64) -> &mut Self {
         let p = PathBuf::from(path);
         self.providers.entry(class.to_string()).or_default().push(Arc::new(
-            CachedModule::new(p.clone(), Arc::new(build(src))),
+            crate::index::sealed::cached_module(p.clone(), Arc::new(build(src))),
         ));
         self.fingerprints.insert(p, fp);
         self
@@ -40,6 +41,9 @@ impl World {
 }
 
 impl CrossFileLookup for World {
+    fn facts_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
+        Arc::clone(cached.analysis())
+    }
     fn resolution_epoch(&self) -> u64 {
         self.epoch.get()
     }
@@ -215,7 +219,7 @@ fn a_dynamic_parent_list_in_the_closure_declines() {
     );
     let origin = build(CHILD);
     let minted = ClosednessCertificate::mint(&w, &origin, "Child");
-    if !w.providers["Base"][0].analysis.has_dynamic_parents("Base") {
+    if !w.providers["Base"][0].analysis().has_dynamic_parents("Base") {
         // The fixture did not produce the shape; say so rather than passing
         // for the wrong reason.
         panic!("fixture no longer yields dynamic parents — the exclusion is untested");

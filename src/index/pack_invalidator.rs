@@ -34,6 +34,7 @@
 //! caches) nests strictly beneath it, and the open-document sweep over
 //! `FileStore` runs AFTER the guard drops, so `change_lock` never meets a
 //! store shard guard.
+use crate::index::sealed::Unsealed;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,7 +44,7 @@ use tower_lsp::lsp_types::Url;
 
 use crate::index::file_store::{FileKey, FileStore};
 use crate::index::module_cache;
-use crate::index::module_index::{CachedModule, ModuleIndex};
+use crate::index::module_index::ModuleIndex;
 use crate::model::file_analysis::FileAnalysis;
 
 /// THE consumer rule: the include closure is the cross-file visibility key,
@@ -325,9 +326,9 @@ impl PackInvalidator {
             Vec::new();
         if let Some(ref pack) = pack {
             pack.for_each_registered_file(&mut |cm| {
-                if is_consumer(&cm.analysis, &canon_str) {
+                if is_consumer(&cm.analysis(), &canon_str) {
                     consumers.push(cm.path.clone());
-                    consumer_closures.push((cm.path.clone(), cm.analysis.pack.include_closure.clone()));
+                    consumer_closures.push((cm.path.clone(), cm.analysis().pack.include_closure.clone()));
                 }
             });
         }
@@ -453,7 +454,7 @@ impl PackInvalidator {
                     |conn, batch: &[(PathBuf, Arc<FileAnalysis>)]| {
                         for (p, arc) in batch {
                             let p_str = p.to_string_lossy();
-                            let cached = Arc::new(CachedModule::new(p.clone(), Arc::clone(arc)));
+                            let cached = Arc::new(crate::index::sealed::cached_module(p.clone(), Arc::clone(arc)));
                             if !module_cache::save_to_db(conn, &p_str, &Some(cached), "workspace") {
                                 // Shredding now would pair a new generation's
                                 // rows with a blob that isn't there — the same

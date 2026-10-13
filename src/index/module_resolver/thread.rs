@@ -1,5 +1,6 @@
 //! The one resolver loop: workspace-root wait, SQLite warm, queue
 //! drain, and the per-module resolve protocol (server and headless).
+use crate::index::sealed::Unsealed;
 
 use super::*;
 
@@ -214,8 +215,8 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                     "Resolved '{}': {} provider(s), {} export, {} export_ok",
                     module_name,
                     providers.len(),
-                    providers[0].analysis.export.len(),
-                    providers[0].analysis.export_ok.len()
+                    providers[0].analysis().export.len(),
+                    providers[0].analysis().export_ok.len()
                 ),
                 None => log::info!("No exports found for '{}'", module_name),
             }
@@ -280,18 +281,18 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                     // class only it names must still resolve.
                     for m in providers {
                     // Explicit imports — the module's own `use` statements.
-                    for imp in &m.analysis.imports {
+                    for imp in &m.analysis().imports {
                         enqueue(&mut pending, imp.module_name.clone());
                     }
                     // Re-export edges — a re-exporting module (Test::Most →
                     // Test::More) pulls its producers' surfaces transitively,
                     // so those producers must be resolved even when no file
                     // `use`s them directly.
-                    for re in &m.analysis.reexport_modules {
+                    for re in &m.analysis().reexport_modules {
                         enqueue(&mut pending, re.clone());
                     }
                     // Parent classes — inheritance chain.
-                    for (_pkg, parents) in m.analysis.package_parent_edges() {
+                    for (_pkg, parents) in m.analysis().package_parent_edges() {
                         for parent in parents {
                             enqueue(&mut pending, parent.clone());
                         }
@@ -300,12 +301,12 @@ pub(super) fn resolver_loop(core: Arc<IndexCore>, server: Option<ServerSession>)
                     // plugin-emitted typed Subs, method return annotations.
                     // These are the chain-invisible-but-reachable classes
                     // the user's chain walks through at query time.
-                    for sym in m.analysis.symbols() {
+                    for sym in m.analysis().symbols() {
                         use crate::model::file_analysis::{InferredType, SymKind, SymbolDetail};
                         if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
                         if !matches!(sym.detail, SymbolDetail::Sub { .. }) { continue; }
                         if let Some(InferredType::ClassName(c)) =
-                            m.analysis.symbol_return_type_via_bag(sym.id, None)
+                            m.analysis().symbol_return_type_via_bag(sym.id, None)
                         {
                             enqueue(&mut pending, c);
                         }

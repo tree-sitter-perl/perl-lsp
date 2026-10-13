@@ -1,3 +1,4 @@
+use crate::index::sealed::Unsealed;
 use super::*;
 use crate::index::module_index::strip_import_copy_one;
 
@@ -77,7 +78,7 @@ sub new {
     );
 
     let core = IndexCore::new();
-    let cached = Arc::new(CachedModule::new(PathBuf::from("/x/Demo/Has/Event.pm"), analysis));
+    let cached = Arc::new(crate::index::sealed::cached_module(PathBuf::from("/x/Demo/Has/Event.pm"), analysis));
 
     // Workspace-index style insert: a resolved module.
     core.insert_resolved("Demo::Has::Event", Some(vec![cached]), false, false);
@@ -94,7 +95,7 @@ sub new {
     // protects against None-over-Some).
     let tree2 = parser.parse(source, None).unwrap();
     let analysis2 = std::sync::Arc::new(crate::build::builder::build(&tree2, source.as_bytes()));
-    let cached2 = Arc::new(CachedModule::new(PathBuf::from("/y/Demo/Has/Event.pm"), analysis2));
+    let cached2 = Arc::new(crate::index::sealed::cached_module(PathBuf::from("/y/Demo/Has/Event.pm"), analysis2));
     core.insert_resolved("Demo::Has::Event", Some(vec![cached2]), false, false);
     assert_eq!(
         core.cache.get("Demo::Has::Event").as_deref().unwrap().as_ref().unwrap().path,
@@ -222,20 +223,20 @@ fn import_tier_strip_gates_on_persistence() {
     let tree = parser.parse(source, None).unwrap();
     let fa = crate::build::builder::build(&tree, source.as_bytes());
     assert!(!fa.witnesses.is_empty());
-    let cm = Arc::new(CachedModule::new(
+    let cm = Arc::new(crate::index::sealed::cached_module(
         PathBuf::from("/inc/Strip.pm"),
         Arc::new(fa),
     ));
 
     let stripped = strip_import_copy_one(&cm, true, true);
-    assert!(stripped.analysis.bag_is_evicted(), "persisted + eviction → bag drops");
-    assert!(!stripped.analysis.symbols_are_evicted(), "symbols stay resident this slice");
-    assert!(!stripped.analysis.refs_are_evicted(), "refs stay resident this slice");
+    assert!(stripped.analysis().bag_is_evicted(), "persisted + eviction → bag drops");
+    assert!(!stripped.analysis().symbols_are_evicted(), "symbols stay resident this slice");
+    assert!(!stripped.analysis().refs_are_evicted(), "refs stay resident this slice");
 
     let whole = strip_import_copy_one(&cm, false, true);
-    assert!(!whole.analysis.bag_is_evicted(), "unpersisted → bag unrecoverable → keep");
+    assert!(!whole.analysis().bag_is_evicted(), "unpersisted → bag unrecoverable → keep");
     let whole2 = strip_import_copy_one(&cm, true, false);
-    assert!(!whole2.analysis.bag_is_evicted(), "NO_EVICT → keep");
+    assert!(!whole2.analysis().bag_is_evicted(), "NO_EVICT → keep");
 }
 
 
@@ -401,7 +402,7 @@ fn a_workspace_file_still_shadows_an_inc_provider_of_the_same_name() {
     let inc_fa = build(inc_src);
     let ws_fa = build(ws_src);
 
-    idx.insert_cache("Shadowed", Some(Arc::new(CachedModule::new(inc_pm.clone(), inc_fa))));
+    idx.insert_cache("Shadowed", Some(Arc::new(crate::index::sealed::cached_module(inc_pm.clone(), inc_fa))));
     idx.register_workspace_module(ws_pm.clone(), ws_fa);
 
     assert_eq!(

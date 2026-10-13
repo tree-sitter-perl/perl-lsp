@@ -1,3 +1,4 @@
+use crate::index::sealed::Unsealed;
 use super::*;
 
 fn parse_source_to_cached(source: &str, module_name: &str) -> Arc<CachedModule> {
@@ -8,7 +9,7 @@ fn parse_source_to_cached(source: &str, module_name: &str) -> Arc<CachedModule> 
         .unwrap();
     let tree = parser.parse(source, None).unwrap();
     let analysis = crate::build::builder::build(&tree, source.as_bytes());
-    Arc::new(CachedModule::new(
+    Arc::new(crate::index::sealed::cached_module(
         PathBuf::from(format!("/fake/{}.pm", module_name.replace("::", "/"))),
         Arc::new(analysis),
     ))
@@ -25,19 +26,19 @@ fn bag_present_rehydrates_evicted_at_both_caps() {
     use crate::index::pack_bag_cache::PackBagCache;
     let src = "package Widget;\nsub make { my $c = shift; return bless {}, $c; }\nsub name { my $s = shift; return 'w'; }\n1;\n";
     let full = parse_source_to_cached(src, "Widget");
-    let full_bag_len = full.analysis.witnesses.len();
+    let full_bag_len = full.analysis().witnesses.len();
     assert!(full_bag_len > 0, "fixture must have a populated bag");
     let path = full.path.clone();
 
     // The resident copy the index would register: bag stripped.
-    let mut stripped = (*full.analysis).clone();
+    let mut stripped = (**full.analysis()).clone();
     stripped.evict_witness_bag();
     assert!(stripped.bag_is_evicted() && stripped.witnesses.is_empty());
-    let stripped_cached = Arc::new(CachedModule::new(path.clone(), Arc::new(stripped)));
+    let stripped_cached = Arc::new(crate::index::sealed::cached_module(path.clone(), Arc::new(stripped)));
 
     for cap in [8 * 1024 * 1024usize, 0] {
         // Loader hands back the FULL analysis (as SQLite would after decode).
-        let full_for_loader = full.analysis.clone();
+        let full_for_loader = full.analysis().clone();
         let cache = Arc::new(PackBagCache::new(cap, move |_p, _want_bag: bool| {
             Ok((*full_for_loader).clone())
         }));
@@ -78,12 +79,12 @@ fn symbols_present_answers_resident_when_only_bag_evicted() {
     }));
     let idx = ModuleIndex::new_for_cli().with_bag_cache(cache);
 
-    let mut bag_only = (*full.analysis).clone();
+    let mut bag_only = (**full.analysis()).clone();
     bag_only.evict_to(crate::model::file_analysis::Residency::RowsOnly);
-    let bag_only_cached = Arc::new(CachedModule::new(path.clone(), Arc::new(bag_only)));
+    let bag_only_cached = Arc::new(crate::index::sealed::cached_module(path.clone(), Arc::new(bag_only)));
     let got = idx.symbols_present(&bag_only_cached);
     assert!(
-        Arc::ptr_eq(&got, &bag_only_cached.analysis),
+        Arc::ptr_eq(&got, &bag_only_cached.analysis()),
         "bag-only-evicted copy answers resident (ptr-identical)"
     );
     assert!(got.has_sub_in_package("make", "Widget"));
@@ -102,15 +103,15 @@ fn symbols_present_rehydrates_evicted_symbols_never_absence_by_eviction() {
     use crate::model::file_analysis::CrossFileLookup;
     let src = "package Widget;\nsub make { my $c = shift; return bless {}, $c; }\n1;\n";
     let full = parse_source_to_cached(src, "Widget");
-    let full_for_loader = full.analysis.clone();
+    let full_for_loader = full.analysis().clone();
     let cache = Arc::new(PackBagCache::new(8 * 1024 * 1024, move |_p: &std::path::Path, _want_bag: bool| {
         Ok((*full_for_loader).clone())
     }));
     let idx = ModuleIndex::new_for_cli().with_bag_cache(cache);
-    let mut stripped = (*full.analysis).clone();
+    let mut stripped = (**full.analysis()).clone();
     stripped.evict_to(crate::model::file_analysis::Residency::Skeleton);
     assert!(stripped.symbols_are_evicted(), "fixture must model the workspace strip");
-    let stripped_cached = Arc::new(CachedModule::new(full.path.clone(), Arc::new(stripped)));
+    let stripped_cached = Arc::new(crate::index::sealed::cached_module(full.path.clone(), Arc::new(stripped)));
     let got = idx.symbols_present(&stripped_cached);
     assert!(!got.symbols_are_evicted(), "rehydrated view carries symbols");
     assert!(
@@ -132,11 +133,11 @@ fn refs_present_answers_resident_when_only_bag_evicted() {
         panic!("refs_present must not rehydrate a rows-resident copy")
     }));
     let idx = ModuleIndex::new_for_cli().with_bag_cache(cache);
-    let mut bag_only = (*full.analysis).clone();
+    let mut bag_only = (**full.analysis()).clone();
     bag_only.evict_to(crate::model::file_analysis::Residency::RowsOnly);
-    let cached = Arc::new(CachedModule::new(full.path.clone(), Arc::new(bag_only)));
+    let cached = Arc::new(crate::index::sealed::cached_module(full.path.clone(), Arc::new(bag_only)));
     let got = idx.refs_present(&cached);
-    assert!(Arc::ptr_eq(&got, &cached.analysis), "rows-resident copy answers resident");
+    assert!(Arc::ptr_eq(&got, &cached.analysis()), "rows-resident copy answers resident");
     assert!(!got.refs().is_empty(), "refs axis is populated on the fast path");
 }
 
@@ -152,15 +153,15 @@ fn refs_present_rehydrates_evicted_refs_never_absence_by_eviction() {
     use crate::model::file_analysis::CrossFileLookup;
     let src = "package Widget;\nsub make { my $c = shift; return bless {}, $c; }\nWidget::make('Widget');\n1;\n";
     let full = parse_source_to_cached(src, "Widget");
-    let full_for_loader = full.analysis.clone();
+    let full_for_loader = full.analysis().clone();
     let cache = Arc::new(PackBagCache::new(8 * 1024 * 1024, move |_p: &std::path::Path, _want_bag: bool| {
         Ok((*full_for_loader).clone())
     }));
     let idx = ModuleIndex::new_for_cli().with_bag_cache(cache);
-    let mut stripped = (*full.analysis).clone();
+    let mut stripped = (**full.analysis()).clone();
     stripped.evict_to(crate::model::file_analysis::Residency::Skeleton);
     assert!(stripped.refs_are_evicted(), "fixture must model the workspace strip");
-    let cached = Arc::new(CachedModule::new(full.path.clone(), Arc::new(stripped)));
+    let cached = Arc::new(crate::index::sealed::cached_module(full.path.clone(), Arc::new(stripped)));
     let got = idx.refs_present(&cached);
     assert!(!got.refs_are_evicted(), "rehydrated view carries refs");
     assert!(!got.symbols_are_evicted(), "rehydrated view carries symbols (matcher reads both)");
@@ -191,16 +192,16 @@ fn test_extract_exports_list_util() {
     assert!(cached.is_some(), "Should parse List::Util");
     let cached = cached.unwrap();
     assert!(
-        cached.analysis.export_ok.contains(&"first".to_string()),
+        cached.analysis().export_ok.contains(&"first".to_string()),
         "List::Util should export_ok 'first', got: {:?}",
-        cached.analysis.export_ok
+        cached.analysis().export_ok
     );
     assert!(
-        cached.analysis.export_ok.contains(&"any".to_string()),
+        cached.analysis().export_ok.contains(&"any".to_string()),
         "List::Util should export_ok 'any'"
     );
     assert!(
-        cached.analysis.export_ok.contains(&"min".to_string()),
+        cached.analysis().export_ok.contains(&"min".to_string()),
         "List::Util should export_ok 'min'"
     );
 }
@@ -225,12 +226,12 @@ fn test_resolver_thread_flow() {
     );
     let cached = idx.get_cached("Carp").unwrap();
     assert!(
-        cached.analysis.export.contains(&"carp".to_string()),
+        cached.analysis().export.contains(&"carp".to_string()),
         "Carp should export 'carp', got: {:?}",
-        cached.analysis.export
+        cached.analysis().export
     );
     assert!(
-        cached.analysis.export.contains(&"croak".to_string()),
+        cached.analysis().export.contains(&"croak".to_string()),
         "Carp should export 'croak'"
     );
 }
@@ -609,12 +610,12 @@ fn register_symbols_stripping_feeds_before_evict() {
     use crate::index::pack_bag_cache::PackBagCache;
     let src = "package Widget;\nsub make { my $c = shift; return bless {}, $c; }\n1;\n";
     let full = parse_source_to_cached(src, "Widget");
-    let full_syms = full.analysis.symbols().len();
+    let full_syms = full.analysis().symbols().len();
     assert!(full_syms > 0);
     let path = full.path.clone();
 
     let idx = ModuleIndex::new_for_cli();
-    let arc = idx.register_symbols_stripping((*path).to_path_buf(), (*full.analysis).clone(), crate::model::file_analysis::Residency::Skeleton);
+    let arc = idx.register_symbols_stripping((*path).to_path_buf(), (**full.analysis()).clone(), crate::model::file_analysis::Residency::Skeleton);
     assert!(arc.symbols_are_evicted() && arc.symbols().is_empty(), "stored copy is stripped");
     assert!(arc.refs_are_evicted());
 
@@ -626,7 +627,7 @@ fn register_symbols_stripping_feeds_before_evict() {
     assert!(!idx.def_candidates("make").is_empty(), "candidate table fed pre-strip");
 
     // whole_present rehydrates symbols through the LRU.
-    let full_for_loader = full.analysis.clone();
+    let full_for_loader = full.analysis().clone();
     let cache = std::sync::Arc::new(PackBagCache::new(1024 * 1024, move |_p, _want_bag: bool| {
         Ok((*full_for_loader).clone())
     }));
@@ -663,14 +664,14 @@ fn closed_dep_return_type_resolves_through_its_imports() {
     );
 
     let idx = ModuleIndex::new_for_test();
-    idx.register_workspace_module(c.path.to_path_buf(), Arc::clone(&c.analysis));
-    idx.register_workspace_module(b.path.to_path_buf(), Arc::clone(&b.analysis));
-    idx.register_workspace_module(a.path.to_path_buf(), Arc::clone(&a.analysis));
+    idx.register_workspace_module(c.path.to_path_buf(), Arc::clone(&c.analysis()));
+    idx.register_workspace_module(b.path.to_path_buf(), Arc::clone(&b.analysis()));
+    idx.register_workspace_module(a.path.to_path_buf(), Arc::clone(&a.analysis()));
 
     // Precondition: B's RAW bag alone can't answer (else the seam proves
     // nothing) — thing() is imported, no local edge.
     assert_eq!(
-        b.analysis.sub_return_type_at_arity("make", None),
+        b.analysis().sub_return_type_at_arity("make", None),
         None,
         "fixture must dead-end without the index (raw bag)"
     );
@@ -678,7 +679,7 @@ fn closed_dep_return_type_resolves_through_its_imports() {
     // Seam 1: the imported-sub hop from A lands in B's bag, whose own
     // imported-sub hop lands in C.
     let t = a
-        .analysis
+        .analysis()
         .sub_return_type_at_arity_ctx("make", None, Some(&idx))
         .expect("the closed-dep chain resolves through the index");
     assert_eq!(
@@ -690,7 +691,7 @@ fn closed_dep_return_type_resolves_through_its_imports() {
     // Seam 2: the PackageSymbol cross-file primary — B::make as a method
     // call target.
     let t2 = a
-        .analysis
+        .analysis()
         .find_method_return_type("B", "make", Some(&idx), None)
         .expect("PackageSymbol chase resolves through B's imports");
     assert_eq!(t2.class_name().as_deref(), Some("Widget"));
@@ -709,8 +710,8 @@ fn import_cycle_terminates_and_resolves_the_acyclic_leg() {
         "CycB",
     );
     let idx = ModuleIndex::new_for_test();
-    idx.register_workspace_module(a.path.to_path_buf(), Arc::clone(&a.analysis));
-    idx.register_workspace_module(b.path.to_path_buf(), Arc::clone(&b.analysis));
+    idx.register_workspace_module(a.path.to_path_buf(), Arc::clone(&a.analysis()));
+    idx.register_workspace_module(b.path.to_path_buf(), Arc::clone(&b.analysis()));
 
     // Terminates (no hang / overflow), and the acyclic leg resolves: afn's
     // return is local to A, so the cycle never has to close.
@@ -719,7 +720,7 @@ fn import_cycle_terminates_and_resolves_the_acyclic_leg() {
         "Cons",
     );
     let t = consumer
-        .analysis
+        .analysis()
         .sub_return_type_at_arity_ctx("bfn", None, Some(&idx))
         .expect("cycle must not block the resolvable leg");
     assert_eq!(t.class_name().as_deref(), Some("AObj"));
@@ -757,7 +758,7 @@ fn cache_bridged(
     });
     idx.insert_cache(
         module_name,
-        Some(Arc::new(CachedModule::new(
+        Some(Arc::new(crate::index::sealed::cached_module(
             PathBuf::from(format!("/fake/{}.pm", module_name.replace("::", "/"))),
             Arc::new(fa),
         ))),
@@ -775,7 +776,7 @@ fn bridged_entity_return_resolves_through_the_bridging_files_imports() {
         "package C;\nour @EXPORT_OK = ('thing');\nsub thing { return bless {}, 'Widget' }\n1;\n",
         "C",
     );
-    idx.register_workspace_module(c.path.to_path_buf(), Arc::clone(&c.analysis));
+    idx.register_workspace_module(c.path.to_path_buf(), Arc::clone(&c.analysis()));
     // Br bridges its `render` entity to class `Painter`; render's return type
     // exists only through Br's OWN import of C.
     let br_src = "package Br;\nuse C 'thing';\nsub render { my $x = thing(); return $x }\n1;\n";
@@ -785,14 +786,14 @@ fn bridged_entity_return_resolves_through_the_bridging_files_imports() {
     // no local edge) — else the index hop proves nothing.
     let br = idx.get_cached("Br").expect("Br cached");
     let render_id = br
-        .analysis
+        .analysis()
         .symbols()
         .iter()
         .find(|s| s.name == "render")
         .map(|s| s.id)
         .unwrap();
     assert_eq!(
-        br.analysis.symbol_return_type_via_bag(render_id, None),
+        br.analysis().symbol_return_type_via_bag(render_id, None),
         None,
         "fixture must dead-end on the raw bag"
     );
@@ -817,7 +818,7 @@ fn idx_find_method_return(
 ) -> Option<InferredType> {
     let consumer = parse_source_to_cached("package Q;\nsub noop { 1 }\n1;\n", "Q");
     consumer
-        .analysis
+        .analysis()
         .find_method_return_type(class, method, Some(idx), None)
 }
 
@@ -835,7 +836,7 @@ fn cross_file_slot_type_primary_resolves_hop1() {
         "package Store;\nsub init {\n    my $self = shift;\n    $self->{conn} = Conn->new;\n}\n1;\n",
         "Store",
     );
-    idx.register_workspace_module(store.path.to_path_buf(), Arc::clone(&store.analysis));
+    idx.register_workspace_module(store.path.to_path_buf(), Arc::clone(&store.analysis()));
 
     let app_src =
         "package App;\nsub run {\n    my $s = Store->new;\n    my $c = $s->{conn};\n}\n1;\n";
@@ -874,15 +875,15 @@ fn imported_return_is_transitive_at_query_time() {
         "A",
     );
     let idx = ModuleIndex::new_for_test();
-    idx.register_workspace_module(c.path.to_path_buf(), Arc::clone(&c.analysis));
-    idx.register_workspace_module(b.path.to_path_buf(), Arc::clone(&b.analysis));
-    idx.register_workspace_module(a.path.to_path_buf(), Arc::clone(&a.analysis));
+    idx.register_workspace_module(c.path.to_path_buf(), Arc::clone(&c.analysis()));
+    idx.register_workspace_module(b.path.to_path_buf(), Arc::clone(&b.analysis()));
+    idx.register_workspace_module(a.path.to_path_buf(), Arc::clone(&a.analysis()));
 
     // Precondition: A's own bag can't type go (make imported, no index).
-    assert_eq!(a.analysis.sub_return_type_at_arity("go", None), None);
+    assert_eq!(a.analysis().sub_return_type_at_arity("go", None), None);
 
     let t = a
-        .analysis
+        .analysis()
         .sub_return_type_at_arity_ctx("go", None, Some(&idx))
         .expect("the A→B→C chain resolves through the index at query time");
     assert_eq!(t.class_name().as_deref(), Some("Widget"), "{t:?}");
@@ -902,10 +903,10 @@ fn mutual_import_query_terminates_without_poison() {
         "CycB",
     );
     let idx = ModuleIndex::new_for_test();
-    idx.register_workspace_module(a.path.to_path_buf(), Arc::clone(&a.analysis));
-    idx.register_workspace_module(b.path.to_path_buf(), Arc::clone(&b.analysis));
+    idx.register_workspace_module(a.path.to_path_buf(), Arc::clone(&a.analysis()));
+    idx.register_workspace_module(b.path.to_path_buf(), Arc::clone(&b.analysis()));
 
-    let q = || a.analysis.sub_return_type_at_arity_ctx("afn", None, Some(&idx));
+    let q = || a.analysis().sub_return_type_at_arity_ctx("afn", None, Some(&idx));
     assert_eq!(q(), None, "a pure cycle has no source value");
     assert_eq!(q(), None, "and re-declines identically");
 }
@@ -926,7 +927,7 @@ fn rehydration_miss_is_counted_and_serves_resident() {
     let tree = parser.parse(src, None).unwrap();
     let mut fa = crate::build::builder::build(&tree, src.as_bytes());
     fa.evict_to(crate::model::file_analysis::Residency::Skeleton);
-    let cm = Arc::new(CachedModule::new(
+    let cm = Arc::new(crate::index::sealed::cached_module(
         PathBuf::from("/fake/Ghost.pm"),
         Arc::new(fa),
     ));
@@ -934,7 +935,7 @@ fn rehydration_miss_is_counted_and_serves_resident() {
     let before = crate::index::module_index::rehydration_miss_count();
     let served = crate::model::file_analysis::CrossFileLookup::bag_present(&idx, &cm);
     assert!(
-        Arc::ptr_eq(&served, &cm.analysis),
+        Arc::ptr_eq(&served, &cm.analysis()),
         "miss degrades to the stripped resident copy, never fabricates"
     );
     assert!(
@@ -987,7 +988,7 @@ fn foreign_path_rehydrates_through_the_owning_sibling() {
     hub.attach_pack_index("cpp", Arc::clone(&sub));
 
     // The misrouted ask: the sub-index handed a hub-owned stripped copy.
-    let cm = Arc::new(CachedModule::new(path, Arc::new(stripped)));
+    let cm = Arc::new(crate::index::sealed::cached_module(path, Arc::new(stripped)));
     let before = crate::index::module_index::rehydration_miss_count();
     let full = crate::model::file_analysis::CrossFileLookup::whole_present(sub.as_ref(), &cm);
     assert!(
@@ -1441,7 +1442,7 @@ fn a_session_derives_a_cross_file_answer_once_and_answers_the_same() {
         "Prov",
     );
     let idx = ModuleIndex::new_for_test();
-    idx.register_workspace_module(provider.path.to_path_buf(), Arc::clone(&provider.analysis));
+    idx.register_workspace_module(provider.path.to_path_buf(), Arc::clone(&provider.analysis()));
     let caller = parse_source_to_cached(
         "package Caller;\nuse Prov;\nsub go { my $r = Prov->make(); return $r }\n1;\n",
         "Caller",
@@ -1450,7 +1451,7 @@ fn a_session_derives_a_cross_file_answer_once_and_answers_the_same() {
 
     let ask = || {
         caller
-            .analysis
+            .analysis()
             .find_method_return_type("Prov", "make", Some(lookup), None)
             .and_then(|t| t.class_name().map(|s| s.to_string()))
     };
@@ -1491,12 +1492,12 @@ fn a_session_memo_drops_when_the_index_moves() {
         "Prov",
     );
     let idx = ModuleIndex::new_for_test();
-    idx.register_workspace_module(provider.path.to_path_buf(), Arc::clone(&provider.analysis));
+    idx.register_workspace_module(provider.path.to_path_buf(), Arc::clone(&provider.analysis()));
     let caller = parse_source_to_cached("package Caller;\nuse Prov;\n1;\n", "Caller");
     let lookup: &dyn crate::model::file_analysis::CrossFileLookup = &idx;
     let ask = || {
         caller
-            .analysis
+            .analysis()
             .find_method_return_type("Prov", "make", Some(lookup), None)
             .and_then(|t| t.class_name().map(|s| s.to_string()))
     };
@@ -1507,7 +1508,7 @@ fn a_session_memo_drops_when_the_index_moves() {
     assert_eq!(ResolutionSession::stats().unwrap().consults, 1);
 
     let other = parse_source_to_cached("package Other;\nsub o { 1 }\n1;\n", "Other");
-    idx.register_workspace_module(other.path.to_path_buf(), Arc::clone(&other.analysis));
+    idx.register_workspace_module(other.path.to_path_buf(), Arc::clone(&other.analysis()));
 
     assert_eq!(ask().as_deref(), Some("Res"), "answer survives the drop");
     assert_eq!(
@@ -1529,13 +1530,13 @@ fn an_exhausted_consult_budget_degrades_instead_of_running_forever() {
         "Prov",
     );
     let idx = ModuleIndex::new_for_test();
-    idx.register_workspace_module(provider.path.to_path_buf(), Arc::clone(&provider.analysis));
+    idx.register_workspace_module(provider.path.to_path_buf(), Arc::clone(&provider.analysis()));
     let caller = parse_source_to_cached("package Caller;\nuse Prov;\n1;\n", "Caller");
     let lookup: &dyn crate::model::file_analysis::CrossFileLookup = &idx;
 
     let _s = ResolutionSession::enter_with_budget(Some(lookup), 0);
     let answer = caller
-        .analysis
+        .analysis()
         .find_method_return_type("Prov", "make", Some(lookup), None);
     assert!(answer.is_none(), "no budget ⇒ no cross-file answer");
     assert!(
@@ -1576,12 +1577,12 @@ fn an_evicted_copy_still_answers_its_export_surface() {
                sub make { my $c = shift; return bless {}, $c; }\nsub helper { return 1 }\n1;\n";
     let full = parse_source_to_cached(src, "Widget");
     assert!(
-        full.analysis.exports_name("make") && full.analysis.exports_name("helper"),
+        full.analysis().exports_name("make") && full.analysis().exports_name("helper"),
         "fixture must export both names before eviction"
     );
 
     for level in [Residency::Whole, Residency::RowsOnly, Residency::Skeleton] {
-        let mut fa = (*full.analysis).clone();
+        let mut fa = (**full.analysis()).clone();
         fa.evict_to(level);
         assert!(
             fa.exports_name("make"),
@@ -1608,7 +1609,7 @@ fn residency_is_a_ladder_so_a_bag_view_always_carries_its_rows() {
     // EVERY level the type can express. A new variant added without a case
     // here fails to compile on the match below, not silently at runtime.
     for level in [Residency::Whole, Residency::RowsOnly, Residency::Skeleton] {
-        let mut fa = (*full.analysis).clone();
+        let mut fa = (**full.analysis()).clone();
         fa.evict_to(level);
         let (bag_gone, refs_gone, syms_gone) =
             (fa.bag_is_evicted(), fa.refs_are_evicted(), fa.symbols_are_evicted());
@@ -2049,7 +2050,7 @@ fn a_conclusions_row_matching_the_recorded_surface_is_used() {
     idx.set_conclusion_cache(Arc::new(ConclusionCache::new(1 << 20, move |_p| {
         Some((ConclusionMap::default(), stamp))
     })));
-    idx.record_surface(&path, &fa.analysis);
+    idx.record_surface(&path, &fa.analysis());
 
     assert!(
         idx.conclusions_for(&path).is_some(),
@@ -2090,7 +2091,7 @@ fn a_conclusions_row_whose_source_moved_reads_absent() {
         Some((ConclusionMap::default(), stamp))
     })));
     // ...while the index has since recorded the NEW one.
-    idx.record_surface(&path, &after.analysis);
+    idx.record_surface(&path, &after.analysis());
 
     assert!(
         idx.conclusions_for(&path).is_none(),
@@ -2138,7 +2139,7 @@ fn a_conclusions_row_for_an_unrecorded_path_reads_absent() {
 /// row-validity tests so they cannot drift from what the writer computes.
 fn surface_fp(c: &Arc<CachedModule>) -> u64 {
     crate::model::surface::surface_fingerprint(&crate::model::surface::Surface::project(
-        &c.analysis,
+        &c.analysis(),
     ))
 }
 
@@ -2185,8 +2186,8 @@ fn a_walk_reads_valid_rows_across_generations() {
         };
         Some((ConclusionMap::default(), stamp))
     })));
-    idx.record_surface(&early, &fa_e.analysis);
-    idx.record_surface(&later, &fa_l.analysis);
+    idx.record_surface(&early, &fa_e.analysis());
+    idx.record_surface(&later, &fa_l.analysis());
 
     // Outside a walk — the control. Without it the assertions below would
     // pass against a `conclusions_for` that answered everything blindly.
@@ -2213,7 +2214,7 @@ fn a_walk_reads_valid_rows_across_generations() {
         "Later",
     );
     assert_ne!(surface_fp(&moved), fp_l, "fixture must move the surface");
-    idx.record_surface(&later, &moved.analysis);
+    idx.record_surface(&later, &moved.analysis());
     idx.invalidate_derived_copies(&later);
     assert!(
         idx.conclusions_for(&later).is_none(),
@@ -2253,7 +2254,7 @@ fn a_rejected_row_enqueues_its_path_for_repair_exactly_once() {
     idx.set_conclusion_cache(Arc::new(ConclusionCache::new(1 << 20, move |_p| {
         Some((ConclusionMap::default(), stamp))
     })));
-    idx.record_surface(&path, &after.analysis);
+    idx.record_surface(&path, &after.analysis());
 
     assert_eq!(idx.repair_pushed_len_for_test(), 0, "precondition");
     for _ in 0..5 {
@@ -2290,10 +2291,10 @@ fn a_background_write_lands_until_the_open_doc_lane_has_recorded() {
     let provider = std::path::PathBuf::from("/fake/Prov.pm");
     let con = parse_source_to_cached("package Con;\nuse Prov;\nsub r { 1 }\n1;\n", "Con");
     let prov = parse_source_to_cached("package Prov;\nsub m { 1 }\n1;\n", "Prov");
-    idx.record_surface(&provider, &prov.analysis);
+    idx.record_surface(&provider, &prov.analysis());
 
     idx.mark_doc_open(&consumer);
-    let v = idx.record_surface(&consumer, &con.analysis);
+    let v = idx.record_surface(&consumer, &con.analysis());
     assert_eq!(
         v,
         SurfaceVerdict::FirstSeen,
@@ -2311,7 +2312,7 @@ fn a_background_write_lands_until_the_open_doc_lane_has_recorded() {
     // open-doc write claims the path, and Background yields to it again.
     idx.record_and_dirty_value(
         &consumer,
-        Surface::project(&con.analysis),
+        Surface::project(&con.analysis()),
         SurfaceWrite::OpenDoc,
     );
     let moved = parse_source_to_cached(
@@ -2319,7 +2320,7 @@ fn a_background_write_lands_until_the_open_doc_lane_has_recorded() {
         "Con",
     );
     assert_eq!(
-        idx.record_surface(&consumer, &moved.analysis),
+        idx.record_surface(&consumer, &moved.analysis()),
         SurfaceVerdict::Unchanged,
         "a Background write must yield once the open-doc lane owns the record \
          — consumers read the buffer, and the disk state is not what they see"
@@ -2332,7 +2333,7 @@ fn a_background_write_lands_until_the_open_doc_lane_has_recorded() {
 fn greet_param_type(greeter: &CachedModule, idx: &ModuleIndex) -> Option<InferredType> {
     // Row 1 of every Greeter fixture below is `sub greet { ... return $u }`.
     greeter
-        .analysis
+        .analysis()
         .inferred_type_via_bag_ctx("$u", tree_sitter::Point { row: 1, column: 40 }, Some(idx))
 }
 
@@ -2342,7 +2343,7 @@ const GREETER_FUNCTION: &str = "package Greeter;\nsub greet { my ($u) = @_;     
 fn index_of(files: &[&Arc<CachedModule>]) -> ModuleIndex {
     let idx = ModuleIndex::new_for_test();
     for f in files {
-        idx.register_workspace_module(f.path.to_path_buf(), Arc::clone(&f.analysis));
+        idx.register_workspace_module(f.path.to_path_buf(), Arc::clone(&f.analysis()));
     }
     idx
 }
@@ -2355,7 +2356,7 @@ fn param_type_joins_method_callers() {
         "App",
     );
     assert_eq!(
-        greeter.analysis.inferred_type_via_bag("$u", tree_sitter::Point { row: 1, column: 40 }),
+        greeter.analysis().inferred_type_via_bag("$u", tree_sitter::Point { row: 1, column: 40 }),
         None,
         "fixture must not type $u from its own file"
     );
@@ -2430,7 +2431,7 @@ fn param_type_follows_a_caller_edit() {
         "package App;\nsub run { Greeter->greet(bless({}, 'Admin')) }\n1;\n",
         "App",
     );
-    idx.register_workspace_module(edited.path.to_path_buf(), Arc::clone(&edited.analysis));
+    idx.register_workspace_module(edited.path.to_path_buf(), Arc::clone(&edited.analysis()));
     assert_eq!(greet_param_type(&greeter, &idx).unwrap().class_name().as_deref(), Some("Admin"));
 }
 
@@ -2448,7 +2449,7 @@ fn param_type_follows_a_new_caller_file() {
         "package Late;\nsub run { Greeter->greet(bless({}, 'Admin')) }\n1;\n",
         "Late",
     );
-    idx.register_workspace_module(late.path.to_path_buf(), Arc::clone(&late.analysis));
+    idx.register_workspace_module(late.path.to_path_buf(), Arc::clone(&late.analysis()));
     assert_eq!(greet_param_type(&greeter, &idx), None, "the new caller disagrees");
 }
 
@@ -2467,12 +2468,12 @@ fn param_type_reads_an_open_buffer_as_its_caller() {
         "package App;\nsub run { Greeter->greet(bless({}, 'Admin')) }\n1;\n",
         "App",
     );
-    idx.set_open_caller(&app.path, Arc::clone(&typing.analysis));
+    idx.set_open_caller(&app.path, Arc::clone(&typing.analysis()));
     assert_eq!(greet_param_type(&greeter, &idx).unwrap().class_name().as_deref(), Some("Admin"));
     // A buffer that drops the call stops being a caller, even though the
     // disk copy still has one.
     let removed = parse_source_to_cached("package App;\nsub run { 1 }\n1;\n", "App");
-    idx.set_open_caller(&app.path, Arc::clone(&removed.analysis));
+    idx.set_open_caller(&app.path, Arc::clone(&removed.analysis()));
     assert_eq!(greet_param_type(&greeter, &idx), None);
     idx.mark_doc_closed(&app.path);
     assert_eq!(greet_param_type(&greeter, &idx).unwrap().class_name().as_deref(), Some("User"));
@@ -2492,7 +2493,7 @@ fn param_type_cycle_terminates() {
     );
     let idx = index_of(&[&ring, &app]);
     let t = ring
-        .analysis
+        .analysis()
         .inferred_type_via_bag_ctx("$x", tree_sitter::Point { row: 1, column: 30 }, Some(&idx))
         .expect("the outside caller types $x; the cycle's leg is cut");
     assert_eq!(t.class_name().as_deref(), Some("User"));
@@ -2607,7 +2608,7 @@ fn param_type_cycle_settles_on_the_common_class() {
         let order = if first == "$x" { ["$x", "$y"] } else { ["$y", "$x"] };
         for var in order {
             let t = ring
-                .analysis
+                .analysis()
                 .inferred_type_via_bag_ctx(var, tree_sitter::Point { row: 1, column: 30 }.max(if var == "$y" { tree_sitter::Point { row: 2, column: 30 } } else { tree_sitter::Point { row: 1, column: 30 } }), Some(&idx))
                 .unwrap_or_else(|| panic!("{var} settles (asked {first} first)"));
             assert_eq!(t.class_name().as_deref(), Some("User"), "{var}, asked {first} first");
@@ -2629,7 +2630,7 @@ fn named_args_type_the_param_hash_and_the_fields_it_fills() {
     );
     let idx = index_of(&[&svc, &app]);
     let at = |var: &str, row: usize, column: usize| {
-        svc.analysis
+        svc.analysis()
             .inferred_type_via_bag_ctx(var, tree_sitter::Point { row, column }, Some(&idx))
             .and_then(|t| t.class_name().map(str::to_string))
     };
@@ -2651,7 +2652,7 @@ fn pushed_slot_elements_type_the_loop_over_the_slot() {
     );
     let idx = index_of(&[&roster, &app]);
     let t = roster
-        .analysis
+        .analysis()
         .inferred_type_via_bag_ctx("$m", tree_sitter::Point { row: 4, column: 2 }, Some(&idx));
     assert_eq!(t.and_then(|t| t.class_name().map(str::to_string)).as_deref(), Some("User"));
 }

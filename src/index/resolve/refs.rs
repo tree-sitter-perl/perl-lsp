@@ -1,5 +1,6 @@
 //! The reference walks: `refs_to`, `group_refs` + group rename edits,
 //! `implementations_of`, specialization families, and delegation aliases.
+use crate::index::sealed::Unsealed;
 use super::*;
 
 /// Group construction shared by the local arm (cursor in the class
@@ -536,8 +537,8 @@ fn walk_refs(
         if let Some(idx) = module_index {
             idx.for_each_cached_file(&mut |cached| {
                 let own = cached.path.to_string_lossy();
-                if file_sees_target_ids(target, &target_def_ids, &cached.analysis, &own) {
-                    seen_by_inclusion.extend(cached.analysis.pack.include_closure.iter_strs().map(|a| a.as_ref().to_owned()));
+                if file_sees_target_ids(target, &target_def_ids, &cached.analysis(), &own) {
+                    seen_by_inclusion.extend(cached.analysis().pack.include_closure.iter_strs().map(|a| a.as_ref().to_owned()));
                 }
             });
         }
@@ -660,7 +661,7 @@ fn walk_refs(
                         if !mask.contains(RoleMask::WORKSPACE) {
                             continue;
                         }
-                        std::sync::Arc::new(crate::model::file_analysis::CachedModule::new(
+                        std::sync::Arc::new(crate::index::sealed::cached_module(
                             path.clone(),
                             arc,
                         ))
@@ -678,7 +679,7 @@ fn walk_refs(
                 covered_paths.insert(path.clone());
                 let key = FileKey::Path(cached.path.clone());
                 let file_str = canonical_file_str(&key);
-                if !gate(&cached.analysis, &file_str) {
+                if !gate(&cached.analysis(), &file_str) {
                     continue;
                 }
                 // The matcher reads refs (usage sites) AND symbols
@@ -717,7 +718,7 @@ fn walk_refs(
             let full = match module_index {
                 Some(idx) => {
                     let cached = std::sync::Arc::new(
-                        crate::model::file_analysis::CachedModule::new(
+                        crate::index::sealed::cached_module(
                             entry.key().clone(),
                             std::sync::Arc::clone(entry.value()),
                         ),
@@ -749,7 +750,7 @@ fn walk_refs(
                 }
                 let key = FileKey::Path(cached.path.clone());
                 let file_str = canonical_file_str(&key);
-                if !gate(&cached.analysis, &file_str) {
+                if !gate(&cached.analysis(), &file_str) {
                     return;
                 }
                 // Rows-off fallback sweep: copies here may still be
@@ -919,7 +920,7 @@ pub fn implementations_of(
         }
         for cached in homes {
             let is_marker = cached
-                .analysis
+                .analysis()
                 .role_requires(pkg.as_str())
                 .iter()
                 .any(|r| r == &target.name);
@@ -1078,7 +1079,7 @@ pub(super) fn delegation_aliases(
     if mask.contains(RoleMask::DEPENDENCY) {
         if let Some(idx) = module_index {
             idx.for_each_cached_file(&mut |cached| {
-                add(&cached.analysis, &cached.path.to_string_lossy());
+                add(&cached.analysis(), &cached.path.to_string_lossy());
             });
         }
     }

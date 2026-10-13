@@ -498,6 +498,25 @@ thread_local! {
     /// A cycle under the innermost settling frame gave up unsettled: its
     /// round's values read assumptions that never held.
     static UNSETTLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Depth of `untracked` scopes: reads inside one belong to a relation
+    /// whose own hash is the recorded dependency, not to the open frame.
+    static UNTRACKED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Run `f` without recording its reads into the open frames. For a derived
+/// relation (the mentions sets) whose result is recorded as one hashed
+/// dependency: the per-file reads that built it would only over-depend,
+/// and a memoized result could not repeat them anyway.
+fn untracked<R>(f: impl FnOnce() -> R) -> R {
+    struct Leave;
+    impl Drop for Leave {
+        fn drop(&mut self) {
+            UNTRACKED.with(|u| u.set(u.get() - 1));
+        }
+    }
+    UNTRACKED.with(|u| u.set(u.get() + 1));
+    let _leave = Leave;
+    f()
 }
 
 struct Member {
@@ -526,6 +545,9 @@ fn taint_open_frames() {
 /// it through their child edge. Called by the index's read seams; a no-op
 /// when no engine computation is running.
 pub fn note_dep(dep: Dep) {
+    if UNTRACKED.with(|u| u.get()) > 0 {
+        return;
+    }
     FRAMES.with(|f| {
         if let Some(frame) = f.borrow_mut().last_mut() {
             frame.deps.insert(dep);
@@ -568,7 +590,7 @@ pub fn deeper_position_of_open_join(key: &JoinKey) -> bool {
 }
 
 fn any_frame_open() -> bool {
-    FRAMES.with(|f| !f.borrow().is_empty())
+    UNTRACKED.with(|u| u.get()) == 0 && FRAMES.with(|f| !f.borrow().is_empty())
 }
 
 /// Record that `path` was read, at its current version. Cheap enough to
@@ -593,6 +615,10 @@ pub fn mentions_hash(paths: &[PathBuf]) -> u64 {
 /// (`mentions_among`, `calls_among`), memoized per `resolution_epoch`: one
 /// verification checks every mentions set its answer's chase read.
 pub fn mentions_of(idx: &dyn CrossFileLookup, kind: MentionKind, key: &str) -> Arc<Vec<PathBuf>> {
+    untracked(|| mentions_of_untracked(idx, kind, key))
+}
+
+fn mentions_of_untracked(idx: &dyn CrossFileLookup, kind: MentionKind, key: &str) -> Arc<Vec<PathBuf>> {
     let Some(store) = idx.answer_store() else {
         let any = mentions_among(idx, key, &uncovered_files(idx));
         return Arc::new(match kind {
@@ -660,13 +686,14 @@ fn mentions_among(idx: &dyn CrossFileLookup, key: &str, uncovered: &[Arc<CachedM
     let mut paths: Vec<PathBuf> = idx.ref_candidate_paths(&[key.to_string()]);
     for cached in uncovered {
         // An evicted copy can't say, so it stays a candidate.
-        if cached.analysis.refs_are_evicted() || !cached.analysis.ref_indices_keyed(key).is_empty() {
+        let fa = idx.facts_present(cached);
+        if fa.refs_are_evicted() || !fa.ref_indices_keyed(key).is_empty() {
             paths.push(cached.path.clone());
         }
     }
     paths.retain(|p| !is_open(p));
     for o in &open {
-        if !o.analysis.ref_indices_keyed(key).is_empty() {
+        if !idx.facts_present(o).ref_indices_keyed(key).is_empty() {
             paths.push(o.path.clone());
         }
     }
@@ -691,7 +718,7 @@ fn calls_among(idx: &dyn CrossFileLookup, store: Option<&AnswerStore>, key: &str
         .iter()
         .filter(|path| {
             if let Some(o) = open.iter().find(|o| &o.path == *path) {
-                return calls(&o.analysis);
+                return calls(&idx.facts_present(o));
             }
             // Unregistered: nothing to read, so nothing calls it.
             let Some(cached) = idx.cached_by_path(path) else { return false };
@@ -759,8 +786,7 @@ pub fn class_family_mentions(idx: &dyn CrossFileLookup, class: &str) -> Option<s
 /// when one is open, else the indexed copy, whole.
 pub fn caller_view(idx: &dyn CrossFileLookup, path: &std::path::Path) -> Option<Arc<FileAnalysis>> {
     if let Some(o) = idx.open_callers().into_iter().find(|o| o.path == path) {
-        note_file(idx, path);
-        return Some(Arc::clone(&o.analysis));
+        return Some(idx.facts_present(&o));
     }
     let cached = idx.cached_by_path(path)?;
     Some(idx.whole_present(&cached))

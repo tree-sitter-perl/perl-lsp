@@ -1,4 +1,5 @@
 //! Diagnostics: unresolved names, the narrowing family, `DiagnosticOptions`.
+use crate::index::sealed::Unsealed;
 
 use super::*;
 
@@ -153,7 +154,7 @@ pub fn collect_diagnostics(
                 let mut bound: HashMap<String, String> = HashMap::new();
                 let mut all: std::collections::HashSet<String> = Default::default();
                 for c in &cands {
-                    let surface = c.analysis.export_surface_with_index(module_index);
+                    let surface = c.analysis().export_surface_with_index(module_index);
                     bound.extend(crate::model::file_analysis::imported_names(import, &surface));
                     all.extend(surface.all_names());
                 }

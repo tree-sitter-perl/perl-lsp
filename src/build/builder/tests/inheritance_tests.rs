@@ -530,7 +530,7 @@ pub(super) fn fake_cached_for_class(
     }
     source.push_str("1;\n");
     let fa = build_fa(&source);
-    std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+    std::sync::Arc::new(crate::index::sealed::cached_module(
         path.to_path_buf(),
         std::sync::Arc::new(fa),
     ))
@@ -635,7 +635,7 @@ sub fetch {
     let fa_parent = build_fa(source);
     idx.insert_cache(
         "Fetcher",
-        Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+        Some(std::sync::Arc::new(crate::index::sealed::cached_module(
             PathBuf::from("/fake/Fetcher.pm"),
             std::sync::Arc::new(fa_parent),
         ))),

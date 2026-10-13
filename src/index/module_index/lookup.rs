@@ -1,5 +1,6 @@
 //! Bridged-entity enumeration, descendant walks, blocking resolution, and the
 //! `CrossFileLookup` trait impl.
+use crate::index::sealed::Unsealed;
 
 use super::*;
 
@@ -112,7 +113,7 @@ impl ModuleIndex {
                 for cached in crate::model::file_analysis::CrossFileLookup::def_candidates(self, &module_name) {
                 // A module can hold several packages; only the ones
                 // actually listing `current` as a parent are children.
-                for (pkg, parents) in cached.analysis.package_parent_edges() {
+                for (pkg, parents) in cached.analysis().package_parent_edges() {
                     if !parents.iter().any(|p| p == &current) {
                         continue;
                     }
@@ -223,7 +224,7 @@ impl ModuleIndex {
     /// plugin's home package). Same guards, same skip license: only a
     /// covered store's proven absence skips.
     fn candidate_may_name(&self, cached: &Arc<CachedModule>, name: &str) -> bool {
-        if !cached.analysis.symbols_are_evicted() {
+        if !cached.analysis().symbols_are_evicted() {
             return true;
         }
         static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -236,12 +237,12 @@ impl ModuleIndex {
             crate::index::module_cache::sym_name_row_exists(
                 conn,
                 &cached.path.to_string_lossy(),
-                cached.analysis.names(),
+                cached.analysis().names(),
                 name,
             )
         });
         member_prefilter_may_declare(
-            !cached.analysis.plugin.gated_emissions.is_empty(),
+            !cached.analysis().plugin.gated_emissions.is_empty(),
             rows,
         )
     }
@@ -315,7 +316,7 @@ impl ModuleIndex {
         crate::util::ghost_stats::count("engine.world_digest");
         let mut files: Vec<(std::path::PathBuf, u64)> = Vec::new();
         self.for_each_cached_file(&mut |cached| {
-            files.push((cached.path.clone(), cached.analysis.source_stamp));
+            files.push((cached.path.clone(), cached.analysis().source_stamp));
         });
         files.sort();
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -353,8 +354,8 @@ impl ModuleIndex {
     }
 
     fn whole_ungated(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
-        if cached.analysis.is_fully_resident() {
-            return cached.analysis.clone();
+        if cached.analysis().is_fully_resident() {
+            return cached.analysis().clone();
         }
         self.rehydrate_or_resident(cached)
     }
@@ -367,10 +368,10 @@ impl ModuleIndex {
     /// only the applied copy is cached, under the file's registration
     /// generation and the fired set it was built for.
     fn gate_applied(&self, cached: &Arc<CachedModule>) -> Option<Arc<FileAnalysis>> {
-        if cached.analysis.plugin.gated_emissions.is_empty() {
+        if cached.analysis().plugin.gated_emissions.is_empty() {
             return None;
         }
-        let fired = cached.analysis.fired_gates(self);
+        let fired = cached.analysis().fired_gates(self);
         if !fired.iter().any(|f| *f) {
             return None;
         }
@@ -493,8 +494,8 @@ impl CrossFileLookup for ModuleIndex {
         // symbol-evicted and rehydrate through the rows-axes lane —
         // bag-stripped LRU entries, so the ancestry storm's working set
         // fits the cap instead of cycling whole copies through it.
-        if !cached.analysis.symbols_are_evicted() {
-            return cached.analysis.clone();
+        if !cached.analysis().symbols_are_evicted() {
+            return cached.analysis().clone();
         }
         self.rehydrate_rows_or_resident(cached)
     }
@@ -510,8 +511,8 @@ impl CrossFileLookup for ModuleIndex {
         // both row axes and rehydrates — never resident-or-empty, or an
         // evicted-empty ref table would read as "this file has no matching
         // refs" and `references` silently under-reports.
-        if !cached.analysis.refs_are_evicted() && !cached.analysis.symbols_are_evicted() {
-            return cached.analysis.clone();
+        if !cached.analysis().refs_are_evicted() && !cached.analysis().symbols_are_evicted() {
+            return cached.analysis().clone();
         }
         self.rehydrate_rows_or_resident(cached)
     }
@@ -570,7 +571,7 @@ impl CrossFileLookup for ModuleIndex {
         // register only AFTER their chunk commits, so for them the rows are
         // at least as fresh as the copy — the freshness argument the skip
         // leans on.
-        if !cached.analysis.symbols_are_evicted() {
+        if !cached.analysis().symbols_are_evicted() {
             return true;
         }
         static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -583,13 +584,13 @@ impl CrossFileLookup for ModuleIndex {
             crate::index::module_cache::sym_member_row_exists(
                 conn,
                 &cached.path.to_string_lossy(),
-                cached.analysis.names(),
+                cached.analysis().names(),
                 name,
                 class,
             )
         });
         member_prefilter_may_declare(
-            !cached.analysis.plugin.gated_emissions.is_empty(),
+            !cached.analysis().plugin.gated_emissions.is_empty(),
             rows,
         )
     }
@@ -604,7 +605,7 @@ impl CrossFileLookup for ModuleIndex {
         // Same freshness gate as `candidate_may_declare`: only a stripped
         // copy registered AFTER its chunk commit is provably no fresher
         // than its rows. Whole and RowsOnly (@INC-tier) copies fail open.
-        if !cached.analysis.symbols_are_evicted() {
+        if !cached.analysis().symbols_are_evicted() {
             return true;
         }
         static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -614,7 +615,7 @@ impl CrossFileLookup for ModuleIndex {
             return true;
         }
         let path = cached.path.to_string_lossy();
-        let names = cached.analysis.names();
+        let names = cached.analysis().names();
         // Raw name only: the probes own the spelling policy (raw + match
         // key — `rows::probe_spelling`). `None` (file never shredded)
         // dominates `Some(false)` — fail open.
@@ -626,7 +627,7 @@ impl CrossFileLookup for ModuleIndex {
             }
         });
         member_prefilter_may_declare(
-            !cached.analysis.plugin.gated_emissions.is_empty(),
+            !cached.analysis().plugin.gated_emissions.is_empty(),
             rows,
         )
     }
@@ -770,6 +771,11 @@ impl CrossFileLookup for ModuleIndex {
         }
     }
 
+    fn facts_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
+        crate::model::witnesses::engine::note_file(self, &cached.path);
+        cached.analysis().clone()
+    }
+
     fn bag_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
         crate::model::witnesses::engine::note_file(self, &cached.path);
         if let Some(v) = self.gate_applied(cached) {
@@ -777,9 +783,9 @@ impl CrossFileLookup for ModuleIndex {
         }
         // Never-evicted copy (open docs, degraded files kept whole): a cheap
         // Arc bump, no I/O.
-        if !cached.analysis.bag_is_evicted() {
+        if !cached.analysis().bag_is_evicted() {
             crate::util::ghost_stats::count("bagpresent.resident_whole");
-            return cached.analysis.clone();
+            return cached.analysis().clone();
         }
         crate::util::ghost_stats::count("bagpresent.rehydrate");
         self.rehydrate_or_resident(cached)
@@ -906,7 +912,7 @@ impl CrossFileLookup for ModuleIndex {
         for module in self.modules_with_parent(class) {
             // The child edge may live in a losing candidate (packages lane).
             for cached in CrossFileLookup::def_candidates(self, &module) {
-                for (pkg, parents) in cached.analysis.package_parent_edges() {
+                for (pkg, parents) in cached.analysis().package_parent_edges() {
                     if parents.iter().any(|p| p == class) {
                         out.push((pkg.clone(), module.clone()));
                     }
@@ -931,7 +937,7 @@ impl CrossFileLookup for ModuleIndex {
             // The specialization edge may live in a losing candidate
             // (pack lane, never evicted).
             for cached in CrossFileLookup::def_candidates(self, &module) {
-                for (spec, prim) in &cached.analysis.pack.specializes {
+                for (spec, prim) in &cached.analysis().pack.specializes {
                     if prim == primary {
                         out.push((spec.clone(), module.clone()));
                     }

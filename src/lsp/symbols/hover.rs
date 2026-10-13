@@ -1,4 +1,5 @@
 //! Hover rendering for Perl and pack languages.
+use crate::index::sealed::Unsealed;
 
 use super::*;
 
@@ -176,7 +177,7 @@ fn render_candidate_hover(
     if let Some(cached) = &found {
         let whole = module_index
             .map(|midx| midx.whole_present(cached))
-            .unwrap_or_else(|| cached.analysis.clone());
+            .unwrap_or_else(|| cached.analysis().clone());
         if let Some(i) = sym_at(&whole) {
             let sym = &whole.symbols()[i];
             let mut out = render_symbol_hover(

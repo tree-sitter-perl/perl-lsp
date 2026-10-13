@@ -1,5 +1,6 @@
 //! Import/export surfaces: Types::Standard vocabulary, unresolved-method ancestry,
 //! %EXPORT_TAGS, import bindings, transitive re-exports, workspace-symbol gating.
+use crate::index::sealed::Unsealed;
 
 use super::*;
 
@@ -391,7 +392,7 @@ fn require_bareword_not_flagged() {
 /// Build a cached module from raw Perl source (lets tests seed `%EXPORT_TAGS`
 /// producers that `fake_cached` can't express).
 fn cached_from_source(path: &str, source: &str) -> std::sync::Arc<crate::index::module_index::CachedModule> {
-    std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+    std::sync::Arc::new(crate::index::sealed::cached_module(
         std::path::PathBuf::from(path),
         std::sync::Arc::new(parse_analysis(source)),
     ))
@@ -684,7 +685,7 @@ sub to_json { }\n\
     idx.set_workspace_root(None);
     idx.insert_cache(
         "JSON::PP",
-        Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+        Some(std::sync::Arc::new(crate::index::sealed::cached_module(
             std::path::PathBuf::from("/usr/lib/perl5/JSON/PP.pm"),
             std::sync::Arc::new(fa),
         ))),
@@ -935,9 +936,9 @@ fn reexport_loop_push_dynamic_list_mints_no_edge() {
     // Confirm no edge was minted on M.
     let m = idx.get_cached("M").expect("M cached");
     assert!(
-        m.analysis.reexport_modules.is_empty(),
+        m.analysis().reexport_modules.is_empty(),
         "dynamic list must mint no re-export edge, got: {:?}",
-        m.analysis.reexport_modules,
+        m.analysis().reexport_modules,
     );
 
     let src = "use M;\na_fn();\n";
@@ -956,9 +957,9 @@ fn reexport_declarative_also_binds() {
     );
     let m = idx.get_cached("M").expect("M cached");
     assert!(
-        m.analysis.reexport_modules.contains(&"Base".to_string()),
+        m.analysis().reexport_modules.contains(&"Base".to_string()),
         "also => ['Base'] mints a re-export edge, got: {:?}",
-        m.analysis.reexport_modules,
+        m.analysis().reexport_modules,
     );
 
     let src = "use M;\nbase_fn();\n";
@@ -1007,7 +1008,7 @@ fn reexport_imported_names_evaluator_unchanged() {
     let import = consumer.imports.iter().find(|i| i.module_name == "M").expect("use M import");
 
     // Own-only surface: just M's own @EXPORT — base_fn NOT visible.
-    let own = m.analysis.export_surface();
+    let own = m.analysis().export_surface();
     let bound_own = crate::model::file_analysis::imported_names(import, &own);
     assert!(bound_own.iter().any(|(l, _)| l == "own_fn"));
     assert!(
@@ -1016,7 +1017,7 @@ fn reexport_imported_names_evaluator_unchanged() {
     );
 
     // Index-walked surface: same evaluator, transitive surface — base_fn binds.
-    let walked = m.analysis.export_surface_with_index(&idx);
+    let walked = m.analysis().export_surface_with_index(&idx);
     let bound_walked = crate::model::file_analysis::imported_names(import, &walked);
     assert!(bound_walked.iter().any(|(l, _)| l == "own_fn"));
     assert!(
@@ -1042,7 +1043,7 @@ class Point {
     let module_index = crate::index::module_index::ModuleIndex::new_for_test();
     module_index.insert_cache(
         "Point",
-        Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+        Some(std::sync::Arc::new(crate::index::sealed::cached_module(
             std::path::PathBuf::from("/tmp/sym_defer_point.pm"),
             std::sync::Arc::new(parse_analysis(point_src)),
         ))),

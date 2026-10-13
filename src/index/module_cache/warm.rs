@@ -401,7 +401,7 @@ pub fn warm_cache(
                         if strip && !fa.degraded {
                             fa.evict_to(crate::model::file_analysis::Residency::RowsOnly);
                         }
-                        let cand = Arc::new(CachedModule::new(path, Arc::new(fa)));
+                        let cand = Arc::new(crate::index::sealed::cached_module(path, Arc::new(fa)));
                         adopt_warm_provider(cache, all_defs, &module_name, cand, &inc_roots);
                         count += 1;
                     }

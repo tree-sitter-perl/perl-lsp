@@ -1,6 +1,7 @@
 //! The completion projections: candidate SOURCES only (`complete`,
 //! `complete_modules`, qualified-path and pack-qualified gathering) —
 //! cursor-context slot detection stays in the LSP layer.
+use crate::index::sealed::Unsealed;
 use super::*;
 
 impl<'a> CandidateSet<'a> {
@@ -362,7 +363,7 @@ impl<'a> CandidateSet<'a> {
                 module_index.for_each_cached_file(&mut |cached| {
                     let p = cached.path.to_string_lossy();
                     let connected = visible.contains(p.as_ref())
-                        || cached.analysis.pack.include_closure.contains(&self_str);
+                        || cached.analysis().pack.include_closure.contains(&self_str);
                     if !connected {
                         return;
                     }

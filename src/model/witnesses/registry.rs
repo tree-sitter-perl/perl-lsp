@@ -532,7 +532,7 @@ pub(super) fn sweep_candidate_may_answer(
     name: &str,
     attributed: bool,
 ) -> bool {
-    let fa = &cached.analysis;
+    let fa = idx.facts_present(cached);
     if !fa.declared_parents(class).is_empty() {
         return true;
     }
@@ -2352,7 +2352,7 @@ impl ReducerRegistry {
                             if reason == super::OpenReason::AbsentNotClosed
                                 && super::closedness::class_is_closed(
                                     idx,
-                                    &cached.analysis,
+                                    &idx.facts_present(cached),
                                     package,
                                 )
                             {

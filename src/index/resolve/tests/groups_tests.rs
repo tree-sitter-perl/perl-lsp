@@ -172,7 +172,7 @@ class Point {
     let class_path = PathBuf::from("/tmp/grp_mint_point.pm");
     idx.insert_cache(
         "Point",
-        Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+        Some(std::sync::Arc::new(crate::index::sealed::cached_module(
             class_path.clone(),
             std::sync::Arc::new(parse(point_src)),
         ))),
@@ -1412,7 +1412,7 @@ fn test_implementations_of_role_requires_fans_out_to_composers() {
         let analysis = Arc::new(parse(src));
         idx.insert_cache(
             name,
-            Some(Arc::new(CachedModule::new(
+            Some(Arc::new(crate::index::sealed::cached_module(
                 PathBuf::from(format!("/fake/{}.pm", name.replace("::", "/"))),
                 analysis,
             ))),
@@ -1473,7 +1473,7 @@ fn test_implementations_finds_mixin_sibling_override() {
         let analysis = Arc::new(parse(src));
         idx.insert_cache(
             name,
-            Some(Arc::new(CachedModule::new(
+            Some(Arc::new(crate::index::sealed::cached_module(
                 PathBuf::from(format!("/fake/{}.pm", name.replace("::", "/"))),
                 analysis,
             ))),
@@ -1586,7 +1586,7 @@ fn test_implementations_on_sub_decl_target_finds_overrides() {
         let analysis = Arc::new(parse(src));
         idx.insert_cache(
             name,
-            Some(Arc::new(CachedModule::new(
+            Some(Arc::new(crate::index::sealed::cached_module(
                 PathBuf::from(format!("/fake/{}.pm", name.replace("::", "/"))),
                 analysis,
             ))),

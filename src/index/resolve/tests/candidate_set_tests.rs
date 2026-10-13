@@ -81,7 +81,7 @@ fn candidate_set_visibility_axis_flows_to_every_projection() {
     let insert = |name: &str, src: &str| {
         idx.insert_cache(
             name,
-            Some(Arc::new(CachedModule::new(
+            Some(Arc::new(crate::index::sealed::cached_module(
                 PathBuf::from(format!("/fake/{}.pm", name.replace("::", "/"))),
                 Arc::new(parse(src)),
             ))),

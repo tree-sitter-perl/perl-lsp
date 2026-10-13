@@ -1,4 +1,5 @@
 //! Construction plus the zero-I/O cached-lookup accessors async handlers call.
+use crate::index::sealed::Unsealed;
 
 use super::*;
 
@@ -264,7 +265,7 @@ impl ModuleIndex {
                 if visit(&cached).is_break() {
                     return;
                 }
-                for next in &cached.analysis.reexport_modules {
+                for next in &cached.analysis().reexport_modules {
                     if !seen.contains(next) {
                         queue.push_back(next.clone());
                     }
@@ -371,8 +372,8 @@ impl ModuleIndex {
                 // ANY candidate file of the module may carry the export list.
                 crate::model::file_analysis::CrossFileLookup::def_candidates(self, m)
                     .iter()
-                    .any(|c| c.analysis.export.iter().any(|e| e == func_name)
-                        || c.analysis.export_ok.iter().any(|e| e == func_name))
+                    .any(|c| c.analysis().export.iter().any(|e| e == func_name)
+                        || c.analysis().export_ok.iter().any(|e| e == func_name))
             })
             .collect();
         result.sort();

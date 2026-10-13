@@ -1,6 +1,7 @@
 //! Import-binding classification (`ImportResolution`, `classify_import`)
 //! and the import/export candidate gatherers the completion projection and
 //! goto-def share, so they can never disagree on importability.
+use crate::index::sealed::Unsealed;
 use super::*;
 
 /// Candidates for names a `use` statement makes (or could make) available:
@@ -63,7 +64,7 @@ pub(super) fn import_candidates(
             continue;
         }
         for cached in &cands {
-            let fa = &cached.analysis;
+            let fa = &cached.analysis();
             let all_exported: Vec<&String> = if import.imported_symbols.is_empty() {
                 // Bare `use Foo;` — offer @EXPORT
                 fa.export.iter().collect()
@@ -152,7 +153,7 @@ pub(super) fn unimported_export_candidates(
             return;
         }
 
-        let fa = &cached.analysis;
+        let fa = &cached.analysis();
         let all_exported = fa.export.iter().chain(fa.export_ok.iter());
         for name in all_exported {
             // Skip functions already defined locally
@@ -273,7 +274,7 @@ fn classify_import(
     module_index: &dyn CrossFileLookup,
 ) -> Option<(ImportResolution, String)> {
     if let Some(cached) = cached {
-        let surface = cached.analysis.export_surface_with_index(module_index);
+        let surface = cached.analysis().export_surface_with_index(module_index);
         let bound = crate::model::file_analysis::imported_names(import, &surface);
         if let Some((_local, remote)) = bound.iter().find(|(local, _)| local == func_name) {
             return Some((ImportResolution::Brought, remote.clone()));
