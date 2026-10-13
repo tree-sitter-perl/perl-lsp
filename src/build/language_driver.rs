@@ -170,6 +170,9 @@ pub trait LanguageDriver: Send + Sync {
 /// asserts the verb surface and regressions are caught; `Beta` = broad gold
 /// coverage, known gaps documented; `Alpha` = it parses and answers, with
 /// little or no net watching it — expect wrong answers.
+// The pack drivers that construct `Beta` and `Alpha` are feature-gated, so a
+// build without them sees only `Stable`.
+#[cfg_attr(not(feature = "pack-langs"), allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Maturity {
     Stable,
@@ -240,7 +243,7 @@ impl LanguageDriver for PerlDriver {
 /// optional pre-parse `transform` (C++ uses it for macro reparse;
 /// others pass through). The whole multi-language story for a language
 /// whose extraction is query-shaped is a `PackDriver { ... }` literal.
-#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
+#[cfg(feature = "pack-langs")]
 pub struct PackDriver {
     id: &'static str,
     maturity: Maturity,
@@ -308,13 +311,13 @@ pub struct PackDriver {
 /// Pre-parse external state gathered in phase 1 (`gather_pack_context`) and
 /// threaded through phases 2 and 5 (`transform_and_parse`, `enrich_skeleton`)
 /// — see the phase list on `analyze_with_path`.
-#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
+#[cfg(feature = "pack-langs")]
 struct PackContext {
     external: std::sync::Arc<crate::build::cpp_reparse::PreExpandedExternal>,
     plan: Option<crate::build::cpp_reparse::MemberBlockPlan>,
 }
 
-#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
+#[cfg(feature = "pack-langs")]
 impl LanguageDriver for PackDriver {
     fn maturity(&self) -> Maturity {
         self.maturity
@@ -421,7 +424,7 @@ impl LanguageDriver for PackDriver {
     }
 }
 
-#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
+#[cfg(feature = "pack-langs")]
 impl PackDriver {
     /// The phase pipeline `analyze_with_path` documents; the trait method
     /// wraps it to stamp `FileAnalysis.language` on every exit.
@@ -475,7 +478,7 @@ impl PackDriver {
 /// The pack analyze pipeline's phases (1/2/5/7 in `analyze_with_path`'s doc;
 /// 3/4/6 are the free fns / `SkeletonAnalysis` method called between them).
 /// Order is fixed and load-bearing — see that doc for the full contract.
-#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
+#[cfg(feature = "pack-langs")]
 impl PackDriver {
     /// Phase 1: pre-parse external context — the cross-file macro table and
     /// the member-block plan. Both read the ORIGINAL source only.
@@ -667,7 +670,7 @@ fn cpp_driver() -> PackDriver {
             p.set_language(&tree_sitter_cpp::LANGUAGE.into()).expect("cpp grammar");
             p
         },
-        pack: crate::build::query_extract::cpp_pack,
+        pack: crate::build::packs::cpp_pack,
         // reparse past the preprocessor before extraction; the anchor map
         // carries the recovered spans back to the original coordinates.
         transform: Some(crate::build::cpp_reparse::preprocess_validated_with),
@@ -693,7 +696,7 @@ fn python_driver() -> PackDriver {
             p.set_language(&tree_sitter_python::LANGUAGE.into()).expect("python grammar");
             p
         },
-        pack: crate::build::query_extract::python_pack,
+        pack: crate::build::packs::python_pack,
         transform: None,
         gather_macros: None,
         collect_macro_defs: None,
@@ -717,7 +720,7 @@ fn r_driver() -> PackDriver {
             p.set_language(&tree_sitter_r::LANGUAGE.into()).expect("r grammar");
             p
         },
-        pack: crate::build::query_extract::r_pack,
+        pack: crate::build::packs::r_pack,
         transform: None,
         gather_macros: None,
         collect_macro_defs: None,
@@ -742,7 +745,7 @@ fn cmake_driver() -> PackDriver {
             p.set_language(&tree_sitter_cmake::LANGUAGE.into()).expect("cmake grammar");
             p
         },
-        pack: crate::build::query_extract::cmake_pack,
+        pack: crate::build::packs::cmake_pack,
         transform: None,
         gather_macros: None,
         collect_macro_defs: None,
@@ -761,7 +764,7 @@ fn cmake_driver() -> PackDriver {
 /// The class is recovered either way (the strip is the unknown-macro safety
 /// net) — only the SIGNAL is plugin-gated: core owns the recovery mechanism,
 /// the plugin owns what the macro means (rule #10).
-#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
+#[cfg(feature = "pack-langs")]
 fn apply_attribute_macros(fa: &mut FileAnalysis, recovered: &[(String, String)]) {
     use crate::model::file_analysis::SymKind;
     if recovered.is_empty() {
@@ -781,22 +784,13 @@ fn apply_attribute_macros(fa: &mut FileAnalysis, recovered: &[(String, String)])
     }
 }
 
-/// Inject the member-block synthetic bases + parent edges into the extracted
-/// skeleton (`docs/adr/macro-handling.md`, "Member-block macros = roles"). The
-/// macro's own `#define` symbol is reclassified Variable → Class (the navigable
-/// base), members are minted under it (package = the macro), and each member
-/// re-sources the SAME `TypeName` edge the expanded field would have. The
-/// existing ancestor walk (`resolve_method_in_ancestors` / `parents_of`) then
-/// delivers `o->op_type` resolution / hover / the references splat — no parallel
-/// field resolution. Spans are already in ORIGINAL coordinates.
-#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
 /// Type each function-like macro from its body: delegation (`#define F(x)
 /// G(x)`) reuses the see-through target as a value edge, else a param-
 /// independent body type (`#define SQ(x) ((x)*(x))` → Numeric). First def wins
 /// per name (a config-variant macro's arms are a later union tier). Object-like
 /// macros are skipped — their value/type lanes ride edges, not the sub-return
 /// path.
-#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
+#[cfg(feature = "pack-langs")]
 fn macro_return_hints(
     macro_defs: &[crate::model::file_analysis::MacroDef],
     parser: &mut tree_sitter::Parser,
@@ -829,6 +823,14 @@ fn macro_return_hints(
     out
 }
 
+/// Inject the member-block synthetic bases + parent edges into the extracted
+/// skeleton (`docs/adr/macro-handling.md`, "Member-block macros = roles"). The
+/// macro's own `#define` symbol is reclassified Variable → Class (the navigable
+/// base), members are minted under it (package = the macro), and each member
+/// re-sources the SAME `TypeName` edge the expanded field would have. The
+/// existing ancestor walk (`resolve_method_in_ancestors` / `parents_of`) then
+/// delivers `o->op_type` resolution / hover / the references splat — no parallel
+/// field resolution. Spans are already in ORIGINAL coordinates.
 #[cfg_attr(not(feature = "cpp"), allow(dead_code))]
 fn inject_member_blocks(
     skel: &mut crate::build::query_extract::SkeletonAnalysis,
@@ -954,7 +956,7 @@ fn stamp_access_regions(fa: &mut FileAnalysis, regions: &[crate::build::cpp_repa
 /// followed the `#include` and has the body, so carry it into THIS file's bag —
 /// the hop then resolves locally. Gated on a type-shaped body so the sea of
 /// value macros mints nothing. Non-cpp packs gather nothing (empty iterator).
-#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
+#[cfg(feature = "pack-langs")]
 fn emit_external_type_aliases(
     witnesses: &mut Vec<crate::model::witnesses::Witness>,
     external: &crate::build::cpp_reparse::PreExpandedExternal,
@@ -1005,7 +1007,7 @@ fn emit_external_type_aliases(
 /// class. Whether a bare name CAN elide `this->` — for members OR methods — is
 /// a language fact the pack declares (`implicit_this_members`): true for C/C++,
 /// false for Python/R where the receiver is mandatory.
-#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
+#[cfg(feature = "pack-langs")]
 fn emit_return_fuel(
     fa: &mut FileAnalysis,
     return_sites: &[(crate::model::file_analysis::ScopeId, crate::model::file_analysis::Span)],
@@ -1165,7 +1167,7 @@ fn emit_return_fuel(
 /// `SkeletonAnalysis` / `SkelRef` / `SkelSymbol` fails to compile HERE
 /// until the new field's spans — or its span-lessness, bound as `_` —
 /// are accounted for.
-#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
+#[cfg(feature = "pack-langs")]
 fn remap_spans(
     skel: &mut crate::build::query_extract::SkeletonAnalysis,
     transformed: &str,
@@ -1364,7 +1366,7 @@ fn remap_spans(
 /// query capture can ref it and find-references on the macro goes dark.
 /// Runs after `remap_spans` (skeleton scopes already in original coords),
 /// before `into_file_analysis` (which resolves/mints the actual refs).
-#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
+#[cfg(feature = "pack-langs")]
 fn mint_erased_macro_reads(
     skel: &mut crate::build::query_extract::SkeletonAnalysis,
     original: &str,
@@ -1465,12 +1467,12 @@ fn mint_erased_macro_reads(
 
 /// Line-start byte offsets, for Point↔byte conversion (Point.column is a
 /// byte offset within its row).
-#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
+#[cfg(feature = "pack-langs")]
 struct LineIndex {
     starts: Vec<usize>,
 }
 
-#[cfg(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake"))]
+#[cfg(feature = "pack-langs")]
 impl LineIndex {
     fn new(s: &str) -> Self {
         let mut starts = vec![0];
@@ -1499,7 +1501,7 @@ pub struct LanguageRegistry {
 impl LanguageRegistry {
     pub fn with_enabled() -> Self {
         #[cfg_attr(
-            not(any(feature = "cpp", feature = "python", feature = "r", feature = "cmake")),
+            not(feature = "pack-langs"),
             allow(unused_mut)
         )]
         let mut drivers: Vec<Box<dyn LanguageDriver>> = vec![Box::new(PerlDriver)];

@@ -1,5 +1,6 @@
 use super::*;
-use crate::build::query_extract::{cmake_pack, cpp_pack, extract, perl_pack, python_pack, r_pack, LangPack};
+use crate::build::packs::{cmake_pack, cpp_pack, perl_pack, python_pack, r_pack};
+use crate::build::query_extract::{extract, LangPack};
 
 fn bundled() -> Vec<(&'static str, LangPack, tree_sitter::Language)> {
     vec![
@@ -62,4 +63,36 @@ fn malformed_names_do_not_parse() {
     for name in ["def", "def.sub.name.x", "scope.", "import.", "ref", "expr.lit.float", "flow"] {
         assert!(Capture::parse(name).is_err(), "@{name} must not parse");
     }
+}
+
+/// A link names a node one level from its pattern's `@link.from.<walk>`; a
+/// pattern that links without one fails the compile instead of recording
+/// nothing.
+#[test]
+fn a_link_without_its_from_fails_the_load() {
+    let err = load_err("(subroutine_declaration_statement)\n(subroutine_declaration_statement name: (_) @link.name)");
+    assert!(err.contains("line 2: a pattern with @link.<rel> needs exactly one @link.from.<walk>"), "{err}");
+}
+
+/// A walk starts at its root capture, so links for a walk whose root the
+/// document never captures have no reader and fail the compile.
+#[test]
+fn a_walk_without_its_root_fails_the_load() {
+    let err = load_err("(subroutine_declaration_statement name: (_) @link.name) @link.from.ool");
+    assert!(err.contains("@link.from.ool links for a walk whose root @ool.def"), "{err}");
+}
+
+/// The bare `@link.from` no longer parses: every link names its walk.
+#[test]
+fn a_from_names_its_walk() {
+    assert!(Capture::parse("link.from").is_err());
+    assert_eq!(Capture::parse("link.from.ool"), Ok(Capture::LinkFrom(LinkWalk::Ool)));
+}
+
+fn load_err(query_source: &'static str) -> String {
+    let pack = LangPack { query_source, ..perl_pack() };
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_parser_perl::LANGUAGE.into()).unwrap();
+    let tree = parser.parse("sub f {}", None).unwrap();
+    extract(&tree, b"sub f {}", &pack).unwrap_err()
 }

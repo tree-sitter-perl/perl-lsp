@@ -1,9 +1,9 @@
-//! `LangPack` and the per-language pack definitions: the query pack
-//! plus the minimal host predicates patterns can't express.
+//! `LangPack`: what a language declares to the query extractor — its
+//! query document plus the minimal host predicates patterns can't express.
+//! Each language's declaration lives in `build/packs/<lang>.rs`.
 
 use super::*;
 use crate::model::file_analysis::NameSpellings;
-
 
 /// Per-language bundle: the query pack plus host predicates. The
 /// predicates are the official escape hatch — kept
@@ -31,16 +31,6 @@ pub struct LangPack {
     /// (`resolve_imports_with_pack` in query_extract_tests.rs) drive it today.
     #[allow(dead_code)]
     pub module_paths: fn(module: &str) -> Vec<String>,
-    /// Does a call to `callee` construct a KEYED value whose named
-    /// arguments are `$`-style accessible keys? (R: list / data.frame.)
-    pub shape_ctor: fn(callee: &str) -> bool,
-    /// Languages where imports are CALLS, not statements (R's
-    /// library()/source()): map (callee, argument) → imported module.
-    pub import_call: fn(callee: &str, arg: &str) -> Option<String>,
-    /// Command-dispatched languages (CMake): what a command DOES with
-    /// its positional arguments. The @cmd/@cmd.arg captures deliver
-    /// (name, ordered args); this predicate classifies.
-    pub cmd_effects: fn(cmd: &str) -> Vec<CmdEffect>,
     /// Guard narrowing: given the guard token (`@narrow.guard` — a
     /// function/operator like `isinstance`, `has_value`; `None` for the
     /// token-less `if (opt)` truthiness form) and the type text, the
@@ -132,11 +122,6 @@ pub struct LangPack {
     /// `deref_stack` resolves by name to decide the expected operator. Also the
     /// cursor-completion "is this receiver a bare variable" test.
     pub simple_var_kinds: &'static [&'static str],
-    /// `@qualifier` node kinds whose `name` FIELD supplies the owner text —
-    /// the structural peel for a templated qualifier (`Buf<T>::grow` files
-    /// under class `Buf`, unifying the out-of-line def with the in-class
-    /// decl). Never string-splitting on `<`. Empty = qualifiers verbatim.
-    pub qualifier_peel: &'static [&'static str],
     /// Member-access node kinds (`field_expression` / `attribute`): a `recv.m`
     /// the cursor-completion path climbs to + types the receiver of. Empty =
     /// no member-access completion (Perl uses `cursor_context`).
@@ -158,10 +143,69 @@ pub struct LangPack {
     /// node a domain comparison — the pack owns which operators mean
     /// "equality against a domain value" (rule #10). Empty = feature off.
     pub domain_compare_ops: &'static [&'static str],
-    /// Out-of-line-definition extraction (`@ool.def` — a `Ret Class::method(...)`
-    /// body owned by a `::` qualifier). The grammar the canonical declarator
-    /// unwrap + qualifier walk consume; `OutOfLineSpec::OFF` = feature off.
-    pub oolfn: OutOfLineSpec,
+}
+
+impl LangPack {
+    /// Every `&'static str` this pack declares, tagged with the field it
+    /// came from: what the rule #15 tripwires walk.
+    ///
+    /// The destructure names every field, so a new `LangPack` field fails to
+    /// compile here until its strings are declared or it is named as
+    /// holding none. `query_source` is the document itself and `names` is
+    /// the language's spelling seam. A fn is code the reflection cannot see
+    /// into, so a callee name inside one escapes it
+    /// (`docs/adr/pack-vocabulary.md`).
+    #[cfg(test)]
+    pub(crate) fn declared_strings(&self) -> Vec<(&'static str, &'static str)> {
+        let LangPack {
+            query_source: _,
+            names: _,
+            shape_name: _,
+            default_name: _,
+            annot_type: _,
+            module_paths: _,
+            narrow_guard: _,
+            rebind_method: _,
+            implicit_this_members: _,
+            include_path_tokens: _,
+            preprocessor_macros: _,
+            entrypoint_symbols,
+            brace_scoped_members: _,
+            trigger_chars,
+            receiver_names,
+            nested_peel,
+            recv_peel,
+            op_map,
+            simple_var_kinds,
+            member_kinds,
+            skip_kinds,
+            call_kinds,
+            domain_compare_kinds,
+            domain_compare_ops,
+        } = self;
+        let mut out: Vec<(&'static str, &'static str)> = Vec::new();
+        let mut list = |field: &'static str, values: &'static [&'static str]| {
+            out.extend(values.iter().map(|v| (field, *v)));
+        };
+        list("entrypoint_symbols", entrypoint_symbols);
+        list("trigger_chars", trigger_chars);
+        list("receiver_names", receiver_names);
+        list("nested_peel.annot_kinds", nested_peel.annot_kinds);
+        list("recv_peel.annot_kinds", recv_peel.annot_kinds);
+        list("simple_var_kinds", simple_var_kinds);
+        list("member_kinds", member_kinds);
+        list("skip_kinds", skip_kinds);
+        list("call_kinds", call_kinds);
+        list("domain_compare_kinds", domain_compare_kinds);
+        list("domain_compare_ops", domain_compare_ops);
+        out.extend(nested_peel.wrappers.iter().map(|(k, _)| ("nested_peel.wrappers", *k)));
+        out.extend(nested_peel.leaf_to_def.iter().map(|(k, _)| ("nested_peel.leaf_to_def", *k)));
+        out.extend(recv_peel.wrappers.iter().map(|(k, _)| ("recv_peel.wrappers", *k)));
+        out.extend(recv_peel.leaf_to_def.iter().map(|(k, _)| ("recv_peel.leaf_to_def", *k)));
+        out.extend(op_map.iter().map(|(k, _)| ("op_map", *k)));
+        out.retain(|(_, v)| !v.is_empty());
+        out
+    }
 }
 
 /// A declarative peel: descend a wrapper chain tree-sitter's fixed-depth
@@ -183,466 +227,6 @@ pub struct PeelSpec {
     pub leaf_to_def: &'static [(&'static str, DefKind)],
     /// Accumulate the per-level `DerefStep` stack (pointer depth) vs descend only.
     pub record_stack: bool,
-}
-
-/// Out-of-line-definition extraction (`Ret Class::method(...) {...}` bodies —
-/// the owner is named by a `::` qualifier, not lexical nesting). Declares the
-/// three grammar shapes the driver's canonical unwrap + qualifier walk consume:
-/// the declarator WRAPPERS peeled (any depth) to reach the function declarator,
-/// the FUNCTION-DECLARATOR node whose `declarator` field carries the (possibly
-/// multi-level) qualified name, and the QUALIFIED-NAME node kind the walk
-/// descends. Empty `declarator_wrappers` = feature off (a pack that mints no
-/// `@ool.def` capture).
-#[derive(Clone, Copy)]
-pub struct OutOfLineSpec {
-    pub declarator_wrappers: &'static [&'static str],
-    pub function_declarator: &'static str,
-    pub qualified_name: &'static str,
-}
-
-impl OutOfLineSpec {
-    pub const OFF: OutOfLineSpec = OutOfLineSpec {
-        declarator_wrappers: &[],
-        function_declarator: "",
-        qualified_name: "",
-    };
-}
-
-/// Peel declarator wrappers (`pointer_declarator`/`reference_declarator`/
-/// `parenthesized_declarator`, ANY depth) to the inner function declarator —
-/// the arbitrary nesting S-queries can't express (`Foo**& Class::m()`). THE
-/// out-of-line unwrap, spelled once so no call site enumerates wrapper kinds.
-/// `None` when no function declarator is reachable (not a function-def shape).
-pub(super) fn unwrap_to_function_declarator<'a>(
-    mut node: tree_sitter::Node<'a>,
-    spec: &OutOfLineSpec,
-) -> Option<tree_sitter::Node<'a>> {
-    for _ in 0..32 {
-        if node.kind() == spec.function_declarator {
-            return Some(node);
-        }
-        if !spec.declarator_wrappers.contains(&node.kind()) {
-            return None;
-        }
-        // pointer_declarator carries its inner under `declarator:`; a
-        // reference/parenthesized declarator holds it as the first named child
-        // (the `&`/parens are anonymous tokens).
-        node = node
-            .child_by_field_name("declarator")
-            .or_else(|| node.named_child(0))?;
-    }
-    None
-}
-
-/// Walk a qualified-name chain (`A::B::c`) to its leaf name token, returning the
-/// full scope text (`A::B`) and the leaf node. THE out-of-line owner walk: the
-/// owning class is the innermost scope — `rsplit("::")` of the returned text, as
-/// the `def.` handler already does for single-hop qualifiers — and the leaf is
-/// the member/ctor/dtor/operator name. A scope segment whose kind is in
-/// `peel_kinds` (a templated owner `Buf<T>`) contributes its `name` field's text
-/// (`Buf`), the same structural peel the single-capture qualifier path applies —
-/// never a string split on `<`. `None` when the node is not a qualified name (a
-/// free function / in-class method — its own pattern owns it).
-pub(super) fn walk_qualifier_chain<'a>(
-    mut node: tree_sitter::Node<'a>,
-    qualified_kind: &str,
-    peel_kinds: &[&str],
-    src: &[u8],
-) -> Option<(String, tree_sitter::Node<'a>)> {
-    if node.kind() != qualified_kind {
-        return None;
-    }
-    let mut scopes: Vec<String> = Vec::new();
-    for _ in 0..32 {
-        if node.kind() != qualified_kind {
-            return Some((scopes.join("::"), node));
-        }
-        if let Some(scope) = node.child_by_field_name("scope") {
-            let seg = if peel_kinds.contains(&scope.kind()) {
-                scope.child_by_field_name("name").unwrap_or(scope)
-            } else {
-                scope
-            };
-            scopes.push(seg.utf8_text(src).unwrap_or("").to_string());
-        }
-        node = node.child_by_field_name("name")?;
-    }
-    None
-}
-
-/// The declarator peel for C/C++ struct fields and locals: pointer/reference
-/// wrappers, `field_identifier`/`identifier` leaves, recording the deref stack.
-/// The cpp pack's `nested_peel` AND the member-block synth lane
-/// (`cpp_reparse::synth_base`) both peel through this, so a pointer field's
-/// `*`s are extracted by ONE walker whether the field was written plainly or
-/// pasted from a `#define BASEOP` body (rule #10 — no second deref walker).
-pub(crate) const C_FIELD_DECL_PEEL: PeelSpec = PeelSpec {
-    wrappers: &[
-        ("pointer_declarator", crate::model::file_analysis::DerefKind::Pointer),
-        ("reference_declarator", crate::model::file_analysis::DerefKind::Reference),
-    ],
-    annot_kinds: &["type_qualifier"],
-    leaf_to_def: &[("identifier", DefKind::Local), ("field_identifier", DefKind::Field)],
-    record_stack: true,
-};
-
-/// One effect of a command-dispatched statement.
-// Variants are constructed only by `cmake_pack` (command languages) and read by
-// the generic cmd-effect match; both absent in a build without that feature.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy)]
-pub enum CmdEffect {
-    /// Argument `name_arg` declares an entity of `kind`.
-    Def { kind: DefKind, name_arg: usize },
-    /// Arguments from `from` onward are name references (all-caps
-    /// keyword arguments like PRIVATE/STATIC are skipped — CMake's
-    /// keyword convention; a finer filter is a later predicate).
-    RefArgsFrom { from: usize },
-    /// Argument `arg` names an imported module (joins import_call's
-    /// role for command languages).
-    Import { arg: usize },
-}
-
-/// The Perl-on-query-engine seam (go-live map ARC 3, the builder.rs shrink):
-/// not registered as a driver — the native builder still owns Perl — but the
-/// parity tests in query_extract_tests.rs measure it against the builder so
-/// the migration path stays proven.
-#[allow(dead_code)]
-pub fn perl_pack() -> LangPack {
-    LangPack {
-        query_source: include_str!("../../../queries/perl/skeleton.scm"),
-        names: crate::model::conventions::PERL_SPELLINGS,
-        // The builder stores variable symbols WITH sigil. Nothing to
-        // re-attach: def.var captures the whole `(scalar)` node, so the
-        // raw text already carries it.
-        shape_name: |raw| raw.to_string(),
-        default_name: |kind| match kind {
-            DefKind::Anon => Some("(anon)"),
-            _ => None,
-        },
-        annot_type: |_| None,
-        module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
-        shape_ctor: |_| false,
-        import_call: |_, _| None,
-        cmd_effects: |_| vec![],
-        narrow_guard: |_, _| None,
-        rebind_method: |_| false,
-        implicit_this_members: false,
-        include_path_tokens: false,
-        preprocessor_macros: false,
-        entrypoint_symbols: &[],
-        brace_scoped_members: false,
-        trigger_chars: &["$", "@", "%", ">", ":", "{"],
-        receiver_names: &[],
-        nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
-        recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
-        op_map: &[],
-        simple_var_kinds: &[],
-        qualifier_peel: &[],
-        member_kinds: &[],
-        skip_kinds: &[],
-        call_kinds: &[],
-        domain_compare_kinds: &[],
-        domain_compare_ops: &[],
-        oolfn: OutOfLineSpec::OFF,
-    }
-}
-
-// Registered by `python_driver` only under `feature = "python"` (and driven by
-// the pack tests); dead weight in a single-language build like `cpp`-only.
-#[allow(dead_code)]
-pub fn python_pack() -> LangPack {
-    LangPack {
-        query_source: include_str!("../../../queries/python/skeleton.scm"),
-        names: NameSpellings::NONE,
-        shape_name: |raw| raw.to_string(),
-        default_name: |_| None,
-        annot_type: |text| match text.trim() {
-            "str" => Some(InferredType::String),
-            "int" | "float" => Some(InferredType::Numeric),
-            "list" => Some(InferredType::ArrayRef),
-            "dict" => Some(InferredType::HashRef),
-            t if t.chars().next().is_some_and(|c| c.is_uppercase()) => {
-                Some(InferredType::ClassName(t.to_string()))
-            }
-            _ => None,
-        },
-        module_paths: |m| {
-            let base = m.replace('.', "/");
-            vec![format!("{base}.py"), format!("{base}/__init__.py")]
-        },
-        shape_ctor: |_| false,
-        import_call: |_, _| None,
-        cmd_effects: |_| vec![],
-        // `isinstance(x, Foo)` narrows x to Foo inside the guard.
-        narrow_guard: |guard, ty| (guard == Some("isinstance")).then(|| InferredType::ClassName(ty.to_string())),
-        rebind_method: |_| false,
-        implicit_this_members: false,
-        include_path_tokens: false,
-        preprocessor_macros: false,
-        entrypoint_symbols: &[],
-        brace_scoped_members: false,
-        trigger_chars: &["."],
-        receiver_names: &["self", "cls"],
-        nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
-        recv_peel: PeelSpec {
-            wrappers: &[("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer)],
-            annot_kinds: &[],
-            leaf_to_def: &[],
-            record_stack: false,
-        },
-        // Python has one member operator (`.`), so no op-DX (op_map empty).
-        op_map: &[],
-        simple_var_kinds: &["identifier"],
-        qualifier_peel: &[],
-        member_kinds: &["attribute"],
-        skip_kinds: &["string", "string_content", "comment", "concatenated_string"],
-        call_kinds: &["call"],
-        domain_compare_kinds: &[],
-        domain_compare_ops: &[],
-        oolfn: OutOfLineSpec::OFF,
-    }
-}
-
-// Live only under `feature = "r"` (or the pack tests); see `python_pack`.
-#[allow(dead_code)]
-pub fn r_pack() -> LangPack {
-    LangPack {
-        query_source: include_str!("../../../queries/r/skeleton.scm"),
-        names: NameSpellings::NONE,
-        shape_name: |raw| raw.to_string(),
-        default_name: |_| None,
-        annot_type: |_| None,
-        // No reliable lexical ctor convention in R (S4/R5 exist but
-        // rare); class typing arrives via shapes and S3 later.
-        // source("util.R") hands us the path verbatim; library(pkg)
-        // resolves into the installed-library tree (a real install
-        // would consult .libPaths() — not modeled here).
-        module_paths: |m| vec![m.to_string()],
-        shape_ctor: |callee| matches!(callee, "list" | "data.frame" | "tibble"),
-        import_call: |callee, arg| match callee {
-            "library" | "require" | "source" => Some(arg.to_string()),
-            _ => None,
-        },
-        cmd_effects: |_| vec![],
-        narrow_guard: |_, _| None,
-        rebind_method: |_| false,
-        implicit_this_members: false,
-        include_path_tokens: false,
-        preprocessor_macros: false,
-        entrypoint_symbols: &[],
-        brace_scoped_members: false,
-        trigger_chars: &["$", "@", ":"],
-        receiver_names: &[],
-        nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
-        recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
-        op_map: &[],
-        simple_var_kinds: &[],
-        qualifier_peel: &[],
-        member_kinds: &[],
-        skip_kinds: &[],
-        call_kinds: &[],
-        domain_compare_kinds: &[],
-        domain_compare_ops: &[],
-        oolfn: OutOfLineSpec::OFF,
-    }
-}
-
-// Live only under `feature = "cmake"` (or the pack tests); see `python_pack`.
-// Sole constructor of the `CmdEffect` variants.
-#[allow(dead_code)]
-pub fn cmake_pack() -> LangPack {
-    LangPack {
-        query_source: include_str!("../../../queries/cmake/skeleton.scm"),
-        names: NameSpellings::NONE,
-        shape_name: |raw| raw.to_string(),
-        default_name: |_| None,
-        annot_type: |_| None,
-        // include(util.cmake) is a literal path; add_subdirectory(src)
-        // means src/CMakeLists.txt. The whole resolution strategy.
-        module_paths: |m| {
-            if m.ends_with(".cmake") {
-                vec![m.to_string()]
-            } else {
-                vec![format!("{m}/CMakeLists.txt"), format!("{m}.cmake")]
-            }
-        },
-        shape_ctor: |_| false,
-        import_call: |_, _| None,
-        cmd_effects: |cmd| match cmd.to_ascii_lowercase().as_str() {
-            "set" | "option" => vec![CmdEffect::Def { kind: DefKind::Var, name_arg: 0 }],
-            "add_library" | "add_executable" | "add_custom_target" => {
-                // Targets. SymKind::Target is the real future; "sub"
-                // rides the full rename/refs machinery today.
-                vec![CmdEffect::Def { kind: DefKind::Sub, name_arg: 0 }]
-            }
-            "target_link_libraries" | "target_include_directories"
-            | "target_compile_definitions" | "target_sources" => vec![
-                CmdEffect::RefArgsFrom { from: 0 },
-            ],
-            "include" | "add_subdirectory" => vec![CmdEffect::Import { arg: 0 }],
-            _ => vec![],
-        },
-        narrow_guard: |_, _| None,
-        rebind_method: |_| false,
-        implicit_this_members: false,
-        include_path_tokens: false,
-        preprocessor_macros: false,
-        entrypoint_symbols: &[],
-        brace_scoped_members: false,
-        trigger_chars: &["{", "("],
-        receiver_names: &[],
-        nested_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: true },
-        recv_peel: PeelSpec { wrappers: &[], annot_kinds: &[], leaf_to_def: &[], record_stack: false },
-        op_map: &[],
-        simple_var_kinds: &[],
-        qualifier_peel: &[],
-        member_kinds: &[],
-        skip_kinds: &[],
-        call_kinds: &[],
-        domain_compare_kinds: &[],
-        domain_compare_ops: &[],
-        oolfn: OutOfLineSpec::OFF,
-    }
-}
-
-pub fn cpp_pack() -> LangPack {
-    LangPack {
-        query_source: include_str!("../../../queries/cpp/skeleton.scm"),
-        names: NameSpellings::with_separator("::"),
-        // Template spellings get ONE canonical whitespace form so a
-        // specialization's identity (`formatter<int, char>`) matches
-        // however the source wrapped it. Identity for every non-template
-        // name (no whitespace, no comma → unchanged).
-        shape_name: |raw| canonical_template_spelling(raw),
-        // an anonymous inline union has no name token of its own; the
-        // synthetic container is outline structure, not an addressable
-        // member (the "anonymous" attribute keeps it out of completion).
-        default_name: |kind| match kind {
-            DefKind::UnionField => Some("(union)"),
-            _ => None,
-        },
-        // C++ declared types ARE the witness source. Primitives → the
-        // value lattice; `auto`/`void` defer (None → edge carries);
-        // anything else identifier-shaped is a class instance.
-        annot_type: |text| {
-            use InferredType::*;
-            match text.trim() {
-                "int" | "long" | "short" | "unsigned" | "size_t" | "int32_t" | "int64_t"
-                | "uint32_t" | "uint64_t" | "double" | "float" | "char" => Some(Numeric),
-                "bool" => Some(Bool),
-                "std::string" | "string" | "std::string_view" => Some(String),
-                "auto" | "void" => None,
-                t => {
-                    // Elaborated type specifier `struct op` / `union u` /
-                    // `enum e` — the dominant C spelling (`struct op* o`).
-                    // The tag names the type; strip the keyword so it resolves
-                    // the same as the bare/typedef'd name.
-                    let tag = t
-                        .strip_prefix("struct ")
-                        .or_else(|| t.strip_prefix("union "))
-                        .or_else(|| t.strip_prefix("enum "))
-                        .unwrap_or(t)
-                        .trim();
-                    // A template spelling (`Box<Widget>`, `vector<int>`)
-                    // peels into the Instance flavor: dispatch keys the
-                    // BASE so members resolve through the plain-class
-                    // machinery; the args ride along for substitution.
-                    if let Some(p) =
-                        crate::model::file_analysis::ParametricType::instance_from_spelling(tag)
-                    {
-                        return Some(Parametric(p));
-                    }
-                    let typeish = !tag.is_empty()
-                        && !tag.contains(' ')
-                        && tag.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_');
-                    // Strip the namespace qualifier — classes/members are
-                    // keyed by the unqualified name (@context.class), so
-                    // `geo::Circle` must type as `Circle` to resolve.
-                    typeish.then(|| ClassName(tag.rsplit("::").next().unwrap_or(tag).to_string()))
-                }
-            }
-        },
-        // #include "a/b.h" / <vector>: strip the delimiters; a quoted
-        // path is workspace-relative verbatim, a system header resolves
-        // through include dirs (library_roots, later). Tier 1: identity.
-        module_paths: |m| {
-            let p = m.trim_matches(|c: char| c == '"' || c == '<' || c == '>');
-            vec![p.to_string()]
-        },
-        shape_ctor: |_| false,
-        import_call: |_, _| None,
-        cmd_effects: |_| vec![],
-        // Two narrowings, both keyed on what the value IS, not a name allowlist:
-        //   `if (dynamic_cast<Derived*>(b))` — b is a Derived inside (ty is the
-        //     template arg; pointer-ness dropped for navigation, like locals).
-        //   `if (opt)` / `if (opt.has_value())` — an engaged std::optional<T>
-        //     holds a T inside (ty is opt's DECLARED type; peel the inner T).
-        //     The bare form carries no guard token; `.has_value()` gates the
-        //     method so `opt.value_or(x)` (not an engagement test) won't narrow.
-        narrow_guard: |guard, ty| {
-            let class = match guard {
-                Some("dynamic_cast") => ty.to_string(),
-                None | Some("has_value") => optional_inner(ty)?,
-                _ => return None,
-            };
-            Some(InferredType::ClassName(class))
-        },
-        // Rebinding methods: a moved-from object is put back into a known state
-        // by these std container/optional/smart-ptr resets, so a use after one
-        // is NOT a use-after-move. (An ordinary `x.use()` is not here, so the
-        // canonical bug still flags.)
-        rebind_method: |m| {
-            matches!(m, "clear" | "reset" | "assign" | "emplace" | "swap")
-        },
-        // C/C++ methods read members with an implicit `this->`.
-        implicit_this_members: true,
-        include_path_tokens: true,
-        preprocessor_macros: true,
-        entrypoint_symbols: &["main"],
-        brace_scoped_members: true,
-        trigger_chars: &[".", ">", ":"],
-        receiver_names: &["this"],
-        // `field_identifier` only ever names a struct/class member (the
-        // grammar's own distinction from a plain `identifier` local), so
-        // `Field` matches the plain (non-pointer) field pattern above.
-        // Shared with the member-block synth lane (rule #10).
-        nested_peel: C_FIELD_DECL_PEEL,
-        // DerefKind placeholder — record_stack false, so it's never read.
-        recv_peel: PeelSpec {
-            wrappers: &[
-                ("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer),
-                ("pointer_expression", crate::model::file_analysis::DerefKind::Pointer),
-            ],
-            annot_kinds: &[],
-            leaf_to_def: &[],
-            record_stack: false,
-        },
-        op_map: &[
-            ("->", crate::model::file_analysis::MemberOp::Arrow),
-            (".", crate::model::file_analysis::MemberOp::Dot),
-        ],
-        simple_var_kinds: &["identifier"],
-        // a templated qualifier (`Buf<T>::grow`) owns by its BASE class name
-        qualifier_peel: &["template_type"],
-        member_kinds: &["field_expression"],
-        skip_kinds: &["string_literal", "char_literal", "raw_string_literal", "comment"],
-        call_kinds: &["call_expression"],
-        domain_compare_kinds: &["binary_expression"],
-        domain_compare_ops: &["==", "!="],
-        // out-of-line defs (`Ret Class::m(){}`): peel pointer/reference/
-        // parenthesized returns to the function declarator, then walk the
-        // qualified name to its leaf + owning class.
-        oolfn: OutOfLineSpec {
-            declarator_wrappers: &[
-                "pointer_declarator",
-                "reference_declarator",
-                "parenthesized_declarator",
-            ],
-            function_declarator: "function_declarator",
-            qualified_name: "qualified_identifier",
-        },
-    }
 }
 
 /// Translate a member's declared return type into the deferred
@@ -687,22 +271,4 @@ pub(super) fn param_return_expr(
         },
         _ => None,
     }
-}
-
-/// Peel `T` out of a `std::optional<T>` declared-type text, unqualified
-/// (matching how `annot_type` keys classes by their last `::` segment). `None`
-/// when the text isn't an optional — the type-side gate that keeps the
-/// token-less `if (opt)` narrowing from firing on non-optional subjects.
-fn optional_inner(ty: &str) -> Option<String> {
-    let inner = ty
-        .trim()
-        .strip_prefix("std::optional<")
-        .or_else(|| ty.trim().strip_prefix("optional<"))?
-        .strip_suffix('>')?
-        .trim();
-    let leaf = inner.rsplit("::").next().unwrap_or(inner).trim();
-    (!leaf.is_empty()
-        && !leaf.contains(' ')
-        && leaf.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_'))
-    .then(|| leaf.to_string())
 }

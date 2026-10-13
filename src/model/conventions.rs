@@ -158,9 +158,14 @@ pub fn field_attribute_flag(attr: &str) -> Option<crate::model::file_analysis::S
     })
 }
 
-/// `__PACKAGE__` — the compile-time token for the enclosing package.
+/// `__PACKAGE__` — the compile-time token for the enclosing package. Perl's
+/// own word: a pack mints the class its receiver names, never this token
+/// (`layering_tests::packs_do_not_borrow_perls_current_package_token`).
+pub const CURRENT_PACKAGE_TOKEN: &str = "__PACKAGE__";
+
+/// Whether `text` is `CURRENT_PACKAGE_TOKEN`.
 pub fn is_current_package_token(text: &str) -> bool {
-    text == "__PACKAGE__"
+    text == CURRENT_PACKAGE_TOKEN
 }
 
 /// A name that can be written as a method / sub call — a syntactically valid

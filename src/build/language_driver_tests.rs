@@ -593,7 +593,7 @@ fn implicit_field_read_pass_gated_by_pack_capability() {
         let mut parser = tree_sitter::Parser::new();
         parser.set_language(&tree_sitter_cpp::LANGUAGE.into()).unwrap();
         let tree = parser.parse(src, None).unwrap();
-        let pack = crate::build::query_extract::cpp_pack();
+        let pack = crate::build::packs::cpp_pack();
         let mut skel = crate::build::query_extract::extract(&tree, src.as_bytes(), &pack).unwrap();
         let sites = std::mem::take(&mut skel.return_sites);
         (skel.into_file_analysis(), sites)
@@ -614,25 +614,25 @@ fn implicit_field_read_pass_gated_by_pack_capability() {
     emit_return_fuel(&mut fa_off, &sites, false);
     assert_eq!(count(&fa_off), 0, "capability off → pass gated, nothing minted");
 
-    assert!(!crate::build::query_extract::python_pack().implicit_this_members,
+    assert!(!crate::build::packs::python_pack().implicit_this_members,
         "python: a bare name is never self.field");
-    assert!(crate::build::query_extract::cpp_pack().implicit_this_members,
+    assert!(crate::build::packs::cpp_pack().implicit_this_members,
         "cpp: methods read members with implicit this->");
 
     // Include-token capability: only C/C++ has `#include`-style path tokens;
     // name-keyed-import languages answer false, so goto-def / references gate
     // on the pack, never a language name.
-    assert!(crate::build::query_extract::cpp_pack().include_path_tokens,
+    assert!(crate::build::packs::cpp_pack().include_path_tokens,
         "cpp: #include path tokens resolve to headers");
-    assert!(!crate::build::query_extract::python_pack().include_path_tokens,
+    assert!(!crate::build::packs::python_pack().include_path_tokens,
         "python: imports are name-keyed, no path tokens");
 
     // Preprocessor capability: only C/C++ has `#define` macros; other packs
     // answer false, so macro completion gates on the pack, never a language
     // name.
-    assert!(crate::build::query_extract::cpp_pack().preprocessor_macros,
+    assert!(crate::build::packs::cpp_pack().preprocessor_macros,
         "cpp: #define macros are a completion surface");
-    assert!(!crate::build::query_extract::python_pack().preprocessor_macros,
+    assert!(!crate::build::packs::python_pack().preprocessor_macros,
         "python: no C preprocessor");
 }
 
@@ -683,7 +683,7 @@ struct Gadget { void run() { helper(); } };\n";
         let mut parser = tree_sitter::Parser::new();
         parser.set_language(&tree_sitter_cpp::LANGUAGE.into()).unwrap();
         let tree = parser.parse(src, None).unwrap();
-        let pack = crate::build::query_extract::cpp_pack();
+        let pack = crate::build::packs::cpp_pack();
         let mut skel = crate::build::query_extract::extract(&tree, src.as_bytes(), &pack).unwrap();
         let sites = std::mem::take(&mut skel.return_sites);
         (skel.into_file_analysis(), sites)

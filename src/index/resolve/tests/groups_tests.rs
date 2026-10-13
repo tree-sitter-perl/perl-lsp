@@ -2163,7 +2163,7 @@ fn test_implementations_on_primary_enumerates_specialization_family() {
         let mut parser = tree_sitter::Parser::new();
         parser.set_language(&tree_sitter_cpp::LANGUAGE.into()).unwrap();
         let tree = parser.parse(src, None).unwrap();
-        crate::build::query_extract::extract(&tree, src.as_bytes(), &crate::build::query_extract::cpp_pack())
+        crate::build::query_extract::extract(&tree, src.as_bytes(), &crate::build::packs::cpp_pack())
             .unwrap()
             .into_file_analysis()
     };

@@ -3,7 +3,8 @@
 //! anchor remap back to original source.
 
 use super::*;
-use crate::build::query_extract::{cpp_pack, extract};
+use crate::build::packs::cpp_pack;
+use crate::build::query_extract::extract;
 
 #[path = "cpp_obstacle_test_corpus.rs"]
 mod cpp_obstacle;

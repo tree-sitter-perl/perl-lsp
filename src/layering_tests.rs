@@ -1378,7 +1378,7 @@ fn allowlist_drift(what: &str, seen: &HashMap<String, usize>, allow: &[(&str, us
                  rule violation until it is justified here; a retired one shrinks the entry"
             )),
             None => out.push(format!(
-                "{what}: {file} has {n} site(s) and is not allowlisted — see CLAUDE.md rules #12–#14"
+                "{what}: {file} has {n} site(s) and is not allowlisted — see CLAUDE.md rules #12–#15"
             )),
         }
     }
@@ -1393,37 +1393,160 @@ fn allowlist_drift(what: &str, seen: &HashMap<String, usize>, allow: &[(&str, us
 /// Rule #12: a language's spellings have ONE home — `conventions.rs` for
 /// Perl, the `LangPack` (as data on `PackFacts`) for a pack. A namespace
 /// separator, a sigil, or an attribute name as a LITERAL anywhere else in
-/// the model or index tiers is that language leaking upward.
+/// the model, index or LSP tiers is that language leaking upward. The
+/// adapter is covered because that is where the leak keeps reappearing: a
+/// verb serving every language reaches for the separator of the one its
+/// author had in mind.
 #[test]
 fn language_spellings_have_one_home() {
-    let files = layer_files(&[Layer::Model, Layer::Index]);
-    let attr = ["\"static\"", "\"interface\"", "\"abstract\"", "\"readonly\"", "\"final\""];
+    // Half one: the separator and sigil literals, in the tiers that serve
+    // every language.
+    let files = layer_files(&[Layer::Model, Layer::Index, Layer::Lsp]);
     let seen = count_lines(&files, &|l| {
-        l.contains("'\\\\'") || l.contains("\"\\\\\"") || l.contains("'$'") || attr.iter().any(|a| l.contains(a))
+        l.contains("'\\\\'") || l.contains("\"\\\\\"") || l.contains("'$'")
     });
     let allow: &[(&str, usize, &str)] = &[
         ("index/module_cache/rows.rs", 2, "SQLite LIKE escaping — SQL syntax, not a language spelling"),
         ("model/conventions.rs", 8, "Perl's home: `PERL_SPELLINGS` and the sigil sites, plus the test's php-shaped fixture spellings and its use-map assertion"),
         ("model/file_analysis/class_queries.rs", 1, "Perl sigil trim on a Corinna field (legacy)"),
         ("model/file_analysis/completion.rs", 10, "Perl sigils re-derived outside conventions.rs — legacy, shrink-only"),
-        ("model/file_analysis/core_types.rs", 3, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`) — the one table every language maps its spellings onto"),
         ("model/file_analysis/cursor_queries.rs", 4, "Perl sigil sites (legacy)"),
         ("model/file_analysis/enrichment.rs", 1, "Perl sigil on a hash-key access (legacy)"),
         ("model/file_analysis/invocants.rs", 3, "Perl sigil sites (legacy)"),
         ("model/file_analysis/outline.rs", 1, "Perl sigil default (legacy)"),
         ("model/file_analysis/queries.rs", 1, "Perl sigil probe (legacy)"),
+        ("lsp/cursor_context.rs", 3, "the sanctioned Perl cursor detector (rule #6): Perl's sigils in source text at the cursor"),
+        ("lsp/cursor_slot.rs", 1, "the same Perl detector, in the slot taxonomy's sigil arm"),
+        ("lsp/symbols/links.rs", 1, "Perl interpolation sigils in the documentLink text scan: source text, the Perl lane"),
     ];
-    let drift = allowlist_drift("rule #12 (language spellings)", &seen, allow);
+    let mut drift = allowlist_drift("rule #12 (separators and sigils)", &seen, allow);
+
+    // Half two: every attribute spelling that HAS a `SymbolFlags` twin,
+    // read out of the canonical table so the probe cannot lag a flag
+    // someone adds. `Build` is in scope because that is where the strings
+    // are minted: the half of the round trip a model-only probe never sees.
+    let twinned = flag_twinned_spellings();
+    let files = layer_files(&[Layer::Model, Layer::Index, Layer::Lsp, Layer::Build]);
+    let seen = count_lines(&files, &|l| twinned.iter().any(|a| l.contains(a.as_str())));
+    let allow: &[(&str, usize, &str)] = &[
+        ("build/cpp_reparse/defs.rs", 4, "the C++ keyword table: grammar vocabulary in the pack's own tier"),
+        ("build/language_driver.rs", 2, "the driver mints two pack attributes (`include_guard`, `non_public`): the minting side"),
+        ("build/plugin/rhai_host.rs", 3, "a manifest signal name in an inline test fixture"),
+        ("build/query_extract/extract/defs.rs", 2, "the extractor mints `anonymous` and `inline`: the minting side"),
+        ("build/query_extract/vocab.rs", 10, "the closed capture vocabulary: capture suffixes, and the attribute each def kind marks"),
+        ("model/conventions.rs", 3, "Perl's own attribute spellings (`field_attribute_flag`): Perl's home"),
+        ("model/file_analysis/core_types.rs", 15, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`): the one table every language maps its spellings onto"),
+        ("model/file_analysis/completion.rs", 1, "a `DeclKind` rendered as completion detail text, not an attribute read"),
+        ("model/file_analysis/outline.rs", 2, "outline detail text for a union container and a param decl kind"),
+        ("model/witnesses/registry.rs", 1, "the `param` owner-keyed fallback key: a witness attachment name"),
+        ("lsp/symbols/hover.rs", 1, "the hover LABEL for a macro-shaped Sub: display text (the fact itself is read as a flag)"),
+    ];
+    drift.extend(allowlist_drift("rule #12 (attribute spellings)", &seen, allow));
+
+    // Half three: the derived probe can only see spellings that already
+    // have a flag, so an attribute with no twin is invisible to it, which
+    // is where the next leak lives. Every attribute literal a consumer
+    // compares either has a twin or is named in `UNTWINNED_ATTRIBUTES`.
+    for (rel, text) in layer_files(&[Layer::Model, Layer::Index, Layer::Lsp]) {
+        for lit in attribute_literals(&text) {
+            let ok = twinned.iter().any(|t| t.trim_matches('"') == lit)
+                || UNTWINNED_ATTRIBUTES.contains(&lit.as_str());
+            if !ok {
+                drift.push(format!(
+                    "{rel}: compares the attribute `{lit}`, which no SymbolFlags \
+                     bit answers to — mint a flag for it, or name it in UNTWINNED_ATTRIBUTES"
+                ));
+            }
+        }
+    }
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
-/// Rule #13: the model never parses a string this codebase rendered. Every
-/// `split`-family call in the model is allowlisted with the reason it is
-/// SOURCE-side (a written spelling, a source-spelled name); a rendered
-/// label, a joined row, or a formatted type being split is a violation.
+/// Attribute spellings a consumer compares that no `SymbolFlags` bit
+/// answers to. Shrink-only: an entry here is a declaration fact the model
+/// should carry as a flag, and the derived probe cannot see it.
+const UNTWINNED_ATTRIBUTES: &[&str] = &[];
+
+/// Every string literal on a line that reads a symbol's `attributes`: the
+/// shape of an attribute comparison in a consumer.
+fn attribute_literals(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines().filter(|l| !l.trim_start().starts_with("//")) {
+        if !line.contains("attributes") {
+            continue;
+        }
+        for (i, part) in line.split('"').enumerate() {
+            if i % 2 == 1 && !part.is_empty() && !part.contains(' ') {
+                out.push(part.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Every attribute spelling with a `SymbolFlags` twin, read out of the
+/// canonical `TryFrom<&str>` table so the tripwire and the table are one
+/// list. A flag added there is probed from the same commit.
+fn flag_twinned_spellings() -> Vec<String> {
+    let text = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/model/file_analysis/core_types.rs"),
+    )
+    .expect("read core_types.rs");
+    let start = text.find("impl TryFrom<&str> for SymbolFlags {").expect("the flag table");
+    let body = &text[start..];
+    let end = body.find("\n}\n").expect("table end");
+    let mut out: Vec<String> = Vec::new();
+    for line in body[..end].lines().filter(|l| l.contains("=> SymbolFlags::")) {
+        for lit in line.split("=> SymbolFlags::").next().unwrap_or("").split('|') {
+            let lit = lit.trim();
+            if lit.starts_with('"') && lit.ends_with('"') && lit.len() > 2 {
+                out.push(lit.to_string());
+            }
+        }
+    }
+    assert!(out.len() >= 15, "the flag table parse found only {out:?}");
+    out
+}
+
+/// A pack declares its OWN spellings; it never borrows another language's.
+/// `__PACKAGE__` is Perl's token for the enclosing package, and a pack that
+/// canonicalizes its receiver onto it puts Perl's vocabulary into an
+/// analysis of a language that has no such word. A receiver that names the
+/// class it is written in mints the class itself.
+#[test]
+fn packs_do_not_borrow_perls_current_package_token() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/build/packs");
+    let mut offenders: Vec<String> = Vec::new();
+    let mut stack = vec![dir.clone()];
+    while let Some(d) = stack.pop() {
+        for entry in fs::read_dir(&d).expect("read packs dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let text = fs::read_to_string(&path).expect("read pack source");
+                if text.contains("CURRENT_PACKAGE_TOKEN") || text.contains("__PACKAGE__") {
+                    offenders.push(path.strip_prefix(&dir).expect("under packs/").display().to_string());
+                }
+            }
+        }
+    }
+    offenders.sort();
+    assert!(
+        offenders.is_empty(),
+        "pack sources spelling Perl's current-package token: {offenders:?} — \
+         mint the class the receiver names at extraction"
+    );
+}
+
+/// Rule #13: the model and the adapter never parse a string this codebase
+/// rendered. Every `split`-family call in those tiers is allowlisted with
+/// the reason it is SOURCE-side (a written spelling, a source-spelled name,
+/// a CLI argument); a rendered label, a joined row, or a formatted type
+/// being split is a violation.
 #[test]
 fn rendered_strings_are_not_reparsed() {
-    let files = layer_files(&[Layer::Model]);
+    let files = layer_files(&[Layer::Model, Layer::Lsp]);
     let fns = [".split(", ".rsplit(", ".split_once(", ".rsplit_once(", ".splitn(", ".rsplitn("];
     let seen = count_lines(&files, &|l| fns.iter().any(|f| l.contains(f)));
     let allow: &[(&str, usize, &str)] = &[
@@ -1432,6 +1555,9 @@ fn rendered_strings_are_not_reparsed() {
         ("model/file_analysis/invocants.rs", 2, "Perl `::` on source-spelled class and sub names"),
         ("model/file_analysis/types.rs", 1, "canonical_template_spelling — a C++ instance as written in source"),
         ("model/file_analysis/use_map.rs", 3, "resolving WRITTEN spellings"),
+        ("lsp/cli/positions.rs", 1, "a `file:line:col` CLI argument: what the user typed, not what we rendered"),
+        ("lsp/cursor_context.rs", 1, "Perl source text at the cursor, split on Perl's own separator"),
+        ("lsp/symbols/links.rs", 2, "POD link text and a module path as the source wrote them"),
     ];
     let drift = allowlist_drift("rule #13 (rendered strings)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
@@ -1452,6 +1578,147 @@ fn source_tags_are_provenance_only() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// Rule #15: the query document owns a language's syntax. A node kind or a
+/// field name in a Rust table on the `LangPack` is the document's job done
+/// a second time, by a consumer that cannot see the capture, so it drifts
+/// from the patterns the extractor matched without a sound.
+///
+/// Checked against the grammar itself, so the test cannot lag a rename:
+/// every string a pack declares is compared to that language's node kinds
+/// and field names. The allowlist only shrinks; each entry names the PR
+/// that moves it.
+#[test]
+fn pack_fields_name_no_grammar_shapes() {
+    let seen =
+        pack_string_sites(&|value, kinds, fields| kinds.contains(value) || fields.contains(value));
+    const TRIGGERS: &str =
+        "kept: the LSP client's trigger characters, which collide with the grammar's anonymous \
+         tokens by coincidence. A protocol vocabulary, not the language's syntax";
+    const CURSOR: &str = "moves when the cursor reads the document: which nodes are \
+         members, calls, bare variables, strings and comparisons is answered by the patterns \
+         that capture them";
+    const DECLARATORS: &str = "moves when cpp declarators come from the document: \
+         one capture per declarator level";
+    const MEMBER_OPS: &str = "moves with cpp/python receivers and member operators: \
+         the operator written is a capture suffix";
+    const RECEIVERS: &str = "moves with cpp/python receivers: a receiver is a flag \
+         the document mints";
+    let allow: &[(&str, &str, usize, &str)] = &[
+        ("cmake", "trigger_chars", 2, TRIGGERS),
+        ("cpp", "call_kinds", 1, CURSOR),
+        ("cpp", "domain_compare_kinds", 1, CURSOR),
+        ("cpp", "domain_compare_ops", 2, CURSOR),
+        ("cpp", "member_kinds", 1, CURSOR),
+        ("cpp", "nested_peel.annot_kinds", 1, DECLARATORS),
+        ("cpp", "nested_peel.leaf_to_def", 2, DECLARATORS),
+        ("cpp", "nested_peel.wrappers", 2, DECLARATORS),
+        ("cpp", "op_map", 2, MEMBER_OPS),
+        ("cpp", "receiver_names", 1, RECEIVERS),
+        ("cpp", "recv_peel.wrappers", 2, CURSOR),
+        ("cpp", "simple_var_kinds", 1, CURSOR),
+        ("cpp", "skip_kinds", 4, CURSOR),
+        ("cpp", "trigger_chars", 3, TRIGGERS),
+        ("python", "call_kinds", 1, CURSOR),
+        ("python", "member_kinds", 1, CURSOR),
+        ("python", "recv_peel.wrappers", 1, CURSOR),
+        ("python", "simple_var_kinds", 1, CURSOR),
+        ("python", "skip_kinds", 4, CURSOR),
+        ("python", "trigger_chars", 1, TRIGGERS),
+        ("r", "trigger_chars", 3, TRIGGERS),
+    ];
+    let drift = pack_allowlist_drift("rule #15 (grammar shapes on the pack)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// Rule #15's other half: a language's VOCABULARY (the token texts, callee
+/// names and runtime-provided names a pattern must fire on) belongs in the
+/// query document as an `#eq?` / `#any-of?` predicate, or in a data
+/// document a plugin dir extends. A Rust table of them is an enumeration a
+/// consumer maintains and a document cannot extend.
+///
+/// The grammar cannot check these (`"main"` names no node kind), so they
+/// are ratcheted by count instead. `trigger_chars` is not here: the LSP
+/// protocol's trigger characters are the client's vocabulary, not the
+/// language's.
+#[test]
+fn pack_string_tables_are_ratcheted() {
+    let seen = pack_string_sites(&|value, kinds, fields| {
+        !kinds.contains(value) && !fields.contains(value)
+    });
+    let seen: HashMap<String, usize> =
+        seen.into_iter().filter(|(k, _)| !k.ends_with(":trigger_chars")).collect();
+    let allow: &[(&str, &str, usize, &str)] = &[
+        ("cpp", "entrypoint_symbols", 1, "moves when the heatmap's entry guard reads a \
+          minted fact: an entry point is a fact the document mints, not a name list"),
+        ("python", "receiver_names", 2, "moves with cpp/python receivers: a receiver is \
+          a flag the document mints"),
+    ];
+    let drift = pack_allowlist_drift("rule #15 (vocabulary tables on the pack)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// Every pack this build serves, with its language id and grammar. Perl's
+/// skeleton pack is test-only and registered nowhere, so it is added by hand.
+fn packs_with_grammars() -> Vec<(&'static str, crate::build::query_extract::LangPack, tree_sitter::Language)> {
+    use crate::build::language_driver::LanguageRegistry;
+    let perl_parser = crate::build::builder::create_parser();
+    let mut out = vec![(
+        "perl",
+        crate::build::packs::perl_pack(),
+        (*perl_parser.language().expect("the perl grammar")).clone(),
+    )];
+    let registry = LanguageRegistry::with_enabled();
+    for id in registry.languages() {
+        let Some(driver) = registry.for_id(id) else { continue };
+        let Some(pack) = driver.lang_pack() else { continue };
+        let parser = driver.make_parser();
+        let language = (*parser.language().expect("the pack's grammar")).clone();
+        out.push((id, pack, language));
+    }
+    out
+}
+
+/// Each pack's declared strings that `keep` admits, counted per
+/// `<lang>:<field>`.
+fn pack_string_sites(
+    keep: &dyn Fn(&str, &std::collections::HashSet<String>, &std::collections::HashSet<&str>) -> bool,
+) -> HashMap<String, usize> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for (id, pack, language) in packs_with_grammars() {
+        let kinds = grammar_kinds(&language);
+        let fields: std::collections::HashSet<&str> = (1..=language.field_count() as u16)
+            .filter_map(|id| language.field_name_for_id(id))
+            .collect();
+        for (field, value) in pack.declared_strings() {
+            if keep(value, &kinds, &fields) {
+                *seen.entry(format!("{id}:{field}")).or_default() += 1;
+            }
+        }
+    }
+    seen
+}
+
+/// `allowlist_drift` over a per-(language, field) allowlist, restricted to
+/// the languages this build serves. A pack behind a feature flag is absent
+/// rather than a missing entry, so one allowlist reads correctly whichever
+/// languages are compiled in, and stays count-exact for the ones that are.
+fn pack_allowlist_drift(
+    what: &str,
+    seen: &HashMap<String, usize>,
+    allow: &[(&'static str, &'static str, usize, &'static str)],
+) -> Vec<String> {
+    let present: std::collections::HashSet<&str> =
+        packs_with_grammars().iter().map(|(id, ..)| *id).collect();
+    let rows: Vec<(String, usize, &'static str)> = allow
+        .iter()
+        .filter(|(lang, ..)| present.contains(lang))
+        .map(|(lang, field, n, why)| (format!("{lang}:{field}"), *n, *why))
+        .collect();
+    let borrowed: Vec<(&str, usize, &str)> =
+        rows.iter().map(|(k, n, why)| (k.as_str(), *n, *why)).collect();
+    allowlist_drift(what, seen, &borrowed)
+}
+
 /// Rule #14: `PackFacts` is per-FILE facts. A per-language constant (the
 /// same value for every file of a language) does not belong on it, and a
 /// per-site fact a query joins back to a symbol is a witness or a ref
@@ -1467,7 +1734,7 @@ fn pack_facts_fields_are_ratcheted() {
     let body = &text[start..];
     let end = body.find("\n}\n").expect("struct end");
     let fields = body[..end].lines().filter(|l| l.starts_with("    pub ")).count();
-    const RATCHET: usize = 35;
+    const RATCHET: usize = 22;
     assert!(
         fields <= RATCHET,
         "PackFacts grew to {fields} fields (ratchet {RATCHET}). A per-language constant goes on \

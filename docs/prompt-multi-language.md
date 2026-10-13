@@ -46,7 +46,7 @@ biggest single line item, bigger than the routing work above.
 
 **The middle: language packs as runtime artifacts (eventually).**
 Every pack predicate written in the spikes (ctor_class, module_paths,
-cmd_effects, annot_type, shape_ctor, import_call) is trivially rhai —
+annot_type) is trivially rhai —
 and the rhai host with fingerprinted cache invalidation already
 ships. End state: a pack is a directory `{grammar, skeleton.scm,
 predicates.rhai, pack.toml}`, installable like `.perl-lsp/` plugins.

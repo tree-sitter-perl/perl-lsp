@@ -44,7 +44,8 @@ pub(crate) struct CompiledPack {
 /// `query_source` is a unique `&'static str`, so its pointer identity keys the
 /// compiled query — same pack, same query, one compilation. Leaking the boxed
 /// query is bounded (one per language pack) and gives the `&'static` the
-/// cache needs. A capture name outside the vocabulary fails the compile.
+/// cache needs. A capture name outside the vocabulary, a link without its
+/// `@link.from.<walk>`, or a walk without its root fails the compile.
 fn cached_query(language: &Language, source: &'static str) -> Result<&'static CompiledPack, String> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -56,6 +57,15 @@ fn cached_query(language: &Language, source: &'static str) -> Result<&'static Co
     }
     let query = Query::new(language, source).map_err(|e| format!("query: {e}"))?;
     let captures = vocab::capture_table(query.capture_names()).map_err(|e| format!("query: {e}"))?;
+    vocab::check_links(&query, &captures).map_err(|e| match e {
+        vocab::LinkError::Pattern(at) => {
+            let line = source[..at].lines().count() + 1;
+            format!("query: line {line}: a pattern with @link.<rel> needs exactly one @link.from.<walk>, and one with a from needs a link")
+        }
+        vocab::LinkError::Unrooted(w) => {
+            format!("query: @link.from.{w} links for a walk whose root @{} the document never captures", w.root())
+        }
+    })?;
     let leaked: &'static CompiledPack = Box::leak(Box::new(CompiledPack { query, captures }));
     cache.lock().unwrap().insert(key, leaked);
     Ok(leaked)

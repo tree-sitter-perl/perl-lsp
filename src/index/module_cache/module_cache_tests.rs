@@ -724,23 +724,26 @@ fn row_probes_plan_as_index_point_lookups() {
             .collect()
     };
     let probes: [(&str, &str, Vec<Box<dyn rusqlite::ToSql>>); 3] = [
-        ("sym_member", super::rows::SYM_MEMBER_PROBE_SQL, vec![Box::new(1i64), Box::new("render"), Box::new("render"), Box::new("My::Base")]),
-        ("sym_name", super::rows::SYM_NAME_PROBE_SQL, vec![Box::new(1i64), Box::new("render"), Box::new("render")]),
-        ("name", super::rows::NAME_PROBE_SQL, vec![Box::new(1i64), Box::new("render"), Box::new("render")]),
+        ("sym_member", super::rows::SYM_MEMBER_PROBE_SQL, vec![Box::new(1i64), Box::new(2i64), Box::new(3i64)]),
+        ("sym_name", super::rows::SYM_NAME_PROBE_SQL, vec![Box::new(1i64), Box::new(2i64)]),
+        ("name", super::rows::NAME_PROBE_SQL, vec![Box::new(1i64), Box::new(2i64)]),
     ];
     for (label, sql, args) in &probes {
         let args: Vec<&dyn rusqlite::ToSql> = args.iter().map(|a| a.as_ref()).collect();
         let lines = plan(sql, &args);
         // Every table access in the whole query is an index search: the
         // only SCAN allowed is the constant row the EXISTS shells produce.
-        // A version that plans any half as a table scan, or reaches
-        // `strings` without its UNIQUE index, fails here.
+        // A version that plans any half as a table scan fails here.
         for l in &lines {
             if l.starts_with("SCAN") {
                 assert_eq!(l, "SCAN CONSTANT ROW", "{label}: a table scan — {l} — plan: {lines:?}");
             }
             if l.starts_with("SEARCH") {
-                assert!(l.contains("INDEX"), "{label}: a search without an index — {l} — plan: {lines:?}");
+                // `refs` is WITHOUT ROWID: its PRIMARY KEY is the index.
+                assert!(
+                    l.contains("INDEX") || l.contains("PRIMARY KEY"),
+                    "{label}: a search without an index — {l} — plan: {lines:?}"
+                );
             }
         }
         // The `syms` halves are point probes on the composites over BOTH
@@ -761,13 +764,24 @@ fn row_probes_plan_as_index_point_lookups() {
                 "{label}: the refs half must probe both key columns — {l} — plan: {lines:?}"
             );
         }
-        // The string interning lookups ride the UNIQUE index on `s`.
-        let strings_lines: Vec<&String> = lines.iter().filter(|l| l.contains("strings")).collect();
-        assert!(!strings_lines.is_empty(), "{label}: no strings lookup in the plan — plan: {lines:?}");
-        for l in &strings_lines {
-            assert!(l.contains("INDEX") && l.contains("(s=?)"), "{label}: a strings lookup off the UNIQUE index — {l} — plan: {lines:?}");
-        }
+        // No ephemeral btree per execution: each create/destroy takes SQLite's
+        // process-global page-cache mutex, which 20 sweep workers contend on
+        // (an `IN` list builds one, even over bound literals).
+        let mut stmt = conn.prepare(&format!("EXPLAIN {sql}")).unwrap();
+        let ephemeral: Vec<String> = stmt
+            .query_map(args.as_slice(), |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .filter(|op| op == "OpenEphemeral" || op == "OpenAutoindex")
+            .collect();
+        assert!(ephemeral.is_empty(), "{label}: builds a temp btree per call — {ephemeral:?}");
     }
+    // The id resolution the probes are fed from rides the UNIQUE index on `s`.
+    let lines = plan("SELECT str_id FROM strings WHERE s = ?1", &[&"render"]);
+    assert!(
+        lines.iter().any(|l| l.contains("INDEX") && l.contains("(s=?)")),
+        "the strings lookup is off the UNIQUE index — plan: {lines:?}"
+    );
 
     let _ = std::fs::remove_file(&pm);
 }

@@ -71,7 +71,7 @@
 ; partial `struct X<T*>`): the name is a `template_type`, and the spec is
 ; its OWN Class (per-spec identity — a spec REPLACES the primary's members
 ; wholesale, so it must own a distinct member table; fork 4 of
-; docs/prompt-template-arc.md). The symbol/package name is the canonical
+; docs/adr/cpp-templates.md). The symbol/package name is the canonical
 ; template spelling (`formatter<int, char>` — see
 ; `canonical_template_spelling`); @spec.primary records the base name so
 ; extraction mints the `Specializes` family edge (goto-implementation
@@ -329,15 +329,36 @@
 ; out-of-line definitions `RetT Class::method(...) { ... }` (incl.
 ; pointer/reference returns, multi-level qualifiers `A::B::m`, and
 ; ctors/dtors with no return type). ONE general capture per return-type
-; presence — the driver peels the declarator (pointer/reference/parenthesized,
-; any depth) to the function declarator, then walks the qualified name to its
-; leaf (the member name) + owning class. This fires for EVERY function_definition;
-; a non-qualified declarator (free function / in-class method, owned by the
+; presence: the driver follows the links below from the definition to its
+; function declarator and down the qualified name to its leaf (the member
+; name) and owning class. This fires for EVERY function_definition; a
+; non-qualified declarator (free function / in-class method, owned by the
 ; patterns above/below) yields nothing. `!type` splits the ctor/dtor shape off
 ; (a `?`-quantified type capture would kill the sibling capture). No @scope here
 ; — the universal `(function_definition) @scope.sub` mints it.
 (function_definition type: (_) @rettype) @ool.def
 (function_definition !type) @ool.def
+
+; ---- links: one level each, which the driver chains to any depth (no
+; fixed-depth pattern reaches `Foo**& A::B::m()`). `@link.from.<walk>` names
+; the walk a link belongs to; a walk starts at its root capture and reads only
+; its own links.
+;
+; The `ool` walk, rooted at `@ool.def` above: a definition and a function
+; declarator link to what they declare, a declarator wrapper to its operand, a
+; qualified name to its scope and name, and a templated owner (`Buf<T>::grow`)
+; to the base name it files under. ----
+(function_definition declarator: (_) @link.declares) @link.from.ool
+(function_declarator declarator: (_) @link.declares) @link.from.ool
+(pointer_declarator declarator: (_) @link.inner) @link.from.ool
+(reference_declarator . (_) @link.inner) @link.from.ool
+(parenthesized_declarator . (_) @link.inner) @link.from.ool
+(qualified_identifier scope: (_) @link.scope) @link.from.ool
+(qualified_identifier name: (_) @link.name) @link.from.ool
+(template_type name: (_) @link.base) @link.from.ool
+; The `qualifier` walk, rooted at each `@qualifier`: a templated owner to the
+; base name it files under.
+(template_type name: (_) @link.base) @link.from.qualifier
 (function_definition
   declarator: (pointer_declarator
     declarator: (function_declarator
@@ -527,7 +548,7 @@
 ; f<char>(..);` — fmt's src/format.cc is entirely this shape). It is a USE
 ; of the named template, not a def-with-body — but a deliberate,
 ; enumerable one, so it mints an outline symbol (fork 2 of
-; docs/prompt-template-arc.md): the class form under the canonical
+; docs/adr/cpp-templates.md): the class form under the canonical
 ; instantiation spelling, the function form under the function's name
 ; (qualified forms join their class via @qualifier, whose template_type
 ; is peeled to the base name — `buffer<char>::append` files under
