@@ -189,8 +189,9 @@ pub fn pack_include_references(
         if cached.path == base {
             return;
         }
-        collect(&cached.path, &cached.analysis);
-    });
+        collect(&cached.path, &module_index.facts_present(cached));
+    })
+    .read();
     out.sort_by(|a, b| {
         a.0.cmp(&b.0).then_with(|| {
             (a.1.start.row, a.1.start.column).cmp(&(b.1.start.row, b.1.start.column))
