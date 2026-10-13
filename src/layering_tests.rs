@@ -1797,6 +1797,7 @@ fn model_statics_cannot_hide_reads() {
         ("model/witnesses/engine.rs::UNTRACKED", "an engine scope count"),
         ("model/witnesses/engine.rs::COMPUTED", "test-only record of computed keys"),
         ("model/witnesses/mod.rs::NEXT", "a generation counter"),
+        ("model/witnesses/mod.rs::CUT_MISSES", "a cut bag's missed reads, taken by the reader of that bag, which widens the cut and asks again"),
         ("model/witnesses/registry.rs::LAST_RESIDUAL", "the bake's residuals: the bake runs with no index"),
         ("model/witnesses/registry.rs::FOLD_MEMO", "refuses any query with a module index"),
         ("model/witnesses/registry.rs::FOLD_MEMO_FORCED_OFF", "a flag"),

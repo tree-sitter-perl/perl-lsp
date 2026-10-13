@@ -33,6 +33,7 @@ pub use query::*;
 mod session;
 pub use session::*;
 pub mod engine;
+pub mod caller_slice;
 pub mod tracked;
 mod conclusions;
 pub use conclusions::*;
@@ -59,10 +60,38 @@ pub struct WitnessBag {
     /// whether the bag it answered from is still the bag being asked.
     #[serde(skip)]
     generation: u64,
+    /// A bag cut from a larger one (`caller_slice`): the hashes of every
+    /// attachment the larger bag held. A read this bag cannot answer but
+    /// the larger one could is recorded as a miss, so the cutter can widen
+    /// the cut.
+    #[serde(skip)]
+    cut_from: Option<std::sync::Arc<std::collections::HashSet<u64>>>,
 }
 
 /// One process-wide counter for every generation stamp, so two stamped
 /// stores never share a value unless their content is the same.
+thread_local! {
+    static CUT_MISSES: std::cell::RefCell<Vec<(u64, WitnessAttachment)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn attachment_hash(att: &WitnessAttachment) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    att.hash(&mut h);
+    h.finish()
+}
+
+/// The reads of `bag` (by generation) that found nothing because the cut
+/// left them out, since the last take.
+pub(crate) fn take_cut_misses(generation: u64) -> Vec<WitnessAttachment> {
+    CUT_MISSES.with(|m| {
+        let mut m = m.borrow_mut();
+        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut *m).into_iter().partition(|(g, _)| *g == generation);
+        *m = rest;
+        mine.into_iter().map(|(_, a)| a).collect()
+    })
+}
+
 pub(crate) fn next_generation() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -84,6 +113,7 @@ impl<'de> Deserialize<'de> for WitnessBag {
             witnesses: on_disk.witnesses,
             index: HashMap::new(),
             generation: 0,
+            cut_from: None,
         };
         bag.rebuild_index();
         Ok(bag)
@@ -109,6 +139,20 @@ impl WitnessBag {
             idx_bytes += v.capacity() * std::mem::size_of::<usize>();
         }
         (vec_bytes, idx_bytes)
+    }
+
+    fn note_cut_miss(&self, att: &WitnessAttachment) {
+        if let Some(held) = &self.cut_from {
+            if !self.index.contains_key(att) && held.contains(&attachment_hash(att)) {
+                CUT_MISSES.with(|m| m.borrow_mut().push((self.generation, att.clone())));
+            }
+        }
+    }
+
+    /// Mark this bag as cut from one that held the attachments `held`.
+    pub(crate) fn mark_cut(&mut self, held: std::sync::Arc<std::collections::HashSet<u64>>) {
+        self.cut_from = Some(held);
+        self.generation = next_generation();
     }
 
     pub fn generation(&self) -> u64 {
@@ -137,6 +181,7 @@ impl WitnessBag {
     }
 
     pub fn for_attachment(&self, att: &WitnessAttachment) -> Vec<&Witness> {
+        self.note_cut_miss(att);
         self.index
             .get(att)
             .map(|ixs| ixs.iter().map(|&i| &self.witnesses[i]).collect())
@@ -146,6 +191,7 @@ impl WitnessBag {
     /// [`for_attachment`](Self::for_attachment) without the allocation, for
     /// a per-hop check that usually finds nothing.
     pub fn iter_attachment<'b>(&'b self, att: &WitnessAttachment) -> impl Iterator<Item = &'b Witness> + 'b {
+        self.note_cut_miss(att);
         self.index.get(att).into_iter().flatten().map(|&i| &self.witnesses[i])
     }
 

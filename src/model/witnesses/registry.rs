@@ -1711,29 +1711,68 @@ impl ReducerRegistry {
         join: &JoinKey,
         file: &std::path::Path,
     ) -> EngineValue {
-        use crate::model::file_analysis::RefKind;
+        let Some(cached) = super::engine::caller_view(idx, file) else { return EngineValue::NOTHING };
+        let key = crate::model::conventions::name_match_key(&join.name, &crate::model::conventions::PERL_SPELLINGS);
+        let mut read = idx.caller_slice(&cached, &key);
+        // A read the cut left out widens the cut and asks again; each round
+        // adds what the last one minted, so a few rounds reach every read.
+        let mut rounds = 0;
+        let value = loop {
+            let value = self.contribution_in(idx, join, &read);
+            let misses = super::take_cut_misses(read.slice.witnesses.generation());
+            if misses.is_empty() {
+                break value;
+            }
+            rounds += 1;
+            if rounds > 8 {
+                crate::util::ghost_stats::count("caller_slice.widen_gave_up");
+                let whole = super::engine::caller_view_whole(idx, file, &key);
+                break whole.map_or(value, |w| self.contribution_in(idx, join, &w));
+            }
+            read = idx.widen_caller_slice(&cached, &key, &read, misses);
+        };
+        if slice_equiv() {
+            let whole = super::engine::untracked(|| super::engine::caller_view_whole(idx, file, &key));
+            if let Some(whole) = whole {
+                let control = self.contribution_in(idx, join, &whole);
+                if control != value {
+                    crate::util::ghost_stats::count("caller_slice.equiv_mismatch");
+                    eprintln!(
+                        "[slice-equiv] {}::{} {:?} in {}: slice {value:?}, whole {control:?}",
+                        join.package,
+                        join.name,
+                        join.want,
+                        file.display()
+                    );
+                } else {
+                    crate::util::ghost_stats::count("caller_slice.equiv_match");
+                }
+            }
+        }
+        value
+    }
+
+    fn contribution_in(
+        &self,
+        idx: &dyn crate::model::file_analysis::CrossFileLookup,
+        join: &JoinKey,
+        read: &super::caller_slice::CallerRead,
+    ) -> EngineValue {
         let (package, name) = (join.package.as_str(), join.name.as_str());
-        let key = crate::model::conventions::name_match_key(name, &crate::model::conventions::PERL_SPELLINGS);
-        let Some(full) = super::engine::caller_view(idx, file) else { return EngineValue::NOTHING };
+        let (frame, full) = (&*read.frame, &*read.slice);
         // The state's memo keys on this copy's bag address, so the copy is
         // pinned exactly as long as the state lives.
         let state = &mut QueryState::new();
         let caller_ctx = BagContext {
-            scopes: &full.scopes,
-            package_framework: &full.packages,
+            scopes: &frame.scopes,
+            package_framework: &frame.packages,
             module_index: Some(idx),
-            package_parents: &full.packages,
-            app_surface_consumers: &full.plugin.app_surface_consumers,
+            package_parents: &frame.packages,
+            app_surface_consumers: &frame.app_surface_consumers,
         };
         let mut joined: Option<InferredType> = None;
-        for &ri in full.ref_indices_keyed(&key) {
-            let r = &full.refs()[ri];
-            let method = match r.kind {
-                RefKind::MethodCall { .. } => true,
-                RefKind::FunctionCall { .. } => false,
-                _ => continue,
-            };
-            let att = WitnessAttachment::Expression(super::RefIdx(ri as u32));
+        for &(ri, method) in &full.calls {
+            let att = WitnessAttachment::Expression(super::RefIdx(ri));
             let Some((receiver, args)) = full.witnesses.for_attachment(&att).iter().find_map(|w| match &w.payload {
                 WitnessPayload::Invoke { callee: Callee::Method { name: n, .. }, receiver, args } if method && n == name => {
                     Some((receiver.clone(), args.clone()))
@@ -1765,7 +1804,7 @@ impl ReducerRegistry {
                     ReducedValue::FactMap(_) | ReducedValue::None => None,
                 };
                 if let Some(c) = recv_class {
-                    if c != package && !crate::model::file_analysis::class_isa(&c, package, &full.packages, Some(idx)) {
+                    if c != package && !crate::model::file_analysis::class_isa(&c, package, &frame.packages, Some(idx)) {
                         continue;
                     }
                 }
@@ -1794,7 +1833,7 @@ impl ReducerRegistry {
             let Some(t) = value else { continue };
             joined = match joined {
                 None => Some(t),
-                Some(j) => match crate::model::file_analysis::join(&j, &t, &CallerOrder { local: &full.packages, idx }) {
+                Some(j) => match crate::model::file_analysis::join(&j, &t, &CallerOrder { local: &frame.packages, idx }) {
                     Some(u) => Some(u),
                     None => {
                         crate::util::ghost_stats::count("param_in.disagree");
@@ -3501,6 +3540,13 @@ mod consult_prefilter_tests;
 
 /// The computation behind each engine key: the key and the index are all it
 /// reads, each on a fresh query state.
+/// `PERL_LSP_SLICE_EQUIV=1`: every caller contribution is also computed
+/// over the whole bag and compared.
+fn slice_equiv() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("PERL_LSP_SLICE_EQUIV").is_ok_and(|v| v == "1"))
+}
+
 /// The least value above both `prev` and `next` on the engine's lattice:
 /// nothing below every type, a disagreement above them, two types at their
 /// cross-file join (a disagreement when they have none).

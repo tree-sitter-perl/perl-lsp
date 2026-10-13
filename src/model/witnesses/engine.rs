@@ -977,14 +977,19 @@ pub fn class_family_mentions(idx: &dyn CrossFileLookup, class: &str) -> Option<s
     Some(out)
 }
 
-/// The analysis a caller join reads for `path`: the open document's build
-/// when one is open, else the indexed copy, whole.
-pub fn caller_view(idx: &dyn CrossFileLookup, path: &std::path::Path) -> Option<Arc<FileAnalysis>> {
+/// What a caller join reads for `path`: the open document's build when one
+/// is open, else the indexed copy, as its caller slice.
+pub fn caller_view(idx: &dyn CrossFileLookup, path: &std::path::Path) -> Option<Arc<CachedModule>> {
     if let Some(o) = idx.open_callers().read().into_iter().find(|o| o.path == path) {
-        return Some(idx.facts_present(&o));
+        return Some(o);
     }
-    let cached = idx.cached_by_path(path).read()?;
-    Some(idx.whole_present(&cached))
+    idx.cached_by_path(path).read()
+}
+
+/// The whole-bag control for `PERL_LSP_SLICE_EQUIV`.
+pub fn caller_view_whole(idx: &dyn CrossFileLookup, path: &std::path::Path, key: &str) -> Option<super::caller_slice::CallerRead> {
+    let cached = caller_view(idx, path)?;
+    Some(super::caller_slice::CallerRead::whole(&idx.whole_present(&cached), key))
 }
 
 /// Is `e` still the answer: its own reads unchanged, and every child it

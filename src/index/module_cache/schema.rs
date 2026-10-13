@@ -225,6 +225,14 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             child_hash INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_answer_kids_key ON answer_kids(key);
+        CREATE TABLE IF NOT EXISTS caller_slices (
+            path            TEXT NOT NULL,
+            key             TEXT NOT NULL,
+            stamp           INTEGER NOT NULL,
+            extract_version INTEGER NOT NULL,
+            body            BLOB NOT NULL,
+            PRIMARY KEY (path, key)
+        ) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS idx_modules_path ON modules(path);
         CREATE INDEX IF NOT EXISTS idx_modules_name ON modules(module_name);",
     )?;
@@ -425,7 +433,8 @@ pub fn clear_derived_rows(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "DELETE FROM refs; DELETE FROM syms; DELETE FROM files; DELETE FROM strings; \
          DELETE FROM stubs; DELETE FROM surfaces; \
-         DELETE FROM answer_nodes; DELETE FROM answer_reads; DELETE FROM answer_kids;",
+         DELETE FROM answer_nodes; DELETE FROM answer_reads; DELETE FROM answer_kids; \
+         DELETE FROM caller_slices;",
     )?;
     bump_strings_generation(conn)
 }

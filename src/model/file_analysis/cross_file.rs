@@ -560,6 +560,23 @@ pub trait CrossFileLookup {
     /// Every other view rehydrates the axis it names.
     fn facts_present(&self, cached: &std::sync::Arc<CachedModule>) -> std::sync::Arc<FileAnalysis>;
 
+    /// What a caller join reads from `cached` for calls keyed `key`: the
+    /// call sites and the part of the bag they reach.
+    fn caller_slice(&self, cached: &std::sync::Arc<CachedModule>, key: &str) -> crate::model::witnesses::caller_slice::CallerRead {
+        crate::model::witnesses::caller_slice::CallerRead::cut(&self.whole_present(cached), key)
+    }
+
+    /// `read`, cut again to also hold `misses`.
+    fn widen_caller_slice(
+        &self,
+        cached: &std::sync::Arc<CachedModule>,
+        key: &str,
+        read: &crate::model::witnesses::caller_slice::CallerRead,
+        misses: Vec<crate::model::witnesses::WitnessAttachment>,
+    ) -> crate::model::witnesses::caller_slice::CallerRead {
+        read.widened(&self.whole_present(cached), key, misses)
+    }
+
     /// This file's baked conclusions, if the store has them at the reader's
     /// pinned generation.
     ///
@@ -1476,6 +1493,18 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     }
     fn facts_present(&self, cached: &std::sync::Arc<CachedModule>) -> std::sync::Arc<FileAnalysis> {
         self.inner.facts_present(cached)
+    }
+    fn caller_slice(&self, cached: &std::sync::Arc<CachedModule>, key: &str) -> crate::model::witnesses::caller_slice::CallerRead {
+        self.inner.caller_slice(cached, key)
+    }
+    fn widen_caller_slice(
+        &self,
+        cached: &std::sync::Arc<CachedModule>,
+        key: &str,
+        read: &crate::model::witnesses::caller_slice::CallerRead,
+        misses: Vec<crate::model::witnesses::WitnessAttachment>,
+    ) -> crate::model::witnesses::caller_slice::CallerRead {
+        self.inner.widen_caller_slice(cached, key, read, misses)
     }
     fn whole_present(
         &self,

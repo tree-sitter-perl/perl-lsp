@@ -96,6 +96,11 @@ impl RefTable {
         self.by_key.get(key).map_or(&[], |v| v.as_slice())
     }
 
+    /// Every `match_key` bucket.
+    pub fn keyed(&self) -> impl Iterator<Item = (&String, &Vec<usize>)> {
+        self.by_key.iter()
+    }
+
     /// Ref indexes resolving to `sym_id`.
     pub fn to_symbol(&self, sym_id: SymbolId) -> &[usize] {
         self.by_target.get(&sym_id).map_or(&[], |v| v.as_slice())
@@ -262,6 +267,11 @@ impl FileAnalysis {
     /// one). Empty on an evicted copy — see `refs_are_evicted`.
     pub fn refs(&self) -> &[Ref] {
         self.refs.as_slice()
+    }
+
+    /// The ref axis itself, for a reader of its key buckets.
+    pub fn refs_table(&self) -> &RefTable {
+        &self.refs
     }
 
     /// Mutable ref view for the post-build stamping passes. Bindings only —

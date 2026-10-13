@@ -89,6 +89,7 @@ pub(crate) struct IndexCore {
     /// the `@INC` roots and the workspace root. Everything else an answer
     /// reads is a recorded dependency.
     pub(crate) world_bumps: std::sync::atomic::AtomicU64,
+    pub(crate) caller_slices: CallerSliceCache,
     /// Long-distance answers, verified on read against what they read
     /// (`model::witnesses::engine`).
     pub(crate) answers: crate::model::witnesses::engine::AnswerStore,
@@ -182,6 +183,7 @@ impl IndexCore {
             open_bumps: std::sync::atomic::AtomicU64::new(0),
             world_digest: Mutex::new(None),
             world_bumps: std::sync::atomic::AtomicU64::new(0),
+            caller_slices: CallerSliceCache::default(),
             long_lived: std::sync::atomic::AtomicBool::new(false),
             bag_cache: Arc::new(std::sync::RwLock::new(None)),
             conclusion_cache: Arc::new(std::sync::RwLock::new(None)),
@@ -413,4 +415,97 @@ pub(crate) struct WorldDigest {
     pub(crate) key: (u64, u64, usize),
     pub(crate) digest: u64,
     pub(crate) stamps: std::collections::HashMap<std::path::PathBuf, u64>,
+}
+
+/// Caller slices held in memory (`model::witnesses::caller_slice`), each
+/// under the source stamp it was cut from; byte-capped, dropped whole when
+/// full (the persisted rows stay).
+#[derive(Default)]
+pub(crate) struct CallerSliceCache {
+    pub(crate) frames: DashMap<std::path::PathBuf, (u64, Arc<crate::model::witnesses::caller_slice::CallerFrame>)>,
+    pub(crate) slices: DashMap<(std::path::PathBuf, String), (u64, Arc<crate::model::witnesses::caller_slice::CallerSlice>)>,
+    pub(crate) bytes: std::sync::atomic::AtomicUsize,
+    /// Rows cut since the last flush.
+    pub(crate) pending: Mutex<Vec<crate::index::module_cache::CallerSliceRows>>,
+    pub(crate) pending_widened: Mutex<Vec<(String, String, u64, Vec<u8>)>>,
+    pub(crate) pending_bytes: std::sync::atomic::AtomicUsize,
+}
+
+/// Measured on Foswiki: one hover's caller reads hold about 20 MB of
+/// slices, so this keeps a session's working set without growing with it.
+pub(crate) const CALLER_SLICE_CAP: usize = 64 << 20;
+pub(crate) const CALLER_SLICE_PENDING_CAP: usize = 16 << 20;
+
+impl CallerSliceCache {
+    /// `true` when the charge dropped the cache: the caller flushes, so
+    /// what was only held here is in the store before it is asked again.
+    fn charge(&self, bytes: usize) -> bool {
+        let now = self.bytes.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed) + bytes;
+        if now <= CALLER_SLICE_CAP {
+            return false;
+        }
+        crate::util::ghost_stats::count("caller_slice.reset");
+        self.frames.clear();
+        self.slices.clear();
+        self.bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+        true
+    }
+
+    pub(crate) fn frame(&self, path: &std::path::Path, stamp: u64) -> Option<Arc<crate::model::witnesses::caller_slice::CallerFrame>> {
+        let hit = self.frames.get(path)?;
+        (hit.0 == stamp).then(|| Arc::clone(&hit.1))
+    }
+
+    pub(crate) fn slice(
+        &self,
+        path: &std::path::Path,
+        key: &str,
+        stamp: u64,
+    ) -> Option<Arc<crate::model::witnesses::caller_slice::CallerSlice>> {
+        let hit = self.slices.get(&(path.to_path_buf(), key.to_string()))?;
+        (hit.0 == stamp).then(|| Arc::clone(&hit.1))
+    }
+
+    pub(crate) fn keep_frame(&self, path: &std::path::Path, stamp: u64, frame: Arc<crate::model::witnesses::caller_slice::CallerFrame>) -> bool {
+        let reset = self.charge(frame.heap_bytes());
+        self.frames.insert(path.to_path_buf(), (stamp, frame));
+        reset
+    }
+
+    pub(crate) fn keep_slice(
+        &self,
+        path: &std::path::Path,
+        key: &str,
+        stamp: u64,
+        slice: Arc<crate::model::witnesses::caller_slice::CallerSlice>,
+    ) -> bool {
+        let reset = self.charge(slice.heap_bytes());
+        self.slices.insert((path.to_path_buf(), key.to_string()), (stamp, slice));
+        reset
+    }
+
+    /// Queue rows for the next flush; `true` when the queue is full.
+    pub(crate) fn queue(&self, rows: crate::index::module_cache::CallerSliceRows) -> bool {
+        let bytes: usize = rows.2.iter().map(|(k, b)| k.len() + b.len()).sum();
+        if let Ok(mut p) = self.pending.lock() {
+            p.push(rows);
+        }
+        self.pending_bytes.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed) + bytes > CALLER_SLICE_PENDING_CAP
+    }
+
+    pub(crate) fn queue_widened(&self, path: String, key: String, stamp: u64, body: Vec<u8>) -> bool {
+        let bytes = body.len() + key.len();
+        if let Ok(mut p) = self.pending_widened.lock() {
+            p.push((path, key, stamp, body));
+        }
+        self.pending_bytes.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed) + bytes > CALLER_SLICE_PENDING_CAP
+    }
+
+    pub(crate) fn take_pending(&self) -> (Vec<crate::index::module_cache::CallerSliceRows>, Vec<(String, String, u64, Vec<u8>)>) {
+        self.pending_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+        (
+            self.pending.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default(),
+            self.pending_widened.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default(),
+        )
+    }
 }

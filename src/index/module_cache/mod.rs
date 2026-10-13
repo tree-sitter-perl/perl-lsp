@@ -38,6 +38,8 @@ mod warm;
 pub use warm::*;
 mod answers_store;
 pub use answers_store::*;
+mod caller_slices_store;
+pub use caller_slices_store::*;
 
 #[cfg(test)]
 #[path = "module_cache_tests.rs"]
