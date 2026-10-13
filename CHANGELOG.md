@@ -20,6 +20,12 @@ crate / VS Code extension versions.
 
 ### Type inference
 
+- **Constant folds follow scope.** `my $m = 'process'` in one sub no
+  longer names `$self->$m` in another sub, an inner `my` shadows an outer
+  fold, a loop variable's values end with its loop, and a write the fold
+  can't name (`$m = $self->pick`) clears it. `our @ISA` and
+  `use constant` are per package, so in a file with several packages each
+  one gets its own parents instead of every earlier package's.
 - **`shift` consumes `@_`; only the first read is the invocant.** A second
   `shift`, a `$_[0]` after shifts, a `shift` inside a callback, and
   `my $x = shift` in a plain helper all used to type as the enclosing
@@ -111,6 +117,8 @@ crate / VS Code extension versions.
 - **A bare block is a lexical scope.** A `my` inside `{ ... }` used to
   shadow the outer declaration past the closing brace, so goto-def,
   rename, and references on the outer variable followed the wrong one.
+- **`$::x` is `$main::x`.** A root-qualified read now binds to `main`'s
+  `our $x`, and goto-def on it looks in `main` rather than an empty package.
 
 ### Completion
 

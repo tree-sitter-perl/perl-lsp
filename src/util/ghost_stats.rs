@@ -119,9 +119,106 @@ pub fn probe(name: &str) -> bool {
 //    whatever call path actually drives the decode storm shows up here.
 // ---------------------------------------------------------------------------
 
-fn counters() -> &'static Mutex<HashMap<String, u64>> {
-    static C: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
+/// The process-wide counter, timing and quantity totals, held as one shard per
+/// thread. A bump locks only its own thread's shard, so no two threads ever
+/// contend on the hot path; readers merge every shard. One shared map
+/// serializes every bump: a 4-thread build bumping millions of hop counters
+/// ran 2.5x slower with the gate on than off, and every concurrent file's
+/// build time absorbed the wait.
+///
+/// A merge reads the shards one at a time, so a report taken while builds
+/// are counting is exact per thread but not one instant across threads.
+#[derive(Default)]
+struct Shard {
+    counters: HashMap<String, u64>,
+    /// tag -> (total nanos, call count).
+    accum: HashMap<String, (u128, u64)>,
+    /// tag -> (total, sample count). Deliberately NOT the duration
+    /// accumulator: rendering a witness count through a millisecond formatter
+    /// reads as a timing and gets quoted as one.
+    quantities: HashMap<String, (u128, u64)>,
+}
+
+/// Every shard ever created. Holding the `Arc` here is what keeps an exited
+/// thread's counts in the totals.
+fn shards() -> &'static Mutex<Vec<Arc<Mutex<Shard>>>> {
+    static S: OnceLock<Mutex<Vec<Arc<Mutex<Shard>>>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn new_shard() -> Arc<Mutex<Shard>> {
+    let shard = Arc::new(Mutex::new(Shard::default()));
+    shards().lock().unwrap_or_else(|e| e.into_inner()).push(Arc::clone(&shard));
+    shard
+}
+
+thread_local! {
+    static SHARD: Arc<Mutex<Shard>> = new_shard();
+}
+
+/// Run `f` on this thread's shard. A bump from a thread-local destructor,
+/// after `SHARD` itself is gone, lands in a shared overflow shard instead of
+/// panicking.
+fn with_shard(f: impl FnOnce(&mut Shard)) {
+    let mut f = Some(f);
+    let ran = SHARD.try_with(|s| {
+        let mut g = s.lock().unwrap_or_else(|e| e.into_inner());
+        (f.take().unwrap())(&mut g);
+    });
+    if ran.is_err() {
+        static OVERFLOW: OnceLock<Arc<Mutex<Shard>>> = OnceLock::new();
+        let s = OVERFLOW.get_or_init(new_shard);
+        let mut g = s.lock().unwrap_or_else(|e| e.into_inner());
+        (f.take().unwrap())(&mut g);
+    }
+}
+
+/// The sum of every shard, for the readers.
+fn merged() -> Shard {
+    let all: Vec<Arc<Mutex<Shard>>> =
+        shards().lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let mut out = Shard::default();
+    for s in all {
+        let g = s.lock().unwrap_or_else(|e| e.into_inner());
+        for (k, v) in &g.counters {
+            *out.counters.entry(k.clone()).or_insert(0) += v;
+        }
+        for (k, (a, n)) in &g.accum {
+            let e = out.accum.entry(k.clone()).or_insert((0, 0));
+            e.0 += a;
+            e.1 += n;
+        }
+        for (k, (a, n)) in &g.quantities {
+            let e = out.quantities.entry(k.clone()).or_insert((0, 0));
+            e.0 += a;
+            e.1 += n;
+        }
+    }
+    out
+}
+
+/// Add `n` under `tag`, allocating the key only the first time it is seen.
+fn bump(map: &mut HashMap<String, u64>, tag: &str, n: u64) {
+    match map.get_mut(tag) {
+        Some(v) => *v += n,
+        None => {
+            map.insert(tag.to_string(), n);
+        }
+    }
+}
+
+/// Add one `(total, samples)` observation under `tag`, allocating the key only
+/// the first time it is seen.
+fn bump_pair(map: &mut HashMap<String, (u128, u64)>, tag: &str, total: u128) {
+    match map.get_mut(tag) {
+        Some(e) => {
+            e.0 += total;
+            e.1 += 1;
+        }
+        None => {
+            map.insert(tag.to_string(), (total, 1));
+        }
+    }
 }
 
 /// Bump a named event counter. No-op when the gate is off.
@@ -130,10 +227,7 @@ pub fn count(tag: &str) {
         return;
     }
     scope_count(tag, 1);
-    {
-        let mut c = counters().lock().unwrap_or_else(|e| e.into_inner());
-        *c.entry(tag.to_string()).or_insert(0) += 1;
-    }
+    with_shard(|s| bump(&mut s.counters, tag, 1));
     // AFTER the guard drops: the re-emit locks the same map, and this mutex
     // is not reentrant.
     maybe_reemit_attribution();
@@ -184,10 +278,7 @@ pub fn count_by(tag: &str, n: u64) {
         return;
     }
     scope_count(tag, n);
-    {
-        let mut c = counters().lock().unwrap_or_else(|e| e.into_inner());
-        *c.entry(tag.to_string()).or_insert(0) += n;
-    }
+    with_shard(|s| bump(&mut s.counters, tag, n));
     maybe_reemit_attribution();
 }
 
@@ -217,7 +308,7 @@ struct ScopeData {
 fn scope_count(tag: &str, n: u64) {
     BUILD_SCOPE.with(|s| {
         if let Some(d) = s.borrow_mut().as_mut() {
-            *d.counts.entry(tag.to_string()).or_insert(0) += n;
+            bump(&mut d.counts, tag, n);
         }
     });
 }
@@ -225,9 +316,7 @@ fn scope_count(tag: &str, n: u64) {
 fn scope_add_ns(tag: &str, nanos: u128) {
     BUILD_SCOPE.with(|s| {
         if let Some(d) = s.borrow_mut().as_mut() {
-            let e = d.ns.entry(tag.to_string()).or_insert((0, 0));
-            e.0 += nanos;
-            e.1 += 1;
+            bump_pair(&mut d.ns, tag, nanos);
         }
     });
 }
@@ -386,21 +475,13 @@ pub fn count_for_file(tag: &str, n: u64) {
     *m.entry((file, tag.to_string())).or_insert(0) += n;
 }
 
-fn accum() -> &'static Mutex<HashMap<String, (u128, u64)>> {
-    static A: OnceLock<Mutex<HashMap<String, (u128, u64)>>> = OnceLock::new();
-    A.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 /// Add one timed region's elapsed nanos to `tag`'s running total.
 pub fn add_ns(tag: &str, nanos: u128) {
     if !enabled() {
         return;
     }
     scope_add_ns(tag, nanos);
-    let mut a = accum().lock().unwrap_or_else(|e| e.into_inner());
-    let e = a.entry(tag.to_string()).or_insert((0, 0));
-    e.0 += nanos;
-    e.1 += 1;
+    with_shard(|s| bump_pair(&mut s.accum, tag, nanos));
 }
 
 /// Add `n` to `tag`'s running total, for a quantity that is not a duration
@@ -410,18 +491,7 @@ pub fn add_n(tag: &str, n: u64) {
     if !enabled() {
         return;
     }
-    let mut q = quantities().lock().unwrap_or_else(|e| e.into_inner());
-    let e = q.entry(tag.to_string()).or_insert((0, 0));
-    e.0 += n as u128;
-    e.1 += 1;
-}
-
-/// tag -> (total, sample count). Deliberately NOT the duration accumulator:
-/// rendering a witness count through a millisecond formatter reads as a
-/// timing and gets quoted as one.
-fn quantities() -> &'static Mutex<HashMap<String, (u128, u64)>> {
-    static Q: OnceLock<Mutex<HashMap<String, (u128, u64)>>> = OnceLock::new();
-    Q.get_or_init(|| Mutex::new(HashMap::new()))
+    with_shard(|s| bump_pair(&mut s.quantities, tag, n as u128));
 }
 
 /// Time `body` into `tag`'s running total. Inert when the gate is off — not
@@ -569,7 +639,13 @@ pub fn count_distinct(tag: &str, key: &str) {
         return;
     }
     let mut d = distincts().lock().unwrap_or_else(|e| e.into_inner());
-    d.entry(tag.to_string()).or_default().insert(key.to_string());
+    if !d.contains_key(tag) {
+        d.insert(tag.to_string(), Default::default());
+    }
+    let set = d.get_mut(tag).expect("inserted above");
+    if !set.contains(key) {
+        set.insert(key.to_string());
+    }
 }
 
 thread_local! {
@@ -683,8 +759,9 @@ pub fn emit_attribution(moment: &str) {
         return;
     }
     let mut out = String::new();
+    let totals = merged();
     {
-        let c = counters().lock().unwrap_or_else(|e| e.into_inner());
+        let c = &totals.counters;
         let mut rows: Vec<(&String, &u64)> = c.iter().collect();
         rows.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
         out.push_str(&format!("[ghost-triggers {moment}] event counters:\n"));
@@ -693,7 +770,7 @@ pub fn emit_attribution(moment: &str) {
         }
     }
     {
-        let a = accum().lock().unwrap_or_else(|e| e.into_inner());
+        let a = &totals.accum;
         if !a.is_empty() {
             let mut rows: Vec<(&String, &(u128, u64))> = a.iter().collect();
             rows.sort_by(|x, y| y.1 .0.cmp(&x.1 .0).then_with(|| x.0.cmp(y.0)));
@@ -708,7 +785,7 @@ pub fn emit_attribution(moment: &str) {
         }
     }
     {
-        let q = quantities().lock().unwrap_or_else(|e| e.into_inner());
+        let q = &totals.quantities;
         if !q.is_empty() {
             let mut rows: Vec<(&String, &(u128, u64))> = q.iter().collect();
             rows.sort_by(|x, y| y.1 .0.cmp(&x.1 .0).then_with(|| x.0.cmp(y.0)));
@@ -724,7 +801,7 @@ pub fn emit_attribution(moment: &str) {
     {
         let d = distincts().lock().unwrap_or_else(|e| e.into_inner());
         if !d.is_empty() {
-            let c = counters().lock().unwrap_or_else(|e| e.into_inner());
+            let c = &totals.counters;
             let mut rows: Vec<(&String, usize)> =
                 d.iter().map(|(k, v)| (k, v.len())).collect();
             rows.sort_by(|x, y| y.1.cmp(&x.1).then_with(|| x.0.cmp(y.0)));
@@ -799,8 +876,9 @@ fn registry() -> &'static Mutex<Vec<Weak<GhostStats>>> {
 pub fn write_json() -> bool {
     use std::fmt::Write as _;
     let mut out = String::from("{\n");
+    let totals = merged();
 
-    let c = counters().lock().unwrap_or_else(|e| e.into_inner());
+    let c = &totals.counters;
     let _ = write!(out, "  \"counters\": {{");
     for (i, (k, v)) in c.iter().enumerate() {
         let _ = write!(
@@ -812,9 +890,8 @@ pub fn write_json() -> bool {
         );
     }
     let _ = write!(out, "{}}},\n", if c.is_empty() { "" } else { "\n  " });
-    drop(c);
 
-    let a = accum().lock().unwrap_or_else(|e| e.into_inner());
+    let a = &totals.accum;
     let _ = write!(out, "  \"timings\": {{");
     for (i, (k, (ns, n))) in a.iter().enumerate() {
         let _ = write!(
@@ -827,9 +904,8 @@ pub fn write_json() -> bool {
         );
     }
     let _ = write!(out, "{}}},\n", if a.is_empty() { "" } else { "\n  " });
-    drop(a);
 
-    let q = quantities().lock().unwrap_or_else(|e| e.into_inner());
+    let q = &totals.quantities;
     let _ = write!(out, "  \"quantities\": {{");
     for (i, (k, (sum, n))) in q.iter().enumerate() {
         let _ = write!(
@@ -842,7 +918,6 @@ pub fn write_json() -> bool {
         );
     }
     let _ = write!(out, "{}}},\n", if q.is_empty() { "" } else { "\n  " });
-    drop(q);
 
     // Per-file lanes, grouped by file so a reader can take one file's whole
     // story in a single object. Both inclusive and exclusive ride every
@@ -1393,5 +1468,38 @@ mod excl_time_tests {
         // And the child (25ms) dominates the parent's self-time (15ms) by
         // construction, so subtraction visibly did something.
         assert!(p_excl < c_incl, "sleep layout guarantees child > parent self");
+    }
+}
+
+#[cfg(test)]
+mod shard_tests {
+    use super::*;
+
+    /// The bump path bypasses the env gate here on purpose: the gate is a
+    /// process-wide OnceLock, and what is under test is that per-thread
+    /// shards lose nothing when they merge.
+    #[test]
+    fn sharded_bumps_from_many_threads_sum_exactly() {
+        const THREADS: u64 = 8;
+        const BUMPS: u64 = 100_000;
+        let tag = "shard_test.bump";
+        let pair = "shard_test.pair";
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    for _ in 0..BUMPS {
+                        with_shard(|s| bump(&mut s.counters, tag, 1));
+                    }
+                    with_shard(|s| bump_pair(&mut s.accum, pair, 5));
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        // Every thread has exited: its shard survives in the registry.
+        let m = merged();
+        assert_eq!(m.counters.get(tag).copied(), Some(THREADS * BUMPS));
+        assert_eq!(m.accum.get(pair).copied(), Some((5 * THREADS as u128, THREADS)));
     }
 }

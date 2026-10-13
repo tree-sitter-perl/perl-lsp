@@ -657,7 +657,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Build an `ArgInfo` for a plugin. Constant-folds literals, barewords,
-    /// and `$var` references that accumulate in `constant_strings`. When the
+    /// and `$var` references that accumulate in the constant table. When the
     /// arg is an anonymous sub, also extracts its param list so plugins
     /// registering handlers (`->on('ready', sub ($s, $m) {})`) can preserve
     /// the handler signature for later sig-help lookup.
@@ -697,11 +697,11 @@ impl<'a> Builder<'a> {
             // `use constant EXTRA => 'Gizmos'`). Falls back to the raw
             // token when it names no constant.
             "bareword" => self
-                .resolve_constant_strings(&text, 0)
+                .resolve_constant_strings(&text, arg)
                 .and_then(|f| f.into_iter().next())
                 .or_else(|| Some(text.clone())),
             "scalar" | "array" | "hash" => {
-                self.resolve_constant_strings(&text, 0).and_then(|f| f.into_iter().next())
+                self.resolve_constant_strings(&text, arg).and_then(|f| f.into_iter().next())
             }
             _ => None,
         };
