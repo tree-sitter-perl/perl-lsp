@@ -714,7 +714,7 @@ fn uncovered_files(idx: &dyn CrossFileLookup) -> Vec<Arc<CachedModule>> {
         if !shredded.contains(&cached.path) {
             files.push(Arc::clone(cached));
         }
-    });
+    }).read();
     files
 }
 

@@ -86,7 +86,7 @@ impl<'a> CandidateSet<'a> {
                     hit = Some((p, span));
                 }
             }
-        });
+        }).read();
         hit.map(|(p, span)| RefLocation {
             key: FileKey::Path(PathBuf::from(p)),
             span,
@@ -253,7 +253,7 @@ impl<'a> CandidateSet<'a> {
                                 },
                             ));
                         }
-                    });
+                    }).read();
                     hits.sort_by(|a, b| a.0.cmp(&b.0));
                     for (_, loc) in hits {
                         push(&mut defs, &loc.key, loc.span);

@@ -242,7 +242,7 @@ pub(crate) fn ranked_macro_variants(
                 push(m, &file_key, &mut sites);
             }
         }
-    });
+    }).read();
 
     if sites.is_empty() {
         return Vec::new();

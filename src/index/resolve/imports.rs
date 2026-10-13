@@ -175,7 +175,7 @@ pub(super) fn unimported_export_candidates(
                 display_override: None,
             });
         }
-    });
+    }).read();
 
     // Sort for deterministic order
     candidates.sort_by(|a, b| a.label.cmp(&b.label).then(a.detail.cmp(&b.detail)));

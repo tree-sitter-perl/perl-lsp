@@ -1133,7 +1133,7 @@ fn thread_path_resolution_feeds_loader_config_shapes() {
     );
 
     let mut shapes: Vec<String> = Vec::new();
-    idx.for_each_loader_shape(&mut |name, _t| shapes.push(name.to_string()));
+    idx.for_each_loader_shape(&mut |name, _t| shapes.push(name.to_string())).read();
     assert!(
         shapes.iter().any(|n| n == "GenericCoApp"),
         "thread-path resolution must feed loader_config_shapes; got {shapes:?}",
@@ -1685,7 +1685,7 @@ fn unregistering_a_workspace_file_retracts_its_loader_shapes() {
 
     let shapes = |idx: &ModuleIndex| {
         let mut out: Vec<String> = Vec::new();
-        idx.for_each_loader_shape(&mut |name, _t| out.push(name.to_string()));
+        idx.for_each_loader_shape(&mut |name, _t| out.push(name.to_string())).read();
         out
     };
     assert!(

@@ -395,7 +395,7 @@ impl FileAnalysis {
             if matches_me(load_name) {
                 shapes.push(t.clone());
             }
-        });
+        }).read();
         if shapes.is_empty() {
             return None;
         }

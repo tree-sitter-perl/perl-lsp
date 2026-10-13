@@ -319,7 +319,7 @@ impl ModuleIndex {
         let mut files: Vec<(std::path::PathBuf, u64)> = Vec::new();
         self.for_each_cached_file(&mut |cached| {
             files.push((cached.path.clone(), cached.analysis().source_stamp));
-        });
+        }).read();
         files.sort();
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for (path, stamp) in &files {

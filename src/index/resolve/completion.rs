@@ -373,7 +373,7 @@ impl<'a> CandidateSet<'a> {
                     // be symbol-evicted; the LRU bounds the rehydration.
                     let whole = module_index.whole_present(cached);
                     gather(&whole, header.as_deref(), &mut seen, &mut out);
-                });
+                }).read();
             }
         }
         out

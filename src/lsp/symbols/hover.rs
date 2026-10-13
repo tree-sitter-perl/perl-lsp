@@ -172,7 +172,7 @@ fn render_candidate_hover(
             if found.is_none() && cached.path == path {
                 found = Some(std::sync::Arc::clone(cached));
             }
-        });
+        }).read();
     }
     if let Some(cached) = &found {
         let whole = module_index

@@ -540,7 +540,7 @@ fn walk_refs(
                 if file_sees_target_ids(target, &target_def_ids, &cached.analysis(), &own) {
                     seen_by_inclusion.extend(cached.analysis().pack.include_closure.iter_strs().map(|a| a.as_ref().to_owned()));
                 }
-            });
+            }).read();
         }
     }
     let gate = |analysis: &FileAnalysis, file_str: &str| {
@@ -758,7 +758,7 @@ fn walk_refs(
                 // the matcher needs refs + symbols, so take the rows view.
                 let full = matcher_view(idx, cached, target);
                 collect_from_analysis(&key, &full, target, &aliases, module_index, &file_str, &memo, &mut out);
-            });
+            }).read();
         }
     }
 
@@ -1080,7 +1080,7 @@ pub(super) fn delegation_aliases(
         if let Some(idx) = module_index {
             idx.for_each_cached_file(&mut |cached| {
                 add(&cached.analysis(), &cached.path.to_string_lossy());
-            });
+            }).read();
         }
     }
     if pairs.is_empty() {

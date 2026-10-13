@@ -518,7 +518,7 @@ impl FileAnalysis {
             if hits && Self::class_is_dbic_result(name, mi) {
                 candidates.push(name.to_string());
             }
-        });
+        }).read();
         if candidates.is_empty() {
             return cn;
         }
@@ -557,7 +557,7 @@ impl FileAnalysis {
                     *fam_size.get_mut(cand).unwrap() += 1;
                 }
             }
-        });
+        }).read();
         candidates.sort_by(|a, b| fam_size[b].cmp(&fam_size[a]).then_with(|| a.cmp(b)));
         candidates.into_iter().next().unwrap()
     }
@@ -643,7 +643,7 @@ impl FileAnalysis {
                 if matches(name) {
                     candidates.push(name.to_string());
                 }
-            });
+            }).read();
         }
         candidates.sort();
         candidates.dedup();

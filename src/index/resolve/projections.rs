@@ -416,7 +416,7 @@ impl<'a> CandidateSet<'a> {
                                 label: None
                             });
                         }
-                    });
+                    }).read();
                 }
             }
         }
