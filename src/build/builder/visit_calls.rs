@@ -1356,8 +1356,14 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        for (span, node) in pending {
-            let Some(ty) = self.invocant_type_at_node(node) else { continue };
+        // Type every invocant before recording any: a push moves the bag's
+        // generation and empties the invocant memo, so interleaving them
+        // would re-type each chain's prefix once per call in it.
+        let typed: Vec<(Span, InferredType)> = pending
+            .into_iter()
+            .filter_map(|(span, node)| Some((span, self.invocant_type_at_node(node)?)))
+            .collect();
+        for (span, ty) in typed {
             self.bag.push(Witness {
                 attachment: WitnessAttachment::Expr(span),
                 source: WitnessSource::Builder("invocant_expr".into()),
@@ -1533,7 +1539,7 @@ impl<'a> Builder<'a> {
         if bare.is_empty() {
             return vec![];
         }
-        self.resolve_constant_strings(&format!("${}", bare), 0).unwrap_or_default()
+        self.resolve_constant_strings(&format!("${}", bare), scalar).unwrap_or_default()
     }
 
     /// `*{ EXPR }` — derive name(s) from the block's single expression.
@@ -1569,7 +1575,7 @@ impl<'a> Builder<'a> {
                 .unwrap_or_default(),
             (None, "binary_expression") => self.try_fold_string_concat(expr),
             (None, "scalar" | "array" | "hash" | "bareword") => self
-                .resolve_constant_strings(expr.utf8_text(self.source).unwrap_or(""), 0)
+                .resolve_constant_strings(expr.utf8_text(self.source).unwrap_or(""), expr)
                 .unwrap_or_default(),
             _ => vec![],
         }
@@ -1591,7 +1597,7 @@ impl<'a> Builder<'a> {
                     let varname = child.named_child(0);
                     match varname.and_then(|v| v.utf8_text(self.source).ok()) {
                         Some(bare) if !bare.is_empty() => self
-                            .resolve_constant_strings(&format!("${}", bare), 0)
+                            .resolve_constant_strings(&format!("${}", bare), child)
                             .unwrap_or_default(),
                         _ => vec![],
                     }
@@ -1658,7 +1664,7 @@ impl<'a> Builder<'a> {
             if let Some(varname_node) = last_child.named_child(0) {
                 let bare_name = varname_node.utf8_text(self.source).unwrap_or("");
                 let lookup_key = format!("${}", bare_name);
-                if let Some(values) = self.resolve_constant_strings(&lookup_key, 0) {
+                if let Some(values) = self.resolve_constant_strings(&lookup_key, last_child) {
                     return values;
                 }
             }
@@ -1692,7 +1698,7 @@ impl<'a> Builder<'a> {
                     if let Some(scalar_varname) = operand.named_child(0) {
                         let bare_name = scalar_varname.utf8_text(self.source).unwrap_or("");
                         let lookup_key = format!("${}", bare_name);
-                        if let Some(values) = self.resolve_constant_strings(&lookup_key, 0) {
+                        if let Some(values) = self.resolve_constant_strings(&lookup_key, operand) {
                             return values;
                         }
                     }
@@ -1711,7 +1717,7 @@ impl<'a> Builder<'a> {
                 if let Some(scalar_varname) = scalar.named_child(0) {
                     let bare_name = scalar_varname.utf8_text(self.source).unwrap_or("");
                     let lookup_key = format!("${}", bare_name);
-                    if let Some(values) = self.resolve_constant_strings(&lookup_key, 0) {
+                    if let Some(values) = self.resolve_constant_strings(&lookup_key, scalar) {
                         return values;
                     }
                 }

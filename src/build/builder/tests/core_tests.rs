@@ -1240,3 +1240,65 @@ fn scopes_own_their_callable_and_params_carry_their_binding_site() {
     assert_eq!(fa.enclosing_callable_at(Point { row: 3, column: 4 }).map(|s| s.name.as_str()), Some("(anon)"));
     assert!(fa.enclosing_callable_at(Point { row: 1, column: 0 }).is_none(), "top-level code has no callable");
 }
+
+/// Chain typing recurses once per hop down an invocant chain. A 120-step
+/// fluent chain builds on a 256 KiB stack — about 50 debug-build hops of raw
+/// recursion — because the recursion grows its own stack. Base-verify by
+/// calling `invocant_type_at_node_on_stack` directly: this aborts.
+#[test]
+fn a_fluent_chain_deeper_than_the_stack_builds() {
+    let mut src = String::from(
+        "package P;\nsub new { my $c = shift; return bless {}, $c }\n\
+         sub step { my $s = shift; return $s }\npackage main;\nmy $r = P->new",
+    );
+    for _ in 0..120 {
+        src.push_str("->step");
+    }
+    src.push_str(";\n");
+    let steps = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            let fa = build_fa(&src);
+            fa.refs().iter().filter(|r| r.target_name == "step").count()
+        })
+        .expect("spawn")
+        .join()
+        .expect("chain typing must not overflow the stack");
+    assert_eq!(steps, 120);
+}
+
+/// The stamp pass shares resolve answers across refs. Each stamped class
+/// must equal what a lone resolution of that ref answers from an empty
+/// memo, including through return-type cycles and chains past the depth cap.
+#[test]
+fn stamp_pass_sharing_matches_lone_resolutions() {
+    let mut srcs = vec![String::from(
+        "package A; sub new { bless {}, shift } sub foo { my $s = shift; return $s->bar->foo } sub bar { my $s = shift; return $s->foo->bar }\npackage main; my $x = A->new->foo->bar->foo; my $y = A->new->bar->foo->bar->foo;\n",
+    )];
+    for n in [10usize, 140, 300] {
+        let mut s = String::from("package P;\nsub new { my $c = shift; return bless {}, $c }\nsub step { my $s = shift; return $s }\nsub other { my $s = shift; return Q->new }\npackage Q; sub new { bless {}, shift } sub step { my $s = shift; return $s->other } sub other { P->new }\npackage main;\nmy $r = P->new");
+        for i in 0..n {
+            s.push_str(if i % 7 == 3 { "->other" } else { "->step" });
+        }
+        s.push_str(";\n");
+        srcs.push(s);
+    }
+    for src in srcs {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(move || {
+                let fa = build_fa(&src);
+                let mut checked = 0;
+                for r in fa.refs().iter().filter(|r| r.member_site().is_some()) {
+                    let lone = fa.method_call_invocant_class(r, None);
+                    let stamped = r.method_target().map(|t| t.invocant_class().to_string());
+                    assert_eq!(stamped, lone, "ref at {:?}", r.span);
+                    checked += 1;
+                }
+                assert!(checked > 0);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+}

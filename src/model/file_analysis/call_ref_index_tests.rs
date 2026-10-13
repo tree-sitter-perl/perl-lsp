@@ -432,3 +432,19 @@ sub touch { 1 }
         );
     }
 }
+
+#[test]
+fn longest_call_chain_counts_the_deepest_fluent_chain() {
+    let fa = parse(
+        r#"package P;
+sub new { bless {}, shift }
+sub a { $_[0] }
+package main;
+my $x = P->new->a->a->a;
+my $y = P->new->a;
+foo(P->new->a->a);
+"#,
+    );
+    // `P->new->a->a->a`: `new` plus three `a` calls, all opening at `P`.
+    assert_eq!(fa.refs.longest_call_chain(), 4);
+}

@@ -13,8 +13,13 @@ FROM read_json_auto('bench/runs/*.jsonl', union_by_name := true, ignore_errors :
 WHERE t = 'run';
 
 CREATE OR REPLACE TABLE measurements AS
-SELECT run_id, corpus, rep, phase, kind, name, value, unit
-FROM read_json_auto('bench/runs/*.jsonl', union_by_name := true, ignore_errors := true)
+SELECT run_id, corpus, rep, phase, kind, name, tag, value, unit
+FROM (
+  -- `tag` keys per-file lanes and editor scenario steps; the empty BY NAME
+  -- arm keeps the column when no loaded run carries one
+  SELECT * FROM read_json_auto('bench/runs/*.jsonl', union_by_name := true, ignore_errors := true)
+  UNION ALL BY NAME SELECT NULL::VARCHAR AS tag WHERE false
+)
 WHERE t = 'm';
 
 -- A run whose binary was built from a dirty tree, or on a loaded box, is not

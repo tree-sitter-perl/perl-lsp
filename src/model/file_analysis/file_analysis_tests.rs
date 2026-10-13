@@ -2521,6 +2521,68 @@ fn test_cross_file_return_type_cycle_terminates() {
     );
 }
 
+/// `P->new->step->step->…` with `n` steps; `step` returns its invocant.
+/// Typing the outermost call chases each receiver in turn, call ⇄ receiver
+/// expression, so the resolve stack reaches `2n` deep.
+fn fluent_chain_return_on_small_stack(n: usize) -> Option<InferredType> {
+    let mut src = String::from(
+        "package P;\nsub new { my $c = shift; return bless {}, $c }\n\
+         sub step { my $s = shift; return $s }\npackage main;\nmy $r = P->new",
+    );
+    for _ in 0..n {
+        src.push_str("->step");
+    }
+    src.push_str(";\n");
+    // Built on a roomy stack: the builder's own walk of a chain this deep is
+    // not what these tests pin (it overflows 2 MiB in a debug build at 300).
+    let fa = std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(move || build_fa_from_source(&src))
+        .expect("spawn")
+        .join()
+        .expect("build");
+    std::thread::Builder::new()
+        // About 50 debug-build hops of raw recursion: far less than either
+        // chain below needs, so what this pins is that the resolvers grow
+        // their own stack.
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            let outermost = fa
+                .refs
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.target_name == "step")
+                .max_by_key(|(_, r)| (r.span.end.row, r.span.end.column))
+                .map(|(i, _)| i)
+                .expect("the chain emits `step` call refs");
+            fa.method_call_return_type_via_bag(outermost, None)
+        })
+        .expect("spawn")
+        .join()
+        .expect("the chase must not overflow the stack")
+}
+
+/// A chain within `RESOLVE_DEPTH_CAP` resolves on a stack it would overflow
+/// without growing. Base-verify by calling the `_uncached` resolvers directly
+/// from their guarded entries: this aborts.
+#[test]
+fn a_fluent_chain_deeper_than_the_stack_resolves() {
+    assert_eq!(
+        fluent_chain_return_on_small_stack(120),
+        Some(InferredType::ClassName("P".into())),
+    );
+}
+
+/// Past the cap the receiver chase stops; the call still answers from its own
+/// build-time edge, and the process does not abort.
+#[test]
+fn a_fluent_chain_past_the_resolve_cap_does_not_abort() {
+    assert_eq!(
+        fluent_chain_return_on_small_stack(300),
+        Some(InferredType::ClassName("P".into())),
+    );
+}
+
 /// The fused-binding contract: a ref's resolution outcome is ONE value
 /// (`Ref::binding`), so re-stamping an owner structurally drops any stale
 /// linked symbol — the components can never drift apart, and the linker

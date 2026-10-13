@@ -3,6 +3,27 @@
 
 use super::*;
 
+/// The package an `our` declaration is gated to: `our` is a package
+/// global with a lexical alias, so a bare use reaches it only from that
+/// package. `None` for `my` / `state` / `field`, which are pure lexicals.
+pub(super) fn our_gate(sym: &Symbol) -> Option<&str> {
+    match &sym.detail {
+        SymbolDetail::Variable { decl_kind: DeclKind::Our, .. } => sym.package.as_deref(),
+        _ => None,
+    }
+}
+
+/// Whether a use in package `use_pkg` sees a declaration gated to `gate`.
+/// A package-less script puts both the `our` decl and bare uses in the
+/// default `main`, but has no package range, so an absent package reads
+/// as `main`.
+pub(super) fn our_gate_admits(gate: Option<&str>, use_pkg: Option<&str>) -> bool {
+    match gate {
+        Some(decl_pkg) => use_pkg.unwrap_or("main") == decl_pkg,
+        None => true,
+    }
+}
+
 impl<'a> Builder<'a> {
     // ---- Post-passes ----
 
@@ -23,10 +44,7 @@ impl<'a> Builder<'a> {
         > = std::collections::HashMap::new();
         for sym in &self.symbols {
             if matches!(sym.kind, SymKind::Variable | SymKind::Field) {
-                let gating_package = match &sym.detail {
-                    SymbolDetail::Variable { decl_kind: DeclKind::Our, .. } => sym.package.clone(),
-                    _ => None,
-                };
+                let gating_package = our_gate(sym).map(str::to_string);
                 scope_symbols
                     .entry(sym.scope)
                     .or_default()
@@ -74,16 +92,7 @@ impl<'a> Builder<'a> {
                         .filter(|(name, _, decl_point, gating_package)| {
                             if name != &ref_target { return false; }
                             if *decl_point > ref_span_start { return false; }
-                            match gating_package {
-                                // A package-less script (no `package` stmt) puts
-                                // both the `our` decl and bare uses in the default
-                                // `main`, but `package_at_pos` yields `None` there
-                                // — so an absent enclosing package reads as `main`.
-                                Some(decl_pkg) => {
-                                    use_pkg.as_deref().unwrap_or("main") == decl_pkg.as_str()
-                                }
-                                None => true,
-                            }
+                            our_gate_admits(gating_package.as_deref(), use_pkg.as_deref())
                         })
                         .last()
                     {
