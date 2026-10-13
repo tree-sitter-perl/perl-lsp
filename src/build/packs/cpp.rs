@@ -84,28 +84,16 @@ pub fn cpp_pack() -> LangPack {
             };
             Some(InferredType::ClassName(class))
         },
-        // Rebinding methods: a moved-from object is put back into a known state
-        // by these std container/optional/smart-ptr resets, so a use after one
-        // is NOT a use-after-move. (An ordinary `x.use()` is not here, so the
-        // canonical bug still flags.)
-        rebind_method: |m| {
-            matches!(m, "clear" | "reset" | "assign" | "emplace" | "swap")
-        },
         // C/C++ methods read members with an implicit `this->`.
         implicit_this_members: true,
         entrypoint_symbols: &["main"],
         brace_scoped_members: true,
         trigger_chars: &[".", ">", ":"],
-        receiver_names: &["this"],
         // `field_identifier` only ever names a struct/class member (the
         // grammar's own distinction from a plain `identifier` local), so
         // `Field` matches the plain (non-pointer) field pattern above.
         // Shared with the member-block synth lane (rule #10).
         recv_peel: &["parenthesized_expression", "pointer_expression"],
-        op_map: &[
-            ("->", crate::model::file_analysis::MemberOp::Arrow),
-            (".", crate::model::file_analysis::MemberOp::Dot),
-        ],
         simple_var_kinds: &["identifier"],
         member_kinds: &["field_expression"],
         skip_kinds: &["string_literal", "char_literal", "raw_string_literal", "comment"],

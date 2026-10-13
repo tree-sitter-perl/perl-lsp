@@ -80,9 +80,10 @@ fn family(cap: Capture) -> Family {
         | C::NsInline
         | C::Alias(_)
         | C::MacroAlias(_)
-        | C::Tmpl(_) => Family::Defs,
+        | C::Tmpl(_)
+        | C::ParamReceiver => Family::Defs,
         C::Ref(_) => Family::Refs,
-        C::Member(_) | C::Arity(_) => Family::Members,
+        C::Member(_) | C::MemberOp(_) | C::Arity(_) => Family::Members,
         C::Flow(_)
         | C::Expr(_)
         | C::Obs(_)
@@ -189,7 +190,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
 
     let root = tree.root_node();
     let mut out = SkeletonAnalysis::default();
-    out.receiver_names = pack.receiver_names.iter().map(|s| s.to_string()).collect();
     out.names = pack.names.clone();
     out.scopes.push(Scope {
         id: ScopeId(0),
@@ -257,7 +257,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             Family::Defs => defs::collect(&mut st, e),
             Family::Flow => flow::collect(&mut st, e),
             Family::Narrowing => narrowing::collect(&mut st, e),
-            Family::Refs | Family::Members | Family::Commands | Family::Imports | Family::Links => {}
+            Family::Members => members::collect(&mut st, e),
+            Family::Refs | Family::Commands | Family::Imports | Family::Links => {}
         }
     }
 

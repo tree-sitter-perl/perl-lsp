@@ -42,12 +42,6 @@ pub struct LangPack {
     /// "which guard means which refinement" (rule #10); core just scopes
     /// the witness to the block.
     pub narrow_guard: fn(guard: Option<&str>, type_text: &str) -> Option<InferredType>,
-    /// Does calling `method` on a variable REBIND it — putting a moved-from
-    /// object back into a known state (`clear`/`reset`/`assign`/…)? Used to end
-    /// a moved-from region (and any narrowing) at the reset call, so a use after
-    /// it is clean. Pack-owned language vocab (like `op_map`): core asks the
-    /// value, never enumerates names itself.
-    pub rebind_method: fn(method: &str) -> bool,
     /// Can a bare, receiver-less identifier resolve through an implicit
     /// `this->` — both a field read (`return inner_;` = `this->inner_`) AND a
     /// sibling method call (`foo()` = `this->foo()`)? True for C/C++ (the
@@ -77,26 +71,10 @@ pub struct LangPack {
     /// completion (and reports the char in `CompletionContext`) when one is
     /// typed. C++ `. > :` cover `.`/`->`/`::`; the member path keys off them.
     pub trigger_chars: &'static [&'static str],
-    /// The language's method-RECEIVER parameter names (Python `self`/`cls`,
-    /// C++ `this`). A receiver param is lexically inside the class body, so
-    /// the sticky class context tags it — but it is NOT a member. Extraction
-    /// clears its package so it reads as a plain local. Lang-specific
-    /// semantics → the pack owns it (NOT core `conventions.rs`, which is
-    /// Perl's `$self`/`$class`).
-    pub receiver_names: &'static [&'static str],
     /// The member-access RECEIVER peel: transparent expression wrapper kinds
     /// (`(*p)`, `(&o)`, `(p)` → `p`) dropped, through their first named
     /// child, so the invocant types via the inner.
     pub recv_peel: &'static [&'static str],
-    /// Member-access node kinds (`receiver OP member`) — extraction records
-    /// each site (simple-variable receiver, operator token span, `->` vs
-    /// `.`) for the operator-DX consumer (`p.` on a `Box*` should be `->`).
-    /// The member operator's grammar token KIND → the `MemberOp` it means
-    /// (`"->"`→Arrow, `"."`→Dot). The `operator:` field of a member access is
-    /// captured as `@member.op`; the engine maps its `kind()` through this
-    /// table. An OPEN set: unmapped kinds (`.*`) get no op-DX, never a guess.
-    /// Empty = no member-operator DX (Perl, single-operator packs).
-    pub op_map: &'static [(&'static str, crate::model::file_analysis::MemberOp)],
     /// Simple-variable node kinds (`identifier`). op-DX fires ONLY when the
     /// IMMEDIATE member-access receiver is one — the receiver whose
     /// `deref_stack` resolves by name to decide the expected operator. Also the
@@ -145,14 +123,11 @@ impl LangPack {
             annot_type: _,
             module_paths: _,
             narrow_guard: _,
-            rebind_method: _,
             implicit_this_members: _,
             entrypoint_symbols,
             brace_scoped_members: _,
             trigger_chars,
-            receiver_names,
             recv_peel,
-            op_map,
             simple_var_kinds,
             member_kinds,
             skip_kinds,
@@ -166,7 +141,6 @@ impl LangPack {
         };
         list("entrypoint_symbols", entrypoint_symbols);
         list("trigger_chars", trigger_chars);
-        list("receiver_names", receiver_names);
         list("recv_peel", recv_peel);
         list("simple_var_kinds", simple_var_kinds);
         list("member_kinds", member_kinds);
@@ -174,7 +148,6 @@ impl LangPack {
         list("call_kinds", call_kinds);
         list("domain_compare_kinds", domain_compare_kinds);
         list("domain_compare_ops", domain_compare_ops);
-        out.extend(op_map.iter().map(|(k, _)| ("op_map", *k)));
         out.retain(|(_, v)| !v.is_empty());
         out
     }

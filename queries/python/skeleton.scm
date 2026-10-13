@@ -28,6 +28,11 @@
 (parameters
   (identifier) @def.var.name @def.var)
 
+; a method's leading `self` / `cls` is its receiver: the object, not a member
+; of the class it is declared in.
+((parameters . (identifier) @param.receiver)
+  (#match? @param.receiver "^(self|cls)$"))
+
 (import_statement
   name: (dotted_name) @import.name) @import
 (import_from_statement

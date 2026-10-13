@@ -884,6 +884,7 @@ fn inject_member_blocks(
                 attributes: Vec::new(),
                 arity: None,
                 qualifier_owned: false,
+                flags: Default::default(),
             });
             // The role member emits the SAME `TypeName` edge an expanded field
             // does — the edge is canonical (the hover leaf + the type chase
@@ -1199,7 +1200,6 @@ fn remap_spans(
         parents: _,
         var_reads,
         label_refs,
-        receiver_names: _,
         flow_edges,
         moved_from,
         control_regions,
@@ -1234,6 +1234,7 @@ fn remap_spans(
             attributes: _,
             arity: _,
             qualifier_owned: _,
+            flags: _,
         } = s;
         *start = r(*start);
         *end = r(*end);

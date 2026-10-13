@@ -1617,18 +1617,12 @@ fn pack_fields_name_no_grammar_shapes() {
     const CURSOR: &str = "moves when the cursor reads the document: which nodes are \
          members, calls, bare variables, strings and comparisons is answered by the patterns \
          that capture them";
-    const MEMBER_OPS: &str = "moves with cpp/python receivers and member operators: \
-         the operator written is a capture suffix";
-    const RECEIVERS: &str = "moves with cpp/python receivers: a receiver is a flag \
-         the document mints";
     let allow: &[(&str, &str, usize, &str)] = &[
         ("cmake", "trigger_chars", 2, TRIGGERS),
         ("cpp", "call_kinds", 1, CURSOR),
         ("cpp", "domain_compare_kinds", 1, CURSOR),
         ("cpp", "domain_compare_ops", 2, CURSOR),
         ("cpp", "member_kinds", 1, CURSOR),
-        ("cpp", "op_map", 2, MEMBER_OPS),
-        ("cpp", "receiver_names", 1, RECEIVERS),
         ("cpp", "recv_peel", 2, CURSOR),
         ("cpp", "simple_var_kinds", 1, CURSOR),
         ("cpp", "skip_kinds", 4, CURSOR),
@@ -1665,8 +1659,6 @@ fn pack_string_tables_are_ratcheted() {
     let allow: &[(&str, &str, usize, &str)] = &[
         ("cpp", "entrypoint_symbols", 1, "moves when the heatmap's entry guard reads a \
           minted fact: an entry point is a fact the document mints, not a name list"),
-        ("python", "receiver_names", 2, "moves with cpp/python receivers: a receiver is \
-          a flag the document mints"),
     ];
     let drift = pack_allowlist_drift("rule #15 (vocabulary tables on the pack)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
@@ -1749,7 +1741,7 @@ fn pack_facts_fields_are_ratcheted() {
     let body = &text[start..];
     let end = body.find("\n}\n").expect("struct end");
     let fields = body[..end].lines().filter(|l| l.starts_with("    pub ")).count();
-    const RATCHET: usize = 22;
+    const RATCHET: usize = 21;
     assert!(
         fields <= RATCHET,
         "PackFacts grew to {fields} fields (ratchet {RATCHET}). A per-language constant goes on \

@@ -356,6 +356,10 @@ bitflags::bitflags! {
         /// A storage slot with a generated writer (Corinna `:writer` /
         /// `:mutator` / `:accessor`, Moo `is => 'rw'`).
         const WRITER = 1 << 14;
+        /// A method's receiver parameter (python `self`/`cls`): the object,
+        /// not a member, though it sits inside the class body. Minted from
+        /// a capture, never spelled as an attribute.
+        const RECEIVER = 1 << 15;
     }
 }
 

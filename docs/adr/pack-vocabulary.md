@@ -72,9 +72,12 @@ the fields the pack lane carries per file.
 ## Consequences
 
 - A fn is code the reflection cannot see into. A callee name inside one
-  (`rebind_method`, `narrow_guard`) escapes both tripwires; moving it into
-  the document is still rule #15's work, done per language as each lane
-  moves. R's constructors and imports and CMake's command families already
+  (`narrow_guard`) escapes both tripwires; moving it into the document is
+  still rule #15's work, done per language as each lane moves. R's
+  constructors and imports, CMake's command families, cpp's rebinding
+  resets (`@flow.rebind` on the receiver of `x.clear()`), the member
+  operators (`@member.op.arrow` / `@member.op.dot`) and the receiver
+  parameter (`@param.receiver`, minting `SymbolFlags::RECEIVER`) already
   live in their documents.
 - A capability the document already states is read off the compiled
   document, never kept as a pack bool beside it: `#include`-style path
@@ -84,5 +87,4 @@ the fields the pack lane carries per file.
   and are not counted; each is a statement the document can make about
   itself.
 - The allowlists today are the cursor sentinel's node-kind tables, cpp's
-  declarator and receiver peels, cpp's member-operator map, the
-  receiver-name lists, and cpp's `main` entry point.
+  receiver peel, and cpp's `main` entry point.

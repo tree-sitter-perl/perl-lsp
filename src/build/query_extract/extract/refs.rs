@@ -29,19 +29,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     }
     let m = &st.members;
     let simple = m.member_simple.get(&e.match_id).copied().unwrap_or(false);
-    let member_op = simple.then(|| m.member_op_raw.get(&e.match_id).copied()).flatten();
-    // Reset-via-method: a rebinding method call on a simple-var
-    // receiver (`x.clear()`/`.reset()`/`.assign()`) puts a
-    // moved-from object back into a known state — a rebind. Mint
-    // a Rebind FlowEdge at the RECEIVER position so the moved-from
-    // window (and the narrowing cutoff) end there, sparing the
-    // receiver read itself. The pack owns which method names
-    // rebind (cpp vocab, like its op_map).
-    if ref_kind == RefKind::Member && (pack.rebind_method)(&e.text) && simple {
-        if let Some((recv_span, recv_text)) = m.member_recv.get(&e.match_id) {
-            st.flow.flow_rebinds.push(((pack.shape_name)(recv_text), st.cur_scope, recv_span.start));
-        }
-    }
+    let member_op = simple.then(|| m.op_of(e.match_id)).flatten();
     // A call ref's arg list opens right where its callee / method token
     // ends; plain (uncalled) member/type refs have no adjacent arg list.
     let arg_count = matches!(ref_kind, RefKind::Call | RefKind::QCall | RefKind::Member)

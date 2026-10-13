@@ -23,9 +23,21 @@ pub(super) struct State {
     /// `@member.recv` → the receiver span of a `recv.field` access, joined to
     /// its `@ref.member` by match_id so the minted MethodCall ref carries it.
     pub(super) member_recv: HashMap<usize, (Span, String)>,
-    /// `@member.op` → the written operator mapped through `pack.op_map` + its
-    /// span; joined to `@ref.member` so op-DX rides the minted ref.
-    pub(super) member_op_raw: HashMap<usize, (MemberOp, Span)>,
+    /// `@member.op` → the operator token's span, joined to `@ref.member` by
+    /// match_id; which operator it is comes from `ops_at`.
+    pub(super) member_op_span: HashMap<usize, Span>,
+    /// `@member.op.<which>` → the operator the document names at a token
+    /// span. A token no pattern names claims no operator, so op-DX stays
+    /// silent rather than guessing.
+    ops_at: HashMap<(Point, Point), MemberOp>,
+}
+
+impl State {
+    /// The operator a member match wrote, with its span.
+    pub(super) fn op_of(&self, match_id: usize) -> Option<(MemberOp, Span)> {
+        let span = *self.member_op_span.get(&match_id)?;
+        Some((*self.ops_at.get(&(span.start, span.end))?, span))
+    }
 }
 
 /// `@member.recv`: a member access receiver. Peel transparent wrappers
@@ -90,18 +102,20 @@ pub(super) fn count_params(members: &mut State, node: tree_sitter::Node<'_>) {
     ));
 }
 
+/// The span-keyed member facts, read before any handler asks them.
+pub(super) fn collect(st: &mut ExtractState, e: &Event) {
+    if let Capture::MemberOp(which) = e.cap {
+        st.members.ops_at.insert((e.start, e.end), which.op());
+    }
+}
+
 pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     match e.cap {
         Capture::Member(MemberCap::Recv) => {
             st.members.member_recv.insert(e.match_id, (e.span(), e.text.clone()));
         }
         Capture::Member(MemberCap::Op) => {
-            // Map the operator token's KIND (== its text, an anonymous
-            // token) to a MemberOp via the pack's open op_map. Unmapped
-            // (`.*`) → no entry → no op-DX. No source-text re-decision.
-            if let Some((_, op)) = st.pack.op_map.iter().find(|(k, _)| *k == e.text) {
-                st.members.member_op_raw.insert(e.match_id, (*op, e.span()));
-            }
+            st.members.member_op_span.insert(e.match_id, e.span());
         }
         _ => {}
     }

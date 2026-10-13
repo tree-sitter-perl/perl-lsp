@@ -165,6 +165,21 @@ spelled! {
 }
 
 spelled! {
+    /// Which member operator a token is; the suffix names the model's
+    /// `MemberOp`, so a token no pattern names claims no operator.
+    pub enum MemberOpCap { Arrow = "arrow", Dot = "dot" }
+}
+
+impl MemberOpCap {
+    pub fn op(self) -> crate::model::file_analysis::MemberOp {
+        match self {
+            MemberOpCap::Arrow => crate::model::file_analysis::MemberOp::Arrow,
+            MemberOpCap::Dot => crate::model::file_analysis::MemberOp::Dot,
+        }
+    }
+}
+
+spelled! {
     pub enum ArityCap { Args = "args", Sig = "sig" }
 }
 
@@ -274,6 +289,11 @@ pub enum Capture {
     Unevaluated,
     ParamRegion,
     Member(MemberCap),
+    /// The operator token a member access wrote, by which operator it is.
+    MemberOp(MemberOpCap),
+    /// A method's receiver parameter (python `self`): the object, not a
+    /// member.
+    ParamReceiver,
     Arity(ArityCap),
     Domain(DomainCap),
     Shape(ShapeCap),
@@ -346,6 +366,8 @@ impl Capture {
             ["guard", "region"] => C::GuardRegion,
             ["unevaluated"] => C::Unevaluated,
             ["param", "region"] => C::ParamRegion,
+            ["param", "receiver"] => C::ParamReceiver,
+            ["member", "op", k] => C::MemberOp(MemberOpCap::parse(k)?),
             ["member", k] => C::Member(MemberCap::parse(k)?),
             ["arity", k] => C::Arity(ArityCap::parse(k)?),
             ["domain", k] => C::Domain(DomainCap::parse(k)?),
@@ -401,6 +423,8 @@ impl fmt::Display for Capture {
             C::Unevaluated => f.write_str("unevaluated"),
             C::ParamRegion => f.write_str("param.region"),
             C::Member(k) => write!(f, "member.{k}"),
+            C::MemberOp(k) => write!(f, "member.op.{k}"),
+            C::ParamReceiver => f.write_str("param.receiver"),
             C::Arity(k) => write!(f, "arity.{k}"),
             C::Domain(k) => write!(f, "domain.{k}"),
             C::Shape(k) => write!(f, "shape.{k}"),

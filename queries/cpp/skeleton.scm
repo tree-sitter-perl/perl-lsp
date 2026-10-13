@@ -697,6 +697,11 @@
   operator: _ @member.op
   field: (field_identifier) @ref.member)
 
+; which operator a member access wrote, so op-DX can name the other one. A
+; token no pattern names here claims no operator.
+(field_expression operator: "->" @member.op.arrow)
+(field_expression operator: "." @member.op.dot)
+
 ; ---- domain typing (int-used-as-enum): a struct-field SLOT compared or
 ; assigned against ANY value. `o->op_type == OP_CONST` / `o->op_type =
 ; OP_FREED` / `o->op_targ = pad_alloc(...)`. @domain.slot is the field access,
@@ -826,6 +831,16 @@
 ; inflowing type yet) so the narrowing cutoff ends a region at the loop.
 (for_range_loop
   declarator: (identifier) @flow.rebind)
+
+; the std container / optional / smart-pointer resets put a moved-from object
+; back into a known state, so the receiver rebinds at the call: a use after
+; `x.clear()` is NOT a use-after-move. An ordinary `x.use()` is not here, so
+; the canonical bug still flags.
+(call_expression
+  function: (field_expression
+    argument: (identifier) @flow.rebind
+    field: (field_identifier) @_m)
+  (#match? @_m "^(clear|reset|assign|emplace|swap)$"))
 
 ; a plain `x = rhs` reassignment rebinds x with the rhs value — mints a Whole
 ; FlowEdge (like a declaration's init) so the moved-from region AND the

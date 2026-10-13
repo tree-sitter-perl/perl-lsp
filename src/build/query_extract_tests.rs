@@ -402,6 +402,40 @@ fn python_fa(src: &str) -> (crate::model::file_analysis::FileAnalysis, Vec<Strin
 }
 
 #[test]
+fn a_python_receiver_is_a_flag_the_document_mints() {
+    use crate::model::file_analysis::{OutlineSymbol, SymbolFlags};
+    // The leading `self` / `cls` is the receiver; a later parameter that
+    // happens to share the spelling is an ordinary parameter.
+    let src = "\
+class Greeter:
+    def greet(self, name):
+        return name
+
+    @classmethod
+    def make(cls, self):
+        return cls
+";
+    let (fa, _) = python_fa(src);
+    let receivers: Vec<(String, usize)> = fa
+        .symbols()
+        .iter()
+        .filter(|s| s.flags.contains(SymbolFlags::RECEIVER))
+        .map(|s| (s.name.clone(), s.selection_span.start.row))
+        .collect();
+    assert_eq!(receivers, vec![("self".to_string(), 1), ("cls".to_string(), 5)]);
+
+    fn names(syms: &[OutlineSymbol], out: &mut Vec<String>) {
+        for s in syms {
+            out.push(s.name.clone());
+            names(&s.children, out);
+        }
+    }
+    let mut outline = Vec::new();
+    names(&fa.document_symbols(), &mut outline);
+    assert!(!outline.iter().any(|n| n == "cls"), "{outline:?}");
+}
+
+#[test]
 fn python_cross_file_function_refs_through_refs_to() {
     // Two pack-built FileAnalyses in the production FileStore; the
     // production refs_to walks them — declaration in a.py, call in
@@ -964,6 +998,7 @@ fn sksym(src: &str, kind: DefKind, name: &str, occ: usize, package: Option<&str>
         attributes: Vec::new(),
         arity: None,
         qualifier_owned: false,
+        flags: Default::default(),
     }
 }
 

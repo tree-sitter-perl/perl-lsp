@@ -16,6 +16,9 @@ pub(super) struct State {
     /// `@def` event fires before these inner captures.
     qualifier_by_match: HashMap<usize, String>,
     rettype_by_match: HashMap<usize, String>,
+    /// `@param.receiver` — a receiver parameter's name span; the symbol
+    /// declared at it carries `RECEIVER`.
+    receiver_spans: std::collections::HashSet<(Point, Point)>,
     /// `@sym.attr` — a token whose TEXT rides onto the match's def symbol as
     /// an attribute (cpp: a declaration's storage class, so "extern" is a
     /// symbol-borne fact goto-def's decl→def ranking can ask the value for).
@@ -115,6 +118,9 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
         Capture::RetType => {
             d.rettype_by_match.insert(e.match_id, e.text.clone());
         }
+        Capture::ParamReceiver => {
+            d.receiver_spans.insert((e.start, e.end));
+        }
         Capture::SymAttr => {
             d.attrs_by_match.entry(e.match_id).or_default().push(e.text.clone());
         }
@@ -189,6 +195,11 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         // `@arity.sig` match fires separately from this def name.
         arity: None,
         qualifier_owned: d.qualifier_by_match.contains_key(&e.match_id),
+        flags: if d.receiver_spans.contains(&(name_start, name_end)) {
+            crate::model::file_analysis::SymbolFlags::RECEIVER
+        } else {
+            crate::model::file_analysis::SymbolFlags::empty()
+        },
     });
 }
 

@@ -17,16 +17,13 @@ pub fn perl_pack() -> LangPack {
         annot_type: |_| None,
         module_paths: |m| vec![format!("{}.pm", m.replace("::", "/"))],
         narrow_guard: |_, _| None,
-        rebind_method: |_| false,
         implicit_this_members: false,
         entrypoint_symbols: &[],
         brace_scoped_members: false,
         // Nothing reads them: Perl's trigger characters come from
         // `PerlDriver::caps`, and this pack is never registered.
         trigger_chars: &[],
-        receiver_names: &[],
         recv_peel: &[],
-        op_map: &[],
         simple_var_kinds: &[],
         member_kinds: &[],
         skip_kinds: &[],
