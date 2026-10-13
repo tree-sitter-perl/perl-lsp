@@ -1156,16 +1156,6 @@ impl FileAnalysis {
             if self.is_role_package(pkg) {
                 continue;
             }
-            if self.class_has_unresolved_ancestor(pkg, module_index) {
-                continue;
-            }
-            if self
-                .resolve_method_in_ancestors(pkg, "AUTOLOAD", module_index)
-                .is_some()
-            {
-                continue;
-            }
-
             // Gather (name, declaring role, direct parent) over the
             // role-only reachable set from each direct parent: the
             // INHERITS walk (app-surface edge excluded — the synthetic
@@ -1197,6 +1187,12 @@ impl FileAnalysis {
                         }
                     },
                 );
+            }
+
+            // Ancestry completeness is a cross-file walk; most packages
+            // compose no requiring role, so it is only paid for those that do.
+            if required.is_empty() || self.class_has_unresolved_ancestor(pkg, module_index) {
+                continue;
             }
 
             let mut checked: HashSet<String> = HashSet::new();

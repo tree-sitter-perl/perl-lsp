@@ -80,11 +80,10 @@ A role engine that is neither declared nor Moo-shaped is one
 ## Honest silence rides the one incompleteness seam
 
 The diagnostic must not fire when provision could exist where we can't
-see. All three escape hatches are facts, not message-level special
+see. Both escape hatches are facts, not message-level special
 cases:
 
 - **Roles are never diagnosed** — their obligations transfer.
-- **AUTOLOAD anywhere in the MRO** can satisfy any contract at runtime.
 - **Incomplete ancestry** — `class_has_unresolved_ancestor`, the
   single source of "is the inheritance chain incomplete" (it already
   gated the unresolved-method hint). This ADR added one input to it:
@@ -130,7 +129,7 @@ concrete composer exactly as a Moose role does. `unfulfilled_role_requires`
 then answers php with no php in it: the composer's MRO must provide each
 name with a non-contract declaration, the walk continues through deferring
 ancestors and prunes at concrete ones, and every honest-silence rule above
-holds — except the `AUTOLOAD` silence, which does not transfer: php checks
-a contract when the class is DECLARED, before any call a `__call` could
-catch, so the pack lane (`unimplemented-method`) reports through a
-catch-all method.
+holds. A catch-all method satisfies no contract in either language: php
+checks a contract when the class is DECLARED, before any call a `__call`
+could catch, and Role::Tiny / Moose check `requires` with `can`, which an
+`AUTOLOAD` never answers.
