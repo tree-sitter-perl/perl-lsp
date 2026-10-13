@@ -60,14 +60,10 @@ pub struct SkelRef {
     /// IMMEDIATE receiver is a simple variable. Rides onto the MethodCall ref
     /// so operator-correctness is a ref query, not a separate walk.
     pub member_op: Option<(crate::model::file_analysis::MemberOp, crate::model::file_analysis::Span)>,
-    /// Written argument count at a call ref (`call`/`qcall`/`member`), counted
-    /// structurally from the argument list. Flows to `Ref.arg_count`; `None`
-    /// for non-call refs.
+    /// Written argument count at a call ref (`call`/`qcall`/`member.call`),
+    /// counted from the argument list the same match captured. Flows to
+    /// `Ref.arg_count`; `None` for non-call refs.
     pub arg_count: Option<usize>,
-    /// A member token read as a VALUE (no argument list follows it): mints
-    /// `RefKind::FieldAccess`; a called member mints `MethodCall`
-    /// (`docs/adr/member-kinds.md`). Only member refs set it.
-    pub value_read: bool,
 }
 
 #[derive(Debug, Default)]
@@ -913,28 +909,29 @@ impl SkeletonAnalysis {
                         binding = Some(RefBinding::Function { package: pkg.to_string() });
                         RefKind::FunctionCall
                     }
-                    // `recv.field` / `recv->field`: the SAME MethodCall ref
-                    // core resolves for Perl `$obj->m`. The invocant types
-                    // query-time via `expr_type_at_span(invocant_span)`;
-                    // `find_definition`/`refs_to`/hover all flow from it.
+                    // `recv.field` / `recv->field`: a value read. The
+                    // invocant types query-time via
+                    // `expr_type_at_span(invocant_span)`.
                     SkelRefKind::Member => {
                         let (inv_span, inv_text) = r.invocant.clone()?;
-                        let invocant = crate::model::conventions::Invocant::assume_canonical(inv_text);
-                        if r.value_read {
-                            RefKind::FieldAccess {
-                                invocant,
-                                invocant_span: Some(inv_span),
-                                member_name_span: Span { start: r.start, end: r.end },
-                                member_op: r.member_op,
-                            }
-                        } else {
-                            RefKind::MethodCall {
-                                invocant,
-                                invocant_span: Some(inv_span),
-                                method_name_span: Span { start: r.start, end: r.end },
-                                member_op: r.member_op,
-                                named_by_string: false,
-                            }
+                        RefKind::FieldAccess {
+                            invocant: crate::model::conventions::Invocant::assume_canonical(inv_text),
+                            invocant_span: Some(inv_span),
+                            member_name_span: Span { start: r.start, end: r.end },
+                            member_op: r.member_op,
+                        }
+                    }
+                    // `recv.f(…)`: the SAME MethodCall ref core resolves for
+                    // Perl `$obj->m`; `find_definition`/`refs_to`/hover all
+                    // flow from it.
+                    SkelRefKind::MemberCall => {
+                        let (inv_span, inv_text) = r.invocant.clone()?;
+                        RefKind::MethodCall {
+                            invocant: crate::model::conventions::Invocant::assume_canonical(inv_text),
+                            invocant_span: Some(inv_span),
+                            method_name_span: Span { start: r.start, end: r.end },
+                            member_op: r.member_op,
+                            named_by_string: false,
                         }
                     }
                     // A type-position name (`Widget w;`, `struct op* o`, a

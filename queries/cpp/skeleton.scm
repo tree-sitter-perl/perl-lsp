@@ -669,33 +669,41 @@
 (labeled_statement label: (statement_identifier) @def.label)
 (goto_statement label: (statement_identifier) @ref.label)
 
-; ---- calls ----
-(call_expression function: (identifier) @ref.call) @expr.call
+; ---- calls. Each call pattern captures its argument list in the same match
+; (@arity.args), so the callee ref carries its written arg count — overload
+; arity ranking fuel (structural counts only; "which overload fits" is
+; downstream interpretation, `ParamArity::fit`). A def's parameter list is
+; joined to the def by span containment. ----
+(call_expression
+  function: (identifier) @ref.call
+  arguments: (_) @arity.args) @expr.call
 
 ; qualified calls (`fmt::format_to(...)`, `detail::vformat_to(...)`,
 ; `Widget::create(...)`): the whole path is captured; extraction narrows the
 ; ref span to the bare name token and carries the qualifier as
 ; `resolved_package` — the namespace-participation half of gr identity.
-(call_expression function: (qualified_identifier) @ref.qcall) @expr.call
+(call_expression
+  function: (qualified_identifier) @ref.qcall
+  arguments: (_) @arity.args) @expr.call
 
-; ---- overload arity ranking fuel (structural counts only; "which overload
-; fits" is downstream interpretation, `ParamArity::fit`). An arg list is
-; joined to its callee ref by adjacency (`ref.end == arglist.start`); a
-; def's parameter list is joined to the def by span containment. ----
-(argument_list) @arity.args
 (function_declarator parameters: (parameter_list) @arity.sig)
 
-; ---- member access (`recv.field` / `recv->field`, AND `recv.method(...)`):
-; the field is the "method", the receiver subtree the invocant. Mints the same
-; MethodCall ref core resolves for Perl `$obj->m` — goto-def / hover /
-; references / rename all flow from it. @member.recv carries the receiver
-; (span+text) for query-time typing via expr_type_at_span. The trailing `()`
-; of a method call doesn't change the reference, so calls + plain field access
-; share one pattern.
+; ---- member access (`recv.field` / `recv->field`): the receiver subtree is
+; the invocant, carried (span+text) for query-time typing via
+; expr_type_at_span. A read mints FieldAccess; a called member
+; (`recv.f(...)`) mints the same MethodCall ref core resolves for Perl
+; `$obj->m`, so goto-def / hover / references / rename flow from it. The read
+; pattern fires on a called member too; the call wins at that token.
 (field_expression
   argument: (_) @member.recv
   operator: _ @member.op
   field: (field_identifier) @ref.member)
+(call_expression
+  function: (field_expression
+    argument: (_) @member.recv
+    operator: _ @member.op
+    field: (field_identifier) @ref.member.call)
+  arguments: (_) @arity.args)
 
 ; which operator a member access wrote, so op-DX can name the other one. A
 ; token no pattern names here claims no operator.

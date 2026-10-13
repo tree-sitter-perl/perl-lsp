@@ -230,7 +230,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             Capture::Member(MemberCap::Recv) => {
                 members::flatten_recv(&mut st.members, node, pack, source, match_id, &mut events)
             }
-            Capture::Arity(ArityCap::Args) => members::count_args(&mut st.members, node),
+            Capture::Arity(ArityCap::Args) => members::count_args(&mut st.members, node, match_id),
             Capture::Arity(ArityCap::Sig) => members::count_params(&mut st.members, node),
             Capture::Qualifier => events.push(Event::at(node, cap, links.qualifier_text(node, source), match_id)),
             _ => events.push(Event::at(node, cap, node.utf8_text(source).unwrap_or("").to_string(), match_id)),
@@ -258,7 +258,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             Family::Flow => flow::collect(&mut st, e),
             Family::Narrowing => narrowing::collect(&mut st, e),
             Family::Members => members::collect(&mut st, e),
-            Family::Refs | Family::Commands | Family::Imports | Family::Links => {}
+            Family::Refs => members::collect_called(&mut st, e),
+            Family::Commands | Family::Imports | Family::Links => {}
         }
     }
 

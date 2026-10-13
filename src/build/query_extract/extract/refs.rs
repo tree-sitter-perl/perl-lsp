@@ -28,13 +28,12 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         return;
     }
     let m = &st.members;
+    if ref_kind == RefKind::Member && m.called_members.contains(&(e.start_byte, e.end_byte)) {
+        return;
+    }
     let simple = m.member_simple.get(&e.match_id).copied().unwrap_or(false);
     let member_op = simple.then(|| m.op_of(e.match_id)).flatten();
-    // A call ref's arg list opens right where its callee / method token
-    // ends; plain (uncalled) member/type refs have no adjacent arg list.
-    let arg_count = matches!(ref_kind, RefKind::Call | RefKind::QCall | RefKind::Member)
-        .then(|| m.arg_counts_by_start.get(&(e.end.row, e.end.column)).copied())
-        .flatten();
+    let arg_count = m.arg_counts_by_match.get(&e.match_id).copied();
     st.out.refs.push(SkelRef {
         kind: ref_kind,
         name: (pack.shape_name)(&e.text),
@@ -44,7 +43,5 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         invocant: m.member_recv.get(&e.match_id).cloned(),
         member_op,
         arg_count,
-        // A member token with no argument list beside it reads a value.
-        value_read: ref_kind == RefKind::Member && arg_count.is_none(),
     });
 }

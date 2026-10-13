@@ -10,12 +10,13 @@ pub(super) struct State {
     /// match_id → was the IMMEDIATE member-access receiver a simple variable?
     /// Recorded at construction (the un-peeled node); gates op-DX at the mint.
     pub(super) member_simple: HashMap<usize, bool>,
-    /// A call's written arg count, keyed by its argument_list's START point
-    /// (the `(`) and by the END of the callee node before it — so a ref
-    /// finds its arity by adjacency without a match join (member calls fire
-    /// a separate match from their arg list), spaced (`f (x)`) or not.
-    /// Presence is also the fact that a member token is CALLED.
-    pub(super) arg_counts_by_start: HashMap<(usize, usize), usize>,
+    /// A call's written arg count, keyed by the match that captured both its
+    /// callee (`@ref.call` / `@ref.qcall` / `@ref.member.call`) and its
+    /// argument list (`@arity.args`).
+    pub(super) arg_counts_by_match: HashMap<usize, usize>,
+    /// Byte spans of the member tokens a `@ref.member.call` names. The plain
+    /// `@ref.member` pattern fires on them too, and the call wins.
+    pub(super) called_members: std::collections::HashSet<(usize, usize)>,
     /// A callable's declared parameter arity, keyed by the parameter_list span.
     /// Associated to its def symbol by span containment in `into_file_analysis`
     /// (`@arity.sig` fires a separate match from the def name).
@@ -62,14 +63,16 @@ pub(super) fn flatten_recv(
 
 /// `@arity.args`: a call's argument_list — count its arguments (the named
 /// children; the C `...` at a CALL site never appears here). Keyed by the
-/// list's start and by its callee's end, so the callee ref finds it by
-/// adjacency whatever whitespace separates them.
-pub(super) fn count_args(members: &mut State, node: tree_sitter::Node<'_>) {
-    let count = node.named_child_count();
-    let at = |p: tree_sitter::Point| (p.row, p.column);
-    members.arg_counts_by_start.insert(at(node.start_position()), count);
-    if let Some(callee) = node.prev_named_sibling() {
-        members.arg_counts_by_start.insert(at(callee.end_position()), count);
+/// match, which also captured the callee.
+pub(super) fn count_args(members: &mut State, node: tree_sitter::Node<'_>, match_id: usize) {
+    members.arg_counts_by_match.insert(match_id, node.named_child_count());
+}
+
+/// The member tokens the document names as called, read before any
+/// `@ref.member` at the same token is handled.
+pub(super) fn collect_called(st: &mut ExtractState, e: &Event) {
+    if e.cap == Capture::Ref(RefKind::MemberCall) {
+        st.members.called_members.insert((e.start_byte, e.end_byte));
     }
 }
 
