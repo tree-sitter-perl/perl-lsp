@@ -38,6 +38,30 @@ document fails that pack's tests instead of extracting nothing.
 A name starting with `_` follows tree-sitter's predicate-only convention
 (`@_const` under `#eq?`). It maps to `None`, and the driver never sees it.
 
+## Decision: structural predicates are a closed set too
+
+Core tree-sitter evaluates text predicates (`#eq?`, `#match?`,
+`#any-of?`) and hands every other predicate to the caller unevaluated.
+A document needs one more kind of filter: where a node sits. A member
+read is a `field_expression` that is not a call's callee, and that fact
+lives on the parent, which a negated field (`!arguments`) cannot test.
+
+`build/query_predicates.rs` evaluates Neovim's structural forms, with
+the same names and arguments: `#has-parent?`, `#not-has-parent?`,
+`#has-ancestor?`, `#not-has-ancestor?`, each `@capture kind ...`. Every
+node the capture holds must satisfy it. `check` runs when a query
+compiles and fails it on any other predicate name, a malformed argument
+list, or a kind the grammar lacks, because an unread predicate is a
+filter that silently matches everything. `admits` runs per match, before
+any capture is recorded. Both query runners use them: pack extraction,
+and the Perl plugin patterns, where `#receiver-isa?` is the one predicate
+deferred to query time.
+
+Ancestry is read by one descent from the walked root
+(`child_with_descendant`), because `Node::parent` descends from the root
+too and would repeat the walk per hop. Only patterns that carry a
+structural predicate pay it.
+
 ## Decision: a kind's meaning lives on the kind
 
 What a kind means is a method on its enum, matched exhaustively:
