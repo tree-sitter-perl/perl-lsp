@@ -498,61 +498,67 @@ impl CrossFileLookup for ModuleIndex {
         };
         let cache = &self.core.caller_slices;
         let path_str = path.to_string_lossy();
-        let frame = cache.frame(path, stamp).or_else(|| {
-            let body = self.with_rows_conn(|c| load_caller_slice(c, &path_str, FRAME_KEY, stamp)).flatten()?;
-            let frame: Arc<CallerFrame> = Arc::new(decode_slice_body(&body)?);
-            if cache.keep_frame(path, stamp, Arc::clone(&frame)) {
-                flush_answers_into(&self.core, self.workspace_root().as_deref());
-            }
-            Some(frame)
-        });
-        if let Some(frame) = frame {
-            if let Some(slice) = cache.slice(path, key, stamp) {
-                crate::util::ghost_stats::count("caller_slice.hit");
-                return CallerRead { frame, slice };
-            }
-            crate::util::ghost_stats::count("caller_slice.row");
-            let slice = self
-                .with_rows_conn(|c| load_caller_slice(c, &path_str, key, stamp))
-                .flatten()
-                .and_then(|body| decode_slice_body::<CallerSlice>(&body))
-                .map(|mut s| {
-                    s.attach(&frame);
-                    s
-                })
-                // The file's rows are written whole: no row, no call by the name.
-                .unwrap_or_else(|| CallerSlice::empty(&frame));
-            let slice = Arc::new(slice);
-            if cache.keep_slice(path, key, stamp, Arc::clone(&slice)) {
-                flush_answers_into(&self.core, self.workspace_root().as_deref());
-            }
-            return CallerRead { frame, slice };
-        }
-        crate::util::ghost_stats::count("caller_slice.cut");
-        let whole = self.whole_ungated(cached);
-        let frame = Arc::new(CallerFrame::of(&whole));
+        // Only what neither memory nor the store holds is cut, and only the
+        // name asked: cutting every name of a file on first read cost more
+        // than the reads it saved.
+        let mut whole: Option<Arc<FileAnalysis>> = None;
         let mut rows = Vec::new();
-        if let Some(body) = crate::index::module_cache::encode_slice_body(&*frame) {
-            rows.push((FRAME_KEY.to_string(), body));
-        }
-        // Every name is kept, not only the one asked: until the flush lands
-        // them, a kept frame is the only promise the other rows exist.
-        let mut reset = cache.keep_frame(path, stamp, Arc::clone(&frame));
-        let mut wanted = None;
-        for (k, slice) in CallerSlice::all_of(&whole, &frame) {
-            if let Some(body) = crate::index::module_cache::encode_slice_body(&slice) {
-                rows.push((k.clone(), body));
+        let frame = match cache.frame(path, stamp) {
+            Some(f) => f,
+            None => {
+                let loaded = self
+                    .with_rows_conn(|c| load_caller_slice(c, &path_str, FRAME_KEY, stamp))
+                    .flatten()
+                    .and_then(|body| decode_slice_body::<CallerFrame>(&body));
+                let frame = Arc::new(loaded.unwrap_or_else(|| {
+                    crate::util::ghost_stats::count("caller_slice.cut_frame");
+                    let fa = whole.get_or_insert_with(|| self.whole_ungated(cached));
+                    let frame = CallerFrame::of(fa);
+                    if let Some(body) = crate::index::module_cache::encode_slice_body(&frame) {
+                        rows.push((path_str.to_string(), FRAME_KEY.to_string(), stamp, body));
+                    }
+                    frame
+                }));
+                cache.keep_frame(path, stamp, Arc::clone(&frame));
+                frame
             }
-            let slice = Arc::new(slice);
-            reset |= cache.keep_slice(path, &k, stamp, Arc::clone(&slice));
-            if k == key {
-                wanted = Some(slice);
+        };
+        let slice = match cache.slice(path, key, stamp) {
+            Some(s) => {
+                crate::util::ghost_stats::count("caller_slice.hit");
+                s
             }
+            None => {
+                let loaded = self
+                    .with_rows_conn(|c| load_caller_slice(c, &path_str, key, stamp))
+                    .flatten()
+                    .and_then(|body| decode_slice_body::<CallerSlice>(&body));
+                let mut slice = match loaded {
+                    Some(s) => {
+                        crate::util::ghost_stats::count("caller_slice.row");
+                        s
+                    }
+                    None => {
+                        crate::util::ghost_stats::count("caller_slice.cut");
+                        let fa = whole.get_or_insert_with(|| self.whole_ungated(cached));
+                        let s = CallerSlice::of(fa, &frame, key, Vec::new());
+                        if let Some(body) = crate::index::module_cache::encode_slice_body(&s) {
+                            rows.push((path_str.to_string(), key.to_string(), stamp, body));
+                        }
+                        s
+                    }
+                };
+                slice.attach(&frame);
+                let slice = Arc::new(slice);
+                cache.keep_slice(path, key, stamp, Arc::clone(&slice));
+                slice
+            }
+        };
+        let mut full = false;
+        for row in rows {
+            full |= cache.queue(row);
         }
-        let slice = wanted.unwrap_or_else(|| Arc::new(CallerSlice::empty(&frame)));
-        // A reset mid-cut dropped the frame too, so the file reads as uncut
-        // until the flush lands its rows.
-        if cache.queue((path_str.into_owned(), stamp, rows)) || reset {
+        if full {
             flush_answers_into(&self.core, self.workspace_root().as_deref());
         }
         CallerRead { frame, slice }
@@ -572,12 +578,9 @@ impl CrossFileLookup for ModuleIndex {
         };
         let wider = read.widened(&self.whole_ungated(cached), key, misses);
         let cache = &self.core.caller_slices;
-        let reset = cache.keep_slice(&cached.path, key, stamp, Arc::clone(&wider.slice));
-        if reset {
-            flush_answers_into(&self.core, self.workspace_root().as_deref());
-        }
+        cache.keep_slice(&cached.path, key, stamp, Arc::clone(&wider.slice));
         if let Some(body) = crate::index::module_cache::encode_slice_body(&*wider.slice) {
-            if cache.queue_widened(cached.path.to_string_lossy().into_owned(), key.to_string(), stamp, body) {
+            if cache.queue((cached.path.to_string_lossy().into_owned(), key.to_string(), stamp, body)) {
                 flush_answers_into(&self.core, self.workspace_root().as_deref());
             }
         }
@@ -1188,8 +1191,8 @@ mod member_prefilter_tests {
 
 pub(super) fn flush_answers_into(core: &super::index_core::IndexCore, root: Option<&str>) {
     let rows = core.answers.take_pending();
-    let (slices, widened) = core.caller_slices.take_pending();
-    if rows.is_empty() && slices.is_empty() && widened.is_empty() {
+    let slices = core.caller_slices.take_pending();
+    if rows.is_empty() && slices.is_empty() {
         return;
     }
     let Some(conn) = crate::index::module_cache::open_cache_db(root, "perl") else {
@@ -1203,13 +1206,8 @@ pub(super) fn flush_answers_into(core: &super::index_core::IndexCore, root: Opti
     }
     if !slices.is_empty() {
         match crate::index::module_cache::save_caller_slices(&conn, &slices) {
-            Ok(()) => crate::util::ghost_stats::count_by("caller_slice.persisted_files", slices.len() as u64),
+            Ok(()) => crate::util::ghost_stats::count_by("caller_slice.persisted_rows", slices.len() as u64),
             Err(e) => log::warn!("persisting caller slices failed: {e}"),
-        }
-    }
-    for (path, key, stamp, body) in widened {
-        if let Err(e) = crate::index::module_cache::save_widened_caller_slice(&conn, &path, &key, stamp, &body) {
-            log::warn!("persisting a widened caller slice failed: {e}");
         }
     }
 }

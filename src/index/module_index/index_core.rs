@@ -426,8 +426,7 @@ pub(crate) struct CallerSliceCache {
     pub(crate) slices: DashMap<(std::path::PathBuf, String), (u64, Arc<crate::model::witnesses::caller_slice::CallerSlice>)>,
     pub(crate) bytes: std::sync::atomic::AtomicUsize,
     /// Rows cut since the last flush.
-    pub(crate) pending: Mutex<Vec<crate::index::module_cache::CallerSliceRows>>,
-    pub(crate) pending_widened: Mutex<Vec<(String, String, u64, Vec<u8>)>>,
+    pub(crate) pending: Mutex<Vec<crate::index::module_cache::CallerSliceRow>>,
     pub(crate) pending_bytes: std::sync::atomic::AtomicUsize,
 }
 
@@ -437,18 +436,16 @@ pub(crate) const CALLER_SLICE_CAP: usize = 64 << 20;
 pub(crate) const CALLER_SLICE_PENDING_CAP: usize = 16 << 20;
 
 impl CallerSliceCache {
-    /// `true` when the charge dropped the cache: the caller flushes, so
-    /// what was only held here is in the store before it is asked again.
-    fn charge(&self, bytes: usize) -> bool {
+    /// `true` when the charge dropped the cache.
+    fn charge(&self, bytes: usize) {
         let now = self.bytes.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed) + bytes;
         if now <= CALLER_SLICE_CAP {
-            return false;
+            return;
         }
         crate::util::ghost_stats::count("caller_slice.reset");
         self.frames.clear();
         self.slices.clear();
         self.bytes.store(0, std::sync::atomic::Ordering::Relaxed);
-        true
     }
 
     pub(crate) fn frame(&self, path: &std::path::Path, stamp: u64) -> Option<Arc<crate::model::witnesses::caller_slice::CallerFrame>> {
@@ -466,10 +463,9 @@ impl CallerSliceCache {
         (hit.0 == stamp).then(|| Arc::clone(&hit.1))
     }
 
-    pub(crate) fn keep_frame(&self, path: &std::path::Path, stamp: u64, frame: Arc<crate::model::witnesses::caller_slice::CallerFrame>) -> bool {
-        let reset = self.charge(frame.heap_bytes());
+    pub(crate) fn keep_frame(&self, path: &std::path::Path, stamp: u64, frame: Arc<crate::model::witnesses::caller_slice::CallerFrame>) {
+        self.charge(frame.heap_bytes());
         self.frames.insert(path.to_path_buf(), (stamp, frame));
-        reset
     }
 
     pub(crate) fn keep_slice(
@@ -478,34 +474,22 @@ impl CallerSliceCache {
         key: &str,
         stamp: u64,
         slice: Arc<crate::model::witnesses::caller_slice::CallerSlice>,
-    ) -> bool {
-        let reset = self.charge(slice.heap_bytes());
+    ) {
+        self.charge(slice.heap_bytes());
         self.slices.insert((path.to_path_buf(), key.to_string()), (stamp, slice));
-        reset
     }
 
-    /// Queue rows for the next flush; `true` when the queue is full.
-    pub(crate) fn queue(&self, rows: crate::index::module_cache::CallerSliceRows) -> bool {
-        let bytes: usize = rows.2.iter().map(|(k, b)| k.len() + b.len()).sum();
+    /// Queue a row for the next flush; `true` when the queue is full.
+    pub(crate) fn queue(&self, row: crate::index::module_cache::CallerSliceRow) -> bool {
+        let bytes = row.1.len() + row.3.len();
         if let Ok(mut p) = self.pending.lock() {
-            p.push(rows);
+            p.push(row);
         }
         self.pending_bytes.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed) + bytes > CALLER_SLICE_PENDING_CAP
     }
 
-    pub(crate) fn queue_widened(&self, path: String, key: String, stamp: u64, body: Vec<u8>) -> bool {
-        let bytes = body.len() + key.len();
-        if let Ok(mut p) = self.pending_widened.lock() {
-            p.push((path, key, stamp, body));
-        }
-        self.pending_bytes.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed) + bytes > CALLER_SLICE_PENDING_CAP
-    }
-
-    pub(crate) fn take_pending(&self) -> (Vec<crate::index::module_cache::CallerSliceRows>, Vec<(String, String, u64, Vec<u8>)>) {
+    pub(crate) fn take_pending(&self) -> Vec<crate::index::module_cache::CallerSliceRow> {
         self.pending_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
-        (
-            self.pending.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default(),
-            self.pending_widened.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default(),
-        )
+        self.pending.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default()
     }
 }

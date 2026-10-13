@@ -129,7 +129,8 @@ impl CallerSlice {
         s
     }
 
-    /// Every call name's slice of `fa`, keyed by `match_key`.
+    /// Every call name's slice of `fa`, keyed by `match_key`: what the
+    /// indexer cuts while the whole analysis is still in hand.
     pub fn all_of(fa: &FileAnalysis, frame: &CallerFrame) -> Vec<(String, CallerSlice)> {
         let refs = fa.refs();
         fa.refs_table()

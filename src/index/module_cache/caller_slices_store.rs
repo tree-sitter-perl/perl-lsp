@@ -1,5 +1,6 @@
 //! Persisted caller slices (`model::witnesses::caller_slice`): one row per
-//! (file, call name), plus the file's frame under the empty key. A row holds
+//! (file, call name) as each is first cut, plus the file's frame under the
+//! empty key. No row means not cut yet, never "no call". A row holds
 //! for the source text it was cut from (`stamp`) under the extractor that
 //! cut it; a reader asks for the stamp it holds, so a stale row is never
 //! served and needs no deletion to stop being read.
@@ -13,14 +14,32 @@ const ZSTD_LEVEL: i32 = 1;
 /// The key a file's frame is stored under.
 pub const FRAME_KEY: &str = "";
 
+/// Bodies under this many bytes are stored raw: a compressor per small
+/// slice cost more time than the bytes it saved (Foswiki, measured).
+const RAW_BELOW: usize = 4096;
+const RAW: u8 = 0;
+const ZSTD: u8 = 1;
+
 pub fn encode_slice_body<T: serde::Serialize>(v: &T) -> Option<Vec<u8>> {
     let bin = bincode::serialize(v).ok()?;
-    zstd::encode_all(bin.as_slice(), ZSTD_LEVEL).ok()
+    if bin.len() < RAW_BELOW {
+        let mut out = Vec::with_capacity(bin.len() + 1);
+        out.push(RAW);
+        out.extend_from_slice(&bin);
+        return Some(out);
+    }
+    let mut out = vec![ZSTD];
+    out.extend(zstd::encode_all(bin.as_slice(), ZSTD_LEVEL).ok()?);
+    Some(out)
 }
 
 pub fn decode_slice_body<T: serde::de::DeserializeOwned>(blob: &[u8]) -> Option<T> {
-    let bin = zstd::decode_all(blob).ok()?;
-    bincode::deserialize(&bin).ok()
+    let (&tag, body) = blob.split_first()?;
+    match tag {
+        RAW => bincode::deserialize(body).ok(),
+        ZSTD => bincode::deserialize(&zstd::decode_all(body).ok()?).ok(),
+        _ => None,
+    }
 }
 
 /// The row for `(path, key)` cut from the text stamped `stamp`.
@@ -35,28 +54,13 @@ pub fn load_caller_slice(conn: &Connection, path: &str, key: &str, stamp: u64) -
     .flatten()
 }
 
-/// One file's rows: `(path, stamp, rows)`.
-pub type CallerSliceRows = (String, u64, Vec<(String, Vec<u8>)>);
+/// One row: `(path, key, stamp, body)`.
+pub type CallerSliceRow = (String, String, u64, Vec<u8>);
 
-/// Replace each file's rows with `files`' rows, in one transaction. A file
-/// is written whole (frame and every name) so a frame at a stamp means
-/// every name the file calls has its row at that stamp.
-pub fn save_caller_slices(conn: &Connection, files: &[CallerSliceRows]) -> rusqlite::Result<()> {
+/// Write `rows` in one transaction.
+pub fn save_caller_slices(conn: &Connection, rows: &[CallerSliceRow]) -> rusqlite::Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
-    let result = (|| {
-        let mut clear = conn.prepare("DELETE FROM caller_slices WHERE path = ?1")?;
-        let mut put = conn.prepare(
-            "INSERT OR REPLACE INTO caller_slices (path, key, stamp, extract_version, body) VALUES (?1, ?2, ?3, ?4, ?5)",
-        )?;
-        for (path, stamp, rows) in files {
-            clear.execute(params![path])?;
-            for (key, body) in rows {
-                put.execute(params![path, key, *stamp as i64, EXTRACT_VERSION, body])?;
-            }
-        }
-        Ok(())
-    })();
-    match result {
+    match put_caller_slices(conn, rows) {
         Ok(()) => conn.execute_batch("COMMIT"),
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK");
@@ -65,12 +69,41 @@ pub fn save_caller_slices(conn: &Connection, files: &[CallerSliceRows]) -> rusql
     }
 }
 
-/// Replace one name's row (a widened cut) when the file's rows are still
-/// at `stamp`.
-pub fn save_widened_caller_slice(conn: &Connection, path: &str, key: &str, stamp: u64, body: &[u8]) -> rusqlite::Result<()> {
-    conn.execute(
-        "UPDATE caller_slices SET body = ?4 WHERE path = ?1 AND key = ?2 AND stamp = ?3",
-        params![path, key, stamp as i64, body],
+/// Write `rows` inside the caller's transaction. A frame row also drops the
+/// file's rows at any other stamp: they can never be read again.
+pub fn put_caller_slices(conn: &Connection, rows: &[CallerSliceRow]) -> rusqlite::Result<()> {
+    let mut stale = conn.prepare_cached("DELETE FROM caller_slices WHERE path = ?1 AND stamp != ?2")?;
+    let mut put = conn.prepare_cached(
+        "INSERT OR REPLACE INTO caller_slices (path, key, stamp, extract_version, body) VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
+    for (path, key, stamp, body) in rows {
+        if key == FRAME_KEY {
+            stale.execute(params![path, *stamp as i64])?;
+        }
+        put.execute(params![path, key, *stamp as i64, EXTRACT_VERSION, body])?;
+    }
     Ok(())
+}
+
+/// Every row of `fa` — its frame and each call name's slice — cut while the
+/// indexer holds the whole analysis, so no caller read decodes the file's
+/// bag to cut one. Empty for a gated view (rebuilt per fired set) or an
+/// unstamped analysis, which readers cut and never keep.
+pub fn caller_slice_rows(path: &str, fa: &crate::model::file_analysis::FileAnalysis) -> Vec<CallerSliceRow> {
+    use crate::model::witnesses::caller_slice::{CallerFrame, CallerSlice};
+    let stamp = fa.source_stamp;
+    if stamp == 0 || !fa.plugin.gated_emissions.is_empty() {
+        return Vec::new();
+    }
+    let frame = CallerFrame::of(fa);
+    let mut rows = Vec::new();
+    if let Some(body) = encode_slice_body(&frame) {
+        rows.push((path.to_string(), FRAME_KEY.to_string(), stamp, body));
+    }
+    for (key, slice) in CallerSlice::all_of(fa, &frame) {
+        if let Some(body) = encode_slice_body(&slice) {
+            rows.push((path.to_string(), key, stamp, body));
+        }
+    }
+    rows
 }

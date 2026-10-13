@@ -336,6 +336,7 @@ pub fn index_workspace_with_index(
         sym_seeds: Vec<crate::model::file_analysis::SymRowSeed>,
         closure: crate::model::file_analysis::path_intern::ClosureList,
         stamp: (i64, i64),
+        slices: Vec<crate::index::module_cache::CallerSliceRow>,
     }
     let (fresh_tx, fresh_rx) = bounded_persist_channel::<WsFresh>();
     let timing = crate::util::timings::is_enabled();
@@ -371,6 +372,9 @@ pub fn index_workspace_with_index(
                                 e.path,
                                 err
                             );
+                        }
+                        if let Err(err) = module_cache::put_caller_slices(conn, &e.slices) {
+                            log::warn!("Failed to write caller slices for {:?}: {}", e.path, err);
                         }
                     }
                 },
@@ -516,7 +520,10 @@ pub fn index_workspace_with_index(
                                 crate::util::qual_dump::append(&buf);
                             }
                             let closure = analysis.pack.include_closure.clone();
-                            (blob, seeds, sym_seeds, closure)
+                            let slices = crate::util::ghost_stats::timed("walk.caller_slices", || {
+                                module_cache::caller_slice_rows(&canon.to_string_lossy(), &analysis)
+                            });
+                            (blob, seeds, sym_seeds, closure, slices)
                         })
                     } else {
                         None
@@ -552,7 +559,7 @@ pub fn index_workspace_with_index(
                                 (std::sync::Arc::new(analysis), None)
                             }
                         };
-                        let (blob, seeds, sym_seeds, closure) = payload.unwrap();
+                        let (blob, seeds, sym_seeds, closure, slices) = payload.unwrap();
                         send_to_writer(&fresh_tx, WsFresh {
                             path: canon.clone(),
                             arc,
@@ -563,6 +570,7 @@ pub fn index_workspace_with_index(
                             sym_seeds,
                             closure,
                             stamp,
+                            slices,
                         });
                     } else {
                         // Whole copy (no persistence, degraded, or NO_EVICT):
@@ -598,7 +606,7 @@ pub fn index_workspace_with_index(
                             }
                             None => std::sync::Arc::new(analysis),
                         };
-                        if let Some((blob, seeds, sym_seeds, closure)) = payload {
+                        if let Some((blob, seeds, sym_seeds, closure, slices)) = payload {
                             send_to_writer(&fresh_tx, WsFresh {
                                 path: canon.clone(),
                                 arc: arc.clone(),
@@ -609,6 +617,7 @@ pub fn index_workspace_with_index(
                                 sym_seeds,
                                 closure,
                                 stamp,
+                                slices,
                             });
                         }
                         files.insert_workspace_arc(canon.clone(), arc);
