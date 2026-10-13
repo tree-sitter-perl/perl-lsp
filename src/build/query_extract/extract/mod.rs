@@ -95,7 +95,7 @@ fn family(cap: Capture) -> Family {
         }
         C::Cmd(_) => Family::Commands,
         C::Import(_) => Family::Imports,
-        C::Link(_) => Family::Links,
+        C::LinkFrom(_) | C::Link(_) => Family::Links,
     }
 }
 
@@ -218,13 +218,16 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let cap_of = |c: &tree_sitter::QueryCapture| compiled.captures[c.index as usize];
     while let Some(m) = matches.next() {
         match_counter += 1;
-        let from = m.captures.iter().find(|c| cap_of(c) == Some(Capture::Link(LinkCap::From)));
+        let from = m.captures.iter().find_map(|c| match cap_of(c) {
+            Some(Capture::LinkFrom(walk)) => Some((walk, c.node)),
+            _ => None,
+        });
         for c in m.captures {
             match cap_of(c) {
-                None | Some(Capture::Link(LinkCap::From)) => {}
+                None | Some(Capture::LinkFrom(_)) => {}
                 Some(Capture::Link(rel)) => {
-                    if let Some(from) = from {
-                        links.record(from.node, rel, c.node);
+                    if let Some((walk, from)) = from {
+                        links.record(walk, from, rel, c.node);
                     }
                 }
                 Some(cap) => captured.push((c.node, cap, match_counter)),
@@ -246,7 +249,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             }
             Capture::Arity(ArityCap::Args) => members::count_args(&mut st.members, node),
             Capture::Arity(ArityCap::Sig) => members::count_params(&mut st.members, node),
-            Capture::Qualifier => events.push(Event::at(node, cap, links.base_text(node, source), match_id)),
+            Capture::Qualifier => events.push(Event::at(node, cap, links.qualifier_text(node, source), match_id)),
             _ => events.push(Event::at(node, cap, node.utf8_text(source).unwrap_or("").to_string(), match_id)),
         }
     }
