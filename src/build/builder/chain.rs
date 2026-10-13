@@ -18,9 +18,16 @@ impl InvocantMemo {
         if self.stamp != stamp {
             self.stamp = stamp;
             self.answers.clear();
+            crate::util::ghost_stats::count("invocant_memo.reset");
             return None;
         }
-        self.answers.get(&node).cloned()
+        let hit = self.answers.get(&node).cloned();
+        crate::util::ghost_stats::count(if hit.is_some() {
+            "invocant_memo.hit"
+        } else {
+            "invocant_memo.miss"
+        });
+        hit
     }
 
     fn put(&mut self, stamp: (u64, u64, usize), node: usize, ty: Option<InferredType>) {

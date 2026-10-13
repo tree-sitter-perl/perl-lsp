@@ -828,7 +828,10 @@ impl Drop for ResolvePass {
             p.get()
         });
         if left == 0 && RESOLVE_STACK.with(|s| s.borrow().is_empty()) {
-            RESOLVE_MEMO.with(|m| m.borrow_mut().clear());
+            // Replaced, not cleared: the map is thread-local on a long-lived
+            // worker, and `clear` would keep a whole pass's capacity forever.
+            let held = RESOLVE_MEMO.with(|m| std::mem::take(&mut *m.borrow_mut()).len());
+            crate::util::ghost_stats::count_by("resolve_pass.entries_at_close", held as u64);
         }
     }
 }
@@ -879,6 +882,7 @@ impl ResolveGuard {
     /// `ResolvePass` when the answer was path-independent.
     fn memo_get(node: &ResolveNode) -> Option<Option<InferredType>> {
         let (ty, shareable) = RESOLVE_MEMO.with(|m| m.borrow().get(node).cloned())?;
+        crate::util::ghost_stats::count("resolve_memo.hit");
         if !shareable {
             // Reading a path-dependent answer makes the reader path-dependent.
             RESOLVE_REFUSALS.with(|c| c.set(c.get() + 1));
