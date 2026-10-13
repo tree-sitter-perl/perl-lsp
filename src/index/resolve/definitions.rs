@@ -55,9 +55,9 @@ impl<'a> CandidateSet<'a> {
         // Name-indexed def candidates first (a File-scope member the index
         // registered) — the cheap subset, path-sorted for determinism.
         {
-            let mut cands = idx.def_candidates(member);
-            cands.read().sort_by(|a, b| a.path.cmp(&b.path));
-            for cached in cands.read() {
+            let mut cands = idx.def_candidates(member).read();
+            cands.sort_by(|a, b| a.path.cmp(&b.path));
+            for cached in cands {
                 if !connected(&cached) {
                     continue;
                 }
@@ -206,9 +206,9 @@ impl<'a> CandidateSet<'a> {
                             || cached.analysis().pack.include_closure.contains(&self_str)
                             || cached.analysis().pack.include_closure.contains(&decl_str))
                 };
-                let mut cands = idx.def_candidates(&sym.name);
-                cands.read().sort_by(|a, b| a.path.cmp(&b.path));
-                for cached in &cands.read() {
+                let mut cands = idx.def_candidates(&sym.name).read();
+                cands.sort_by(|a, b| a.path.cmp(&b.path));
+                for cached in &cands {
                     if !connected(cached) {
                         continue;
                     }
@@ -286,7 +286,7 @@ impl<'a> CandidateSet<'a> {
             return self.preferred_definitions(decl, self.origin);
         }
         if let (Some(idx), FileKey::Path(p)) = (self.idx(), decl.key.clone()) {
-            if let Some(cached) = idx.cached_by_path(&p) {
+            if let Some(cached) = idx.cached_by_path(&p).read() {
                 let whole = idx.whole_present(&cached);
                 return self.preferred_definitions(decl, &whole);
             }
@@ -417,9 +417,9 @@ impl<'a> CandidateSet<'a> {
         if let Some((self_path, visible)) = idx.visibility_scope() {
             let self_str = self_path.to_string_lossy().into_owned();
             let origin_path = key_for_sort(&self.origin_key);
-            let mut cached_files = idx.def_candidates(&name);
-            cached_files.read().sort_by(|a, b| a.path.cmp(&b.path));
-            for cached in cached_files.read() {
+            let mut cached_files = idx.def_candidates(&name).read();
+            cached_files.sort_by(|a, b| a.path.cmp(&b.path));
+            for cached in cached_files {
                 if cached.path == origin_path {
                     continue;
                 }
@@ -732,9 +732,9 @@ impl<'a> CandidateSet<'a> {
                     // Test::More's `ok`). Chase the edges to the defining
                     // module; fall back to the directly-`use`d path.
                     let defining =
-                        idx.defining_module_cached(&import.module_name, &remote_name);
+                        idx.defining_module_cached(&import.module_name, &remote_name).read();
                     let module_path = defining
-                        .read().as_ref()
+                        .as_ref()
                         .map(|m| m.path.clone())
                         .unwrap_or(module_path);
                     if Url::from_file_path(&module_path).is_ok() {
@@ -742,7 +742,7 @@ impl<'a> CandidateSet<'a> {
                         // the module (or one it re-exports) defines the remote
                         // name. One hop to it whenever known: landing on the
                         // consumer's `use` line was never the goal.
-                        let def_line = defining.read().and_then(|cached| {
+                        let def_line = defining.and_then(|cached| {
                             idx.whole_present(&cached)
                                 .sub_info_view(&remote_name)
                                 .map(|s| s.def_line())
@@ -778,7 +778,7 @@ impl<'a> CandidateSet<'a> {
                     // `ScopedLookup` — the ONE visibility seam; Perl's own
                     // ranking tier plugs in there, never in a second filter
                     // here).
-                    if let Some(cached) = idx.candidate_defining_sub(pkg, bare) {
+                    if let Some(cached) = idx.candidate_defining_sub(pkg, bare).read() {
                         if Url::from_file_path(&cached.path).is_ok() {
                             if let Some(line) = idx
                                 .symbols_present(&cached)
@@ -798,7 +798,7 @@ impl<'a> CandidateSet<'a> {
                     // Perl keeps the file-top fallback — landing on the
                     // `.pm` top is meaningful there.
                     if !self.pack {
-                        if let Some(cached) = idx.get_cached(pkg) {
+                        if let Some(cached) = idx.get_cached(pkg).read() {
                             if Url::from_file_path(&cached.path).is_ok() {
                                 return vec![line_loc(cached.path.clone(), 0)];
                             }
@@ -816,9 +816,9 @@ impl<'a> CandidateSet<'a> {
                 // Same candidate discipline as the FQ-call arm: the
                 // declaring file is whichever of `pkg`'s files defines the
                 // global, not the name-slot winner.
-                let mut cands = idx.visible_def_candidates(pkg);
-                cands.read().sort_by(|a, b| a.path.cmp(&b.path));
-                for cached in &cands.read() {
+                let mut cands = idx.visible_def_candidates(pkg).read();
+                cands.sort_by(|a, b| a.path.cmp(&b.path));
+                for cached in &cands {
                     if Url::from_file_path(&cached.path).is_ok() {
                         if let Some(def_line) =
                             idx.symbols_present(cached).package_var_def_line(&name, pkg)
@@ -890,7 +890,7 @@ impl<'a> CandidateSet<'a> {
                 }
                 // No analysis cached: the path map alone still beats no
                 // answer — land at the top of the file.
-                if let Some(path) = idx.module_path_cached(&r.target_name) {
+                if let Some(path) = idx.module_path_cached(&r.target_name).read() {
                     if Url::from_file_path(&path).is_ok() {
                         return vec![line_loc(path, 0)];
                     }

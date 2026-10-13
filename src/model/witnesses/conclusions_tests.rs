@@ -378,7 +378,7 @@ fn a_parentless_bridged_class_does_not_get_its_absence_trusted() {
     // guard would cost every absence rather than the bridged ones.
     let idx = crate::index::module_index::ModuleIndex::new_for_cli();
     assert!(
-        !idx.class_is_bridged_to("B"),
+        !idx.class_is_bridged_to("B").read(),
         "an index with no bridges reported one; the guard would then decode \
          every absence and the layer's main win would be off"
     );

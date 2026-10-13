@@ -105,7 +105,7 @@ impl FileAnalysis {
                                             // definer may be a losing candidate.
                                             let module = def_module.as_deref().unwrap_or(class.as_str());
                                             if let Some(cached) =
-                                                idx.candidate_defining_sub_in_package(module, class, mname)
+                                                idx.candidate_defining_sub_in_package(module, class, mname).read()
                                             {
                                                 let whole = idx.bag_present(&cached);
                                                 if let Some(sub_info) = whole.sub_info_view(mname) {
@@ -160,7 +160,7 @@ impl FileAnalysis {
                             // The exporting package may be split — pick the
                             // candidate file that defines the remote sub.
                             let Some(cached) =
-                                idx.candidate_defining_sub(&import.module_name, is.remote())
+                                idx.candidate_defining_sub(&import.module_name, is.remote()).read()
                             else { continue };
                             let whole = idx.whole_present(&cached);
                             let Some(sub_info) = whole.sub_info_view(is.remote()) else { continue };
@@ -223,7 +223,7 @@ impl FileAnalysis {
                                     // definer may be a losing candidate.
                                     let module = def_module.as_deref().unwrap_or(class.as_str());
                                     if let Some(cached) =
-                                        idx.candidate_defining_sub_in_package(module, class, method)
+                                        idx.candidate_defining_sub_in_package(module, class, method).read()
                                     {
                                         let whole = idx.bag_present(&cached);
                                         if let Some(sub_info) = whole.sub_info_view(method) {

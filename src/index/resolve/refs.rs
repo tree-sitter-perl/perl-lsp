@@ -670,7 +670,7 @@ fn walk_refs(
                         if !mask.contains(RoleMask::DEPENDENCY) {
                             continue;
                         }
-                        match idx.cached_by_path(path) {
+                        match idx.cached_by_path(path).read() {
                             Some(cm) => cm,
                             None => continue,
                         }

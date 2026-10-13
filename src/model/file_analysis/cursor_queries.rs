@@ -908,8 +908,8 @@ impl FileAnalysis {
                     // The class's files as a SET: a shadow in ANY candidate
                     // overrides DBIC's verb (same gate as the builder's
                     // `user_shadows_verb`); the column may be minted by any.
-                    let cands = idx.visible_def_candidates(&class);
-                    let shadows = cands.read().iter().any(|c| {
+                    let cands = idx.visible_def_candidates(&class).read();
+                    let shadows = cands.iter().any(|c| {
                         idx.whole_present(c).symbols.iter().any(|s| {
                             matches!(s.kind, SymKind::Sub | SymKind::Method)
                                 && s.name == verb
@@ -917,7 +917,7 @@ impl FileAnalysis {
                         })
                     });
                     let is_column = !shadows
-                        && cands.read().iter().any(|c| {
+                        && cands.iter().any(|c| {
                             idx.whole_present(c)
                                 .field_projections_named(&key_ref.target_name, &class)
                                 // ONLY a real `Class`-owned column (DBIC /

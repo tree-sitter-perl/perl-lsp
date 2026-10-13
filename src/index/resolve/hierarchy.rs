@@ -69,7 +69,7 @@ pub fn analysis_for_key(
         }
     }
     module_index
-        .and_then(|idx| idx.cached_by_path(&path).map(|cm| idx.whole_present(&cm)).read())
+        .and_then(|idx| idx.cached_by_path(&path).read().map(|cm| idx.whole_present(&cm)))
         .or(resident)
 }
 
@@ -153,7 +153,7 @@ impl<'a> CandidateSet<'a> {
                 // isn't scanned (e.g. a name-keyed @INC module whose file
                 // the candidates table doesn't carry): the file top is the
                 // honest goto-def parity answer.
-                if let Some(path) = idx.module_path_cached(class) {
+                if let Some(path) = idx.module_path_cached(class).read() {
                     out.push(RefLocation {
                         key: FileKey::Path(path),
                         span: Span {

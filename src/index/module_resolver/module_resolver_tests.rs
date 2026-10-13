@@ -353,7 +353,7 @@ fn a_name_keeps_every_provider_not_just_the_last_inserted() {
         idx.insert_cache("Twin", Some(Arc::clone(m)));
     }
 
-    let cands = idx.def_candidates("Twin");
+    let cands = idx.def_candidates("Twin").read();
     assert_eq!(
         cands.len(),
         2,
@@ -365,11 +365,11 @@ fn a_name_keeps_every_provider_not_just_the_last_inserted() {
     // resolves to the file that defines it.
     let owner = idx
         .candidate_defining_sub("Twin", "only_in_b")
-        .expect("only_in_b is defined by the shadowed provider");
+        .read().expect("only_in_b is defined by the shadowed provider");
     assert_eq!(owner.path, b.join("Twin.pm"));
     let owner_a = idx
         .candidate_defining_sub("Twin", "only_in_a")
-        .expect("only_in_a is defined by the winning provider");
+        .read().expect("only_in_a is defined by the winning provider");
     assert_eq!(owner_a.path, a.join("Twin.pm"));
 }
 
@@ -411,7 +411,7 @@ fn a_workspace_file_still_shadows_an_inc_provider_of_the_same_name() {
         "the workspace file must hold the name slot",
     );
     // Both remain candidates — shadowing decides the winner, not membership.
-    assert_eq!(idx.def_candidates("Shadowed").len(), 2);
+    assert_eq!(idx.def_candidates("Shadowed").read().len(), 2);
 }
 
 #[test]
@@ -486,7 +486,7 @@ fn two_askers_with_different_use_lib_see_different_providers() {
     let resolved_by = |fa: &crate::model::file_analysis::FileAnalysis| {
         let axis = VisibilityAxis::for_origin(fa, None, &idx, crate::model::file_analysis::PackVisibility::Host);
         let scoped = ScopedLookup::new(&idx, &empty, None, axis);
-        scoped.get_cached("Twin").map(|c| c.path.clone())
+        scoped.get_cached("Twin").read().map(|c| c.path.clone())
     };
 
     assert_eq!(

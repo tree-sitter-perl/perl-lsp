@@ -2324,7 +2324,7 @@ impl ReducerRegistry {
                             targets,
                             arity,
                             receiver,
-                        } if !idx.class_is_bridged_to(package) => {
+                        } if !idx.class_is_bridged_to(package).read() => {
                             match follow_link(idx, &targets, &receiver, arity, &q.args) {
                                 Some(t) => {
                                     crate::util::ghost_stats::count(

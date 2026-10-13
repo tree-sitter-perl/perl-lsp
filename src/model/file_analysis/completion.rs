@@ -409,7 +409,7 @@ impl FileAnalysis {
         for import in &self.imports {
             // The exporting package may be split — the sub (and its keys)
             // live in whichever candidate defines it.
-            let Some(cached) = module_index.candidate_defining_sub(&import.module_name, sub_name)
+            let Some(cached) = module_index.candidate_defining_sub(&import.module_name, sub_name).read()
             else { continue };
             let whole = module_index.whole_present(&cached);
             for sym in &whole.symbols {
@@ -930,7 +930,7 @@ impl FileAnalysis {
                 Some(MethodResolution::CrossFile { ref class, .. }) => {
                     if let Some(idx) = module_index {
                         // Symbol-disambiguated: the candidate defining `name`.
-                        if let Some(cached) = idx.candidate_defining_sub(class, name) {
+                        if let Some(cached) = idx.candidate_defining_sub(class, name).read() {
                             let whole = idx.bag_present(&cached);
                             if let Some(sub_info) = whole.sub_info_view(name) {
                                 return Some(cross_file_resolved(&sub_info));

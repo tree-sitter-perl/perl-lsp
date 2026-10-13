@@ -1139,18 +1139,18 @@ impl FileAnalysis {
             // declaration rides the symbols axis (a resident copy is
             // stripped), so the identity check reads that axis.
             let idx = module_index?;
-            let candidates = idx.visible_def_candidates(c);
+            let candidates = idx.visible_def_candidates(c).read();
             if self.identity_namespace(c).is_some() {
                 // the declaration of that identity decides, role or not;
                 // none visible is not a guess
                 let declared = candidates
-                    .read().iter()
+                    .iter()
                     .find(|cached| idx.symbols_present(cached).find_type_decl(c).is_some())?;
                 let fa = idx.facts_present(declared);
                 return fa.is_role_package(c).then(|| fa.role_requires(c).to_vec());
             }
             candidates
-                .read().iter()
+                .iter()
                 .map(|cached| idx.facts_present(cached))
                 .find(|fa| fa.is_role_package(c))
                 .map(|fa| fa.role_requires(c).to_vec())

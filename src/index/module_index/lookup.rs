@@ -112,7 +112,7 @@ impl ModuleIndex {
             for module_name in self.modules_with_parent(&current) {
                 // Every candidate file of the name — the parent edge may
                 // live in a losing candidate (packages lane, never evicted).
-                for cached in crate::model::file_analysis::CrossFileLookup::def_candidates(self, &module_name) {
+                for cached in crate::model::file_analysis::CrossFileLookup::def_candidates(self, &module_name).read() {
                 // A module can hold several packages; only the ones
                 // actually listing `current` as a parent are children.
                 for (pkg, parents) in cached.analysis().package_parent_edges() {
@@ -930,6 +930,18 @@ impl CrossFileLookup for ModuleIndex {
         }
         Tracked::visited(Lookup::LoaderShapes, hash)
     }
+
+    fn complete_module_names(&self, prefix: &str) -> Vec<(String, bool)> {
+        self.complete_module_names(prefix)
+    }
+
+    fn visible_defs_with_prefix(
+        &self,
+        prefix: &str,
+        visible: &std::collections::HashSet<String>,
+    ) -> Vec<(String, Arc<CachedModule>)> {
+        self.visible_defs_with_prefix(prefix, visible)
+    }
 }
 
 impl ModuleIndex {
@@ -977,19 +989,6 @@ impl ModuleIndex {
 
 }
 
-impl CrossFileLookup for ModuleIndex {
-    fn complete_module_names(&self, prefix: &str) -> Vec<(String, bool)> {
-        self.complete_module_names(prefix)
-    }
-
-    fn visible_defs_with_prefix(
-        &self,
-        prefix: &str,
-        visible: &std::collections::HashSet<String>,
-    ) -> Vec<(String, Arc<CachedModule>)> {
-        self.visible_defs_with_prefix(prefix, visible)
-    }
-}
 
 impl ModuleIndex {
     /// The candidate relation for `name`, path-ordered.

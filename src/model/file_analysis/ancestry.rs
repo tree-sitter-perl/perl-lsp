@@ -581,7 +581,7 @@ impl FileAnalysis {
             // the same-leaf classes of other namespaces stand in. Each
             // then answers under its OWN identity — the member lives on
             // the stranger — and the verdict rides the result.
-            let (cands, widened) = idx.visible_def_candidates_widening(cls);
+            let (cands, widened) = idx.visible_def_candidates_widening(cls).read();
             let leaf = name_match_key(cls, self.names());
             for cached in cands {
                 // Rows-backed pre-filter (`docs/prompt-relational-iteration.md`):
@@ -675,7 +675,7 @@ impl FileAnalysis {
             // Cross-package typeglob install: the method is attributed to `cls`
             // but lives in a differently-named module file (`*{'DateTime::'.
             // $sub} = …` inside `package DateTime::PP`). Record the home module.
-            if let Some(home) = idx.module_declaring_method_in_package(method_name, cls) {
+            if let Some(home) = idx.module_declaring_method_in_package(method_name, cls).read() {
                 return Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: Some(home), widened: false });
             }
             // Plugin-bridged method (a Mojo helper synthesized in another file,

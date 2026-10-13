@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::model::file_analysis::{CachedModule, CrossFileLookup};
+use crate::model::witnesses::tracked::Tracked;
 
 /// `candidate_answer` memoizes the candidate's WHOLE contribution, which is
 /// what the caller consumes as one unit.
@@ -106,7 +107,9 @@ struct SessionState {
     memo: HashMap<CandidateKey, Arc<ReducedValue>>,
     /// `visible_def_candidates` is a clone + sort of the whole candidate
     /// vec per call; one walk asks for the same class millions of times.
-    candidates: HashMap<String, Arc<Vec<Arc<CachedModule>>>>,
+    /// With the relation's dependency hash, replayed on a hit: a hit inside
+    /// an engine computation must record the read the miss made.
+    candidates: HashMap<String, (Arc<Vec<Arc<CachedModule>>>, u64)>,
     /// Consult budget for the whole walk. Even memoized, some query at
     /// some scale exceeds any bound; a capped, marked-incomplete answer
     /// beats one that never returns.
@@ -333,18 +336,21 @@ pub(super) fn visible_def_candidates(
     idx: &dyn CrossFileLookup,
     class: &str,
 ) -> Arc<Vec<Arc<CachedModule>>> {
-    if let Some(hit) = with_session(idx, |st| {
-        st.candidates.get(class).map(Arc::clone).inspect(|_| {
+    let lookup = || crate::model::witnesses::tracked::Lookup::VisibleDefs(class.to_string());
+    if let Some((hit, hash)) = with_session(idx, |st| {
+        st.candidates.get(class).cloned().inspect(|_| {
             crate::util::ghost_stats::count("session.candidates_hit");
         })
     })
     .flatten()
     {
-        return hit;
+        return Tracked::from_memo(hit, lookup(), hash).read();
     }
-    let v = Arc::new(idx.visible_def_candidates(class));
+    let tracked = idx.visible_def_candidates(class);
+    let hash = tracked.dep_hash();
+    let v = Arc::new(tracked.read());
     with_session(idx, |st| {
-        st.candidates.insert(class.to_string(), Arc::clone(&v));
+        st.candidates.insert(class.to_string(), (Arc::clone(&v), hash));
     });
     v
 }

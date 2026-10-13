@@ -509,6 +509,8 @@ thread_local! {
     /// A cycle under the innermost settling frame gave up unsettled: its
     /// round's values read assumptions that never held.
     static UNSETTLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Stored answers being checked (`verify`), outermost first.
+    static VERIFYING: RefCell<Vec<EngineKey>> = const { RefCell::new(Vec::new()) };
     /// Depth of `untracked` scopes: reads inside one belong to a relation
     /// whose own hash is the recorded dependency, not to the open frame.
     static UNTRACKED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
@@ -721,8 +723,8 @@ fn uncovered_files(idx: &dyn CrossFileLookup) -> Vec<Arc<CachedModule>> {
 /// from its current build. Sorted, so its hash is a stable `Mentions`
 /// dependency.
 fn mentions_among(idx: &dyn CrossFileLookup, key: &str, uncovered: &[Arc<CachedModule>]) -> Vec<PathBuf> {
-    let open = idx.open_callers();
-    let is_open = |p: &PathBuf| open.read().iter().any(|o| &o.path == p);
+    let open = idx.open_callers().read();
+    let is_open = |p: &PathBuf| open.iter().any(|o| &o.path == p);
     let mut paths: Vec<PathBuf> = idx.ref_candidate_paths(&[key.to_string()]);
     for cached in uncovered {
         // An evicted copy can't say, so it stays a candidate.
@@ -732,7 +734,7 @@ fn mentions_among(idx: &dyn CrossFileLookup, key: &str, uncovered: &[Arc<CachedM
         }
     }
     paths.retain(|p| !is_open(p));
-    for o in &open.read() {
+    for o in &open {
         if !idx.facts_present(o).ref_indices_keyed(key).is_empty() {
             paths.push(o.path.clone());
         }
@@ -753,15 +755,15 @@ fn calls_among(idx: &dyn CrossFileLookup, store: Option<&AnswerStore>, key: &str
             .iter()
             .any(|&ri| matches!(analysis.refs()[ri].kind, RefKind::FunctionCall { .. }))
     };
-    let open = idx.open_callers();
+    let open = idx.open_callers().read();
     mentions
         .iter()
         .filter(|path| {
-            if let Some(o) = open.read().iter().find(|o| &o.path == *path) {
+            if let Some(o) = open.iter().find(|o| &o.path == *path) {
                 return calls(&idx.facts_present(o));
             }
             // Unregistered: nothing to read, so nothing calls it.
-            let Some(cached) = idx.cached_by_path(path) else { return false };
+            let Some(cached) = idx.cached_by_path(path).read() else { return false };
             let version = idx.file_version(path);
             let slot = (key.to_string(), (*path).clone());
             if let (Some(v), Some(store)) = (version, store) {
@@ -823,7 +825,7 @@ pub fn class_family_mentions(idx: &dyn CrossFileLookup, class: &str) -> Option<s
 /// The analysis a caller join reads for `path`: the open document's build
 /// when one is open, else the indexed copy, whole.
 pub fn caller_view(idx: &dyn CrossFileLookup, path: &std::path::Path) -> Option<Arc<FileAnalysis>> {
-    if let Some(o) = idx.open_callers().into_iter.read()().find(|o| o.path == path) {
+    if let Some(o) = idx.open_callers().read().into_iter().find(|o| o.path == path) {
         return Some(idx.facts_present(&o));
     }
     let cached = idx.cached_by_path(path).read()?;
@@ -833,8 +835,26 @@ pub fn caller_view(idx: &dyn CrossFileLookup, path: &std::path::Path) -> Option<
 /// Is `e` still the answer: its own reads unchanged, and every child it
 /// consulted still holding the value it read (verified first, and restamped
 /// at `epoch` when it holds).
-fn verify(idx: &dyn CrossFileLookup, store: &AnswerStore, e: &Entry, epoch: u64, depth: usize) -> bool {
+///
+/// A check never re-enters itself: a child already being checked further up
+/// (stored answers that consult each other in a cycle) cannot vouch for this
+/// entry, and a stale child is recomputed without being checked again. Each
+/// check of a stale child once restarted a full-depth check of it, so a
+/// stored cycle recursed without bound (a Foswiki warm start ran to 13.9 GB).
+fn verify(idx: &dyn CrossFileLookup, store: &AnswerStore, key: &EngineKey, e: &Entry, epoch: u64, depth: usize) -> bool {
+    struct Leave;
+    impl Drop for Leave {
+        fn drop(&mut self) {
+            VERIFYING.with(|v| v.borrow_mut().pop());
+        }
+    }
+    VERIFYING.with(|v| v.borrow_mut().push(key.clone()));
+    let _leave = Leave;
     super::registry::with_stack_headroom(|| verify_on_stack(idx, store, e, epoch, depth))
+}
+
+fn being_verified(key: &EngineKey) -> bool {
+    VERIFYING.with(|v| v.borrow().iter().any(|k| k == key))
 }
 
 fn verify_on_stack(idx: &dyn CrossFileLookup, store: &AnswerStore, e: &Entry, epoch: u64, depth: usize) -> bool {
@@ -875,8 +895,12 @@ fn verify_on_stack(idx: &dyn CrossFileLookup, store: &AnswerStore, e: &Entry, ep
             // A stale child is brought current first — recomputed if it must
             // be — so a recomputation that lands on the same value keeps the
             // serial this entry read, and the entry stands.
-            if !verify(idx, store, &child, epoch, depth + 1) {
-                let _ = answer(idx, k);
+            if being_verified(k) {
+                crate::util::ghost_stats::count("engine.stale_by.verify_cycle");
+                return false;
+            }
+            if !verify(idx, store, k, &child, epoch, depth + 1) {
+                let _ = super::registry::with_stack_headroom(|| answer_on_stack(idx, k, Check::KnownStale));
             } else {
                 restamp(store, k, epoch);
             }
@@ -914,10 +938,18 @@ pub fn answer(idx: &dyn CrossFileLookup, key: &EngineKey) -> EngineValue {
     // An answer's computation asks other answers, through chases that are
     // themselves recursive: the engine's own recursion needs the headroom
     // the chases have (a Foswiki edit overflowed a 2 MiB worker without it).
-    super::registry::with_stack_headroom(|| answer_on_stack(idx, key))
+    super::registry::with_stack_headroom(|| answer_on_stack(idx, key, Check::Verify))
 }
 
-fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey) -> EngineValue {
+/// Whether a stored answer from an earlier epoch is checked before use.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Check {
+    Verify,
+    /// The caller just failed to verify it.
+    KnownStale,
+}
+
+fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey, check: Check) -> EngineValue {
     let reentered = FRAMES.with(|f| {
         let mut frames = f.borrow_mut();
         let pos = frames.iter().position(|fr| &fr.key == key)?;
@@ -957,10 +989,11 @@ fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey) -> EngineValue {
             }
         }
         if let Some(e) = found {
-            let fresh = e.epoch == epoch || {
-                crate::util::ghost_stats::count("engine.verify");
-                verify(idx, store, &e, epoch, 0)
-            };
+            let fresh = e.epoch == epoch
+                || (check == Check::Verify && !being_verified(key) && {
+                    crate::util::ghost_stats::count("engine.verify");
+                    verify(idx, store, key, &e, epoch, 0)
+                });
             if fresh {
                 crate::util::ghost_stats::count("engine.hit");
                 note_child(key, e.changed);
@@ -1129,7 +1162,7 @@ fn push_pending(store: &AnswerStore, row: (Vec<u8>, PersistedNode)) {
     let bytes = std::mem::size_of::<(Vec<u8>, PersistedNode)>()
         + row.0.len()
         + node.value.len()
-        + node.reads.iter().map(|r| std::mem::size_of::<PersistedRead>() + r.to_row().1.len()).sum::<usize>()
+        + node.reads.iter().map(|r| std::mem::size_of::<PersistedRead>() + r.to_row().map_or(0, |row| row.1.len())).sum::<usize>()
         + node.kids.iter().map(|(k, _)| std::mem::size_of::<(Vec<u8>, u64)>() + k.len()).sum::<usize>();
     if let Ok(mut p) = store.pending.lock() {
         if p.bytes + bytes <= PENDING_BYTE_CAP {

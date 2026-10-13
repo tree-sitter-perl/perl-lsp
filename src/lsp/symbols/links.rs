@@ -145,11 +145,11 @@ fn registered_module_path(
     idx: Option<&dyn crate::model::file_analysis::CrossFileLookup>,
 ) -> Option<PathBuf> {
     let idx = idx?;
-    if let Some(p) = idx.module_path_cached(module) {
+    if let Some(p) = idx.module_path_cached(module).read() {
         return Some(p);
     }
     idx.visible_def_candidates(module)
-        .into_iter.read()()
+        .read().into_iter()
         .next()
         .map(|c| c.path.clone())
 }

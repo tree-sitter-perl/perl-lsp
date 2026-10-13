@@ -317,14 +317,14 @@ pub(crate) fn resolve_imported_function_classified<'b>(
         // Classify against EVERY candidate file of the imported module —
         // a split exporter's surface (and the sub itself) may live in a
         // losing candidate. `Brought` is the strongest verdict per import.
-        let cands = module_index.visible_def_candidates(&import.module_name);
+        let cands = module_index.visible_def_candidates(&import.module_name).read();
         let mut hit: Option<(Option<PathBuf>, String, ImportResolution)> = None;
-        if cands.read().is_empty() {
+        if cands.is_empty() {
             if let Some((res, remote)) = classify_import(import, func_name, None, module_index) {
                 hit = Some((None, remote, res));
             }
         } else {
-            for c in &cands.read() {
+            for c in &cands {
                 if let Some((res, remote)) =
                     classify_import(import, func_name, Some(c.as_ref()), module_index)
                 {

@@ -145,6 +145,12 @@ impl LookupHash for Arc<Vec<PathBuf>> {
     }
 }
 
+impl LookupHash for Arc<Vec<Arc<CachedModule>>> {
+    fn lookup_hash(&self, h: &mut std::collections::hash_map::DefaultHasher) {
+        (**self).lookup_hash(h);
+    }
+}
+
 impl<A: LookupHash, B: LookupHash> LookupHash for (A, B) {
     fn lookup_hash(&self, h: &mut std::collections::hash_map::DefaultHasher) {
         self.0.lookup_hash(h);
@@ -216,6 +222,14 @@ impl<T: LookupHash> Tracked<T> {
     pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Tracked<U> {
         let hash = self.dep_hash();
         Tracked { value: f(self.value), lookup: self.lookup, hash: Some(hash) }
+    }
+}
+
+impl<T> Tracked<T> {
+    /// A relation a memo served, with the hash its miss recorded: a memo
+    /// hit replays the dependency instead of serving the value bare.
+    pub(crate) fn from_memo(value: T, lookup: Lookup, hash: u64) -> Tracked<T> {
+        Tracked { value, lookup, hash: Some(hash) }
     }
 }
 

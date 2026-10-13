@@ -414,9 +414,9 @@ fn cli_full_startup(
             // every provider's re-export edges.
             let cands = {
                 use crate::model::file_analysis::CrossFileLookup;
-                module_index.def_candidates(&name)
+                module_index.def_candidates(&name).read()
             };
-            (!cands.read().is_empty()).then_some(cands)
+            (!cands.is_empty()).then_some(cands)
         } else {
             if stale_set.contains(&name) {
                 parse_memo.remove(&name);

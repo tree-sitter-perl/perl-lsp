@@ -690,9 +690,9 @@ fn test_parents_cached() {
         )),
     );
 
-    let parents = idx.parents_cached("Child::Mod");
+    let parents = idx.parents_cached("Child::Mod").read();
     assert_eq!(parents, vec!["Parent::Mod", "Mixin::Role"]);
-    assert!(idx.parents_cached("Unknown::Mod").is_empty());
+    assert!(idx.parents_cached("Unknown::Mod").read().is_empty());
 }
 
 #[test]

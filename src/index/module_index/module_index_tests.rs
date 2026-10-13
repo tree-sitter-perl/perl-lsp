@@ -624,7 +624,7 @@ fn register_symbols_stripping_feeds_before_evict() {
     // the pack feed, so the sub name is the right probe here.)
     let hit = idx.get_cached("make").expect("sub name registered pre-strip");
     assert_eq!(hit.path, path);
-    assert!(!idx.def_candidates("make").is_empty(), "candidate table fed pre-strip");
+    assert!(!idx.def_candidates("make").read().is_empty(), "candidate table fed pre-strip");
 
     // whole_present rehydrates symbols through the LRU.
     let full_for_loader = full.analysis().clone();
@@ -639,7 +639,7 @@ fn register_symbols_stripping_feeds_before_evict() {
     // The unregister inverse walks the recorded names, not the evicted vec.
     idx.unregister_file(&path);
     assert!(idx.get_cached("make").is_none(), "cache slot removed");
-    assert!(idx.def_candidates("make").is_empty(), "candidates removed");
+    assert!(idx.def_candidates("make").read().is_empty(), "candidates removed");
 }
 
 /// A closed dep whose answer chains through ITS OWN imports: B's bag holds
@@ -1260,7 +1260,7 @@ fn same_package_two_files_is_order_independent() {
             let _ = idx.register_workspace_resident(path.clone(), Arc::new(build_fa(src)));
         }
         let cands = idx.def_candidates("Shared::Thing");
-        let mut paths: Vec<_> = cands.iter().map(|c| c.path.clone()).collect();
+        let mut paths: Vec<_> = cands.read().iter().map(|c| c.path.clone()).collect();
         paths.sort();
         assert_eq!(paths, vec![pa.clone(), pb.clone()], "both files stay candidates");
         winners.push(idx.get_cached("Shared::Thing").expect("winner").path.clone());
@@ -1309,12 +1309,12 @@ fn package_reopened_in_three_files_unregisters_cleanly() {
         let src = format!("package Tri::Pod;\nsub sub{i} {{ {i} }}\n1;\n");
         let _ = idx.register_workspace_resident(p.clone(), Arc::new(build_fa(&src)));
     }
-    assert_eq!(idx.def_candidates("Tri::Pod").len(), 3);
+    assert_eq!(idx.def_candidates("Tri::Pod").read().len(), 3);
     assert_eq!(idx.get_cached("Tri::Pod").unwrap().path, paths[0]);
 
     // Removing the WINNER re-picks the next-smallest path.
     idx.unregister_workspace_path(&paths[0]);
-    assert_eq!(idx.def_candidates("Tri::Pod").len(), 2);
+    assert_eq!(idx.def_candidates("Tri::Pod").read().len(), 2);
     assert_eq!(idx.get_cached("Tri::Pod").unwrap().path, paths[1]);
     // The departed file's sub left the reverse index; survivors' stayed.
     assert!(idx.modules_with_symbol("sub0").is_empty());
@@ -1894,7 +1894,7 @@ fn typeglob_fallback_still_answers_from_a_candidate_the_ancestor_walk_rejected()
         "fixture must give the class two providers, the non-answer sorting first"
     );
     assert_eq!(
-        idx.visible_def_candidates("Widget").len(),
+        idx.visible_def_candidates("Widget").read().len(),
         1,
         "fixture must put `Widget`'s own file in the walk's path — the overlap"
     );
