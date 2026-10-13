@@ -904,6 +904,9 @@ impl CrossFileLookup for ModuleIndex {
             return cached.analysis().clone();
         }
         crate::util::ghost_stats::count("bagpresent.rehydrate");
+        if crate::util::ghost_stats::enabled() {
+            crate::util::ghost_stats::count(&crate::model::witnesses::engine::innermost_kind("bagpresent.under"));
+        }
         self.rehydrate_or_resident(cached)
     }
 

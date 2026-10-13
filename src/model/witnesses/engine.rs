@@ -762,6 +762,19 @@ pub(crate) fn frame_open() -> bool {
     any_frame_open()
 }
 
+/// Measurement: `prefix` tagged with the innermost open key's kind.
+pub fn innermost_kind(prefix: &'static str) -> String {
+    let kind = FRAMES.with(|f| {
+        f.borrow().last().map(|fr| match &fr.key {
+            EngineKey::Join(_) => "join",
+            EngineKey::Contribution { .. } => "contribution",
+            EngineKey::Consult(_) => "consult",
+            EngineKey::CallbackProviders { .. } => "callback",
+        })
+    });
+    format!("{prefix}.{}", kind.unwrap_or("none"))
+}
+
 fn any_frame_open() -> bool {
     UNTRACKED.with(|u| u.get()) == 0 && FRAMES.with(|f| !f.borrow().is_empty())
 }
