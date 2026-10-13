@@ -953,12 +953,6 @@ impl<'a> Builder<'a> {
                 }
                 _ => self.push_return_value_arm(sym_id, span),
             }
-            self.bag.push(Witness {
-                attachment: WitnessAttachment::Symbol(sym_id),
-                source: WitnessSource::Builder("return_arm_chain".into()),
-                payload: WitnessPayload::Edge(WitnessAttachment::SymbolReturnArm(sym_id)),
-                span,
-            });
         }
     }
 

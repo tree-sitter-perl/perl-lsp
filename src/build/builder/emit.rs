@@ -625,6 +625,7 @@ impl<'a> Builder<'a> {
             },
             span,
         });
+        self.link_return_arms(sym_id, span);
     }
 
     /// Publish one VALUE arm on the sub's return-arm attachment: the edge to
@@ -653,6 +654,34 @@ impl<'a> Builder<'a> {
                 key: String::new(),
                 value: FactValue::Bool(true),
             },
+            span,
+        });
+        self.link_return_arms(sym_id, span);
+    }
+
+    /// Make the sub's arm-join a candidate answer on `Symbol(sub)`: one
+    /// `Edge(SymbolReturnArm(sub))` per sub, anchored at its first arm.
+    ///
+    /// The link is a per-sub fact, not a per-arm one — every copy would point
+    /// at the same arm set and materialize the same join, and each extra copy
+    /// re-enters that set on every query of the sub's return. Only the arm
+    /// pushers above call this, so every arm, explicit or fallthrough, is
+    /// linked by construction.
+    fn link_return_arms(&mut self, sym_id: SymbolId, span: Span) {
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let arms = WitnessAttachment::SymbolReturnArm(sym_id);
+        let symbol = WitnessAttachment::Symbol(sym_id);
+        if self
+            .bag
+            .iter_attachment(&symbol)
+            .any(|w| matches!(&w.payload, WitnessPayload::Edge(t) if *t == arms))
+        {
+            return;
+        }
+        self.bag.push(Witness {
+            attachment: symbol,
+            source: WitnessSource::Builder("return_arm_chain".into()),
+            payload: WitnessPayload::Edge(arms),
             span,
         });
     }
@@ -897,12 +926,11 @@ impl<'a> Builder<'a> {
     ///   witness per arm. `SymbolReturnArmFold` claims this
     ///   attachment and folds arms via `resolve_return_type`
     ///   (agreement / disagreement / single-arm).
-    /// - `Symbol(sub_id)` gets one `Edge(SymbolReturnArm(sub_id))`
-    ///   chain witness so consumers querying the symbol's return
-    ///   walk through to the arm-fold. Pushed per arm — duplicates
-    ///   are idempotent (same target, same materialized result).
+    /// - `Symbol(sub_id)` carries one `Edge(SymbolReturnArm(sub_id))`
+    ///   per sub (`link_return_arms`) so consumers querying the
+    ///   symbol's return walk through to the arm-fold.
     pub(super) fn publish_return_arm_witnesses(&mut self, return_node: Node<'a>, scope: ScopeId) {
-        use crate::model::witnesses::{tags, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        use crate::model::witnesses::tags;
         let body = return_node.named_child(0);
         let arm_span = body.map(node_to_span).unwrap_or_else(|| node_to_span(return_node));
 
@@ -935,12 +963,6 @@ impl<'a> Builder<'a> {
             self.emit_expr_witness(body);
             self.push_return_value_arm(sym_id, arm_span);
         }
-        self.bag.push(Witness {
-            attachment: WitnessAttachment::Symbol(sym_id),
-            source: WitnessSource::Builder("return_arm_chain".into()),
-            payload: WitnessPayload::Edge(WitnessAttachment::SymbolReturnArm(sym_id)),
-            span: arm_span,
-        });
     }
 
     /// RHS-ternary convenience: `my $x = $c ? A : B` → one
