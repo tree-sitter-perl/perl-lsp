@@ -368,8 +368,11 @@ impl Capture {
             ["move", k] => C::Move(MoveCap::parse(k)?),
             ["guard", "region"] => C::GuardRegion,
             ["unevaluated"] => C::Unevaluated,
-            ["param", "region"] => C::ParamRegion,
-            ["param", "receiver"] => C::ParamReceiver,
+            ["param", k] => match *k {
+                "region" => C::ParamRegion,
+                "receiver" => C::ParamReceiver,
+                _ => return None,
+            },
             ["member", "op", k] => C::MemberOp(MemberOpCap::parse(k)?),
             ["member", k] => C::Member(MemberCap::parse(k)?),
             ["arity", k] => C::Arity(ArityCap::parse(k)?),
