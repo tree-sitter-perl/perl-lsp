@@ -303,14 +303,15 @@ fn build_once(
         method_call_bindings: Vec::new(),
         pod_texts: Vec::new(),
         package_parents: Default::default(),
+        invocant_memo: Default::default(),
         package_uses: std::collections::HashMap::new(),
         use_dedup: std::collections::HashSet::new(),
         dispatch_dedup: std::collections::HashSet::new(),
         sub_return_delegations: std::collections::HashMap::new(),
         framework_modes: std::collections::HashMap::new(),
         framework_imports: std::collections::HashSet::new(),
-        constant_strings: std::collections::HashMap::new(),
-        constant_string_source: std::collections::HashMap::new(),
+        consts: Default::default(),
+        var_decls: std::collections::HashMap::new(),
         declared_constants: std::collections::HashMap::new(),
         export_member_sites: Vec::new(),
         export: Vec::new(),
@@ -955,12 +956,6 @@ impl<'a> Builder<'a> {
                 }
                 _ => self.push_return_value_arm(sym_id, span),
             }
-            self.bag.push(Witness {
-                attachment: WitnessAttachment::Symbol(sym_id),
-                source: WitnessSource::Builder("return_arm_chain".into()),
-                payload: WitnessPayload::Edge(WitnessAttachment::SymbolReturnArm(sym_id)),
-                span,
-            });
         }
     }
 

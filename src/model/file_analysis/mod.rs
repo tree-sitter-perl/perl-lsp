@@ -784,13 +784,68 @@ thread_local! {
     /// *depth*, this bounds *work*. Within one outermost resolution the
     /// FileAnalyses are immutable, so a node's answer is stable and safe
     /// to reuse; on-path (cycle-blocked) answers are never memoized.
-    static RESOLVE_MEMO: std::cell::RefCell<HashMap<ResolveNode, Option<InferredType>>> =
+    static RESOLVE_MEMO: std::cell::RefCell<HashMap<ResolveNode, (Option<InferredType>, bool)>> =
         std::cell::RefCell::new(HashMap::new());
+    /// Times `enter` refused a node (on the path, or past the depth cap).
+    /// An answer whose subtree saw a refusal depends on the path it was
+    /// asked from, so it is never shared beyond that path's resolution.
+    static RESOLVE_REFUSALS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Open `ResolvePass` scopes on this thread.
+    static RESOLVE_PASSES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
-/// Depth backstop for a genuinely (non-cyclic) deep chain — the occurs
-/// check is the primary termination guarantee; this only guards the
-/// stack against a pathological linear descent.
+/// Shortest fluent chain for which a `ResolvePass` pays off. Gated on cost,
+/// measured 2026-10-13 (cold `--check` A/B, single-threaded): on real
+/// projects, whose chains are short, keeping and sifting the memo made the
+/// stamp pass 7-8% slower (ensembl, Znuny). Below this length every chase is
+/// short anyway, so only a file with a long chain pays the bookkeeping.
+const PASS_MIN_CHAIN: usize = 32;
+
+/// Keeps path-independent resolve answers across top-level resolutions for
+/// as long as it lives. Only sound while every FileAnalysis the resolutions
+/// can reach is immutable and alive, so it borrows the one analysis it
+/// serves and refuses to open when an index could reach others.
+pub(crate) struct ResolvePass<'a>(std::marker::PhantomData<&'a FileAnalysis>);
+
+impl<'a> ResolvePass<'a> {
+    /// `None` when `module_index` is present, when the file has no chain
+    /// long enough to pay for the bookkeeping (`PASS_MIN_CHAIN`), or when the
+    /// build memos are off (`build_memos_disabled`): every top-level
+    /// resolution then starts from an empty memo.
+    pub(crate) fn open(
+        analysis: &'a FileAnalysis,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<Self> {
+        if module_index.is_some()
+            || analysis.refs.longest_call_chain() < PASS_MIN_CHAIN
+            || crate::model::witnesses::build_memos_disabled()
+        {
+            return None;
+        }
+        RESOLVE_PASSES.with(|p| p.set(p.get() + 1));
+        Some(ResolvePass(std::marker::PhantomData))
+    }
+}
+
+impl Drop for ResolvePass<'_> {
+    fn drop(&mut self) {
+        let left = RESOLVE_PASSES.with(|p| {
+            p.set(p.get() - 1);
+            p.get()
+        });
+        if left == 0 && RESOLVE_STACK.with(|s| s.borrow().is_empty()) {
+            // Replaced, not cleared: the map is thread-local on a long-lived
+            // worker, and `clear` would keep a whole pass's capacity forever.
+            let held = RESOLVE_MEMO.with(|m| std::mem::take(&mut *m.borrow_mut()).len());
+            crate::util::ghost_stats::count_by("resolve_pass.entries_at_close", held as u64);
+        }
+    }
+}
+
+/// Depth budget for a genuinely (non-cyclic) deep chain — the occurs check
+/// is the primary termination guarantee. Not a stack guard: both resolvers
+/// enter through `with_stack_headroom`, so the stack grows past any cap.
+/// A fluent chain of N calls nests 2N deep (call ⇄ receiver expression).
 const RESOLVE_DEPTH_CAP: usize = 256;
 
 /// Entry cap on the stack-scoped memo. A dense workspace's reachable
@@ -804,34 +859,52 @@ const RESOLVE_MEMO_CAP: usize = 50_000;
 /// re-entering) or the depth cap is hit; otherwise pushes and pops on
 /// unwind. When the stack drains back to empty the memo is cleared, so
 /// it never outlives the outermost resolution.
-struct ResolveGuard;
+struct ResolveGuard {
+    node: ResolveNode,
+    refusals_before: u64,
+    truncations_before: u64,
+}
 
 impl ResolveGuard {
     fn enter(node: ResolveNode) -> Option<Self> {
         RESOLVE_STACK.with(|s| {
             let mut st = s.borrow_mut();
             if st.len() >= RESOLVE_DEPTH_CAP || st.contains(&node) {
+                RESOLVE_REFUSALS.with(|c| c.set(c.get() + 1));
                 None
             } else {
                 st.push(node);
-                Some(ResolveGuard)
+                Some(ResolveGuard {
+                    node,
+                    refusals_before: RESOLVE_REFUSALS.with(|c| c.get()),
+                    truncations_before: crate::model::witnesses::query_rec_truncations(),
+                })
             }
         })
     }
 
     /// Memo lookup for `node` — hits only survive within one outermost
-    /// resolution (the guard clears the map on drain).
+    /// resolution (the guard clears the map on drain), or for the life of a
+    /// `ResolvePass` when the answer was path-independent.
     fn memo_get(node: &ResolveNode) -> Option<Option<InferredType>> {
-        RESOLVE_MEMO.with(|m| m.borrow().get(node).cloned())
+        let (ty, shareable) = RESOLVE_MEMO.with(|m| m.borrow().get(node).cloned())?;
+        crate::util::ghost_stats::count("resolve_memo.hit");
+        if !shareable {
+            // Reading a path-dependent answer makes the reader path-dependent.
+            RESOLVE_REFUSALS.with(|c| c.set(c.get() + 1));
+        }
+        Some(ty)
     }
 
-    /// Record `node`'s resolved answer for reuse by later parents in this
-    /// same outermost resolution.
-    fn memo_put(node: ResolveNode, ty: Option<InferredType>) {
+    /// Record this frame's answer. It is path-independent when nothing in
+    /// its subtree was refused by the occurs check or either depth cap.
+    fn store(self, ty: Option<InferredType>) {
+        let shareable = RESOLVE_REFUSALS.with(|c| c.get()) == self.refusals_before
+            && crate::model::witnesses::query_rec_truncations() == self.truncations_before;
         RESOLVE_MEMO.with(|m| {
             let mut mm = m.borrow_mut();
             if mm.len() < RESOLVE_MEMO_CAP {
-                mm.insert(node, ty);
+                mm.insert(self.node, (ty, shareable));
             }
         });
     }
@@ -843,7 +916,13 @@ impl Drop for ResolveGuard {
             let mut st = s.borrow_mut();
             st.pop();
             if st.is_empty() {
-                RESOLVE_MEMO.with(|m| m.borrow_mut().clear());
+                RESOLVE_MEMO.with(|m| {
+                    if RESOLVE_PASSES.with(|p| p.get()) > 0 {
+                        m.borrow_mut().retain(|_, (_, shareable)| *shareable);
+                    } else {
+                        m.borrow_mut().clear();
+                    }
+                });
             }
         });
     }

@@ -37,15 +37,17 @@ pub struct RefTable {
     #[serde(skip, default)]
     by_target: HashMap<SymbolId, Vec<usize>>,
 
-    /// Start-point → call-shaped ref index, used by
-    /// `method_call_invocant_class` to chase a chain receiver:
-    /// `Foo->new->m`'s outer `->m` `invocant_span` starts at the inner
-    /// `Foo->new` call's start; `make_b()->touch()`'s outer
-    /// `invocant_span` starts at `make_b`'s start. Only MethodCall and
-    /// FunctionCall refs go in — the receiver dispatch is keyed on those
-    /// two kinds.
+    /// Call-shaped refs (MethodCall / FunctionCall) sorted by
+    /// `(start, end, index)`. Answers both chain lookups by binary search:
+    /// the narrowest call at a start point (`Foo->new->m`'s outer `->m`
+    /// `invocant_span` starts at the inner `Foo->new` call's start), and
+    /// the call spanning exactly an expression.
     #[serde(skip, default)]
-    call_by_start: HashMap<Point, usize>,
+    calls_by_span: Vec<usize>,
+    /// Most calls sharing one start point: a fluent chain's calls all open
+    /// where its first receiver does, so this is the file's deepest chain.
+    #[serde(skip, default)]
+    longest_call_chain: usize,
 }
 
 impl RefTable {
@@ -100,15 +102,38 @@ impl RefTable {
     }
 
     /// The call-shaped ref anchored at `start` — the chain-receiver hop.
+    /// The narrowest span wins (closest to the actual receiver: in
+    /// `Foo->new->m` the outer `m` and inner `Foo->new` share a start), a
+    /// tie the earlier ref.
     pub fn call_at_start(&self, start: &Point) -> Option<usize> {
-        self.call_by_start.get(start).copied()
+        let at = self.calls_by_span.partition_point(|&i| self.refs[i].span.start < *start);
+        self.calls_by_span.get(at).copied().filter(|&i| self.refs[i].span.start == *start)
     }
 
-    /// Every `(anchor point, ref index)` the call index holds — the shape
-    /// pins read it to assert the tiebreak and that only call-shaped kinds
-    /// are indexed.
+    /// Calls in the file's deepest fluent chain (`a->b->c` is 2, the
+    /// receiver `a` is no call).
+    pub fn longest_call_chain(&self) -> usize {
+        self.longest_call_chain
+    }
+
+    /// The first call-shaped ref whose span is exactly `span`.
+    pub fn call_spanning(&self, span: Span) -> Option<usize> {
+        let key = |i: usize| (self.refs[i].span.start, self.refs[i].span.end);
+        let at = self.calls_by_span.partition_point(|&i| key(i) < (span.start, span.end));
+        self.calls_by_span.get(at).copied().filter(|&i| self.refs[i].span == span)
+    }
+
+    /// Every `(anchor point, ref index)` `call_at_start` can answer — the
+    /// shape pins read it to assert the tiebreak and that only call-shaped
+    /// kinds are indexed.
     pub fn call_index_entries(&self) -> impl Iterator<Item = (Point, usize)> + '_ {
-        self.call_by_start.iter().map(|(&p, &i)| (p, i))
+        self.calls_by_span
+            .iter()
+            .enumerate()
+            .filter(|&(k, &i)| {
+                k == 0 || self.refs[self.calls_by_span[k - 1]].span.start != self.refs[i].span.start
+            })
+            .map(|(_, &i)| (self.refs[i].span.start, i))
     }
 
     /// Every ref's relational row seed, in ref order.
@@ -121,38 +146,28 @@ impl RefTable {
     pub fn rebuild_indices(&mut self, names: &NameSpellings) {
         self.by_key.clear();
         self.by_target.clear();
-        self.call_by_start.clear();
+        self.calls_by_span.clear();
         for (i, r) in self.refs.iter().enumerate() {
             self.by_key.entry(r.match_key(names)).or_default().push(i);
             if let Some(sym_id) = r.resolved_symbol() {
                 self.by_target.entry(sym_id).or_default().push(i);
             }
             if matches!(r.kind, RefKind::MethodCall { .. } | RefKind::FunctionCall { .. }) {
-                // Smaller span (closer to the actual receiver) wins; a tie
-                // keeps the earlier insertion. Method-call refs are visited
-                // outer-first, so for a chain like `Foo->new->m` the outer
-                // `m` and inner `Foo->new` share a start point — keeping the
-                // smaller-span ref points the index at the inner receiver.
-                // FunctionCall refs (just the function-name span) are
-                // naturally narrower than the enclosing MethodCall, so they
-                // win the same way.
-                let take = match self.call_by_start.get(&r.span.start).copied() {
-                    None => true,
-                    Some(prev) => {
-                        let prev_span = self.refs[prev].span;
-                        (r.span.end.row, r.span.end.column)
-                            < (prev_span.end.row, prev_span.end.column)
-                    }
-                };
-                if take {
-                    self.call_by_start.insert(r.span.start, i);
-                }
+                self.calls_by_span.push(i);
             }
         }
+        let refs = &self.refs;
+        self.calls_by_span.sort_by_key(|&i| (refs[i].span.start, refs[i].span.end, i));
+        self.longest_call_chain = self
+            .calls_by_span
+            .chunk_by(|&a, &b| refs[a].span.start == refs[b].span.start)
+            .map(<[usize]>::len)
+            .max()
+            .unwrap_or(0);
     }
 
     /// Refresh the name/target lookups only — the enrichment refresh.
-    /// `call_by_start` is left alone on purpose: every entry it holds
+    /// `calls_by_span` is left alone on purpose: every entry it holds
     /// points into the baseline prefix (it is built before the baseline is
     /// sealed, and no post-build pass mints call refs), and enrichment
     /// restores that prefix verbatim before appending only synthetic
@@ -176,7 +191,8 @@ impl RefTable {
         self.refs = Vec::new();
         self.by_key = HashMap::new();
         self.by_target = HashMap::new();
-        self.call_by_start = HashMap::new();
+        self.calls_by_span = Vec::new();
+        self.longest_call_chain = 0;
         self.evicted = true;
     }
 
@@ -196,7 +212,9 @@ impl RefTable {
                 .map(|r| r.target_name.capacity() + std::mem::size_of::<String>())
                 .sum::<usize>();
 
-        let mut b = mcap(&self.by_target) + mcap(&self.call_by_start) + mcap(&self.by_key);
+        let mut b = mcap(&self.by_target)
+            + mcap(&self.by_key)
+            + self.calls_by_span.capacity() * std::mem::size_of::<usize>();
         for (k, v) in &self.by_key {
             b += k.capacity() + v.capacity() * std::mem::size_of::<usize>();
         }

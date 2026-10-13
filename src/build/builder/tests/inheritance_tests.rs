@@ -111,6 +111,26 @@ fn test_isa_assignment() {
     );
 }
 
+/// Each package's `@ISA` names only its own parents. The left-hand `@ISA`
+/// is not a source: read as a value it would fold to the previous package's
+/// list, giving `B` the parents `[B, C]` here.
+#[test]
+fn isa_assignments_in_successive_packages_stay_separate() {
+    let fa = build_fa(
+        "
+            package A;
+            our @ISA = ('B');
+            package B;
+            our @ISA = ('C');
+            package C;
+            @ISA = qw(D);
+        ",
+    );
+    assert_eq!(fa.declared_parents("A"), &vec!["B".to_string()]);
+    assert_eq!(fa.declared_parents("B"), &vec!["C".to_string()]);
+    assert_eq!(fa.declared_parents("C"), &vec!["D".to_string()]);
+}
+
 #[test]
 fn test_class_isa_populates_package_parents() {
     let fa = build_fa(

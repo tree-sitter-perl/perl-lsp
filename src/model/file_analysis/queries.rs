@@ -475,11 +475,13 @@ impl FileAnalysis {
         if let Some(hit) = ResolveGuard::memo_get(&node) {
             return hit;
         }
-        let Some(_guard) = ResolveGuard::enter(node) else {
+        let Some(guard) = ResolveGuard::enter(node) else {
             return None;
         };
-        let result = self.method_call_return_type_via_bag_uncached(ref_idx, module_index);
-        ResolveGuard::memo_put(node, result.clone());
+        let result = crate::model::witnesses::with_stack_headroom(|| {
+            self.method_call_return_type_via_bag_uncached(ref_idx, module_index)
+        });
+        guard.store(result.clone());
         result
     }
 
@@ -652,11 +654,13 @@ impl FileAnalysis {
         if let Some(hit) = ResolveGuard::memo_get(&node) {
             return hit;
         }
-        let Some(_guard) = ResolveGuard::enter(node) else {
+        let Some(guard) = ResolveGuard::enter(node) else {
             return None;
         };
-        let result = self.expr_type_at_span_uncached(span, module_index);
-        ResolveGuard::memo_put(node, result.clone());
+        let result = crate::model::witnesses::with_stack_headroom(|| {
+            self.expr_type_at_span_uncached(span, module_index)
+        });
+        guard.store(result.clone());
         result
     }
 
@@ -682,16 +686,11 @@ impl FileAnalysis {
         // exact-span match is what distinguishes "the value of
         // `$f->get_bar()->get_name()`" (the outer call's return) from
         // "the inner receiver `$f->get_bar()`" (which has its own,
-        // narrower span). `RefTable::call_at_start` deliberately points at the
-        // innermost receiver, so we can't use it here — we want the ref
-        // that exactly spans the queried expression.
-        if let Some((recv_idx, kind)) = self.refs.iter().enumerate().find_map(|(i, r)| {
-            if r.span == span && matches!(r.kind, RefKind::MethodCall { .. } | RefKind::FunctionCall { .. }) {
-                Some((i, &r.kind))
-            } else {
-                None
-            }
-        }) {
+        // narrower span), which is why this asks `call_spanning` and not
+        // `call_at_start` (the innermost receiver).
+        if let Some((recv_idx, kind)) =
+            self.refs.call_spanning(span).map(|i| (i, &self.refs[i].kind))
+        {
             match kind {
                 RefKind::MethodCall { .. } => {
                     if let Some(t) =

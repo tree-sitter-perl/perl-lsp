@@ -15,12 +15,12 @@ pub struct LangPack {
     /// variable sigils. Baked onto `PackFacts::names`; every key function
     /// reads it there.
     pub names: NameSpellings,
-    /// Shape a captured name token's text (e.g. keep the sigil on a
-    /// Perl variable). `capture_kind` is the vocabulary name
-    /// (`def.var`, `ref.method`, ...) so one pack hook serves all.
-    pub shape_name: fn(capture_kind: &str, raw: &str) -> String,
+    /// Shape a captured name token's text into the identity it is filed
+    /// under (cpp canonicalizes template spellings). Applied to every
+    /// captured name alike.
+    pub shape_name: fn(raw: &str) -> String,
     /// Name for defs with no name token (anonymous subs).
-    pub default_name: fn(kind: &str) -> Option<&'static str>,
+    pub default_name: fn(kind: DefKind) -> Option<&'static str>,
     /// Map a `@type.annot` token's text to a type — the pack predicate
     /// for languages whose ring 3 is partly in the tree (`x: int`).
     pub annot_type: fn(text: &str) -> Option<InferredType>,
@@ -176,11 +176,11 @@ pub struct PeelSpec {
     pub wrappers: &'static [(&'static str, crate::model::file_analysis::DerefKind)],
     /// Per-level annotation node kinds (cv-qualifiers) collected onto a step.
     pub annot_kinds: &'static [&'static str],
-    /// Leaf node kind → the `def.*` capture the synthetic leaf event mints
-    /// (`identifier`→`def.local`, `field_identifier`→`def.var`). EMPTY = accept
+    /// Leaf node kind → the def kind the synthetic leaf event mints
+    /// (`identifier`→`Local`, `field_identifier`→`Field`). EMPTY = accept
     /// ANY leaf and mint no def (the receiver-peel case — the leaf is an
     /// invocant, not a declaration).
-    pub leaf_to_def: &'static [(&'static str, &'static str)],
+    pub leaf_to_def: &'static [(&'static str, DefKind)],
     /// Accumulate the per-level `DerefStep` stack (pointer depth) vs descend only.
     pub record_stack: bool,
 }
@@ -282,7 +282,7 @@ pub(crate) const C_FIELD_DECL_PEEL: PeelSpec = PeelSpec {
         ("reference_declarator", crate::model::file_analysis::DerefKind::Reference),
     ],
     annot_kinds: &["type_qualifier"],
-    leaf_to_def: &[("identifier", "def.local"), ("field_identifier", "def.field")],
+    leaf_to_def: &[("identifier", DefKind::Local), ("field_identifier", DefKind::Field)],
     record_stack: true,
 };
 
@@ -292,9 +292,8 @@ pub(crate) const C_FIELD_DECL_PEEL: PeelSpec = PeelSpec {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub enum CmdEffect {
-    /// Argument `name_arg` declares an entity of `kind` ("var",
-    /// "sub", ...).
-    Def { kind: &'static str, name_arg: usize },
+    /// Argument `name_arg` declares an entity of `kind`.
+    Def { kind: DefKind, name_arg: usize },
     /// Arguments from `from` onward are name references (all-caps
     /// keyword arguments like PRIVATE/STATIC are skipped — CMake's
     /// keyword convention; a finer filter is a later predicate).
@@ -313,15 +312,12 @@ pub fn perl_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/perl/skeleton.scm"),
         names: crate::model::conventions::PERL_SPELLINGS,
-        shape_name: |kind, raw| match kind {
-            // The builder stores variable symbols WITH sigil; varname
-            // captures are sigil-less. Predicate re-attaches nothing —
-            // def.var captures the whole `(scalar)` node so raw text
-            // already carries the sigil.
-            _ => raw.to_string(),
-        },
+        // The builder stores variable symbols WITH sigil. Nothing to
+        // re-attach: def.var captures the whole `(scalar)` node, so the
+        // raw text already carries it.
+        shape_name: |raw| raw.to_string(),
         default_name: |kind| match kind {
-            "anon" => Some("(anon)"),
+            DefKind::Anon => Some("(anon)"),
             _ => None,
         },
         annot_type: |_| None,
@@ -359,7 +355,7 @@ pub fn python_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/python/skeleton.scm"),
         names: NameSpellings::NONE,
-        shape_name: |_, raw| raw.to_string(),
+        shape_name: |raw| raw.to_string(),
         default_name: |_| None,
         annot_type: |text| match text.trim() {
             "str" => Some(InferredType::String),
@@ -414,7 +410,7 @@ pub fn r_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/r/skeleton.scm"),
         names: NameSpellings::NONE,
-        shape_name: |_, raw| raw.to_string(),
+        shape_name: |raw| raw.to_string(),
         default_name: |_| None,
         annot_type: |_| None,
         // No reliable lexical ctor convention in R (S4/R5 exist but
@@ -459,7 +455,7 @@ pub fn cmake_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/cmake/skeleton.scm"),
         names: NameSpellings::NONE,
-        shape_name: |_, raw| raw.to_string(),
+        shape_name: |raw| raw.to_string(),
         default_name: |_| None,
         annot_type: |_| None,
         // include(util.cmake) is a literal path; add_subdirectory(src)
@@ -474,11 +470,11 @@ pub fn cmake_pack() -> LangPack {
         shape_ctor: |_| false,
         import_call: |_, _| None,
         cmd_effects: |cmd| match cmd.to_ascii_lowercase().as_str() {
-            "set" | "option" => vec![CmdEffect::Def { kind: "var", name_arg: 0 }],
+            "set" | "option" => vec![CmdEffect::Def { kind: DefKind::Var, name_arg: 0 }],
             "add_library" | "add_executable" | "add_custom_target" => {
                 // Targets. SymKind::Target is the real future; "sub"
                 // rides the full rename/refs machinery today.
-                vec![CmdEffect::Def { kind: "sub", name_arg: 0 }]
+                vec![CmdEffect::Def { kind: DefKind::Sub, name_arg: 0 }]
             }
             "target_link_libraries" | "target_include_directories"
             | "target_compile_definitions" | "target_sources" => vec![
@@ -518,12 +514,12 @@ pub fn cpp_pack() -> LangPack {
         // specialization's identity (`formatter<int, char>`) matches
         // however the source wrapped it. Identity for every non-template
         // name (no whitespace, no comma → unchanged).
-        shape_name: |_, raw| canonical_template_spelling(raw),
+        shape_name: |raw| canonical_template_spelling(raw),
         // an anonymous inline union has no name token of its own; the
         // synthetic container is outline structure, not an addressable
         // member (the "anonymous" attribute keeps it out of completion).
         default_name: |kind| match kind {
-            "unionfield" => Some("(union)"),
+            DefKind::UnionField => Some("(union)"),
             _ => None,
         },
         // C++ declared types ARE the witness source. Primitives → the
@@ -609,7 +605,7 @@ pub fn cpp_pack() -> LangPack {
         receiver_names: &["this"],
         // `field_identifier` only ever names a struct/class member (the
         // grammar's own distinction from a plain `identifier` local), so
-        // "def.field" matches the plain (non-pointer) field pattern above.
+        // `Field` matches the plain (non-pointer) field pattern above.
         // Shared with the member-block synth lane (rule #10).
         nested_peel: C_FIELD_DECL_PEEL,
         // DerefKind placeholder — record_stack false, so it's never read.
@@ -709,18 +705,4 @@ fn optional_inner(ty: &str) -> Option<String> {
         && !leaf.contains(' ')
         && leaf.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_'))
     .then(|| leaf.to_string())
-}
-
-/// `expr.lit.<t>` suffix → type. ENGINE-side vocabulary, not per-pack:
-/// the suffix set names the engine's value lattice, packs just choose
-/// which nodes carry each suffix.
-pub(super) fn lit_type(suffix: &str) -> Option<InferredType> {
-    match suffix {
-        "string" => Some(InferredType::String),
-        "number" => Some(InferredType::Numeric),
-        "bool" => Some(InferredType::Bool),
-        "arrayref" => Some(InferredType::ArrayRef),
-        "hashref" => Some(InferredType::HashRef),
-        _ => None,
-    }
 }

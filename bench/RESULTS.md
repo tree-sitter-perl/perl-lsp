@@ -349,3 +349,61 @@ Known residual, named: Glyphs standalone still spends 7.9 s (build) +
 N queries × W witnesses, clone-free but not fold-free, temporal semantics
 make naive memoization wrong. Separate design question; the checked-in
 baselines will hold the line meanwhile.
+
+## 2026-09-16 — sweep at d289481a: wall flat-to-better, peak RSS +8–21% everywhere
+
+Reproducible-8, n=3 cold+warm, clean tree, `bench/runs/20260916T213730Z-1130713.jsonl`.
+Against the 2026-09-06 run (d342a401): warm wall improved on six of eight
+corpora (Webmin −21%, openfoodfacts −16%, WeBWorK −15%, BMO −13%, Evergreen
+−31% but inside its noise); cold wall within noise except Foswiki +6%
+(500 ms, noise 360). Peak RSS REGRESSED on every corpus and phase, well
+clear of noise: +8–12% cold, +14–21% warm (BMO 711 → 783 cold, 737 → 842
+warm; FHEM 2201 → 2421 / 2130 → 2468). CPU utilization roughly tripled
+(BMO warm 256% → 1064%): the process is now actually parallel.
+
+Bisected on BMO (all four binaries back to back, n=3):
+
+| binary | what | cold MB | warm MB | warm wall |
+|---|---|---|---|---|
+| d342a401 | control | 704–716 | 736–741 | 1.85 s |
+| 109fb33c | ts-parser-perl 2.0 | 701–710 | 731–743 | 1.85 s |
+| edf2b674 | #178 RetainedReader pool | 742–747 | 770–786 | 1.70 s |
+| d289481a | #176 model layer | 784–803 | 840–848 | 1.77 s |
+
+Two mechanisms, neither a leak. #178's pool removed the lock that
+serialized every rehydrate, so twenty workers now hold decoded blobs (and
+one SQLite connection each) at once: ~+40 MB, and the wall win above.
+`RAYON_NUM_THREADS=4` at HEAD lands at 705/775 MB, i.e. the concurrency
+share is ~75 MB of BMO's +105. #176 widened the check sweep's working set:
+`sweep.lookup` ×1.73, `sweep.distinct` ×1.37, `sweepprov.hit` ×1.82 on BMO
+cold, so the byte-budgeted `SweepProviders` cache fills further; the blob
+store grew only 2.8%, so it is consult volume, not fatter analyses. Its
+answers moved the right way (unresolved-method 956 → 933, unknown-hash-key
+21 → 11 on BMO). Also new: `hop.other` (753k reads on BMO cold) — a
+witness payload the registry's hop classifier does not name yet.
+
+Same-day follow-up, BMO at 20 threads, RSS sampled every 50 ms: the curve
+is monotone to exit on both binaries (peak == last sample), because
+`--check`'s `SweepProviders` cache (`PERL_LSP_SWEEP_PROVIDER_CACHE_MB`,
+default 1024) keeps every decoded provider resident for the whole sweep —
+this KPI is the sweep's working set, not a transient spike. With that cache
+disabled HEAD drops 791 → 724 cold / 852 → 767 warm. With `PERL_LSP_NO_EVICT`
+the whole-copy heap estimate over BMO's 739 workspace files is 237 → 252 MB
+(+6%: witness_vec +9.1, symbols +2.8, refs +1.9), so #176's share is a ~6%
+fatter FileAnalysis (more witnesses per file, plus the new per-analysis
+lookup structures) × a cache that holds all of them. The SERVER is nearly
+flat: the Bugzilla editor scenario's end-of-session VmRSS is 371/389 →
+399/408 MB cold and 256/260 → 268/269 MB warm (n=2 each), because the
+server never opens the sweep cache and strips resident copies after persist.
+
+Re-run 2026-09-17 from a quiet start (load 1.23; run
+`20260917T074356Z-1827761`): every number above reproduces within noise
+(BMO 785 / 838 MB, FHEM 2453 / 2484 MB; Znuny 33.6 s / 11.3 s). Accepted and
+seeded as the new KPI baseline — the RSS step is the sweep cache × a ~6%
+fatter analysis, and the server is flat. `baseline-check.sql` now compares
+against the newest baseline row per KPI, so the 08-30 rows stay as history.
+
+Original note from the 09-16 run — baselines (2026-08-30, ce16a564) were NOT reseeded that day: the sweep ran on a box that
+was not quiet (loadavg 6–16 during the run, though `cpu` rows show it was
+mostly self-load), and the RSS step wants a decision first — accept it as
+the price of the parallel sweep, or cap the pool / the sweep providers.

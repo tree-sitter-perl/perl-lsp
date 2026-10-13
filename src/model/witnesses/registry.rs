@@ -163,11 +163,11 @@ fn visited_key(bag: &WitnessBag, q: &ReducerQuery) -> VisitedKey {
 /// queries whose context (scopes / module_index / framework) differs.
 /// Record a would-be consult, OUT OF LINE.
 ///
-/// `#[inline(never)]` is load-bearing rather than a hint. `query_rec` recurses
-/// once per MRO hop and the depth cap is tuned against a 2 MiB stack at 600
-/// hops; building a `ConclusionKey` inline grew that frame enough to overflow
-/// before the cap could fire. Temporaries belong in a callee's frame, not in
-/// one that is live 600 deep.
+/// `#[inline(never)]` keeps `query_rec`'s frame small: it recurses once per MRO
+/// hop, so a temporary built inline is paid once per live hop. Stack growth
+/// keeps a big frame from overflowing, but every extra KiB per hop is another
+/// segment a deep chase has to map. Temporaries belong in a callee's frame,
+/// not in one that is live hundreds deep.
 #[inline(never)]
 fn note_moc_exit(state: &mut QueryState, class: &str, name: &str) {
     state.note_exit(Some(super::ConclusionKey::MethodOnClass {
@@ -251,14 +251,20 @@ impl FoldMemoScope {
     /// `PERL_LSP_NO_FOLD_MEMO=1` leaves the scope closed: the A/B control,
     /// and the check that the memo changes no answer.
     pub(crate) fn enter() -> Self {
-        static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let disabled = *DISABLED.get_or_init(|| std::env::var_os("PERL_LSP_NO_FOLD_MEMO").is_some());
-        #[cfg(test)]
-        let disabled = disabled || FOLD_MEMO_FORCED_OFF.with(|c| c.get());
-        let fresh = (!disabled).then(FoldMemo::default);
+        let fresh = (!build_memos_disabled()).then(FoldMemo::default);
         let outer = FOLD_MEMO.with(|m| std::mem::replace(&mut *m.borrow_mut(), fresh));
         FoldMemoScope { outer }
     }
+}
+
+/// `PERL_LSP_NO_FOLD_MEMO=1` (or `without_fold_memo` in tests) turns off
+/// every memo that shares answers across a build's queries, as one switch.
+pub(crate) fn build_memos_disabled() -> bool {
+    static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let disabled = *DISABLED.get_or_init(|| std::env::var_os("PERL_LSP_NO_FOLD_MEMO").is_some());
+    #[cfg(test)]
+    let disabled = disabled || FOLD_MEMO_FORCED_OFF.with(|c| c.get());
+    disabled
 }
 
 #[cfg(test)]
@@ -288,6 +294,12 @@ impl Drop for FoldMemoScope {
         let outer = self.outer.take();
         FOLD_MEMO.with(|m| *m.borrow_mut() = outer);
     }
+}
+
+/// True while a `FoldMemoScope` is open with the memo on. Build-time memos
+/// that live beside it ride the same scope, kill switch and equivalence net.
+pub(crate) fn fold_memo_open() -> bool {
+    FOLD_MEMO.with(|m| m.borrow().is_some())
 }
 
 /// Answer `q` from the fold memo, or hand back the generations and key to
@@ -636,8 +648,8 @@ fn is_subclass_of(child: &str, ancestor: &str, ctx: &BagContext) -> bool {
 }
 
 /// Depth backstop for `query_rec`. The `(bag, attachment)` visited set is
-/// the primary cycle guard; this cap is belt-and-braces against a new,
-/// unaccounted-for recursion shape blowing the stack. On hit, warn once
+/// the primary cycle guard; this cap bounds the WORK a new, unaccounted-for
+/// recursion shape can do (the stack itself grows, see below). On hit, warn once
 /// per process and return `None` (give up cleanly rather than abort).
 ///
 /// **It fires in production** (Tier 2 of the scale hitlist, seen again in
@@ -673,23 +685,28 @@ fn is_subclass_of(child: &str, ancestor: &str, ctx: &BagContext) -> bool {
 /// wants a corpus case where the served answer actually differs — not a
 /// reproduction of the mechanism, which is easy and proves nothing.
 ///
-/// **Profile-aware, because the stack ceiling is.** Measured on a 2 MiB stack
-/// (the tokio blocking-pool and rayon worker size) with an `@ISA` chain of N
-/// packages, one `query_rec` level per hop:
-///
-/// | build | deepest chain that answers | at 512 |
-/// |---|---|---|
-/// | release | ≥2,000 (cap fires first) | cap fires, answer degrades to `None` |
-/// | debug | 400 | **stack overflow — the process aborts** |
-///
-/// So a single value cannot serve both: 512 is under the release ceiling and
-/// over the debug one, and a debug abort is a `cargo test` that dies rather
-/// than fails. Release keeps 512 — this changes no shipped answer — and debug
-/// drops to a value with margin under its own measured ceiling.
-#[cfg(not(debug_assertions))]
+/// **A budget, not a stack guard.** `query_rec` grows its stack through
+/// [`with_stack_headroom`], so how deep a chase can go does not depend on the
+/// thread's stack size or the build profile — one value serves both.
 const QUERY_REC_DEPTH_CAP: u32 = 512;
-#[cfg(debug_assertions)]
-const QUERY_REC_DEPTH_CAP: u32 = 256;
+
+/// Headroom a recursive resolver keeps before it switches to a fresh stack
+/// segment. One `query_rec` hop costs about 5 KiB in a debug build and under
+/// 1 KiB in release, so this is many hops of margin.
+const STACK_RED_ZONE: usize = 64 * 1024;
+/// Size of each segment mapped once the red zone is reached. It is unmapped
+/// when the recursion unwinds past it; a larger segment means a deep chase
+/// crosses into a new one less often.
+const STACK_SEGMENT: usize = 1024 * 1024;
+
+/// Runs `f`, first moving onto a fresh stack segment if this thread is within
+/// `STACK_RED_ZONE` of the end of its stack. Every recursive resolver calls
+/// this at its single re-entry point, so its depth cap is a work budget and
+/// not a function of the thread's stack size or the build profile. `f` runs on
+/// the same thread, so thread-locals are unaffected.
+pub(crate) fn with_stack_headroom<R>(f: impl FnOnce() -> R) -> R {
+    stacker::maybe_grow(STACK_RED_ZONE, STACK_SEGMENT, f)
+}
 
 thread_local! {
     /// Set when an edge chase reads an `Expr(span)` attachment — the marker
@@ -705,6 +722,13 @@ thread_local! {
     /// across a region — an absolute count would be sticky for the rest of the
     /// process once any chase anywhere truncated.
     static QUERY_REC_TRUNCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times `QUERY_REC_DEPTH_CAP` has fired on this thread. Read as a
+/// difference across a region: a rise means an answer computed inside it
+/// depended on how deep the region was entered.
+pub(crate) fn query_rec_truncations() -> u64 {
+    QUERY_REC_TRUNCATIONS.with(|c| c.get())
 }
 
 #[derive(Default)]
@@ -858,6 +882,15 @@ impl ReducerRegistry {
         q: &ReducerQuery,
         state: &mut QueryState,
     ) -> std::sync::Arc<ReducedValue> {
+        with_stack_headroom(|| self.query_rec_on_stack(bag, q, state))
+    }
+
+    fn query_rec_on_stack(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+    ) -> std::sync::Arc<ReducedValue> {
         // The chase has landed on a raw-derivation attachment. Whatever the
         // top-level question was, its answer now depends on the bag's
         // observations rather than on any conclusion we could have stored.
@@ -866,19 +899,21 @@ impl ReducerRegistry {
         // as a conclusion if what it points at is too, transitively — so an
         // `Observation` anywhere in the walk is what would make the layer
         // genuinely open.
-        for w in bag.for_attachment(&q.attachment) {
-            crate::util::ghost_stats::count(match &w.payload {
-                WitnessPayload::Observation(_) => "hop.OBSERVATION",
-                WitnessPayload::InferredType(_) => "hop.inferred_type",
-                WitnessPayload::Edge(_) => "hop.edge",
-                WitnessPayload::Invoke { .. } => "hop.invoke",
-                WitnessPayload::ReturnExpr(_) => "hop.return_expr",
-                WitnessPayload::Fact { .. } => "hop.fact",
-                WitnessPayload::Derivation => "hop.derivation",
-                WitnessPayload::Custom { .. } => "hop.custom",
-                WitnessPayload::Projected { .. } => "hop.projected",
-                _ => "hop.other",
-            });
+        if crate::util::ghost_stats::enabled() {
+            for w in bag.iter_attachment(&q.attachment) {
+                crate::util::ghost_stats::count(match &w.payload {
+                    WitnessPayload::Observation(_) => "hop.OBSERVATION",
+                    WitnessPayload::InferredType(_) => "hop.inferred_type",
+                    WitnessPayload::Edge(_) => "hop.edge",
+                    WitnessPayload::Invoke { .. } => "hop.invoke",
+                    WitnessPayload::ReturnExpr(_) => "hop.return_expr",
+                    WitnessPayload::Fact { .. } => "hop.fact",
+                    WitnessPayload::Derivation => "hop.derivation",
+                    WitnessPayload::Custom { .. } => "hop.custom",
+                    WitnessPayload::Projected { .. } => "hop.projected",
+                    _ => "hop.other",
+                });
+            }
         }
         if matches!(q.attachment, WitnessAttachment::Expr(_)) {
             TOUCHED_EXPR.with(|c| c.set(true));
@@ -888,19 +923,21 @@ impl ReducerRegistry {
             // one — "returns its invocant", a function of the query rather
             // than a value). If they are spread across everything, the
             // derivation is genuinely open and no conclusion layer closes it.
-            for w in bag.for_attachment(&q.attachment) {
-                crate::util::ghost_stats::count(match &w.payload {
-                    WitnessPayload::InferredType(_) => "expr_hop.inferred_type",
-                    WitnessPayload::Observation(_) => "expr_hop.observation",
-                    WitnessPayload::Edge(_) => "expr_hop.edge",
-                    WitnessPayload::Invoke { .. } => "expr_hop.invoke",
-                    WitnessPayload::ReturnExpr(_) => "expr_hop.return_expr",
-                    WitnessPayload::Fact { .. } => "expr_hop.fact",
-                    WitnessPayload::Derivation => "expr_hop.derivation",
-                    WitnessPayload::Custom { .. } => "expr_hop.custom",
-                    WitnessPayload::Projected { .. } => "expr_hop.projected",
-                    _ => "expr_hop.other",
-                });
+            if crate::util::ghost_stats::enabled() {
+                for w in bag.iter_attachment(&q.attachment) {
+                    crate::util::ghost_stats::count(match &w.payload {
+                        WitnessPayload::InferredType(_) => "expr_hop.inferred_type",
+                        WitnessPayload::Observation(_) => "expr_hop.observation",
+                        WitnessPayload::Edge(_) => "expr_hop.edge",
+                        WitnessPayload::Invoke { .. } => "expr_hop.invoke",
+                        WitnessPayload::ReturnExpr(_) => "expr_hop.return_expr",
+                        WitnessPayload::Fact { .. } => "expr_hop.fact",
+                        WitnessPayload::Derivation => "expr_hop.derivation",
+                        WitnessPayload::Custom { .. } => "expr_hop.custom",
+                        WitnessPayload::Projected { .. } => "expr_hop.projected",
+                        _ => "expr_hop.other",
+                    });
+                }
             }
         }
         let depth = QUERY_REC_DEPTH.with(|c| {
@@ -1832,8 +1869,7 @@ impl ReducerRegistry {
     ///
     /// Out of line for the same reason as `moc_cross_file_primary`: this
     /// block's locals would otherwise live in `query_rec_body`'s frame,
-    /// which is live once per inheritance hop against the 2 MiB stack the
-    /// depth-cap test pins, and a debug build overflowed it there.
+    /// which is live once per inheritance hop.
     #[inline(never)]
     fn owner_keyed_fallback(
         &self,
@@ -1976,7 +2012,7 @@ impl ReducerRegistry {
     /// locals — two capture-heavy `attempt` closures, the conclusion-outcome
     /// bookkeeping, the equivalence probes — otherwise live in the caller's
     /// frame, and the caller is `query_rec_body`, which is live once per MRO
-    /// hop against the 2 MiB stack the depth-cap test pins. An index-less chase
+    /// hop. An index-less chase
     /// (a bake, a hand-built FA) never enters here at all, so keeping it inline
     /// charged every one of those hops for a block it does not run.
     #[inline(never)]

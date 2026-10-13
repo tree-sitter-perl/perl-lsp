@@ -1746,7 +1746,7 @@ impl<'a> Builder<'a> {
                     // the loop iterates over. Mint an edge per statically
                     // resolvable list element. Dynamic lists fold to `values`
                     // empty → no edge (honest). Done before the move of
-                    // `values` into `constant_strings`.
+                    // `values` into the constant table.
                     if !values.is_empty() {
                         if let Some(body) = node
                             .child_by_field_name("block")
@@ -1759,9 +1759,7 @@ impl<'a> Builder<'a> {
                             }
                         }
                     }
-                    if !values.is_empty() {
-                        self.constant_strings.insert(var_name, values);
-                    }
+                    self.write_constant(&var_name, list_node, Some(values));
                 }
 
                 self.queue_children_then(node, |b| { b.pop_scope(); });
@@ -1799,19 +1797,12 @@ impl<'a> Builder<'a> {
         // per element with `$_` bound — fold `$_` over the literal list
         // for the body visit so registration loops expand
         // (`$app->helper($_ => …) for qw(a b c)` is N registrations).
-        // Scoped: saved and restored around the children walk.
-        let saved = self.constant_strings.get("$_").cloned();
+        // Bound from the statement's start (EXPR precedes LIST in the
+        // source) to its end, where the outer topic resumes.
         if !topic_values.is_empty() {
-            self.constant_strings.insert("$_".to_string(), topic_values);
+            self.with_topic(node, topic_values);
         }
-        self.queue_children_then(node, move |b| match saved {
-            Some(v) => {
-                b.constant_strings.insert("$_".to_string(), v);
-            }
-            None => {
-                b.constant_strings.remove("$_");
-            }
-        });
+        self.queue_children(node);
     }
 
     /// Is `node` a `mk_classdata`/`mk_classaccessor` call whose single arg is the

@@ -49,7 +49,7 @@ impl<'a> Builder<'a> {
         };
         let (named, residue) = crate::cst::string_list_with_residue(args, self.source, &mut |n| {
             let Ok(text) = n.utf8_text(self.source) else { return vec![] };
-            let Some(values) = self.resolve_constant_strings(text, 0) else { return vec![] };
+            let Some(values) = self.resolve_constant_strings(text, n) else { return vec![] };
             let span = node_to_span(n);
             values.into_iter().map(|v| (v, span)).collect()
         });
