@@ -458,9 +458,9 @@ pub trait CrossFileLookup {
         None
     }
 
-    /// Moves on every surface-changing write and every structure change (a
-    /// file added or removed, a provider swapped) — everything name lookups
-    /// read. Body-only edits leave it standing.
+    /// Moves when a fact every engine answer assumes without reading it
+    /// moves. An index without a store has no stored answer to keep, so the
+    /// default moves with everything.
     fn world_generation(&self) -> u64 {
         self.resolution_epoch()
     }
@@ -478,8 +478,7 @@ pub trait CrossFileLookup {
     }
 
     /// A digest of everything `world_generation` guards, recomputable by a
-    /// later process: two indexes with equal digests answer every name
-    /// lookup the same. `None`: this index does not persist answers.
+    /// later process. `None`: this index does not persist answers.
     fn world_digest(&self) -> Option<u64> {
         None
     }

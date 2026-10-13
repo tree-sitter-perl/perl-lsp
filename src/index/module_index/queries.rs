@@ -49,6 +49,7 @@ impl ModuleIndex {
         *guard = Some(root.map(String::from));
         self.core.workspace_root.condvar.notify_one();
         drop(guard);
+        self.core.world_bumps.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // The hub's relational-ref-index reader: the SAME cache key the
         // resolver thread writes under (both spell it as this root string),
         // so retrieval and shred always address one DB.

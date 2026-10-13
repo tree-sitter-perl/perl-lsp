@@ -85,6 +85,10 @@ pub(crate) struct IndexCore {
     /// missed bump is silent staleness, so mutators bump even when a gen
     /// mint usually accompanies them.
     pub(crate) shape_bumps: std::sync::atomic::AtomicU64,
+    /// Moves when a fact every answer assumes without reading it moves:
+    /// the `@INC` roots and the workspace root. Everything else an answer
+    /// reads is a recorded dependency.
+    pub(crate) world_bumps: std::sync::atomic::AtomicU64,
     /// Long-distance answers, verified on read against what they read
     /// (`model::witnesses::engine`).
     pub(crate) answers: crate::model::witnesses::engine::AnswerStore,
@@ -177,6 +181,7 @@ impl IndexCore {
             open_callers: DashMap::new(),
             open_bumps: std::sync::atomic::AtomicU64::new(0),
             world_digest: Mutex::new(None),
+            world_bumps: std::sync::atomic::AtomicU64::new(0),
             long_lived: std::sync::atomic::AtomicBool::new(false),
             bag_cache: Arc::new(std::sync::RwLock::new(None)),
             conclusion_cache: Arc::new(std::sync::RwLock::new(None)),
@@ -194,6 +199,7 @@ impl IndexCore {
         if let Ok(mut g) = self.inc_roots.write() {
             *g = Arc::new(canon);
         }
+        self.world_bumps.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Mint a fresh monotonic registration generation for `path`. The
@@ -401,7 +407,7 @@ pub(crate) fn strip_import_copy_one(
     }
 }
 
-/// `CrossFileLookup::world_digest` and the source stamps it was built from.
+/// `CrossFileLookup::world_digest`, and the held files' source stamps.
 pub(crate) struct WorldDigest {
     /// `(world_generation, gen_counter, held files)` when built.
     pub(crate) key: (u64, u64, usize),

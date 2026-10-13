@@ -2561,6 +2561,37 @@ fn persisted_param_answer_adopts_only_while_its_reads_hold() {
     );
 }
 
+/// A stored join stands through edits it never read — even one that
+/// changes another file's surface — and recomputes when a relation it read
+/// moves (a new caller arrives).
+#[test]
+fn a_join_recomputes_only_when_what_it_read_moves() {
+    use crate::model::witnesses::engine::{take_computed, EngineKey};
+    let greeter = parse_source_to_cached(GREETER_METHOD, "Greeter");
+    let app = parse_source_to_cached(
+        "package App;\nsub run { Greeter->greet(bless({}, 'User')) }\n1;\n",
+        "App",
+    );
+    let other = parse_source_to_cached("package Other;\nsub x { 1 }\n1;\n", "Other");
+    let idx = index_of(&[&greeter, &app, &other]);
+    let joins = |keys: Vec<EngineKey>| keys.into_iter().filter(|k| matches!(k, EngineKey::Join(_))).count();
+    assert_eq!(greet_param_type(&greeter, &idx).and_then(|t| t.class_name().map(str::to_string)).as_deref(), Some("User"));
+    assert!(joins(take_computed()) > 0, "the first ask computes the join");
+
+    let other_moved = parse_source_to_cached("package Other;\nsub x { 1 }\nsub y { 2 }\n1;\n", "Other");
+    idx.register_workspace_module(other_moved.path.to_path_buf(), Arc::clone(&other_moved.analysis()));
+    assert_eq!(greet_param_type(&greeter, &idx).and_then(|t| t.class_name().map(str::to_string)).as_deref(), Some("User"));
+    assert_eq!(joins(take_computed()), 0, "a surface edit to a file the join never read leaves it standing");
+
+    let admin = parse_source_to_cached(
+        "package Adm;\nsub run { Greeter->greet(bless({}, 'Admin')) }\n1;\n",
+        "Adm",
+    );
+    idx.register_workspace_module(admin.path.to_path_buf(), Arc::clone(&admin.analysis()));
+    assert_eq!(greet_param_type(&greeter, &idx), None, "the new caller disagrees");
+    assert!(joins(take_computed()) > 0, "a new caller moves the mentions the join read");
+}
+
 /// Callers passing a class and its subclass agree on the class.
 #[test]
 fn param_type_joins_a_class_and_its_subclass() {

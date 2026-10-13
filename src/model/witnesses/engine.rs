@@ -16,15 +16,16 @@
 //!   which files mention it, ...), by the hash of the value read. A body
 //!   edit that adds or removes a call site moves the mentions relation
 //!   without touching any surface.
-//! - the world generation, carried on the entry: every surface-changing
-//!   write and every structure change (a file added, removed, a provider
-//!   swapped) moves it. Name lookups (exporters, parents, declarers, bridges)
-//!   read only surfaces, so this one number covers them.
+//! - the world generation, carried on the entry: what every answer assumes
+//!   without reading it (the `@INC` and workspace roots). Nothing a file
+//!   edit or a registration changes is in it; those reach an answer only
+//!   through the two dependencies above, so an edit stales only the answers
+//!   that read what it moved.
 //!
 //! Lookup is two-tier. When nothing in the index moved since the entry was
 //! verified (`resolution_epoch` equal) it is a hit outright. Otherwise the
 //! entry is re-verified: same world, every file at its recorded version,
-//! every mentions set unchanged — then the answer stands and is re-stamped
+//! every relation hashing the same — then the answer stands and is re-stamped
 //! at the current epoch without recomputing. An edit to a file the answer
 //! never read costs one verification, not a recomputation.
 //!
@@ -46,7 +47,7 @@
 //!
 //! Whole entries outlive the process as a graph (`PersistedNode`): each
 //! node's own reads in terms a later process can check (a file by its
-//! `source_stamp`, a mentions set by its hash, the world by `world_digest`),
+//! `source_stamp`, a relation by its hash, the world by `world_digest`),
 //! and each child by the hash of the value it read. A later process adopts a
 //! node when its reads hold and every child — adopted or recomputed — still
 //! hashes the same, so an edit one process saw stops at the first answer
@@ -516,6 +517,18 @@ thread_local! {
     /// Depth of `untracked` scopes: reads inside one belong to a relation
     /// whose own hash is the recorded dependency, not to the open frame.
     static UNTRACKED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static COMPUTED: RefCell<Vec<EngineKey>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The keys this thread computed (rather than served from the store)
+/// since the last call.
+#[cfg(test)]
+pub fn take_computed() -> Vec<EngineKey> {
+    COMPUTED.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }
 
 /// Run `f` without recording its reads into the open frames. For a derived
@@ -1104,6 +1117,8 @@ fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey, check: Check) -> 
         }
     }
     crate::util::ghost_stats::count("engine.compute");
+    #[cfg(test)]
+    COMPUTED.with(|c| c.borrow_mut().push(key.clone()));
     let world = idx.world_generation();
     let digest = idx.world_digest();
     let members_mark = MEMBERS.with(|m| m.borrow().len());

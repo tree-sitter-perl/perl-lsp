@@ -298,10 +298,11 @@ impl ModuleIndex {
 }
 
 impl ModuleIndex {
-    /// The current world digest, rebuilt when the index moved. Each held
-    /// file contributes its surface fingerprint where the freshness index
-    /// records one — a body edit leaves names standing — and its source
-    /// stamp otherwise.
+    /// The current world digest and source stamps, rebuilt when the index
+    /// moved. The digest covers what every answer assumes without reading
+    /// it (`world_bumps`' facts, plus the plugins that baked every
+    /// analysis); the stamps let a later process check the files an answer
+    /// read.
     pub(crate) fn world_digest_now(&self) -> Arc<super::index_core::WorldDigest> {
         use crate::model::file_analysis::CrossFileLookup;
         let held = self.core.cache.len() + self.all_files.len();
@@ -316,22 +317,27 @@ impl ModuleIndex {
             }
         }
         crate::util::ghost_stats::count("engine.world_digest");
-        let mut files: Vec<(std::path::PathBuf, u64)> = Vec::new();
-        self.for_each_cached_file(&mut |cached| {
-            files.push((cached.path.clone(), cached.analysis().source_stamp));
-        }).read();
-        files.sort();
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        for (path, stamp) in &files {
-            use std::hash::Hash;
-            path.hash(&mut h);
-            self.freshness.fingerprint_of(path).unwrap_or(*stamp).hash(&mut h);
-        }
         let digest = {
-            use std::hash::Hasher;
+            use std::hash::{Hash, Hasher};
+            static PLUGINS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            self.inc_roots().hash(&mut h);
+            self.workspace_root().hash(&mut h);
+            PLUGINS.get_or_init(crate::build::plugin::rhai_host::plugin_fingerprint).hash(&mut h);
             h.finish()
         };
-        let stamps = files.into_iter().filter(|(_, s)| *s != 0).collect();
+        // The stamps are the index's bookkeeping, not a read of the answer
+        // asking for one.
+        let mut stamps = std::collections::HashMap::new();
+        crate::model::witnesses::engine::untracked(|| {
+            self.for_each_cached_file(&mut |cached| {
+                let stamp = cached.analysis().source_stamp;
+                if stamp != 0 {
+                    stamps.insert(cached.path.clone(), stamp);
+                }
+            })
+            .read()
+        });
         let d = Arc::new(super::index_core::WorldDigest { key, digest, stamps });
         if let Ok(mut g) = self.core.world_digest.lock() {
             *g = Some(Arc::clone(&d));
@@ -425,7 +431,7 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn world_generation(&self) -> u64 {
-        self.core.shape_bumps.load(std::sync::atomic::Ordering::Relaxed) + self.freshness.write_count()
+        self.core.world_bumps.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn file_version(&self, path: &std::path::Path) -> Option<u64> {
