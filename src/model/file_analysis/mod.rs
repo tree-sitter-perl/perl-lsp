@@ -803,6 +803,13 @@ thread_local! {
     static RESOLVE_PASSES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
+/// Shortest fluent chain for which a `ResolvePass` pays off. Gated on cost,
+/// measured 2026-10-13 (cold `--check` A/B, single-threaded): on real
+/// projects, whose chains are short, keeping and sifting the memo made the
+/// stamp pass 7-8% slower (ensembl, Znuny). Below this length every chase is
+/// short anyway, so only a file with a long chain pays the bookkeeping.
+const PASS_MIN_CHAIN: usize = 32;
+
 /// Keeps path-independent resolve answers across top-level resolutions for
 /// as long as it lives. Only sound while every FileAnalysis the resolutions
 /// can reach is immutable and alive, so it borrows the one analysis it
@@ -810,14 +817,18 @@ thread_local! {
 pub(crate) struct ResolvePass<'a>(std::marker::PhantomData<&'a FileAnalysis>);
 
 impl<'a> ResolvePass<'a> {
-    /// `None` when `module_index` is present, or when the build memos are
-    /// off (`build_memos_disabled`): every top-level resolution then starts
-    /// from an empty memo.
+    /// `None` when `module_index` is present, when the file has no chain
+    /// long enough to pay for the bookkeeping (`PASS_MIN_CHAIN`), or when the
+    /// build memos are off (`build_memos_disabled`): every top-level
+    /// resolution then starts from an empty memo.
     pub(crate) fn open(
-        _analysis: &'a FileAnalysis,
+        analysis: &'a FileAnalysis,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<Self> {
-        if module_index.is_some() || crate::model::witnesses::build_memos_disabled() {
+        if module_index.is_some()
+            || analysis.refs.longest_call_chain() < PASS_MIN_CHAIN
+            || crate::model::witnesses::build_memos_disabled()
+        {
             return None;
         }
         RESOLVE_PASSES.with(|p| p.set(p.get() + 1));

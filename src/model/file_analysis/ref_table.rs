@@ -51,6 +51,10 @@ pub struct RefTable {
     /// the call spanning exactly an expression.
     #[serde(skip, default)]
     calls_by_span: Vec<usize>,
+    /// Most calls sharing one start point: a fluent chain's calls all open
+    /// where its first receiver does, so this is the file's deepest chain.
+    #[serde(skip, default)]
+    longest_call_chain: usize,
 }
 
 impl RefTable {
@@ -113,6 +117,12 @@ impl RefTable {
         self.calls_by_span.get(at).copied().filter(|&i| self.refs[i].span.start == *start)
     }
 
+    /// Calls in the file's deepest fluent chain (`a->b->c` is 2, the
+    /// receiver `a` is no call).
+    pub fn longest_call_chain(&self) -> usize {
+        self.longest_call_chain
+    }
+
     /// The first call-shaped ref whose span is exactly `span`.
     pub fn call_spanning(&self, span: Span) -> Option<usize> {
         let key = |i: usize| (self.refs[i].span.start, self.refs[i].span.end);
@@ -165,6 +175,12 @@ impl RefTable {
         }
         let refs = &self.refs;
         self.calls_by_span.sort_by_key(|&i| (refs[i].span.start, refs[i].span.end, i));
+        self.longest_call_chain = self
+            .calls_by_span
+            .chunk_by(|&a, &b| refs[a].span.start == refs[b].span.start)
+            .map(<[usize]>::len)
+            .max()
+            .unwrap_or(0);
     }
 
     /// Refresh the name/target lookups only — the enrichment refresh.
@@ -193,6 +209,7 @@ impl RefTable {
         self.by_key = HashMap::new();
         self.by_target = HashMap::new();
         self.calls_by_span = Vec::new();
+        self.longest_call_chain = 0;
         self.evicted = true;
     }
 
