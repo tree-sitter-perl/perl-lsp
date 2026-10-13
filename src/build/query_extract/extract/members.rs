@@ -14,17 +14,17 @@ pub(super) struct State {
     /// callee (`@ref.call` / `@ref.qcall` / `@ref.member.call`) and its
     /// argument list (`@arity.args`).
     pub(super) arg_counts_by_match: HashMap<usize, usize>,
-    /// Byte spans of the member tokens a `@ref.member.call` names. The plain
-    /// `@ref.member` pattern fires on them too, and the call wins.
+    /// Byte spans of the member tokens a `@ref.member.call` names. The
+    /// `@ref.member.value` pattern fires on them too, and the call wins.
     pub(super) called_members: std::collections::HashSet<(usize, usize)>,
     /// A callable's declared parameter arity, keyed by the parameter_list span.
     /// Associated to its def symbol by span containment in `into_file_analysis`
     /// (`@arity.sig` fires a separate match from the def name).
     param_sigs: Vec<(Span, ParamArity)>,
     /// `@member.recv` → the receiver span of a `recv.field` access, joined to
-    /// its `@ref.member` by match_id so the minted MethodCall ref carries it.
+    /// its `@ref.member.*` by match_id so the minted MethodCall ref carries it.
     pub(super) member_recv: HashMap<usize, (Span, String)>,
-    /// `@member.op` → the operator token's span, joined to `@ref.member` by
+    /// `@member.op` → the operator token's span, joined to `@ref.member.*` by
     /// match_id; which operator it is comes from `ops_at`.
     pub(super) member_op_span: HashMap<usize, Span>,
     /// `@member.op.<which>` → the operator the document names at a token
@@ -69,7 +69,7 @@ pub(super) fn count_args(members: &mut State, node: tree_sitter::Node<'_>, match
 }
 
 /// The member tokens the document names as called, read before any
-/// `@ref.member` at the same token is handled.
+/// `@ref.member.value` at the same token is handled.
 pub(super) fn collect_called(st: &mut ExtractState, e: &Event) {
     if e.cap == Capture::Ref(RefKind::MemberCall) {
         st.members.called_members.insert((e.start_byte, e.end_byte));
