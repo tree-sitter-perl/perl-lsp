@@ -71,6 +71,15 @@ fn cached_query(language: &Language, source: &'static str) -> Result<&'static Co
     Ok(leaked)
 }
 
+/// Every capture `pack`'s document mints, through the extractor's own
+/// compilation. Empty when the document does not compile, which the first
+/// extraction reports.
+pub fn document_captures(language: &Language, pack: &LangPack) -> Vec<Capture> {
+    cached_query(language, pack.query_source)
+        .map(|c| c.captures.iter().flatten().copied().collect())
+        .unwrap_or_default()
+}
+
 mod extract;
 mod packs;
 mod skeleton;

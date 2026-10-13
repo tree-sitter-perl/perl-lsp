@@ -76,10 +76,13 @@ the fields the pack lane carries per file.
   the document is still rule #15's work, done per language as each lane
   moves. R's constructors and imports and CMake's command families already
   live in their documents.
-- The pack's capability bools (`implicit_this_members`,
-  `include_path_tokens`, `preprocessor_macros`, `brace_scoped_members`)
-  hold no strings and are not counted. Each is a statement the document
-  can make about itself.
+- A capability the document already states is read off the compiled
+  document, never kept as a pack bool beside it: `#include`-style path
+  tokens are the document minting `@import.path`, a preprocessor is it
+  minting `@def.macro` (`LanguageRegistry::document_mints`). The bools
+  left (`implicit_this_members`, `brace_scoped_members`) hold no strings
+  and are not counted; each is a statement the document can make about
+  itself.
 - The allowlists today are the cursor sentinel's node-kind tables, cpp's
   declarator and receiver peels, cpp's member-operator map, the
   receiver-name lists, and cpp's `main` entry point.

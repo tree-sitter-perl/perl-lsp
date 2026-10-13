@@ -68,10 +68,6 @@ pub struct DriverCaps {
     /// See `LangPack::entrypoint_symbols` — symbols the runtime enters
     /// through the ABI, alive at zero fan-in by contract.
     pub entrypoint_symbols: &'static [&'static str],
-    /// See `LangPack::include_path_tokens`.
-    pub include_path_tokens: bool,
-    /// See `LangPack::preprocessor_macros`.
-    pub preprocessor_macros: bool,
 }
 
 /// Everything the server needs to host one language: parse + analyze a
@@ -408,8 +404,6 @@ impl LanguageDriver for PackDriver {
             pack_invalidation: true,
             cross_file_words: true,
             entrypoint_symbols: pack.entrypoint_symbols,
-            include_path_tokens: pack.include_path_tokens,
-            preprocessor_macros: pack.preprocessor_macros,
             ..Default::default()
         }
     }
@@ -1493,21 +1487,27 @@ pub struct LanguageRegistry {
 }
 
 impl LanguageRegistry {
-    pub fn with_enabled() -> Self {
-        #[cfg_attr(
-            not(feature = "pack-langs"),
-            allow(unused_mut)
-        )]
-        let mut drivers: Vec<Box<dyn LanguageDriver>> = vec![Box::new(PerlDriver)];
-        #[cfg(feature = "cpp")]
-        drivers.push(Box::new(cpp_driver()));
-        #[cfg(feature = "python")]
-        drivers.push(Box::new(python_driver()));
-        #[cfg(feature = "r")]
-        drivers.push(Box::new(r_driver()));
-        #[cfg(feature = "cmake")]
-        drivers.push(Box::new(cmake_driver()));
-        LanguageRegistry { drivers }
+    /// The registry, built once per process. Which drivers a binary serves
+    /// is fixed at compile time, and capability asks reach for it on the
+    /// keystroke path, several per diagnostics publish.
+    pub fn with_enabled() -> &'static Self {
+        static REGISTRY: std::sync::OnceLock<LanguageRegistry> = std::sync::OnceLock::new();
+        REGISTRY.get_or_init(|| {
+            #[cfg_attr(
+                not(feature = "pack-langs"),
+                allow(unused_mut)
+            )]
+            let mut drivers: Vec<Box<dyn LanguageDriver>> = vec![Box::new(PerlDriver)];
+            #[cfg(feature = "cpp")]
+            drivers.push(Box::new(cpp_driver()));
+            #[cfg(feature = "python")]
+            drivers.push(Box::new(python_driver()));
+            #[cfg(feature = "r")]
+            drivers.push(Box::new(r_driver()));
+            #[cfg(feature = "cmake")]
+            drivers.push(Box::new(cmake_driver()));
+            LanguageRegistry { drivers }
+        })
     }
 
     /// The id of the driver that serves files no other driver claims —
@@ -1593,7 +1593,8 @@ impl LanguageRegistry {
     /// surfaces — the LSP handlers and their CLI/--batch mirrors — so
     /// editor and gold cannot answer it differently.
     pub fn has_include_tokens(id: &str) -> bool {
-        Self::caps(id).include_path_tokens
+        use crate::build::query_extract::{Capture, ImportCap};
+        Self::document_mints(id, Capture::Import(ImportCap::Path))
     }
 
     /// Does this language's pack declare a C-style preprocessor — `#define`
@@ -1601,7 +1602,33 @@ impl LanguageRegistry {
     /// completion offers? Same asked-never-named contract as
     /// `has_include_tokens`.
     pub fn has_preprocessor_macros(id: &str) -> bool {
-        Self::caps(id).preprocessor_macros
+        use crate::build::query_extract::{Capture, DefKind, DefPart};
+        Self::document_mints(id, Capture::Def { kind: DefKind::Macro, part: DefPart::Node })
+    }
+
+    /// Does `id`'s query document mint `capture`? A capability the document
+    /// states is read off what compiles, never a pack bool beside it that can
+    /// disagree with the patterns (rule #15). The compilation is the
+    /// extractor's own, and the answer is memoized per language because it
+    /// cannot change within a process.
+    fn document_mints(id: &str, capture: crate::build::query_extract::Capture) -> bool {
+        use crate::build::query_extract::Capture;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex, OnceLock};
+        static MINTS: OnceLock<Mutex<HashMap<String, Arc<Vec<Capture>>>>> = OnceLock::new();
+        let memo = MINTS.get_or_init(Default::default);
+        if let Some(caps) = memo.lock().unwrap().get(id) {
+            return caps.contains(&capture);
+        }
+        let caps: Arc<Vec<Capture>> = Arc::new(
+            LanguageRegistry::with_enabled()
+                .for_id(id)
+                .and_then(|d| Some((d.make_parser().language()?.clone(), d.lang_pack()?)))
+                .map(|(language, pack)| crate::build::query_extract::document_captures(&language, &pack))
+                .unwrap_or_default(),
+        );
+        memo.lock().unwrap().insert(id.to_string(), Arc::clone(&caps));
+        caps.contains(&capture)
     }
 
     /// The driver that serves files no driver claims — found by asking each

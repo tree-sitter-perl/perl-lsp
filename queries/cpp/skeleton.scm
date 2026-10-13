@@ -13,8 +13,11 @@
 ; capture the string CONTENT for quoted paths so the cache key is the
 ; clean relative path ("util.h", not "\"util.h\""); system <...>
 ; headers have no content node, so keep the whole token. ----
-(preproc_include path: (string_literal (string_content) @import.name))
-(preproc_include path: (system_lib_string) @import.name)
+; `#include` splices a PATH and binds no name, so the capture says so; the
+; path-shaped lanes (goto-def on a header, "who includes this") are on for a
+; language whose document mints it.
+(preproc_include path: (string_literal (string_content) @import.path))
+(preproc_include path: (system_lib_string) @import.path)
 
 ; ---- #define macros become SYMBOLS (completion / goto-def / outline).
 ; For a macro-heavy API (perl5: Newx/SvPV; embedded HALs) the macros ARE

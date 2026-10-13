@@ -96,6 +96,9 @@ spelled! {
         /// The whole import statement (pattern anchor).
         Statement = "",
         Name = "name",
+        /// An import token that is a source PATH, not a name: C/C++
+        /// `#include` splices a file and binds no name.
+        Path = "path",
         /// The module an import CALL names (R `library(pkg)`, CMake
         /// `include(f)`), as written.
         Arg = "arg",

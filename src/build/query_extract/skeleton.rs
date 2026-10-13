@@ -1109,7 +1109,9 @@ impl SkeletonAnalysis {
             param_regions: std::mem::take(&mut self.param_regions),
             ..Default::default()
         };
+        let fold_ranges = fold_ranges_of(&self.scopes);
         let mut fa = FileAnalysis::new(FileAnalysisParts {
+            fold_ranges,
             scopes: self.scopes,
             symbols,
             refs,
@@ -1145,4 +1147,24 @@ fn symbol_flags_of(kind: DefKind, attributes: &[String]) -> SymbolFlags {
         }
     }
     flags
+}
+
+/// Folding follows the scopes the document minted, so an editor folds the
+/// same structure navigation walks: every multi-line scope but the file is
+/// a region, one per line pair (a definition and its body block often span
+/// the same lines).
+fn fold_ranges_of(scopes: &[crate::model::file_analysis::Scope]) -> Vec<crate::model::file_analysis::FoldRange> {
+    use crate::model::file_analysis::{FoldKind, FoldRange, ScopeKind};
+    let mut lines: Vec<(usize, usize)> = scopes
+        .iter()
+        .filter(|sc| !matches!(sc.kind, ScopeKind::File))
+        .map(|sc| (sc.span.start.row, sc.span.end.row))
+        .filter(|(start, end)| end > start)
+        .collect();
+    lines.sort_unstable();
+    lines.dedup();
+    lines
+        .into_iter()
+        .map(|(start_line, end_line)| FoldRange { start_line, end_line, kind: FoldKind::Region })
+        .collect()
 }

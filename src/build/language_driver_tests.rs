@@ -29,6 +29,17 @@ fn cpp_driver_analyzes_through_reparse() {
     assert!(boxsym.attributes.is_empty(), "unknown macro → no signal: {:?}", boxsym.attributes);
 }
 
+/// A pack folds where its document minted scopes: the class body, the method
+/// body and the nested block each fold once, and a one-line scope does not.
+#[cfg(feature = "cpp")]
+#[test]
+fn cpp_folds_follow_the_scopes() {
+    let src = "class Box {\n  int w() const {\n    if (x) {\n      return 1;\n    }\n    return 0;\n  }\n  int h() { return 2; }\n};\n";
+    let fa = cpp_driver().analyze(src);
+    let lines: Vec<(usize, usize)> = fa.fold_ranges.iter().map(|f| (f.start_line, f.end_line)).collect();
+    assert_eq!(lines, vec![(0, 8), (1, 6), (2, 4)], "{lines:?}");
+}
+
 #[cfg(feature = "cpp")]
 #[test]
 fn cpp_known_attribute_macro_signals_the_recovered_class() {
@@ -617,28 +628,12 @@ fn implicit_field_read_pass_gated_by_pack_capability() {
         "python: a bare name is never self.field");
     assert!(crate::build::packs::cpp_pack().implicit_this_members,
         "cpp: methods read members with implicit this->");
-
-    // Include-token capability: only C/C++ has `#include`-style path tokens;
-    // name-keyed-import languages answer false, so goto-def / references gate
-    // on the pack, never a language name.
-    assert!(crate::build::packs::cpp_pack().include_path_tokens,
-        "cpp: #include path tokens resolve to headers");
-    assert!(!crate::build::packs::python_pack().include_path_tokens,
-        "python: imports are name-keyed, no path tokens");
-
-    // Preprocessor capability: only C/C++ has `#define` macros; other packs
-    // answer false, so macro completion gates on the pack, never a language
-    // name.
-    assert!(crate::build::packs::cpp_pack().preprocessor_macros,
-        "cpp: #define macros are a completion surface");
-    assert!(!crate::build::packs::python_pack().preprocessor_macros,
-        "python: no C preprocessor");
 }
 
 // The by-id capability askers on the registry are THE include-token /
 // preprocessor gates for both serving surfaces (LSP handlers and their
-// CLI/--batch mirrors) — pin their answers so the shared gate can't
-// silently regress to a language-name probe on either side.
+// CLI/--batch mirrors). Each answer is read off what the language's
+// document mints (`@import.path`, `@def.macro`), never a pack bool.
 #[cfg(feature = "cpp")]
 #[test]
 fn capability_askers_answer_by_language_id() {
@@ -951,8 +946,6 @@ fn driver_caps_axes_are_reviewed_exhaustively() {
             pack_invalidation,
             cross_file_words,
             entrypoint_symbols,
-            include_path_tokens,
-            preprocessor_macros,
         } = d.caps();
         // The hub lanes (enrichment, native cursor/hover/rebuild verbs) and
         // the pack lanes (invalidator, gather, bare words) are disjoint
@@ -966,8 +959,6 @@ fn driver_caps_axes_are_reviewed_exhaustively() {
         let pack_family = pack_invalidation
             || context_gather
             || cross_file_words
-            || include_path_tokens
-            || preprocessor_macros
             || !entrypoint_symbols.is_empty();
         assert!(
             !(hub_family && pack_family),
