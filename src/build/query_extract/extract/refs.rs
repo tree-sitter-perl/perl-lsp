@@ -28,9 +28,6 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         return;
     }
     let m = &st.members;
-    if ref_kind == RefKind::MemberValue && m.called_members.contains(&(e.start_byte, e.end_byte)) {
-        return;
-    }
     let simple = m.member_simple.get(&e.match_id).copied().unwrap_or(false);
     let member_op = simple.then(|| m.member_op_raw.get(&e.match_id).copied()).flatten();
     // Reset-via-method: a rebinding method call on a simple-var
