@@ -8,7 +8,7 @@ way down: a distinct ref kind, a distinct witness attachment, a distinct
 ancestor walk. There is no shape tag on a shared ref, no source tag the
 registry partitions on, and no per-pack strictness flag.
 
-## The three seams
+## The seams
 
 - **Ref kind.** `RefKind::FieldAccess { invocant, invocant_span,
   member_name_span, member_op }` is the value access; `RefKind::MethodCall`
@@ -16,7 +16,9 @@ registry partitions on, and no per-pack strictness flag.
   the invocant ladder (`method_call_invocant_type` / `_class`), op-DX and
   the rename token gate serve both without a kind branch. The frozen
   dispatch edge (`RefBinding::Method` / `MethodTarget`) rides both — for a
-  `FieldAccess` it lands on the field symbol.
+  `FieldAccess` it lands on the field symbol. The pack extractor mints
+  the kind from the argument list: a member token with one beside it
+  (spaced or not) is a call, one without reads a value.
 - **Attachment.** A field's value edge is `Field{owner, name} →
   Edge(Variable{decl})`, pushed per field declaration by the pack
   extractor. `Field{owner, name}` is the storage slot's project-wide
@@ -37,6 +39,13 @@ registry partitions on, and no per-pack strictness flag.
   kind-less ladder (method return first, field fallback) for an asker
   with no ref in hand — the sentinel mid-keystroke, member hover before a
   ref exists.
+
+- **Target.** `TargetRef.member_kind` carries the family the cursor
+  stated: a `FieldAccess` cursor or a stored-member declaration is
+  `Value`, a `MethodCall` cursor or a sub declaration `Callable`. The
+  override family and rename chain walk that family, and the collector
+  admits a declaration (`admits_decl`) and a use (`admits_ref`) under the
+  SCANNED file's member namespace. Outgoing calls skip value reads.
 
 ## A language decides how its classes hold members
 

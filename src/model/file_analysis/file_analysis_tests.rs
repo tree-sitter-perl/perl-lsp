@@ -424,7 +424,7 @@ fn test_fq_method_call_nav_dispatches_from_named_class() {
 
     // rename resolves to the bare method on the qualifier class.
     match fa.rename_kind_at(Point::new(4, 22), None) {
-        Some(RenameKind::Method { name, class }) => {
+        Some(RenameKind::Method { name, class, .. }) => {
             assert_eq!(name, "build");
             assert_eq!(class, "Widget");
         }
@@ -488,7 +488,7 @@ fn test_super_method_nav_resolves_to_parent() {
     assert_eq!(def.start.row, 1, "SUPER::greet resolves to Base::greet, got {:?}", def);
     // Renaming targets the parent method on `Base` (so the SUPER call tracks).
     match fa.rename_kind_at(span.start, None) {
-        Some(RenameKind::Method { name, class }) => {
+        Some(RenameKind::Method { name, class, .. }) => {
             assert_eq!(name, "greet");
             assert_eq!(class, "Base");
         }
@@ -1845,7 +1845,7 @@ $dog->speak();
 
     // Inherited (defined in Animal, not in Dog) — chain runs
     // child → defining ancestor and stops.
-    let chain = fa.method_rename_chain("Dog", "breathe", None);
+    let chain = fa.member_rename_chain("Dog", "breathe", MemberKind::Callable, None);
     assert_eq!(
         chain,
         vec!["Dog".to_string(), "Animal".to_string()],
@@ -1855,7 +1855,7 @@ $dog->speak();
     // Override (Dog defines `speak` itself) — chain stops at
     // child. Walking past the override into Animal would lump
     // two semantically distinct methods together in one rename.
-    let chain = fa.method_rename_chain("Dog", "speak", None);
+    let chain = fa.member_rename_chain("Dog", "speak", MemberKind::Callable, None);
     assert_eq!(
         chain,
         vec!["Dog".to_string()],
@@ -1865,7 +1865,7 @@ $dog->speak();
 
     // Unknown method: degrade to the original class so the
     // backend's per-class rename still runs (no edits, no harm).
-    let chain = fa.method_rename_chain("Dog", "nonexistent", None);
+    let chain = fa.member_rename_chain("Dog", "nonexistent", MemberKind::Callable, None);
     assert_eq!(chain, vec!["Dog".to_string()]);
 }
 
@@ -3035,6 +3035,12 @@ fn a_member_ask_crosses_families_only_in_a_shared_namespace() {
         assert!(MemberKind::Callable.admits_decl(k, MemberNamespace::PerFamily));
         assert!(!MemberKind::Value.admits_decl(k, MemberNamespace::PerFamily));
         assert!(MemberKind::Value.admits_decl(k, MemberNamespace::Shared));
+    }
+    for (want, other) in [(MemberKind::Value, MemberKind::Callable), (MemberKind::Callable, MemberKind::Value)] {
+        assert!(want.admits_ref(Some(want), MemberNamespace::PerFamily));
+        assert!(!want.admits_ref(Some(other), MemberNamespace::PerFamily));
+        assert!(want.admits_ref(Some(other), MemberNamespace::Shared));
+        assert!(want.admits_ref(None, MemberNamespace::PerFamily), "a non-member use is not refused");
     }
     assert_eq!(
         crate::model::conventions::PERL_SPELLINGS.member_namespace,

@@ -1205,6 +1205,7 @@ impl FileAnalysis {
                             return Some(RenameKind::Method {
                                 name: r.unqualified_target_name(self.names()).to_string(),
                                 class,
+                                member: MemberKind::of_ref(&r.kind),
                             });
                         }
                     }
@@ -1262,6 +1263,7 @@ impl FileAnalysis {
                     Some(RenameKind::Method {
                         name: sym.name.clone(),
                         class,
+                        member: Some(MemberKind::of_sym(sym.kind)),
                     })
                 }
                 SymKind::Package | SymKind::Class => Some(RenameKind::Package(sym.name.clone())),
@@ -1336,7 +1338,7 @@ impl FileAnalysis {
     ///
     /// Single-file rename primitive: exact-match on `scope`, no
     /// inheritance fan-out. Cross-file callers go through `refs_to`
-    /// (which calls `method_rename_chain` for MethodCall fan-out) and
+    /// (which calls `member_rename_chain` for MethodCall fan-out) and
     /// convert `RefLocation`s to edits directly.
     #[allow(dead_code)]
     fn rename_callable_in_scope(

@@ -197,18 +197,14 @@ fn delegation_macro_types_as_the_wrapped_functions_return() {
 #[cfg(feature = "cpp")]
 #[test]
 fn ctor_convention_unresolvable_uppercase_call_no_phantom_class() {
-    use crate::model::file_analysis::{InferredType, RefKind};
+    use crate::model::file_analysis::InferredType;
     let src = "void g(char *pv) {\n  auto rcpv = RCPVx(pv);\n  rcpv->refcount++;\n}\n";
     let fa = cpp_driver().analyze(src);
     let inv = fa
         .refs()
         .iter()
-        .find_map(|r| match &r.kind {
-            RefKind::MethodCall { invocant_span: Some(sp), .. } if r.target_name == "refcount" => {
-                Some(*sp)
-            }
-            _ => None,
-        })
+        .filter(|r| r.target_name == "refcount")
+        .find_map(|r| r.member_site()?.invocant_span)
         .expect("rcpv->refcount minted a member ref with an invocant span");
     let ty = fa.expr_type_at_span(inv, None);
     assert!(
@@ -401,7 +397,7 @@ fn expanded_macro_uses_still_carry_refs() {
 #[cfg(feature = "cpp")]
 #[test]
 fn cpp_brace_init_declaration_survives_declarator_strip() {
-    use crate::model::file_analysis::{RefKind, SymKind};
+    use crate::model::file_analysis::SymKind;
     let src = "struct Point { int x; int y; };\nint main() {\n  struct Point p {1, 2};\n  return p.x;\n}\n";
     let fa = cpp_driver().analyze(src);
     // No phantom Class minted from the declared variable.
@@ -420,10 +416,8 @@ fn cpp_brace_init_declaration_survives_declarator_strip() {
     let inv = fa
         .refs()
         .iter()
-        .find_map(|r| match &r.kind {
-            RefKind::MethodCall { invocant_span: Some(sp), .. } if r.target_name == "x" => Some(*sp),
-            _ => None,
-        })
+        .filter(|r| r.target_name == "x")
+        .find_map(|r| r.member_site()?.invocant_span)
         .expect("p.x minted a member ref with an invocant span");
     let t = fa.expr_type_at_span(inv, None).expect("receiver types");
     assert_eq!(t.class_name(), Some("Point"), "p types as Point: {t:?}");
@@ -475,16 +469,12 @@ fn h4_fixture() -> crate::model::file_analysis::FileAnalysis {
 fn h4_member_ref(
     fa: &crate::model::file_analysis::FileAnalysis,
 ) -> (crate::model::file_analysis::Span, Option<(crate::model::file_analysis::MemberOp, crate::model::file_analysis::Span)>) {
-    use crate::model::file_analysis::RefKind;
     fa.refs()
         .iter()
-        .find_map(|r| match &r.kind {
-            RefKind::MethodCall { invocant_span: Some(sp), member_op, .. }
-                if r.target_name == "size" && r.span.start.row == 5 =>
-            {
-                Some((*sp, *member_op))
-            }
-            _ => None,
+        .filter(|r| r.target_name == "size" && r.span.start.row == 5)
+        .find_map(|r| {
+            let site = r.member_site()?;
+            Some((site.invocant_span?, site.member_op.copied()))
         })
         .expect("w.size on the spliced line minted a member ref with an invocant span")
 }

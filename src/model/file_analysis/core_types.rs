@@ -898,6 +898,26 @@ impl MemberKind {
             MemberNamespace::Shared => true,
         }
     }
+
+    /// The family a ref's own kind states: a value read is `Value`, a call
+    /// `Callable`, anything else no member at all.
+    pub fn of_ref(kind: &RefKind) -> Option<MemberKind> {
+        match kind {
+            RefKind::FieldAccess { .. } => Some(MemberKind::Value),
+            RefKind::MethodCall { .. } => Some(MemberKind::Callable),
+            _ => None,
+        }
+    }
+
+    /// May a use of family `other` reference a target of this family? The
+    /// same rule as `admits_decl`, read from the use's side; a use that is
+    /// no member access is not this rule's to refuse.
+    pub fn admits_ref(self, other: Option<MemberKind>, namespace: MemberNamespace) -> bool {
+        match namespace {
+            MemberNamespace::PerFamily => other.is_none_or(|o| o == self),
+            MemberNamespace::Shared => true,
+        }
+    }
 }
 
 /// How a language's classes hold their members. A language declares it on
@@ -1474,11 +1494,12 @@ pub enum RenameKind {
     /// walks don't rename same-named subs in unrelated packages.
     Function { name: String, package: Option<String> },
     Package(String),
-    /// A method with its owning class. Cross-file walks use `class`
-    /// to avoid unioning unrelated classes that share a method name
+    /// A member with its owning class. Cross-file walks use `class`
+    /// to avoid unioning unrelated classes that share a member name
     /// (e.g. `Foo::run` vs `Bar::run`, mojo-helper leaves vs route
-    /// targets).
-    Method { name: String, class: String },
+    /// targets); `member` is the family the cursor's own syntax or
+    /// declaration states (`None` where neither told).
+    Method { name: String, class: String, member: Option<MemberKind> },
     HashKey(String),
     /// Rename a `Handler` by (owner, name) — touches the handler symbol's
     /// name + every `DispatchCall` ref targeting it.

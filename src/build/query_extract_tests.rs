@@ -181,7 +181,7 @@ fn query_skeleton_differential_report() {
         for r in fa.refs() {
             if matches!(
                 r.kind,
-                RefKind::FunctionCall { .. } | RefKind::MethodCall { .. } | RefKind::Variable
+                RefKind::FunctionCall { .. } | RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } | RefKind::Variable
             ) {
                 builder_ref_pos.insert((r.span.start.row, r.span.start.column));
             }
@@ -2181,6 +2181,30 @@ fn cpp_fa(src: &str) -> crate::model::file_analysis::FileAnalysis {
     extract(&tree, src.as_bytes(), &cpp_pack())
         .unwrap()
         .into_file_analysis()
+}
+
+/// A member token with an argument list beside it is a call; without one
+/// it reads a value — spaced or not, the extractor states which.
+#[test]
+fn cpp_member_read_is_a_field_access_and_a_member_call_is_a_method_call() {
+    use crate::model::file_analysis::RefKind;
+    let fa = cpp_fa(
+        "struct S { int n; int f(int); };\n\
+         int g(S s) { return s.n + s.f(1) + s.f (2); }\n",
+    );
+    let kinds = |name: &str| -> Vec<(bool, Option<usize>)> {
+        fa.refs()
+            .iter()
+            .filter(|r| r.target_name == name && r.member_site().is_some())
+            .map(|r| (matches!(r.kind, RefKind::FieldAccess { .. }), r.arg_count))
+            .collect()
+    };
+    assert_eq!(kinds("n"), vec![(true, None)], "an uncalled member reads a value");
+    assert_eq!(
+        kinds("f"),
+        vec![(false, Some(1)), (false, Some(1))],
+        "a called member is a call, with or without space before its arguments"
+    );
 }
 
 /// C++ classes hold ONE member namespace: the nearest declaration of a

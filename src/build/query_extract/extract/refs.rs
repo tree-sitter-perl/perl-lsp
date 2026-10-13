@@ -42,6 +42,11 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             st.flow.flow_rebinds.push(((pack.shape_name)(recv_text), st.cur_scope, recv_span.start));
         }
     }
+    // A call ref's arg list opens right where its callee / method token
+    // ends; plain (uncalled) member/type refs have no adjacent arg list.
+    let arg_count = matches!(ref_kind, RefKind::Call | RefKind::QCall | RefKind::Member)
+        .then(|| m.arg_counts_by_start.get(&(e.end.row, e.end.column)).copied())
+        .flatten();
     st.out.refs.push(SkelRef {
         kind: ref_kind,
         name: (pack.shape_name)(&e.text),
@@ -50,11 +55,8 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         scope: st.cur_scope,
         invocant: m.member_recv.get(&e.match_id).cloned(),
         member_op,
-        // A call ref's arg list opens right where its callee /
-        // method token ends; plain (uncalled) member/type refs
-        // have no adjacent arg list and stay `None`.
-        arg_count: matches!(ref_kind, RefKind::Call | RefKind::QCall | RefKind::Member)
-            .then(|| m.arg_counts_by_start.get(&(e.end.row, e.end.column)).copied())
-            .flatten(),
+        arg_count,
+        // A member token with no argument list beside it reads a value.
+        value_read: ref_kind == RefKind::Member && arg_count.is_none(),
     });
 }

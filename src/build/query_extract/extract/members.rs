@@ -11,10 +11,10 @@ pub(super) struct State {
     /// Recorded at construction (the un-peeled node); gates op-DX at the mint.
     pub(super) member_simple: HashMap<usize, bool>,
     /// A call's written arg count, keyed by its argument_list's START point
-    /// (the `(`), which is adjacent to the callee/method name token's END — so
-    /// a ref finds its arity by `ref.end == arglist.start` without a match join
-    /// (member calls fire a separate match from their arg list). One entry per
-    /// `@arity.args`.
+    /// (the `(`) and by the END of the callee node before it — so a ref
+    /// finds its arity by adjacency without a match join (member calls fire
+    /// a separate match from their arg list), spaced (`f (x)`) or not.
+    /// Presence is also the fact that a member token is CALLED.
     pub(super) arg_counts_by_start: HashMap<(usize, usize), usize>,
     /// A callable's declared parameter arity, keyed by the parameter_list span.
     /// Associated to its def symbol by span containment in `into_file_analysis`
@@ -50,11 +50,15 @@ pub(super) fn flatten_recv(
 
 /// `@arity.args`: a call's argument_list — count its arguments (the named
 /// children; the C `...` at a CALL site never appears here). Keyed by the
-/// list's start so the callee ref finds it by adjacency.
+/// list's start and by its callee's end, so the callee ref finds it by
+/// adjacency whatever whitespace separates them.
 pub(super) fn count_args(members: &mut State, node: tree_sitter::Node<'_>) {
-    members
-        .arg_counts_by_start
-        .insert((node.start_position().row, node.start_position().column), node.named_child_count());
+    let count = node.named_child_count();
+    let at = |p: tree_sitter::Point| (p.row, p.column);
+    members.arg_counts_by_start.insert(at(node.start_position()), count);
+    if let Some(callee) = node.prev_named_sibling() {
+        members.arg_counts_by_start.insert(at(callee.end_position()), count);
+    }
 }
 
 /// `@arity.sig`: a callable's parameter_list — count declared params

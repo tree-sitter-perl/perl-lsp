@@ -817,7 +817,7 @@ impl FileAnalysis {
         let r = self
             .refs
             .iter()
-            .find(|r| r.span == site.slot_span && matches!(r.kind, RefKind::MethodCall { .. }))?;
+            .find(|r| r.span == site.slot_span && r.member_site().is_some())?;
         let class = self.method_call_invocant_class(r, module_index)?;
         let crate::model::witnesses::WitnessAttachment::Field { owner, .. } =
             self.field_subject(&class, &site.slot, module_index)
