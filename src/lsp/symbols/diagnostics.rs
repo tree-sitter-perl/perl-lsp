@@ -337,6 +337,22 @@ pub fn collect_diagnostics(
             .chain(analysis.plugin.meta_methods.iter().map(|s| s.as_str()))
             .collect();
     let _g_meth = crate::util::ghost_stats::ScopedNs::start("diag.3_unresolved_method_loop");
+    // With the warning limited to local classes, a call whose method every
+    // such class answers can never warn, whatever its receiver's type: its
+    // receiver is not typed. Typing a receiver can mean joining every
+    // caller of a sub across the index, and most receivers are not local.
+    let local_classes: Option<Vec<String>> = (!options.unresolved_method_cross_file).then(|| {
+        let mut out: Vec<String> = analysis
+            .symbols()
+            .iter()
+            .filter(|s| matches!(s.kind, FaSymKind::Class | FaSymKind::Package))
+            .map(|s| s.name.clone())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    });
+    let mut answered_by_every_local: std::collections::HashMap<&str, bool> = std::collections::HashMap::new();
     for r in analysis.refs() {
         let (invocant, _invocant_span) = match &r.kind {
             // A plugin-bridged token is plugin-resolved, not a receiver we
@@ -369,8 +385,24 @@ pub fn collect_diagnostics(
         // warnings on untyped invocants — and skips everything else.
         let class_name = match invocant.classify() {
             InvocantText::Bareword(b) => Some(b.to_string()),
-            InvocantText::Scalar(_) => analysis.inferred_type_via_bag_ctx(invocant, r.span.start, Some(module_index))
-                .and_then(|ty| ty.class_name().map(|s| s.to_string())),
+            InvocantText::Scalar(_) => {
+                let cannot_warn = local_classes.as_ref().is_some_and(|locals| {
+                    *answered_by_every_local.entry(method_name.as_str()).or_insert_with(|| {
+                        locals.iter().all(|c| {
+                            analysis.resolve_method_in_ancestors(c, method_name, Some(module_index)).is_some()
+                        })
+                    })
+                });
+                if cannot_warn {
+                    crate::util::ghost_stats::count("diag.3_receiver_untyped_answered_locally");
+                    None
+                } else {
+                    crate::util::ghost_stats::count("diag.3_receiver_typed");
+                    analysis
+                        .inferred_type_via_bag_ctx(invocant, r.span.start, Some(module_index))
+                        .and_then(|ty| ty.class_name().map(|s| s.to_string()))
+                }
+            }
             _ => None,
         };
         let class_name = match class_name {

@@ -1645,10 +1645,6 @@ impl ReducerRegistry {
         EngineValue::Value(joined.map_or(ReducedValue::None, ReducedValue::Type))
     }
 
-    /// One caller file's part of a join: the argument `join.want` names at
-    /// each call site of the sub in `file`, folded. A method call counts when
-    /// its receiver is the package or a subclass, or untyped (a may-caller);
-    /// a function call when it names the package or calls the bare name.
     /// A candidate's verdict on `q` through its consult key; `None` when
     /// the index keeps no answers (a scoped view), where the caller chases
     /// it inline.
@@ -1702,6 +1698,10 @@ impl ReducerRegistry {
         (*self.query_rec(&full.witnesses, &q, &mut QueryState::new())).clone()
     }
 
+    /// One caller file's part of a join: the argument `join.want` names at
+    /// each call site of the sub in `file`, folded. A method call counts when
+    /// its receiver is the package or a subclass, or untyped (a may-caller);
+    /// a function call when it names the package or calls the bare name.
     pub(super) fn param_contribution(
         &self,
         idx: &dyn crate::model::file_analysis::CrossFileLookup,
