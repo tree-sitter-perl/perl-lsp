@@ -17,9 +17,10 @@ registry partitions on, and no per-pack strictness flag.
   the rename token gate serve both without a kind branch. The frozen
   dispatch edge (`RefBinding::Method` / `MethodTarget`) rides both — for a
   `FieldAccess` it lands on the field symbol. The pack document states
-  the kind: `@ref.member` is a read, `@ref.member.call` a call whose
-  pattern also captures its argument list (`@arity.args`, joined by
-  match). Both fire at a called member's token and the call wins.
+  the kind: `@ref.member.value` is a read, `@ref.member.call` a call
+  whose pattern also captures its argument list (`@arity.args`, joined by
+  match). A query cannot exclude a called member from the value pattern,
+  so both fire at that token and the call wins.
 - **Attachment.** A field's value edge is `Field{owner, name} →
   Edge(Variable{decl})`, pushed per field declaration by the pack
   extractor. `Field{owner, name}` is the storage slot's project-wide
