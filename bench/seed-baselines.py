@@ -10,7 +10,8 @@ is just a moving average wearing a baseline's clothes.
 What qualifies as a KPI lives here, on purpose, in one place:
   batch : check.wall + peak RSS (cold and warm medians), per-file build
           p50/p99/max — the leading indicator that catches the next
-          20-second file before a user does.
+          20-second file before a user does. The p99 row also names
+          its `tail`: every file at or above it, so a move says which.
   editor: startup ready, per-verb p50/p99, diagnostics push, server RSS
           (from lsp_bench --jsonl rows, when the run contains them).
 Counters and per-file lanes are DIAGNOSTICS, never baselined: they exist to
@@ -31,6 +32,7 @@ def main():
     run = None
     vals = defaultdict(list)          # (corpus, phase, metric) -> samples
     files = defaultdict(list)         # (corpus, phase, rep) -> per-file build ms
+    by_file = defaultdict(lambda: defaultdict(list))  # (corpus, phase) -> module -> ms per rep
     for line in open(path):
         r = json.loads(line)
         if r.get("t") == "run":
@@ -45,6 +47,7 @@ def main():
             vals[(c, p, "check.peak_rss_mb")].append(r["value"])
         elif k == "file_build":
             files[(c, p, r["rep"])].append(r["value"])
+            by_file[(c, p)][r["name"]].append(r["value"])
         elif k == "startup":
             vals[(c, p, f"editor.{r['name']}_ms")].append(r["value"])
         elif k == "verb_ms":
@@ -63,7 +66,7 @@ def main():
     out = []
     def row(corpus, phase, metric, samples):
         if not samples:
-            return
+            return None
         out.append({
             "date": run["ts"][:10], "sha": run["sha"], "dirty": run.get("dirty"),
             "host": run.get("host"), "corpus": corpus, "phase": phase,
@@ -72,6 +75,7 @@ def main():
             "spread": round(max(samples) - min(samples), 2),
             "note": note,
         })
+        return out[-1]
     for (c, p, mname), samples in sorted(vals.items()):
         row(c, p, mname, samples)
     # Each distribution stat is taken PER REP, and the baseline is the median
@@ -87,7 +91,16 @@ def main():
         for suffix, f in stats.items():
             per_rep[(c, p, f"file_build_ms{suffix}")].append(f(samples))
     for (c, p, mname), samples in sorted(per_rep.items()):
-        row(c, p, mname, samples)
+        r = row(c, p, mname, samples)
+        if mname == "file_build_ms.p99":
+            # The files that ARE the tail: a p99 move is only actionable
+            # when it names what got slower. Ranked by each file's median
+            # across reps, so one noisy rep cannot put a file in or out.
+            tail = [{"file": f, "ms": round(st.median(v), 2),
+                     "spread": round(max(v) - min(v), 2), "reps": len(v)}
+                    for f, v in by_file[(c, p)].items()
+                    if st.median(v) >= r["value"]]
+            r["tail"] = sorted(tail, key=lambda t: -t["ms"])
 
     with open("bench/baselines.jsonl", "a") as f:
         for r in out:
