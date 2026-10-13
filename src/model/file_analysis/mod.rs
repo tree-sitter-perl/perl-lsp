@@ -784,7 +784,7 @@ thread_local! {
     /// *depth*, this bounds *work*. Within one outermost resolution the
     /// FileAnalyses are immutable, so a node's answer is stable and safe
     /// to reuse; on-path (cycle-blocked) answers are never memoized.
-    static RESOLVE_MEMO: std::cell::RefCell<HashMap<ResolveNode, (Option<InferredType>, bool)>> =
+    static RESOLVE_MEMO: std::cell::RefCell<HashMap<ResolveNode, ResolveMemoEntry>> =
         std::cell::RefCell::new(HashMap::new());
     /// Times `enter` refused a node (on the path, or past the depth cap).
     /// An answer whose subtree saw a refusal depends on the path it was
@@ -854,6 +854,14 @@ const RESOLVE_DEPTH_CAP: usize = 256;
 /// the occurs check) rather than growing unbounded.
 const RESOLVE_MEMO_CAP: usize = 50_000;
 
+/// `(answer, path-independent, what computing it recorded)`: a hit inside
+/// an engine computation replays the recording (`engine::CaptureGuard`).
+type ResolveMemoEntry = (
+    Option<InferredType>,
+    bool,
+    Option<std::sync::Arc<crate::model::witnesses::engine::Captured>>,
+);
+
 /// RAII stack frame. `enter` returns `None` when `node` is already on
 /// the active stack (a return-type cycle → answer `None` instead of
 /// re-entering) or the depth cap is hit; otherwise pushes and pops on
@@ -863,6 +871,7 @@ struct ResolveGuard {
     node: ResolveNode,
     refusals_before: u64,
     truncations_before: u64,
+    capture: crate::model::witnesses::engine::CaptureGuard,
 }
 
 impl ResolveGuard {
@@ -878,6 +887,7 @@ impl ResolveGuard {
                     node,
                     refusals_before: RESOLVE_REFUSALS.with(|c| c.get()),
                     truncations_before: crate::model::witnesses::query_rec_truncations(),
+                    capture: crate::model::witnesses::engine::CaptureGuard::open(),
                 })
             }
         })
@@ -887,7 +897,11 @@ impl ResolveGuard {
     /// resolution (the guard clears the map on drain), or for the life of a
     /// `ResolvePass` when the answer was path-independent.
     fn memo_get(node: &ResolveNode) -> Option<Option<InferredType>> {
-        let (ty, shareable) = RESOLVE_MEMO.with(|m| m.borrow().get(node).cloned())?;
+        let (ty, shareable, captured) = RESOLVE_MEMO.with(|m| m.borrow().get(node).cloned())?;
+        if !crate::model::witnesses::engine::replay(captured.as_deref()) {
+            crate::util::ghost_stats::count("resolve_memo.unreplayable");
+            return None;
+        }
         crate::util::ghost_stats::count("resolve_memo.hit");
         if !shareable {
             // Reading a path-dependent answer makes the reader path-dependent.
@@ -904,7 +918,7 @@ impl ResolveGuard {
         RESOLVE_MEMO.with(|m| {
             let mut mm = m.borrow_mut();
             if mm.len() < RESOLVE_MEMO_CAP {
-                mm.insert(self.node, (ty, shareable));
+                mm.insert(self.node, (ty, shareable, self.capture.captured()));
             }
         });
     }
@@ -918,7 +932,7 @@ impl Drop for ResolveGuard {
             if st.is_empty() {
                 RESOLVE_MEMO.with(|m| {
                     if RESOLVE_PASSES.with(|p| p.get()) > 0 {
-                        m.borrow_mut().retain(|_, (_, shareable)| *shareable);
+                        m.borrow_mut().retain(|_, (_, shareable, _)| *shareable);
                     } else {
                         m.borrow_mut().clear();
                     }

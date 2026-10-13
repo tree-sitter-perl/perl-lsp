@@ -1480,3 +1480,76 @@ fn pack_facts_fields_are_ratcheted() {
         "PackFacts shrank to {fields} fields — lower the ratchet ({RATCHET}) so it keeps biting"
     );
 }
+
+/// Every `static` in the model, named, with why it cannot hold a value an
+/// engine answer would read without recording it. The answer engine trusts
+/// an answer's recorded reads (`model/witnesses/engine.rs`); a memo kept in
+/// a static that serves a cross-file value without replaying what computing
+/// it read would hide those reads, and the answer would never go stale. So
+/// a new static fails here until it says which of these it is: no value at
+/// all (a guard, a counter, a flag), a value replayed through
+/// `engine::CaptureGuard`, or a memo that refuses any query an index can
+/// reach. A `OnceLock<bool>` is an environment switch read once per process
+/// and is not listed.
+#[test]
+fn model_statics_cannot_hide_reads() {
+    let files = layer_files(&[Layer::Model]);
+    let mut seen: Vec<String> = Vec::new();
+    for (rel, text) in &files {
+        for line in text.lines().filter(|l| !l.trim_start().starts_with("//")) {
+            if line.contains("OnceLock<bool>") {
+                continue;
+            }
+            let Some(at) = line.find("static ") else { continue };
+            let before = &line[..at];
+            if !before.trim().is_empty() && !before.trim_end().ends_with("pub") && !before.trim_end().ends_with(')') {
+                continue;
+            }
+            let name: String = line[at + 7..].chars().take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_').collect();
+            if !name.is_empty() {
+                seen.push(format!("{rel}::{name}"));
+            }
+        }
+    }
+    let allow: &[(&str, &str)] = &[
+        ("model/builtins.rs::BUILTINS", "a constant table"),
+        ("model/file_analysis/cross_file.rs::IDS", "path interning: an id names a path, it answers nothing"),
+        ("model/file_analysis/mod.rs::RESOLVE_STACK", "the occurs check: the open resolutions, no values"),
+        ("model/file_analysis/mod.rs::RESOLVE_MEMO", "replays each entry's capture"),
+        ("model/file_analysis/mod.rs::RESOLVE_REFUSALS", "a counter"),
+        ("model/file_analysis/mod.rs::RESOLVE_PASSES", "a scope count"),
+        ("model/witnesses/conclusions.rs::IN_BAKE", "a flag"),
+        ("model/witnesses/conclusions.rs::REG", "the stateless reducer registry"),
+        ("model/witnesses/engine.rs::CHANGED_SERIAL", "the engine's own serial"),
+        ("model/witnesses/engine.rs::FRAMES", "the engine's open computations"),
+        ("model/witnesses/engine.rs::ASSUMED", "the engine's cycle assumptions"),
+        ("model/witnesses/engine.rs::MEMBERS", "the engine's provisional values"),
+        ("model/witnesses/engine.rs::UNSETTLED", "an engine flag"),
+        ("model/witnesses/engine.rs::CAPTURES", "the engine's open captures"),
+        ("model/witnesses/engine.rs::VERIFYING", "the engine's open checks"),
+        ("model/witnesses/engine.rs::UNTRACKED", "an engine scope count"),
+        ("model/witnesses/engine.rs::COMPUTED", "test-only record of computed keys"),
+        ("model/witnesses/mod.rs::NEXT", "a generation counter"),
+        ("model/witnesses/registry.rs::LAST_RESIDUAL", "the bake's residuals: the bake runs with no index"),
+        ("model/witnesses/registry.rs::FOLD_MEMO", "refuses any query with a module index"),
+        ("model/witnesses/registry.rs::FOLD_MEMO_FORCED_OFF", "a flag"),
+        ("model/witnesses/registry.rs::TOUCHED_EXPR", "a flag"),
+        ("model/witnesses/registry.rs::QUERY_REC_DEPTH", "a depth count"),
+        ("model/witnesses/registry.rs::QUERY_REC_DEPTH_WARNED", "a flag"),
+        ("model/witnesses/registry.rs::QUERY_REC_TRUNCATIONS", "a counter"),
+        ("model/witnesses/session.rs::SESSION", "the consult memo: replays each entry's capture"),
+        ("model/witnesses/session.rs::LAST_WALK_DEGRADED", "a flag"),
+    ];
+    let mut out = Vec::new();
+    for s in &seen {
+        if !allow.iter().any(|(a, _)| a == s) {
+            out.push(format!("{s}: a new static in the model — say here why it cannot hide an engine answer's reads"));
+        }
+    }
+    for (a, _) in allow {
+        if !seen.iter().any(|s| s == a) {
+            out.push(format!("{a}: allowlisted but gone — drop the entry"));
+        }
+    }
+    assert!(out.is_empty(), "{}", out.join("\n"));
+}
