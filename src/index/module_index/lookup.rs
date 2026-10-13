@@ -448,12 +448,12 @@ impl CrossFileLookup for ModuleIndex {
         self.world_digest_now().stamps.get(path).copied()
     }
 
-    fn persisted_answer(&self, key: &[u8]) -> Option<Vec<u8>> {
+    fn persisted_node(&self, key: &[u8]) -> Option<Arc<crate::model::witnesses::engine::PersistedNode>> {
         if self.core.persisted_answers.get().is_none() {
             // Not latched until the store opens: a lookup racing startup
             // must not pin an empty table for the process's lifetime.
             let rows = self.with_rows_conn(crate::index::module_cache::load_answers)?;
-            let _ = self.core.persisted_answers.set(rows.into_iter().collect());
+            let _ = self.core.persisted_answers.set(rows.into_iter().map(|(k, n)| (k, Arc::new(n))).collect());
         }
         self.core.persisted_answers.get()?.get(key).cloned()
     }

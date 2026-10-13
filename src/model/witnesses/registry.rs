@@ -28,14 +28,7 @@ use super::*;
 /// is resolving, which is a different question, not a cycle. Every other
 /// attachment ignores the point and keeps it out of the key, so the memo
 /// still collapses their diamonds.
-/// Which of a call's arguments a caller join reads.
-#[derive(Debug, Clone, Copy)]
-enum ArgWant {
-    /// The one argument at this `@_` position.
-    At(u32),
-    /// Every argument from this `@_` position on, as key/value pairs.
-    PairsFrom(u32),
-}
+use super::engine::{EngineKey, EngineValue, JoinKey, JoinWant};
 
 /// The hash the arguments from `from` on spell as key/value pairs: a literal
 /// word in key position names a key, the value after it types it. Anything
@@ -1438,7 +1431,7 @@ impl ReducerRegistry {
         // of the `PackageSymbol` ladder, same shared visited set. No bridge
         // hop: a plugin entity is a callable, never a stored value.
         if let WitnessAttachment::Field { owner, name } = q.attachment {
-            if let Some(v) = self.owner_keyed_fallback(bag, q, state, owner, "field", &|p| {
+            if let Some(v) = self.owner_keyed_fallback(bag, q, state, owner, "field", None, &|p| {
                 WitnessAttachment::Field { owner: p, name: name.clone() }
             }) {
                 return v;
@@ -1455,7 +1448,7 @@ impl ReducerRegistry {
             if !bag.for_attachment(q.attachment).is_empty() {
                 return ReducedValue::Type(InferredType::Unknown);
             }
-            if let Some(v) = self.owner_keyed_fallback(bag, q, state, package, "param", &|p| {
+            if let Some(v) = self.owner_keyed_fallback(bag, q, state, package, "param", None, &|p| {
                 WitnessAttachment::Param { package: p, name: name.clone(), index: *index }
             }) {
                 return v;
@@ -1463,17 +1456,15 @@ impl ReducerRegistry {
         }
 
         if let WitnessAttachment::SlotElements { class, key } = q.attachment {
-            if let Some(v) = self.owner_keyed_fallback(bag, q, state, class, "slot_elements", &|p| {
+            if let Some(v) = self.owner_keyed_fallback(bag, q, state, class, "slot_elements", None, &|p| {
                 WitnessAttachment::SlotElements { class: p, key: key.clone() }
             }) {
                 return v;
             }
         }
 
-        if let WitnessAttachment::CallbackIn { package, name, param, index } = q.attachment {
-            if let Some(v) = self.owner_keyed_fallback(bag, q, state, package, "callback_in", &|p| {
-                WitnessAttachment::CallbackIn { package: p, name: name.clone(), param: *param, index: *index }
-            }) {
+        if let WitnessAttachment::CallbackIn { .. } = q.attachment {
+            if let Some(v) = self.callback_in_fallback(bag, q, state) {
                 return v;
             }
         }
@@ -1485,13 +1476,13 @@ impl ReducerRegistry {
         }
 
         if let WitnessAttachment::ParamIn { package, name, index, method } = q.attachment {
-            if let Some(v) = self.param_in_fallback(q, state, package, name, *method, ArgWant::At(*index)) {
+            if let Some(v) = self.param_in_fallback(q, state, package, name, *method, JoinWant::At(*index)) {
                 return v;
             }
         }
 
         if let WitnessAttachment::ParamPairs { package, name, from, method } = q.attachment {
-            if let Some(v) = self.param_in_fallback(q, state, package, name, *method, ArgWant::PairsFrom(*from)) {
+            if let Some(v) = self.param_in_fallback(q, state, package, name, *method, JoinWant::PairsFrom(*from)) {
                 return v;
             }
         }
@@ -1499,15 +1490,10 @@ impl ReducerRegistry {
         ReducedValue::None
     }
 
-    /// `ParamIn{package, name, index}`: join the argument at `index` over the
-    /// call sites of `name` the index can see. The mentions relation is the
-    /// ref rows (`ref_candidate_paths`), plus every resident file the rows
-    /// don't cover. A method call joins when its receiver is `package` or a
-    /// subclass, or untyped (a may-caller); a function call joins when it
-    /// names `package` or calls the bare name. Agreeing answers fold to one;
-    /// disagreement answers nothing. The join runs as an engine answer on its
-    /// own `QueryState`; a parameter whose callers pass it back to itself
-    /// cuts on the engine's open-key path.
+    /// `ParamIn{package, name, index}` the callee's bag can't answer: the
+    /// join of the argument over the sub's callers (`param_in_join`), an
+    /// engine answer; a parameter whose callers pass it back to itself cuts
+    /// on the engine's open-key path.
     fn param_in_fallback(
         &self,
         q: &ReducerQuery,
@@ -1515,21 +1501,19 @@ impl ReducerRegistry {
         package: &str,
         name: &str,
         method: bool,
-        want: ArgWant,
+        want: JoinWant,
     ) -> Option<ReducedValue> {
         let ctx = q.context?;
         let Some(idx) = ctx.module_index else {
             super::note_bake_exit("param_in", true);
             return None;
         };
-        if super::engine::deeper_position_of_open_join(q.attachment) {
+        let join = JoinKey { package: package.to_string(), name: name.to_string(), method, want };
+        if super::engine::deeper_position_of_open_join(&join) {
             crate::util::ghost_stats::count("param_in.forward_cut");
             return Some(ReducedValue::None);
         }
-        let v = super::engine::answer(idx, q.attachment, || {
-            self.param_in_join(idx, package, name, method, want)
-        });
-        Some(v)
+        Some(super::engine::answer(idx, &EngineKey::Join(join)).reduced())
     }
 
     /// A slot no write types may still arrive with the instance: the hash
@@ -1563,18 +1547,15 @@ impl ReducerRegistry {
         })
     }
 
-    fn param_in_join(
-        &self,
-        idx: &dyn crate::model::file_analysis::CrossFileLookup,
-        package: &str,
-        name: &str,
-        method: bool,
-        want: ArgWant,
-    ) -> ReducedValue {
-        use crate::model::file_analysis::RefKind;
-        let key = crate::model::conventions::name_match_key(name, &crate::model::conventions::PERL_SPELLINGS);
+    /// The join of one parameter over the call sites of its sub: one engine
+    /// answer per caller file (`param_contribution`), folded. The mentions
+    /// relation is the ref rows (`ref_candidate_paths`), plus every resident
+    /// file the rows don't cover. Agreeing answers fold to one; a file whose
+    /// call sites disagree, or two files that do, answer nothing.
+    pub(super) fn param_in_join(&self, idx: &dyn crate::model::file_analysis::CrossFileLookup, join: &JoinKey) -> EngineValue {
+        let key = crate::model::conventions::name_match_key(&join.name, &crate::model::conventions::PERL_SPELLINGS);
         // A sub's callers call it as a function; a method's spell any ref.
-        let kind = if method { super::engine::MentionKind::Any } else { super::engine::MentionKind::Calls };
+        let kind = if join.method { super::engine::MentionKind::Any } else { super::engine::MentionKind::Calls };
         let mut paths = (*super::engine::mentions_of(idx, kind, &key)).clone();
         super::engine::note_dep(super::engine::Dep::Mentions {
             kind,
@@ -1590,115 +1571,143 @@ impl ReducerRegistry {
         // TODO(caller-narrowing): a method caller whose receiver is untyped
         // in a file that never names the family is left out of the join.
         // A family too large to enumerate reads every mention instead.
-        if method {
-            if let Some(family) = super::engine::class_family_mentions(idx, package) {
+        if join.method {
+            if let Some(family) = super::engine::class_family_mentions(idx, &join.package) {
                 paths.retain(|p| family.contains(p));
             }
         }
         crate::util::ghost_stats::count("param_in.join");
-        // No cap on the sweep: a name every file mentions (`new`) usually
-        // meets an unrelated disagreement early, and an agreeing one is
-        // swept once and then answered from the store.
         crate::util::ghost_stats::count_by("param_in.files", paths.len() as u64);
+        // Across files the class order is the index's alone: no one caller's
+        // own parents decide between two others' answers.
+        let no_local: std::collections::HashMap<String, crate::model::file_analysis::PackageFacts> =
+            std::collections::HashMap::new();
+        let order = CallerOrder { local: &no_local, idx };
         let mut joined: Option<InferredType> = None;
-        for path in paths.iter() {
-            let Some(full) = super::engine::caller_view(idx, path) else { continue };
-            // One query state per caller: its memo keys on this copy's bag
-            // address, so the copy is pinned exactly as long as the state
-            // lives, and a sweep holds one whole caller at a time, not all.
-            let state = &mut QueryState::new();
-            let caller_ctx = BagContext {
-                scopes: &full.scopes,
-                package_framework: &full.packages,
-                module_index: Some(idx),
-                package_parents: &full.packages,
-                app_surface_consumers: &full.plugin.app_surface_consumers,
+        for path in paths {
+            let part = super::engine::answer(idx, &EngineKey::Contribution { join: join.clone(), file: path });
+            let t = match part {
+                EngineValue::Value(ReducedValue::Type(t)) => t,
+                EngineValue::Value(ReducedValue::FactMap(_) | ReducedValue::None) => continue,
+                EngineValue::Disagree => return EngineValue::NOTHING,
             };
-            for &ri in full.ref_indices_keyed(&key) {
-                let r = &full.refs()[ri];
-                let method = match r.kind {
-                    RefKind::MethodCall { .. } => true,
-                    RefKind::FunctionCall { .. } => false,
-                    _ => continue,
-                };
-                let att = WitnessAttachment::Expression(super::RefIdx(ri as u32));
-                let Some((receiver, args)) = full.witnesses.for_attachment(&att).iter().find_map(|w| {
-                    match &w.payload {
-                        WitnessPayload::Invoke { callee: Callee::Method { name: n, .. }, receiver, args }
-                            if method && n == name => Some((receiver.clone(), args.clone())),
-                        WitnessPayload::Invoke { callee: Callee::Sub { package: p, name: n }, args, .. }
-                            if !method && n == name && p.as_deref().map_or(true, |p| p == package) =>
-                        {
-                            Some((None, args.clone()))
-                        }
-                        _ => None,
+            joined = match joined {
+                None => Some(t),
+                Some(j) => match crate::model::file_analysis::join(&j, &t, &order) {
+                    Some(u) => Some(u),
+                    None => {
+                        crate::util::ghost_stats::count("param_in.disagree");
+                        return EngineValue::NOTHING;
                     }
-                }) else {
-                    continue;
+                },
+            };
+        }
+        EngineValue::Value(joined.map_or(ReducedValue::None, ReducedValue::Type))
+    }
+
+    /// One caller file's part of a join: the argument `join.want` names at
+    /// each call site of the sub in `file`, folded. A method call counts when
+    /// its receiver is the package or a subclass, or untyped (a may-caller);
+    /// a function call when it names the package or calls the bare name.
+    pub(super) fn param_contribution(
+        &self,
+        idx: &dyn crate::model::file_analysis::CrossFileLookup,
+        join: &JoinKey,
+        file: &std::path::Path,
+    ) -> EngineValue {
+        use crate::model::file_analysis::RefKind;
+        let (package, name) = (join.package.as_str(), join.name.as_str());
+        let key = crate::model::conventions::name_match_key(name, &crate::model::conventions::PERL_SPELLINGS);
+        let Some(full) = super::engine::caller_view(idx, file) else { return EngineValue::NOTHING };
+        // The state's memo keys on this copy's bag address, so the copy is
+        // pinned exactly as long as the state lives.
+        let state = &mut QueryState::new();
+        let caller_ctx = BagContext {
+            scopes: &full.scopes,
+            package_framework: &full.packages,
+            module_index: Some(idx),
+            package_parents: &full.packages,
+            app_surface_consumers: &full.plugin.app_surface_consumers,
+        };
+        let mut joined: Option<InferredType> = None;
+        for &ri in full.ref_indices_keyed(&key) {
+            let r = &full.refs()[ri];
+            let method = match r.kind {
+                RefKind::MethodCall { .. } => true,
+                RefKind::FunctionCall { .. } => false,
+                _ => continue,
+            };
+            let att = WitnessAttachment::Expression(super::RefIdx(ri as u32));
+            let Some((receiver, args)) = full.witnesses.for_attachment(&att).iter().find_map(|w| match &w.payload {
+                WitnessPayload::Invoke { callee: Callee::Method { name: n, .. }, receiver, args } if method && n == name => {
+                    Some((receiver.clone(), args.clone()))
+                }
+                WitnessPayload::Invoke { callee: Callee::Sub { package: p, name: n }, args, .. }
+                    if !method && n == name && p.as_deref().map_or(true, |p| p == package) =>
+                {
+                    Some((None, args.clone()))
+                }
+                _ => None,
+            }) else {
+                continue;
+            };
+            let query_in = |this: &Self, att: &WitnessAttachment, state: &mut QueryState| {
+                let q = ReducerQuery {
+                    attachment: att,
+                    point: None,
+                    framework: FrameworkFact::Plain,
+                    arity_hint: None,
+                    receiver: None,
+                    args: Vec::new(),
+                    context: Some(&caller_ctx),
                 };
-                let query_in = |this: &Self, att: &WitnessAttachment, state: &mut QueryState| {
-                    let q = ReducerQuery {
-                        attachment: att,
-                        point: None,
-                        framework: FrameworkFact::Plain,
-                        arity_hint: None,
-                        receiver: None,
-                        args: Vec::new(),
-                        context: Some(&caller_ctx),
-                    };
-                    (*this.query_rec(&full.witnesses, &q, state)).clone()
+                (*this.query_rec(&full.witnesses, &q, state)).clone()
+            };
+            if let Some(recv) = &receiver {
+                let recv_class = match query_in(self, recv, state) {
+                    ReducedValue::Type(t) => t.class_name().map(str::to_string),
+                    ReducedValue::FactMap(_) | ReducedValue::None => None,
                 };
-                if let Some(recv) = &receiver {
-                    let recv_class = match query_in(self, recv, state) {
-                        ReducedValue::Type(t) => t.class_name().map(str::to_string),
-                        ReducedValue::FactMap(_) | ReducedValue::None => None,
-                    };
-                    if let Some(c) = recv_class {
-                        if c != package
-                            && !crate::model::file_analysis::class_isa(&c, package, &full.packages, Some(idx))
-                        {
-                            continue;
-                        }
+                if let Some(c) = recv_class {
+                    if c != package && !crate::model::file_analysis::class_isa(&c, package, &full.packages, Some(idx)) {
+                        continue;
                     }
                 }
-                let skip = |i: u32| if method { i.checked_sub(1) } else { Some(i) };
-                let value = match want {
-                    ArgWant::At(index) => {
-                        let value_att = match (method, index) {
-                            (true, 0) => receiver,
-                            (_, i) => skip(i).and_then(|i| positional_arg(args.as_deref(), i)),
-                        };
-                        let Some(value_att) = value_att else { continue };
-                        match query_in(self, &value_att, state) {
-                            ReducedValue::Type(t) => Some(t),
-                            ReducedValue::FactMap(_) | ReducedValue::None => None,
-                        }
-                    }
-                    ArgWant::PairsFrom(from) => {
-                        let (Some(from), Some(args)) = (skip(from), args.as_deref()) else { continue };
-                        Some(pairs_type(args, from as usize, &mut |att| match query_in(self, att, state) {
-                            ReducedValue::Type(t) => Some(t),
-                            ReducedValue::FactMap(_) | ReducedValue::None => None,
-                        }))
-                    }
-                };
-                let Some(t) = value else { continue };
-                joined = match joined {
-                    None => Some(t),
-                    Some(j) => match crate::model::file_analysis::join(&j, &t, &CallerOrder { local: &full.packages, idx }) {
-                        Some(u) => Some(u),
-                        None => {
-                            crate::util::ghost_stats::count("param_in.disagree");
-                            return ReducedValue::None;
-                        }
-                    },
-                };
             }
+            let skip = |i: u32| if method { i.checked_sub(1) } else { Some(i) };
+            let value = match join.want {
+                JoinWant::At(index) => {
+                    let value_att = match (method, index) {
+                        (true, 0) => receiver,
+                        (_, i) => skip(i).and_then(|i| positional_arg(args.as_deref(), i)),
+                    };
+                    let Some(value_att) = value_att else { continue };
+                    match query_in(self, &value_att, state) {
+                        ReducedValue::Type(t) => Some(t),
+                        ReducedValue::FactMap(_) | ReducedValue::None => None,
+                    }
+                }
+                JoinWant::PairsFrom(from) => {
+                    let (Some(from), Some(args)) = (skip(from), args.as_deref()) else { continue };
+                    Some(pairs_type(args, from as usize, &mut |att| match query_in(self, att, state) {
+                        ReducedValue::Type(t) => Some(t),
+                        ReducedValue::FactMap(_) | ReducedValue::None => None,
+                    }))
+                }
+            };
+            let Some(t) = value else { continue };
+            joined = match joined {
+                None => Some(t),
+                Some(j) => match crate::model::file_analysis::join(&j, &t, &CallerOrder { local: &full.packages, idx }) {
+                    Some(u) => Some(u),
+                    None => {
+                        crate::util::ghost_stats::count("param_in.disagree");
+                        return EngineValue::Disagree;
+                    }
+                },
+            };
         }
-        match joined {
-            Some(t) => ReducedValue::Type(t),
-            None => ReducedValue::None,
-        }
+        EngineValue::Value(joined.map_or(ReducedValue::None, ReducedValue::Type))
     }
 
     /// Query `Symbol(sid)` inside another file's bag, as a hop of THIS query:
@@ -1833,6 +1842,7 @@ impl ReducerRegistry {
         state: &mut QueryState,
         owner: &str,
         site: &'static str,
+        provider: Option<&EngineKey>,
         rekey: &dyn Fn(String) -> WitnessAttachment,
     ) -> Option<ReducedValue> {
         let ctx = q.context?;
@@ -1842,17 +1852,22 @@ impl ReducerRegistry {
             super::note_bake_exit(site, false);
         }
         if let Some(idx) = ctx.module_index {
-            // A callback's parameter is asked once per sub literal handed to
-            // the member, from every file holding one, so its provider scan
-            // is an engine answer: the files it reads are its deps. Asked
-            // from the owner's own file the scan re-reads that file at the
-            // normalized point; a re-entry lands on the open frame.
-            let v = if site == "callback_in" {
-                super::engine::answer(idx, q.attachment, || {
-                    self.owner_provider_scan(idx, None, q, &mut QueryState::new(), owner, site)
-                })
-            } else {
-                self.owner_provider_scan(idx, Some(bag), q, state, owner, site)
+            // An engine-keyed scan is shared by every asker: asked from the
+            // owner's own file it re-reads that file at the normalized point,
+            // and a re-entry lands on the open frame.
+            let v = match provider {
+                Some(key) => super::engine::answer(idx, key).reduced(),
+                None => self.owner_provider_scan(
+                    idx,
+                    Some(bag),
+                    q.attachment,
+                    q.framework,
+                    q.receiver.clone(),
+                    q.args.clone(),
+                    state,
+                    owner,
+                    site,
+                ),
             };
             if v != ReducedValue::None {
                 return Some(v);
@@ -1883,14 +1898,39 @@ impl ReducerRegistry {
         None
     }
 
+    /// `CallbackIn` the asking bag can't answer: the files declaring the
+    /// member's class, as one engine answer shared by every sub literal
+    /// handed to the member, then the class's parents. Out of line: the key
+    /// it builds would otherwise sit in `query_rec_body`'s frame on every hop.
+    #[inline(never)]
+    fn callback_in_fallback(&self, bag: &WitnessBag, q: &ReducerQuery, state: &mut QueryState) -> Option<ReducedValue> {
+        let WitnessAttachment::CallbackIn { package, name, param, index } = q.attachment else {
+            return None;
+        };
+        let provider = EngineKey::CallbackProviders {
+            package: package.clone(),
+            name: name.clone(),
+            param: *param,
+            index: *index,
+        };
+        self.owner_keyed_fallback(bag, q, state, package, "callback_in", Some(&provider), &|p| {
+            WitnessAttachment::CallbackIn { package: p, name: name.clone(), param: *param, index: *index }
+        })
+    }
+
     /// The cross-file primary hop of an owner-keyed attachment: every file
     /// declaring `owner`, asked at the normalized point, first answer wins.
     /// `skip` is the asking bag, which already answered for itself.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
     fn owner_provider_scan(
         &self,
         idx: &dyn crate::model::file_analysis::CrossFileLookup,
         skip: Option<&WitnessBag>,
-        q: &ReducerQuery,
+        attachment: &WitnessAttachment,
+        framework: FrameworkFact,
+        receiver: Option<InferredType>,
+        args: Vec<InferredType>,
         state: &mut QueryState,
         owner: &str,
         site: &'static str,
@@ -1910,13 +1950,13 @@ impl ReducerRegistry {
                 app_surface_consumers: &full.plugin.app_surface_consumers,
             };
             let sub_q = ReducerQuery {
-                attachment: q.attachment,
+                attachment,
                 // Cross-file: point normalized (see the slot arm).
                 point: None,
-                framework: q.framework,
+                framework,
                 arity_hint: None,
-                receiver: q.receiver.clone(),
-                args: q.args.clone(),
+                receiver: receiver.clone(),
+                args: args.clone(),
                 context: Some(&cached_ctx),
             };
             let v = self.query_rec(&full.witnesses, &sub_q, state);
@@ -3352,3 +3392,35 @@ fn follow_one(
 #[cfg(test)]
 #[path = "consult_prefilter_tests.rs"]
 mod consult_prefilter_tests;
+
+/// The computation behind each engine key: the key and the index are all it
+/// reads, each on a fresh query state.
+pub(super) fn compute_engine_key(
+    idx: &dyn crate::model::file_analysis::CrossFileLookup,
+    key: &EngineKey,
+) -> EngineValue {
+    let reg = super::conclusions::shared_registry();
+    match key {
+        EngineKey::Join(join) => reg.param_in_join(idx, join),
+        EngineKey::Contribution { join, file } => reg.param_contribution(idx, join, file),
+        EngineKey::CallbackProviders { package, name, param, index } => {
+            let att = WitnessAttachment::CallbackIn {
+                package: package.clone(),
+                name: name.clone(),
+                param: *param,
+                index: *index,
+            };
+            EngineValue::Value(reg.owner_provider_scan(
+                idx,
+                None,
+                &att,
+                FrameworkFact::Plain,
+                None,
+                Vec::new(),
+                &mut QueryState::new(),
+                package,
+                "callback_in",
+            ))
+        }
+    }
+}

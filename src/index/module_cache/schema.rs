@@ -203,11 +203,28 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             version TEXT NOT NULL,
             surface BLOB NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS answers (
+        DROP TABLE IF EXISTS answers;
+        CREATE TABLE IF NOT EXISTS answer_nodes (
             key             BLOB PRIMARY KEY,
             extract_version INTEGER NOT NULL,
-            answer          BLOB NOT NULL
+            value           BLOB NOT NULL,
+            value_hash      INTEGER NOT NULL,
+            world           INTEGER NOT NULL
         ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS answer_reads (
+            key     BLOB NOT NULL,
+            kind    INTEGER NOT NULL,
+            subject TEXT NOT NULL,
+            stamp   INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_answer_reads_key ON answer_reads(key);
+        CREATE INDEX IF NOT EXISTS idx_answer_reads_subject ON answer_reads(subject);
+        CREATE TABLE IF NOT EXISTS answer_kids (
+            key        BLOB NOT NULL,
+            child      BLOB NOT NULL,
+            child_hash INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_answer_kids_key ON answer_kids(key);
         CREATE INDEX IF NOT EXISTS idx_modules_path ON modules(path);
         CREATE INDEX IF NOT EXISTS idx_modules_name ON modules(module_name);",
     )?;
@@ -407,7 +424,8 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 pub fn clear_derived_rows(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "DELETE FROM refs; DELETE FROM syms; DELETE FROM files; DELETE FROM strings; \
-         DELETE FROM stubs; DELETE FROM surfaces; DELETE FROM answers;",
+         DELETE FROM stubs; DELETE FROM surfaces; \
+         DELETE FROM answer_nodes; DELETE FROM answer_reads; DELETE FROM answer_kids;",
     )?;
     bump_strings_generation(conn)
 }

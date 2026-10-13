@@ -89,7 +89,9 @@ pub(crate) struct IndexCore {
     pub(crate) answers: crate::model::witnesses::engine::AnswerStore,
     /// Persisted answer rows, `key → answer` in the engine's encoding, read
     /// from the store once, on the first lookup after it opens.
-    pub(crate) persisted_answers: std::sync::OnceLock<std::collections::HashMap<Vec<u8>, Vec<u8>>>,
+    pub(crate) persisted_answers: std::sync::OnceLock<
+        std::collections::HashMap<Vec<u8>, std::sync::Arc<crate::model::witnesses::engine::PersistedNode>>,
+    >,
     /// Open documents' current analyses, as callers: a call site typed into
     /// an unsaved buffer joins `ParamIn` like a saved one. Keyed by
     /// canonical path, each with its overlay version (`OPEN_VERSION_BIT` set,

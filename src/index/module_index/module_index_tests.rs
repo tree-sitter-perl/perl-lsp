@@ -2498,11 +2498,13 @@ fn param_type_cycle_terminates() {
     assert_eq!(t.class_name().as_deref(), Some("User"));
 }
 
-/// A persisted answer is adopted while everything it read still holds, and
-/// refused once a file it read has moved.
+/// A persisted answer is adopted while everything it read still holds. An
+/// edit that leaves a caller's part of the join unchanged keeps the adopted
+/// join (the cutoff holds across processes); one that changes it recomputes.
 #[test]
 fn persisted_param_answer_adopts_only_while_its_reads_hold() {
     use crate::model::file_analysis::CrossFileLookup;
+    use crate::model::witnesses::engine::{decode_key, with_persisted_value, EngineKey};
     let greeter = parse_source_to_cached(GREETER_METHOD, "Greeter");
     let app = parse_source_to_cached(
         "package App;\nsub run { Greeter->greet(bless({}, 'User')) }\n1;\n",
@@ -2511,34 +2513,50 @@ fn persisted_param_answer_adopts_only_while_its_reads_hold() {
     let first = index_of(&[&greeter, &app]);
     assert!(greet_param_type(&greeter, &first).is_some());
     let rows = first.answer_store().unwrap().take_pending();
-    assert_eq!(rows.len(), 1, "one whole answer to persist: {rows:?}");
-    // Swap the value so adoption is observable: a recomputation answers User.
-    let marked: std::collections::HashMap<Vec<u8>, Vec<u8>> = rows
+    let kinds: Vec<EngineKey> = rows.iter().filter_map(|(k, _)| decode_key(k)).collect();
+    assert!(
+        kinds.iter().any(|k| matches!(k, EngineKey::Join(_)))
+            && kinds.iter().any(|k| matches!(k, EngineKey::Contribution { .. })),
+        "a join and its caller's part persist: {kinds:?}"
+    );
+    // Swap the join's value so adoption is observable: a recomputation
+    // answers the caller's class.
+    let marked: std::collections::HashMap<Vec<u8>, std::sync::Arc<_>> = rows
         .iter()
-        .map(|(k, a)| {
-            let t = InferredType::ClassName("Persisted".into());
-            (k.clone(), crate::model::witnesses::engine::with_persisted_value(a, Some(t)))
+        .map(|(k, n)| {
+            let n = match decode_key(k) {
+                Some(EngineKey::Join(_)) => with_persisted_value(n, Some(InferredType::ClassName("Persisted".into()))),
+                _ => n.clone(),
+            };
+            (k.clone(), std::sync::Arc::new(n))
         })
         .collect();
+    let adopted = |app: &Arc<CachedModule>| {
+        let idx = index_of(&[&greeter, app]);
+        let _ = idx.core.persisted_answers.set(marked.clone());
+        greet_param_type(&greeter, &idx).and_then(|t| t.class_name().map(str::to_string))
+    };
 
-    let same = index_of(&[&greeter, &app]);
-    let _ = same.core.persisted_answers.set(marked.clone());
-    assert_eq!(
-        greet_param_type(&greeter, &same).unwrap().class_name().as_deref(),
-        Some("Persisted"),
-        "an unchanged index adopts the persisted answer"
-    );
+    assert_eq!(adopted(&app).as_deref(), Some("Persisted"), "an unchanged index adopts the persisted answer");
 
-    let edited = parse_source_to_cached(
+    let spaced = parse_source_to_cached(
         "package App;\nsub run { Greeter->greet(bless({}, 'User'));  }\n1;\n",
         "App",
     );
-    let moved = index_of(&[&greeter, &edited]);
-    let _ = moved.core.persisted_answers.set(marked);
     assert_eq!(
-        greet_param_type(&greeter, &moved).unwrap().class_name().as_deref(),
-        Some("User"),
-        "a caller whose source moved refuses the row and recomputes"
+        adopted(&spaced).as_deref(),
+        Some("Persisted"),
+        "a caller whose source moved but whose part did not leaves the join adopted"
+    );
+
+    let retyped = parse_source_to_cached(
+        "package App;\nsub run { Greeter->greet(bless({}, 'Admin')) }\n1;\n",
+        "App",
+    );
+    assert_eq!(
+        adopted(&retyped).as_deref(),
+        Some("Admin"),
+        "a caller whose part changed refuses the join and recomputes it"
     );
 }
 

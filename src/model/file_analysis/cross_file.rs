@@ -472,9 +472,8 @@ pub trait CrossFileLookup {
         None
     }
 
-    /// The persisted answer row for an engine key, both in the engine's own
-    /// encoding.
-    fn persisted_answer(&self, _key: &[u8]) -> Option<Vec<u8>> {
+    /// The persisted answer node for an encoded engine key.
+    fn persisted_node(&self, _key: &[u8]) -> Option<std::sync::Arc<crate::model::witnesses::engine::PersistedNode>> {
         None
     }
 

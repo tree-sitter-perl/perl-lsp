@@ -1,6 +1,10 @@
 //! The answer engine: a verifying memo for long-distance answers — the ones
-//! whose value depends on files the asker never named (`ParamIn` joins the
-//! call sites of a sub across the whole index).
+//! whose value depends on files the asker never named (a parameter's type
+//! joins the call sites of its sub across the whole index).
+//!
+//! Every key is an `EngineKey`, and the key alone says how its value is
+//! computed (`registry::compute_engine_key`): a computation is a function of
+//! its key and the index, with nothing captured from the asker.
 //!
 //! An entry records what its computation READ, as dependencies:
 //!
@@ -27,9 +31,9 @@
 //! reads it makes itself, plus an edge to each engine answer it consults,
 //! stamped with that answer's `changed` serial. Verifying an entry verifies
 //! its children first; a child recomputed to the same value keeps its serial,
-//! so its parents stand (early cutoff). Replaying a child's reads into every
-//! open frame instead made each hit cost its whole read set times the stack
-//! depth.
+//! so its parents stand (early cutoff). A caller join is the fold of one
+//! child per caller file (`Contribution`), so an edit recomputes the edited
+//! file's part and refolds the rest from the store.
 //!
 //! Keys that depend on each other (parameters passed around in a circle)
 //! settle by fixpoint at the outermost key of the cycle (`answer`). Values
@@ -39,12 +43,13 @@
 //! thread could not use them, and a shared slot would let it overwrite one
 //! mid-cycle.
 //!
-//! Whole entries outlive the process. A persisted entry restates its
-//! dependencies in terms a later process can check: each file by its
-//! `source_stamp`, each mentions set by its hash, the world by
-//! `world_digest`. A later process adopts the entry on its first miss for
-//! the key when all three still hold, and from then on it is an ordinary
-//! entry.
+//! Whole entries outlive the process as a graph (`PersistedNode`): each
+//! node's own reads in terms a later process can check (a file by its
+//! `source_stamp`, a mentions set by its hash, the world by `world_digest`),
+//! and each child by the hash of the value it read. A later process adopts a
+//! node when its reads hold and every child — adopted or recomputed — still
+//! hashes the same, so an edit one process saw stops at the first answer
+//! whose value it did not move, in the next process too.
 
 use super::*;
 
@@ -63,7 +68,7 @@ pub enum Dep {
 }
 
 /// Which files a mentions set holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum MentionKind {
     /// Any ref keyed by the name.
     Any,
@@ -73,15 +78,109 @@ pub enum MentionKind {
     Calls,
 }
 
+/// Which of a call's arguments a caller join reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum JoinWant {
+    /// The one argument at this `@_` position.
+    At(u32),
+    /// Every argument from this `@_` position on, as key/value pairs.
+    PairsFrom(u32),
+}
+
+/// A parameter of `package::name` joined over its callers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct JoinKey {
+    pub package: String,
+    pub name: String,
+    pub method: bool,
+    pub want: JoinWant,
+}
+
+/// What the engine answers. Closed: each key names its computation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum EngineKey {
+    /// A parameter's type over every file calling its sub.
+    Join(JoinKey),
+    /// One caller file's part of a join.
+    Contribution { join: JoinKey, file: PathBuf },
+    /// A callback parameter, asked of the files declaring its member's class.
+    CallbackProviders { package: String, name: String, param: u32, index: u32 },
+}
+
+/// An engine answer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EngineValue {
+    Value(ReducedValue),
+    /// A caller file whose own call sites disagree: the join it feeds has
+    /// no answer, whatever the other files say.
+    Disagree,
+}
+
+impl EngineValue {
+    pub const NOTHING: EngineValue = EngineValue::Value(ReducedValue::None);
+
+    /// The value as a reduced answer; a disagreement answers nothing.
+    pub fn reduced(self) -> ReducedValue {
+        match self {
+            EngineValue::Value(v) => v,
+            EngineValue::Disagree => ReducedValue::None,
+        }
+    }
+
+    /// The value in the form a later process can read. `None` for a fact
+    /// map, which no engine key answers today and nothing persists.
+    fn persisted(&self) -> Option<PersistedValue> {
+        match self {
+            EngineValue::Value(ReducedValue::Type(t)) => Some(PersistedValue::Type(t.clone())),
+            EngineValue::Value(ReducedValue::None) => Some(PersistedValue::Nothing),
+            EngineValue::Value(ReducedValue::FactMap(_)) => None,
+            EngineValue::Disagree => Some(PersistedValue::Disagree),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+enum PersistedValue {
+    Nothing,
+    Type(InferredType),
+    Disagree,
+}
+
+impl PersistedValue {
+    fn into_value(self) -> EngineValue {
+        match self {
+            PersistedValue::Nothing => EngineValue::NOTHING,
+            PersistedValue::Type(t) => EngineValue::Value(ReducedValue::Type(t)),
+            PersistedValue::Disagree => EngineValue::Disagree,
+        }
+    }
+}
+
+/// The hash a parent records for a child: stable across processes, so a
+/// later process can tell whether the child it computes is the one read.
+fn value_hash(v: &EngineValue) -> Option<u64> {
+    use std::hash::Hasher;
+    let bytes = bincode::serialize(&v.persisted()?).ok()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    h.write(&bytes);
+    Some(h.finish())
+}
+
+pub fn encode_key(key: &EngineKey) -> Option<Vec<u8>> {
+    bincode::serialize(key).ok()
+}
+
 #[derive(Debug, Clone)]
 struct Entry {
-    value: Arc<ReducedValue>,
+    value: Arc<EngineValue>,
+    /// `value_hash` of `value`; `None` for a value nothing persists.
+    hash: Option<u64>,
     /// `resolution_epoch` when last verified.
     epoch: u64,
     world: u64,
     deps: Arc<[Dep]>,
     /// The engine answers it consulted, each with the `changed` serial it read.
-    children: Arc<[(WitnessAttachment, u64)]>,
+    children: Arc<[(EngineKey, u64)]>,
     /// Moves only when a recomputation produced a different value.
     changed: u64,
     /// `world_digest` of the world `world` names; `None` when the index
@@ -95,24 +194,58 @@ fn next_changed() -> u64 {
     CHANGED_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// An entry as it is persisted: every dependency in a form another process
-/// can check against its own index.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct PersistedAnswer {
-    value: Option<InferredType>,
-    world: u64,
-    files: Vec<(PathBuf, u64)>,
-    mentions: Vec<(String, u64)>,
-    calls: Vec<(String, u64)>,
+/// One read of a persisted node, checkable by another process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PersistedRead {
+    File { path: PathBuf, stamp: u64 },
+    Mentions { kind: MentionKind, key: String, hash: u64 },
 }
 
-/// Byte caps. Past its cap a map drops everything and starts over: a full
-/// reset is the one eviction that can never serve a stale entry. The pending
-/// buffer instead stops taking rows until it is flushed; a row it refuses
-/// is an answer the next process recomputes.
+impl PersistedRead {
+    /// `(kind, subject, stamp)`: the read as a row.
+    pub fn to_row(&self) -> (i64, String, i64) {
+        match self {
+            PersistedRead::File { path, stamp } => (0, path.to_string_lossy().into_owned(), *stamp as i64),
+            PersistedRead::Mentions { kind: MentionKind::Any, key, hash } => (1, key.clone(), *hash as i64),
+            PersistedRead::Mentions { kind: MentionKind::Calls, key, hash } => (2, key.clone(), *hash as i64),
+        }
+    }
+
+    pub fn from_row(kind: i64, subject: String, stamp: i64) -> Option<PersistedRead> {
+        Some(match kind {
+            0 => PersistedRead::File { path: PathBuf::from(subject), stamp: stamp as u64 },
+            1 => PersistedRead::Mentions { kind: MentionKind::Any, key: subject, hash: stamp as u64 },
+            2 => PersistedRead::Mentions { kind: MentionKind::Calls, key: subject, hash: stamp as u64 },
+            _ => return None,
+        })
+    }
+}
+
+/// An answer as it is persisted: its value, its own reads, and the children
+/// it consulted with the hash of the value each one answered.
+#[derive(Debug, Clone)]
+pub struct PersistedNode {
+    /// The encoded value (opaque to the store).
+    pub value: Vec<u8>,
+    pub value_hash: u64,
+    pub world: u64,
+    pub reads: Vec<PersistedRead>,
+    /// `(encoded child key, child value hash)`.
+    pub kids: Vec<(Vec<u8>, u64)>,
+}
+
+/// Byte caps. Past its cap a shard drops everything and starts over: a full
+/// reset is the one eviction that can never serve a stale entry, and a
+/// parent whose child was dropped verifies as stale. The pending buffer
+/// instead stops taking rows until it is flushed; a row it refuses is an
+/// answer the next process recomputes.
 const ENTRIES_BYTE_CAP: usize = 32 << 20;
 const MENTIONS_BYTE_CAP: usize = 16 << 20;
 const PENDING_BYTE_CAP: usize = 16 << 20;
+
+/// Entry shards: lookups run on every worker thread, and one lock over the
+/// whole map serialized them.
+const SHARDS: usize = 16;
 
 /// A map with the estimated heap bytes of what it holds.
 #[derive(Default)]
@@ -125,14 +258,18 @@ fn path_bytes(p: &std::path::Path) -> usize {
     std::mem::size_of::<PathBuf>() + p.as_os_str().len()
 }
 
-fn entry_bytes(key: &WitnessAttachment, e: &Entry) -> usize {
-    std::mem::size_of::<(WitnessAttachment, Entry)>()
-        + bincode::serialized_size(key).unwrap_or(0) as usize
+fn key_bytes(key: &EngineKey) -> usize {
+    std::mem::size_of::<EngineKey>() + bincode::serialized_size(key).unwrap_or(0) as usize
+}
+
+fn entry_bytes(key: &EngineKey, e: &Entry) -> usize {
+    std::mem::size_of::<Entry>()
+        + key_bytes(key)
         + match &*e.value {
-            ReducedValue::Type(t) => bincode::serialized_size(t).unwrap_or(0) as usize,
+            EngineValue::Value(ReducedValue::Type(t)) => bincode::serialized_size(t).unwrap_or(0) as usize,
             // A fact map is the size of its debug rendering, near enough.
-            ReducedValue::FactMap(m) => format!("{m:?}").len(),
-            ReducedValue::None => 0,
+            EngineValue::Value(ReducedValue::FactMap(m)) => format!("{m:?}").len(),
+            EngineValue::Value(ReducedValue::None) | EngineValue::Disagree => 0,
         }
         + e.deps
             .iter()
@@ -144,19 +281,18 @@ fn entry_bytes(key: &WitnessAttachment, e: &Entry) -> usize {
                     }
             })
             .sum::<usize>()
-        + e.children
-            .iter()
-            .map(|(k, _)| std::mem::size_of::<(WitnessAttachment, u64)>() + bincode::serialized_size(k).unwrap_or(0) as usize)
-            .sum::<usize>()
+        + e.children.iter().map(|(k, _)| key_bytes(k) + std::mem::size_of::<u64>()).sum::<usize>()
 }
+
+type Shard = Mutex<Budgeted<HashMap<EngineKey, Entry>>>;
 
 /// The index-owned answer store. Lives as long as the index; validity is
 /// re-established per lookup, never by a caller remembering to invalidate.
 #[derive(Default)]
 pub struct AnswerStore {
-    entries: Mutex<Budgeted<HashMap<WitnessAttachment, Entry>>>,
-    /// Encoded rows not yet persisted.
-    pending: Mutex<Budgeted<Vec<(Vec<u8>, Vec<u8>)>>>,
+    shards: [Shard; SHARDS],
+    /// Nodes not yet persisted, with their encoded keys.
+    pending: Mutex<Budgeted<Vec<(Vec<u8>, PersistedNode)>>>,
     /// `mentions_of` per key, valid while `resolution_epoch` stands.
     mentions: Mutex<Budgeted<HashMap<(MentionKind, String), (u64, Arc<Vec<PathBuf>>)>>>,
     /// `uncovered_files` at a `resolution_epoch`.
@@ -173,104 +309,122 @@ impl AnswerStore {
         AnswerStore::default()
     }
 
+    fn shard(&self, key: &EngineKey) -> &Shard {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut h);
+        &self.shards[h.finish() as usize % SHARDS]
+    }
+
+    fn get(&self, key: &EngineKey) -> Option<Entry> {
+        self.shard(key).lock().ok().and_then(|m| m.map.get(key).cloned())
+    }
+
     pub fn len(&self) -> usize {
-        self.entries.lock().map(|m| m.map.len()).unwrap_or(0)
+        self.shards.iter().map(|s| s.lock().map(|m| m.map.len()).unwrap_or(0)).sum()
     }
 
     /// Estimated heap bytes held: entries, pending rows, mentions memo.
     pub fn heap_bytes(&self) -> usize {
-        self.entries.lock().map(|m| m.bytes).unwrap_or(0)
+        self.shards.iter().map(|s| s.lock().map(|m| m.bytes).unwrap_or(0)).sum::<usize>()
             + self.pending.lock().map(|m| m.bytes).unwrap_or(0)
             + self.mentions.lock().map(|m| m.bytes).unwrap_or(0)
             + self.call_verdicts.lock().map(|m| m.bytes).unwrap_or(0)
     }
 
-    /// Rows written since the last take, for the caller to persist.
-    pub fn take_pending(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+    /// Nodes written since the last take, for the caller to persist.
+    pub fn take_pending(&self) -> Vec<(Vec<u8>, PersistedNode)> {
         self.pending.lock().map(|mut p| std::mem::take(&mut *p).map).unwrap_or_default()
     }
 }
 
-/// `e` as a persisted row, encoded when it is computed so its stamps are the
-/// ones it read. `None` for an entry that cannot outlive the process:
-/// unpersisting index, a payload outside the persisted shape, or a file read
-/// with no source stamp.
+/// `e` as a persisted node, encoded when it is computed so its stamps are
+/// the ones it read. `None` for an entry that cannot outlive the process:
+/// unpersisting index, a value outside the persisted shape, a file read with
+/// no source stamp, or a child the store no longer holds.
 fn encode_persisted(
     idx: &dyn CrossFileLookup,
     store: &AnswerStore,
-    key: &WitnessAttachment,
+    key: &EngineKey,
     e: &Entry,
-) -> Option<(Vec<u8>, Vec<u8>)> {
+) -> Option<(Vec<u8>, PersistedNode)> {
     let world = e.digest?;
-    let value = match &*e.value {
-        ReducedValue::Type(t) => Some(t.clone()),
-        ReducedValue::None => None,
-        ReducedValue::FactMap(_) => return None,
-    };
-    // A later process has no graph to walk, so a row restates every read
-    // beneath it; a child the store no longer holds leaves it unpersisted.
-    let mut flat: std::collections::BTreeSet<Dep> = e.deps.iter().cloned().collect();
-    let mut seen: std::collections::HashSet<WitnessAttachment> = std::collections::HashSet::new();
-    let mut stack: Vec<WitnessAttachment> = e.children.iter().map(|(k, _)| k.clone()).collect();
-    while let Some(k) = stack.pop() {
-        if !seen.insert(k.clone()) {
-            continue;
-        }
-        let child = store.entries.lock().ok()?.map.get(&k).cloned()?;
-        flat.extend(child.deps.iter().cloned());
-        stack.extend(child.children.iter().map(|(k, _)| k.clone()));
+    let value_hash = e.hash?;
+    let value = bincode::serialize(&e.value.persisted()?).ok()?;
+    let mut reads = Vec::with_capacity(e.deps.len());
+    for d in e.deps.iter() {
+        reads.push(match d {
+            Dep::File { path, .. } => PersistedRead::File { path: path.clone(), stamp: idx.source_stamp(path)? },
+            Dep::Mentions { kind, key, hash } => PersistedRead::Mentions { kind: *kind, key: key.clone(), hash: *hash },
+        });
     }
-    let mut files = Vec::new();
-    let mut mentions = Vec::new();
-    let mut calls = Vec::new();
-    for d in flat.iter() {
-        match d {
-            Dep::File { path, .. } => files.push((path.clone(), idx.source_stamp(path)?)),
-            Dep::Mentions { kind: MentionKind::Any, key, hash } => mentions.push((key.clone(), *hash)),
-            Dep::Mentions { kind: MentionKind::Calls, key, hash } => calls.push((key.clone(), *hash)),
-        }
+    let mut kids = Vec::with_capacity(e.children.len());
+    for (k, _) in e.children.iter() {
+        kids.push((encode_key(k)?, store.get(k)?.hash?));
     }
-    let p = PersistedAnswer { value, world, files, mentions, calls };
-    Some((bincode::serialize(key).ok()?, bincode::serialize(&p).ok()?))
+    Some((encode_key(key)?, PersistedNode { value, value_hash, world, reads, kids }))
 }
 
-/// Adopt the persisted answer for `key`, when every dependency it records
-/// still holds in `idx`, as an entry stamped at `epoch`.
-fn adopt_persisted(idx: &dyn CrossFileLookup, key: &WitnessAttachment, epoch: u64) -> Option<Entry> {
-    let raw = idx.persisted_answer(&bincode::serialize(key).ok()?)?;
-    let p: PersistedAnswer = bincode::deserialize(&raw).ok()?;
+/// Adopt the persisted node for `key` when every read it records still
+/// holds and every child, answered now, hashes to the value it read. The
+/// children are asked under a frame of `key`'s own, so their edges land on
+/// the adopted entry; a child that reads back into `key` or into an open
+/// cycle refuses the node, which is then computed.
+fn adopt_persisted(idx: &dyn CrossFileLookup, key: &EngineKey, epoch: u64) -> Option<Entry> {
+    let node = idx.persisted_node(&encode_key(key)?)?;
     let digest = idx.world_digest()?;
-    if p.world != digest {
+    if node.world != digest {
         crate::util::ghost_stats::count("engine.persisted_world_moved");
         return None;
     }
-    let mut deps = Vec::with_capacity(p.files.len() + p.mentions.len());
-    for (path, stamp) in p.files {
-        if idx.source_stamp(&path) != Some(stamp) {
-            crate::util::ghost_stats::count("engine.persisted_file_moved");
-            return None;
+    let mut deps = Vec::with_capacity(node.reads.len());
+    for read in &node.reads {
+        match read {
+            PersistedRead::File { path, stamp } => {
+                if idx.source_stamp(path) != Some(*stamp) {
+                    crate::util::ghost_stats::count("engine.persisted_file_moved");
+                    return None;
+                }
+                deps.push(Dep::File { path: path.clone(), version: idx.file_version(path)? });
+            }
+            PersistedRead::Mentions { kind, key, hash } => {
+                if mentions_hash(&mentions_of(idx, *kind, key)) != *hash {
+                    crate::util::ghost_stats::count("engine.persisted_mentions_moved");
+                    return None;
+                }
+                deps.push(Dep::Mentions { kind: *kind, key: key.clone(), hash: *hash });
+            }
         }
-        let version = idx.file_version(&path)?;
-        deps.push(Dep::File { path, version });
     }
-    let sets = p.mentions.into_iter().map(|m| (MentionKind::Any, m)).chain(p.calls.into_iter().map(|m| (MentionKind::Calls, m)));
-    for (kind, (key, hash)) in sets {
-        if mentions_hash(&mentions_of(idx, kind, &key)) != hash {
-            crate::util::ghost_stats::count("engine.persisted_mentions_moved");
-            return None;
+    let value: PersistedValue = bincode::deserialize(&node.value).ok()?;
+    let members_mark = MEMBERS.with(|m| m.borrow().len());
+    FRAMES.with(|f| f.borrow_mut().push(Frame::open(key.clone(), members_mark, false)));
+    let mut kids_hold = true;
+    for (kid, hash) in &node.kids {
+        let Ok(kid) = bincode::deserialize::<EngineKey>(kid) else {
+            kids_hold = false;
+            break;
+        };
+        if value_hash(&answer(idx, &kid)) != Some(*hash) {
+            crate::util::ghost_stats::count("engine.persisted_kid_moved");
+            kids_hold = false;
+            break;
         }
-        deps.push(Dep::Mentions { kind, key, hash });
     }
-    let value = match p.value {
-        Some(t) => ReducedValue::Type(t),
-        None => ReducedValue::None,
-    };
+    let frame = FRAMES.with(|f| f.borrow_mut().pop())?;
+    if !kids_hold || frame.is_head || frame.tainted || frame.reads_open.is_some() {
+        // Whatever the children computed against this frame's assumption
+        // is retired with it.
+        next_round(members_mark);
+        return None;
+    }
     Some(Entry {
-        value: Arc::new(value),
+        value: Arc::new(value.into_value()),
+        hash: Some(node.value_hash),
         epoch,
         world: idx.world_generation(),
         deps: deps.into(),
-        children: Arc::from([]),
+        children: frame.children.into_iter().collect::<Vec<_>>().into(),
         changed: next_changed(),
         digest: Some(digest),
     })
@@ -278,12 +432,12 @@ fn adopt_persisted(idx: &dyn CrossFileLookup, key: &WitnessAttachment, epoch: u6
 
 /// One open computation.
 struct Frame {
-    key: WitnessAttachment,
+    key: EngineKey,
     /// A set: a chase reads the same file at every hop that reaches it, and
     /// a list of every read grows with the chase, not with what it read.
     deps: std::collections::HashSet<Dep>,
     /// The engine answers consulted directly beneath this frame.
-    children: HashMap<WitnessAttachment, u64>,
+    children: HashMap<EngineKey, u64>,
     /// Depth of the outermost open key this computation read while that
     /// key was still being computed (a cycle back to an ancestor frame):
     /// the value holds only for that ancestor's assumption.
@@ -303,6 +457,22 @@ struct Frame {
     unsettled_before: bool,
 }
 
+impl Frame {
+    fn open(key: EngineKey, members_mark: usize, unsettled_before: bool) -> Frame {
+        Frame {
+            key,
+            deps: std::collections::HashSet::new(),
+            children: HashMap::new(),
+            reads_open: None,
+            tainted: false,
+            is_head: false,
+            changed: false,
+            members_mark,
+            unsettled_before,
+        }
+    }
+}
+
 /// Rounds a cycle may take before its fixpoint is declared not to exist
 /// and its outermost key answers nothing. The joins only move up a finite
 /// class lattice, so real cycles settle in two or three.
@@ -316,7 +486,7 @@ thread_local! {
     /// the cycle it is in (nothing, at first). Lives until the outermost
     /// computation returns, so a key inside a cycle keeps its assumption
     /// across the outer rounds that recompute it.
-    static ASSUMED: RefCell<HashMap<WitnessAttachment, ReducedValue>> = RefCell::new(HashMap::new());
+    static ASSUMED: RefCell<HashMap<EngineKey, EngineValue>> = RefCell::new(HashMap::new());
     /// Provisional values computed under the open frames, outermost first;
     /// the only place they live, and what a lookup serves them from:
     /// when a frame closes outside every open cycle with the cycles under it
@@ -331,7 +501,7 @@ thread_local! {
 }
 
 struct Member {
-    key: WitnessAttachment,
+    key: EngineKey,
     entry: Entry,
     /// Depth of the open frame whose assumption it read; `None` when it read
     /// a value from outside the fixpoint.
@@ -364,7 +534,7 @@ pub fn note_dep(dep: Dep) {
 }
 
 /// Record that the innermost open frame consulted engine answer `key`.
-fn note_child(key: &WitnessAttachment, changed: u64) {
+fn note_child(key: &EngineKey, changed: u64) {
     FRAMES.with(|f| {
         if let Some(frame) = f.borrow_mut().last_mut() {
             frame.children.insert(key.clone(), changed);
@@ -379,18 +549,20 @@ fn note_child(key: &WitnessAttachment, changed: u64) {
 /// recursion asks a NEW key: the chase never meets itself as a cycle and
 /// runs to the depth cap. Cutting the deeper position drops only the
 /// self-forwarding caller's contribution; every other caller still joins.
-pub fn deeper_position_of_open_join(key: &WitnessAttachment) -> bool {
-    use WitnessAttachment::{ParamIn, ParamPairs};
-    let position = |k: &WitnessAttachment| match k {
-        ParamIn { package, name, index, method } | ParamPairs { package, name, from: index, method } => {
-            Some((package.clone(), name.clone(), *method, *index))
-        }
-        _ => None,
+pub fn deeper_position_of_open_join(key: &JoinKey) -> bool {
+    let position = |w: &JoinWant| match w {
+        JoinWant::At(i) | JoinWant::PairsFrom(i) => *i,
     };
-    let Some((package, name, method, index)) = position(key) else { return false };
     FRAMES.with(|f| {
         f.borrow().iter().any(|frame| {
-            position(&frame.key).is_some_and(|(p, n, m, i)| p == package && n == name && m == method && i < index)
+            let open = match &frame.key {
+                EngineKey::Join(j) | EngineKey::Contribution { join: j, .. } => j,
+                EngineKey::CallbackProviders { .. } => return false,
+            };
+            open.package == key.package
+                && open.name == key.name
+                && open.method == key.method
+                && position(&open.want) < position(&key.want)
         })
     })
 }
@@ -621,50 +793,56 @@ fn verify(idx: &dyn CrossFileLookup, store: &AnswerStore, e: &Entry, epoch: u64,
     });
     reads_hold
         && e.children.iter().all(|(k, changed)| {
-            let Some(child) = store.entries.lock().ok().and_then(|m| m.map.get(k).cloned()) else {
+            let Some(child) = store.get(k) else {
                 crate::util::ghost_stats::count("engine.stale_by.child_evicted");
                 return false;
             };
-            if child.changed != *changed {
-                crate::util::ghost_stats::count("engine.stale_by.child_changed");
-                return false;
-            }
             if child.epoch == epoch {
+                if child.changed != *changed {
+                    crate::util::ghost_stats::count("engine.stale_by.child_changed");
+                    return false;
+                }
                 return true;
             }
-            let holds = verify(idx, store, &child, epoch, depth + 1);
-            if holds {
+            // A stale child is brought current first — recomputed if it must
+            // be — so a recomputation that lands on the same value keeps the
+            // serial this entry read, and the entry stands.
+            if !verify(idx, store, &child, epoch, depth + 1) {
+                let _ = answer(idx, k);
+            } else {
                 restamp(store, k, epoch);
             }
-            holds
+            match store.get(k) {
+                Some(now) if now.changed == *changed => true,
+                _ => {
+                    crate::util::ghost_stats::count("engine.stale_by.child_changed");
+                    false
+                }
+            }
         })
 }
 
-fn restamp(store: &AnswerStore, key: &WitnessAttachment, epoch: u64) {
-    if let Ok(mut m) = store.entries.lock() {
+fn restamp(store: &AnswerStore, key: &EngineKey, epoch: u64) {
+    if let Ok(mut m) = store.shard(key).lock() {
         if let Some(slot) = m.map.get_mut(key) {
             slot.epoch = epoch;
         }
     }
 }
 
-/// Answer `key` from the store, or compute it with `compute` and store it.
-/// Without a store this is `compute`.
+/// Answer `key` from the store, or compute it and store it. Without a store
+/// this is the computation.
 ///
-/// `compute` must run on a fresh `QueryState`: a memo carried in from the
-/// asking query would answer sub-queries without the reads that record
-/// their dependencies, and its cycle cuts would depend on the asker. On a
-/// fresh state the chase is a function of the key and the index alone. Cycles across engine keys settle here instead: a key
-/// re-entered while open answers its current assumption (nothing, at
-/// first), and when its computation finishes it is recomputed from what it
-/// produced until the two agree. The values computed on the way read an
-/// assumption, so they are provisional; the settled head is whole unless it
-/// read a head further out.
-pub fn answer(
-    idx: &dyn CrossFileLookup,
-    key: &WitnessAttachment,
-    mut compute: impl FnMut() -> ReducedValue,
-) -> ReducedValue {
+/// The computation is `registry::compute_engine_key`, a function of the key
+/// and the index on a fresh `QueryState`: a memo carried in from the asking
+/// query would answer sub-queries without the reads that record their
+/// dependencies, and its cycle cuts would depend on the asker. Cycles across
+/// engine keys settle here instead: a key re-entered while open answers its
+/// current assumption (nothing, at first), and when its computation finishes
+/// it is recomputed from what it produced until the two agree. The values
+/// computed on the way read an assumption, so they are provisional; the
+/// settled head is whole unless it read a head further out.
+pub fn answer(idx: &dyn CrossFileLookup, key: &EngineKey) -> EngineValue {
     let reentered = FRAMES.with(|f| {
         let mut frames = f.borrow_mut();
         let pos = frames.iter().position(|fr| &fr.key == key)?;
@@ -676,7 +854,7 @@ pub fn answer(
     });
     if reentered.is_some() {
         crate::util::ghost_stats::count("engine.cycle");
-        return ASSUMED.with(|a| a.borrow().get(key).cloned()).unwrap_or(ReducedValue::None);
+        return ASSUMED.with(|a| a.borrow().get(key).cloned()).unwrap_or(EngineValue::NOTHING);
     }
     let member = MEMBERS.with(|m| {
         m.borrow().iter().rev().find(|mb| &mb.key == key).map(|mb| (mb.reads_open, Arc::clone(&mb.entry.value), mb.entry.changed))
@@ -695,7 +873,7 @@ pub fn answer(
     let store = idx.answer_store();
     let epoch = idx.resolution_epoch();
     if let Some(store) = store {
-        let mut found = store.entries.lock().ok().and_then(|m| m.map.get(key).cloned());
+        let mut found = store.get(key);
         if found.is_none() {
             if let Some(e) = crate::util::ghost_stats::timed("engine.adopt_time", || adopt_persisted(idx, key, epoch)) {
                 crate::util::ghost_stats::count("engine.persisted_adopt");
@@ -726,28 +904,18 @@ pub fn answer(
     let unsettled_before = UNSETTLED.with(|u| u.replace(false));
     let depth = FRAMES.with(|f| {
         let mut frames = f.borrow_mut();
-        frames.push(Frame {
-            key: key.clone(),
-            deps: std::collections::HashSet::new(),
-            children: HashMap::new(),
-            reads_open: None,
-            tainted: false,
-            is_head: false,
-            changed: false,
-            members_mark,
-            unsettled_before,
-        });
+        frames.push(Frame::open(key.clone(), members_mark, unsettled_before));
         frames.len() - 1
     });
     let mut rounds = 0;
     let (value, moved) = loop {
-        let v = crate::util::ghost_stats::timed("engine.compute_time", &mut compute);
+        let v = crate::util::ghost_stats::timed("engine.compute_time", || super::registry::compute_engine_key(idx, key));
         let (inner, moved) = FRAMES.with(|f| {
             let mut frames = f.borrow_mut();
             let fr = &mut frames[depth];
             let own_moved = fr.is_head
                 && ASSUMED.with(|a| a.borrow_mut().insert(key.clone(), v.clone()))
-                    .map_or(v != ReducedValue::None, |prev| prev != v);
+                    .map_or(v != EngineValue::NOTHING, |prev| prev != v);
             let moved = own_moved || fr.changed;
             fr.is_head = false;
             fr.changed = false;
@@ -764,7 +932,7 @@ pub fn answer(
         if rounds >= MAX_FIXPOINT_ROUNDS {
             crate::util::ghost_stats::count("engine.fixpoint_unsettled");
             UNSETTLED.with(|u| u.set(true));
-            break (ReducedValue::None, false);
+            break (EngineValue::NOTHING, false);
         }
     };
     let Some(Frame { deps, children, reads_open, tainted, .. }) = FRAMES.with(|f| f.borrow_mut().pop()) else {
@@ -794,12 +962,12 @@ pub fn answer(
         // Early cutoff: a recomputation that lands on the value already held
         // keeps its serial, so the answers that read it stay valid.
         let changed = store
-            .entries
-            .lock()
-            .ok()
-            .and_then(|m| m.map.get(key).filter(|old| *old.value == value).map(|old| old.changed))
+            .get(key)
+            .filter(|old| *old.value == value)
+            .map(|old| old.changed)
             .unwrap_or_else(next_changed);
         let entry = Entry {
+            hash: value_hash(&value),
             value: Arc::new(value.clone()),
             epoch,
             world,
@@ -859,17 +1027,18 @@ fn mark_reads_open(depth: usize) {
     });
 }
 
-fn store_entry(idx: &dyn CrossFileLookup, store: &AnswerStore, key: &WitnessAttachment, entry: Entry) {
+fn store_entry(idx: &dyn CrossFileLookup, store: &AnswerStore, key: &EngineKey, entry: Entry) {
+    // Stored first: the node's children are read back from the store.
+    insert_entry(store, key, entry.clone());
     if let Some(row) = encode_persisted(idx, store, key, &entry) {
         push_pending(store, row);
     }
-    insert_entry(store, key, entry);
 }
 
-fn insert_entry(store: &AnswerStore, key: &WitnessAttachment, entry: Entry) {
+fn insert_entry(store: &AnswerStore, key: &EngineKey, entry: Entry) {
     let bytes = entry_bytes(key, &entry);
-    if let Ok(mut m) = store.entries.lock() {
-        if m.bytes + bytes > ENTRIES_BYTE_CAP {
+    if let Ok(mut m) = store.shard(key).lock() {
+        if m.bytes + bytes > ENTRIES_BYTE_CAP / SHARDS {
             crate::util::ghost_stats::count("engine.reset");
             *m = Budgeted::default();
         }
@@ -880,8 +1049,13 @@ fn insert_entry(store: &AnswerStore, key: &WitnessAttachment, entry: Entry) {
     }
 }
 
-fn push_pending(store: &AnswerStore, row: (Vec<u8>, Vec<u8>)) {
-    let bytes = 2 * std::mem::size_of::<Vec<u8>>() + row.0.len() + row.1.len();
+fn push_pending(store: &AnswerStore, row: (Vec<u8>, PersistedNode)) {
+    let node = &row.1;
+    let bytes = std::mem::size_of::<(Vec<u8>, PersistedNode)>()
+        + row.0.len()
+        + node.value.len()
+        + node.reads.iter().map(|r| std::mem::size_of::<PersistedRead>() + r.to_row().1.len()).sum::<usize>()
+        + node.kids.iter().map(|(k, _)| std::mem::size_of::<(Vec<u8>, u64)>() + k.len()).sum::<usize>();
     if let Ok(mut p) = store.pending.lock() {
         if p.bytes + bytes <= PENDING_BYTE_CAP {
             p.map.push(row);
@@ -892,11 +1066,19 @@ fn push_pending(store: &AnswerStore, row: (Vec<u8>, Vec<u8>)) {
     }
 }
 
-/// `raw` with its value replaced, every recorded dependency kept: lets a
-/// test tell an adopted answer from a recomputed one.
+/// `node` with its value replaced and its hash kept: lets a test tell an
+/// adopted answer from a recomputed one.
 #[cfg(test)]
-pub(crate) fn with_persisted_value(raw: &[u8], value: Option<InferredType>) -> Vec<u8> {
-    let mut p: PersistedAnswer = bincode::deserialize(raw).expect("a persisted row");
-    p.value = value;
-    bincode::serialize(&p).expect("re-encode")
+pub(crate) fn with_persisted_value(node: &PersistedNode, value: Option<InferredType>) -> PersistedNode {
+    let v = match value {
+        Some(t) => PersistedValue::Type(t),
+        None => PersistedValue::Nothing,
+    };
+    PersistedNode { value: bincode::serialize(&v).expect("encode"), ..node.clone() }
+}
+
+/// The key a persisted node was written under, for tests that pick nodes.
+#[cfg(test)]
+pub(crate) fn decode_key(bytes: &[u8]) -> Option<EngineKey> {
+    bincode::deserialize(bytes).ok()
 }
