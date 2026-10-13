@@ -2183,6 +2183,26 @@ fn cpp_fa(src: &str) -> crate::model::file_analysis::FileAnalysis {
         .into_file_analysis()
 }
 
+/// C++ classes hold ONE member namespace: the nearest declaration of a
+/// name answers a call and a value read alike, so a derived member
+/// function hides a base data member of its name for both asks, and a
+/// call reaches a data member (`d.hook()` calls what `hook` holds).
+#[test]
+fn cpp_member_asks_answer_the_nearest_declaration_of_either_family() {
+    use crate::model::file_analysis::MethodResolution;
+    let fa = cpp_fa(
+        "struct Base { int hook; int count; };\n\
+         struct Derived : Base { void hook(); };\n",
+    );
+    let class_of = |r: Option<MethodResolution>| match r {
+        Some(MethodResolution::Local { class, .. }) => Some(class),
+        other => panic!("expected a local hit, got {other:?}"),
+    };
+    assert_eq!(class_of(fa.resolve_field_in_ancestors("Derived", "hook", None)), Some("Derived".into()));
+    assert_eq!(class_of(fa.resolve_method_in_ancestors("Derived", "hook", None)), Some("Derived".into()));
+    assert_eq!(class_of(fa.resolve_method_in_ancestors("Derived", "count", None)), Some("Base".into()));
+}
+
 /// An EXPLICIT declared type governs member dispatch for EVERY C++
 /// initializer shape — `T x = {…}`, `T x{…}`, `T x;` — the braced-init
 /// twin of the annotation-priority fix. The initializer's literals mint a

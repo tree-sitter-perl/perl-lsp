@@ -238,6 +238,9 @@ pub struct NameSpellings {
     /// The package an empty qualifier names (Perl's `$::x` is `$main::x`);
     /// `None` keeps the empty qualifier as written.
     pub root_package: Option<std::borrow::Cow<'static, str>>,
+    /// How the language's classes hold their members: the rule a member
+    /// ask is answered by (`docs/adr/member-kinds.md`).
+    pub member_namespace: MemberNamespace,
 }
 
 /// What a class spelling written in a file denotes — the capability the
@@ -262,6 +265,7 @@ impl NameSpellings {
         sigils: std::borrow::Cow::Borrowed(&[]),
         class_spelling: ClassSpelling::Identity,
         root_package: None,
+        member_namespace: MemberNamespace::PerFamily,
     };
 
     /// A language with a namespace separator, no sigils, and spellings
@@ -273,6 +277,7 @@ impl NameSpellings {
             sigils: std::borrow::Cow::Borrowed(&[]),
             class_spelling: ClassSpelling::Identity,
             root_package: None,
+            member_namespace: MemberNamespace::PerFamily,
         }
     }
 
@@ -864,6 +869,51 @@ impl Symbol {
     pub fn hidden_in_outline(&self) -> bool {
         self.presentation.hide_in_outline
     }
+}
+
+/// Which family a member belongs to: a stored value or a callable. An ask
+/// carries the family of the fact that produced it, a declaration the
+/// family of its symbol kind (`docs/adr/member-kinds.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MemberKind {
+    Value,
+    Callable,
+}
+
+impl MemberKind {
+    pub fn of_sym(kind: SymKind) -> MemberKind {
+        match kind {
+            SymKind::Sub | SymKind::Method => MemberKind::Callable,
+            _ => MemberKind::Value,
+        }
+    }
+
+    /// May a declaration of `kind` answer an ask of this family, in a
+    /// language whose classes hold their members in `namespace`? Nothing
+    /// resolves across families where they are separate; where there is
+    /// one namespace the family never mattered.
+    pub fn admits_decl(self, kind: SymKind, namespace: MemberNamespace) -> bool {
+        match namespace {
+            MemberNamespace::PerFamily => MemberKind::of_sym(kind) == self,
+            MemberNamespace::Shared => true,
+        }
+    }
+}
+
+/// How a language's classes hold their members. A language declares it on
+/// its spellings; the member walk reads the value and never asks which
+/// language it serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum MemberNamespace {
+    /// A namespace per family: a read reaches only a stored value and a
+    /// call only a callable (Perl's sub beside a same-named `field`).
+    #[default]
+    PerFamily,
+    /// One namespace: a name is one member whatever its kind, so every ask
+    /// reaches the nearest declaration of it. C++'s `d.hook()` reads member
+    /// `hook` and calls whatever it holds, so a derived function pointer
+    /// hides a base method of that name.
+    Shared,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

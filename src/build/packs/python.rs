@@ -1,12 +1,14 @@
 //! Python's pack.
 
 use crate::build::query_extract::*;
-use crate::model::file_analysis::{InferredType, NameSpellings};
+use crate::model::file_analysis::{InferredType, MemberNamespace, NameSpellings};
 
 pub fn python_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/python/skeleton.scm"),
-        names: NameSpellings::NONE,
+        // One member namespace: the nearest declaration of a name wins,
+        // whether it is a data member or a member function.
+        names: NameSpellings { member_namespace: MemberNamespace::Shared, ..NameSpellings::NONE },
         shape_name: |raw| raw.to_string(),
         default_name: |_| None,
         annot_type: |text| match text.trim() {
