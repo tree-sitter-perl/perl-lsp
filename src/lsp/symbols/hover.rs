@@ -360,7 +360,7 @@ fn perl_hover_named(
                 // A split exporter's sub may live in a losing candidate —
                 // pick by the queried symbol, keeping the plain winner as
                 // the last resort (hover still names the module's file).
-                .or_else(|| module_index.candidate_defining_sub(&import.module_name, &remote_name))
+                .or_else(|| module_index.candidate_defining_sub(&import.module_name, &remote_name).read())
                 .or_else(|| module_index.get_cached(&import.module_name))
             {
                 let whole = module_index.bag_present(&cached);
@@ -390,7 +390,7 @@ fn perl_hover_named(
             let bare = r.unqualified_target_name(analysis.names());
             // Symbol-disambiguated: the file defining `bare`, not the
             // name-slot winner (same rule as the FQ goto-def lane).
-            let cached = module_index.candidate_defining_sub(pkg, bare)?;
+            let cached = module_index.candidate_defining_sub(pkg, bare).read()?;
             let whole = module_index.bag_present(&cached);
             let sub_info = whole.sub_info_view(bare)?;
             let sig = format_imported_signature(bare, &sub_info);

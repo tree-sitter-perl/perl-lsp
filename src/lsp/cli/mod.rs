@@ -416,7 +416,7 @@ fn cli_full_startup(
                 use crate::model::file_analysis::CrossFileLookup;
                 module_index.def_candidates(&name)
             };
-            (!cands.is_empty()).then_some(cands)
+            (!cands.read().is_empty()).then_some(cands)
         } else {
             if stale_set.contains(&name) {
                 parse_memo.remove(&name);

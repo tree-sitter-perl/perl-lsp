@@ -138,7 +138,7 @@ impl ClosednessCertificate {
         // Exclusions ride the VALUE, not the name (rule #10): we ask each
         // class whether it can be vouched for rather than matching a list of
         // classes we happen to know about.
-        if idx.class_is_bridged_to(name) {
+        if idx.class_is_bridged_to(name).read() {
             // A plugin namespace can bridge content onto this class without
             // any file declaring it, so the ancestry walk does not see the
             // whole world. v1 declines rather than guessing; whether

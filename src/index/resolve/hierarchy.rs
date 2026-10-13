@@ -69,7 +69,7 @@ pub fn analysis_for_key(
         }
     }
     module_index
-        .and_then(|idx| idx.cached_by_path(&path).map(|cm| idx.whole_present(&cm)))
+        .and_then(|idx| idx.cached_by_path(&path).map(|cm| idx.whole_present(&cm)).read())
         .or(resident)
 }
 
@@ -132,7 +132,7 @@ impl<'a> CandidateSet<'a> {
             out.push(self.origin_decl(s.selection_span));
         }
         if let Some(idx) = self.idx() {
-            for cached in idx.visible_def_candidates(class) {
+            for cached in idx.visible_def_candidates(class).read() {
                 let whole = idx.whole_present(&cached);
                 for s in whole
                     .symbols()
@@ -256,7 +256,7 @@ impl<'a> CandidateSet<'a> {
                 .find(|s| s.name == class && contains_point_of(s, location.span.start))
                 .map(|s| s.kind),
             FileKey::Path(p) => self.idx().and_then(|idx| {
-                let cm = idx.cached_by_path(p)?;
+                let cm = idx.cached_by_path(p).read()?;
                 let whole = idx.whole_present(&cm);
                 whole
                     .symbols()

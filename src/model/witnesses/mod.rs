@@ -33,6 +33,7 @@ pub use query::*;
 mod session;
 pub use session::*;
 pub mod engine;
+pub mod tracked;
 mod conclusions;
 pub use conclusions::*;
 mod closedness;

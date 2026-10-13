@@ -909,7 +909,7 @@ impl FileAnalysis {
                     // overrides DBIC's verb (same gate as the builder's
                     // `user_shadows_verb`); the column may be minted by any.
                     let cands = idx.visible_def_candidates(&class);
-                    let shadows = cands.iter().any(|c| {
+                    let shadows = cands.read().iter().any(|c| {
                         idx.whole_present(c).symbols.iter().any(|s| {
                             matches!(s.kind, SymKind::Sub | SymKind::Method)
                                 && s.name == verb
@@ -917,7 +917,7 @@ impl FileAnalysis {
                         })
                     });
                     let is_column = !shadows
-                        && cands.iter().any(|c| {
+                        && cands.read().iter().any(|c| {
                             idx.whole_present(c)
                                 .field_projections_named(&key_ref.target_name, &class)
                                 // ONLY a real `Class`-owned column (DBIC /
@@ -1001,7 +1001,7 @@ impl FileAnalysis {
         // Later `use` wins, mirroring `resolve_call_package`'s import scan.
         // A split exporter's surface lives across its candidate files.
         for import in self.imports.iter().rev() {
-            for cached in idx.visible_def_candidates(&import.module_name) {
+            for cached in idx.visible_def_candidates(&import.module_name).read() {
                 let fa = idx.facts_present(&cached);
                 let surface = fa.export_surface_with_index(idx);
                 if imported_names(import, &surface)

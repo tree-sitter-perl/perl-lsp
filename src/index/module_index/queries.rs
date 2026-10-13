@@ -261,7 +261,7 @@ impl ModuleIndex {
             }
             // Every candidate file registered under the name — a split
             // module's re-export edges (and defs) span the set.
-            for cached in crate::model::file_analysis::CrossFileLookup::def_candidates(self, &module) {
+            for cached in crate::model::file_analysis::CrossFileLookup::def_candidates(self, &module).read() {
                 if visit(&cached).is_break() {
                     return;
                 }
@@ -371,7 +371,7 @@ impl ModuleIndex {
             .filter(|m| {
                 // ANY candidate file of the module may carry the export list.
                 crate::model::file_analysis::CrossFileLookup::def_candidates(self, m)
-                    .iter()
+                    .read().iter()
                     .any(|c| c.analysis().export.iter().any(|e| e == func_name)
                         || c.analysis().export_ok.iter().any(|e| e == func_name))
             })
@@ -428,7 +428,7 @@ impl ModuleIndex {
                 // EVERY file registered under this module name — the definer
                 // may be a losing candidate of its own name slot. Symbols-axis
                 // existence scan — no bag/refs read.
-                self.def_candidates(mod_name).iter().any(|c| {
+                self.def_candidates(mod_name).read().iter().any(|c| {
                     // Rows-backed pre-filter, the same probe as the MRO
                     // walk's (`docs/prompt-relational-iteration.md` ladder 2):
                     // `has_sub_in_package` tests exactly the (name, package)

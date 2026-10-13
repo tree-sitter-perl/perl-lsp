@@ -183,7 +183,7 @@ impl Backend {
                     use crate::model::file_analysis::CrossFileLookup;
                     module_index
                         .visible_def_candidates(class)
-                        .iter()
+                        .read().iter()
                         .map(|c| c.path.clone())
                         .collect()
                 };

@@ -43,7 +43,7 @@ pub(super) fn import_candidates(
             }
             // Detail from whichever candidate defines the remote sub.
             let def = idx.candidate_defining_sub(&import.module_name, is.remote());
-            let whole = def.as_ref().map(|c| idx.bag_present(c));
+            let whole = def.read().as_ref().map(|c| idx.bag_present(c));
             let detail =
                 completion_detail_for_import(is.remote(), whole.as_deref(), &import.module_name);
             out.push(CompletionCandidate {
@@ -63,7 +63,7 @@ pub(super) fn import_candidates(
         if !mask.contains(RoleMask::DEPENDENCY) {
             continue;
         }
-        for cached in &cands {
+        for cached in &cands.read() {
             let fa = &cached.analysis();
             let all_exported: Vec<&String> = if import.imported_symbols.is_empty() {
                 // Bare `use Foo;` — offer @EXPORT
@@ -212,10 +212,10 @@ pub(super) fn dispatch_handler_locations(
 ) -> Vec<RefLocation> {
     use crate::model::file_analysis::SymbolDetail;
     let mut locs: Vec<RefLocation> = Vec::new();
-    for module_name in module_index.modules_with_symbol(name) {
+    for module_name in module_index.modules_with_symbol(name).read() {
         // Every file registered under the name — stacked registrations
         // may live in a losing candidate.
-        for cached in module_index.visible_def_candidates(&module_name) {
+        for cached in module_index.visible_def_candidates(&module_name).read() {
             let whole = module_index.whole_present(&cached);
             for sym in whole.symbols() {
                 if sym.name != name {
@@ -319,12 +319,12 @@ pub(crate) fn resolve_imported_function_classified<'b>(
         // losing candidate. `Brought` is the strongest verdict per import.
         let cands = module_index.visible_def_candidates(&import.module_name);
         let mut hit: Option<(Option<PathBuf>, String, ImportResolution)> = None;
-        if cands.is_empty() {
+        if cands.read().is_empty() {
             if let Some((res, remote)) = classify_import(import, func_name, None, module_index) {
                 hit = Some((None, remote, res));
             }
         } else {
-            for c in &cands {
+            for c in &cands.read() {
                 if let Some((res, remote)) =
                     classify_import(import, func_name, Some(c.as_ref()), module_index)
                 {

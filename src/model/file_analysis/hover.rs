@@ -267,7 +267,7 @@ impl FileAnalysis {
                             }
                             Some(MethodResolution::CrossFile { ref class, .. }) => {
                                 let idx = module_index?;
-                                for cached in idx.visible_def_candidates(class) {
+                                for cached in idx.visible_def_candidates(class).read() {
                                     let whole = idx.whole_present(&cached);
                                     let Some(sym) = whole.symbols().iter().find(|s| {
                                         !matches!(s.kind, SymKind::Sub | SymKind::Method)
@@ -375,7 +375,7 @@ impl FileAnalysis {
                 // holds the field, not the name-slot winner. `render` reads
                 // the field's flow type from its OWNING bag — the symbol
                 // scan needs symbols too; take the whole view.
-                idx.visible_def_candidates(&class).iter().find_map(|cached| {
+                idx.visible_def_candidates(&class).read().iter().find_map(|cached| {
                     let full = idx.whole_present(cached);
                     let sym = full.symbols.iter().find(|s| {
                         matches!(s.kind, SymKind::Variable | SymKind::Field)
@@ -430,10 +430,10 @@ impl FileAnalysis {
         // that have a symbol with this name are visited; most of the
         // workspace is skipped without any per-module inspection.
         if let Some(idx) = module_index {
-            for module_name in idx.modules_with_symbol(name) {
+            for module_name in idx.modules_with_symbol(name).read() {
                 // Every file registered under the name — a registration
                 // gathering must not stop at the name-slot winner.
-                for cached in idx.visible_def_candidates(&module_name) {
+                for cached in idx.visible_def_candidates(&module_name).read() {
                     let whole = idx.whole_present(&cached);
                     for sym in &whole.symbols {
                         if sym.name != name { continue; }
@@ -475,8 +475,8 @@ impl FileAnalysis {
         // dispatcher list to the consumer.
         if dispatchers.is_empty() {
             if let Some(idx) = module_index {
-                for module_name in idx.modules_with_symbol(name) {
-                    for cached in idx.visible_def_candidates(&module_name) {
+                for module_name in idx.modules_with_symbol(name).read() {
+                    for cached in idx.visible_def_candidates(&module_name).read() {
                         let whole = idx.whole_present(&cached);
                         for sym in &whole.symbols {
                             if sym.name != name { continue; }

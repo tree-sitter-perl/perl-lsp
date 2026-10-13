@@ -320,7 +320,7 @@ pub(super) fn pack_symbol_def_location(
     // never serves (`Perl_fix_optchain`'s body is in peep.c; proto.h wins
     // the scoped lookup).
     let mut seen_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    for cached in module_index.def_candidates(name) {
+    for cached in module_index.def_candidates(name).read() {
         if !seen_paths.insert(cached.path.clone()) {
             continue;
         }
@@ -393,7 +393,7 @@ pub(super) fn names_visible_macro(
     origin.names_macro_def(name, None)
         || idx.is_some_and(|i| {
             i.def_candidates(name)
-                .iter()
+                .read().iter()
                 .any(|c| c.analysis().names_macro_def(name, None))
         })
 }
@@ -445,7 +445,7 @@ pub(super) fn pack_def_paths(
     if origin_defines {
         out.push(self_str.clone());
     }
-    for c in idx.def_candidates(name) {
+    for c in idx.def_candidates(name).read() {
         let p = c.path.to_string_lossy().into_owned();
         // A `#define` of the name anywhere joins unconditionally — config
         // variants of one conceptual macro live in disjoint headers (win32.h

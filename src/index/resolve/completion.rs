@@ -21,7 +21,7 @@ impl<'a> CandidateSet<'a> {
         }
         // Whichever candidate file declares the type symbol — not the
         // name-slot winner.
-        idx.visible_def_candidates(type_name).iter().find_map(|cached| {
+        idx.visible_def_candidates(type_name).read().iter().find_map(|cached| {
             let whole = idx.whole_present(cached);
             let sym = whole
                 .symbols()

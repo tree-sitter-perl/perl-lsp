@@ -175,7 +175,7 @@ impl QueryCx {
             return Some((None, span, line));
         }
         // Whichever candidate file yields a definition line.
-        idx.visible_def_candidates(word).iter().find_map(|cached| {
+        idx.visible_def_candidates(word).read().iter().find_map(|cached| {
             let text = std::fs::read_to_string(&cached.path).ok()?;
             let (span, line) = pick(&idx.whole_present(cached), &text)?;
             Some((Url::from_file_path(&cached.path).ok(), span, line))

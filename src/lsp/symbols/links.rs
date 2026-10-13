@@ -149,7 +149,7 @@ fn registered_module_path(
         return Some(p);
     }
     idx.visible_def_candidates(module)
-        .into_iter()
+        .into_iter.read()()
         .next()
         .map(|c| c.path.clone())
 }

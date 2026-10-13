@@ -471,7 +471,7 @@ impl FileAnalysis {
             if let Some(mi) = module_index {
                 // Every file declaring `cls` — fields of a reopened class
                 // live across the set (`seen` dedups).
-                for cached in mi.visible_def_candidates(cls) {
+                for cached in mi.visible_def_candidates(cls).read() {
                     mi.whole_present(&cached).collect_class_fields(
                         cls, &mut candidates, &mut seen, requesting_class,
                     );
@@ -545,7 +545,7 @@ impl FileAnalysis {
                 // Whichever of `class`'s candidate files holds the field.
                 // The field's type lives in the OWNING file's bag; the symbol
                 // scan needs symbols too; take the whole view.
-                idx.visible_def_candidates(&class).iter().find_map(|cached| {
+                idx.visible_def_candidates(&class).read().iter().find_map(|cached| {
                     let full = idx.whole_present(cached);
                     let sym = full.symbols.iter().find(|s| {
                         matches!(s.kind, SymKind::Variable | SymKind::Field)
@@ -582,7 +582,7 @@ impl FileAnalysis {
                 // `type_name_edge_of` reads the field's `Edge(TypeName(_))`
                 // witness — plus the symbol scan; take the whole view of
                 // whichever candidate file holds the field.
-                idx.visible_def_candidates(&class).iter().find_map(|cached| {
+                idx.visible_def_candidates(&class).read().iter().find_map(|cached| {
                     let full = idx.whole_present(cached);
                     let sym = full.symbols.iter().find(|s| {
                         matches!(s.kind, SymKind::Variable | SymKind::Field)
@@ -629,7 +629,7 @@ impl FileAnalysis {
         // Symbols-axis read only (name/kind/package scan) — first candidate
         // file that attributes the value to a package.
         idx.visible_def_candidates(value)
-            .iter()
+            .read().iter()
             .find_map(|cached| packaged(&idx.symbols_present(cached)))
     }
 
@@ -873,7 +873,7 @@ impl FileAnalysis {
             .and_then(|idx| {
                 // First candidate file whose analysis yields members.
                 idx.visible_def_candidates(enum_name)
-                    .iter()
+                    .read().iter()
                     .map(|cached| collect(&idx.whole_present(cached)))
                     .find(|v| !v.is_empty())
             })

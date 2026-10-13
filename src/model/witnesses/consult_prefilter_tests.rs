@@ -9,6 +9,7 @@ use super::sweep_candidate_may_answer;
 use crate::model::file_analysis::{CachedModule, CrossFileLookup, FileAnalysis};
 use std::path::PathBuf;
 use std::sync::Arc;
+use crate::model::witnesses::tracked::{Lookup, Tracked};
 use crate::index::sealed::Unsealed;
 
 fn build(src: &str) -> FileAnalysis {
@@ -29,22 +30,24 @@ impl CrossFileLookup for RowsSay {
     fn facts_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
         Arc::clone(cached.analysis())
     }
-    fn get_cached(&self, _m: &str) -> Option<Arc<CachedModule>> {
-        None
+    fn get_cached(&self, m: &str) -> Tracked<Option<Arc<CachedModule>>> {
+        Tracked::new(Lookup::Winner(m.to_string()), None)
     }
-    fn modules_with_symbol(&self, _n: &str) -> Vec<String> {
-        Vec::new()
+    fn modules_with_symbol(&self, n: &str) -> Tracked<Vec<String>> {
+        Tracked::new(Lookup::ModulesWithSymbol(n.to_string()), Vec::new())
     }
-    fn find_exporters(&self, _n: &str) -> Vec<String> {
-        Vec::new()
+    fn find_exporters(&self, n: &str) -> Tracked<Vec<String>> {
+        Tracked::new(Lookup::Exporters(n.to_string()), Vec::new())
     }
-    fn defining_module_cached(&self, _e: &str, _n: &str) -> Option<Arc<CachedModule>> {
-        None
+    fn defining_module_cached(&self, e: &str, n: &str) -> Tracked<Option<Arc<CachedModule>>> {
+        Tracked::new(Lookup::DefiningModule { entry: e.to_string(), name: n.to_string() }, None)
     }
-    fn module_declaring_method_in_package(&self, _p: &str, _m: &str) -> Option<String> {
-        None
+    fn module_declaring_method_in_package(&self, p: &str, m: &str) -> Tracked<Option<String>> {
+        Tracked::new(Lookup::DeclaringModule { name: p.to_string(), class: m.to_string() }, None)
     }
-    fn for_each_cached(&self, _f: &mut dyn FnMut(&str, &Arc<CachedModule>)) {}
+    fn for_each_cached(&self, _f: &mut dyn FnMut(&str, &Arc<CachedModule>)) -> Tracked<()> {
+        Tracked::visited(Lookup::AllModules, Default::default())
+    }
     fn for_each_reexport_module(
         &self,
         _s: Vec<String>,
@@ -61,13 +64,14 @@ impl CrossFileLookup for RowsSay {
         ) -> std::ops::ControlFlow<()>,
     ) {
     }
-    fn direct_children_of(&self, _p: &str) -> Vec<(String, String)> {
-        Vec::new()
+    fn direct_children_of(&self, p: &str) -> Tracked<Vec<(String, String)>> {
+        Tracked::new(Lookup::Children(p.to_string()), Vec::new())
     }
     fn for_each_loader_shape(
         &self,
         _f: &mut dyn FnMut(&str, &crate::model::file_analysis::InferredType),
-    ) {
+    ) -> Tracked<()> {
+        Tracked::visited(Lookup::LoaderShapes, Default::default())
     }
     fn candidate_bag_may_answer(
         &self,

@@ -392,14 +392,14 @@ impl FileAnalysis {
             // CrossFile where the local walk resolved Local. Require the class
             // to be declared nowhere else before trusting the local chain.
             if let Some(idx) = module_index {
-                if idx.visible_def_candidates(&c).len() > 1 {
+                if idx.visible_def_candidates(&c).read().len() > 1 {
                     verdict = false;
                     break;
                 }
             }
             let local: Vec<String> = self.declared_parents(&c).to_vec();
             if let Some(idx) = module_index {
-                if idx.parents_cached(&c).iter().any(|p| !local.contains(p)) {
+                if idx.parents_cached(&c).read().iter().any(|p| !local.contains(p)) {
                     verdict = false;
                     break;
                 }

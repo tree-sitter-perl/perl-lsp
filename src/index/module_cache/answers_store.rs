@@ -35,7 +35,7 @@ pub fn load_answers(conn: &Connection) -> Vec<(Vec<u8>, PersistedNode)> {
     }
     if let Ok(mut stmt) = conn.prepare("SELECT key, kind, subject, stamp FROM answer_reads") {
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?))
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?, row.get::<_, Vec<u8>>(2)?, row.get::<_, i64>(3)?))
         });
         for (key, kind, subject, stamp) in rows.into_iter().flatten().flatten() {
             let (Some(node), Some(read)) = (nodes.get_mut(&key), PersistedRead::from_row(kind, subject, stamp)) else {
@@ -75,7 +75,7 @@ pub fn save_answers(conn: &Connection, nodes: &[(Vec<u8>, PersistedNode)]) -> ru
             clear_reads.execute(params![k])?;
             clear_kids.execute(params![k])?;
             for r in &n.reads {
-                let (kind, subject, stamp) = r.to_row();
+                let Some((kind, subject, stamp)) = r.to_row() else { continue };
                 read_stmt.execute(params![k, kind, subject, stamp])?;
             }
             for (child, hash) in &n.kids {
@@ -94,11 +94,12 @@ pub fn save_answers(conn: &Connection, nodes: &[(Vec<u8>, PersistedNode)]) -> ru
 }
 
 /// The encoded keys of every persisted answer that read `path`.
-pub fn answers_reading(conn: &Connection, path: &str) -> Vec<Vec<u8>> {
-    let Ok(mut stmt) = conn.prepare("SELECT key FROM answer_reads WHERE kind = 0 AND subject = ?1") else {
+pub fn answers_reading(conn: &Connection, path: &std::path::Path) -> Vec<Vec<u8>> {
+    let Ok(mut stmt) = conn.prepare("SELECT key FROM answer_reads WHERE kind = ?1 AND subject = ?2") else {
         return Vec::new();
     };
-    stmt.query_map(params![path], |row| row.get(0))
+    let subject = path.as_os_str().as_encoded_bytes();
+    stmt.query_map(params![crate::model::witnesses::engine::READ_FILE, subject], |row| row.get(0))
         .map(|rows| rows.filter_map(Result::ok).collect())
         .unwrap_or_default()
 }

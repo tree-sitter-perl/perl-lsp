@@ -150,10 +150,10 @@ pub fn collect_diagnostics(
             // producer — a split exporter's surface (and thus a false
             // "not exported" verdict) must not hinge on the name-slot winner.
             let cands = module_index.visible_def_candidates(&import.module_name);
-            let (bound, exported) = if !cands.is_empty() {
+            let (bound, exported) = if !cands.read().is_empty() {
                 let mut bound: HashMap<String, String> = HashMap::new();
                 let mut all: std::collections::HashSet<String> = Default::default();
-                for c in &cands {
+                for c in &cands.read() {
                     let surface = c.analysis().export_surface_with_index(module_index);
                     bound.extend(crate::model::file_analysis::imported_names(import, &surface));
                     all.extend(surface.all_names());

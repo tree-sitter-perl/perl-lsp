@@ -29,7 +29,7 @@ pub(super) fn attr_group_via_ancestors(
             .or_else(|| {
                 // Whichever candidate file declaring `c` mints the group.
                 idx.visible_def_candidates(c)
-                    .iter()
+                    .read().iter()
                     .find_map(|cc| {
                         idx.whole_present(cc).field_projections_named(bare, c).filter(&ok)
                     })
@@ -68,7 +68,7 @@ pub(super) fn attr_group_via_ancestors(
     }
     // The defining class's declaring file is whichever candidate mints the
     // projection group, not the name-slot winner.
-    idx.visible_def_candidates(&defining).iter().find_map(|cached| {
+    idx.visible_def_candidates(&defining).read().iter().find_map(|cached| {
         let whole = idx.whole_present(cached);
         let p = whole.field_projections_named(bare, &defining).filter(&ok)?;
         Some(group_from_projections(p, &whole, Some(cached.path.clone()), Some(idx)))
@@ -323,7 +323,7 @@ pub fn resolve_symbol_scoped(
                     // Whole view: the class-content / file-scope shape tests
                     // walk symbols, which the resident copy may have evicted.
                     // Any candidate file declaring the name may claim.
-                    idx.visible_def_candidates(&r.target_name).iter().find_map(|cached| {
+                    idx.visible_def_candidates(&r.target_name).read().iter().find_map(|cached| {
                         let whole = idx.whole_present(cached);
                         whole
                             .symbols()
@@ -431,7 +431,7 @@ pub(super) fn class_member_bare_constant(
             // A candidate's verdict is a whole-copy fetch plus a scan of
             // THAT file; under a walk memo each candidate pays it once
             // however many askers (scoped or not) reach it.
-            i.visible_def_candidates(class).iter().find_map(|c| {
+            i.visible_def_candidates(class).read().iter().find_map(|c| {
                 let Some(memo) = memo else {
                     return check(&i.whole_present(c));
                 };

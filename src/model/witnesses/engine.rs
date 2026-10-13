@@ -11,10 +11,11 @@
 //! - `File { path, version }` — an analysis read through the index (any of
 //!   the residency views). `version` is the index's registration generation
 //!   for the path, so any re-registration of the file moves it.
-//! - `Mentions { kind, key, hash }` — the set of files the index says
-//!   mention a name (`MentionKind::Any`), or call it as a plain function
-//!   (`MentionKind::Calls`). A body edit that adds or removes a call site
-//!   changes it without touching any surface.
+//! - `Lookup { lookup, hash }` — a name relation the index derives from
+//!   many files (`tracked::Lookup`: who declares a name, who exports it,
+//!   which files mention it, ...), by the hash of the value read. A body
+//!   edit that adds or removes a call site moves the mentions relation
+//!   without touching any surface.
 //! - the world generation, carried on the entry: every surface-changing
 //!   write and every structure change (a file added, removed, a provider
 //!   swapped) moves it. Name lookups (exporters, parents, declarers, bridges)
@@ -60,11 +61,13 @@ use std::sync::{Arc, Mutex};
 
 use crate::model::file_analysis::{CachedModule, CrossFileLookup, FileAnalysis};
 
+use super::tracked::{Lookup, Tracked};
+
 /// One thing an answer read.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Dep {
     File { path: PathBuf, version: u64 },
-    Mentions { kind: MentionKind, key: String, hash: u64 },
+    Lookup { lookup: Lookup, hash: u64 },
 }
 
 /// Which files a mentions set holds.
@@ -198,24 +201,29 @@ fn next_changed() -> u64 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PersistedRead {
     File { path: PathBuf, stamp: u64 },
-    Mentions { kind: MentionKind, key: String, hash: u64 },
+    Lookup { lookup: Lookup, hash: u64 },
 }
 
+/// `PersistedRead::to_row` kinds.
+pub const READ_FILE: i64 = 0;
+pub const READ_LOOKUP: i64 = 1;
+
 impl PersistedRead {
-    /// `(kind, subject, stamp)`: the read as a row.
-    pub fn to_row(&self) -> (i64, String, i64) {
-        match self {
-            PersistedRead::File { path, stamp } => (0, path.to_string_lossy().into_owned(), *stamp as i64),
-            PersistedRead::Mentions { kind: MentionKind::Any, key, hash } => (1, key.clone(), *hash as i64),
-            PersistedRead::Mentions { kind: MentionKind::Calls, key, hash } => (2, key.clone(), *hash as i64),
-        }
+    /// `(kind, subject, stamp)`: the read as a row. A file's subject is its
+    /// path's bytes, so "what read this file" is one indexed lookup.
+    pub fn to_row(&self) -> Option<(i64, Vec<u8>, i64)> {
+        Some(match self {
+            PersistedRead::File { path, stamp } => {
+                (READ_FILE, path.as_os_str().as_encoded_bytes().to_vec(), *stamp as i64)
+            }
+            PersistedRead::Lookup { lookup, hash } => (READ_LOOKUP, bincode::serialize(lookup).ok()?, *hash as i64),
+        })
     }
 
-    pub fn from_row(kind: i64, subject: String, stamp: i64) -> Option<PersistedRead> {
+    pub fn from_row(kind: i64, subject: Vec<u8>, stamp: i64) -> Option<PersistedRead> {
         Some(match kind {
-            0 => PersistedRead::File { path: PathBuf::from(subject), stamp: stamp as u64 },
-            1 => PersistedRead::Mentions { kind: MentionKind::Any, key: subject, hash: stamp as u64 },
-            2 => PersistedRead::Mentions { kind: MentionKind::Calls, key: subject, hash: stamp as u64 },
+            READ_FILE => PersistedRead::File { path: PathBuf::from(String::from_utf8(subject).ok()?), stamp: stamp as u64 },
+            READ_LOOKUP => PersistedRead::Lookup { lookup: bincode::deserialize(&subject).ok()?, hash: stamp as u64 },
             _ => return None,
         })
     }
@@ -277,7 +285,7 @@ fn entry_bytes(key: &EngineKey, e: &Entry) -> usize {
                 std::mem::size_of::<Dep>()
                     + match d {
                         Dep::File { path, .. } => path.as_os_str().len(),
-                        Dep::Mentions { key, .. } => key.len(),
+                        Dep::Lookup { lookup, .. } => bincode::serialized_size(lookup).unwrap_or(0) as usize,
                     }
             })
             .sum::<usize>()
@@ -295,6 +303,8 @@ pub struct AnswerStore {
     pending: Mutex<Budgeted<Vec<(Vec<u8>, PersistedNode)>>>,
     /// `mentions_of` per key, valid while `resolution_epoch` stands.
     mentions: Mutex<Budgeted<HashMap<(MentionKind, String), (u64, Arc<Vec<PathBuf>>)>>>,
+    /// `lookup_holds` per relation: `(resolution_epoch, hash)`.
+    lookups: Mutex<Budgeted<HashMap<Lookup, (u64, u64)>>>,
     /// `uncovered_files` at a `resolution_epoch`.
     uncovered: Mutex<Option<(u64, Arc<Vec<Arc<CachedModule>>>)>>,
     /// Whether an indexed file holds a plain function call keyed by a
@@ -329,6 +339,7 @@ impl AnswerStore {
         self.shards.iter().map(|s| s.lock().map(|m| m.bytes).unwrap_or(0)).sum::<usize>()
             + self.pending.lock().map(|m| m.bytes).unwrap_or(0)
             + self.mentions.lock().map(|m| m.bytes).unwrap_or(0)
+            + self.lookups.lock().map(|m| m.bytes).unwrap_or(0)
             + self.call_verdicts.lock().map(|m| m.bytes).unwrap_or(0)
     }
 
@@ -355,7 +366,7 @@ fn encode_persisted(
     for d in e.deps.iter() {
         reads.push(match d {
             Dep::File { path, .. } => PersistedRead::File { path: path.clone(), stamp: idx.source_stamp(path)? },
-            Dep::Mentions { kind, key, hash } => PersistedRead::Mentions { kind: *kind, key: key.clone(), hash: *hash },
+            Dep::Lookup { lookup, hash } => PersistedRead::Lookup { lookup: lookup.clone(), hash: *hash },
         });
     }
     let mut kids = Vec::with_capacity(e.children.len());
@@ -387,12 +398,12 @@ fn adopt_persisted(idx: &dyn CrossFileLookup, key: &EngineKey, epoch: u64) -> Op
                 }
                 deps.push(Dep::File { path: path.clone(), version: idx.file_version(path)? });
             }
-            PersistedRead::Mentions { kind, key, hash } => {
-                if mentions_hash(&mentions_of(idx, *kind, key)) != *hash {
-                    crate::util::ghost_stats::count("engine.persisted_mentions_moved");
+            PersistedRead::Lookup { lookup, hash } => {
+                if lookup_holds(idx, lookup) != *hash {
+                    crate::util::ghost_stats::count("engine.persisted_lookup_moved");
                     return None;
                 }
-                deps.push(Dep::Mentions { kind: *kind, key: key.clone(), hash: *hash });
+                deps.push(Dep::Lookup { lookup: lookup.clone(), hash: *hash });
             }
         }
     }
@@ -507,7 +518,7 @@ thread_local! {
 /// relation (the mentions sets) whose result is recorded as one hashed
 /// dependency: the per-file reads that built it would only over-depend,
 /// and a memoized result could not repeat them anyway.
-fn untracked<R>(f: impl FnOnce() -> R) -> R {
+pub(crate) fn untracked<R>(f: impl FnOnce() -> R) -> R {
     struct Leave;
     impl Drop for Leave {
         fn drop(&mut self) {
@@ -589,6 +600,11 @@ pub fn deeper_position_of_open_join(key: &JoinKey) -> bool {
     })
 }
 
+/// Would a read now be recorded?
+pub(crate) fn frame_open() -> bool {
+    any_frame_open()
+}
+
 fn any_frame_open() -> bool {
     UNTRACKED.with(|u| u.get()) == 0 && FRAMES.with(|f| !f.borrow().is_empty())
 }
@@ -604,18 +620,42 @@ pub fn note_file(idx: &dyn CrossFileLookup, path: &std::path::Path) {
     }
 }
 
-pub fn mentions_hash(paths: &[PathBuf]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    paths.hash(&mut h);
-    h.finish()
+/// The current hash of `lookup`, recomputed at most once per
+/// `resolution_epoch`: every answer that read it verifies against one
+/// recomputation.
+fn lookup_holds(idx: &dyn CrossFileLookup, lookup: &Lookup) -> u64 {
+    let epoch = idx.resolution_epoch();
+    let store = idx.answer_store();
+    if let Some(store) = store {
+        if let Some(&(at, hash)) = store.lookups.lock().ok().as_ref().and_then(|m| m.map.get(lookup)) {
+            if at == epoch {
+                crate::util::ghost_stats::count("engine.lookup_memo_hit");
+                return hash;
+            }
+        }
+    }
+    crate::util::ghost_stats::count("engine.lookup_recompute");
+    let hash = untracked(|| super::tracked::lookup_hash(idx, lookup));
+    if let Some(store) = store {
+        if let Ok(mut m) = store.lookups.lock() {
+            let bytes = std::mem::size_of::<(Lookup, (u64, u64))>()
+                + bincode::serialized_size(lookup).unwrap_or(0) as usize;
+            if m.bytes + bytes > MENTIONS_BYTE_CAP {
+                *m = Budgeted::default();
+            }
+            if m.map.insert(lookup.clone(), (epoch, hash)).is_none() {
+                m.bytes += bytes;
+            }
+        }
+    }
+    hash
 }
 
 /// The files the index says mention `key` the way `kind` asks
 /// (`mentions_among`, `calls_among`), memoized per `resolution_epoch`: one
 /// verification checks every mentions set its answer's chase read.
-pub fn mentions_of(idx: &dyn CrossFileLookup, kind: MentionKind, key: &str) -> Arc<Vec<PathBuf>> {
-    untracked(|| mentions_of_untracked(idx, kind, key))
+pub fn mentions_of(idx: &dyn CrossFileLookup, kind: MentionKind, key: &str) -> Tracked<Arc<Vec<PathBuf>>> {
+    Tracked::derive(Lookup::Mentions(kind, key.to_string()), || mentions_of_untracked(idx, kind, key))
 }
 
 fn mentions_of_untracked(idx: &dyn CrossFileLookup, kind: MentionKind, key: &str) -> Arc<Vec<PathBuf>> {
@@ -645,7 +685,7 @@ fn mentions_of_untracked(idx: &dyn CrossFileLookup, kind: MentionKind, key: &str
     };
     let paths = Arc::new(match kind {
         MentionKind::Any => mentions_among(idx, key, &uncovered),
-        MentionKind::Calls => calls_among(idx, Some(store), key, &mentions_of(idx, MentionKind::Any, key)),
+        MentionKind::Calls => calls_among(idx, Some(store), key, &mentions_of(idx, MentionKind::Any, key).read()),
     });
     if let Ok(mut m) = store.mentions.lock() {
         let bytes = std::mem::size_of::<((MentionKind, String), (u64, Arc<Vec<PathBuf>>))>()
@@ -682,7 +722,7 @@ fn uncovered_files(idx: &dyn CrossFileLookup) -> Vec<Arc<CachedModule>> {
 /// dependency.
 fn mentions_among(idx: &dyn CrossFileLookup, key: &str, uncovered: &[Arc<CachedModule>]) -> Vec<PathBuf> {
     let open = idx.open_callers();
-    let is_open = |p: &PathBuf| open.iter().any(|o| &o.path == p);
+    let is_open = |p: &PathBuf| open.read().iter().any(|o| &o.path == p);
     let mut paths: Vec<PathBuf> = idx.ref_candidate_paths(&[key.to_string()]);
     for cached in uncovered {
         // An evicted copy can't say, so it stays a candidate.
@@ -692,7 +732,7 @@ fn mentions_among(idx: &dyn CrossFileLookup, key: &str, uncovered: &[Arc<CachedM
         }
     }
     paths.retain(|p| !is_open(p));
-    for o in &open {
+    for o in &open.read() {
         if !idx.facts_present(o).ref_indices_keyed(key).is_empty() {
             paths.push(o.path.clone());
         }
@@ -717,7 +757,7 @@ fn calls_among(idx: &dyn CrossFileLookup, store: Option<&AnswerStore>, key: &str
     mentions
         .iter()
         .filter(|path| {
-            if let Some(o) = open.iter().find(|o| &o.path == *path) {
+            if let Some(o) = open.read().iter().find(|o| &o.path == *path) {
                 return calls(&idx.facts_present(o));
             }
             // Unregistered: nothing to read, so nothing calls it.
@@ -756,7 +796,7 @@ pub fn class_family_mentions(idx: &dyn CrossFileLookup, class: &str) -> Option<s
     let mut family = vec![class.to_string()];
     let mut i = 0;
     while i < family.len() && family.len() < MAX_FAMILY {
-        for (child, _) in idx.direct_children_of(&family[i]) {
+        for (child, _) in idx.direct_children_of(&family[i]).read() {
             if !family.contains(&child) {
                 family.push(child);
             }
@@ -775,9 +815,7 @@ pub fn class_family_mentions(idx: &dyn CrossFileLookup, class: &str) -> Option<s
     keys.dedup();
     let mut out = std::collections::HashSet::new();
     for key in keys {
-        let paths = mentions_of(idx, MentionKind::Any, &key);
-        note_dep(Dep::Mentions { kind: MentionKind::Any, key, hash: mentions_hash(&paths) });
-        out.extend(paths.iter().cloned());
+        out.extend(mentions_of(idx, MentionKind::Any, &key).read().iter().cloned());
     }
     Some(out)
 }
@@ -785,10 +823,10 @@ pub fn class_family_mentions(idx: &dyn CrossFileLookup, class: &str) -> Option<s
 /// The analysis a caller join reads for `path`: the open document's build
 /// when one is open, else the indexed copy, whole.
 pub fn caller_view(idx: &dyn CrossFileLookup, path: &std::path::Path) -> Option<Arc<FileAnalysis>> {
-    if let Some(o) = idx.open_callers().into_iter().find(|o| o.path == path) {
+    if let Some(o) = idx.open_callers().into_iter.read()().find(|o| o.path == path) {
         return Some(idx.facts_present(&o));
     }
-    let cached = idx.cached_by_path(path)?;
+    let cached = idx.cached_by_path(path).read()?;
     Some(idx.whole_present(&cached))
 }
 
@@ -796,6 +834,10 @@ pub fn caller_view(idx: &dyn CrossFileLookup, path: &std::path::Path) -> Option<
 /// consulted still holding the value it read (verified first, and restamped
 /// at `epoch` when it holds).
 fn verify(idx: &dyn CrossFileLookup, store: &AnswerStore, e: &Entry, epoch: u64, depth: usize) -> bool {
+    super::registry::with_stack_headroom(|| verify_on_stack(idx, store, e, epoch, depth))
+}
+
+fn verify_on_stack(idx: &dyn CrossFileLookup, store: &AnswerStore, e: &Entry, epoch: u64, depth: usize) -> bool {
     const MAX_VERIFY_DEPTH: usize = 64;
     if depth > MAX_VERIFY_DEPTH || e.world != idx.world_generation() {
         crate::util::ghost_stats::count(if depth > MAX_VERIFY_DEPTH { "engine.stale_by.depth" } else { "engine.stale_by.world" });
@@ -809,10 +851,10 @@ fn verify(idx: &dyn CrossFileLookup, store: &AnswerStore, e: &Entry, epoch: u64,
             }
             holds
         }
-        Dep::Mentions { kind, key, hash } => {
-            let holds = mentions_hash(&mentions_of(idx, *kind, key)) == *hash;
+        Dep::Lookup { lookup, hash } => {
+            let holds = lookup_holds(idx, lookup) == *hash;
             if !holds {
-                crate::util::ghost_stats::count("engine.stale_by.mentions");
+                crate::util::ghost_stats::count("engine.stale_by.lookup");
             }
             holds
         }
@@ -869,6 +911,13 @@ fn restamp(store: &AnswerStore, key: &EngineKey, epoch: u64) {
 /// computed on the way read an assumption, so they are provisional; the
 /// settled head is whole unless it read a head further out.
 pub fn answer(idx: &dyn CrossFileLookup, key: &EngineKey) -> EngineValue {
+    // An answer's computation asks other answers, through chases that are
+    // themselves recursive: the engine's own recursion needs the headroom
+    // the chases have (a Foswiki edit overflowed a 2 MiB worker without it).
+    super::registry::with_stack_headroom(|| answer_on_stack(idx, key))
+}
+
+fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey) -> EngineValue {
     let reentered = FRAMES.with(|f| {
         let mut frames = f.borrow_mut();
         let pos = frames.iter().position(|fr| &fr.key == key)?;

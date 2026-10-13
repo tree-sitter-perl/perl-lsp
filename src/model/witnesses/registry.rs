@@ -1421,7 +1421,7 @@ impl ReducerRegistry {
                     note_type_name_exit(state, name);
                 }
                 if let Some(idx) = ctx.module_index {
-                    for cached in idx.visible_def_candidates(name) {
+                    for cached in idx.visible_def_candidates(name).read() {
                         crate::util::ghost_stats::count("moc.provider_fetched");
                         crate::util::ghost_stats::count("mocsite.type_name");
                         let full = idx.bag_present(&cached);
@@ -1593,12 +1593,7 @@ impl ReducerRegistry {
         let key = crate::model::conventions::name_match_key(&join.name, &crate::model::conventions::PERL_SPELLINGS);
         // A sub's callers call it as a function; a method's spell any ref.
         let kind = if join.method { super::engine::MentionKind::Any } else { super::engine::MentionKind::Calls };
-        let mut paths = (*super::engine::mentions_of(idx, kind, &key)).clone();
-        super::engine::note_dep(super::engine::Dep::Mentions {
-            kind,
-            key: key.clone(),
-            hash: super::engine::mentions_hash(&paths),
-        });
+        let mut paths = (*super::engine::mentions_of(idx, kind, &key).read()).clone();
         // A method's caller names the callee's family somewhere in its file:
         // the receiver it spells or the package it declares. Reading only
         // those files keeps a name every file mentions (`new`, `Get`) from
@@ -1807,7 +1802,7 @@ impl ReducerRegistry {
             args: q.args.clone(),
             context: None,
         };
-        for module_name in idx.find_exporters(name) {
+        for module_name in idx.find_exporters(name).read() {
             for cached in super::session::visible_def_candidates(idx, &module_name).iter() {
                 if let Some(hit) = super::session::candidate_answer(idx, &cached.path, &memo_q) {
                     if *hit != ReducedValue::None {
@@ -1971,7 +1966,7 @@ impl ReducerRegistry {
         owner: &str,
         site: &'static str,
     ) -> ReducedValue {
-        for cached in idx.visible_def_candidates(owner) {
+        for cached in idx.visible_def_candidates(owner).read() {
             crate::util::ghost_stats::count("moc.provider_fetched");
             crate::util::ghost_stats::count(if site == "field" { "mocsite.field" } else { "mocsite.param" });
             let full = idx.bag_present(&cached);
@@ -2255,7 +2250,7 @@ impl ReducerRegistry {
                             // happens to contain no such class —
                             // corpus luck, not soundness.
                             if baked_said_absent
-                                && idx.class_is_bridged_to(package)
+                                && idx.class_is_bridged_to(package).read()
                             {
                                 crate::util::ghost_stats::count(
                                     "consult.absent_but_bridged",

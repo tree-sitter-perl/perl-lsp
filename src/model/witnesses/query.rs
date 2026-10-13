@@ -85,10 +85,10 @@ pub fn query_sub_return_type(
     // overrides, and fold rules; only the bag and symbols change.
     if let Some(ctx) = context {
         if let Some(idx) = ctx.module_index {
-            for module_name in idx.find_exporters(sub_name) {
+            for module_name in idx.find_exporters(sub_name).read() {
                 // Every candidate file registered under the exporter's name —
                 // a split exporter's sub lives in whichever file defines it.
-                for cached in idx.visible_def_candidates(&module_name) {
+                for cached in idx.visible_def_candidates(&module_name).read() {
                     let full = idx.bag_present(&cached);
                     let Some(sym) = full.symbols().iter().find(|s| {
                         s.name == sub_name
@@ -144,7 +144,7 @@ pub fn query_sub_return_type(
             if scope.is_some() || idx.flat_scope() {
                 let mut answer: Option<InferredType> = None;
                 let mut ambiguous = false;
-                for cached in idx.def_candidates(sub_name) {
+                for cached in idx.def_candidates(sub_name).read() {
                     let p = cached.path.to_string_lossy();
                     // Reachability reads pinned fields (path + include_closure),
                     // so gate BEFORE rehydrating — an unreachable candidate

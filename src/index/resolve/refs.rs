@@ -825,7 +825,7 @@ pub fn implementations_of(
                 },
             );
             for pkg in &descendants {
-                for cached in idx.def_candidates(pkg) {
+                for cached in idx.def_candidates(pkg).read() {
                     // Declaration-site scan reads symbols only.
                     let whole = idx.symbols_present(&cached);
                     for s in whole.symbols() {
@@ -905,10 +905,10 @@ pub fn implementations_of(
         // name → set of files); the names index covers cross-named and
         // multi-package homes when the direct registration is empty.
         let mut homes: Vec<std::sync::Arc<crate::model::file_analysis::CachedModule>> =
-            idx.visible_def_candidates(pkg);
+            idx.visible_def_candidates(pkg).read();
         if homes.is_empty() {
-            for m in idx.modules_with_symbol(pkg) {
-                for c in idx.visible_def_candidates(&m) {
+            for m in idx.modules_with_symbol(pkg).read() {
+                for c in idx.visible_def_candidates(&m).read() {
                     let declares = idx.symbols_present(&c).symbols().iter().any(|s| {
                         matches!(s.kind, SymKind::Package | SymKind::Class) && &s.name == pkg
                     });
@@ -989,7 +989,7 @@ pub(super) fn specialization_family(
         // `def_candidates` is the by-name candidate table the pack index
         // keys everything on — every file defining this spec spelling.
         let Some(idx) = module_index else { continue };
-        for cached in idx.def_candidates(spec) {
+        for cached in idx.def_candidates(spec).read() {
             // Spec-class def-site scan reads symbols only.
             let whole = idx.symbols_present(&cached);
             for s in whole.symbols() {

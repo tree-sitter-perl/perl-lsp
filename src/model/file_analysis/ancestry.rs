@@ -24,7 +24,7 @@ pub fn real_parents_of(
 ) -> Vec<String> {
     let mut parents: Vec<String> = local.declared_parents(class).to_vec();
     if let Some(idx) = module_index {
-        for p in idx.parents_cached(class) {
+        for p in idx.parents_cached(class).read() {
             if !parents.contains(&p) {
                 parents.push(p);
             }
@@ -135,7 +135,7 @@ fn isa_parents(
 ) -> Vec<String> {
     let mut v = local.declared_parents(cur).to_vec();
     if let Some(idx) = module_index {
-        v.extend(idx.parents_cached(cur));
+        v.extend(idx.parents_cached(cur).read());
     }
     v
 }
@@ -781,7 +781,7 @@ impl FileAnalysis {
                 self.declares_interface(cls)
                     || module_index.is_some_and(|i| {
                         i.visible_def_candidates(cls)
-                            .iter()
+                            .read().iter()
                             .any(|c| i.whole_present(c).declares_interface(cls))
                     })
             }
@@ -876,7 +876,7 @@ impl FileAnalysis {
                 return true;
             }
             module_index
-                .map(|idx| idx.get_cached(name).is_some())
+                .map(|idx| idx.get_cached(name).read().is_some())
                 .unwrap_or(false)
         };
 
@@ -891,7 +891,7 @@ impl FileAnalysis {
                     // ANY file declaring `cls` may hold the runtime-generated
                     // parent edge (packages lane — never evicted).
                     idx.visible_def_candidates(cls)
-                        .iter()
+                        .read().iter()
                         .any(|c| idx.facts_present(c).has_dynamic_parents(cls))
                 });
             if dynamic_here {
@@ -1062,7 +1062,7 @@ impl FileAnalysis {
             // (2) Real methods on class_name's own cached module — EVERY
             // file declaring the class (a reopened package's methods live
             // across the set; `seen_names` keeps child-shadows-parent).
-            for cached in idx.visible_def_candidates(class_name) {
+            for cached in idx.visible_def_candidates(class_name).read() {
                 let whole = idx.whole_present(&cached);
                 for sym in &whole.symbols {
                     if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }

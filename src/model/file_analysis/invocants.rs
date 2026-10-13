@@ -264,12 +264,12 @@ impl FileAnalysis {
             }
         }
         if let Some(idx) = module_index {
-            for (spec, module) in idx.direct_specializations_of(base) {
+            for (spec, module) in idx.direct_specializations_of(base).read() {
                 // The spec's params live in whichever candidate file
                 // declares it (pack lane — never evicted).
                 let params = idx
                     .visible_def_candidates(&module)
-                    .iter()
+                    .read().iter()
                     .find_map(|c| idx.facts_present(c).pack.template_params.get(&spec).cloned());
                 push_cand(&spec, params.as_ref(), &mut cands);
             }
@@ -301,7 +301,7 @@ impl FileAnalysis {
             // params (pack lane — never evicted).
             if let Some(p) = idx
                 .visible_def_candidates(class)
-                .iter()
+                .read().iter()
                 .find_map(|c| idx.facts_present(c).pack.template_params.get(class).cloned())
             {
                 return p;
@@ -411,7 +411,7 @@ impl FileAnalysis {
         self.symbols
             .iter()
             .any(|s| matches!(s.kind, SymKind::Class | SymKind::Package) && s.name == name)
-            || module_index.is_some_and(|mi| mi.get_cached(name).is_some())
+            || module_index.is_some_and(|mi| mi.get_cached(name).read().is_some())
     }
 
     /// The class a `MethodCall` ref's method lookup STARTS at — the
@@ -583,7 +583,7 @@ impl FileAnalysis {
                 max_visits: 40,
                 ..crate::model::graph::WalkBound::ISA
             },
-            |c| mi.parents_cached(c),
+            |c| mi.parents_cached(c).read(),
             |c| {
                 if c == "DBIx::Class::Core" || c == "DBIx::Class::Row" {
                     isa_dbic = true;
@@ -634,7 +634,7 @@ impl FileAnalysis {
             .map(|s| s.name.clone())
             .collect();
         if let Some(idx) = module_index {
-            for m in idx.modules_with_symbol(action) {
+            for m in idx.modules_with_symbol(action).read() {
                 if matches(&m) {
                     candidates.push(m);
                 }
@@ -1072,7 +1072,7 @@ impl FileAnalysis {
         let idx = module_index?;
         let cached = idx
             .candidate_defining_sub_in_package(&module, &on_class, &name)
-            .or_else(|| idx.get_cached(&module))?;
+            .read().or_else(|| idx.get_cached(&module).read())?;
         let whole = idx.whole_present(&cached);
         let is_bridge = whole.plugin.namespaces.iter().any(|ns| {
             ns.bridges
@@ -1144,13 +1144,13 @@ impl FileAnalysis {
                 // the declaration of that identity decides, role or not;
                 // none visible is not a guess
                 let declared = candidates
-                    .iter()
+                    .read().iter()
                     .find(|cached| idx.symbols_present(cached).find_type_decl(c).is_some())?;
                 let fa = idx.facts_present(declared);
                 return fa.is_role_package(c).then(|| fa.role_requires(c).to_vec());
             }
             candidates
-                .iter()
+                .read().iter()
                 .map(|cached| idx.facts_present(cached))
                 .find(|fa| fa.is_role_package(c))
                 .map(|fa| fa.role_requires(c).to_vec())
@@ -1219,7 +1219,7 @@ impl FileAnalysis {
                 self.for_each_ancestor_class(pkg, module_index, |a| {
                     let here = self.class_provides_method(a, &name)
                         || module_index.is_some_and(|idx| {
-                            idx.visible_def_candidates(a).iter().any(|c| {
+                            idx.visible_def_candidates(a).read().iter().any(|c| {
                                 let whole = idx.whole_present(c);
                                 if package_bound {
                                     whole.provides_method_in_package(&name, a)
@@ -1237,10 +1237,10 @@ impl FileAnalysis {
                             // and contract-excluded, or every requires
                             // satisfies itself.
                             idx.module_declaring_method_in_package(&name, a)
-                                .is_some_and(|home| {
+                                .read().is_some_and(|home| {
                                     // The definer may be a losing candidate
                                     // of its own name slot.
-                                    idx.visible_def_candidates(&home).iter().any(|c| {
+                                    idx.visible_def_candidates(&home).read().iter().any(|c| {
                                         idx.whole_present(c).provides_method_in_package(&name, a)
                                     })
                                 }) || {

@@ -38,7 +38,7 @@ impl<'a> CandidateSet<'a> {
         // Class-keyed cached module — the fast path when `class` names a
         // struct/class/enum that is itself a cache key. Every candidate
         // file declaring the class may hold the member.
-        for cached in idx.visible_def_candidates(class) {
+        for cached in idx.visible_def_candidates(class).read() {
             if let Some(span) = member_span_in(&idx.whole_present(&cached)) {
                 return loc_of(&cached, span);
             }
@@ -56,8 +56,8 @@ impl<'a> CandidateSet<'a> {
         // registered) — the cheap subset, path-sorted for determinism.
         {
             let mut cands = idx.def_candidates(member);
-            cands.sort_by(|a, b| a.path.cmp(&b.path));
-            for cached in cands {
+            cands.read().sort_by(|a, b| a.path.cmp(&b.path));
+            for cached in cands.read() {
                 if !connected(&cached) {
                     continue;
                 }
@@ -207,8 +207,8 @@ impl<'a> CandidateSet<'a> {
                             || cached.analysis().pack.include_closure.contains(&decl_str))
                 };
                 let mut cands = idx.def_candidates(&sym.name);
-                cands.sort_by(|a, b| a.path.cmp(&b.path));
-                for cached in &cands {
+                cands.read().sort_by(|a, b| a.path.cmp(&b.path));
+                for cached in &cands.read() {
                     if !connected(cached) {
                         continue;
                     }
@@ -399,7 +399,7 @@ impl<'a> CandidateSet<'a> {
         // owner-matched member directly from `get_cached(class)` so the
         // ranking can float it above the frees.
         if let Some(p) = &pkg {
-            for cached in idx.visible_def_candidates(p) {
+            for cached in idx.visible_def_candidates(p).read() {
                 let key = FileKey::Path(cached.path.clone());
                 let whole = idx.whole_present(&cached);
                 for s in whole.symbols().iter().filter(|s| {
@@ -418,8 +418,8 @@ impl<'a> CandidateSet<'a> {
             let self_str = self_path.to_string_lossy().into_owned();
             let origin_path = key_for_sort(&self.origin_key);
             let mut cached_files = idx.def_candidates(&name);
-            cached_files.sort_by(|a, b| a.path.cmp(&b.path));
-            for cached in cached_files {
+            cached_files.read().sort_by(|a, b| a.path.cmp(&b.path));
+            for cached in cached_files.read() {
                 if cached.path == origin_path {
                     continue;
                 }
@@ -698,7 +698,7 @@ impl<'a> CandidateSet<'a> {
                 if let (Some(owner), Some(class)) = (owner, class) {
                     // Whichever candidate file of the class holds the key
                     // def (whole view — HashKeyDefs ride the symbols axis).
-                    for cached in idx.visible_def_candidates(&class) {
+                    for cached in idx.visible_def_candidates(&class).read() {
                         if let Some(def) = idx
                             .whole_present(&cached)
                             .hash_key_defs_for_owner(&owner)
@@ -734,7 +734,7 @@ impl<'a> CandidateSet<'a> {
                     let defining =
                         idx.defining_module_cached(&import.module_name, &remote_name);
                     let module_path = defining
-                        .as_ref()
+                        .read().as_ref()
                         .map(|m| m.path.clone())
                         .unwrap_or(module_path);
                     if Url::from_file_path(&module_path).is_ok() {
@@ -742,7 +742,7 @@ impl<'a> CandidateSet<'a> {
                         // the module (or one it re-exports) defines the remote
                         // name. One hop to it whenever known: landing on the
                         // consumer's `use` line was never the goal.
-                        let def_line = defining.and_then(|cached| {
+                        let def_line = defining.read().and_then(|cached| {
                             idx.whole_present(&cached)
                                 .sub_info_view(&remote_name)
                                 .map(|s| s.def_line())
@@ -817,8 +817,8 @@ impl<'a> CandidateSet<'a> {
                 // declaring file is whichever of `pkg`'s files defines the
                 // global, not the name-slot winner.
                 let mut cands = idx.visible_def_candidates(pkg);
-                cands.sort_by(|a, b| a.path.cmp(&b.path));
-                for cached in &cands {
+                cands.read().sort_by(|a, b| a.path.cmp(&b.path));
+                for cached in &cands.read() {
                     if Url::from_file_path(&cached.path).is_ok() {
                         if let Some(def_line) =
                             idx.symbols_present(cached).package_var_def_line(&name, pkg)
@@ -846,7 +846,7 @@ impl<'a> CandidateSet<'a> {
                 // the picker when a real type declaration exists.
                 let mut type_hits: Vec<RefLocation> = Vec::new();
                 let mut value_hits: Vec<RefLocation> = Vec::new();
-                for cached in idx.visible_def_candidates(&r.target_name) {
+                for cached in idx.visible_def_candidates(&r.target_name).read() {
                     if Url::from_file_path(&cached.path).is_ok() {
                         let whole = idx.whole_present(&cached);
                         let loc = |span| RefLocation {
@@ -943,7 +943,7 @@ impl<'a> CandidateSet<'a> {
                         // last resort (data-member reads below).
                         let chosen = idx
                             .candidate_defining_sub_in_package(module, class, method)
-                            .or_else(|| idx.get_cached(module));
+                            .read().or_else(|| idx.get_cached(module).read());
                         if let Some(cached) = chosen {
                             // A cross-file DBIC accessor is a deferred emission
                             // MATERIALIZED into the whole cached copy at index
@@ -1023,7 +1023,7 @@ impl<'a> CandidateSet<'a> {
         if let Some(r) = analysis.ref_at(point) {
             if matches!(r.kind, RefKind::FunctionCall { .. } | RefKind::Variable) {
                 let name = r.unqualified_target_name(analysis.names());
-                for cached in idx.visible_def_candidates(name) {
+                for cached in idx.visible_def_candidates(name).read() {
                     let whole = idx.whole_present(&cached);
                     if let Some(sym) = whole.symbols().iter().find(|s| {
                         s.name == name

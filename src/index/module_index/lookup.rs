@@ -4,6 +4,8 @@ use crate::index::sealed::Unsealed;
 
 use super::*;
 
+use crate::model::witnesses::tracked::{Lookup, Tracked, VisitHash};
+
 impl ModuleIndex {
     /// Every cached module that declares at least one `PluginNamespace`
     /// whose `bridges` list includes `Bridge::Class(class_name)`.
@@ -181,10 +183,10 @@ impl ModuleIndex {
         ) -> std::ops::ControlFlow<()>,
     ) {
         use crate::model::file_analysis::CrossFileLookup;
-        for mod_name in self.modules_bridging_to(class_name) {
+        for mod_name in CrossFileLookup::bridging_modules(self, class_name).read() {
             // Every candidate file of the name — the bridging namespace may
             // live in a losing candidate.
-            for cached in CrossFileLookup::def_candidates(self, &mod_name) {
+            for cached in CrossFileLookup::def_candidates(self, &mod_name).read() {
             if let Some(name) = name_hint {
                 if !self.candidate_may_name(&cached, name) {
                     crate::util::ghost_stats::count("bridged.candidate_prefiltered");
@@ -433,8 +435,11 @@ impl CrossFileLookup for ModuleIndex {
         self.core.registration_gen.get(path).map(|g| *g)
     }
 
-    fn open_callers(&self) -> Vec<Arc<CachedModule>> {
-        self.core.open_callers.iter().map(|e| Arc::clone(&e.value().1)).collect()
+    fn open_callers(&self) -> Tracked<Vec<Arc<CachedModule>>> {
+        let mut open: Vec<Arc<CachedModule>> = self.core.open_callers.iter().map(|e| Arc::clone(&e.value().1)).collect();
+        // Sorted so the relation hashes the same whatever the map's order.
+        open.sort_by(|a, b| a.path.cmp(&b.path));
+        Tracked::new(Lookup::OpenCallers, open)
     }
 
     fn world_digest(&self) -> Option<u64> {
@@ -459,20 +464,17 @@ impl CrossFileLookup for ModuleIndex {
         self.core.persisted_answers.get()?.get(key).cloned()
     }
 
-    fn get_cached(&self, module_name: &str) -> Option<Arc<CachedModule>> {
-        let cached = self.get_cached(module_name);
-        if let Some(c) = &cached {
-            crate::model::witnesses::engine::note_file(self, &c.path);
-        }
-        cached
+    fn get_cached(&self, module_name: &str) -> Tracked<Option<Arc<CachedModule>>> {
+        Tracked::new(Lookup::Winner(module_name.to_string()), self.get_cached(module_name))
     }
 
     fn get_cached_scoped(
         &self,
         module_name: &str,
         visible: &std::collections::HashSet<String>,
-    ) -> Option<Arc<CachedModule>> {
-        self.get_cached_scoped(module_name, visible)
+    ) -> Tracked<Option<Arc<CachedModule>>> {
+        // Only a scoped lookup asks this, inside its own derived relation.
+        Tracked::new(Lookup::Winner(module_name.to_string()), self.get_cached_scoped(module_name, visible))
     }
 
 
@@ -652,32 +654,34 @@ impl CrossFileLookup for ModuleIndex {
         .unwrap_or_default()
     }
 
-    fn cached_by_path(&self, path: &std::path::Path) -> Option<Arc<CachedModule>> {
+    fn cached_by_path(&self, path: &std::path::Path) -> Tracked<Option<Arc<CachedModule>>> {
         // Pack sub-indexes: the per-path registry is O(1). The Perl hub's
         // cache is name-keyed with unique paths — linear fallback (hub
         // candidate sets are @INC-sized, not tree-sized).
-        if let Some(cm) = self.all_files.get(path) {
-            return Some(cm.value().clone());
-        }
-        self.core.cache.iter().find_map(|entry| {
-            entry
-                .value()
-                .as_ref()
-                .filter(|cm| cm.path == path)
-                .cloned()
-        })
+        let held = match self.all_files.get(path) {
+            Some(cm) => Some(cm.value().clone()),
+            None => self.core.cache.iter().find_map(|entry| {
+                entry
+                    .value()
+                    .as_ref()
+                    .filter(|cm| cm.path == path)
+                    .cloned()
+            }),
+        };
+        Tracked::new(Lookup::ByPath(path.to_path_buf()), held)
     }
 
-    fn class_is_bridged_to(&self, class: &str) -> bool {
+    fn class_is_bridged_to(&self, class: &str) -> Tracked<bool> {
         // Bucket NON-EMPTY, not key-present: `purge_module` can leave an empty
         // bucket behind, and a key-exists test would then report a bridge that
         // no longer exists — permanently pessimising a class that used to be
         // bridged.
-        self.core
-            .edges
-            .bridges
-            .get(class)
-            .is_some_and(|b| !b.is_empty())
+        let bridged = self.core.edges.bridges.get(class).is_some_and(|b| !b.is_empty());
+        Tracked::new(Lookup::Bridged(class.to_string()), bridged)
+    }
+
+    fn bridging_modules(&self, class: &str) -> Tracked<Vec<String>> {
+        Tracked::new(Lookup::BridgingModules(class.to_string()), self.modules_bridging_to(class))
     }
 
     fn surface_fingerprint_of(&self, path: &std::path::Path) -> Option<u64> {
@@ -794,8 +798,8 @@ impl CrossFileLookup for ModuleIndex {
     // `parents_cached`: the trait default unions over `def_candidates`
     // (every file declaring the package), which is the honest Perl relation.
 
-    fn module_path_cached(&self, module_name: &str) -> Option<std::path::PathBuf> {
-        self.module_path_cached(module_name)
+    fn module_path_cached(&self, module_name: &str) -> Tracked<Option<std::path::PathBuf>> {
+        Tracked::new(Lookup::ModulePath(module_name.to_string()), self.module_path_cached(module_name))
     }
 
     fn inc_roots(&self) -> Arc<Vec<std::path::PathBuf>> {
@@ -812,47 +816,39 @@ impl CrossFileLookup for ModuleIndex {
             .and_then(crate::index::module_resolver::uri_to_path)
     }
 
-    fn modules_with_symbol(&self, name: &str) -> Vec<String> {
-        self.modules_with_symbol(name)
+    fn modules_with_symbol(&self, name: &str) -> Tracked<Vec<String>> {
+        Tracked::new(Lookup::ModulesWithSymbol(name.to_string()), self.modules_with_symbol(name))
     }
 
-    fn find_exporters(&self, func_name: &str) -> Vec<String> {
-        self.find_exporters(func_name)
+    fn find_exporters(&self, func_name: &str) -> Tracked<Vec<String>> {
+        Tracked::new(Lookup::Exporters(func_name.to_string()), self.find_exporters(func_name))
     }
 
-    fn defining_module_cached(&self, entry: &str, name: &str) -> Option<Arc<CachedModule>> {
-        self.defining_module_cached(entry, name)
+    fn defining_module_cached(&self, entry: &str, name: &str) -> Tracked<Option<Arc<CachedModule>>> {
+        let lookup = Lookup::DefiningModule { entry: entry.to_string(), name: name.to_string() };
+        Tracked::derive(lookup, || self.defining_module_cached(entry, name))
     }
 
-    fn module_declaring_method_in_package(&self, name: &str, class: &str) -> Option<String> {
-        self.module_declaring_method_in_package(name, class)
+    fn module_declaring_method_in_package(&self, name: &str, class: &str) -> Tracked<Option<String>> {
+        let lookup = Lookup::DeclaringModule { name: name.to_string(), class: class.to_string() };
+        Tracked::derive(lookup, || self.module_declaring_method_in_package(name, class))
     }
 
-    fn for_each_cached(&self, f: &mut dyn FnMut(&str, &Arc<CachedModule>)) {
-        self.for_each_cached(f)
+    fn for_each_cached(&self, f: &mut dyn FnMut(&str, &Arc<CachedModule>)) -> Tracked<()> {
+        let mut hash = VisitHash::default();
+        self.for_each_cached(|name, cached| {
+            hash.add(name);
+            hash.add(cached);
+            f(name, cached)
+        });
+        Tracked::visited(Lookup::AllModules, hash)
     }
 
-    fn def_candidates(&self, name: &str) -> Vec<Arc<CachedModule>> {
-        match self.core.all_defs.get(name) {
-            Some(cands) if !cands.is_empty() => {
-                // Path-ordered HERE, the one speller of candidate order —
-                // `all_defs` vecs are insertion-ordered (parallel indexing),
-                // and every consumer scan/union/tie-break leans on this
-                // being deterministic.
-                let mut v = cands.clone();
-                v.sort_by(|a, b| a.path.cmp(&b.path));
-                v
-            }
-            // No workspace candidates: fall back to the name-slot winner.
-            // The @INC tier lands here — single-provider by CURRENT
-            // construction (one resolve per name), not by Perl semantics:
-            // @INC is per-entrypoint, so the honest shape there is the same
-            // candidate relation scoped by the asker's @INC.
-            _ => self.get_cached(name).into_iter().collect(),
-        }
+    fn def_candidates(&self, name: &str) -> Tracked<Vec<Arc<CachedModule>>> {
+        Tracked::new(Lookup::DefCandidates(name.to_string()), self.def_candidates_now(name))
     }
 
-    fn for_each_cached_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) {
+    fn for_each_cached_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) -> Tracked<()> {
         // `all_files` is the complete per-path registry (pack indexes, fed by
         // `register_symbols`) — the name-keyed views can't see a file that
         // lost all its name ties OR declares nothing registrable. The Perl
@@ -860,26 +856,34 @@ impl CrossFileLookup for ModuleIndex {
         // file), so union it in for both worlds.
         let mut seen: std::collections::HashSet<std::path::PathBuf> =
             std::collections::HashSet::new();
+        let mut hash = VisitHash::default();
         for entry in self.all_files.iter() {
             if seen.insert(entry.key().clone()) {
+                hash.add(entry.value());
                 f(entry.value());
             }
         }
         for entry in self.core.cache.iter() {
             if let Some(ref cached) = *entry.value() {
                 if seen.insert(cached.path.clone()) {
+                    hash.add(cached);
                     f(cached);
                 }
             }
         }
+        Tracked::visited(Lookup::AllFiles, hash)
     }
-
     fn for_each_reexport_module(
         &self,
         start: Vec<String>,
         visit: &mut dyn FnMut(&Arc<CachedModule>) -> std::ops::ControlFlow<()>,
     ) {
-        self.for_each_reexport_module(start, visit)
+        // The walk reads each visited file's re-export edges: recorded as
+        // reads of that file (its candidates are recorded by the walk).
+        self.for_each_reexport_module(start, |cached| {
+            crate::model::witnesses::engine::note_file(self, &cached.path);
+            visit(cached)
+        })
     }
 
     fn for_each_entity_bridged_to(
@@ -907,11 +911,33 @@ impl CrossFileLookup for ModuleIndex {
         self.bridged_walk(class_name, Some(name), f)
     }
 
-    fn direct_children_of(&self, class: &str) -> Vec<(String, String)> {
+    fn direct_children_of(&self, class: &str) -> Tracked<Vec<(String, String)>> {
+        Tracked::derive(Lookup::Children(class.to_string()), || self.direct_children_now(class))
+    }
+
+    fn direct_specializations_of(&self, primary: &str) -> Tracked<Vec<(String, String)>> {
+        Tracked::derive(Lookup::Specializations(primary.to_string()), || self.direct_specializations_now(primary))
+    }
+
+    fn for_each_loader_shape(&self, f: &mut dyn FnMut(&str, &crate::model::file_analysis::InferredType)) -> Tracked<()> {
+        let mut hash = VisitHash::default();
+        for entry in self.core.loader_config_shapes.iter() {
+            for (_contributor, t) in entry.value() {
+                hash.add(entry.key().as_str());
+                hash.add(t);
+                f(entry.key(), t);
+            }
+        }
+        Tracked::visited(Lookup::LoaderShapes, hash)
+    }
+}
+
+impl ModuleIndex {
+    fn direct_children_now(&self, class: &str) -> Vec<(String, String)> {
         let mut out = Vec::new();
         for module in self.modules_with_parent(class) {
             // The child edge may live in a losing candidate (packages lane).
-            for cached in CrossFileLookup::def_candidates(self, &module) {
+            for cached in CrossFileLookup::def_candidates(self, &module).read() {
                 for (pkg, parents) in cached.analysis().package_parent_edges() {
                     if parents.iter().any(|p| p == class) {
                         out.push((pkg.clone(), module.clone()));
@@ -924,7 +950,7 @@ impl CrossFileLookup for ModuleIndex {
         out
     }
 
-    fn direct_specializations_of(&self, primary: &str) -> Vec<(String, String)> {
+    fn direct_specializations_now(&self, primary: &str) -> Vec<(String, String)> {
         let mut out = Vec::new();
         let modules: Vec<String> = self
             .core
@@ -936,7 +962,7 @@ impl CrossFileLookup for ModuleIndex {
         for module in modules {
             // The specialization edge may live in a losing candidate
             // (pack lane, never evicted).
-            for cached in CrossFileLookup::def_candidates(self, &module) {
+            for cached in CrossFileLookup::def_candidates(self, &module).read() {
                 for (spec, prim) in &cached.analysis().pack.specializes {
                     if prim == primary {
                         out.push((spec.clone(), module.clone()));
@@ -949,14 +975,9 @@ impl CrossFileLookup for ModuleIndex {
         out
     }
 
-    fn for_each_loader_shape(&self, f: &mut dyn FnMut(&str, &crate::model::file_analysis::InferredType)) {
-        for entry in self.core.loader_config_shapes.iter() {
-            for (_contributor, t) in entry.value() {
-                f(entry.key(), t);
-            }
-        }
-    }
+}
 
+impl CrossFileLookup for ModuleIndex {
     fn complete_module_names(&self, prefix: &str) -> Vec<(String, bool)> {
         self.complete_module_names(prefix)
     }
@@ -968,6 +989,30 @@ impl CrossFileLookup for ModuleIndex {
     ) -> Vec<(String, Arc<CachedModule>)> {
         self.visible_defs_with_prefix(prefix, visible)
     }
+}
+
+impl ModuleIndex {
+    /// The candidate relation for `name`, path-ordered.
+    pub(crate) fn def_candidates_now(&self, name: &str) -> Vec<Arc<CachedModule>> {
+        match self.core.all_defs.get(name) {
+            Some(cands) if !cands.is_empty() => {
+                // Path-ordered HERE, the one speller of candidate order —
+                // `all_defs` vecs are insertion-ordered (parallel indexing),
+                // and every consumer scan/union/tie-break leans on this
+                // being deterministic.
+                let mut v = cands.clone();
+                v.sort_by(|a, b| a.path.cmp(&b.path));
+                v
+            }
+            // No workspace candidates: fall back to the name-slot winner.
+            // The @INC tier lands here — single-provider by CURRENT
+            // construction (one resolve per name), not by Perl semantics:
+            // @INC is per-entrypoint, so the honest shape there is the same
+            // candidate relation scoped by the asker's @INC.
+            _ => self.get_cached(name).into_iter().collect(),
+        }
+    }
+
 }
 
 /// The member pre-filter's verdict, separated from the store and the copy so

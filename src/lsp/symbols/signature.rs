@@ -508,10 +508,10 @@ fn string_dispatch_signature_for(
         push_sig(&mut signatures, sym, None);
     }
     if let Some(idx) = module_index {
-        for module_name in idx.modules_with_symbol(handler_name) {
+        for module_name in idx.modules_with_symbol(handler_name).read() {
             // Every file registered under the name — stacked registrations
             // may live in a losing candidate.
-            for cached in idx.visible_def_candidates(&module_name) {
+            for cached in idx.visible_def_candidates(&module_name).read() {
                 let whole = idx.whole_present(&cached);
                 for sym in whole.symbols() {
                     if sym.name != handler_name { continue; }

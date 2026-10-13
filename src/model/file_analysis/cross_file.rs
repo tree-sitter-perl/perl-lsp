@@ -1,6 +1,7 @@
 //! Cross-file capability: `CachedModule`, `SubInfo`, the `CrossFileLookup`
 //! trait and `ScopedLookup`, plus the global path-intern table.
 
+use crate::model::witnesses::tracked::{Lookup, Tracked};
 use super::*;
 
 // ---- Cross-file lookup capability ----
@@ -472,8 +473,8 @@ pub trait CrossFileLookup {
 
     /// Open documents' current builds, each standing in for its path's
     /// indexed copy as a caller (whole copies).
-    fn open_callers(&self) -> Vec<std::sync::Arc<CachedModule>> {
-        Vec::new()
+    fn open_callers(&self) -> crate::model::witnesses::tracked::Tracked<Vec<std::sync::Arc<CachedModule>>> {
+        crate::model::witnesses::tracked::Tracked::new(crate::model::witnesses::tracked::Lookup::OpenCallers, Vec::new())
     }
 
     /// A digest of everything `world_generation` guards, recomputable by a
@@ -514,8 +515,12 @@ pub trait CrossFileLookup {
     /// Defaults to `true` — the conservative answer. An index that cannot say
     /// makes its callers decode rather than trust, which is slow and never
     /// wrong.
-    fn class_is_bridged_to(&self, _class: &str) -> bool {
-        true
+    fn class_is_bridged_to(&self, class: &str) -> crate::model::witnesses::tracked::Tracked<bool> {
+        crate::model::witnesses::tracked::Tracked::new(crate::model::witnesses::tracked::Lookup::Bridged(class.to_string()), true)
+    }
+    /// The modules whose plugin namespaces bridge onto `class`.
+    fn bridging_modules(&self, class: &str) -> crate::model::witnesses::tracked::Tracked<Vec<String>> {
+        crate::model::witnesses::tracked::Tracked::new(crate::model::witnesses::tracked::Lookup::BridgingModules(class.to_string()), Vec::new())
     }
 
     /// The surface fingerprint the freshness index currently records for
@@ -572,7 +577,7 @@ pub trait CrossFileLookup {
     ) -> Option<std::sync::Arc<crate::model::witnesses::ConclusionMap>> {
         None
     }
-    fn get_cached(&self, module_name: &str) -> Option<std::sync::Arc<CachedModule>>;
+    fn get_cached(&self, module_name: &str) -> crate::model::witnesses::tracked::Tracked<Option<std::sync::Arc<CachedModule>>>;
     /// `get_cached` scoped to a querying file's VISIBILITY set (its own path +
     /// its `#include` closure) — see `ModuleIndex::get_cached_scoped`. Default:
     /// ignore the scope (identical to `get_cached`), so non-index impls and
@@ -582,15 +587,15 @@ pub trait CrossFileLookup {
         &self,
         module_name: &str,
         _visible: &std::collections::HashSet<String>,
-    ) -> Option<std::sync::Arc<CachedModule>> {
+    ) -> crate::model::witnesses::tracked::Tracked<Option<std::sync::Arc<CachedModule>>> {
         self.get_cached(module_name)
     }
     /// EVERY cached file defining `name` (the pack index's full candidate
     /// table), not just the one-winner `get_cached` view — for consumers that
     /// must weigh candidates themselves (definition-over-prototype). Default:
     /// the winner alone.
-    fn def_candidates(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
-        self.get_cached(name).into_iter().collect()
+    fn def_candidates(&self, name: &str) -> crate::model::witnesses::tracked::Tracked<Vec<std::sync::Arc<CachedModule>>> {
+        crate::model::witnesses::tracked::Tracked::derive(crate::model::witnesses::tracked::Lookup::DefCandidates(name.to_string()), || self.get_cached(name).read().into_iter().collect())
     }
     /// `def_candidates` AS SEEN from the querying scope — the forward-
     /// resolution face of the candidate table. Raw indexes pass the full
@@ -601,8 +606,8 @@ pub trait CrossFileLookup {
     /// package relation is name → MANY files by design) passes the relation
     /// through — Perl's own visibility tier plugs into `CandidateSet::scoped`
     /// when it lands, never into a second mechanism here.
-    fn visible_def_candidates(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
-        self.def_candidates(name)
+    fn visible_def_candidates(&self, name: &str) -> crate::model::witnesses::tracked::Tracked<Vec<std::sync::Arc<CachedModule>>> {
+        crate::model::witnesses::tracked::Tracked::derive(crate::model::witnesses::tracked::Lookup::VisibleDefs(name.to_string()), || self.def_candidates(name).read())
     }
     /// `visible_def_candidates` with its WIDENING verdict: `true` when the
     /// name is an identity nothing indexed declares and the candidates are
@@ -612,8 +617,8 @@ pub trait CrossFileLookup {
     fn visible_def_candidates_widening(
         &self,
         name: &str,
-    ) -> (Vec<std::sync::Arc<CachedModule>>, bool) {
-        (self.visible_def_candidates(name), false)
+    ) -> crate::model::witnesses::tracked::Tracked<(Vec<std::sync::Arc<CachedModule>>, bool)> {
+        crate::model::witnesses::tracked::Tracked::derive(crate::model::witnesses::tracked::Lookup::VisibleDefsWidening(name.to_string()), || (self.visible_def_candidates(name).read(), false))
     }
     /// Among the files declaring `pkg`, the one that DEFINES sub/method
     /// `member` — package-attributed first (a reopened package's sub lives
@@ -629,7 +634,7 @@ pub trait CrossFileLookup {
         &self,
         pkg: &str,
         member: &str,
-    ) -> Option<std::sync::Arc<CachedModule>> {
+    ) -> crate::model::witnesses::tracked::Tracked<Option<std::sync::Arc<CachedModule>>> {
         self.candidate_defining_sub_in_package(pkg, pkg, member)
     }
     /// The two-key form of `candidate_defining_sub`: candidates come from
@@ -642,17 +647,24 @@ pub trait CrossFileLookup {
         module_key: &str,
         pkg: &str,
         member: &str,
-    ) -> Option<std::sync::Arc<CachedModule>> {
-        let cands = self.visible_def_candidates(module_key);
-        cands
-            .iter()
-            .find(|c| self.symbols_present(c).has_sub_in_package(member, pkg))
-            .or_else(|| {
-                cands
-                    .iter()
-                    .find(|c| self.symbols_present(c).sub_info_view(member).is_some())
-            })
-            .cloned()
+    ) -> crate::model::witnesses::tracked::Tracked<Option<std::sync::Arc<CachedModule>>> {
+        let lookup = crate::model::witnesses::tracked::Lookup::DefiningSub {
+            module_key: module_key.to_string(),
+            pkg: pkg.to_string(),
+            member: member.to_string(),
+        };
+        crate::model::witnesses::tracked::Tracked::derive(lookup, || {
+            let cands = self.visible_def_candidates(module_key).read();
+            cands
+                .iter()
+                .find(|c| self.symbols_present(c).has_sub_in_package(member, pkg))
+                .or_else(|| {
+                    cands
+                        .iter()
+                        .find(|c| self.symbols_present(c).sub_info_view(member).is_some())
+                })
+                .cloned()
+        })
     }
     /// A cached module's analysis with its witness bag GUARANTEED present.
     /// Slice 2 evicts the bag from resident pack-index copies; every TYPE
@@ -814,9 +826,9 @@ pub trait CrossFileLookup {
     /// visibility gate + whole-copy rehydration). Default `None`.
     fn cached_by_path(
         &self,
-        _path: &std::path::Path,
-    ) -> Option<std::sync::Arc<CachedModule>> {
-        None
+        path: &std::path::Path,
+    ) -> crate::model::witnesses::tracked::Tracked<Option<std::sync::Arc<CachedModule>>> {
+        crate::model::witnesses::tracked::Tracked::new(crate::model::witnesses::tracked::Lookup::ByPath(path.to_path_buf()), None)
     }
     /// Parent classes of `module_name` — the UNION over every file
     /// declaring the package (any file may push `@ISA` / `use parent`; the
@@ -824,21 +836,23 @@ pub trait CrossFileLookup {
     /// parents come first (candidates are path-ordered), so the DFS MRO
     /// stays deterministic. The `packages` lane is never evicted, so the
     /// raw candidate analyses answer without rehydration.
-    fn parents_cached(&self, module_name: &str) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        for c in self.visible_def_candidates(module_name) {
-            for p in self.facts_present(&c).declared_parents(module_name) {
-                if !out.iter().any(|x| x == p) {
-                    out.push(p.clone());
+    fn parents_cached(&self, module_name: &str) -> crate::model::witnesses::tracked::Tracked<Vec<String>> {
+        crate::model::witnesses::tracked::Tracked::derive(crate::model::witnesses::tracked::Lookup::Parents(module_name.to_string()), || {
+            let mut out: Vec<String> = Vec::new();
+            for c in self.visible_def_candidates(module_name).read() {
+                for p in self.facts_present(&c).declared_parents(module_name) {
+                    if !out.iter().any(|x| x == p) {
+                        out.push(p.clone());
+                    }
                 }
             }
-        }
-        out
+            out
+        })
     }
-    fn modules_with_symbol(&self, name: &str) -> Vec<String>;
-    fn find_exporters(&self, func_name: &str) -> Vec<String>;
-    fn defining_module_cached(&self, entry: &str, name: &str) -> Option<std::sync::Arc<CachedModule>>;
-    fn module_declaring_method_in_package(&self, name: &str, class: &str) -> Option<String>;
+    fn modules_with_symbol(&self, name: &str) -> crate::model::witnesses::tracked::Tracked<Vec<String>>;
+    fn find_exporters(&self, func_name: &str) -> crate::model::witnesses::tracked::Tracked<Vec<String>>;
+    fn defining_module_cached(&self, entry: &str, name: &str) -> crate::model::witnesses::tracked::Tracked<Option<std::sync::Arc<CachedModule>>>;
+    fn module_declaring_method_in_package(&self, name: &str, class: &str) -> crate::model::witnesses::tracked::Tracked<Option<String>>;
     /// The search-path roots this index resolved modules from — the
     /// process-wide `@INC`, most-preferred first, ALREADY CANONICAL
     /// (canonicalized once when the resolver published it, never per
@@ -869,8 +883,8 @@ pub trait CrossFileLookup {
     }
     /// The on-disk path a module name resolves to (Perl module goto-def).
     /// Default `None` for impls without a path map.
-    fn module_path_cached(&self, _module_name: &str) -> Option<std::path::PathBuf> {
-        None
+    fn module_path_cached(&self, module_name: &str) -> crate::model::witnesses::tracked::Tracked<Option<std::path::PathBuf>> {
+        crate::model::witnesses::tracked::Tracked::new(crate::model::witnesses::tracked::Lookup::ModulePath(module_name.to_string()), None)
     }
     /// The querying file's visibility scope when this lookup is bound to one
     /// (`ScopedLookup`): its own canonical path + the visible set (self path ∪
@@ -891,7 +905,7 @@ pub trait CrossFileLookup {
     fn flat_scope(&self) -> bool {
         false
     }
-    fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>));
+    fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>)) -> crate::model::witnesses::tracked::Tracked<()>;
     /// Visit every distinct cached FILE exactly once. `for_each_cached` is
     /// keyed by NAME with one winner per key, so a pack file that loses every
     /// name tie (two fixtures both declaring `is_scope`) is invisible there —
@@ -900,14 +914,19 @@ pub trait CrossFileLookup {
     /// `for_each_cached` (correct for the Perl hub, whose module-name keys
     /// are unique per file); the pack index overrides with its complete
     /// per-file candidate table.
-    fn for_each_cached_file(&self, f: &mut dyn FnMut(&std::sync::Arc<CachedModule>)) {
+    fn for_each_cached_file(&self, f: &mut dyn FnMut(&std::sync::Arc<CachedModule>)) -> crate::model::witnesses::tracked::Tracked<()> {
         let mut seen: std::collections::HashSet<std::path::PathBuf> =
             std::collections::HashSet::new();
-        self.for_each_cached(&mut |_n, cached| {
+        let mut hash = crate::model::witnesses::tracked::VisitHash::default();
+        // The visited files are this relation's value; the name enumeration
+        // under it is not read on its own.
+        let _ = self.for_each_cached(&mut |_n, cached| {
             if seen.insert(cached.path.clone()) {
+                hash.add(cached);
                 f(cached);
             }
         });
+        crate::model::witnesses::tracked::Tracked::visited(crate::model::witnesses::tracked::Lookup::AllFiles, hash)
     }
     fn for_each_reexport_module(
         &self,
@@ -952,19 +971,19 @@ pub trait CrossFileLookup {
     /// Direct children/composers of `class` as (package, module) pairs
     /// — the `children_index` inverse, depth 1 (the graph walker
     /// supplies transitivity).
-    fn direct_children_of(&self, class: &str) -> Vec<(String, String)>;
+    fn direct_children_of(&self, class: &str) -> crate::model::witnesses::tracked::Tracked<Vec<(String, String)>>;
     /// Template specializations of `primary` as (spec, module) pairs — the
     /// cross-file half of the graph's `Specializes` family edge (the local
     /// half reads `FileAnalysis.pack.specializes`). Default: none (the Perl hub
     /// and language-less impls have no specialization index).
-    fn direct_specializations_of(&self, _primary: &str) -> Vec<(String, String)> {
-        Vec::new()
+    fn direct_specializations_of(&self, primary: &str) -> crate::model::witnesses::tracked::Tracked<Vec<(String, String)>> {
+        crate::model::witnesses::tracked::Tracked::new(crate::model::witnesses::tracked::Lookup::Specializations(primary.to_string()), Vec::new())
     }
     /// Registration-time loader-config shapes: every (load_name, shape)
     /// projected from `PluginLoad` facts across the workspace —
     /// INCLUDING packageless entrypoint scripts, which never enter the
     /// module cache.
-    fn for_each_loader_shape(&self, f: &mut dyn FnMut(&str, &InferredType));
+    fn for_each_loader_shape(&self, f: &mut dyn FnMut(&str, &InferredType)) -> crate::model::witnesses::tracked::Tracked<()>;
     /// Loadable module names matching `prefix` for completion, as
     /// (name, is_resolved) — resolved modules have full analysis, the rest
     /// are @INC-scanned availability. Defaults empty so lookups that have
@@ -1266,13 +1285,13 @@ impl<'a> ScopedLookup<'a> {
         name: &str,
     ) -> (Vec<std::sync::Arc<CachedModule>>, bool) {
         if let (Some(ns), leaf) = split_qualified(name, &pins.names) {
-            let exact = self.inner.def_candidates(name);
+            let exact = self.inner.def_candidates(name).read();
             if !exact.is_empty() {
                 return (exact, false);
             }
             let mut agree: Vec<std::sync::Arc<CachedModule>> = Vec::new();
             let mut rest: Vec<std::sync::Arc<CachedModule>> = Vec::new();
-            for c in self.inner.def_candidates(leaf) {
+            for c in self.inner.def_candidates(leaf).read() {
                 match self.inner.symbols_present(&c).declared_class_namespace(leaf) {
                     Some(d) if d == ns => agree.push(c),
                     _ => rest.push(c),
@@ -1284,7 +1303,7 @@ impl<'a> ScopedLookup<'a> {
             let widened = !rest.is_empty();
             return (rest, widened);
         }
-        let cands = self.inner.def_candidates(name);
+        let cands = self.inner.def_candidates(name).read();
         // One candidate has nothing to disambiguate; the table read
         // below rehydrates symbols, so only a genuinely ambiguous
         // leaf pays it.
@@ -1327,59 +1346,11 @@ impl<'a> ScopedLookup<'a> {
                 out.extend(rest);
                 (out, false)
     }
-}
 
-impl<'a> CrossFileLookup for ScopedLookup<'a> {
-    fn resolution_epoch(&self) -> u64 {
-        self.inner.resolution_epoch()
-    }
-    fn is_dependency_path(&self, path: &std::path::Path) -> bool {
-        self.inner.is_dependency_path(path)
-    }
-    fn get_cached(&self, module_name: &str) -> Option<std::sync::Arc<CachedModule>> {
-        // A search-path origin's winner is PER-ASKER: the same name means
-        // whichever provider this file's own @INC reaches first. Falling
-        // back to the global slot keeps a name with no ranked candidate
-        // answering exactly as before.
-        if matches!(self.axis, VisibilityAxis::SearchPath(_) | VisibilityAxis::UseMap(_)) {
-            if let Some(best) = self.visible_def_candidates(module_name).into_iter().next() {
-                return Some(best);
-            }
-        }
-        self.inner.get_cached_scoped(module_name, &self.visible)
-    }
-    fn get_cached_scoped(
-        &self,
-        module_name: &str,
-        _visible: &std::collections::HashSet<String>,
-    ) -> Option<std::sync::Arc<CachedModule>> {
-        self.get_cached(module_name)
-    }
-    fn inc_roots(&self) -> std::sync::Arc<Vec<std::path::PathBuf>> {
-        self.inner.inc_roots()
-    }
-    fn workspace_root_path(&self) -> Option<std::path::PathBuf> {
-        self.inner.workspace_root_path()
-    }
-    fn def_candidates(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
-        // Unscoped by design: consumers of the full candidate table weigh
-        // definition-ness themselves, and a definition legitimately lives
-        // OUTSIDE the querying file's closure (a `.c` body nobody includes).
-        self.inner.def_candidates(name)
-    }
-    fn visible_def_candidates_widening(
-        &self,
-        name: &str,
-    ) -> (Vec<std::sync::Arc<CachedModule>>, bool) {
-        match &self.axis {
-            VisibilityAxis::UseMap(pins) => self.use_map_candidates(pins, name),
-            _ => (self.visible_def_candidates(name), false),
-        }
-    }
-    fn visible_def_candidates(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
+    fn visible_def_candidates_now(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
         match &self.axis {
             VisibilityAxis::Transparent | VisibilityAxis::Flat => {
-                self.inner.def_candidates(name)
+                self.inner.def_candidates(name).read()
             }
             VisibilityAxis::UseMap(pins) => self.use_map_candidates(pins, name).0,
             VisibilityAxis::IncludeClosure => {
@@ -1397,6 +1368,7 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
                 let mut out: Vec<std::sync::Arc<CachedModule>> = self
                     .inner
                     .def_candidates(name)
+                    .read()
                     .into_iter()
                     .filter(|c| {
                         let p = c.path.to_string_lossy();
@@ -1407,7 +1379,7 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
                     })
                     .collect();
                 if out.is_empty() {
-                    out.extend(self.get_cached(name));
+                    out.extend(self.get_cached(name).read());
                 }
                 out
             }
@@ -1421,11 +1393,12 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
                 let mut ranked: Vec<(usize, std::sync::Arc<CachedModule>)> = self
                     .inner
                     .def_candidates(name)
+                    .read()
                     .into_iter()
                     .filter_map(|c| self.axis.rank(&c.path).map(|r| (r, c)))
                     .collect();
                 if ranked.is_empty() {
-                    return self.inner.def_candidates(name);
+                    return self.inner.def_candidates(name).read();
                 }
                 // Stable within a rank: `def_candidates` arrives path-ordered
                 // and every consumer's tie-break leans on that staying so.
@@ -1433,6 +1406,60 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
                 ranked.into_iter().map(|(_, c)| c).collect()
             }
         }
+    }
+}
+
+impl<'a> CrossFileLookup for ScopedLookup<'a> {
+    fn resolution_epoch(&self) -> u64 {
+        self.inner.resolution_epoch()
+    }
+    fn is_dependency_path(&self, path: &std::path::Path) -> bool {
+        self.inner.is_dependency_path(path)
+    }
+    fn get_cached(&self, module_name: &str) -> Tracked<Option<std::sync::Arc<CachedModule>>> {
+        // A search-path origin's winner is PER-ASKER: the same name means
+        // whichever provider this file's own @INC reaches first. Falling
+        // back to the global slot keeps a name with no ranked candidate
+        // answering exactly as before.
+        Tracked::derive(Lookup::Winner(module_name.to_string()), || {
+            if matches!(self.axis, VisibilityAxis::SearchPath(_) | VisibilityAxis::UseMap(_)) {
+                if let Some(best) = self.visible_def_candidates_now(module_name).into_iter().next() {
+                    return Some(best);
+                }
+            }
+            self.inner.get_cached_scoped(module_name, &self.visible).read()
+        })
+    }
+    fn get_cached_scoped(
+        &self,
+        module_name: &str,
+        _visible: &std::collections::HashSet<String>,
+    ) -> Tracked<Option<std::sync::Arc<CachedModule>>> {
+        self.get_cached(module_name)
+    }
+    fn inc_roots(&self) -> std::sync::Arc<Vec<std::path::PathBuf>> {
+        self.inner.inc_roots()
+    }
+    fn workspace_root_path(&self) -> Option<std::path::PathBuf> {
+        self.inner.workspace_root_path()
+    }
+    fn def_candidates(&self, name: &str) -> Tracked<Vec<std::sync::Arc<CachedModule>>> {
+        // Unscoped by design: consumers of the full candidate table weigh
+        // definition-ness themselves, and a definition legitimately lives
+        // OUTSIDE the querying file's closure (a `.c` body nobody includes).
+        self.inner.def_candidates(name)
+    }
+    fn visible_def_candidates_widening(
+        &self,
+        name: &str,
+    ) -> Tracked<(Vec<std::sync::Arc<CachedModule>>, bool)> {
+        Tracked::derive(Lookup::VisibleDefsWidening(name.to_string()), || match &self.axis {
+            VisibilityAxis::UseMap(pins) => self.use_map_candidates(pins, name),
+            _ => (self.visible_def_candidates_now(name), false),
+        })
+    }
+    fn visible_def_candidates(&self, name: &str) -> Tracked<Vec<std::sync::Arc<CachedModule>>> {
+        Tracked::derive(Lookup::VisibleDefs(name.to_string()), || self.visible_def_candidates_now(name))
     }
     fn bag_present(
         &self,
@@ -1507,32 +1534,36 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn cached_by_path(
         &self,
         path: &std::path::Path,
-    ) -> Option<std::sync::Arc<CachedModule>> {
+    ) -> Tracked<Option<std::sync::Arc<CachedModule>>> {
         self.inner.cached_by_path(path)
     }
     // `parents_cached` deliberately NOT delegated: the provided default
     // unions over THIS decorator's `visible_def_candidates`, so the scope
     // (pack closure narrowing) applies to the parent relation too.
-    fn modules_with_symbol(&self, name: &str) -> Vec<String> {
+    fn modules_with_symbol(&self, name: &str) -> Tracked<Vec<String>> {
         self.inner.modules_with_symbol(name)
     }
-    fn find_exporters(&self, func_name: &str) -> Vec<String> {
+    fn find_exporters(&self, func_name: &str) -> Tracked<Vec<String>> {
         self.inner.find_exporters(func_name)
     }
-    fn defining_module_cached(&self, entry: &str, name: &str) -> Option<std::sync::Arc<CachedModule>> {
+    fn defining_module_cached(&self, entry: &str, name: &str) -> Tracked<Option<std::sync::Arc<CachedModule>>> {
         self.inner.defining_module_cached(entry, name)
     }
-    fn module_declaring_method_in_package(&self, name: &str, class: &str) -> Option<String> {
+    fn module_declaring_method_in_package(&self, name: &str, class: &str) -> Tracked<Option<String>> {
         self.inner.module_declaring_method_in_package(name, class)
     }
-    fn module_path_cached(&self, module_name: &str) -> Option<std::path::PathBuf> {
+    fn module_path_cached(&self, module_name: &str) -> Tracked<Option<std::path::PathBuf>> {
         // Scope-aware: the path must name the same candidate the scoped
         // `get_cached` answers with, or a consumer that pairs this path with a
         // scoped range splices two different files (wrong file at a
         // nonexistent position). Fall back to the raw path map only when no
         // analysis is cached at all.
-        self.get_cached(module_name).map(|c| c.path.clone())
-            .or_else(|| self.inner.module_path_cached(module_name))
+        Tracked::derive(Lookup::ModulePath(module_name.to_string()), || {
+            self.get_cached(module_name)
+                .read()
+                .map(|c| c.path.clone())
+                .or_else(|| self.inner.module_path_cached(module_name).read())
+        })
     }
     fn visibility_scope(
         &self,
@@ -1551,10 +1582,10 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn flat_scope(&self) -> bool {
         self.axis.name_keyed()
     }
-    fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>)) {
+    fn for_each_cached(&self, f: &mut dyn FnMut(&str, &std::sync::Arc<CachedModule>)) -> Tracked<()> {
         self.inner.for_each_cached(f)
     }
-    fn for_each_cached_file(&self, f: &mut dyn FnMut(&std::sync::Arc<CachedModule>)) {
+    fn for_each_cached_file(&self, f: &mut dyn FnMut(&std::sync::Arc<CachedModule>)) -> Tracked<()> {
         self.inner.for_each_cached_file(f)
     }
     fn for_each_reexport_module(
@@ -1589,13 +1620,13 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
         // the row store the name pre-filter reads.
         self.inner.for_each_entity_bridged_to_named(class_name, name, f)
     }
-    fn direct_children_of(&self, class: &str) -> Vec<(String, String)> {
+    fn direct_children_of(&self, class: &str) -> Tracked<Vec<(String, String)>> {
         self.inner.direct_children_of(class)
     }
-    fn direct_specializations_of(&self, primary: &str) -> Vec<(String, String)> {
+    fn direct_specializations_of(&self, primary: &str) -> Tracked<Vec<(String, String)>> {
         self.inner.direct_specializations_of(primary)
     }
-    fn for_each_loader_shape(&self, f: &mut dyn FnMut(&str, &InferredType)) {
+    fn for_each_loader_shape(&self, f: &mut dyn FnMut(&str, &InferredType)) -> Tracked<()> {
         self.inner.for_each_loader_shape(f)
     }
     fn visible_defs_with_prefix(

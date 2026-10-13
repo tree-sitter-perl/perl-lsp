@@ -962,7 +962,7 @@ impl FileAnalysis {
                     // A split exporter's surface lives across its candidates.
                     let bound_remote = idx
                         .visible_def_candidates(&import.module_name)
-                        .iter()
+                        .read().iter()
                         .find_map(|cached| {
                             let fa = idx.facts_present(&cached);
                             let surface = fa.export_surface_with_index(idx);
@@ -978,7 +978,7 @@ impl FileAnalysis {
                     // the candidate pick covers a split module's own subs.
                     if let Some(cached) = idx
                         .defining_module_cached(&import.module_name, &remote)
-                        .or_else(|| idx.candidate_defining_sub(&import.module_name, &remote))
+                        .read().or_else(|| idx.candidate_defining_sub(&import.module_name, &remote).read())
                     {
                         let whole = idx.bag_present(&cached);
                         if let Some(sub_info) = whole.sub_info_view(&remote) {

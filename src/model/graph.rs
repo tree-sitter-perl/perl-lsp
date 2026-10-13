@@ -276,7 +276,7 @@ impl<'a> GraphView<'a> {
                         }
                     }
                     if let Some(idx) = self.idx {
-                        for (pkg, _module) in idx.direct_children_of(class) {
+                        for (pkg, _module) in idx.direct_children_of(class).read() {
                             out.push(Node::Class(pkg));
                         }
                     }
@@ -307,7 +307,7 @@ impl<'a> GraphView<'a> {
                         out.push(Node::Class(spec.clone()));
                     }
                     if let Some(idx) = self.idx {
-                        for (spec, _module) in idx.direct_specializations_of(class) {
+                        for (spec, _module) in idx.direct_specializations_of(class).read() {
                             out.push(Node::Class(spec));
                         }
                     }

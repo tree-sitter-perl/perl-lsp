@@ -10,7 +10,7 @@ const SCHEMA_VERSION: &str = "10";
 /// Bumped when the builder's analysis output changes shape in a way that
 /// invalidates cached blobs. Unlike `SCHEMA_VERSION`, this does not drop
 /// the table — stale entries are re-resolved lazily with priority.
-pub const EXTRACT_VERSION: i64 = 233;
+pub const EXTRACT_VERSION: i64 = 234;
 
 /// Bumped when the ROW format of the relational ref index changes shape.
 /// Unlike `EXTRACT_VERSION` (which governs the blobs), a mismatch only wipes
@@ -214,7 +214,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS answer_reads (
             key     BLOB NOT NULL,
             kind    INTEGER NOT NULL,
-            subject TEXT NOT NULL,
+            subject BLOB NOT NULL,
             stamp   INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_answer_reads_key ON answer_reads(key);
