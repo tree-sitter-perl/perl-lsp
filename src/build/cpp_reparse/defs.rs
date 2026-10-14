@@ -143,7 +143,7 @@ pub(super) fn walk_macro_defs(
             .map(|n| (n.start_position(), n.end_position()))
             .unwrap_or_default();
         if let (Some(n), Some(b)) = (oname, obody) {
-            emit(n, Macro { params: None, body: b, guards: guards.clone(), def_line, variant_delegates: Vec::new() }, name_span);
+            emit(n, Macro { params: None, body: b, guards: guards.clone(), def_line, variant_delegates: Vec::new(), via_include: None }, name_span);
         }
         // Bodyless `#define FLAG` — the canonical config knob (feature
         // toggles, include guards, `PERL_CORE`-style markers). It must enter
@@ -153,12 +153,12 @@ pub(super) fn walk_macro_defs(
         if let Some(n) = bname {
             emit(
                 n,
-                Macro { params: None, body: String::new(), guards: guards.clone(), def_line, variant_delegates: Vec::new() },
+                Macro { params: None, body: String::new(), guards: guards.clone(), def_line, variant_delegates: Vec::new(), via_include: None },
                 name_span,
             );
         }
         if let (Some(n), Some(p), Some(b)) = (fname, fparams, fbody) {
-            emit(n, Macro { params: Some(p), body: b, guards, def_line, variant_delegates: Vec::new() }, name_span);
+            emit(n, Macro { params: Some(p), body: b, guards, def_line, variant_delegates: Vec::new(), via_include: None }, name_span);
         }
     }
 }

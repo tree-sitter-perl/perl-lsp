@@ -506,7 +506,11 @@ impl<'a> CandidateSet<'a> {
         // see-through target, labeled. `docs/adr/macro-handling.md`.
         if self.pack {
             if let (Some(source), Some(idx)) = (self.source, self.idx()) {
-                if let Some(word) = word_at_point(source, point) {
+                // A token above its macro's `#define` (or the `#include`
+                // bringing it in) is not a macro use, so the lane stands aside.
+                if let Some(word) =
+                    word_at_point(source, point).filter(|w| !analysis.macro_inactive_at(w, point))
+                {
                     // Shape gate: a function-like `#define F(x)` expands only at
                     // call shape `F(`. At a parenless site it can't claim the
                     // token — drop those variants so a parenless type token

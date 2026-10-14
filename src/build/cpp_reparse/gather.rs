@@ -100,10 +100,42 @@ impl PreExpandedExternal {
 
     /// Every callee a use of gathered macro `name` may forward to, across
     /// its config variants in the whole closure — the delegation edges the
-    /// build mints onto this file's use sites (`macro_delegations`).
+    /// build mints onto this file's use sites (`macro_uses`).
     pub fn delegates_of(&self, name: &str) -> Vec<String> {
         self.raw.get(name).map(|m| m.all_delegates().collect()).unwrap_or_default()
     }
+
+    /// Where gathered macro `name` becomes defined in the gathering file:
+    /// `include_lines[i]` for the `#include` line it arrives through, 0 when
+    /// it is visible from the top. `None` when
+    /// the closure does not define it. `include_lines` is any per-line
+    /// projection of `include_lines(src)` (byte offsets, rows).
+    pub fn activation_line(&self, name: &str, include_lines: &[usize]) -> Option<usize> {
+        let m = self.raw.get(name)?;
+        Some(m.via_include.and_then(|i| include_lines.get(i as usize).copied()).unwrap_or(0))
+    }
+}
+
+/// The line shape `include_set_hash` keys on: `#` then `include`.
+pub(super) fn is_include_line(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with('#') && t[1..].trim_start().starts_with("include")
+}
+
+/// Every `#include` line as `(byte offset, row)` of its start, in source
+/// order — the ordinal space `Macro::via_include` indexes. It is the line
+/// set `include_set_hash` hashes, so an ordinal stays valid exactly as long
+/// as the gathered table cached under that hash does.
+pub fn include_lines(src: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut byte = 0;
+    for (row, line) in src.split_inclusive('\n').enumerate() {
+        if is_include_line(line) {
+            out.push((byte, row));
+        }
+        byte += line.len();
+    }
+    out
 }
 
 /// Every identifier token appearing in any macro body — the reference
@@ -228,29 +260,42 @@ pub(super) fn gather_included_macros(
     let Some(lang) = parser.language().map(|l| (*l).clone()) else {
         return (macros, headers);
     };
-    let mut frontier: Vec<std::path::PathBuf> = include_paths(src, parser)
-        .iter()
-        .filter_map(|inc| resolve_include(file_path, inc))
+    // Each header's index in `parsed`, and the include graph over those
+    // indices — what `via_include` is computed from once the walk is done.
+    let mut index_of: std::collections::HashMap<std::path::PathBuf, usize> = std::collections::HashMap::new();
+    let mut parsed: Vec<std::sync::Arc<CachedHeader>> = Vec::new();
+    let mut children: Vec<Vec<usize>> = Vec::new();
+    let mut roots: Vec<(u32, usize)> = Vec::new();
+    let line_starts: Vec<usize> = include_lines(src).into_iter().map(|(b, _)| b).collect();
+    let mut frontier: Vec<(std::path::PathBuf, Parent)> = include_sites(src, parser)
+        .into_iter()
+        .filter_map(|(inc, at)| {
+            let ordinal = line_starts.partition_point(|&b| b <= at).checked_sub(1)?;
+            Some((resolve_include(file_path, &inc)?, Parent::Line(ordinal as u32)))
+        })
         .collect();
     while !frontier.is_empty() {
         // Canonicalize + dedup this level in queue order (cheap stat) so the
         // parallel parse below can't perturb the first-wins merge order.
-        let mut level: Vec<std::path::PathBuf> = Vec::with_capacity(frontier.len());
-        for path in frontier.drain(..) {
+        let mut level: Vec<(std::path::PathBuf, Parent)> = Vec::with_capacity(frontier.len());
+        let mut edges: Vec<(Parent, std::path::PathBuf)> = Vec::new();
+        for (path, parent) in frontier.drain(..) {
             let Ok(canon) = path.canonicalize() else { continue };
             if seen.insert(canon.clone()) {
-                level.push(canon);
+                level.push((canon, parent));
+            } else {
+                edges.push((parent, canon));
             }
         }
         // header_info is pure per header → parse the level concurrently.
         let infos: Vec<Option<std::sync::Arc<CachedHeader>>> = level
             .par_iter()
-            .map(|canon| with_pooled_parser(&lang, |p| header_info(canon, p)))
+            .map(|(canon, _)| with_pooled_parser(&lang, |p| header_info(canon, p)))
             .collect();
-        let mut next: Vec<std::path::PathBuf> = Vec::new();
-        for (canon, info) in level.iter().zip(infos) {
+        let mut next: Vec<(std::path::PathBuf, Parent)> = Vec::new();
+        for ((canon, parent), info) in level.into_iter().zip(infos) {
             let Some(info) = info else { continue };
-            headers.push((canon.clone(), file_stamp(canon)));
+            headers.push((canon.clone(), file_stamp(&canon)));
             for (k, v) in &info.macros {
                 match macros.entry(k.clone()) {
                     std::collections::btree_map::Entry::Vacant(e) => {
@@ -260,14 +305,58 @@ pub(super) fn gather_included_macros(
                 }
             }
             for inc in &info.includes {
-                if let Some(nx) = resolve_include(canon, inc) {
-                    next.push(nx);
+                if let Some(nx) = resolve_include(&canon, inc) {
+                    next.push((nx, Parent::Header(parsed.len())));
                 }
+            }
+            index_of.insert(canon.clone(), parsed.len());
+            parsed.push(info);
+            children.push(Vec::new());
+            edges.push((parent, canon));
+        }
+        for (parent, canon) in edges {
+            let Some(&child) = index_of.get(&canon) else { continue };
+            match parent {
+                Parent::Line(o) => roots.push((o, child)),
+                Parent::Header(p) => children[p].push(child),
             }
         }
         frontier = next;
     }
+    // A header's macros are defined from the FIRST include line whose
+    // closure reaches it (an include guard makes later includes no-ops):
+    // flood from the include lines in source order, first visit wins.
+    roots.sort_by_key(|&(o, _)| o);
+    let mut ordinal: Vec<Option<u32>> = vec![None; parsed.len()];
+    for (o, root) in roots {
+        let mut stack = vec![root];
+        while let Some(h) = stack.pop() {
+            if ordinal[h].is_some() {
+                continue;
+            }
+            ordinal[h] = Some(o);
+            stack.extend(children[h].iter().copied());
+        }
+    }
+    for (info, o) in parsed.iter().zip(ordinal) {
+        for k in info.macros.keys() {
+            if let Some(m) = macros.get_mut(k) {
+                m.via_include = match (m.via_include, o) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
+            }
+        }
+    }
     (macros, headers)
+}
+
+/// Who included a frontier header: one of the gathering file's own
+/// `#include` lines (its ordinal), or an already-walked header.
+#[derive(Clone, Copy)]
+enum Parent {
+    Line(u32),
+    Header(usize),
 }
 
 /// The persisted macro table's per-header validation stamp: a hash of
@@ -604,9 +693,9 @@ pub fn cache_size_report() -> String {
     )
 }
 
-fn include_paths(src: &str, parser: &mut tree_sitter::Parser) -> Vec<String> {
+fn include_sites(src: &str, parser: &mut tree_sitter::Parser) -> Vec<(String, usize)> {
     match parser.parse(src, None) {
-        Some(tree) => include_paths_tree(&tree, src),
+        Some(tree) => include_sites_tree(&tree, src),
         None => Vec::new(),
     }
 }
@@ -616,6 +705,11 @@ fn include_paths(src: &str, parser: &mut tree_sitter::Parser) -> Vec<String> {
 /// `<>`, and the walk-up resolver finds both (true system headers like
 /// `<vector>` simply don't resolve in the workspace, and are skipped).
 fn include_paths_tree(tree: &Tree, src: &str) -> Vec<String> {
+    include_sites_tree(tree, src).into_iter().map(|(p, _)| p).collect()
+}
+
+/// `include_paths_tree` with each path token's byte offset.
+fn include_sites_tree(tree: &Tree, src: &str) -> Vec<(String, usize)> {
     let q = cached_query(&INCLUDE_Q, &tree.language(), INCLUDE_QUERY);
     let names = q.capture_names().to_vec();
     let mut out = Vec::new();
@@ -625,8 +719,8 @@ fn include_paths_tree(tree: &Tree, src: &str) -> Vec<String> {
         for c in m.captures {
             let Ok(t) = c.node.utf8_text(src.as_bytes()) else { continue };
             match names[c.index as usize] {
-                "p" => out.push(t.to_string()),
-                "s" => out.push(t.trim_start_matches('<').trim_end_matches('>').to_string()),
+                "p" => out.push((t.to_string(), c.node.start_byte())),
+                "s" => out.push((t.trim_start_matches('<').trim_end_matches('>').to_string(), c.node.start_byte())),
                 _ => {}
             }
         }

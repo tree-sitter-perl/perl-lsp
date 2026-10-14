@@ -56,6 +56,12 @@ pub struct Macro {
     /// see-through must count all of them.
     #[serde(default)]
     pub variant_delegates: Vec<String>,
+    /// For a gathered macro: the ordinal of the gathering file's `#include`
+    /// line (`include_lines`) after which the name is defined — the first
+    /// direct include whose closure defines it. `None` for a file's own
+    /// `#define`s, and for a gathered name visible from the top.
+    #[serde(default)]
+    pub via_include: Option<u32>,
 }
 
 /// One source replacement: original `[start,end)` → `replacement`.

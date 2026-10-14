@@ -2171,6 +2171,54 @@ mod pack_symmetry {
     }
 
     #[test]
+    fn delegation_follows_only_macros_defined_at_the_use() {
+        // `A → B` arrives with the first include, `B → F` with the second.
+        // Above the second include `A(1)` reaches only `B`, and `B(0)` is not
+        // a macro use at all; below it `A(2)` reaches `F` too.
+        let dir = std::env::temp_dir().join("perl_lsp_delegation_position");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("inc_a.h"), "#define A(x) B(x)\n").unwrap();
+        let b_src = "int F(int x);\n#define B(x) F(x)\n";
+        std::fs::write(dir.join("inc_b.h"), b_src).unwrap();
+        let use_src =
+            "#include \"inc_a.h\"\nvoid f() { B(0); A(1); }\n#include \"inc_b.h\"\nvoid g() { A(2); }\n";
+        let use_path = dir.join("use.c");
+        std::fs::write(&use_path, use_src).unwrap();
+        let fa = crate::build::language_driver::LanguageRegistry::with_enabled()
+            .for_id("cpp")
+            .unwrap()
+            .analyze_with_path(use_src, Some(&use_path));
+        let at = |name: &str, row: usize, col: usize| {
+            fa.refs()
+                .iter()
+                .position(|r| r.target_name == name && r.span.start == tree_sitter::Point::new(row, col))
+                .unwrap_or_else(|| panic!("{name} use minted at {row}:{col}: {:?}", fa.refs()))
+        };
+        let (b0, a1, a2) = (at("B", 1, 11), at("A", 1, 17), at("A", 3, 11));
+        assert!(fa.is_premature_macro_use(b0), "B above its include is not a macro use");
+        assert!(fa.ref_delegates(b0).is_empty());
+        assert_eq!(fa.ref_delegates(a1), ["B".to_string()]);
+        assert_eq!(fa.ref_delegates(a2), ["B".to_string(), "F".to_string()]);
+
+        let header = cpp(b_src);
+        let target = match resolve_symbol(&header, tree_sitter::Point::new(0, 4), None) {
+            Some(ResolvedTarget::Target(t)) => t,
+            other => panic!("F target: {other:?}"),
+        };
+        let store = FileStore::new();
+        store.insert_workspace(use_path, fa);
+        let results = refs_to(&store, None, &target, RoleMask::EDITABLE);
+        assert!(
+            results.iter().any(|r| r.span.start == tree_sitter::Point::new(3, 11)),
+            "A(2) below the include reaches F: {results:?}"
+        );
+        assert!(
+            !results.iter().any(|r| r.span.start == tree_sitter::Point::new(1, 17)),
+            "A(1) above the include does not: {results:?}"
+        );
+    }
+
+    #[test]
     fn file_scope_global_def_reaches_bare_reads() {
         let store = FileStore::new();
         let a = cpp("int global_counter;\n");

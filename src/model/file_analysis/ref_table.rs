@@ -8,7 +8,6 @@
 //! delegates its ref-shaped queries to it.
 
 use super::*;
-use std::collections::BTreeMap;
 
 /// Every ref in one file, plus the derived lookups over them.
 ///
@@ -57,14 +56,61 @@ pub struct RefTable {
     #[serde(skip, default)]
     longest_call_chain: usize,
 
-    /// Macro delegation edges, minted by the build per used macro name:
-    /// `IncRef → [B, Perl_Inc]` when this file's preprocessor view sees
-    /// `#define IncRef(sv) B(sv)` and `#define B(x) Perl_Inc(x)`. A use
-    /// spelled through the macro IS a use of every name in its chain, so
-    /// the use is indexed (and row-shredded) under each delegate's key too
-    /// — the backward half of goto-def's see-through. Empty outside C.
+    /// Per-site macro facts the C build mints (`MacroUses`). Empty outside C.
     #[serde(default)]
-    delegations: BTreeMap<String, Box<[String]>>,
+    macro_uses: MacroUses,
+}
+
+/// What the C preprocessor made of each macro-spelled use in this file,
+/// keyed by ref index — minted by the build, which holds the file's own
+/// `#define`s, its gathered include closure and every position.
+///
+/// A use spelled through a delegating macro IS a use of every name in its
+/// chain (`IncRef(x)` with `#define IncRef(sv) B(sv)` and `#define B(x)
+/// Perl_Inc(x)` reaches `[B, Perl_Inc]`), so the use is indexed and
+/// row-shredded under each delegate's key: the backward half of goto-def's
+/// see-through. A chain only follows macros defined at the use's position.
+/// A use before its macro's `#define` (or before the `#include` that
+/// brings it in) is not a macro use at all, and is listed as `premature`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MacroUses {
+    /// Distinct delegate chains, each sorted.
+    chains: Vec<Box<[String]>>,
+    /// `(ref index, chain index)`, sorted by ref index.
+    delegated: Vec<(u32, u32)>,
+    /// Ref indices spelling a macro name before the macro is defined, sorted.
+    premature: Vec<u32>,
+}
+
+impl MacroUses {
+    /// `delegated` and `premature` must be sorted by ref index.
+    pub fn from_parts(chains: Vec<Box<[String]>>, delegated: Vec<(u32, u32)>, premature: Vec<u32>) -> Self {
+        debug_assert!(delegated.windows(2).all(|w| w[0].0 < w[1].0));
+        debug_assert!(premature.windows(2).all(|w| w[0] < w[1]));
+        MacroUses { chains, delegated, premature }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.delegated.is_empty() && self.premature.is_empty()
+    }
+
+    fn delegates_of(&self, i: usize) -> &[String] {
+        let Ok(i) = u32::try_from(i) else { return &[] };
+        match self.delegated.binary_search_by_key(&i, |&(r, _)| r) {
+            Ok(at) => &self.chains[self.delegated[at].1 as usize],
+            Err(_) => &[],
+        }
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.chains
+            .iter()
+            .map(|c| c.iter().map(|d| d.capacity() + std::mem::size_of::<String>()).sum::<usize>())
+            .sum::<usize>()
+            + self.chains.capacity() * std::mem::size_of::<Box<[String]>>()
+            + self.delegated.capacity() * std::mem::size_of::<(u32, u32)>()
+            + self.premature.capacity() * std::mem::size_of::<u32>()
+    }
 }
 
 impl RefTable {
@@ -159,7 +205,7 @@ impl RefTable {
         let mut out = Vec::with_capacity(self.refs.len());
         for (i, r) in self.refs.iter().enumerate() {
             let seed = r.row_seed(names);
-            for d in self.delegates_at(i, names) {
+            for d in self.delegates_at(i) {
                 let key = name_match_key(d, names);
                 if key != seed.key {
                     out.push(RefRowSeed { key, ..seed.clone() });
@@ -170,30 +216,32 @@ impl RefTable {
         out
     }
 
-    /// Adopt the build's macro delegation edges. The owning `FileAnalysis`
+    /// Adopt the build's per-site macro facts. The owning `FileAnalysis`
     /// rebuilds the indices afterwards.
-    pub fn set_delegations(&mut self, delegations: BTreeMap<String, Box<[String]>>) {
-        self.delegations = delegations;
+    pub fn set_macro_uses(&mut self, uses: MacroUses) {
+        self.macro_uses = uses;
     }
 
-    /// The names ref `i` reaches through macro delegation — empty unless
-    /// the ref can spell a macro use and names a delegating macro.
-    pub fn delegates_at(&self, i: usize, names: &NameSpellings) -> &[String] {
-        if self.delegations.is_empty() {
-            return &[];
-        }
-        let r = &self.refs[i];
-        if !r.can_spell_macro_use() {
-            return &[];
-        }
-        self.delegations.get(r.unqualified_target_name(names)).map_or(&[], |d| d)
+    /// The names ref `i` reaches through macro delegation.
+    pub fn delegates_at(&self, i: usize) -> &[String] {
+        self.macro_uses.delegates_of(i)
+    }
+
+    /// Refs spelling a macro name before that macro is defined.
+    pub fn premature_macro_uses(&self) -> impl Iterator<Item = usize> + '_ {
+        self.macro_uses.premature.iter().map(|&i| i as usize)
+    }
+
+    /// Whether ref `i` spells a macro name before that macro is defined.
+    pub fn is_premature_macro_use(&self, i: usize) -> bool {
+        u32::try_from(i).is_ok_and(|i| self.macro_uses.premature.binary_search(&i).is_ok())
     }
 
     /// Bucket ref `i` under its own match key and every delegate's.
     fn index_keys(&mut self, i: usize, names: &NameSpellings) {
         let own = self.refs[i].match_key(names);
         let extra: Vec<String> = self
-            .delegates_at(i, names)
+            .delegates_at(i)
             .iter()
             .map(|d| name_match_key(d, names))
             .filter(|k| *k != own)
@@ -267,7 +315,7 @@ impl RefTable {
         self.by_target = HashMap::new();
         self.calls_by_span = Vec::new();
         self.longest_call_chain = 0;
-        self.delegations = BTreeMap::new();
+        self.macro_uses = MacroUses::default();
         self.evicted = true;
     }
 
@@ -286,15 +334,7 @@ impl RefTable {
                 .iter()
                 .map(|r| r.target_name.capacity() + std::mem::size_of::<String>())
                 .sum::<usize>()
-            + self
-                .delegations
-                .iter()
-                .map(|(k, v)| {
-                    k.capacity()
-                        + 64
-                        + v.iter().map(|d| d.capacity() + std::mem::size_of::<String>()).sum::<usize>()
-                })
-                .sum::<usize>();
+            + self.macro_uses.heap_bytes();
 
         let mut b = mcap(&self.by_target)
             + mcap(&self.by_key)
@@ -386,18 +426,33 @@ impl FileAnalysis {
         self.refs.row_seeds(&self.pack.names)
     }
 
-    /// Adopt the build's macro delegation edges (`RefTable::delegations`)
-    /// and re-index, so every delegated use sits in its delegates' buckets.
-    pub fn adopt_macro_delegations(&mut self, delegations: BTreeMap<String, Box<[String]>>) {
-        if delegations.is_empty() {
+    /// Adopt the build's per-site macro facts (`MacroUses`) and re-index,
+    /// so every delegated use sits in its delegates' buckets.
+    pub fn adopt_macro_uses(&mut self, uses: MacroUses) {
+        if uses.is_empty() {
             return;
         }
-        self.refs.set_delegations(delegations);
+        self.refs.set_macro_uses(uses);
         self.refs.rebuild_indices(&self.pack.names);
     }
 
     /// The names ref `ri` reaches through macro delegation.
     pub fn ref_delegates(&self, ri: usize) -> &[String] {
-        self.refs.delegates_at(ri, &self.pack.names)
+        self.refs.delegates_at(ri)
+    }
+
+    /// Whether ref `ri` spells a macro name before that macro is defined
+    /// (its `#define`, or the `#include` that brings it in, comes later).
+    pub fn is_premature_macro_use(&self, ri: usize) -> bool {
+        self.refs.is_premature_macro_use(ri)
+    }
+
+    /// Whether the `name` token at `point` precedes that macro's definition,
+    /// so it is not a macro use (goto-def's macro lane stands aside).
+    pub fn macro_inactive_at(&self, name: &str, point: Point) -> bool {
+        self.refs.premature_macro_uses().any(|i| {
+            let r = &self.refs.as_slice()[i];
+            r.span.start <= point && point <= r.span.end && r.unqualified_target_name(&self.pack.names) == name
+        })
     }
 }

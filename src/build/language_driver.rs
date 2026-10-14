@@ -449,14 +449,14 @@ impl PackDriver {
                 if pack.brace_scoped_members {
                     skel.reanchor_truncated_containers(source);
                 }
-                let macro_defs = self.enrich_skeleton(&mut skel, &mut parser, source, &src, &map, &ctx);
+                let macros = self.enrich_skeleton(&mut skel, &mut parser, source, &src, &map, &ctx);
                 // `return_sites` is structural skeleton output; taken before
                 // assembly consumes `skel` so phase 7 can interpret it against
                 // the FINAL FileAnalysis.
                 let return_sites = std::mem::take(&mut skel.return_sites);
                 let mut fa = skel.into_file_analysis();
                 emit_return_fuel(&mut fa, &return_sites, pack.implicit_this_members);
-                self.register_post_build(&mut fa, &mut parser, source, path, &ctx, &recovered, macro_defs);
+                self.register_post_build(&mut fa, &mut parser, source, path, &ctx, &recovered, macros);
                 fa
             }
             Err(e) => {
@@ -519,8 +519,9 @@ impl PackDriver {
     }
 
     /// Phase 5: post-remap, pre-assembly skeleton enrichment. Returns the
-    /// macro-identity lane (`MacroDef`s) for phase 7 to stamp onto the built
-    /// `FileAnalysis` — the skeleton itself has no field for it.
+    /// macro-identity lane (`MacroDef`s, plus where `#define` bodies name
+    /// macros) for phase 7 to stamp onto the built `FileAnalysis` — the
+    /// skeleton itself has no field for it.
     fn enrich_skeleton(
         &self,
         skel: &mut crate::build::query_extract::SkeletonAnalysis,
@@ -529,7 +530,7 @@ impl PackDriver {
         src: &str,
         map: &crate::build::cpp_reparse::SpliceMap,
         ctx: &PackContext,
-    ) -> Vec<crate::model::file_analysis::MacroDef> {
+    ) -> MacroLane {
         // Type-alias `#define`s gathered from the include closure ride into
         // this file's bag as `TypeName` witnesses (span-less, so post-remap is
         // fine): the cross-file chase can't index a gitignored generated
@@ -554,6 +555,7 @@ impl PackDriver {
         // Macro identity lane: collect every `#define` off the ORIGINAL
         // source (spans in user coordinates, no splice remap needed).
         let macro_defs = self.collect_macro_defs.map(|collect| collect(parser, source)).unwrap_or_default();
+        let mut body_uses = Vec::new();
         // Nested-macro-body references: a use of macro `A` inside `B`'s
         // `#define` body is preproc-excluded from the code parse (one opaque
         // `preproc_arg` token), so no query capture reaches it and gr on `A`
@@ -567,6 +569,7 @@ impl PackDriver {
             let body_refs = crate::build::cpp_reparse::macro_body_name_refs(parser, source, &known);
             for (name, span) in body_refs.name_refs {
                 skel.var_reads.push((name, crate::model::file_analysis::ScopeId(0), span));
+                body_uses.push(span.start);
             }
             // Field/member uses inside bodies (`->op_next`) — untyped here (the
             // receiver is a macro param), resolved to the declaring class and
@@ -608,7 +611,8 @@ impl PackDriver {
             skel.macro_call_arg_spans =
                 crate::build::cpp_reparse::macro_call_arg_spans(parser, source, &param_macro_names);
         }
-        macro_defs
+        body_uses.sort();
+        MacroLane { defs: macro_defs, body_uses }
     }
 
     /// Phase 7: post-assembly hooks — fields only fillable once the
@@ -622,14 +626,14 @@ impl PackDriver {
         path: Option<&Path>,
         ctx: &PackContext,
         recovered: &[(String, String)],
-        macro_defs: Vec<crate::model::file_analysis::MacroDef>,
+        macros: MacroLane,
     ) {
-        fa.pack.macro_defs = macro_defs;
+        fa.pack.macro_defs = macros.defs;
         if self.collect_macro_defs.is_some() {
-            let delegations = crate::util::timings::phase("cpp.macro_delegations", || {
-                macro_delegations(fa, &ctx.external)
+            let uses = crate::util::timings::phase("cpp.macro_uses", || {
+                macro_uses(fa, source, &ctx.external, &macros.body_uses)
             });
-            fa.adopt_macro_delegations(delegations);
+            fa.adopt_macro_uses(uses);
         }
         apply_attribute_macros(fa, recovered);
         // Access-specifier regions: a fresh parse of the ORIGINAL source
@@ -1359,52 +1363,124 @@ fn remap_spans(
     }
 }
 
-/// The delegation chain of every macro name this file's refs use: the
-/// transitive callees (`#define A(x) B(x)`, `#define B(x) F(x)` gives
-/// `A → [B, F]`) through this file's OWN `#define`s and its include
-/// closure's gathered table — exactly the macros its preprocessor would
-/// expand, so the edge needs no query-time visibility check. Every config
-/// variant of a name contributes (`Macro::variant_delegates`).
+/// Phase 5's macro lane, carried to phase 7.
 #[cfg(feature = "pack-langs")]
-fn macro_delegations(
+struct MacroLane {
+    defs: Vec<crate::model::file_analysis::MacroDef>,
+    /// Where `#define` bodies use a macro name, sorted. A body is
+    /// expanded where its macro is used, not where it is written, so these
+    /// uses see every macro the file ever defines.
+    body_uses: Vec<tree_sitter::Point>,
+}
+
+/// What this file's preprocessor makes of each macro-spelled use
+/// (`MacroUses`): the use's transitive delegate chain (`#define A(x) B(x)`,
+/// `#define B(x) F(x)` gives `A → [B, F]`), or that it precedes the macro's
+/// definition. A macro is defined from its own `#define` line, or for a
+/// gathered one from the `#include` line bringing it in; a chain follows a
+/// link only while that link's macro is defined at the use, which is when
+/// the preprocessor would rescan it. Every config variant of a name
+/// contributes (`Macro::variant_delegates`).
+#[cfg(feature = "pack-langs")]
+fn macro_uses(
     fa: &FileAnalysis,
+    source: &str,
     external: &crate::build::cpp_reparse::PreExpandedExternal,
-) -> std::collections::BTreeMap<String, Box<[String]>> {
-    let mut own: std::collections::HashMap<&str, Vec<String>> = std::collections::HashMap::new();
+    body_uses: &[tree_sitter::Point],
+) -> crate::model::file_analysis::MacroUses {
+    use std::collections::HashMap;
+    let include_rows: Vec<usize> =
+        crate::build::cpp_reparse::include_lines(source).into_iter().map(|(_, row)| row).collect();
+    let mut own: HashMap<&str, (usize, Vec<String>)> = HashMap::new();
     for m in &fa.pack.macro_defs {
+        let e = own.entry(m.name.as_str()).or_insert((usize::MAX, Vec::new()));
+        e.0 = e.0.min(m.selection_span.start.row);
         if let Some(d) = &m.delegate {
-            own.entry(m.name.as_str()).or_default().push(d.clone());
+            e.1.push(d.clone());
         }
     }
+    let activation = |name: &str| -> Option<usize> {
+        let local = own.get(name).map(|(row, _)| *row);
+        let gathered = external.activation_line(name, &include_rows);
+        match (local, gathered) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    };
     let direct = |name: &str| -> Vec<String> {
-        let mut v = own.get(name).cloned().unwrap_or_default();
+        let mut v = own.get(name).map(|(_, d)| d.clone()).unwrap_or_default();
         v.extend(external.delegates_of(name));
         v
     };
-    let names = &fa.pack.names;
-    let used: std::collections::BTreeSet<&str> = fa
-        .refs()
-        .iter()
-        .filter(|r| r.can_spell_macro_use())
-        .map(|r| r.unqualified_target_name(names))
-        .collect();
-    let mut out = std::collections::BTreeMap::new();
-    for name in used {
+    // The chain at `row`: every name the expansion spells, following a link
+    // only while its macro is defined there.
+    let chain_at = |name: &str, row: usize| -> Vec<String> {
         let mut chain: Vec<String> = Vec::new();
         let mut frontier = direct(name);
         while let Some(d) = frontier.pop() {
             if d == name || chain.contains(&d) {
                 continue;
             }
-            frontier.extend(direct(&d));
+            if activation(&d).is_some_and(|act| act <= row) {
+                frontier.extend(direct(&d));
+            }
             chain.push(d);
         }
-        if !chain.is_empty() {
-            chain.sort();
-            out.insert(name.to_string(), chain.into_boxed_slice());
+        chain.sort();
+        chain
+    };
+    // A name's chain only changes where one of its links becomes defined, so
+    // it is computed once per such step: `(from row, chain index)`.
+    let mut steps: HashMap<String, Vec<(usize, Option<u32>)>> = HashMap::new();
+    let mut chains: Vec<Box<[String]>> = Vec::new();
+    let mut chain_ids: HashMap<Box<[String]>, u32> = HashMap::new();
+    let mut steps_of = |name: &str, act: usize| -> Vec<(usize, Option<u32>)> {
+        let mut rows = vec![act];
+        let mut every = chain_at(name, usize::MAX);
+        while let Some(d) = every.pop() {
+            if let Some(a) = activation(&d).filter(|&a| a > act) {
+                rows.push(a);
+            }
+        }
+        rows.sort_unstable();
+        rows.dedup();
+        let mut out: Vec<(usize, Option<u32>)> = Vec::new();
+        for row in rows.into_iter().chain(std::iter::once(usize::MAX)) {
+            let chain = chain_at(name, row);
+            let id = (!chain.is_empty()).then(|| {
+                let chain = chain.into_boxed_slice();
+                *chain_ids.entry(chain.clone()).or_insert_with(|| {
+                    chains.push(chain);
+                    (chains.len() - 1) as u32
+                })
+            });
+            if out.last().is_none_or(|&(_, last)| last != id) {
+                out.push((row, id));
+            }
+        }
+        out
+    };
+    let names = &fa.pack.names;
+    let mut delegated: Vec<(u32, u32)> = Vec::new();
+    let mut premature: Vec<u32> = Vec::new();
+    for (i, r) in fa.refs().iter().enumerate() {
+        if !r.can_spell_macro_use() {
+            continue;
+        }
+        let name = r.unqualified_target_name(names);
+        let Some(act) = activation(name) else { continue };
+        let row = if body_uses.binary_search(&r.span.start).is_ok() { usize::MAX } else { r.span.start.row };
+        if row < act {
+            premature.push(i as u32);
+            continue;
+        }
+        let steps = steps.entry(name.to_string()).or_insert_with(|| steps_of(name, act));
+        let at = steps.partition_point(|&(from, _)| from <= row) - 1;
+        if let Some(id) = steps[at].1 {
+            delegated.push((i as u32, id));
         }
     }
-    out
+    crate::model::file_analysis::MacroUses::from_parts(chains, delegated, premature)
 }
 
 /// Re-mint a variable read at every macro use the transform ERASED from the
