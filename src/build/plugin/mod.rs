@@ -735,8 +735,9 @@ pub struct PatternSpec {
     pub phase: String,
     /// Tree-sitter query source. Standard text predicates (`#eq?`,
     /// `#match?`, `#any-of?`, …) are evaluated by the query engine at
-    /// match time; unknown predicate names are ignored at match time
-    /// (reserved for deferred host predicates like `#receiver-isa?`).
+    /// match time, structural ones (`#has-parent?`, `#has-ancestor?` and
+    /// their `not-` forms) by the dispatcher; `#receiver-isa?` is deferred
+    /// to query time. Any other predicate fails the compile.
     pub query: String,
     /// capture name → projection names (see `CaptureData` fields).
     #[serde(default)]

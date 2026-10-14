@@ -364,6 +364,7 @@ fn equal_span_first_write_wins() {
             },
             package: None,
             owner: None,
+            implicit_receiver: false,
         }],
         refs,
         ..Default::default()

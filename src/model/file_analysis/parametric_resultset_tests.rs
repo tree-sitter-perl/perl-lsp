@@ -367,7 +367,7 @@ $schema->resultset('Schema::Result::Users')->search({ name => 'X' });
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "name".to_string(),
         kind: TargetKind::HashKeyOfBridged("Schema::Result::Users".to_string()),
-        method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
+        method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
     let consumer_hit = refs
@@ -492,7 +492,7 @@ my $name = $schema->resultset('Schema::Result::Users')->find(1)->name;
             kind: TargetKind::Method {
                 class: "Schema::Result::Users".to_string(),
             },
-            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
+            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -810,7 +810,7 @@ sub action {
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "name".to_string(),
         kind: TargetKind::HashKeyOfBridged("Schema::Result::Sner".to_string()),
-        method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
+        method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
     let consumer_hit = refs
@@ -881,7 +881,7 @@ sub action {
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "name".to_string(),
         kind: TargetKind::HashKeyOfBridged("Schema::Result::Sner".to_string()),
-        method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
+        method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
     let consumer_hit = refs

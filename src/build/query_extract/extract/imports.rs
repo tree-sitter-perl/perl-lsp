@@ -14,7 +14,9 @@ pub(super) struct State {
 
 pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     match e.cap {
-        Capture::Import(ImportCap::Name) => {
+        // One import row either way; the spellings differ in what the
+        // document claims about the token, which the registry reads.
+        Capture::Import(ImportCap::Name | ImportCap::Path) => {
             st.out.import_sites.push((e.text.clone(), e.span()));
             st.out.imports.push(e.text.clone());
         }

@@ -12,9 +12,11 @@ on.
 
 `query_extract/vocab.rs` declares `Capture`: one variant per capture
 family, each carrying a sub-enum of exactly the suffixes the documents
-use. The families that name an entity kind stay typed past the driver:
-`DefKind` is `SkelSymbol.kind` and `RefKind` is `SkelRef.kind`, so the
-projection to `FileAnalysis` matches on the enum too.
+use, named `<Family>Cap`. The families that name an entity kind stay
+typed past the driver: `DefCap` is `SkelSymbol.kind` and `RefCap` is
+`SkelRef.kind`, so the projection to `FileAnalysis` matches on the enum
+too. The `Cap` suffix keeps them apart from the model's `RefKind` /
+`SymKind`, which they project to.
 
 Each enum's spelling table is written once, in a `spelled!` invocation,
 which generates `parse`, `spelling` and `Display` from it. The two
@@ -25,7 +27,7 @@ directions cannot disagree.
 `Capture::parse` turns a name into a `Capture`. Nothing else reads a
 capture name: the driver, the pack hooks and the projection all match on
 the enum. A pack hook that depends on a kind takes the typed kind
-(`default_name: fn(DefKind)`).
+(`default_name: fn(DefCap)`).
 
 ## Decision: the vocabulary is checked when the query compiles
 
@@ -38,10 +40,34 @@ document fails that pack's tests instead of extracting nothing.
 A name starting with `_` follows tree-sitter's predicate-only convention
 (`@_const` under `#eq?`). It maps to `None`, and the driver never sees it.
 
+## Decision: structural predicates are a closed set too
+
+Core tree-sitter evaluates text predicates (`#eq?`, `#match?`,
+`#any-of?`) and hands every other predicate to the caller unevaluated.
+A document needs one more kind of filter: where a node sits. A member
+read is a `field_expression` that is not a call's callee, and that fact
+lives on the parent, which a negated field (`!arguments`) cannot test.
+
+`build/query_predicates.rs` evaluates Neovim's structural forms, with
+the same names and arguments: `#has-parent?`, `#not-has-parent?`,
+`#has-ancestor?`, `#not-has-ancestor?`, each `@capture kind ...`. Every
+node the capture holds must satisfy it. `check` runs when a query
+compiles and fails it on any other predicate name, a malformed argument
+list, or a kind the grammar lacks, because an unread predicate is a
+filter that silently matches everything. `admits` runs per match, before
+any capture is recorded. Both query runners use them: pack extraction,
+and the Perl plugin patterns, where `#receiver-isa?` is the one predicate
+deferred to query time.
+
+Ancestry is read by one descent from the walked root
+(`child_with_descendant`), because `Node::parent` descends from the root
+too and would repeat the walk per hop. Only patterns that carry a
+structural predicate pay it.
+
 ## Decision: a kind's meaning lives on the kind
 
 What a kind means is a method on its enum, matched exhaustively:
-`DefKind::sym_kind` (the `SymKind` it projects to), `DefKind::marker`
+`DefCap::sym_kind` (the `SymKind` it projects to), `DefCap::marker`
 (the `union` / `reexport` / `macro` attribute and the `SymbolFlags` it
 implies), `LitKind::value_type`, `ObsKind::observation`. A new kind does
 not compile until it says what it is.
@@ -86,8 +112,10 @@ pattern per depth would silently miss the next depth.
 So the document states each level once, as a link: `@link.from.<walk>` on
 a node and `@link.<rel>` on the node one level away, by a closed set of
 relations (`inner`, `declares`, `scope`, `name`, `base`). The `<walk>` suffix
-names the walk the link belongs to, from a closed set (`ool`, `qualifier`),
-and each walk has a root capture (`@ool.def`, `@qualifier`). The driver
+names the walk the link belongs to, from a closed set (`ool`, `qualifier`,
+`deref`), and each walk has a root capture (`@ool.def`, `@qualifier`,
+`@nested.target`). The `deref` walk also reads `@deref.*` marks, which say
+what a level is rather than where it leads (`docs/adr/pointer-stack.md`). The driver
 records every link while it flattens the matches, keyed by walk and node id.
 A walk starts at its root's node and follows only its own links
 (`extract/links.rs`), so two walks never read each other's edges, and a

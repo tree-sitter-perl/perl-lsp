@@ -482,12 +482,12 @@ fn resolve_node_type(
     // Transparent wrappers — `(expr)`, `*p`, `&obj` — denote the same class
     // as their operand (pointer-/reference-ness dropped). Peel and recurse so
     // `(*p).m` / `(&o)->m` reach the members `p->m` does.
-    if cfg.recv_peel.wrappers.iter().any(|(k, _)| *k == node.kind()) {
+    if cfg.recv_peel.contains(&node.kind()) {
         return resolve_node_type(node.named_child(0)?, cfg, src, analysis, module_index);
     }
     // Implicit-`this` member receiver: a bare identifier (`iter_->`, `mem_->`,
-    // `options_.`) with NO local declaration IS `this->name` where the pack
-    // elides the receiver (`implicit_this_members`). Resolve it on the
+    // `options_.`) with NO local declaration IS `this->name` where the
+    // document says the body elides the receiver. Resolve it on the
     // enclosing class — `member_value_type` runs the SAME dispatch ladder +
     // cross-file field lookup member access uses, so a field declared in the
     // class's header (an out-of-line method body reads it cross-file) resolves
@@ -496,9 +496,9 @@ fn resolve_node_type(
     // "local" flow witnesses on the name (here typing it `Numeric` off a buried
     // literal) that would otherwise shadow the true member type. A genuine
     // local/param keeps its flow-narrowed value (it has a Variable symbol, so
-    // this branch is skipped). Gated on the pack capability so Python/R
-    // (mandatory receiver) never treat a bare name as a member.
-    if cfg.implicit_this_members && cfg.simple_var_kinds.contains(&node.kind()) {
+    // this branch is skipped). A body whose language spells the receiver
+    // (Python, R) has no eliding scope, so no class answers.
+    if cfg.simple_var_kinds.contains(&node.kind()) {
         if let Ok(name) = node.utf8_text(src.as_bytes()) {
             if !analysis.has_local_variable_at(name, node.start_position()) {
                 if let Some(t) =

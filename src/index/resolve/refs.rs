@@ -27,6 +27,8 @@ pub(super) fn group_from_projections(
             TargetRef::method(
                 p.bare.clone(),
                 p.class.clone(),
+                // a reader is called, whatever backs it
+                Some(MemberKind::Callable),
                 class_analysis,
                 module_index,
                 OverrideScope::Dispatch,
@@ -481,7 +483,7 @@ pub(super) fn matcher_view(
     let needs_whole = match &target.kind {
         TargetKind::Handler { .. } => !view.provisional_dispatches.is_empty(),
         TargetKind::Sub { .. } | TargetKind::Method { .. } => refs_keyed(&view, &target.name).any(|r| {
-            matches!(r.kind, RefKind::MethodCall { .. })
+            r.member_site().is_some()
                 && r.unqualified_target_name(view.names()) == target.name
                 && !r.match_verdict_baked()
         }),
@@ -942,7 +944,7 @@ pub fn implementations_of(
     // PARENT of a shared descendant (DBIC's `Ordered` sits alongside `Row` in
     // `Track`'s MRO, not beneath it), which an INHERITS_INV sweep alone never
     // reaches. `dispatch_participants` is that gather, shared with
-    // `method_override_family` — while each had its own walk, this verb found
+    // `member_override_family` — while each had its own walk, this verb found
     // the sibling and `references` did not, from the same cursor.
     let mut implementers = origin.dispatch_participants(class, Some(idx));
     // The target and its own ancestry are the CONTRACT side, not an

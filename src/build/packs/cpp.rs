@@ -1,12 +1,14 @@
 //! C/C++'s pack.
 
 use crate::build::query_extract::*;
-use crate::model::file_analysis::{InferredType, NameSpellings};
+use crate::model::file_analysis::{InferredType, MemberNamespace, NameSpellings};
 
 pub fn cpp_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/cpp/skeleton.scm"),
-        names: NameSpellings::with_separator("::"),
+        // One member namespace: the nearest declaration of a name wins,
+        // whether it is a data member or a member function.
+        names: NameSpellings { member_namespace: MemberNamespace::Shared, ..NameSpellings::with_separator("::") },
         // Template spellings get ONE canonical whitespace form so a
         // specialization's identity (`formatter<int, char>`) matches
         // however the source wrapped it. Identity for every non-template
@@ -16,7 +18,7 @@ pub fn cpp_pack() -> LangPack {
         // synthetic container is outline structure, not an addressable
         // member (the "anonymous" attribute keeps it out of completion).
         default_name: |kind| match kind {
-            DefKind::UnionField => Some("(union)"),
+            DefCap::UnionField => Some("(union)"),
             _ => None,
         },
         // C++ declared types ARE the witness source. Primitives → the
@@ -82,40 +84,14 @@ pub fn cpp_pack() -> LangPack {
             };
             Some(InferredType::ClassName(class))
         },
-        // Rebinding methods: a moved-from object is put back into a known state
-        // by these std container/optional/smart-ptr resets, so a use after one
-        // is NOT a use-after-move. (An ordinary `x.use()` is not here, so the
-        // canonical bug still flags.)
-        rebind_method: |m| {
-            matches!(m, "clear" | "reset" | "assign" | "emplace" | "swap")
-        },
-        // C/C++ methods read members with an implicit `this->`.
-        implicit_this_members: true,
-        include_path_tokens: true,
-        preprocessor_macros: true,
         entrypoint_symbols: &["main"],
         brace_scoped_members: true,
         trigger_chars: &[".", ">", ":"],
-        receiver_names: &["this"],
         // `field_identifier` only ever names a struct/class member (the
         // grammar's own distinction from a plain `identifier` local), so
         // `Field` matches the plain (non-pointer) field pattern above.
         // Shared with the member-block synth lane (rule #10).
-        nested_peel: C_FIELD_DECL_PEEL,
-        // DerefKind placeholder — record_stack false, so it's never read.
-        recv_peel: PeelSpec {
-            wrappers: &[
-                ("parenthesized_expression", crate::model::file_analysis::DerefKind::Pointer),
-                ("pointer_expression", crate::model::file_analysis::DerefKind::Pointer),
-            ],
-            annot_kinds: &[],
-            leaf_to_def: &[],
-            record_stack: false,
-        },
-        op_map: &[
-            ("->", crate::model::file_analysis::MemberOp::Arrow),
-            (".", crate::model::file_analysis::MemberOp::Dot),
-        ],
+        recv_peel: &["parenthesized_expression", "pointer_expression"],
         simple_var_kinds: &["identifier"],
         member_kinds: &["field_expression"],
         skip_kinds: &["string_literal", "char_literal", "raw_string_literal", "comment"],
@@ -124,22 +100,6 @@ pub fn cpp_pack() -> LangPack {
         domain_compare_ops: &["==", "!="],
     }
 }
-
-/// The declarator peel for C/C++ struct fields and locals: pointer/reference
-/// wrappers, `field_identifier`/`identifier` leaves, recording the deref stack.
-/// The cpp pack's `nested_peel` AND the member-block synth lane
-/// (`cpp_reparse::synth_base`) both peel through this, so a pointer field's
-/// `*`s are extracted by ONE walker whether the field was written plainly or
-/// pasted from a `#define BASEOP` body (rule #10 — no second deref walker).
-pub(crate) const C_FIELD_DECL_PEEL: PeelSpec = PeelSpec {
-    wrappers: &[
-        ("pointer_declarator", crate::model::file_analysis::DerefKind::Pointer),
-        ("reference_declarator", crate::model::file_analysis::DerefKind::Reference),
-    ],
-    annot_kinds: &["type_qualifier"],
-    leaf_to_def: &[("identifier", DefKind::Local), ("field_identifier", DefKind::Field)],
-    record_stack: true,
-};
 
 /// Peel `T` out of a `std::optional<T>` declared-type text, unqualified
 /// (matching how `annot_type` keys classes by their last `::` segment). `None`
