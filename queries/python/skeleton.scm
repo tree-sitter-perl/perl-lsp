@@ -68,12 +68,18 @@
 
 ; ---- member access (`recv.attr`, and `recv.m(...)`): the receiver subtree is
 ; the invocant, typed at query time through expr_type_at_span — the same
-; MethodCall ref core resolves for Perl `$obj->m`. An arg list joined to the
-; member ref by adjacency is what makes it a call rather than a value read. ----
-(attribute
+; MethodCall ref core resolves for Perl `$obj->m`. The document states the
+; kind: an attribute that is a call's callee is a member call, any other is a
+; value read. ----
+((attribute
   object: (_) @member.recv
-  attribute: (identifier) @ref.member)
-(argument_list) @arity.args
+  attribute: (identifier) @ref.member.value) @_attr
+ (#not-has-parent? @_attr call))
+(call
+  function: (attribute
+    object: (_) @member.recv
+    attribute: (identifier) @ref.member.call)
+  arguments: (argument_list) @arity.args)
 (identifier) @expr.read.var
 
 (string) @expr.lit.string
