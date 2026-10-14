@@ -4,8 +4,8 @@
 
 #[cfg(any(test, feature = "cmake"))]
 mod cmake;
-// Compiled in every build: `cpp_reparse`, which is too, peels with its
-// declarator grammar.
+// Compiled in every build: `cpp_reparse`, which is too, peels declarators
+// through its document.
 #[cfg_attr(not(feature = "cpp"), allow(dead_code))]
 mod cpp;
 // Not a registered driver: the native builder serves Perl, and the parity
@@ -19,8 +19,6 @@ mod r;
 
 #[cfg(any(test, feature = "cmake"))]
 pub use cmake::cmake_pack;
-pub(crate) use cpp::C_FIELD_DECL_PEEL;
-#[cfg(any(test, feature = "cpp"))]
 pub use cpp::cpp_pack;
 #[cfg(test)]
 pub use perl::perl_pack;

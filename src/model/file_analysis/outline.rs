@@ -205,7 +205,7 @@ impl FileAnalysis {
             }
             // The method receiver (`self`/`cls`) is tagged with the class by
             // the sticky context but isn't outline structure.
-            if matches!(sym.kind, SymKind::Variable) && self.pack.receiver_names.contains(&sym.name) {
+            if sym.flags.contains(SymbolFlags::RECEIVER) {
                 continue;
             }
             // Local variables — navigation targets (goto-def, hover) but not

@@ -723,9 +723,9 @@ fn row_probes_plan_as_index_point_lookups() {
             .collect()
     };
     let probes: [(&str, &str, Vec<Box<dyn rusqlite::ToSql>>); 3] = [
-        ("sym_member", super::rows::SYM_MEMBER_PROBE_SQL, vec![Box::new(1i64), Box::new(2i64), Box::new(3i64)]),
-        ("sym_name", super::rows::SYM_NAME_PROBE_SQL, vec![Box::new(1i64), Box::new(2i64)]),
-        ("name", super::rows::NAME_PROBE_SQL, vec![Box::new(1i64), Box::new(2i64)]),
+        ("sym_member", super::rows::SYM_MEMBER_PROBE_SQL, vec![Box::new(path_str.clone()), Box::new("render"), Box::new("My::Base::render"), Box::new("My::Base")]),
+        ("sym_name", super::rows::SYM_NAME_PROBE_SQL, vec![Box::new(path_str.clone()), Box::new("render"), Box::new("My::Base::render")]),
+        ("name", super::rows::NAME_PROBE_SQL, vec![Box::new(path_str.clone()), Box::new("cache"), Box::new(Option::<String>::None)]),
     ];
     for (label, sql, args) in &probes {
         let args: Vec<&dyn rusqlite::ToSql> = args.iter().map(|a| a.as_ref()).collect();
@@ -774,6 +774,12 @@ fn row_probes_plan_as_index_point_lookups() {
             .filter(|op| op == "OpenEphemeral" || op == "OpenAutoindex")
             .collect();
         assert!(ephemeral.is_empty(), "{label}: builds a temp btree per call — {ephemeral:?}");
+        // One statement per probe: string ids resolve inside it, through the
+        // UNIQUE index on `s`, never as separate reads.
+        assert!(
+            lines.iter().any(|l| l.contains("strings") && l.contains("(s=?)")),
+            "{label}: spellings don't resolve inside the probe — plan: {lines:?}"
+        );
     }
     // The id resolution the probes are fed from rides the UNIQUE index on `s`.
     let lines = plan("SELECT str_id FROM strings WHERE s = ?1", &[&"render"]);

@@ -84,6 +84,9 @@ pub(crate) struct IndexCore {
     /// missed bump is silent staleness, so mutators bump even when a gen
     /// mint usually accompanies them.
     pub(crate) shape_bumps: std::sync::atomic::AtomicU64,
+    /// Process-unique identity, for sweep stores that key per index: an
+    /// `Arc` address can be reused by a later core and inherit its entries.
+    pub(crate) core_id: u64,
     /// The flush clock, and the per-file marks compared against it.
     ///
     /// The re-stamp gate's whole mechanism: a flush bumps `flush_epoch` once,
@@ -159,6 +162,10 @@ impl IndexCore {
             registration_gen: DashMap::new(),
             gen_counter: std::sync::atomic::AtomicU64::new(1),
             shape_bumps: std::sync::atomic::AtomicU64::new(0),
+            core_id: {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            },
             flush_epoch: std::sync::atomic::AtomicU64::new(0),
             provider_diff_gen: DashMap::new(),
             long_lived: std::sync::atomic::AtomicBool::new(false),

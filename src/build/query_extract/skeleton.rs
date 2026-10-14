@@ -7,7 +7,7 @@ use super::*;
 /// The skeleton's symbol row. Its kind is the `@def.<kind>` that minted it.
 #[derive(Debug, Clone)]
 pub struct SkelSymbol {
-    pub kind: DefKind,
+    pub kind: DefCap,
     pub name: String,
     pub start: Point,
     pub end: Point,
@@ -19,12 +19,12 @@ pub struct SkelSymbol {
     /// Declared return type (`@rettype`), for methods/functions — drives
     /// method-return resolution + chaining through PackageSymbol.
     pub return_type: Option<InferredType>,
-    /// Pointer/reference declarator stack, unravelled by `peel_nested` from
-    /// a `@nested.target` capture (empty otherwise). Flows to `Symbol.deref_stack`.
+    /// Pointer/reference declarator stack, unravelled by the `deref` walk
+    /// from a `@nested.target` capture (empty otherwise). Flows to `Symbol.deref_stack`.
     pub deref_stack: Vec<crate::model::file_analysis::DerefStep>,
     /// Structural markers carried onto `Symbol.attributes`: "anonymous" when
     /// the name came from the pack's `default_name` (not addressable by name —
-    /// completion skips it). The kind's own marker (`DefKind::marker`) is
+    /// completion skips it). The kind's own marker (`DefCap::marker`) is
     /// stamped in `into_file_analysis`.
     pub attributes: Vec<String>,
     /// Declared parameter arity for a callable, counted structurally from the
@@ -37,11 +37,15 @@ pub struct SkelSymbol {
     /// (a header), so `reanchor_truncated_containers` must not re-attribute it to
     /// the enclosing namespace. Not serialized — a driver-internal marker.
     pub qualifier_owned: bool,
+    /// Declaration facts a capture minted rather than an attribute token
+    /// (a receiver parameter). Or-ed onto the flags the kind and the
+    /// attributes give.
+    pub flags: SymbolFlags,
 }
 
 #[derive(Debug, Clone)]
 pub struct SkelRef {
-    pub kind: RefKind,
+    pub kind: RefCap,
     pub name: String,
     pub start: Point,
     pub end: Point,
@@ -52,13 +56,13 @@ pub struct SkelRef {
     /// `InvocantName`). `None` for plain calls / var refs.
     pub invocant: Option<(crate::model::file_analysis::Span, String)>,
     /// The written member operator (`.`/`->`) + its span, mapped from the
-    /// `@member.op` token's kind via the pack `op_map`, `Some` only when the
+    /// `@member.op.<which>` capture on the operator token, `Some` only when the
     /// IMMEDIATE receiver is a simple variable. Rides onto the MethodCall ref
     /// so operator-correctness is a ref query, not a separate walk.
     pub member_op: Option<(crate::model::file_analysis::MemberOp, crate::model::file_analysis::Span)>,
-    /// Written argument count at a call ref (`call`/`qcall`/`member`), counted
-    /// structurally from the argument list. Flows to `Ref.arg_count`; `None`
-    /// for non-call refs.
+    /// Written argument count at a call ref (`call`/`qcall`/`member.call`),
+    /// counted from the argument list the same match captured. Flows to
+    /// `Ref.arg_count`; `None` for non-call refs.
     pub arg_count: Option<usize>,
 }
 
@@ -104,10 +108,6 @@ pub struct SkeletonAnalysis {
     /// is a macro parameter with no type, hence the class is frozen from the
     /// field decl rather than inferred from the (untypeable) invocant.
     pub macro_body_member_reads: Vec<(String, crate::model::file_analysis::Span)>,
-    /// The pack's receiver param names (Python `self`/`cls`). A Variable so
-    /// named is the method receiver, not a class member — its (wrongly
-    /// sticky-tagged) class package is cleared in `into_file_analysis`.
-    pub receiver_names: Vec<String>,
     /// The language's name spellings (`LangPack::names`), baked onto
     /// `PackFacts::names`.
     pub names: crate::model::file_analysis::NameSpellings,
@@ -155,9 +155,8 @@ pub struct SkeletonAnalysis {
     /// `return EXPR;` sites (`@expr.return.value`): (enclosing scope, the
     /// returned expression's span). Purely structural — this tier doesn't
     /// know what a `return` MEANS for any given language; the interpretation
-    /// (join to an owning function, decide whether it needs implicit-return
-    /// fuel) is cpp-specific and lives in `language_driver.rs`'s post-
-    /// extraction pipeline (`emit_return_fuel`).
+    /// (join to the owning callable, chain it when the callable declares no
+    /// return) is `into_file_analysis`'s.
     pub return_sites: Vec<(crate::model::file_analysis::ScopeId, Span)>,
     /// Callable parameter arities keyed by parameter_list span (`@arity.sig`).
     /// Associated to def symbols by span containment in `into_file_analysis`.
@@ -319,7 +318,7 @@ impl SkeletonAnalysis {
         }
         let mut containers: Vec<Container> = Vec::new();
         for s in &self.symbols {
-            if !matches!(s.kind, DefKind::Class | DefKind::Union | DefKind::Package) {
+            if !matches!(s.kind, DefCap::Class | DefCap::Union | DefCap::Package) {
                 continue;
             }
             let (ns, ne) = (pt(s.name_start), pt(s.name_end));
@@ -404,13 +403,13 @@ impl SkeletonAnalysis {
             let union_keys: std::collections::HashSet<ClassKey> = self
                 .symbols
                 .iter()
-                .filter(|s| s.kind == DefKind::Union)
+                .filter(|s| s.kind == DefCap::Union)
                 .map(key_of)
                 .collect();
             let mut seen = std::collections::HashSet::new();
             self.symbols.retain(|s| match s.kind {
-                DefKind::Class => !union_keys.contains(&key_of(s)) && seen.insert(key_of(s)),
-                DefKind::Union => seen.insert(key_of(s)),
+                DefCap::Class => !union_keys.contains(&key_of(s)) && seen.insert(key_of(s)),
+                DefCap::Union => seen.insert(key_of(s)),
                 _ => true,
             });
         }
@@ -422,8 +421,8 @@ impl SkeletonAnalysis {
         // identical span). Per kind, so a sub and a method never cross-dedup.
         {
             use std::collections::HashMap;
-            let dedup = |k: DefKind| matches!(k, DefKind::Sub | DefKind::Method);
-            type Key = (DefKind, usize, usize, usize, usize);
+            let dedup = |k: DefCap| matches!(k, DefCap::Sub | DefCap::Method);
+            type Key = (DefCap, usize, usize, usize, usize);
             let key_of = |s: &SkelSymbol| -> Key {
                 (s.kind, s.name_start.row, s.name_start.column, s.name_end.row, s.name_end.column)
             };
@@ -460,7 +459,7 @@ impl SkeletonAnalysis {
             let param_sigs = std::mem::take(&mut self.param_sigs);
             let after = |a: Point, b: Point| (a.row, a.column) >= (b.row, b.column);
             for s in self.symbols.iter_mut() {
-                if !matches!(s.kind, DefKind::Sub | DefKind::Method) {
+                if !matches!(s.kind, DefCap::Sub | DefCap::Method) {
                     continue;
                 }
                 s.arity = param_sigs
@@ -508,7 +507,7 @@ impl SkeletonAnalysis {
                     a.extend(s.kind.marker().map(str::to_string));
                     a
                 },
-                flags: symbol_flags_of(s.kind, &s.attributes),
+                flags: symbol_flags_of(s.kind, &s.attributes) | s.flags,
                 declared_with: None,
                 deref_stack: s.deref_stack.clone(),
                 arity: s.arity,
@@ -563,7 +562,7 @@ impl SkeletonAnalysis {
                     && (i.end.row, i.end.column) <= (o.end.row, o.end.column)
             };
             for idx in 0..symbols.len() {
-                if self.symbols[idx].kind != DefKind::Enumerator {
+                if self.symbols[idx].kind != DefCap::Enumerator {
                     continue;
                 }
                 let esp = symbols[idx].span;
@@ -887,11 +886,11 @@ impl SkeletonAnalysis {
             .iter()
             .filter_map(|r| {
                 use crate::model::file_analysis::{RefBinding, RefKind};
-                use super::vocab::RefKind as SkelRefKind;
+                use super::vocab::RefCap;
                 let mut span = Span { start: r.start, end: r.end };
                 let mut binding = None;
                 let kind = match r.kind {
-                    SkelRefKind::Call => RefKind::FunctionCall,
+                    RefCap::Call => RefKind::FunctionCall,
                     // Qualified call (`fmt::format_to(...)`): Perl parity —
                     // the full path rides `target_name`, the qualifier the
                     // `Function` binding, and the span narrows to the bare
@@ -899,7 +898,7 @@ impl SkeletonAnalysis {
                     // suppresses the `@expr.read.var` duplicate at the same
                     // start). The tail segment is an identifier, so it never
                     // spans rows — the end-anchored column math is safe.
-                    SkelRefKind::QCall => {
+                    RefCap::QCall => {
                         let (pkg, bare) = crate::model::file_analysis::split_qualified(&r.name, &names);
                         let pkg = pkg?;
                         span.start = tree_sitter::Point {
@@ -909,11 +908,22 @@ impl SkeletonAnalysis {
                         binding = Some(RefBinding::Function { package: pkg.to_string() });
                         RefKind::FunctionCall
                     }
-                    // `recv.field` / `recv->field`: the SAME MethodCall ref
-                    // core resolves for Perl `$obj->m`. The invocant types
-                    // query-time via `expr_type_at_span(invocant_span)`;
-                    // `find_definition`/`refs_to`/hover all flow from it.
-                    SkelRefKind::Member => {
+                    // `recv.field` / `recv->field`: a value read. The
+                    // invocant types query-time via
+                    // `expr_type_at_span(invocant_span)`.
+                    RefCap::MemberValue => {
+                        let (inv_span, inv_text) = r.invocant.clone()?;
+                        RefKind::FieldAccess {
+                            invocant: crate::model::conventions::Invocant::assume_canonical(inv_text),
+                            invocant_span: Some(inv_span),
+                            member_name_span: Span { start: r.start, end: r.end },
+                            member_op: r.member_op,
+                        }
+                    }
+                    // `recv.f(…)`: the SAME MethodCall ref core resolves for
+                    // Perl `$obj->m`; `find_definition`/`refs_to`/hover all
+                    // flow from it.
+                    RefCap::MemberCall => {
                         let (inv_span, inv_text) = r.invocant.clone()?;
                         RefKind::MethodCall {
                             invocant: crate::model::conventions::Invocant::assume_canonical(inv_text),
@@ -926,7 +936,7 @@ impl SkeletonAnalysis {
                     // A type-position name (`Widget w;`, `struct op* o`, a
                     // base-class clause): the same PackageRef a Perl package
                     // use carries, so type gd/gr ride the Package machinery.
-                    SkelRefKind::Type => {
+                    RefCap::Type => {
                         if decl_name_spans.contains(&(
                             r.start.row,
                             r.start.column,
@@ -939,10 +949,10 @@ impl SkeletonAnalysis {
                     }
                     // A `goto` label resolves through `label_refs`; the
                     // remaining kinds stay skeleton-only rows.
-                    SkelRefKind::Label
-                    | SkelRefKind::Method
-                    | SkelRefKind::Var
-                    | SkelRefKind::Key => return None,
+                    RefCap::Label
+                    | RefCap::Method
+                    | RefCap::Var
+                    | RefCap::Key => return None,
                 };
                 Some(crate::model::file_analysis::Ref {
                     kind,
@@ -1008,8 +1018,8 @@ impl SkeletonAnalysis {
         // minted — an ambiguous field (same name on two structs) or a
         // cross-file-only field stays silent (documented residual), keeping the
         // over-approximation honest. The frozen `MethodTarget` is exactly what
-        // `refs_to`'s `(Method, MethodCall)` arm reads, so references on the
-        // field include the in-body use without needing the invocant to type.
+        // `refs_to`'s member arm reads, so references on the field include the
+        // in-body use without needing the invocant to type.
         if !self.macro_body_member_reads.is_empty() {
             // field name → every (declaring class, decl SymbolId). The receiver
             // in a macro body is an untypeable macro parameter, so the class is
@@ -1044,13 +1054,13 @@ impl SkeletonAnalysis {
                 }
                 let Some(owners) = field_owners.get(field.as_str()) else { continue };
                 for (class, sym_id) in owners {
+                    // The drill reads a stored member: a value access.
                     refs.push(crate::model::file_analysis::Ref {
-                        kind: crate::model::file_analysis::RefKind::MethodCall {
+                        kind: crate::model::file_analysis::RefKind::FieldAccess {
                             invocant: crate::model::conventions::Invocant::assume_canonical(String::new()),
                             invocant_span: None,
-                            method_name_span: *span,
+                            member_name_span: *span,
                             member_op: None,
-                            named_by_string: false,
                         },
                         span: *span,
                         scope: crate::model::file_analysis::ScopeId(0),
@@ -1072,6 +1082,138 @@ impl SkeletonAnalysis {
                 }
             }
         }
+        // A callable's body scope names the callable (`Scope::owner`). The
+        // document mints `@scope.sub` and `@def.sub` / `@def.method` on the
+        // same `function_definition` node, so the spans are equal; a shape
+        // that declares on another node keeps no owner.
+        {
+            let by_span: std::collections::HashMap<(Point, Point), SymbolId> = symbols
+                .iter()
+                .rev()
+                .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method))
+                .map(|s| ((s.span.start, s.span.end), s.id))
+                .collect();
+            for sc in &mut self.scopes {
+                if matches!(sc.kind, crate::model::file_analysis::ScopeKind::Sub { .. }) {
+                    sc.owner = by_span.get(&(sc.span.start, sc.span.end)).copied();
+                }
+            }
+        }
+        // Implicit receiver: where the document says a body elides it, a bare
+        // name is a member of the class the body belongs to. That class is
+        // the package of the eliding scope's owner, in-class and out-of-line
+        // alike: a `void Buf<T>::reserve(…)` body is lexically at file scope,
+        // and only the method symbol carries `Buf`.
+        //
+        // This and the return arms below are pushed before
+        // `finalize_post_walk` seals the enrichment baseline; above it, the
+        // first enrichment truncates them away.
+        //
+        // TODO(implicit-receiver-invoke): membership is read from THIS file's
+        // symbols only, so a member declared in a header (class in `buf.h`,
+        // body in `buf.cpp`) or inherited from a base stays free, and resolves
+        // to a same-named free function if an include has one. The fix is the
+        // implicit receiver as an Invoke hop resolved at query time: the
+        // class's members across files and up `GraphView`, then the free
+        // lookup.
+        {
+            use crate::model::file_analysis::{RefKind, ScopeId};
+            use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
+            let scopes = &self.scopes;
+            let implicit_class = |scope: ScopeId| -> Option<&str> {
+                std::iter::successors(Some(scope), |sc| scope_parent.get(sc).copied().flatten())
+                    .find(|sc| scopes[sc.0 as usize].implicit_receiver)
+                    .and_then(|sc| scopes[sc.0 as usize].owner)
+                    .and_then(|sid| symbols.get(sid.0 as usize))
+                    .and_then(|s| s.package.as_deref())
+            };
+            let mut fields: std::collections::HashMap<(&str, &str), (ScopeId, SymbolId)> = Default::default();
+            let mut methods: std::collections::HashSet<(&str, &str)> = Default::default();
+            for s in &symbols {
+                let Some(pkg) = s.package.as_deref() else { continue };
+                match s.kind {
+                    SymKind::Field => {
+                        fields.entry((pkg, s.name.as_str())).or_insert((s.scope, s.id));
+                    }
+                    SymKind::Method => {
+                        methods.insert((pkg, s.name.as_str()));
+                    }
+                    _ => {}
+                }
+            }
+            let mut field_reads: Vec<(usize, SymbolId, ScopeId)> = Vec::new();
+            let mut sibling_calls: Vec<(usize, String)> = Vec::new();
+            for (i, r) in refs.iter().enumerate() {
+                if matches!(r.kind, RefKind::Variable) && r.resolved_symbol().is_none() {
+                    let Some(class) = implicit_class(r.scope) else { continue };
+                    if let Some(&(fscope, fsym)) = fields.get(&(class, r.target_name.as_str())) {
+                        field_reads.push((i, fsym, fscope));
+                    }
+                } else if matches!(r.kind, RefKind::FunctionCall) && r.binding.is_none() {
+                    let Some(class) = implicit_class(r.scope) else { continue };
+                    if methods.contains(&(class, r.target_name.as_str())) {
+                        sibling_calls.push((i, class.to_string()));
+                    }
+                }
+            }
+            for (i, fsym, fscope) in field_reads {
+                // The binding answers goto-def / references / rename; the edge
+                // onto the field's own `Variable` types the read. One without
+                // the other is the projection disagreement the consistency
+                // net flags as I4.
+                refs[i].bind_symbol(fsym);
+                bag.push(Witness {
+                    attachment: WA::Expr(refs[i].span),
+                    source: WitnessSource::Builder("implicit_field_read".into()),
+                    payload: WP::Edge(WA::Variable { name: refs[i].target_name.clone(), scope: fscope }),
+                    span: refs[i].span,
+                });
+            }
+            // A bare sibling call pinned to the class resolves through the same
+            // package-scoped callable lookup a qualified `Class::foo()` uses. A
+            // name no member answers stays free.
+            for (i, class) in sibling_calls {
+                refs[i].bind_function_package(class);
+            }
+        }
+        // Implicit return: a callable whose syntax declares no return takes
+        // its type from what it returns. `return_sites` is the extractor's
+        // language-blind record (enclosing scope, returned expression); each
+        // site becomes an arm of the nearest owning callable.
+        {
+            use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
+            // Decided once per callable, from the bag as the declarations left
+            // it: this loop writes the very `Symbol` witnesses a live check
+            // would read, so the first arm would block every later one.
+            let mut undeclared: std::collections::HashMap<SymbolId, bool> = Default::default();
+            for (ret_scope, ret_span) in &self.return_sites {
+                let owner = std::iter::successors(Some(*ret_scope), |sc| scope_parent.get(sc).copied().flatten())
+                    .find_map(|sc| self.scopes.get(sc.0 as usize).and_then(|s| s.owner));
+                let Some(sid) = owner else { continue };
+                let first = !undeclared.contains_key(&sid);
+                let open = *undeclared
+                    .entry(sid)
+                    .or_insert_with(|| bag.for_attachment(&WA::Symbol(sid)).is_empty());
+                if !open {
+                    continue;
+                }
+                bag.push(Witness {
+                    attachment: WA::SymbolReturnArm(sid),
+                    source: WitnessSource::Builder("return_arm".into()),
+                    payload: WP::Edge(WA::Expr(*ret_span)),
+                    span: *ret_span,
+                });
+                // One chain edge per callable; its arms accumulate under it.
+                if first {
+                    bag.push(Witness {
+                        attachment: WA::Symbol(sid),
+                        source: WitnessSource::Builder("return_arm_chain".into()),
+                        payload: WP::Edge(WA::SymbolReturnArm(sid)),
+                        span: *ret_span,
+                    });
+                }
+            }
+        }
         let mut packages: std::collections::HashMap<
             String,
             crate::model::file_analysis::PackageFacts,
@@ -1080,10 +1222,6 @@ impl SkeletonAnalysis {
             packages.entry(child.clone()).or_default().parents.push(parent.clone());
         }
         let pack = crate::model::file_analysis::PackFacts {
-            // Pack-declared receiver names ride the FA so core's member /
-            // outline filters can exclude them generically (lang semantics in
-            // the pack, generic logic in core).
-            receiver_names: std::mem::take(&mut self.receiver_names),
             names: std::mem::take(&mut self.names),
             // Specialization family edges (spec → primary). NOT an inheritance
             // edge: a spec inherits nothing from its primary (it replaces
@@ -1109,7 +1247,9 @@ impl SkeletonAnalysis {
             param_regions: std::mem::take(&mut self.param_regions),
             ..Default::default()
         };
+        let fold_ranges = fold_ranges_of(&self.scopes);
         let mut fa = FileAnalysis::new(FileAnalysisParts {
+            fold_ranges,
             scopes: self.scopes,
             symbols,
             refs,
@@ -1131,7 +1271,7 @@ impl SkeletonAnalysis {
 /// the pack's attribute vocabulary — the ONE place a pack's attribute
 /// spellings become model facts (rule #12: the model asks the flag, never
 /// the string).
-fn symbol_flags_of(kind: DefKind, attributes: &[String]) -> SymbolFlags {
+fn symbol_flags_of(kind: DefCap, attributes: &[String]) -> SymbolFlags {
     let mut flags = SymbolFlags::empty();
     if let Some(f) = kind.marker().and_then(|m| SymbolFlags::try_from(m).ok()) {
         flags.insert(f);
@@ -1145,4 +1285,24 @@ fn symbol_flags_of(kind: DefKind, attributes: &[String]) -> SymbolFlags {
         }
     }
     flags
+}
+
+/// Folding follows the scopes the document minted, so an editor folds the
+/// same structure navigation walks: every multi-line scope but the file is
+/// a region, one per line pair (a definition and its body block often span
+/// the same lines).
+fn fold_ranges_of(scopes: &[crate::model::file_analysis::Scope]) -> Vec<crate::model::file_analysis::FoldRange> {
+    use crate::model::file_analysis::{FoldKind, FoldRange, ScopeKind};
+    let mut lines: Vec<(usize, usize)> = scopes
+        .iter()
+        .filter(|sc| !matches!(sc.kind, ScopeKind::File))
+        .map(|sc| (sc.span.start.row, sc.span.end.row))
+        .filter(|(start, end)| end > start)
+        .collect();
+    lines.sort_unstable();
+    lines.dedup();
+    lines
+        .into_iter()
+        .map(|(start_line, end_line)| FoldRange { start_line, end_line, kind: FoldKind::Region })
+        .collect()
 }

@@ -305,20 +305,6 @@ impl FileAnalysis {
         found
     }
 
-    /// Inheritance chain for a method rename: `[class, ..., defining_class]`.
-    ///
-    /// Cross-class method rename has to touch two distinct things:
-    ///   * the `sub M` definition in whichever ancestor actually
-    ///     defines the method, and
-    ///   * every `$obj->M(...)` call site whose static `invocant_class`
-    ///     is the rename target *or* an intermediate ancestor that
-    ///     inherited (didn't override) the method.
-    ///
-    /// `rename_method_in_class` is per-class — so callers iterate this
-    /// chain. Stops at the first ancestor that defines the method
-    /// (inclusive); intermediate ancestors that *override* are
-    /// skipped because they're a different method from the
-    /// inheritance perspective.
     /// The full **override family** of `(class, method)` — the contract root
     /// (topmost ancestor defining the method) plus every class that inherits or
     /// overrides it. The membership set for `OverrideScope::Hierarchy` rename:
@@ -328,15 +314,18 @@ impl FileAnalysis {
     /// edges only (`@ISA`/`use parent`/Moo via `GraphView`), NEVER name matches
     /// — two unrelated classes both defining `sub render {}` with no edge
     /// between them are not a family.
-    pub fn method_override_family(
+    /// `want` is the family the asker names; the member walk admits per
+    /// the language's member namespace.
+    pub fn member_override_family(
         &self,
         class_name: &str,
         method_name: &str,
+        want: MemberKind,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<String> {
         let defines = |cls: &str| {
             matches!(
-                self.resolve_method_in_ancestors(cls, method_name, module_index),
+                self.resolve_member_in_ancestors(cls, method_name, module_index, want),
                 Some(MethodResolution::Local { class: ref c, .. })
                     | Some(MethodResolution::CrossFile { class: ref c, .. })
                     if c == cls
@@ -378,7 +367,7 @@ impl FileAnalysis {
     /// empty answer rather than a wrong one.
     ///
     /// One gather, two readers: `implementations_of` (which then subtracts
-    /// its own contract line) and `method_override_family`. They disagreed
+    /// its own contract line) and `member_override_family`. They disagreed
     /// while each had its own walk — `--implementations` found the sibling
     /// and `references` did not, from the same cursor.
     pub fn dispatch_participants(
@@ -415,7 +404,7 @@ impl FileAnalysis {
     /// A root class plus every transitive descendant that inherits from it,
     /// over PROVEN inheritance edges only (`GraphView`'s `INHERITS_INV`
     /// walk, which excludes the origin — re-added as the family head).
-    /// The shared descendant-walk tail of `method_override_family` and
+    /// The shared descendant-walk tail of `member_override_family` and
     /// `owned_accessor_family`; the two differ only in how they choose the
     /// root (contract-root search UP vs the owning class itself).
     fn descendant_family(
@@ -443,7 +432,7 @@ impl FileAnalysis {
     /// The rename family for a class-OWNED synthesized accessor (a Moo `has`
     /// reader, a DBIC column/relationship accessor): the owning class plus
     /// every transitive descendant that inherits it. Unlike
-    /// `method_override_family`, it never searches UPWARD for a contract
+    /// `member_override_family`, it never searches UPWARD for a contract
     /// root — a synthesized accessor is owned by its declaring class, and a
     /// same-named method in a framework ancestor (`DBIx::Class::PK::id` vs a
     /// synthesized `id` column) is a name collision, not the same symbol.
@@ -460,13 +449,28 @@ impl FileAnalysis {
         self.descendant_family(class_name.to_string(), module_index)
     }
 
-    pub fn method_rename_chain(
+    /// Inheritance chain for a method rename: `[class, ..., defining_class]`.
+    ///
+    /// Cross-class method rename has to touch two distinct things:
+    ///   * the `sub M` definition in whichever ancestor actually
+    ///     defines the method, and
+    ///   * every `$obj->M(...)` call site whose static `invocant_class`
+    ///     is the rename target *or* an intermediate ancestor that
+    ///     inherited (didn't override) the method.
+    ///
+    /// `rename_method_in_class` is per-class — so callers iterate this
+    /// chain. Stops at the first ancestor that defines the method
+    /// (inclusive); intermediate ancestors that *override* are
+    /// skipped because they're a different method from the
+    /// inheritance perspective.
+    pub fn member_rename_chain(
         &self,
         class_name: &str,
         method_name: &str,
+        want: MemberKind,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<String> {
-        let defining = match self.resolve_method_in_ancestors(class_name, method_name, module_index) {
+        let defining = match self.resolve_member_in_ancestors(class_name, method_name, module_index, want) {
             Some(MethodResolution::Local { class, .. })
             | Some(MethodResolution::CrossFile { class, .. }) => class,
             None => return vec![class_name.to_string()],
@@ -489,15 +493,17 @@ impl FileAnalysis {
     /// `SUPER::` share one definition of "this class has the method". (a) local
     /// symbols packaged under `cls`, (b) local plugin-namespace entities
     /// bridged to `cls`, (c) cross-file: `cls`'s own module, cross-package
-    /// typeglob installs, and plugin bridges from other files.
+    /// typeglob installs, and plugin bridges from other files. Only a
+    /// declaration the language's member namespace lets `want` reach
+    /// answers (`MemberKind::admits_decl`).
     fn method_resolution_on_class(
         &self,
         cls: &str,
         method_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
-        agrees: &dyn Fn(SymKind) -> bool,
+        want: MemberKind,
     ) -> Option<MethodResolution> {
-        self.member_resolution_on_class_pass(cls, method_name, module_index, agrees)
+        self.member_resolution_on_class_pass(cls, method_name, module_index, want)
     }
 
     fn member_resolution_on_class_pass(
@@ -505,12 +511,14 @@ impl FileAnalysis {
         cls: &str,
         method_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
-        agrees: &dyn Fn(SymKind) -> bool,
+        want: MemberKind,
     ) -> Option<MethodResolution> {
+        let namespace = self.names().member_namespace;
+        // A callable-only arm (plugin entities, typeglob installs, bridges)
+        // answers only an ask that reaches callables.
+        let reaches_callables = want.admits_decl(SymKind::Sub, namespace);
         // (a) Local symbols in this file packaged under `cls`. Methods AND
-        // data members: cpp `obj->field` mints the same `MethodCall` ref as a
-        // method call, and a `Variable`/`Field` member is its def. (Perl
-        // members are always Sub/Method, so this is a no-op there.) A
+        // data members, as the namespace admits them. A
         // Variable/Field must be the class's OWN content — a lexical local
         // inside an inline method carries the class as sticky `package` too
         // (`T* data = this->data();` in a member body is NOT member `data`).
@@ -525,12 +533,12 @@ impl FileAnalysis {
             };
             // A re-export (`using Base::m;`) is API surface, not a def —
             // fall through so the walk reaches the origin ancestor.
-            if member_kind && agrees(sym.kind) && !sym.is_reexport() && self.symbol_in_class(sid, cls) {
+            if member_kind && want.admits_decl(sym.kind, namespace) && !sym.is_reexport() && self.symbol_in_class(sid, cls) {
                 return Some(MethodResolution::Local { class: cls.to_string(), sym_id: sid });
             }
         }
         // (b) Local plugin-namespace entities bridged to `cls`.
-        for ns in &self.plugin.namespaces {
+        for ns in self.plugin.namespaces.iter().filter(|_| reaches_callables) {
             if !ns.bridges.iter().any(|b| matches!(b, Bridge::Class(c) if c == cls)) { continue; }
             for sym_id in &ns.entities {
                 let Some(sym) = self.symbols.get(sym_id.0 as usize) else { continue };
@@ -604,7 +612,7 @@ impl FileAnalysis {
                     s.name == method_name
                         && s.package.as_deref() == Some(cand_cls.as_str())
                         && !s.is_reexport()
-                        && agrees(s.kind)
+                        && want.admits_decl(s.kind, namespace)
                         && (matches!(s.kind, SymKind::Sub | SymKind::Method)
                             || (matches!(
                                 s.kind,
@@ -652,6 +660,9 @@ impl FileAnalysis {
             // Cross-package typeglob install: the method is attributed to `cls`
             // but lives in a differently-named module file (`*{'DateTime::'.
             // $sub} = …` inside `package DateTime::PP`). Record the home module.
+            if !reaches_callables {
+                return None;
+            }
             if let Some(home) = idx.module_declaring_method_in_package(method_name, cls) {
                 return Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: Some(home), widened: false });
             }
@@ -678,47 +689,43 @@ impl FileAnalysis {
     }
 
     /// Walk the inheritance chain to find a CALLED member (DFS, Perl's
-    /// default MRO). Any member kind answers: a language whose member read
-    /// is a call (Perl's `$o->m`, a `has` accessor) has no value-read
-    /// syntax, so the call is the only spelling a data member ever gets.
+    /// default MRO).
     pub fn resolve_method_in_ancestors(
         &self,
         class_name: &str,
         method_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<MethodResolution> {
-        self.resolve_member_in_ancestors(class_name, method_name, module_index, &|_| true)
+        self.resolve_member_in_ancestors(class_name, method_name, module_index, MemberKind::Callable)
     }
 
     /// Walk the inheritance chain to find a VALUE member — what a
-    /// `FieldAccess` ref names. Callables never answer: the syntax said the
-    /// token reads a stored value, so a name only a method carries is an
-    /// undeclared property here, not that method.
+    /// `FieldAccess` ref names.
     pub fn resolve_field_in_ancestors(
         &self,
         class_name: &str,
         field_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<MethodResolution> {
-        self.resolve_member_in_ancestors(class_name, field_name, module_index, &|k| {
-            !matches!(k, SymKind::Sub | SymKind::Method)
-        })
+        self.resolve_member_in_ancestors(class_name, field_name, module_index, MemberKind::Value)
     }
 
-    /// The MRO walk both member walks share; `agrees` is the kind family
-    /// the asking ref admits.
-    fn resolve_member_in_ancestors(
+    /// The MRO walk both member walks share. Which declarations answer
+    /// `want` is the language's `MemberNamespace`: per family, a call
+    /// reaches only callables and a value read only values; in one shared
+    /// namespace the nearest declaration of the name answers either.
+    pub fn resolve_member_in_ancestors(
         &self,
         class_name: &str,
         method_name: &str,
         module_index: Option<&dyn CrossFileLookup>,
-        agrees: &dyn Fn(SymKind) -> bool,
+        want: MemberKind,
     ) -> Option<MethodResolution> {
         let _t = crate::util::ghost_stats::ScopedNs::start("mroc.total");
         let mut result: Option<MethodResolution> = None;
         let mut iface_fallback: Option<MethodResolution> = None;
         self.for_each_ancestor_class(class_name, module_index, |cls| {
-            match self.method_resolution_on_class(cls, method_name, module_index, agrees) {
+            match self.method_resolution_on_class(cls, method_name, module_index, want) {
                 // An INTERFACE hit is held as fallback, never the answer
                 // while a concrete definer exists: php's MRO interleaves
                 // `implements` (header) ahead of `use Trait` (body), so the
@@ -806,7 +813,7 @@ impl FileAnalysis {
                 let crate::model::graph::Node::Class(cls) = n else {
                     return crate::model::graph::WalkControl::Continue;
                 };
-                match self.method_resolution_on_class(cls, method_name, module_index, &|_| true) {
+                match self.method_resolution_on_class(cls, method_name, module_index, MemberKind::Callable) {
                     Some(r) => {
                         if self.hit_class_is_interface(cls, &r, module_index) {
                             iface_fallback.get_or_insert(r);
