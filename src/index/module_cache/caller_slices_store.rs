@@ -45,7 +45,7 @@ pub fn decode_slice_body<T: serde::de::DeserializeOwned>(blob: &[u8]) -> Option<
 /// The row for `(path, key)` cut from the text stamped `stamp`.
 pub fn load_caller_slice(conn: &Connection, path: &str, key: &str, stamp: u64) -> Option<Vec<u8>> {
     conn.query_row(
-        "SELECT body FROM caller_slices WHERE path = ?1 AND key = ?2 AND stamp = ?3 AND extract_version = ?4",
+        "SELECT body FROM caller_slice WHERE path = ?1 AND key = ?2 AND stamp = ?3 AND extract_version = ?4",
         params![path, key, stamp as i64, EXTRACT_VERSION],
         |row| row.get::<_, Vec<u8>>(0),
     )
@@ -72,9 +72,9 @@ pub fn save_caller_slices(conn: &Connection, rows: &[CallerSliceRow]) -> rusqlit
 /// Write `rows` inside the caller's transaction. A frame row also drops the
 /// file's rows at any other stamp: they can never be read again.
 pub fn put_caller_slices(conn: &Connection, rows: &[CallerSliceRow]) -> rusqlite::Result<()> {
-    let mut stale = conn.prepare_cached("DELETE FROM caller_slices WHERE path = ?1 AND stamp != ?2")?;
+    let mut stale = conn.prepare_cached("DELETE FROM caller_slice WHERE path = ?1 AND stamp != ?2")?;
     let mut put = conn.prepare_cached(
-        "INSERT OR REPLACE INTO caller_slices (path, key, stamp, extract_version, body) VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT OR REPLACE INTO caller_slice (path, key, stamp, extract_version, body) VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
     for (path, key, stamp, body) in rows {
         if key == FRAME_KEY {

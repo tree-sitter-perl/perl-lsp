@@ -204,35 +204,45 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             surface BLOB NOT NULL
         );
         DROP TABLE IF EXISTS answers;
-        CREATE TABLE IF NOT EXISTS answer_nodes (
-            key             BLOB PRIMARY KEY,
+        DROP TABLE IF EXISTS answer_nodes;
+        DROP TABLE IF EXISTS answer_reads;
+        DROP TABLE IF EXISTS answer_kids;
+        DROP TABLE IF EXISTS caller_slices;
+        -- Reads and kids name their answer by `id`: repeating the encoded
+        -- key per row, plus an index over it, was most of the graph's bytes.
+        CREATE TABLE IF NOT EXISTS answer_node (
+            id              INTEGER PRIMARY KEY,
+            key             BLOB NOT NULL UNIQUE,
             extract_version INTEGER NOT NULL,
             value           BLOB NOT NULL,
             value_hash      INTEGER NOT NULL,
             world           INTEGER NOT NULL
-        ) WITHOUT ROWID;
-        CREATE TABLE IF NOT EXISTS answer_reads (
-            key     BLOB NOT NULL,
+        );
+        CREATE TABLE IF NOT EXISTS answer_read (
+            node    INTEGER NOT NULL,
             kind    INTEGER NOT NULL,
             subject BLOB NOT NULL,
             stamp   INTEGER NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_answer_reads_key ON answer_reads(key);
-        CREATE INDEX IF NOT EXISTS idx_answer_reads_subject ON answer_reads(subject);
-        CREATE TABLE IF NOT EXISTS answer_kids (
-            key        BLOB NOT NULL,
+        CREATE INDEX IF NOT EXISTS idx_answer_read_node ON answer_read(node);
+        CREATE INDEX IF NOT EXISTS idx_answer_read_subject ON answer_read(subject);
+        CREATE TABLE IF NOT EXISTS answer_kid (
+            node       INTEGER NOT NULL,
             child      BLOB NOT NULL,
             child_hash INTEGER NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_answer_kids_key ON answer_kids(key);
-        CREATE TABLE IF NOT EXISTS caller_slices (
+        CREATE INDEX IF NOT EXISTS idx_answer_kid_node ON answer_kid(node);
+        -- A rowid table, not WITHOUT ROWID: bodies run to kilobytes, and a
+        -- clustered index packs rows that size badly (44% of its pages
+        -- were empty on FHEM).
+        CREATE TABLE IF NOT EXISTS caller_slice (
             path            TEXT NOT NULL,
             key             TEXT NOT NULL,
             stamp           INTEGER NOT NULL,
             extract_version INTEGER NOT NULL,
             body            BLOB NOT NULL,
-            PRIMARY KEY (path, key)
-        ) WITHOUT ROWID;
+            UNIQUE (path, key)
+        );
         CREATE INDEX IF NOT EXISTS idx_modules_path ON modules(path);
         CREATE INDEX IF NOT EXISTS idx_modules_name ON modules(module_name);",
     )?;
@@ -433,8 +443,8 @@ pub fn clear_derived_rows(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "DELETE FROM refs; DELETE FROM syms; DELETE FROM files; DELETE FROM strings; \
          DELETE FROM stubs; DELETE FROM surfaces; \
-         DELETE FROM answer_nodes; DELETE FROM answer_reads; DELETE FROM answer_kids; \
-         DELETE FROM caller_slices;",
+         DELETE FROM answer_node; DELETE FROM answer_read; DELETE FROM answer_kid; \
+         DELETE FROM caller_slice;",
     )?;
     bump_strings_generation(conn)
 }
