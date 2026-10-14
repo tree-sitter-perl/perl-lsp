@@ -2219,6 +2219,43 @@ mod pack_symmetry {
     }
 
     #[test]
+    fn goto_def_above_a_define_lands_on_the_plain_name() {
+        // re2's shape: a call above `#define Simplify DontCallSimplify` is the
+        // function, not the macro, so gd's macro lane stands aside for it;
+        // below the `#define` the same spelling is the macro.
+        let src = "int Simplify(int x) { return x; }\nint f() { return Simplify(1); }\n#define Simplify DontCallSimplify\nint g() { return Simplify(2); }\n";
+        let fa = cpp(src);
+        let idx = crate::index::module_index::ModuleIndex::new_for_test();
+        let store = FileStore::new();
+        let gd = |row: usize| {
+            resolve(
+                &store,
+                &fa,
+                FileKey::Path(PathBuf::from("/tmp/gd_position.c")),
+                tree_sitter::Point::new(row, 17),
+                Some(&idx),
+                OverrideScope::default(),
+            )
+            .with_source(src)
+            .definitions()
+        };
+        let above = gd(1);
+        assert!(
+            above.iter().any(|d| d.span.start.row == 0),
+            "the call above the #define reaches the function: {above:?}"
+        );
+        assert!(
+            !above.iter().any(|d| d.span.start.row == 2),
+            "and not the #define: {above:?}"
+        );
+        let below = gd(3);
+        assert!(
+            below.iter().any(|d| d.span.start.row == 2),
+            "the use below the #define reaches it: {below:?}"
+        );
+    }
+
+    #[test]
     fn file_scope_global_def_reaches_bare_reads() {
         let store = FileStore::new();
         let a = cpp("int global_counter;\n");
