@@ -17,7 +17,9 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$HERE/target/release/perl-lsp"
+# PERL_LSP_BIN / PERL_LSP_SHA measure a binary built elsewhere (an A/B side
+# built in a worktree) under its own sha.
+BIN="${PERL_LSP_BIN:-$HERE/target/release/perl-lsp}"
 BULK="${PERL_CORPORA:-$HOME/perl-corpora}/bulk"
 DEPS="${PERL_CORPORA:-$HOME/perl-corpora}/deps"
 REPS=3
@@ -27,6 +29,10 @@ OUT="$HERE/bench/runs"
 # you lose the box mid-measurement and the run with it.
 MAX_RSS_MB=8000
 MAX_SECS=1200
+# Ghost counters cost wall and RSS (a global mutex and a String per witness
+# visit), so a timed KPI run turns them off; --counters keeps them for
+# attribution runs.
+GHOST=0
 ONLY=()
 
 while [ $# -gt 0 ]; do
@@ -35,6 +41,7 @@ while [ $# -gt 0 ]; do
     --out)  OUT="$2"; shift 2;;
     --max-rss-mb) MAX_RSS_MB="$2"; shift 2;;
     --max-secs)   MAX_SECS="$2"; shift 2;;
+    --counters)   GHOST=1; shift;;
     -h|--help) sed -n '2,16p' "$0"; exit 0;;
     *) ONLY+=("$1"); shift;;
   esac
@@ -62,8 +69,8 @@ trap 'rm -rf "$SCRATCH"' EXIT
 # --- provenance, once per run -------------------------------------------
 # A measurement without its build features is a trap: a non-cpp build
 # lang-skips half of gold, and the same class of silence poisons timings.
-SHA="$(git -C "$HERE" rev-parse --short=8 HEAD)"
-DIRTY=false; git -C "$HERE" diff --quiet || DIRTY=true
+SHA="${PERL_LSP_SHA:-$(git -C "$HERE" rev-parse --short=8 HEAD)}"
+DIRTY=false; [ -n "${PERL_LSP_SHA:-}" ] || git -C "$HERE" diff --quiet || DIRTY=true
 FEATURES="$("$BIN" --languages 2>/dev/null | sed 's/.*languages: //')"
 jq -cn \
   --arg run_id "$RUN_ID" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -120,7 +127,7 @@ measure_one() { # corpus root rep phase cachedir
   # only the kernel catches an allocation that outruns a 250ms poll.
   ( ulimit -v $(( (MAX_RSS_MB + 4000) * 1024 )) 2>/dev/null
     PERL5LIB="$pl" XDG_CACHE_HOME="$cache" \
-    PERL_LSP_TIMINGS=1 PERL_LSP_GHOST_STATS=1 \
+    PERL_LSP_TIMINGS=1 PERL_LSP_GHOST_STATS="$GHOST" \
     PERL_LSP_MAX_RSS_MB="$MAX_RSS_MB" PERL_LSP_MAX_SECONDS="$MAX_SECS" \
     PERL_LSP_GHOST_JSON="$g" PERL_LSP_TIMINGS_JSON="$t" PERL_LSP_HEAP_JSON="$h" \
       timeout -k 30 -s TERM $(( MAX_SECS + 120 )) \

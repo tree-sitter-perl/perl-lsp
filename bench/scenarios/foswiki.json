@@ -1,0 +1,86 @@
+{
+  "project": {
+    "repo": "https://github.com/foswiki/distro",
+    "root_subdir": "",
+    "note": "Repo root (core/ plus the bundled extensions). Foswiki.pm normalizeWebTopicName's $web param is joined from every call site's argument (cross-file param inference): the cold-hover stress case."
+  },
+  "readiness": {
+    "file": "core/lib/Foswiki.pm",
+    "line": 1752,
+    "character": 6
+  },
+  "steps": [
+    {
+      "action": "open",
+      "file": "core/lib/Foswiki.pm"
+    },
+    {
+      "action": "hover",
+      "file": "core/lib/Foswiki.pm",
+      "line": 1754,
+      "character": 16,
+      "name": "hover-param-web"
+    },
+    {
+      "action": "open",
+      "file": "core/lib/Foswiki/Func.pm"
+    },
+    {
+      "action": "definition",
+      "file": "core/lib/Foswiki/Func.pm",
+      "line": 80,
+      "character": 40,
+      "name": "def-normalizeWebTopicName"
+    },
+    {
+      "action": "references",
+      "file": "core/lib/Foswiki.pm",
+      "line": 1752,
+      "character": 6,
+      "name": "refs-normalizeWebTopicName"
+    },
+    {
+      "action": "rss",
+      "name": "post-nav"
+    },
+    {
+      "action": "insert_line",
+      "file": "core/lib/Foswiki.pm",
+      "line": 1757,
+      "text": "    my $zz_bench_tmp = 1;",
+      "name": "body-edit-1",
+      "await_diagnostics": true
+    },
+    {
+      "action": "revert",
+      "file": "core/lib/Foswiki.pm",
+      "name": "revert-body",
+      "await_diagnostics": true
+    },
+    {
+      "action": "insert_line",
+      "file": "core/lib/Foswiki.pm",
+      "line": 3800,
+      "text": "sub zz_bench_probe { return 42 }",
+      "name": "contract-edit-add-sub",
+      "await_diagnostics": true
+    },
+    {
+      "action": "revert",
+      "file": "core/lib/Foswiki.pm",
+      "name": "revert-contract",
+      "await_diagnostics": true
+    },
+    {
+      "action": "hover",
+      "file": "core/lib/Foswiki.pm",
+      "line": 1754,
+      "character": 16,
+      "name": "hover-param-web-after-edits"
+    },
+    {
+      "action": "rss",
+      "name": "post-edits"
+    }
+  ]
+}
