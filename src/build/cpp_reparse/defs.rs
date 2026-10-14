@@ -60,6 +60,13 @@ pub(super) const INCLUDE_QUERY: &str = r#"
 (preproc_include path: (system_lib_string) @s)
 "#;
 
+/// `#undef NAME` — the directive line ends the name's macro definition.
+pub(super) const UNDEF_QUERY: &str = r#"
+(preproc_call
+  directive: (preproc_directive) @d (#match? @d "^#[ \t]*undef$")
+  argument: (preproc_arg) @name)
+"#;
+
 /// A function-like macro use that already parses as a call — the "leave" set
 /// for the expansion flip (`clean_call_sites`).
 pub(super) const CALL_QUERY: &str = r#"
@@ -76,6 +83,7 @@ pub(super) static EXCLUDE_Q: OnceLock<Query> = OnceLock::new();
 pub(super) static EXCLUDE_Q_WIDE: OnceLock<Query> = OnceLock::new();
 pub(super) static INCLUDE_Q: OnceLock<Query> = OnceLock::new();
 pub(super) static CALL_Q: OnceLock<Query> = OnceLock::new();
+pub(super) static UNDEF_Q: OnceLock<Query> = OnceLock::new();
 
 pub(super) fn cached_query(slot: &'static OnceLock<Query>, lang: &tree_sitter::Language, src: &str) -> &'static Query {
     slot.get_or_init(|| Query::new(lang, src).expect("cpp_reparse query"))
@@ -258,13 +266,26 @@ pub fn collect_macro_defs(
     parser: &mut tree_sitter::Parser,
     source: &str,
 ) -> Vec<crate::model::file_analysis::MacroDef> {
+    collect_macro_directives(parser, source).defs
+}
+
+/// A file's own macro directives, from one parse of the ORIGINAL source.
+#[derive(Default)]
+pub struct MacroDirectives {
+    pub defs: Vec<crate::model::file_analysis::MacroDef>,
+    /// `(name, row)` per `#undef NAME`.
+    pub undefs: Vec<(String, usize)>,
+}
+
+/// `collect_macro_defs` plus the `#undef`s, from the same parse.
+pub fn collect_macro_directives(parser: &mut tree_sitter::Parser, source: &str) -> MacroDirectives {
     use crate::model::file_analysis::{MacroDef, Span};
-    let Some(tree) = parser.parse(source, None) else { return Vec::new() };
+    let Some(tree) = parser.parse(source, None) else { return MacroDirectives::default() };
     let src = source.as_bytes();
-    let mut out = Vec::new();
+    let mut out = MacroDirectives::default();
     walk_macro_defs(&tree, src, |name, m, (start, end)| {
         let delegate = m.delegate();
-        out.push(MacroDef {
+        out.defs.push(MacroDef {
             name,
             params: m.params,
             body: m.body,
@@ -273,7 +294,42 @@ pub fn collect_macro_defs(
             delegate,
         });
     });
+    walk_macro_undefs(&tree, src, |name, node| out.undefs.push((name, node.start_position().row)));
     out
+}
+
+/// Call `emit(name, directive node)` per `#undef NAME`.
+pub(super) fn walk_macro_undefs(tree: &Tree, src: &[u8], mut emit: impl FnMut(String, tree_sitter::Node)) {
+    let query = cached_query(&UNDEF_Q, &tree.language(), UNDEF_QUERY);
+    let names: Vec<&str> = query.capture_names().to_vec();
+    let mut cursor = QueryCursor::new();
+    let mut it = cursor.matches(query, tree.root_node(), src);
+    while let Some(m) = it.next() {
+        for c in m.captures {
+            if names[c.index as usize] != "name" {
+                continue;
+            }
+            let Ok(t) = c.node.utf8_text(src) else { continue };
+            let name = t.trim();
+            if !name.is_empty() && name.bytes().all(is_ident_byte) {
+                let directive = c.node.parent().unwrap_or(c.node);
+                emit(name.to_string(), directive);
+            }
+        }
+    }
+}
+
+/// The line a definition counting from `from` stops counting at: the first
+/// `#undef` of the name at or below it. Lines are any one unit (byte
+/// offsets, rows); an `#undef` on a gathered macro's line 0 (visible from
+/// the top) ends it.
+pub fn definition_end(from: usize, undef_lines: &[usize]) -> Option<usize> {
+    undef_lines.iter().copied().filter(|&u| u >= from).min()
+}
+
+/// Whether a definition over `[from, end)` counts at `at`.
+pub fn definition_counts_at(from: usize, end: Option<usize>, at: usize) -> bool {
+    from <= at && end.is_none_or(|end| at < end)
 }
 
 /// A direct-delegation body — a single call `G(args)` whose whole point is to

@@ -1220,9 +1220,10 @@ pub(super) fn collect_from_analysis(
                 None => true,
                 Some(id) => {
                     let s = analysis.symbol(id);
-                    // A use above the macro's `#define` (or its `#include`)
-                    // is not a macro use: it stands on the bound symbol.
-                    (macro_visible_here && !analysis.is_premature_macro_use(ri))
+                    // A use where the macro is not defined (above its
+                    // `#define` or `#include`, or below an `#undef`) is not a
+                    // macro use: it stands on the bound symbol.
+                    (macro_visible_here && !analysis.is_inactive_macro_use(ri))
                         || analysis.names_macro_def(&s.name, Some(s.selection_span))
                         || analysis.symbol_is_file_scope_value(s)
                 }

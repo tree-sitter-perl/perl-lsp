@@ -279,8 +279,9 @@ pub struct PackDriver {
     >,
     /// The macro identity/navigation lane collector (C preprocessor only):
     /// original source → every `#define` as a `MacroDef` (guard trail, def
-    /// span, delegation callee). `None` for packs without a preprocessor.
-    collect_macro_defs: Option<fn(&mut tree_sitter::Parser, &str) -> Vec<crate::model::file_analysis::MacroDef>>,
+    /// span, delegation callee) and every `#undef`. `None` for packs without
+    /// a preprocessor.
+    collect_macro_directives: Option<fn(&mut tree_sitter::Parser, &str) -> crate::build::cpp_reparse::MacroDirectives>,
     /// Member-block macros as roles (C preprocessor only): classify a macro
     /// pasted standalone into a struct/class body, BLANK the use (so the base
     /// parses clean), and mint the synthetic base + parent edges. `None` for
@@ -361,7 +362,7 @@ impl LanguageDriver for PackDriver {
     /// 5. `enrich_skeleton` — post-remap, pre-assembly skeleton enrichment:
     ///    external type-alias witnesses, member-block injection (synthetic
     ///    bases + parent edges), erased-macro-read minting, and the macro
-    ///    identity/typing lane (`collect_macro_defs` + `macro_return_hints`).
+    ///    identity/typing lane (`collect_macro_directives` + `macro_return_hints`).
     ///    MUST run after (4) (injected spans are original-coordinate) and
     ///    before (6) (`into_file_analysis` builds indices over everything).
     /// 6. `skel.into_file_analysis()` — the skeleton → FileAnalysis assembly
@@ -554,7 +555,8 @@ impl PackDriver {
         mint_erased_macro_reads(skel, source, src, map, ctx.plan.as_ref());
         // Macro identity lane: collect every `#define` off the ORIGINAL
         // source (spans in user coordinates, no splice remap needed).
-        let macro_defs = self.collect_macro_defs.map(|collect| collect(parser, source)).unwrap_or_default();
+        let crate::build::cpp_reparse::MacroDirectives { defs: macro_defs, undefs } =
+            self.collect_macro_directives.map(|collect| collect(parser, source)).unwrap_or_default();
         let mut body_uses = Vec::new();
         // Nested-macro-body references: a use of macro `A` inside `B`'s
         // `#define` body is preproc-excluded from the code parse (one opaque
@@ -562,7 +564,7 @@ impl PackDriver {
         // goes dark. Scan each body for identifier tokens naming a KNOWN macro
         // (this file's `#define`s ∪ the include closure's) and mint a read at
         // the ORIGINAL span (rule #7). Only for drivers with the macro lane.
-        if self.collect_macro_defs.is_some() {
+        if self.collect_macro_directives.is_some() {
             let mut known: std::collections::HashSet<String> =
                 macro_defs.iter().map(|m| m.name.clone()).collect();
             known.extend(ctx.external.macro_names().map(str::to_string));
@@ -612,7 +614,7 @@ impl PackDriver {
                 crate::build::cpp_reparse::macro_call_arg_spans(parser, source, &param_macro_names);
         }
         body_uses.sort();
-        MacroLane { defs: macro_defs, body_uses }
+        MacroLane { defs: macro_defs, undefs, body_uses }
     }
 
     /// Phase 7: post-assembly hooks — fields only fillable once the
@@ -629,9 +631,9 @@ impl PackDriver {
         macros: MacroLane,
     ) {
         fa.pack.macro_defs = macros.defs;
-        if self.collect_macro_defs.is_some() {
+        if self.collect_macro_directives.is_some() {
             let uses = crate::util::timings::phase("cpp.macro_uses", || {
-                macro_uses(fa, source, &ctx.external, &macros.body_uses)
+                macro_uses(fa, source, &ctx.external, &macros.undefs, &macros.body_uses)
             });
             fa.adopt_macro_uses(uses);
         }
@@ -685,7 +687,7 @@ fn cpp_driver() -> PackDriver {
         // carries the recovered spans back to the original coordinates.
         transform: Some(crate::build::cpp_reparse::preprocess_validated_with),
         gather_macros: Some(crate::build::cpp_reparse::included_macros_pre_expanded),
-        collect_macro_defs: Some(crate::build::cpp_reparse::collect_macro_defs),
+        collect_macro_directives: Some(crate::build::cpp_reparse::collect_macro_directives),
         member_blocks: Some(crate::build::cpp_reparse::plan_member_blocks),
         include_closure: Some(crate::build::cpp_reparse::include_closure),
         input_fingerprint: Some(crate::build::cpp_reparse::toolchain_fingerprint),
@@ -709,7 +711,7 @@ fn python_driver() -> PackDriver {
         pack: crate::build::packs::python_pack,
         transform: None,
         gather_macros: None,
-        collect_macro_defs: None,
+        collect_macro_directives: None,
         member_blocks: None,
         include_closure: None,
         input_fingerprint: None,
@@ -733,7 +735,7 @@ fn r_driver() -> PackDriver {
         pack: crate::build::packs::r_pack,
         transform: None,
         gather_macros: None,
-        collect_macro_defs: None,
+        collect_macro_directives: None,
         member_blocks: None,
         include_closure: None,
         input_fingerprint: None,
@@ -758,7 +760,7 @@ fn cmake_driver() -> PackDriver {
         pack: crate::build::packs::cmake_pack,
         transform: None,
         gather_macros: None,
-        collect_macro_defs: None,
+        collect_macro_directives: None,
         member_blocks: None,
         include_closure: None,
         input_fingerprint: None,
@@ -1367,6 +1369,8 @@ fn remap_spans(
 #[cfg(feature = "pack-langs")]
 struct MacroLane {
     defs: Vec<crate::model::file_analysis::MacroDef>,
+    /// `(name, row)` per `#undef`.
+    undefs: Vec<(String, usize)>,
     /// Where `#define` bodies use a macro name, sorted. A body is
     /// expanded where its macro is used, not where it is written, so these
     /// uses see every macro the file ever defines.
@@ -1377,7 +1381,8 @@ struct MacroLane {
 /// (`MacroUses`): the use's transitive delegate chain (`#define A(x) B(x)`,
 /// `#define B(x) F(x)` gives `A → [B, F]`), or that the name is no macro
 /// there. A definition counts from its own `#define` line, or for a gathered
-/// one from the `#include` line bringing its header in; a chain follows a
+/// one from the `#include` line bringing its header in, until the next
+/// `#undef` of the name; a chain follows a
 /// link only while that link's macro is defined at the use, which is when
 /// the preprocessor would rescan it. Every config variant of a name
 /// contributes, each from its own line (`Macro::variant_delegates`).
@@ -1386,20 +1391,25 @@ fn macro_uses(
     fa: &FileAnalysis,
     source: &str,
     external: &crate::build::cpp_reparse::PreExpandedExternal,
+    undefs: &[(String, usize)],
     body_uses: &[tree_sitter::Point],
 ) -> crate::model::file_analysis::MacroUses {
     use std::collections::HashMap;
     let include_rows: Vec<usize> =
         crate::build::cpp_reparse::include_lines(source).into_iter().map(|(_, row)| row).collect();
-    // Every definition of a name this file sees: `(row it counts from,
-    // delegate)`. A gathered name is defined from its include line even
-    // when no variant delegates.
+    // Every definition of a name this file sees: the rows it counts over
+    // and its delegate. A gathered name is defined from its include line
+    // even when no variant delegates.
     let mut own: HashMap<&str, Vec<(usize, Option<String>)>> = HashMap::new();
     for m in &fa.pack.macro_defs {
         own.entry(m.name.as_str()).or_default().push((m.selection_span.start.row, m.delegate.clone()));
     }
-    let mut defs: HashMap<String, Vec<(usize, Option<String>)>> = HashMap::new();
-    let mut defs_of = |name: &str| -> Vec<(usize, Option<String>)> {
+    let mut undef_rows: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (name, row) in undefs {
+        undef_rows.entry(name.as_str()).or_default().push(*row);
+    }
+    let mut defs: HashMap<String, Vec<MacroSpan>> = HashMap::new();
+    let mut defs_of = |name: &str| -> Vec<MacroSpan> {
         defs.entry(name.to_string())
             .or_insert_with(|| {
                 let mut v = own.get(name).cloned().unwrap_or_default();
@@ -1407,7 +1417,14 @@ fn macro_uses(
                     v.push((row, None));
                 }
                 v.extend(external.delegates_of(name, &include_rows).into_iter().map(|(d, row)| (row, Some(d))));
-                v
+                let undefs = undef_rows.get(name).map_or(&[][..], |u| &u[..]);
+                v.into_iter()
+                    .map(|(from, delegate)| MacroSpan {
+                        from,
+                        until: crate::build::cpp_reparse::definition_end(from, undefs),
+                        delegate,
+                    })
+                    .collect()
             })
             .clone()
     };
@@ -1429,8 +1446,9 @@ fn macro_uses(
         if own_defs.is_empty() {
             continue;
         }
-        let row = if body_uses.binary_search(&r.span.start).is_ok() { usize::MAX } else { r.span.start.row };
-        if !own_defs.iter().any(|(from, _)| *from <= row) {
+        // `None`: anywhere, for a use inside a `#define` body.
+        let at = (body_uses.binary_search(&r.span.start).is_err()).then_some(r.span.start.row);
+        if !own_defs.iter().any(|d| d.counts_at(at)) {
             inactive.push(i as u32);
             continue;
         }
@@ -1443,9 +1461,7 @@ fn macro_uses(
                 })
             })
         };
-        let id = if row == usize::MAX {
-            *body_chains.entry(name).or_insert_with(|| intern(chain_at(name, usize::MAX, &mut defs_of)))
-        } else {
+        let id = if let Some(row) = at {
             let steps = steps.entry(name).or_insert_with(|| {
                 // The chain only changes where a reachable definition starts
                 // counting, so it is computed once per such row.
@@ -1453,8 +1469,9 @@ fn macro_uses(
                 let mut seen: Vec<String> = vec![name.to_string()];
                 let mut frontier = vec![name.to_string()];
                 while let Some(n) = frontier.pop() {
-                    for (from, d) in defs_of(&n) {
+                    for MacroSpan { from, until, delegate: d } in defs_of(&n) {
                         rows.push(from);
+                        rows.extend(until);
                         if let Some(d) = d {
                             if !seen.contains(&d) {
                                 seen.push(d.clone());
@@ -1467,7 +1484,7 @@ fn macro_uses(
                 rows.dedup();
                 let mut out: Vec<(usize, Vec<String>)> = Vec::new();
                 for row in rows {
-                    let chain = chain_at(name, row, &mut defs_of);
+                    let chain = chain_at(name, Some(row), &mut defs_of);
                     if out.last().is_none_or(|(_, last)| *last != chain) {
                         out.push((row, chain));
                     }
@@ -1475,6 +1492,8 @@ fn macro_uses(
                 out.into_iter().map(|(from, chain)| (from, intern(chain))).collect()
             });
             steps[steps.partition_point(|&(from, _)| from <= row) - 1].1
+        } else {
+            *body_chains.entry(name).or_insert_with(|| intern(chain_at(name, None, &mut defs_of)))
         };
         if let Some(id) = id {
             delegated.push((i as u32, id));
@@ -1483,20 +1502,43 @@ fn macro_uses(
     crate::model::file_analysis::MacroUses::from_parts(chains, delegated, inactive)
 }
 
-/// The names a use of macro `name` at `row` spells through delegation:
-/// every delegate of a definition counting at `row`, then theirs, sorted.
+/// One definition of a macro name as one file sees it: it counts from row
+/// `from` (its `#define`, or its header's `#include`) until `until` (an
+/// `#undef`), and forwards to `delegate`.
+#[cfg(feature = "pack-langs")]
+#[derive(Clone)]
+struct MacroSpan {
+    from: usize,
+    until: Option<usize>,
+    delegate: Option<String>,
+}
+
+#[cfg(feature = "pack-langs")]
+impl MacroSpan {
+    /// `None` asks whether it counts anywhere in the file.
+    fn counts_at(&self, row: Option<usize>) -> bool {
+        row.is_none_or(|row| crate::build::cpp_reparse::definition_counts_at(self.from, self.until, row))
+    }
+}
+
+/// The names a use of macro `name` at `row` (`None`: anywhere) spells
+/// through delegation: every delegate of a definition counting at `row`,
+/// then theirs, sorted.
 #[cfg(feature = "pack-langs")]
 fn chain_at(
     name: &str,
-    row: usize,
-    defs_of: &mut impl FnMut(&str) -> Vec<(usize, Option<String>)>,
+    row: Option<usize>,
+    defs_of: &mut impl FnMut(&str) -> Vec<MacroSpan>,
 ) -> Vec<String> {
     let mut chain: Vec<String> = Vec::new();
     let mut frontier = vec![name.to_string()];
     while let Some(n) = frontier.pop() {
-        for (from, d) in defs_of(&n) {
-            let Some(d) = d else { continue };
-            if from > row || d == name || chain.contains(&d) {
+        for def in defs_of(&n) {
+            if !def.counts_at(row) {
+                continue;
+            }
+            let Some(d) = def.delegate else { continue };
+            if d == name || chain.contains(&d) {
                 continue;
             }
             chain.push(d.clone());
