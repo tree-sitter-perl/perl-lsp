@@ -17,31 +17,41 @@ it can't peel the chain after the fact either.
 
 ## Decision
 
-Peel **where the node is still live** — at event construction. A pack marks a
-declarator chain with one `@nested.target` capture; `peel_nested` (in
-`query_extract.rs`) walks it to the leaf identifier and the per-level deref
-stack, then emits the leaf as a **synthetic** `@flow.target`/`@def.local`
-event carrying the same `match_id`. Downstream is unchanged: the `@type.annot`
-join still fires, the symbol is created, goto-def/references/witnesses all
-work — and arbitrary depth needs no enumerated patterns. The stack rides to
-`Symbol.deref_stack` (serde-default, travels the cache, so cross-file hover
-gets the stars too).
+Peel **where the node is still live** — at event construction. A document
+marks a declarator chain with one `@nested.target` capture, the root of the
+`deref` link walk (`docs/adr/capture-vocabulary.md`). `Links::peel_declarator`
+(`query_extract/extract/links.rs`) follows the walk to the leaf identifier,
+collecting the per-level deref stack, then emits the leaf as a **synthetic**
+`@flow.target`/`@def.<kind>` event carrying the same `match_id`. Downstream is
+unchanged: the `@type.annot` join still fires, the symbol is created,
+goto-def/references/witnesses all work, and arbitrary depth needs no
+enumerated patterns. The stack rides to `Symbol.deref_stack` (serde-default,
+travels the cache, so cross-file hover gets the stars too).
 
 ## Generic by construction
 
-Core branches on no grammar name. The LangPack declares the rule:
+Core branches on no grammar name (rule #15). The document states each level
+once and marks what it is:
 
-- `nested_peel: &[(node_kind, DerefKind)]` — which kinds nest, and the deref
-  each contributes (cpp: `pointer_declarator`→Pointer, `reference_declarator`
-  →Reference);
-- `nested_leaf` — the bottom kind (`identifier`);
-- `nested_annot_kinds: &[node_kind]` — per-level annotation kinds
+- `@link.from.deref` + `@link.inner` — a level links to its operand;
+- `@deref.pointer` / `@deref.ref` — the level contributes that deref (cpp:
+  `pointer_declarator` / `reference_declarator`);
+- `@deref.annot` — a per-level annotation among the level's children
   (`type_qualifier` → `const`/`volatile`/`restrict`), collected onto each
   `DerefStep.annotations` as **free strings** (not typed flags) so new
-  qualifiers and const-correctness diagnostics needn't reshape the type.
+  qualifiers and const-correctness diagnostics needn't reshape the type;
+- `@deref.leaf.<kind>` — the bottom, whose suffix names the def it mints
+  (`@deref.leaf.field` → a member, `@deref.leaf.local` → a local).
+- `@deref.pass` — a level the walk descends without a step of its own
+  (cpp: the grouping `parenthesized_declarator` and a function pointer's
+  `function_declarator`, so `int (*read)(char *)` is one pointer over the
+  field `read`).
 
-A future pack with its own chained-wrapper shape declares its own rule; no
-core change.
+A tree the extractor never saw (the member-block reparse of a macro body) is
+read the same way: `DeclaratorPeel::of_tree` runs the document over it and
+peels through the same walk, so a field's stars come out the same however it
+was written. A language with its own chained-wrapper shape spells the
+captures in its own document; no core change.
 
 ## Stack shape
 

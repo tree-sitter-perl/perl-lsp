@@ -31,7 +31,7 @@ pub(super) fn finish(st: &mut ExtractState) {
     let c = &st.commands;
     for (mid, (cmd, cmd_span, scope)) in &c.cmd_names {
         st.out.refs.push(SkelRef {
-            kind: RefKind::Call,
+            kind: RefCap::Call,
             name: cmd.clone(),
             start: cmd_span.start,
             end: cmd_span.end,

@@ -453,7 +453,7 @@ fn sub_exporter_member_goto_def_and_references() {
             kind: TargetKind::Sub {
                 package: Some("My::Exp".to_string()),
             },
-            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
+            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -1102,7 +1102,7 @@ sub go {
                 names: crate::model::conventions::PERL_SPELLINGS,
                 name: name.to_string(),
                 kind: TargetKind::Sub { package: Some("Foo".to_string()) },
-                method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
+                method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
             },
             RoleMask::EDITABLE,
         );
@@ -1219,7 +1219,7 @@ sub go {
                 names: crate::model::conventions::PERL_SPELLINGS,
                 name: name.to_string(),
                 kind: TargetKind::Sub { package: Some("Foo".to_string()) },
-                method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false,
+                method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
             },
             RoleMask::EDITABLE,
         );

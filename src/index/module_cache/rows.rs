@@ -510,88 +510,95 @@ pub fn sym_rows_matching(conn: &Connection, query: &str) -> Vec<SymRowHit> {
 
 /// The per-file probes' SQL, shared with the plan test
 /// (`row_probes_plan_as_index_point_lookups`) that pins how SQLite runs
-/// them. Each takes RESOLVED string ids (`?1` file, `?2` name, `?3`
-/// container) and runs once per distinct spelling, rather than resolving
-/// spellings in an `IN (SELECT ..)`: an IN list, even of bound literals,
-/// materializes an ephemeral btree per execution, and each create/destroy
-/// takes SQLite's process-global page-cache mutex — 20 sweep workers
-/// probing at once spent twice their user time in the kernel on it. Every
-/// half is its own `EXISTS`, never one `OR` inside a WHERE: an OR plans as a
-/// scan of the `file_id` prefix whatever index exists, while each half alone
-/// is a covering point probe on `(file_id, name_id|key_id, container_id)`.
-/// The plan is the SQLite planner's choice, so the test asserts it rather
-/// than this comment.
-pub(super) const SYM_MEMBER_PROBE_SQL: &str = "SELECT EXISTS(
-            SELECT 1 FROM syms y
-             WHERE y.file_id = ?1 AND y.name_id = ?2 AND y.container_id = ?3)
-         OR EXISTS(
-            SELECT 1 FROM syms y
-             WHERE y.file_id = ?1 AND y.key_id = ?2 AND y.container_id = ?3)";
-
-pub(super) const SYM_NAME_PROBE_SQL: &str = "SELECT EXISTS(
-            SELECT 1 FROM syms y WHERE y.file_id = ?1 AND y.name_id = ?2)
-         OR EXISTS(
-            SELECT 1 FROM syms y WHERE y.file_id = ?1 AND y.key_id = ?2)";
-
-pub(super) const NAME_PROBE_SQL: &str = "SELECT EXISTS(
-            SELECT 1 FROM refs r WHERE r.name_id = ?2 AND r.file_id = ?1)
-         OR EXISTS(
-            SELECT 1 FROM syms y WHERE y.file_id = ?1 AND y.name_id = ?2)
-         OR EXISTS(
-            SELECT 1 FROM syms y WHERE y.file_id = ?1 AND y.key_id = ?2)";
-
-/// A probe's subject, resolved to ids: `Err(())` when the store cannot speak
-/// (never shredded, or a read failed — fail open), `Ok(None)` when it can and
-/// a string the probe needs was never interned (no row can reference it, so
-/// the answer is `Some(false)`).
-struct ProbeIds {
-    file_id: i64,
-    /// The raw name's and its match key's ids, deduplicated; empty when
-    /// neither spelling was ever interned.
-    names: Vec<i64>,
+/// them. Binds: `?1` path, `?2` raw name, `?3` its match key (NULL when the
+/// same spelling), `?4` container. Each probe is ONE statement because each
+/// statement is its own read transaction, and every read transaction takes
+/// the database file's WAL shared-memory mutex (shared by every connection
+/// in the process) and `fstat`s the file: the earlier five statements per
+/// probe were 3.1M fstats on one networkx heatmap.
+///
+/// Shapes the planner needs: spellings resolve through scalar subqueries
+/// with `=`, never `IN` (an IN list, even of bound literals, materializes an
+/// ephemeral btree per execution, and its create/destroy takes SQLite's
+/// process-global page-cache mutex). Every (spelling, column) half is its
+/// own `EXISTS`, never one `OR` inside a WHERE: an OR plans as a scan of the
+/// `file_id` prefix, while each half alone is a covering point probe on
+/// `(file_id, name_id|key_id, container_id)`. An unshredded file returns NO
+/// row (`None`, fail open); a never-interned string compares NULL, so its
+/// halves are false. The plan is the SQLite planner's choice, so the test
+/// asserts it rather than this comment.
+macro_rules! sid {
+    ($n:literal) => {
+        concat!("(SELECT str_id FROM strings WHERE s = ", $n, ")")
+    };
+}
+macro_rules! syms_half {
+    ($col:literal, $n:literal) => {
+        concat!(
+            "EXISTS(SELECT 1 FROM syms y WHERE y.file_id = f.file_id AND y.",
+            $col, " = ", sid!($n), ")"
+        )
+    };
+    ($col:literal, $n:literal, container) => {
+        concat!(
+            "EXISTS(SELECT 1 FROM syms y WHERE y.file_id = f.file_id AND y.",
+            $col, " = ", sid!($n), " AND y.container_id = ", sid!("?4"), ")"
+        )
+    };
+}
+macro_rules! refs_half {
+    ($n:literal) => {
+        concat!("EXISTS(SELECT 1 FROM refs r WHERE r.name_id = ", sid!($n), " AND r.file_id = f.file_id)")
+    };
 }
 
-fn probe_ids(conn: &Connection, path: &str, names: &NameSpellings, name: &str) -> Option<ProbeIds> {
-    let file_id: i64 = conn
-        .prepare_cached("SELECT file_id FROM files WHERE path = ?1")
-        .ok()?
-        .query_row(params![path], |row| row.get(0))
-        .ok()?;
+pub(super) const SYM_MEMBER_PROBE_SQL: &str = concat!(
+    "SELECT ",
+    syms_half!("name_id", "?2", container), " OR ",
+    syms_half!("key_id", "?2", container), " OR ",
+    syms_half!("name_id", "?3", container), " OR ",
+    syms_half!("key_id", "?3", container),
+    " FROM files f WHERE f.path = ?1"
+);
+
+pub(super) const SYM_NAME_PROBE_SQL: &str = concat!(
+    "SELECT ",
+    syms_half!("name_id", "?2"), " OR ",
+    syms_half!("key_id", "?2"), " OR ",
+    syms_half!("name_id", "?3"), " OR ",
+    syms_half!("key_id", "?3"),
+    " FROM files f WHERE f.path = ?1"
+);
+
+pub(super) const NAME_PROBE_SQL: &str = concat!(
+    "SELECT ",
+    refs_half!("?2"), " OR ",
+    refs_half!("?3"), " OR ",
+    syms_half!("name_id", "?2"), " OR ",
+    syms_half!("key_id", "?2"), " OR ",
+    syms_half!("name_id", "?3"), " OR ",
+    syms_half!("key_id", "?3"),
+    " FROM files f WHERE f.path = ?1"
+);
+
+/// Run one probe: `None` when the file was never shredded or the read
+/// failed, else whether any half hit.
+fn run_probe(
+    conn: &Connection,
+    sql: &str,
+    path: &str,
+    names: &NameSpellings,
+    name: &str,
+    container: Option<&str>,
+) -> Option<bool> {
     let norm = probe_spelling(name, names);
-    let mut ids = Vec::with_capacity(2);
-    for s in [name, norm.as_str()] {
-        if let Some(id) = str_id_of(conn, s)? {
-            if !ids.contains(&id) {
-                ids.push(id);
-            }
-        }
-    }
-    Some(ProbeIds { file_id, names: ids })
-}
-
-/// `Some(None)` = never interned; `None` = the read failed.
-fn str_id_of(conn: &Connection, s: &str) -> Option<Option<i64>> {
-    conn.prepare_cached("SELECT str_id FROM strings WHERE s = ?1")
-        .ok()?
-        .query_row(params![s], |row| row.get(0))
-        .optional()
-        .ok()
-}
-
-/// Run `sql` once per name id; `Some(true)` on the first hit.
-fn any_probe_hit(conn: &Connection, sql: &str, ids: &ProbeIds, container: Option<i64>) -> Option<bool> {
+    let norm = (norm != name).then_some(norm);
     let mut stmt = conn.prepare_cached(sql).ok()?;
-    for &name_id in &ids.names {
-        let hit: bool = match container {
-            Some(c) => stmt.query_row(params![ids.file_id, name_id, c], |row| row.get(0)),
-            None => stmt.query_row(params![ids.file_id, name_id], |row| row.get(0)),
-        }
-        .ok()?;
-        if hit {
-            return Some(true);
-        }
-    }
-    Some(false)
+    let row = match container {
+        Some(c) => stmt.query_row(params![path, name, norm, c], |row| row.get::<_, bool>(0)),
+        None => stmt.query_row(params![path, name, norm], |row| row.get::<_, bool>(0)),
+    };
+    row.optional().ok()?
 }
 
 /// Can the row store rule out a member named `name` attributed to container
@@ -617,13 +624,9 @@ pub fn sym_member_row_exists(
     name: &str,
     container: &str,
 ) -> Option<bool> {
-    let ids = probe_ids(conn, path, names, name)?;
     // The container stays EXACT-match: it is a package name, and its match
     // key strips the qualifier, which would let `Base` claim `My::Base`'s rows.
-    let Some(container_id) = str_id_of(conn, container)? else {
-        return Some(false);
-    };
-    any_probe_hit(conn, SYM_MEMBER_PROBE_SQL, &ids, Some(container_id))
+    run_probe(conn, SYM_MEMBER_PROBE_SQL, path, names, name, Some(container))
 }
 
 /// The store's spelling policy, in ONE place: callers pass the RAW name and
@@ -654,8 +657,7 @@ pub fn sym_name_row_exists(
     names: &NameSpellings,
     name: &str,
 ) -> Option<bool> {
-    let ids = probe_ids(conn, path, names, name)?;
-    any_probe_hit(conn, SYM_NAME_PROBE_SQL, &ids, None)
+    run_probe(conn, SYM_NAME_PROBE_SQL, path, names, name, None)
 }
 
 /// The widest per-file mention probe: can the store rule out ANY row —
@@ -674,8 +676,7 @@ pub fn name_row_exists(
     names: &NameSpellings,
     name: &str,
 ) -> Option<bool> {
-    let ids = probe_ids(conn, path, names, name)?;
-    any_probe_hit(conn, NAME_PROBE_SQL, &ids, None)
+    run_probe(conn, NAME_PROBE_SQL, path, names, name, None)
 }
 
 /// How many FILES carry a ref row for one match key.

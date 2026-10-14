@@ -23,7 +23,10 @@ pub fn pack_hover_markdown(
     // symbol on another class) can't hijack it with the wrong scope.
     // A data field shows `field: type` (member_hover, keyed on the field's own
     // scope); a method shows its signature.
-    if let Some(r) = analysis.ref_at(point).filter(|r| matches!(r.kind, RefKind::MethodCall { .. })) {
+    if let Some((r, want)) = analysis
+        .ref_at(point)
+        .and_then(|r| Some((r, crate::model::file_analysis::MemberKind::of_ref(&r.kind)?)))
+    {
         if let Some(midx) = module_index {
             if let Some(cn) = analysis.method_call_invocant_class(r, Some(midx)) {
                 let field = r.unqualified_target_name(analysis.names());
@@ -32,20 +35,25 @@ pub fn pack_hover_markdown(
                 // type (`T get()` on a `Box<int>` receiver → `int`) — shown
                 // only when the substitution actually changed the answer,
                 // so non-template hovers stay byte-identical.
-                let recv_ty = match &r.kind {
-                    RefKind::MethodCall { invocant_span: Some(sp), .. } => {
-                        analysis.expr_type_at_span(*sp, Some(midx))
-                    }
-                    _ => None,
-                };
+                let recv_ty = r
+                    .member_site()
+                    .and_then(|m| m.invocant_span)
+                    .and_then(|sp| analysis.expr_type_at_span(sp, Some(midx)));
+                // The ref's family picks the rung: a value read never answers
+                // through a method's return.
                 let substituted = |raw: Option<InferredType>| -> Option<InferredType> {
-                    let sub = recv_ty
-                        .as_ref()
-                        .and_then(|t| analysis.member_value_type(t, field, Some(midx), None))?;
+                    let sub = recv_ty.as_ref().and_then(|t| match want {
+                        crate::model::file_analysis::MemberKind::Value => {
+                            analysis.field_value_type(t, field, Some(midx))
+                        }
+                        crate::model::file_analysis::MemberKind::Callable => {
+                            analysis.member_value_type(t, field, Some(midx), None)
+                        }
+                    })?;
                     (raw.as_ref() != Some(&sub)).then_some(sub)
                 };
                 if let Some(crate::model::file_analysis::MethodResolution::Local { sym_id, .. }) =
-                    analysis.resolve_method_in_ancestors(&cn, field, Some(midx))
+                    analysis.resolve_member_in_ancestors(&cn, field, Some(midx), want)
                 {
                     let sym = analysis.symbol(sym_id);
                     if matches!(sym.kind, FaSymKind::Method | FaSymKind::Sub) {

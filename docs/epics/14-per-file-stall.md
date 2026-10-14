@@ -83,10 +83,10 @@ does.
    lives) so the repro is reproducible on another box.
 2. Attribute with the existing instrumentation, not new `eprintln!`s:
    - `PERL_LSP_PHASE_TIMING` + `timings::phase` / `tphase!` for the
-     named phases. `PackDriver::analyze_with_path`'s pipeline is **eight
+     named phases. `PackDriver::analyze_with_path`'s pipeline is **seven
      named phases** (gather context → transform+parse → extract → remap
-     spans → enrich skeleton → `into_file_analysis` → `emit_return_fuel`
-     → register post-build hooks) — the attribution should land on one
+     spans → enrich skeleton → `into_file_analysis` → register post-build
+     hooks) — the attribution should land on one
      of them before it lands anywhere finer.
    - `bphase!` → `ghost_stats::timed` for per-file regions, and
      `ghost_stats::count_by` for per-file quantities. **A printed line
