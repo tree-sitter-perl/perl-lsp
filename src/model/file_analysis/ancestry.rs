@@ -583,13 +583,17 @@ impl FileAnalysis {
             // the stranger — and the verdict rides the result.
             let (cands, widened) = idx.visible_def_candidates_widening(cls).read();
             let leaf = name_match_key(cls, self.names());
-            for cached in cands {
+            let may = if widened {
+                vec![true; cands.len()]
+            } else {
+                idx.candidates_may_declare(&cands, method_name, cls)
+            };
+            for (cached, may_declare) in cands.into_iter().zip(may) {
                 // Rows-backed pre-filter (`docs/prompt-relational-iteration.md`):
                 // skip the rehydrate when the row store PROVES this candidate
                 // declares nothing named `method_name` under `cls`. Fail-open
                 // everywhere the store cannot speak; the equiv switch runs the
                 // skipped scan anyway and screams on divergence.
-                let may_declare = widened || idx.candidate_may_declare(&cached, method_name, cls);
                 if !may_declare {
                     crate::util::ghost_stats::count("mroc.candidate_prefiltered");
                     if !member_prefilter_equiv() {
@@ -780,9 +784,15 @@ impl FileAnalysis {
             MethodResolution::CrossFile { .. } => {
                 self.declares_interface(cls)
                     || module_index.is_some_and(|i| {
-                        i.visible_def_candidates(cls)
-                            .read().iter()
-                            .any(|c| i.whole_present(c).declares_interface(cls))
+                        // Only a file declaring `cls` as a class can mark it
+                        // an interface: the rows rule out the rest (every
+                        // Perl `package`) without a rehydrate.
+                        let cands = i.visible_def_candidates(cls).read();
+                        let may = i.candidates_may_declare_kind(&cands, cls, SymKind::Class);
+                        cands
+                            .iter()
+                            .zip(may)
+                            .any(|(c, may)| may && i.symbols_present(c).declares_interface(cls))
                     })
             }
         }

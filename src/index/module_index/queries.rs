@@ -379,10 +379,18 @@ impl ModuleIndex {
             .into_iter()
             .filter(|m| {
                 // ANY candidate file of the module may carry the export list.
-                crate::model::file_analysis::CrossFileLookup::def_candidates(self, m)
-                    .read().iter()
-                    .any(|c| c.analysis().export.iter().any(|e| e == func_name)
-                        || c.analysis().export_ok.iter().any(|e| e == func_name))
+                // Order-free, so the raw relation: `def_candidates` clones
+                // and path-sorts it per call, and a sweep asks per import.
+                let exports = |c: &Arc<CachedModule>| {
+                    c.analysis().export.iter().any(|e| e == func_name)
+                        || c.analysis().export_ok.iter().any(|e| e == func_name)
+                };
+                match self.core.all_defs.get(m.as_str()) {
+                    Some(cands) if !cands.is_empty() => cands.iter().any(exports),
+                    _ => crate::model::file_analysis::CrossFileLookup::def_candidates(self, m)
+                        .read().iter()
+                        .any(exports),
+                }
             })
             .collect();
         result.sort();
@@ -431,32 +439,28 @@ impl ModuleIndex {
         crate::util::ghost_stats::count("mdmp.call");
         let mods = self.modules_providing_package(class);
         crate::util::ghost_stats::count_by("mdmp.modules_scanned", mods.len() as u64);
-        let found = mods
+        // EVERY file registered under each module name — the definer may be
+        // a losing candidate of its own name slot — prefiltered as ONE set:
+        // the walk's misses land here, where every candidate scan is wasted,
+        // and a reopened package's providers number in the hundreds.
+        let cands: Vec<(String, Arc<CachedModule>)> = mods
             .into_iter()
-            .find(|mod_name| {
-                // EVERY file registered under this module name — the definer
-                // may be a losing candidate of its own name slot. Symbols-axis
-                // existence scan — no bag/refs read.
-                self.def_candidates(mod_name).read().iter().any(|c| {
-                    // Rows-backed pre-filter, the same probe as the MRO
-                    // walk's (`docs/prompt-relational-iteration.md` ladder 2):
-                    // `has_sub_in_package` tests exactly the (name, package)
-                    // attribution the syms rows carry, and this runs on the
-                    // walk's MISSES, where every candidate scan is wasted.
-                    // Fail-open everywhere the store cannot speak.
-                    if !self.candidate_may_declare(c, name, class) {
-                        crate::util::ghost_stats::count("mdmp.candidate_prefiltered");
-                        return false;
-                    }
-                    crate::util::ghost_stats::count("mdmp.candidate_fetched");
-                    crate::util::ghost_stats::count(if crate::util::ghost_stats::mroc_saw(&c.path) {
-                        "mdmp.candidate_seen_by_mroc"
-                    } else {
-                        "mdmp.candidate_new"
-                    });
-                    self.symbols_present(c).has_sub_in_package(name, class)
-                })
-            });
+            .flat_map(|m| {
+                let cs = self.def_candidates(&m).read();
+                cs.into_iter().map(move |c| (m.clone(), c))
+            })
+            .collect();
+        let files: Vec<Arc<CachedModule>> = cands.iter().map(|(_, c)| Arc::clone(c)).collect();
+        let may = self.candidates_may_declare(&files, name, class);
+        let found = cands.into_iter().zip(may).find_map(|((mod_name, c), may_declare)| {
+            if !may_declare {
+                crate::util::ghost_stats::count("mdmp.candidate_prefiltered");
+                return None;
+            }
+            crate::util::ghost_stats::count("mdmp.candidate_fetched");
+            // Symbols-axis existence scan — no bag/refs read.
+            self.symbols_present(&c).has_sub_in_package(name, class).then_some(mod_name)
+        });
         crate::util::ghost_stats::count(if found.is_some() {
             "mdmp.found"
         } else {

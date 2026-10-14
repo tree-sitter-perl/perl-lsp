@@ -626,6 +626,70 @@ pub fn sym_member_row_exists(
     any_probe_hit(conn, SYM_MEMBER_PROBE_SQL, &ids, Some(container_id))
 }
 
+/// Every shredded file holding a sym row named (or keyed) by any of `names`
+/// under `container`: `sym_member_row_exists` asked of a whole candidate set
+/// at once. One indexed lookup per spelling instead of one probe per file —
+/// a reopened package (`main`, declared by hundreds of files) made the
+/// per-file probe the walk's whole cost. `None` when a read failed. Each
+/// spelling is its own `=` lookup: an `IN` list builds an ephemeral btree
+/// per execution under SQLite's process-global page-cache mutex.
+pub fn sym_member_files(
+    conn: &Connection,
+    names: &[String],
+    container: &str,
+) -> Option<std::collections::HashSet<String>> {
+    const SQL: [&str; 2] = [
+        "SELECT f.path FROM syms y JOIN files f ON f.file_id = y.file_id
+          WHERE y.name_id = ?1 AND y.container_id = ?2",
+        "SELECT f.path FROM syms y JOIN files f ON f.file_id = y.file_id
+          WHERE y.key_id = ?1 AND y.container_id = ?2",
+    ];
+    let Some(container_id) = str_id_of(conn, container)? else {
+        return Some(Default::default());
+    };
+    files_matching(conn, names, &SQL, container_id)
+}
+
+/// Every shredded file holding a sym row of `kind` (a `sym_kind_code`)
+/// named or keyed by any of `names`, under any container.
+pub fn sym_kind_files(
+    conn: &Connection,
+    names: &[String],
+    kind: u8,
+) -> Option<std::collections::HashSet<String>> {
+    const SQL: [&str; 2] = [
+        "SELECT f.path FROM syms y JOIN files f ON f.file_id = y.file_id
+          WHERE y.name_id = ?1 AND y.kind = ?2",
+        "SELECT f.path FROM syms y JOIN files f ON f.file_id = y.file_id
+          WHERE y.key_id = ?1 AND y.kind = ?2",
+    ];
+    files_matching(conn, names, &SQL, kind as i64)
+}
+
+/// The paths `sql` (bound to a name id and `second`) yields, over every
+/// interned spelling in `names`.
+fn files_matching(
+    conn: &Connection,
+    names: &[String],
+    sql: &[&str],
+    second: i64,
+) -> Option<std::collections::HashSet<String>> {
+    let mut out = std::collections::HashSet::new();
+    for name in names {
+        let Some(name_id) = str_id_of(conn, name)? else { continue };
+        for sql in sql {
+            let mut stmt = conn.prepare_cached(sql).ok()?;
+            let rows = stmt
+                .query_map(params![name_id, second], |row| row.get::<_, String>(0))
+                .ok()?;
+            for path in rows {
+                out.insert(path.ok()?);
+            }
+        }
+    }
+    Some(out)
+}
+
 /// The store's spelling policy, in ONE place: callers pass the RAW name and
 /// every per-file probe also matches its match-key normalization, because
 /// refs rows are keyed by `Ref::match_key()` while syms rows carry both the

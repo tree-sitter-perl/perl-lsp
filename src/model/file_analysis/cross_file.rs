@@ -778,6 +778,28 @@ pub trait CrossFileLookup {
         let _ = (cached, name, class);
         true
     }
+    /// `candidate_may_declare` for each of `cands`, in order: the walk's
+    /// whole candidate set asked at once, so an implementor with a row store
+    /// can answer it in one lookup instead of one per file.
+    fn candidates_may_declare(
+        &self,
+        cands: &[std::sync::Arc<CachedModule>],
+        name: &str,
+        class: &str,
+    ) -> Vec<bool> {
+        cands.iter().map(|c| self.candidate_may_declare(c, name, class)).collect()
+    }
+    /// Can each of `cands` declare a symbol of `kind` named `name` (under
+    /// any container)? `true` wherever the implementor cannot prove absence.
+    fn candidates_may_declare_kind(
+        &self,
+        cands: &[std::sync::Arc<CachedModule>],
+        name: &str,
+        kind: SymKind,
+    ) -> Vec<bool> {
+        let _ = (name, kind);
+        vec![true; cands.len()]
+    }
     /// The registry-sweep sibling of `candidate_may_declare`: can `cached`'s
     /// BAG hold any witness for a class-keyed attachment named `name`
     /// (`PackageSymbol{class, name}` when `attributed`, `SlotType{.., key}`
@@ -1541,6 +1563,22 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
         // Same delegation rule as `symbols_present` — the inner index owns
         // the row store; the default would fail open and lose the skip.
         self.inner.candidate_may_declare(cached, name, class)
+    }
+    fn candidates_may_declare(
+        &self,
+        cands: &[std::sync::Arc<CachedModule>],
+        name: &str,
+        class: &str,
+    ) -> Vec<bool> {
+        self.inner.candidates_may_declare(cands, name, class)
+    }
+    fn candidates_may_declare_kind(
+        &self,
+        cands: &[std::sync::Arc<CachedModule>],
+        name: &str,
+        kind: SymKind,
+    ) -> Vec<bool> {
+        self.inner.candidates_may_declare_kind(cands, name, kind)
     }
     fn candidate_bag_may_answer(
         &self,

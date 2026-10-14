@@ -955,7 +955,7 @@ fn mentions_among(idx: &dyn CrossFileLookup, key: &str, uncovered: &[Arc<CachedM
 }
 
 /// The files among `mentions` holding a plain function call keyed `key`,
-/// each read through its refs view (open documents through their build).
+/// each read through its caller slice (open documents through their build).
 /// An indexed file's verdict is memoized at its registration version.
 fn calls_among(idx: &dyn CrossFileLookup, store: Option<&AnswerStore>, key: &str, mentions: &[PathBuf]) -> Vec<PathBuf> {
     use crate::model::file_analysis::RefKind;
@@ -983,7 +983,9 @@ fn calls_among(idx: &dyn CrossFileLookup, store: Option<&AnswerStore>, key: &str
                     return verdict;
                 }
             }
-            let verdict = calls(&idx.refs_present(&cached));
+            // The caller slice records its file's calls of `key`, and the
+            // indexer cut it: a small row read instead of a refs rehydrate.
+            let verdict = idx.caller_slice(&cached, key).slice.calls.iter().any(|&(_, method)| !method);
             if let (Some(v), Some(store)) = (version, store) {
                 if let Ok(mut m) = store.call_verdicts.lock() {
                     let bytes = std::mem::size_of::<((String, PathBuf), (u64, bool))>() + key.len() + path_bytes(path);

@@ -710,6 +710,35 @@ impl CrossFileLookup for ModuleIndex {
         )
     }
 
+    fn candidates_may_declare(
+        &self,
+        cands: &[Arc<CachedModule>],
+        name: &str,
+        class: &str,
+    ) -> Vec<bool> {
+        self.candidates_in_row_set(
+            cands,
+            name,
+            |c| self.candidate_may_declare(c, name, class),
+            |conn, spellings| crate::index::module_cache::sym_member_files(conn, spellings, class),
+        )
+    }
+
+    fn candidates_may_declare_kind(
+        &self,
+        cands: &[Arc<CachedModule>],
+        name: &str,
+        kind: crate::model::file_analysis::SymKind,
+    ) -> Vec<bool> {
+        let code = crate::model::file_analysis::sym_kind_code(&kind);
+        self.candidates_in_row_set(
+            cands,
+            name,
+            |_| true,
+            |conn, spellings| crate::index::module_cache::sym_kind_files(conn, spellings, code),
+        )
+    }
+
     fn candidate_bag_may_answer(
         &self,
         cached: &Arc<CachedModule>,
@@ -1209,5 +1238,58 @@ pub(super) fn flush_answers_into(core: &super::index_core::IndexCore, root: Opti
             Ok(()) => crate::util::ghost_stats::count_by("caller_slice.persisted_rows", slices.len() as u64),
             Err(e) => log::warn!("persisting caller slices failed: {e}"),
         }
+    }
+}
+
+impl ModuleIndex {
+    /// A row-store prefilter over a whole candidate set: `per_file` for a
+    /// small set, else ONE `set_query` over the name's spellings, whose
+    /// result every stripped candidate is tested against. A reopened
+    /// package (`main`, declared by hundreds of files) made a probe per file
+    /// the walk's whole cost.
+    fn candidates_in_row_set(
+        &self,
+        cands: &[Arc<CachedModule>],
+        name: &str,
+        per_file: impl Fn(&Arc<CachedModule>) -> bool,
+        set_query: impl FnOnce(&rusqlite::Connection, &[String]) -> Option<std::collections::HashSet<String>>,
+    ) -> Vec<bool> {
+        // Below this many candidates a probe per file costs no more than the
+        // set lookup, and the set query's fixed cost would be the loss.
+        const SET_LOOKUP_FROM: usize = 8;
+        let fallback = || cands.iter().map(&per_file).collect();
+        let stripped: Vec<&Arc<CachedModule>> =
+            cands.iter().filter(|c| c.analysis().symbols_are_evicted()).collect();
+        if stripped.len() < SET_LOOKUP_FROM
+            || std::env::var_os("PERL_LSP_NO_MEMBER_PREFILTER").is_some()
+        {
+            return fallback();
+        }
+        // The spellings a per-file probe tries, over every candidate's own
+        // name rules (`probe_spelling`).
+        let mut spellings = vec![name.to_string()];
+        for c in &stripped {
+            let key = crate::model::file_analysis::name_match_key(name, c.analysis().names());
+            if !spellings.contains(&key) {
+                spellings.push(key);
+            }
+        }
+        let Some(Some(hits)) = self.with_rows_conn(|conn| set_query(conn, &spellings)) else {
+            return fallback();
+        };
+        // A stripped copy registers only after its chunk (blob AND rows)
+        // commits, so its absence from the set is a per-file probe's
+        // `Some(false)`; resident and gated copies fail open as there.
+        cands
+            .iter()
+            .map(|c| {
+                let a = c.analysis();
+                !a.symbols_are_evicted()
+                    || member_prefilter_may_declare(
+                        !a.plugin.gated_emissions.is_empty(),
+                        Some(Some(hits.contains(c.path.to_string_lossy().as_ref()))),
+                    )
+            })
+            .collect()
     }
 }
