@@ -131,7 +131,7 @@ unsigned short`). Abstraction for inference, concrete leaf for the human.
   decided it. Freshness rides the Surface: macro bodies are on it, so a
   header edit that changes a delegate re-analyzes its includers.
 
-### Position: a macro is defined from its `#define`, or its `#include`
+### Position: a macro is defined from its `#define`, or its `#include`, until `#undef`
 
 The preprocessor reads top to bottom, so a name is a macro only below the
 line that defines it: its own `#define`, or for a gathered macro the
@@ -139,19 +139,23 @@ line that defines it: its own `#define`, or for a gathered macro the
 ordinal into the file's include lines; an include guard makes later
 includes of the same header no-ops, so the first one wins). The table
 keeps one body per name, but each config variant's delegate carries its
-own header's ordinal and counts only below that header's include. Three
-consumers read this:
+own header's ordinal and counts only below that header's include. A file's
+own `#undef` ends a definition until the next `#define` (`definition_end`
+and `definition_counts_at` are the one rule). Three consumers read this:
 
-- **Expansion** leaves a use above that line unexpanded (re2's
-  `Regexp::Simplify` above `#define Simplify DontCallSimplify`).
+- **Expansion** leaves a use where the name is not defined unexpanded
+  (re2's `Regexp::Simplify` above `#define Simplify DontCallSimplify`).
 - **Delegation** follows a chain link only where that link is defined, so
   `A → B → F` stops at `B` above the include that defines `B`. A use inside
   a `#define` body is expanded where its macro is used, so it sees every
   macro the file defines.
-- **Goto-def and references** treat a use above the line as the plain name
-  it spells (`MacroUses::premature`): the macro lane stands aside.
+- **Goto-def and references** treat a use where the name is not defined as
+  the plain name it spells (`MacroUses::inactive`): the macro lane stands
+  aside.
 
-`#undef` is not modeled: a macro, once defined, stays defined.
+An `#undef` inside a gathered header is not modeled: the gather keeps one
+table per include closure, not the order its headers define and undefine
+in.
 
 ### Resolution visibility = the include-closure lie (generalizes beyond macros)
 

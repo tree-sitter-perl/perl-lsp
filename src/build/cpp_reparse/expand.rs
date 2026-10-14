@@ -235,23 +235,21 @@ fn line_start_offsets(src: &str) -> Vec<usize> {
     v
 }
 
-/// The byte at which each file-LOCAL macro's object-like/function-like
-/// `#define` becomes active — the start of its directive line. A use of the
-/// name STRICTLY BEFORE this byte predates the definition and, per the C
-/// preprocessor, must NOT expand: `#define Simplify DontCallSimplify` at
-/// re2/simplify.cc:201 protects the out-of-line def `Regexp* Regexp::Simplify()`
-/// at :180 and the call at :31, which both keep the real name. Keyed by the
-/// FIRST definition (min row) so a later redefinition never retro-activates
-/// earlier uses. Gathered macros activate at their `#include` line instead
-/// (`PreExpandedExternal::activation_line`).
-fn local_macro_activation(tree: &Tree, src: &str) -> HashMap<String, usize> {
+/// Where each file-LOCAL macro is defined and undefined: the line start
+/// bytes of its `#define`s and its `#undef`s. A use STRICTLY BEFORE the
+/// first `#define` predates the definition and, per the C preprocessor, must
+/// NOT expand: `#define Simplify DontCallSimplify` at re2/simplify.cc:201
+/// protects the out-of-line def `Regexp* Regexp::Simplify()` at :180 and the
+/// call at :31, which both keep the real name. A use after an `#undef` keeps
+/// its name the same way.
+fn local_macro_lines(tree: &Tree, src: &str) -> HashMap<String, (Vec<usize>, Vec<usize>)> {
     let line_starts = line_start_offsets(src);
-    let mut out: HashMap<String, usize> = HashMap::new();
+    let mut out: HashMap<String, (Vec<usize>, Vec<usize>)> = HashMap::new();
     walk_macro_defs(tree, src.as_bytes(), |name, m, _span| {
-        let byte = line_starts.get(m.def_line).copied().unwrap_or(0);
-        out.entry(name)
-            .and_modify(|b| *b = (*b).min(byte))
-            .or_insert(byte);
+        out.entry(name).or_default().0.push(line_starts.get(m.def_line).copied().unwrap_or(0));
+    });
+    walk_macro_undefs(tree, src.as_bytes(), |name, node| {
+        out.entry(name).or_default().1.push(node.start_byte());
     });
     out
 }
@@ -271,19 +269,25 @@ fn compute_splices_inner(
         return Vec::new();
     }
     // Per the C preprocessor, an object-like `#define` applies only to text
-    // AT/AFTER its directive. Uses of a file-local macro name before its own
-    // `#define` (re2 `Simplify` → `DontCallSimplify`) must keep the real name.
+    // AT/AFTER its directive and until an `#undef`. Uses of a file-local
+    // macro name before its own `#define` (re2 `Simplify` →
+    // `DontCallSimplify`) must keep the real name.
     // The same holds for a gathered macro: it is defined from the `#include`
     // line that brings it in, so a use above that line keeps its name.
-    let local_activation = local_macro_activation(tree, src);
+    let local_lines = local_macro_lines(tree, src);
     let include_starts: Vec<usize> = include_lines(src).into_iter().map(|(b, _)| b).collect();
-    let activation = |word: &str| -> Option<usize> {
-        let local = local_activation.get(word).copied();
+    let defined_at = |word: &str, at: usize| -> Option<bool> {
+        let (defs, undefs) = local_lines.get(word).map_or((&[][..], &[][..]), |(d, u)| (&d[..], &u[..]));
         let gathered = external.activation_line(word, &include_starts);
-        match (local, gathered) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
+        if defs.is_empty() && gathered.is_none() {
+            return None;
         }
+        Some(
+            defs.iter()
+                .copied()
+                .chain(gathered)
+                .any(|from| definition_counts_at(from, definition_end(from, undefs), at)),
+        )
     };
     let excludes = exclusion_spans(tree, expand_region_bodies);
     // The HARD exclusions (strings/comments/directives) a context-free-safe
@@ -364,11 +368,11 @@ fn compute_splices_inner(
             }
             if let Some(m) = eff.get(word) {
                 // A use before its `#define` (or the `#include` bringing it
-                // in) predates the definition — leave it unexpanded (C
-                // preprocessor position semantics). `start` and the activation
-                // byte are both original coordinates, so the comparison is
-                // frame-consistent.
-                if activation(word).is_some_and(|act| start < act) {
+                // in), or after an `#undef`, is no macro use — leave it
+                // unexpanded (C preprocessor position semantics). `start` and
+                // the directive bytes are both original coordinates, so the
+                // comparison is frame-consistent.
+                if defined_at(word, start) == Some(false) {
                     continue;
                 }
                 if m.params.is_some() && is_clean_call {

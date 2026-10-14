@@ -2195,7 +2195,7 @@ mod pack_symmetry {
                 .unwrap_or_else(|| panic!("{name} use minted at {row}:{col}: {:?}", fa.refs()))
         };
         let (b0, a1, a2) = (at("B", 1, 11), at("A", 1, 17), at("A", 3, 11));
-        assert!(fa.is_premature_macro_use(b0), "B above its include is not a macro use");
+        assert!(fa.is_inactive_macro_use(b0), "B above its include is not a macro use");
         assert!(fa.ref_delegates(b0).is_empty());
         assert_eq!(fa.ref_delegates(a1), ["B".to_string()]);
         assert_eq!(fa.ref_delegates(a2), ["B".to_string(), "F".to_string()]);
@@ -2304,6 +2304,43 @@ mod pack_symmetry {
         };
         assert!(!gd(0).iter().any(|d| d.span.start.row == 1), "above: {:?}", gd(0));
         assert!(gd(2).iter().any(|d| d.span.start.row == 1), "below: {:?}", gd(2));
+    }
+
+    #[test]
+    fn a_use_below_undef_is_not_a_macro_use() {
+        // Below `#undef W` the call is no longer spelled through `W`: it
+        // reaches neither `F` by delegation nor `W`'s `#define` by gd.
+        let src = "int F(int x);\n#define W(x) F(x)\nint a = W(1);\n#undef W\nint b = W(2);\n";
+        let fa = cpp(src);
+        let at = |row: usize| {
+            fa.refs()
+                .iter()
+                .position(|r| r.target_name == "W" && r.span.start == tree_sitter::Point::new(row, 8))
+                .unwrap_or_else(|| panic!("W use minted on row {row}: {:?}", fa.refs()))
+        };
+        assert_eq!(fa.ref_delegates(at(2)), ["F".to_string()]);
+        assert!(fa.ref_delegates(at(4)).is_empty());
+        assert!(fa.is_inactive_macro_use(at(4)), "W below its #undef is not a macro use");
+
+        let idx = crate::index::module_index::ModuleIndex::new_for_test();
+        let store = FileStore::new();
+        let key = FileKey::Path(PathBuf::from("/tmp/undef_use.c"));
+        let gd = |row: usize| {
+            resolve(&store, &fa, key.clone(), tree_sitter::Point::new(row, 8), Some(&idx), OverrideScope::default())
+                .with_source(src)
+                .definitions()
+        };
+        assert!(gd(2).iter().any(|d| d.span.start.row == 1), "W above the #undef reaches its #define");
+        assert!(!gd(4).iter().any(|d| d.span.start.row == 1), "W below the #undef does not: {:?}", gd(4));
+
+        let target = match resolve_symbol(&fa, tree_sitter::Point::new(0, 4), None) {
+            Some(ResolvedTarget::Target(t)) => t,
+            other => panic!("F target: {other:?}"),
+        };
+        store.insert_workspace(PathBuf::from("/tmp/undef_use.c"), fa.clone());
+        let results = refs_to(&store, None, &target, RoleMask::EDITABLE);
+        assert!(results.iter().any(|r| r.span.start == tree_sitter::Point::new(2, 8)), "W(1) reaches F: {results:?}");
+        assert!(!results.iter().any(|r| r.span.start == tree_sitter::Point::new(4, 8)), "W(2) does not: {results:?}");
     }
 
     #[test]

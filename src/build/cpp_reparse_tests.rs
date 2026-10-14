@@ -1023,6 +1023,30 @@ fn include_lines_are_the_lines_the_include_hash_keys_on() {
 }
 
 #[test]
+fn macro_does_not_expand_uses_after_its_undef() {
+    let mut p = cpp_parser();
+    // Redefined with the same body: a table keeps one body per name.
+    let src = "#define FOO bar\nint FOO;\n#undef FOO\nint FOO2 = FOO;\n#define FOO bar\nint q = FOO;\n";
+    let tree = parse(&mut p, src);
+    let (rewritten, _map) = preprocess_with(&tree, src, &PreExpandedExternal::empty());
+    assert!(rewritten.contains("int bar;"), "use before the #undef expands: {rewritten}");
+    assert!(rewritten.contains("int FOO2 = FOO;"), "use after the #undef keeps its name: {rewritten}");
+    assert!(!rewritten.contains("int q = FOO;"), "use after the redefinition expands again: {rewritten}");
+}
+
+#[test]
+fn a_definition_counts_until_the_next_undef() {
+    // `#define` on line 2, `#undef` on 5 and 7.
+    let end = definition_end(2, &[5, 7]);
+    assert_eq!(end, Some(5));
+    assert!(!definition_counts_at(2, end, 1));
+    assert!(definition_counts_at(2, end, 3));
+    assert!(!definition_counts_at(2, end, 6));
+    // Visible from the top (a gathered macro), undefined on line 0.
+    assert!(!definition_counts_at(0, definition_end(0, &[0]), 4));
+}
+
+#[test]
 fn macro_still_expands_uses_after_its_define() {
     // The position guard must not suppress the normal case: a use after the
     // `#define` still expands.
@@ -1290,3 +1314,4 @@ fn gather_cache_invalidate_predicate_selective() {
     assert_eq!(*cache.get_or_fill(1, 0, || panic!("1 still cached")), 1);
     assert_eq!(*cache.get_or_fill(3, 0, || panic!("3 still cached")), 3);
 }
+
