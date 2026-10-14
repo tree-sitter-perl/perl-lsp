@@ -36,6 +36,9 @@ pub use crate::model::file_analysis::{CachedModule, SubInfo};
 /// Set on an open-doc overlay's file version (`set_open_caller`), so it is
 /// never equal to a registration generation of the same path.
 pub(crate) const OPEN_VERSION_BIT: u64 = 1 << 63;
+/// Set beside `OPEN_VERSION_BIT` on a version that counts publishes, so it
+/// never equals one taken from the buffer's text.
+pub(crate) const OPEN_COUNTED_BIT: u64 = 1 << 62;
 
 type InferredTypeOwned = crate::model::file_analysis::InferredType;
 

@@ -618,11 +618,21 @@ impl ModuleIndex {
 
     /// The open-doc build of `path` is now `analysis`: long-distance joins
     /// read it in place of the indexed disk copy until `mark_doc_closed`.
-    pub fn set_open_caller(&self, path: &std::path::Path, analysis: Arc<FileAnalysis>) {
+    /// `of_text_alone` says `analysis` is a function of its buffer's text
+    /// (no plugin gate could apply to it): its version is then the text's
+    /// stamp, so undoing an edit restores the version every answer that
+    /// read the buffer recorded, and they verify instead of recomputing.
+    pub fn set_open_caller(&self, path: &std::path::Path, analysis: Arc<FileAnalysis>, of_text_alone: bool) {
         let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        // Every publish moves the epoch, whichever way the version is taken.
         let n = self.core.open_bumps.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let version = if of_text_alone && analysis.source_stamp != 0 {
+            super::OPEN_VERSION_BIT | (analysis.source_stamp & !(super::OPEN_VERSION_BIT | super::OPEN_COUNTED_BIT))
+        } else {
+            super::OPEN_VERSION_BIT | super::OPEN_COUNTED_BIT | n
+        };
         let cached = Arc::new(crate::index::sealed::cached_module(canon.clone(), analysis));
-        self.core.open_callers.insert(canon, (super::OPEN_VERSION_BIT | n, cached));
+        self.core.open_callers.insert(canon, (version, cached));
     }
 
     /// The transitive consumers of `path`'s last-recorded surface — the

@@ -2468,12 +2468,12 @@ fn param_type_reads_an_open_buffer_as_its_caller() {
         "package App;\nsub run { Greeter->greet(bless({}, 'Admin')) }\n1;\n",
         "App",
     );
-    idx.set_open_caller(&app.path, Arc::clone(&typing.analysis()));
+    idx.set_open_caller(&app.path, Arc::clone(&typing.analysis()), false);
     assert_eq!(greet_param_type(&greeter, &idx).unwrap().class_name().as_deref(), Some("Admin"));
     // A buffer that drops the call stops being a caller, even though the
     // disk copy still has one.
     let removed = parse_source_to_cached("package App;\nsub run { 1 }\n1;\n", "App");
-    idx.set_open_caller(&app.path, Arc::clone(&removed.analysis()));
+    idx.set_open_caller(&app.path, Arc::clone(&removed.analysis()), false);
     assert_eq!(greet_param_type(&greeter, &idx), None);
     idx.mark_doc_closed(&app.path);
     assert_eq!(greet_param_type(&greeter, &idx).unwrap().class_name().as_deref(), Some("User"));

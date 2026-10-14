@@ -489,13 +489,11 @@ impl CrossFileLookup for ModuleIndex {
         use crate::model::witnesses::caller_slice::{CallerFrame, CallerRead, CallerSlice};
         crate::model::witnesses::engine::note_file(self, &cached.path);
         let path = &cached.path;
-        // A gated view is rebuilt per fired set, and an unsaved buffer has no
-        // stamp: both are cut from the view itself, kept nowhere.
-        let stamp = if cached.analysis().plugin.gated_emissions.is_empty() { self.source_stamp(path) } else { None };
-        let Some(stamp) = stamp else {
+        let Some(SliceKeeping { stamp, persisted }) = self.slice_keeping(cached) else {
             crate::util::ghost_stats::count("caller_slice.unkept");
             return CallerRead::cut(&self.whole_present(cached), key);
         };
+        let cut_from = || if persisted { self.whole_ungated(cached) } else { self.whole_present(cached) };
         let cache = &self.core.caller_slices;
         let path_str = path.to_string_lossy();
         // Only what neither memory nor the store holds is cut, and only the
@@ -506,16 +504,19 @@ impl CrossFileLookup for ModuleIndex {
         let frame = match cache.frame(path, stamp) {
             Some(f) => f,
             None => {
-                let loaded = self
-                    .with_rows_conn(|c| load_caller_slice(c, &path_str, FRAME_KEY, stamp))
+                let loaded = persisted
+                    .then(|| self.with_rows_conn(|c| load_caller_slice(c, &path_str, FRAME_KEY, stamp)))
+                    .flatten()
                     .flatten()
                     .and_then(|body| decode_slice_body::<CallerFrame>(&body));
                 let frame = Arc::new(loaded.unwrap_or_else(|| {
                     crate::util::ghost_stats::count("caller_slice.cut_frame");
-                    let fa = whole.get_or_insert_with(|| self.whole_ungated(cached));
+                    let fa = whole.get_or_insert_with(cut_from);
                     let frame = CallerFrame::of(fa);
-                    if let Some(body) = crate::index::module_cache::encode_slice_body(&frame) {
-                        rows.push((path_str.to_string(), FRAME_KEY.to_string(), stamp, body));
+                    if persisted {
+                        if let Some(body) = crate::index::module_cache::encode_slice_body(&frame) {
+                            rows.push((path_str.to_string(), FRAME_KEY.to_string(), stamp, body));
+                        }
                     }
                     frame
                 }));
@@ -529,8 +530,9 @@ impl CrossFileLookup for ModuleIndex {
                 s
             }
             None => {
-                let loaded = self
-                    .with_rows_conn(|c| load_caller_slice(c, &path_str, key, stamp))
+                let loaded = persisted
+                    .then(|| self.with_rows_conn(|c| load_caller_slice(c, &path_str, key, stamp)))
+                    .flatten()
                     .flatten()
                     .and_then(|body| decode_slice_body::<CallerSlice>(&body));
                 let mut slice = match loaded {
@@ -540,10 +542,12 @@ impl CrossFileLookup for ModuleIndex {
                     }
                     None => {
                         crate::util::ghost_stats::count("caller_slice.cut");
-                        let fa = whole.get_or_insert_with(|| self.whole_ungated(cached));
+                        let fa = whole.get_or_insert_with(cut_from);
                         let s = CallerSlice::of(fa, &frame, key, Vec::new());
-                        if let Some(body) = crate::index::module_cache::encode_slice_body(&s) {
-                            rows.push((path_str.to_string(), key.to_string(), stamp, body));
+                        if persisted {
+                            if let Some(body) = crate::index::module_cache::encode_slice_body(&s) {
+                                rows.push((path_str.to_string(), key.to_string(), stamp, body));
+                            }
                         }
                         s
                     }
@@ -572,10 +576,14 @@ impl CrossFileLookup for ModuleIndex {
         misses: Vec<crate::model::witnesses::WitnessAttachment>,
     ) -> crate::model::witnesses::caller_slice::CallerRead {
         crate::util::ghost_stats::count("caller_slice.widen");
-        let stamp = if cached.analysis().plugin.gated_emissions.is_empty() { self.source_stamp(&cached.path) } else { None };
-        let Some(stamp) = stamp else {
+        let Some(SliceKeeping { stamp, persisted }) = self.slice_keeping(cached) else {
             return read.widened(&self.whole_present(cached), key, misses);
         };
+        if !persisted {
+            let wider = read.widened(&self.whole_present(cached), key, misses);
+            self.core.caller_slices.keep_slice(&cached.path, key, stamp, Arc::clone(&wider.slice));
+            return wider;
+        }
         let wider = read.widened(&self.whole_ungated(cached), key, misses);
         let cache = &self.core.caller_slices;
         cache.keep_slice(&cached.path, key, stamp, Arc::clone(&wider.slice));
@@ -1291,5 +1299,30 @@ impl ModuleIndex {
                     )
             })
             .collect()
+    }
+}
+
+/// Where a file's caller slices are kept, under which stamp.
+struct SliceKeeping {
+    stamp: u64,
+    /// In the store as well as memory; an open buffer's are memory only.
+    persisted: bool,
+}
+
+impl ModuleIndex {
+    /// An open buffer's slices are kept in memory under its overlay version
+    /// (its text's, or one per publish); a disk file's under its source
+    /// stamp, in the store too. A gated disk view is rebuilt per fired set,
+    /// so it is kept nowhere.
+    fn slice_keeping(&self, cached: &Arc<CachedModule>) -> Option<SliceKeeping> {
+        if let Some(open) = self.core.open_callers.get(&cached.path) {
+            if Arc::ptr_eq(&open.1, cached) {
+                return Some(SliceKeeping { stamp: open.0, persisted: false });
+            }
+        }
+        if !cached.analysis().plugin.gated_emissions.is_empty() {
+            return None;
+        }
+        self.source_stamp(&cached.path).map(|stamp| SliceKeeping { stamp, persisted: true })
     }
 }
