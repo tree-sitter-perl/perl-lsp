@@ -2129,6 +2129,48 @@ mod pack_symmetry {
     }
 
     #[test]
+    fn delegation_through_an_included_header_reaches_every_config_variant() {
+        // The delegating `#define` lives in a header, in two config variants
+        // forwarding to different callees. The using file's build sees both
+        // through its include closure and mints the edge on the use site, so
+        // gr on either callee lists `WRAP(1)` with no query-time macro scan.
+        let dir = std::env::temp_dir().join("perl_lsp_delegation_header");
+        std::fs::create_dir_all(&dir).unwrap();
+        let header_src = "int real(int x);\nint real_t(int x);\n#ifdef THREADED\n#define WRAP(x) real_t(x)\n#else\n#define WRAP(x) real(x)\n#endif\n";
+        std::fs::write(dir.join("wrap.h"), header_src).unwrap();
+        let use_src = "#include \"wrap.h\"\nvoid f() { WRAP(1); }\n";
+        let use_path = dir.join("use.c");
+        std::fs::write(&use_path, use_src).unwrap();
+        let fa = crate::build::language_driver::LanguageRegistry::with_enabled()
+            .for_id("cpp")
+            .unwrap()
+            .analyze_with_path(use_src, Some(&use_path));
+        let wrap = fa
+            .refs()
+            .iter()
+            .position(|r| r.target_name == "WRAP" && r.span.start == tree_sitter::Point::new(1, 11))
+            .unwrap_or_else(|| panic!("WRAP use minted: {:?}", fa.refs()));
+        let mut delegates = fa.ref_delegates(wrap).to_vec();
+        delegates.sort();
+        assert_eq!(delegates, vec!["real".to_string(), "real_t".to_string()]);
+
+        let header = cpp(header_src);
+        let store = FileStore::new();
+        store.insert_workspace(use_path, fa);
+        for (row, name) in [(0, "real"), (1, "real_t")] {
+            let target = match resolve_symbol(&header, tree_sitter::Point::new(row, 5), None) {
+                Some(ResolvedTarget::Target(t)) => t,
+                other => panic!("{name} target: {other:?}"),
+            };
+            let results = refs_to(&store, None, &target, RoleMask::EDITABLE);
+            assert!(
+                results.iter().any(|r| r.span.start == tree_sitter::Point::new(1, 11) && !r.rewritable),
+                "WRAP(1) is a non-rewritable reference to {name}: {results:?}"
+            );
+        }
+    }
+
+    #[test]
     fn file_scope_global_def_reaches_bare_reads() {
         let store = FileStore::new();
         let a = cpp("int global_counter;\n");

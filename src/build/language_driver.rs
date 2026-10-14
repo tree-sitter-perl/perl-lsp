@@ -604,6 +604,12 @@ impl PackDriver {
         macro_defs: Vec<crate::model::file_analysis::MacroDef>,
     ) {
         fa.pack.macro_defs = macro_defs;
+        if self.collect_macro_defs.is_some() {
+            let delegations = crate::util::timings::phase("cpp.macro_delegations", || {
+                macro_delegations(fa, &ctx.external)
+            });
+            fa.adopt_macro_delegations(delegations);
+        }
         apply_attribute_macros(fa, recovered);
         // Access-specifier regions: a fresh parse of the ORIGINAL source
         // (spans already in original coords, no remap needed) tags each
@@ -1157,6 +1163,54 @@ fn remap_spans(
         let crate::model::file_analysis::DomainSite { slot: _, value: _, slot_span } = ds;
         *slot_span = rspan(*slot_span);
     }
+}
+
+/// The delegation chain of every macro name this file's refs use: the
+/// transitive callees (`#define A(x) B(x)`, `#define B(x) F(x)` gives
+/// `A → [B, F]`) through this file's OWN `#define`s and its include
+/// closure's gathered table — exactly the macros its preprocessor would
+/// expand, so the edge needs no query-time visibility check. Every config
+/// variant of a name contributes (`Macro::variant_delegates`).
+#[cfg(feature = "pack-langs")]
+fn macro_delegations(
+    fa: &FileAnalysis,
+    external: &crate::build::cpp_reparse::PreExpandedExternal,
+) -> std::collections::BTreeMap<String, Box<[String]>> {
+    let mut own: std::collections::HashMap<&str, Vec<String>> = std::collections::HashMap::new();
+    for m in &fa.pack.macro_defs {
+        if let Some(d) = &m.delegate {
+            own.entry(m.name.as_str()).or_default().push(d.clone());
+        }
+    }
+    let direct = |name: &str| -> Vec<String> {
+        let mut v = own.get(name).cloned().unwrap_or_default();
+        v.extend(external.delegates_of(name));
+        v
+    };
+    let names = &fa.pack.names;
+    let used: std::collections::BTreeSet<&str> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.can_spell_macro_use())
+        .map(|r| r.unqualified_target_name(names))
+        .collect();
+    let mut out = std::collections::BTreeMap::new();
+    for name in used {
+        let mut chain: Vec<String> = Vec::new();
+        let mut frontier = direct(name);
+        while let Some(d) = frontier.pop() {
+            if d == name || chain.contains(&d) {
+                continue;
+            }
+            frontier.extend(direct(&d));
+            chain.push(d);
+        }
+        if !chain.is_empty() {
+            chain.sort();
+            out.insert(name.to_string(), chain.into_boxed_slice());
+        }
+    }
+    out
 }
 
 /// Re-mint a variable read at every macro use the transform ERASED from the

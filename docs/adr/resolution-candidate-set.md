@@ -172,7 +172,8 @@ The spike's axes live in CandidateSet construction:
   `Result` REFUSES on alias-spelled sites (full-or-refuse) instead of
   silently skipping.
 - **delegation / `Specializes` / domain edges** — consumers declare
-  traversal: references walks delegation aliases (never the domain
+  traversal: references reaches macro-spelled uses through the delegation
+  keys the build minted on them (never the domain
   bridge); `implementations()` walks `Specializes` families and the
   enum-def → field-slot domain bridge; goto-def sees through direct
   delegation on the top-ranked macro variant.
