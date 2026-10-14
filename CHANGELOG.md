@@ -137,10 +137,22 @@ crate / VS Code extension versions.
 - **Files with long fluent chains or many `return`s build faster.** A
   chain of calls no longer costs time quadratic in its length.
 
-### Python (alpha)
+### C++, Python, R and CMake
 
-- **Goto-def on `obj.m()` reaches the method.** A method call through a
-  receiver used to find nothing; `obj.m` without a call stays a value read.
+- **Folding.** Class bodies, function bodies and blocks fold in every
+  pack language; they used to return no folding ranges.
+- **C++ data members are fields, not calls.** `o.count` without an
+  argument list reads a field, so goto-def, hover and references land on
+  the data member, and a method and a field of the same name stay apart.
+- **C++ function-pointer members resolve.** `int (*read)(char *buf);`
+  is a field, and `d->read(buf)` reaches it.
+- **C++ bare member names inside a method keep their links.** A bare
+  field or sibling call in a method body (implicit `this`) used to lose
+  its resolution after the first cross-file refresh in the editor, and a
+  function's second `return` didn't count toward its return type.
+- **Python goto-def on `obj.m()` reaches the method.** A method call
+  through a receiver used to find nothing; `obj.m` without a call stays a
+  value read.
 
 ### Scoping
 
@@ -158,6 +170,8 @@ crate / VS Code extension versions.
   offered, because only declared keys were; `$h{` and `$self->{` now
   list them. On DateTime, `$self->{` used to offer 2 keys and now
   offers the slots its constructor writes.
+- **Lexical methods complete after `->`.** A `my method hidden` in scope
+  is offered as `&hidden`, the only spelling that dispatches to it.
 
 ## v0.7.0 — 2026-08-31
 
