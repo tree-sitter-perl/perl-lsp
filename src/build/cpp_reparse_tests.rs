@@ -123,6 +123,7 @@ fn two_tier_matches_single_tier_expansion() {
                 guards: Vec::new(),
                 def_line: 0,
                 variant_delegates: Vec::new(),
+                via_include: None,
             },
         );
     };
@@ -883,6 +884,7 @@ fn macro_table(defs: &[(&str, Option<&[&str]>, &str)]) -> PreExpandedExternal {
                 guards: Vec::new(),
                 def_line: 0,
                 variant_delegates: Vec::new(),
+                via_include: None,
             },
         );
     }
@@ -987,6 +989,37 @@ Regexp* Foo() { return Simplify(); }\n";
         !rewritten.starts_with("Regexp* Regexp::DontCallSimplify"),
         "pre-directive def NOT expanded: {rewritten}"
     );
+}
+
+#[test]
+fn gathered_macro_does_not_expand_uses_before_its_include() {
+    // A gathered macro is defined from the `#include` line bringing it in
+    // (`via_include` = that line's ordinal), so a use above it keeps its name.
+    let mut p = cpp_parser();
+    let mut ext = std::collections::BTreeMap::new();
+    ext.insert(
+        "ALIAS".to_string(),
+        Macro {
+            params: None,
+            body: "real_name".to_string(),
+            guards: Vec::new(),
+            def_line: 0,
+            variant_delegates: Vec::new(),
+            via_include: Some(1),
+        },
+    );
+    let external = PreExpandedExternal::from_raw(std::sync::Arc::new(ext));
+    let src = "#include \"a.h\"\nint x = ALIAS;\n#include \"b.h\"\nint y = ALIAS;\n";
+    let tree = parse(&mut p, src);
+    let (rewritten, _map) = preprocess_with(&tree, src, &external);
+    assert!(rewritten.contains("int x = ALIAS;"), "use above the include keeps its name: {rewritten}");
+    assert!(rewritten.contains("int y = real_name;"), "use below the include expands: {rewritten}");
+}
+
+#[test]
+fn include_lines_are_the_lines_the_include_hash_keys_on() {
+    let src = "// x\n#include <a.h>\n  #  include \"b.h\"\nint include;\n";
+    assert_eq!(include_lines(src), vec![(5, 1), (20, 2)]);
 }
 
 #[test]

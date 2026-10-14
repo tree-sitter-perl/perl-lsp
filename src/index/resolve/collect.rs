@@ -1037,7 +1037,8 @@ pub(super) fn collect_from_analysis(
         // `#define IncRef(sv) Perl_Inc(sv)`, or the object-like alias
         // `#define op_prune_chain_head Perl_op_prune_chain_head`) IS a use of
         // the target — the backward see-through, minted by the build with
-        // this file's own preprocessor view (`RefTable::delegations`).
+        // this file's own preprocessor view at the use's position
+        // (`MacroUses`).
         // Bypasses the package gates below (the delegation edge already
         // pinned the identity) and is never rewritable (the token spells the
         // MACRO's name).
@@ -1242,7 +1243,9 @@ pub(super) fn collect_from_analysis(
                 None => true,
                 Some(id) => {
                     let s = analysis.symbol(id);
-                    macro_visible_here
+                    // A use above the macro's `#define` (or its `#include`)
+                    // is not a macro use: it stands on the bound symbol.
+                    (macro_visible_here && !analysis.is_premature_macro_use(ri))
                         || analysis.names_macro_def(&s.name, Some(s.selection_span))
                         || analysis.symbol_is_file_scope_value(s)
                 }

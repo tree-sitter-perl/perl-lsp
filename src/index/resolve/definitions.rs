@@ -470,6 +470,30 @@ impl<'a> CandidateSet<'a> {
     /// the never-pruned ranked multi-def is the documented residual the
     /// spike's ranking axis fills in (see the ADR's merge plan).
     pub fn definitions(&self) -> Vec<RefLocation> {
+        let defs = self.definitions_of_any_lane();
+        // A token where its macro is not defined is no macro use, so no lane
+        // answers it with that macro's `#define`.
+        let inactive = self.source.and_then(|src| word_at_point(src, self.point)).filter(|w| {
+            self.origin.macro_inactive_at(w, self.point)
+        });
+        let Some(word) = inactive else { return defs };
+        defs.into_iter().filter(|d| !self.is_macro_def_site(word, d)).collect()
+    }
+
+    /// Whether `loc` is a `#define` of `name`, here or in an indexed file.
+    fn is_macro_def_site(&self, name: &str, loc: &RefLocation) -> bool {
+        if file_key_eq(&loc.key, &self.origin_key) {
+            return self.origin.names_macro_def(name, Some(loc.span));
+        }
+        self.idx().is_some_and(|idx| {
+            idx.def_candidates(name).iter().any(|c| {
+                file_key_eq(&loc.key, &FileKey::Path(c.path.clone()))
+                    && c.analysis.names_macro_def(name, Some(loc.span))
+            })
+        })
+    }
+
+    fn definitions_of_any_lane(&self) -> Vec<RefLocation> {
         let analysis = self.origin;
         let point = self.point;
 
@@ -506,7 +530,11 @@ impl<'a> CandidateSet<'a> {
         // see-through target, labeled. `docs/adr/macro-handling.md`.
         if self.pack {
             if let (Some(source), Some(idx)) = (self.source, self.idx()) {
-                if let Some(word) = word_at_point(source, point) {
+                // A token above its macro's `#define` (or the `#include`
+                // bringing it in) is not a macro use, so the lane stands aside.
+                if let Some(word) =
+                    word_at_point(source, point).filter(|w| !analysis.macro_inactive_at(w, point))
+                {
                     // Shape gate: a function-like `#define F(x)` expands only at
                     // call shape `F(`. At a parenless site it can't claim the
                     // token — drop those variants so a parenless type token

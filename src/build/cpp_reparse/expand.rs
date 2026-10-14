@@ -242,8 +242,8 @@ fn line_start_offsets(src: &str) -> Vec<usize> {
 /// re2/simplify.cc:201 protects the out-of-line def `Regexp* Regexp::Simplify()`
 /// at :180 and the call at :31, which both keep the real name. Keyed by the
 /// FIRST definition (min row) so a later redefinition never retro-activates
-/// earlier uses. External (`#include`d) macros are absent here — they are
-/// active from the file's top, since we don't model include ordering.
+/// earlier uses. Gathered macros activate at their `#include` line instead
+/// (`PreExpandedExternal::activation_line`).
 fn local_macro_activation(tree: &Tree, src: &str) -> HashMap<String, usize> {
     let line_starts = line_start_offsets(src);
     let mut out: HashMap<String, usize> = HashMap::new();
@@ -273,7 +273,18 @@ fn compute_splices_inner(
     // Per the C preprocessor, an object-like `#define` applies only to text
     // AT/AFTER its directive. Uses of a file-local macro name before its own
     // `#define` (re2 `Simplify` → `DontCallSimplify`) must keep the real name.
+    // The same holds for a gathered macro: it is defined from the `#include`
+    // line that brings it in, so a use above that line keeps its name.
     let local_activation = local_macro_activation(tree, src);
+    let include_starts: Vec<usize> = include_lines(src).into_iter().map(|(b, _)| b).collect();
+    let activation = |word: &str| -> Option<usize> {
+        let local = local_activation.get(word).copied();
+        let gathered = external.activation_line(word, &include_starts);
+        match (local, gathered) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    };
     let excludes = exclusion_spans(tree, expand_region_bodies);
     // The HARD exclusions (strings/comments/directives) a context-free-safe
     // macro is *never* exempt from — only computed for the wide fallback, where
@@ -352,12 +363,12 @@ fn compute_splices_inner(
                 continue;
             }
             if let Some(m) = eff.get(word) {
-                // A use before its own file-local `#define` predates the
-                // definition — leave it unexpanded (C preprocessor position
-                // semantics). External macros are absent from the map (always
-                // active). `start` and the activation byte are both original
-                // coordinates, so the comparison is frame-consistent.
-                if local_activation.get(word).is_some_and(|&act| start < act) {
+                // A use before its `#define` (or the `#include` bringing it
+                // in) predates the definition — leave it unexpanded (C
+                // preprocessor position semantics). `start` and the activation
+                // byte are both original coordinates, so the comparison is
+                // frame-consistent.
+                if activation(word).is_some_and(|act| start < act) {
                     continue;
                 }
                 if m.params.is_some() && is_clean_call {
