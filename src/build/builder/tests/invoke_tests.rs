@@ -108,3 +108,45 @@ fn a_postfix_deref_argument_spreads() {
     let fa = build_fa(&src);
     assert_eq!(class(fa.sub_return_type_at_arity("probe", None)).as_deref(), Some("Base"));
 }
+
+/// Each free call's `Invoke`: (callee as written, resolved in this file,
+/// which arguments spread), in source order.
+fn free_calls(src: &str) -> Vec<(String, bool, Vec<bool>)> {
+    use crate::model::witnesses::{CallArg, Callee, WitnessPayload};
+    let mut out: Vec<_> = build_fa(src)
+        .witnesses
+        .all()
+        .iter()
+        .filter_map(|w| match &w.payload {
+            WitnessPayload::Invoke { callee: Callee::Function { name, local }, args, .. } => Some((
+                w.span.start,
+                name.clone(),
+                local.is_some(),
+                args.iter().flatten().map(|a| matches!(a, CallArg::Spread(_))).collect(),
+            )),
+            _ => None,
+        })
+        .collect();
+    out.sort_by_key(|c| (c.0.row, c.0.column));
+    out.dedup();
+    out.into_iter().map(|(_, n, l, a)| (n, l, a)).collect()
+}
+
+#[test]
+fn a_free_call_is_an_invoke_on_its_arguments() {
+    // `later` is defined below its call, so it resolves after the walk.
+    let src = "my @a;\nmy $x = later(1, @a);\nsub later { return Base->new }\n1;\n";
+    assert_eq!(free_calls(src), vec![("later".into(), true, vec![false, true])]);
+    let src = format!("{PRELUDE}sub probe {{ return later(1) }}\nsub later {{ return Kid->new }}\n1;\n");
+    assert_eq!(class(build_fa(&src).sub_return_type_at_arity("probe", None)).as_deref(), Some("Kid"));
+}
+
+#[test]
+fn a_callee_this_file_never_defines_is_looked_up_across_files() {
+    let src = "my $x = imported(2);\nmy $y = Other::qualified(3);\nmy $z = join(',', 4);\n1;\n";
+    assert_eq!(
+        free_calls(src),
+        vec![("imported".into(), false, vec![false])],
+        "a qualified call names its package and a builtin is no sub, so neither asks the exporters"
+    );
+}

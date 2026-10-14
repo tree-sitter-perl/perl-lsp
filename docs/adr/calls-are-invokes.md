@@ -52,8 +52,12 @@ children less the grammar's extras, so a comment is not an argument.
 
 - Pack free calls (`@ref.call` beside `@expr.call`) mint `Function`. A
   qualified pack call (`@ref.qcall`) mints no call value yet.
-- Perl's free calls still edge to the local `Symbol` and carry no arguments
-  (`TODO(perl-free-invoke)` in `emit.rs`).
+- Perl's free calls mint `Function` too. The walk resolves a callee defined
+  above the call; `resolve_forward_expr_witnesses` resolves one defined
+  below it, and only a name still unresolved after that goes to the
+  exporters. A qualified call that names another package (`Other::f()`)
+  and a builtin mint no call value: the exporter lookup asks by bare name,
+  and a builtin is not a sub.
 - A keyword argument (`f(x=1)`) is a positional `One`; nothing yet binds it
   by name.
 - A function-like macro whose return is its n-th argument keeps its
