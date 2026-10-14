@@ -137,7 +137,9 @@ The preprocessor reads top to bottom, so a name is a macro only below the
 line that defines it: its own `#define`, or for a gathered macro the
 `#include` line whose closure first defines it (`Macro::via_include`, an
 ordinal into the file's include lines; an include guard makes later
-includes of the same header no-ops, so the first one wins). Three
+includes of the same header no-ops, so the first one wins). The table
+keeps one body per name, but each config variant's delegate carries its
+own header's ordinal and counts only below that header's include. Three
 consumers read this:
 
 - **Expansion** leaves a use above that line unexpanded (re2's
