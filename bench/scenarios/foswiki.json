@@ -6,14 +6,10 @@
   },
   "readiness": {
     "file": "core/lib/Foswiki.pm",
-    "line": 1752,
-    "character": 6
+    "line": 1213,
+    "character": 16
   },
   "steps": [
-    {
-      "action": "open",
-      "file": "core/lib/Foswiki.pm"
-    },
     {
       "action": "hover",
       "file": "core/lib/Foswiki.pm",
@@ -22,20 +18,16 @@
       "name": "hover-param-web"
     },
     {
-      "action": "open",
-      "file": "core/lib/Foswiki/Func.pm"
-    },
-    {
       "action": "definition",
-      "file": "core/lib/Foswiki/Func.pm",
-      "line": 80,
-      "character": 40,
+      "file": "core/lib/Foswiki.pm",
+      "line": 1213,
+      "character": 16,
       "name": "def-normalizeWebTopicName"
     },
     {
       "action": "references",
       "file": "core/lib/Foswiki.pm",
-      "line": 1752,
+      "line": 1753,
       "character": 6,
       "name": "refs-normalizeWebTopicName"
     },
