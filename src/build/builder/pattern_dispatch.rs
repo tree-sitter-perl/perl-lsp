@@ -22,6 +22,7 @@ use crate::model::file_analysis::{DispatchCandidate, HandlerOwner, InferredType,
 use crate::build::plugin::{self, CaptureData, CaptureValue, MatchContext, PatternSpec};
 
 use super::{node_to_span, Builder};
+use crate::build::query_predicates::admits;
 
 /// A `#receiver-isa?` deferred predicate on a pattern: NOT a match-time
 /// filter (receiver isa is a cross-file, query-time question — see
@@ -35,12 +36,15 @@ struct ReceiverGate {
     target_class: String,
 }
 
+/// The one predicate a pattern may carry that is not evaluated at match time.
+const RECEIVER_ISA: &str = "receiver-isa?";
+
 /// Extract a pattern's `#receiver-isa? @cap "Class"` predicate, if any.
 /// Unknown predicate names land in `general_predicates` unevaluated —
 /// the binding's reservation this tier is built on.
 fn receiver_gate_for(query: &Query, pattern_index: usize) -> Option<ReceiverGate> {
     for p in query.general_predicates(pattern_index) {
-        if &*p.operator != "receiver-isa?" {
+        if &*p.operator != RECEIVER_ISA {
             continue;
         }
         let mut cap = None;
@@ -109,6 +113,7 @@ fn cached_pattern_query(source: &str) -> Result<&'static Query, String> {
                     ));
                 }
             }
+            crate::build::query_predicates::check(&q, &language, &[RECEIVER_ISA])?;
             let leaked: &'static Query = Box::leak(Box::new(q));
             Ok(leaked)
         });
@@ -169,6 +174,9 @@ pub(crate) fn verify_pattern_expects(spec: &PatternSpec) -> Result<(), String> {
             let mut cursor = QueryCursor::new();
             let mut it = cursor.matches(query, tree.root_node(), ex.src.as_bytes());
             while let Some(m) = it.next() {
+                if !admits(query, m, tree.root_node()) {
+                    continue;
+                }
                 count += 1;
                 for c in m.captures {
                     let name = query.capture_names()[c.index as usize];
@@ -463,6 +471,9 @@ impl<'a> Builder<'a> {
             {
                 let mut it = cursor.matches(c.query, root, self.source);
                 while let Some(m) = it.next() {
+                    if !admits(c.query, m, root) {
+                        continue;
+                    }
                     let caps: Vec<(u32, Node<'a>)> =
                         m.captures.iter().map(|cap| (cap.index, cap.node)).collect();
                     if caps.is_empty() {
@@ -492,6 +503,9 @@ impl<'a> Builder<'a> {
                 {
                     let mut it = cursor.matches(*q, root, self.source);
                     while let Some(m) = it.next() {
+                        if !admits(q, m, root) {
+                            continue;
+                        }
                         let caps: Vec<(u32, Node<'a>)> =
                             m.captures.iter().map(|cap| (cap.index, cap.node)).collect();
                         if !caps.is_empty() {
@@ -616,8 +630,8 @@ impl<'a> Builder<'a> {
             // immutably, the projection pass needs `&mut self`.
             // Text predicates (#eq?, #any-of?, …) are evaluated
             // by the query engine here, since `matches` gets the
-            // source text; unknown predicate names pass through
-            // unfiltered (the deferred-predicate reservation).
+            // source text; structural ones (#has-parent?, …) by
+            // `admits`; `#receiver-isa?` is deferred to query time.
             let rounds_matches = crate::util::ghost_stats::timed("pd.collect", || {
                 self.collect_walk_matches(root, &specs, combined.as_ref())
             });
@@ -867,6 +881,9 @@ impl<'a> Builder<'a> {
                     let mut cursor = QueryCursor::new();
                     let mut it = cursor.matches(query, root, self.source);
                     while let Some(m) = it.next() {
+                        if !admits(query, m, root) {
+                            continue;
+                        }
                         let caps: Vec<(u32, Node<'a>)> =
                             m.captures.iter().map(|c| (c.index, c.node)).collect();
                         if !caps.is_empty() {

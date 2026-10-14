@@ -19,8 +19,8 @@ use std::path::PathBuf;
 use tower_lsp::lsp_types::Url;
 
 use crate::model::file_analysis::{
-    AccessKind, CompletionCandidate, CrossFileLookup, FileAnalysis, HandlerOwner, RefKind, Span,
-    SymKind,
+    AccessKind, CompletionCandidate, CrossFileLookup, FileAnalysis, HandlerOwner, MemberKind,
+    RefKind, Span, SymKind,
 };
 use crate::index::file_store::{FileKey, FileStore};
 

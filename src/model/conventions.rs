@@ -15,7 +15,7 @@
 //! whose name they handle: nothing in the model assumes a separator or a
 //! sigil (CLAUDE.md rule #12).
 
-use crate::model::file_analysis::{ClassSpelling, NameSpellings};
+use crate::model::file_analysis::{ClassSpelling, MemberNamespace, NameSpellings};
 
 /// Perl's name spellings: `::` qualifies, `$` / `@` / `%` lead variables.
 pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
@@ -23,6 +23,8 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     sigils: std::borrow::Cow::Borrowed(&['$', '@', '%']),
     class_spelling: ClassSpelling::Identity,
     root_package: Some(std::borrow::Cow::Borrowed("main")),
+    // A call reaches a sub, never a `field` of the same name.
+    member_namespace: MemberNamespace::PerFamily,
 };
 
 /// Split a possibly-qualified name into `(Option<package>, basename)`.
@@ -460,6 +462,7 @@ mod tests {
             sigils: std::borrow::Cow::Borrowed(&['$']),
             class_spelling: ClassSpelling::UseMap,
             root_package: None,
+            member_namespace: crate::model::file_analysis::MemberNamespace::PerFamily,
         };
         assert_eq!(super::split_qualified("App\\Models\\User", &php), (Some("App\\Models"), "User"));
         assert_eq!(super::name_match_key("App\\Models\\User", &php), "User");

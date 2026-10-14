@@ -20,7 +20,7 @@ pub struct LangPack {
     /// captured name alike.
     pub shape_name: fn(raw: &str) -> String,
     /// Name for defs with no name token (anonymous subs).
-    pub default_name: fn(kind: DefKind) -> Option<&'static str>,
+    pub default_name: fn(kind: DefCap) -> Option<&'static str>,
     /// Map a `@type.annot` token's text to a type — the pack predicate
     /// for languages whose ring 3 is partly in the tree (`x: int`).
     pub annot_type: fn(text: &str) -> Option<InferredType>,
@@ -42,36 +42,6 @@ pub struct LangPack {
     /// "which guard means which refinement" (rule #10); core just scopes
     /// the witness to the block.
     pub narrow_guard: fn(guard: Option<&str>, type_text: &str) -> Option<InferredType>,
-    /// Does calling `method` on a variable REBIND it — putting a moved-from
-    /// object back into a known state (`clear`/`reset`/`assign`/…)? Used to end
-    /// a moved-from region (and any narrowing) at the reset call, so a use after
-    /// it is clean. Pack-owned language vocab (like `op_map`): core asks the
-    /// value, never enumerates names itself.
-    pub rebind_method: fn(method: &str) -> bool,
-    /// Can a bare, receiver-less identifier resolve through an implicit
-    /// `this->` — both a field read (`return inner_;` = `this->inner_`) AND a
-    /// sibling method call (`foo()` = `this->foo()`)? True for C/C++ (the
-    /// receiver is elided for both members and methods); false for Python/R
-    /// (the receiver is mandatory for both). One language fact, not two: no
-    /// language elides fields but not methods. Gates the member-access half of
-    /// `language_driver::emit_return_fuel` — asked of the pack, never a
-    /// language-name branch.
-    pub implicit_this_members: bool,
-    /// Does this language have `#include`-style path tokens — a source-path
-    /// reference (the header IS the module, `#include` = `use`) that goto-def
-    /// resolves to a file and references reverses ("who includes this
-    /// header")? True for C/C++; false for languages whose imports are
-    /// name-keyed (Perl `use`, Python `import`). Gates the include-token lanes
-    /// in goto-def / references — asked of the pack, never a language-name
-    /// branch (the token is path-shaped, not name-shaped, so it stays ahead of
-    /// the name-keyed CandidateSet).
-    pub include_path_tokens: bool,
-    /// Does this language have a C-style preprocessor — `#define` macros
-    /// reachable through `#include`s that identifier-context completion offers
-    /// as an API surface? True for C/C++; false for languages with no
-    /// preprocessor (Perl, Python, R, CMake). Gates `macro_completion` — asked
-    /// of the pack, never a language-name branch (rule #10).
-    pub preprocessor_macros: bool,
     /// Symbols the runtime enters from OUTSIDE the source graph (C/C++
     /// `main`: reached through the ABI, never a source call site) — a
     /// zero-fan-in callable with one of these names is alive by contract.
@@ -92,31 +62,10 @@ pub struct LangPack {
     /// completion (and reports the char in `CompletionContext`) when one is
     /// typed. C++ `. > :` cover `.`/`->`/`::`; the member path keys off them.
     pub trigger_chars: &'static [&'static str],
-    /// The language's method-RECEIVER parameter names (Python `self`/`cls`,
-    /// C++ `this`). A receiver param is lexically inside the class body, so
-    /// the sticky class context tags it — but it is NOT a member. Extraction
-    /// clears its package so it reads as a plain local. Lang-specific
-    /// semantics → the pack owns it (NOT core `conventions.rs`, which is
-    /// Perl's `$self`/`$class`).
-    pub receiver_names: &'static [&'static str],
-    /// The pointer/reference DECLARATOR peel: a `@nested.target` chain
-    /// flattened to its leaf + per-level deref stack — `Box**`, `char****`,
-    /// `Box* const&`. THE recursion S-queries can't express (unbounded depth);
-    /// the pack declares the grammar, the generic `peel` walks it.
-    pub nested_peel: PeelSpec,
-    /// The member-access RECEIVER peel: transparent expression wrappers
-    /// (`(*p)`, `(&o)`, `(p)` → `p`) dropped so the invocant types via the
-    /// inner. The SAME `peel`, no stack, any leaf.
-    pub recv_peel: PeelSpec,
-    /// Member-access node kinds (`receiver OP member`) — extraction records
-    /// each site (simple-variable receiver, operator token span, `->` vs
-    /// `.`) for the operator-DX consumer (`p.` on a `Box*` should be `->`).
-    /// The member operator's grammar token KIND → the `MemberOp` it means
-    /// (`"->"`→Arrow, `"."`→Dot). The `operator:` field of a member access is
-    /// captured as `@member.op`; the engine maps its `kind()` through this
-    /// table. An OPEN set: unmapped kinds (`.*`) get no op-DX, never a guess.
-    /// Empty = no member-operator DX (Perl, single-operator packs).
-    pub op_map: &'static [(&'static str, crate::model::file_analysis::MemberOp)],
+    /// The member-access RECEIVER peel: transparent expression wrapper kinds
+    /// (`(*p)`, `(&o)`, `(p)` → `p`) dropped, through their first named
+    /// child, so the invocant types via the inner.
+    pub recv_peel: &'static [&'static str],
     /// Simple-variable node kinds (`identifier`). op-DX fires ONLY when the
     /// IMMEDIATE member-access receiver is one — the receiver whose
     /// `deref_stack` resolves by name to decide the expected operator. Also the
@@ -165,17 +114,10 @@ impl LangPack {
             annot_type: _,
             module_paths: _,
             narrow_guard: _,
-            rebind_method: _,
-            implicit_this_members: _,
-            include_path_tokens: _,
-            preprocessor_macros: _,
             entrypoint_symbols,
             brace_scoped_members: _,
             trigger_chars,
-            receiver_names,
-            nested_peel,
             recv_peel,
-            op_map,
             simple_var_kinds,
             member_kinds,
             skip_kinds,
@@ -189,44 +131,16 @@ impl LangPack {
         };
         list("entrypoint_symbols", entrypoint_symbols);
         list("trigger_chars", trigger_chars);
-        list("receiver_names", receiver_names);
-        list("nested_peel.annot_kinds", nested_peel.annot_kinds);
-        list("recv_peel.annot_kinds", recv_peel.annot_kinds);
+        list("recv_peel", recv_peel);
         list("simple_var_kinds", simple_var_kinds);
         list("member_kinds", member_kinds);
         list("skip_kinds", skip_kinds);
         list("call_kinds", call_kinds);
         list("domain_compare_kinds", domain_compare_kinds);
         list("domain_compare_ops", domain_compare_ops);
-        out.extend(nested_peel.wrappers.iter().map(|(k, _)| ("nested_peel.wrappers", *k)));
-        out.extend(nested_peel.leaf_to_def.iter().map(|(k, _)| ("nested_peel.leaf_to_def", *k)));
-        out.extend(recv_peel.wrappers.iter().map(|(k, _)| ("recv_peel.wrappers", *k)));
-        out.extend(recv_peel.leaf_to_def.iter().map(|(k, _)| ("recv_peel.leaf_to_def", *k)));
-        out.extend(op_map.iter().map(|(k, _)| ("op_map", *k)));
         out.retain(|(_, v)| !v.is_empty());
         out
     }
-}
-
-/// A declarative peel: descend a wrapper chain tree-sitter's fixed-depth
-/// S-expression queries cannot express, to the leaf, optionally accumulating a
-/// per-level deref stack. ONE combinator the pack parameterizes — `nested_peel`
-/// (declarators, stack, leaf→def) and `recv_peel` (expr wrappers, no stack, any
-/// leaf) are both instances of it. Empty `wrappers` = the capture is absent.
-#[derive(Clone, Copy)]
-pub struct PeelSpec {
-    /// Wrapper node kinds → the `DerefKind` each contributes (only consulted
-    /// when `record_stack`; a placeholder otherwise).
-    pub wrappers: &'static [(&'static str, crate::model::file_analysis::DerefKind)],
-    /// Per-level annotation node kinds (cv-qualifiers) collected onto a step.
-    pub annot_kinds: &'static [&'static str],
-    /// Leaf node kind → the def kind the synthetic leaf event mints
-    /// (`identifier`→`Local`, `field_identifier`→`Field`). EMPTY = accept
-    /// ANY leaf and mint no def (the receiver-peel case — the leaf is an
-    /// invocant, not a declaration).
-    pub leaf_to_def: &'static [(&'static str, DefKind)],
-    /// Accumulate the per-level `DerefStep` stack (pointer depth) vs descend only.
-    pub record_stack: bool,
 }
 
 /// Translate a member's declared return type into the deferred

@@ -108,6 +108,14 @@ pub struct Scope {
     /// question — so neither is a span scan. `None` for every other scope.
     #[serde(default)]
     pub owner: Option<SymbolId>,
+    /// A bare name in this scope may leave the member receiver unwritten:
+    /// the language's rule, stated by the capture that mints the scope
+    /// (`@scope.sub.implicit_receiver`). The chain carries it, so a block or
+    /// lambda nested in such a body elides too. Whether a class is there is
+    /// resolution: a free function's body carries the flag and its owner
+    /// names no package, so nothing binds.
+    #[serde(default)]
+    pub implicit_receiver: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,6 +246,9 @@ pub struct NameSpellings {
     /// The package an empty qualifier names (Perl's `$::x` is `$main::x`);
     /// `None` keeps the empty qualifier as written.
     pub root_package: Option<std::borrow::Cow<'static, str>>,
+    /// How the language's classes hold their members: the rule a member
+    /// ask is answered by (`docs/adr/member-kinds.md`).
+    pub member_namespace: MemberNamespace,
 }
 
 /// What a class spelling written in a file denotes — the capability the
@@ -262,6 +273,7 @@ impl NameSpellings {
         sigils: std::borrow::Cow::Borrowed(&[]),
         class_spelling: ClassSpelling::Identity,
         root_package: None,
+        member_namespace: MemberNamespace::PerFamily,
     };
 
     /// A language with a namespace separator, no sigils, and spellings
@@ -273,6 +285,7 @@ impl NameSpellings {
             sigils: std::borrow::Cow::Borrowed(&[]),
             class_spelling: ClassSpelling::Identity,
             root_package: None,
+            member_namespace: MemberNamespace::PerFamily,
         }
     }
 
@@ -351,6 +364,10 @@ bitflags::bitflags! {
         /// A storage slot with a generated writer (Corinna `:writer` /
         /// `:mutator` / `:accessor`, Moo `is => 'rw'`).
         const WRITER = 1 << 14;
+        /// A method's receiver parameter (python `self`/`cls`): the object,
+        /// not a member, though it sits inside the class body. Minted from
+        /// a capture, never spelled as an attribute.
+        const RECEIVER = 1 << 15;
     }
 }
 
@@ -864,6 +881,71 @@ impl Symbol {
     pub fn hidden_in_outline(&self) -> bool {
         self.presentation.hide_in_outline
     }
+}
+
+/// Which family a member belongs to: a stored value or a callable. An ask
+/// carries the family of the fact that produced it, a declaration the
+/// family of its symbol kind (`docs/adr/member-kinds.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MemberKind {
+    Value,
+    Callable,
+}
+
+impl MemberKind {
+    pub fn of_sym(kind: SymKind) -> MemberKind {
+        match kind {
+            SymKind::Sub | SymKind::Method => MemberKind::Callable,
+            _ => MemberKind::Value,
+        }
+    }
+
+    /// May a declaration of `kind` answer an ask of this family, in a
+    /// language whose classes hold their members in `namespace`? Nothing
+    /// resolves across families where they are separate; where there is
+    /// one namespace the family never mattered.
+    pub fn admits_decl(self, kind: SymKind, namespace: MemberNamespace) -> bool {
+        match namespace {
+            MemberNamespace::PerFamily => MemberKind::of_sym(kind) == self,
+            MemberNamespace::Shared => true,
+        }
+    }
+
+    /// The family a ref's own kind states: a value read is `Value`, a call
+    /// `Callable`, anything else no member at all.
+    pub fn of_ref(kind: &RefKind) -> Option<MemberKind> {
+        match kind {
+            RefKind::FieldAccess { .. } => Some(MemberKind::Value),
+            RefKind::MethodCall { .. } => Some(MemberKind::Callable),
+            _ => None,
+        }
+    }
+
+    /// May a use of family `other` reference a target of this family? The
+    /// same rule as `admits_decl`, read from the use's side; a use that is
+    /// no member access is not this rule's to refuse.
+    pub fn admits_ref(self, other: Option<MemberKind>, namespace: MemberNamespace) -> bool {
+        match namespace {
+            MemberNamespace::PerFamily => other.is_none_or(|o| o == self),
+            MemberNamespace::Shared => true,
+        }
+    }
+}
+
+/// How a language's classes hold their members. A language declares it on
+/// its spellings; the member walk reads the value and never asks which
+/// language it serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum MemberNamespace {
+    /// A namespace per family: a read reaches only a stored value and a
+    /// call only a callable (Perl's sub beside a same-named `field`).
+    #[default]
+    PerFamily,
+    /// One namespace: a name is one member whatever its kind, so every ask
+    /// reaches the nearest declaration of it. C++'s `d.hook()` reads member
+    /// `hook` and calls whatever it holds, so a derived function pointer
+    /// hides a base method of that name.
+    Shared,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1424,11 +1506,12 @@ pub enum RenameKind {
     /// walks don't rename same-named subs in unrelated packages.
     Function { name: String, package: Option<String> },
     Package(String),
-    /// A method with its owning class. Cross-file walks use `class`
-    /// to avoid unioning unrelated classes that share a method name
+    /// A member with its owning class. Cross-file walks use `class`
+    /// to avoid unioning unrelated classes that share a member name
     /// (e.g. `Foo::run` vs `Bar::run`, mojo-helper leaves vs route
-    /// targets).
-    Method { name: String, class: String },
+    /// targets); `member` is the family the cursor's own syntax or
+    /// declaration states (`None` where neither told).
+    Method { name: String, class: String, member: Option<MemberKind> },
     HashKey(String),
     /// Rename a `Handler` by (owner, name) — touches the handler symbol's
     /// name + every `DispatchCall` ref targeting it.

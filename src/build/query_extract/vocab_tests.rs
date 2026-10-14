@@ -51,9 +51,9 @@ fn predicate_only_captures_are_skipped() {
     assert_eq!(
         table,
         vec![
-            Some(Capture::Def { kind: DefKind::Sub, part: DefPart::Node }),
+            Some(Capture::Def { kind: DefCap::Sub, part: DefPart::Node }),
             None,
-            Some(Capture::Def { kind: DefKind::Sub, part: DefPart::Name }),
+            Some(Capture::Def { kind: DefCap::Sub, part: DefPart::Name }),
         ]
     );
 }
