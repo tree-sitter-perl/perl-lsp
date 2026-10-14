@@ -155,8 +155,9 @@ identifiers) is a precision knob that must be calibrated against the
 macro-heavy real substrate (spdlog/fmt/onednn) before it can be trusted.
 That calibration is the deliverable, and it is its own slice — see
 `docs/PARKED.md`. The diagnostic reuses no per-language shape: the gate is
-a pack **capability** (declared like `implicit_this_members`), not a
-`lang == cpp` branch, so wiring it is mechanical once the valve is sound.
+a fact the language's document states (as `@scope.sub.implicit_receiver`
+states receiver elision), not a `lang == cpp` branch, so wiring it is
+mechanical once the valve is sound.
 
 ## Forward work
 

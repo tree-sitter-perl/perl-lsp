@@ -28,6 +28,11 @@
 (parameters
   (identifier) @def.var.name @def.var)
 
+; a method's leading `self` / `cls` is its receiver: the object, not a member
+; of the class it is declared in.
+((parameters . (identifier) @param.receiver)
+  (#match? @param.receiver "^(self|cls)$"))
+
 (import_statement
   name: (dotted_name) @import.name) @import
 (import_from_statement
@@ -60,6 +65,21 @@
   function: (identifier) @ref.call) @expr.call
 (call
   function: (attribute attribute: (identifier) @ref.method))
+
+; ---- member access (`recv.attr`, and `recv.m(...)`): the receiver subtree is
+; the invocant, typed at query time through expr_type_at_span — the same
+; MethodCall ref core resolves for Perl `$obj->m`. The document states the
+; kind: an attribute that is a call's callee is a member call, any other is a
+; value read. ----
+((attribute
+  object: (_) @member.recv
+  attribute: (identifier) @ref.member.value) @_attr
+ (#not-has-parent? @_attr call))
+(call
+  function: (attribute
+    object: (_) @member.recv
+    attribute: (identifier) @ref.member.call)
+  arguments: (argument_list) @arity.args)
 (identifier) @expr.read.var
 
 (string) @expr.lit.string

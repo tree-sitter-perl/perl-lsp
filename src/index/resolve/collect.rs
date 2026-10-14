@@ -368,12 +368,15 @@ pub(super) fn method_classes_for(
     origin: &FileAnalysis,
     class: &str,
     name: &str,
+    member_kind: Option<MemberKind>,
     module_index: Option<&dyn CrossFileLookup>,
     scope: OverrideScope,
 ) -> Vec<String> {
+    // A target no cursor or declaration told about walks as a callable.
+    let want = member_kind.unwrap_or(MemberKind::Callable);
     match scope {
-        OverrideScope::Hierarchy => origin.method_override_family(class, name, module_index),
-        OverrideScope::Dispatch => origin.method_rename_chain(class, name, module_index),
+        OverrideScope::Hierarchy => origin.member_override_family(class, name, want, module_index),
+        OverrideScope::Dispatch => origin.member_rename_chain(class, name, want, module_index),
     }
 }
 
@@ -591,9 +594,14 @@ pub(super) fn symbol_defines_target(
             // class-content check, because a pack LOCAL inside an inline
             // method also carries the class as sticky `package` and must
             // never read as a member declaration.
+            // The declaring file's member namespace decides whether a
+            // member of the other family declares this target.
             (matches!(sym.kind, SymKind::Sub | SymKind::Method)
                 || analysis.symbol_is_class_content(sym))
                 && on_chain
+                && target
+                    .member_kind
+                    .is_none_or(|k| k.admits_decl(sym.kind, analysis.names().member_namespace))
         }
         TargetKind::Package => matches!(
             sym.kind,
@@ -933,6 +941,11 @@ pub(super) fn collect_from_analysis(
     // calls against the same class.
     let mut rename_chain_cache: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
+    // The chain walks the target's family (constant per call, so the
+    // class-keyed cache stays sound); the scanned file's namespace decides
+    // which uses that family reaches.
+    let chain_want = target.member_kind.unwrap_or(MemberKind::Callable);
+    let namespace = analysis.names().member_namespace;
 
     // Pack (closure-carrying) files speak C++'s relative name lookup and may
     // carry only partial namespace attribution — `pkg_agrees` reads this.
@@ -1013,8 +1026,9 @@ pub(super) fn collect_from_analysis(
         // A qualified call (`Foo::baz()` / `$o->Foo::Bar::baz()`) keeps its
         // whole path in `target_name`; match it on the bare callable tail (the
         // dispatch-class checks in the call arms below still pin the right
-        // package/class). Every other ref kind matches by exact name.
-        let name_matches = if matches!(r.kind, RefKind::FunctionCall { .. } | RefKind::MethodCall { .. }) {
+        // package/class). A member value read matches on the same tail;
+        // every other ref kind matches by exact name.
+        let name_matches = if matches!(r.kind, RefKind::FunctionCall { .. }) || r.member_site().is_some() {
             r.unqualified_target_name(analysis.names()) == target.name
         } else {
             r.target_name == target.name
@@ -1103,7 +1117,7 @@ pub(super) fn collect_from_analysis(
                 }
             }
             (TargetKind::Sub { .. } | TargetKind::Method { .. },
-             RefKind::MethodCall { .. }) => {
+             RefKind::MethodCall { .. } | RefKind::FieldAccess { .. }) => {
                 // Prefer the build-time-frozen dispatch edge (the `Method`
                 // binding) so a call that resolved at build
                 // time stays matched regardless of query-time inference. An
@@ -1111,7 +1125,7 @@ pub(super) fn collect_from_analysis(
                 // into a cross-file parent; enrichment re-stamps OPEN docs
                 // only) — re-resolve lazily here, where the index is in hand,
                 // rather than silently excluding the site. Either way the
-                // class then fans out over `method_rename_chain` so
+                // class then fans out over `member_rename_chain` so
                 // `$child->m` matches an ancestor-defined target while
                 // unrelated same-named methods stay out.
                 // Same derived-from-the-same-match invariant as the FunctionCall
@@ -1119,6 +1133,15 @@ pub(super) fn collect_from_analysis(
                 let Some(scope) = callable_scope_for_refs.as_ref() else {
                     continue;
                 };
+                // The use's family must be one the target's admits under
+                // the scanned file's member namespace: a value read never
+                // references a method where the families are separate.
+                if !target
+                    .member_kind
+                    .is_none_or(|k| k.admits_ref(MemberKind::of_ref(&r.kind), namespace))
+                {
+                    continue;
+                }
                 let method = r.unqualified_target_name(analysis.names());
                 {
                     let resolved_class = match r.method_target() {
@@ -1156,7 +1179,7 @@ pub(super) fn collect_from_analysis(
                                     || rename_chain_cache
                                         .entry(cn.clone())
                                         .or_insert_with(|| {
-                                            analysis.method_rename_chain(&cn, method, module_index)
+                                            analysis.member_rename_chain(&cn, method, chain_want, module_index)
                                         })
                                         .iter()
                                         .any(|c| target.method_classes.iter().any(|f| f == c))
@@ -1168,7 +1191,7 @@ pub(super) fn collect_from_analysis(
                                 cn == *pkg || rename_chain_cache
                                     .entry(cn.clone())
                                     .or_insert_with(|| {
-                                        analysis.method_rename_chain(&cn, method, module_index)
+                                        analysis.member_rename_chain(&cn, method, chain_want, module_index)
                                     })
                                     .iter()
                                     .any(|c| c == pkg)
@@ -1305,14 +1328,10 @@ pub(super) fn collect_from_analysis(
             _ => false,
         };
         if matches_kind {
-            // MethodCall r.span covers the whole call expression; callers
-            // (rename, highlight) want just the method-name token so they
+            // A member access's r.span covers the whole expression; callers
+            // (rename, highlight) want just the member-name token so they
             // can replace or underline exactly the right characters.
-            let span = if let RefKind::MethodCall { method_name_span, .. } = &r.kind {
-                *method_name_span
-            } else {
-                r.span
-            };
+            let span = r.member_site().map_or(r.span, |m| m.name_span);
             out.push(RefLocation {
                 key: key.clone(),
                 span,
