@@ -32,7 +32,7 @@ macro_rules! spelled {
 spelled! {
     /// What a `@def.<kind>` declares. The symbol model it projects to is
     /// `sym_kind`; the structural marker it carries is `marker`.
-    pub enum DefKind {
+    pub enum DefCap {
         Sub = "sub",
         Method = "method",
         /// `(anon)`-named callable (Perl `sub { ... }`).
@@ -60,7 +60,7 @@ spelled! {
 
 spelled! {
     /// What a `@ref.<kind>` refers through.
-    pub enum RefKind {
+    pub enum RefCap {
         Call = "call",
         /// A `::`-qualified call (`fmt::format_to(...)`).
         QCall = "qcall",
@@ -273,8 +273,8 @@ pub enum DefPart {
 /// One capture of a pack query document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Capture {
-    Def { kind: DefKind, part: DefPart },
-    Ref(RefKind),
+    Def { kind: DefCap, part: DefPart },
+    Ref(RefCap),
     Scope(ScopeCap),
     Context(ContextKind),
     /// A base class, paired with the match's `@def.class.name`.
@@ -324,7 +324,7 @@ pub enum Capture {
     /// One level of a declarator chain, as the `deref` walk reads it.
     Deref(DerefCap),
     /// A declarator chain's leaf; the suffix names the def the leaf mints.
-    DerefLeaf(DefKind),
+    DerefLeaf(DefCap),
     Link(LinkCap),
 }
 
@@ -347,9 +347,9 @@ impl Capture {
         use Capture as C;
         let segs: Vec<&str> = name.split('.').collect();
         Some(match segs.as_slice() {
-            ["def", k] => C::Def { kind: DefKind::parse(k)?, part: DefPart::Node },
-            ["def", k, "name"] => C::Def { kind: DefKind::parse(k)?, part: DefPart::Name },
-            ["ref", rest @ ..] => C::Ref(RefKind::parse(&rest.join("."))?),
+            ["def", k] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Node },
+            ["def", k, "name"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Name },
+            ["ref", rest @ ..] => C::Ref(RefCap::parse(&rest.join("."))?),
             ["scope"] => C::Scope(ScopeCap::Block),
             ["scope", "sub", "implicit_receiver"] => C::Scope(ScopeCap::SubImplicitReceiver),
             ["scope", k] if !k.is_empty() => C::Scope(ScopeCap::parse(k)?),
@@ -393,7 +393,7 @@ impl Capture {
             ["ns", "inline"] => C::NsInline,
             ["anonagg", "member"] => C::AnonAggMember,
             ["link", "from", w] => C::LinkFrom(LinkWalk::parse(w)?),
-            ["deref", "leaf", k] => C::DerefLeaf(DefKind::parse(k)?),
+            ["deref", "leaf", k] => C::DerefLeaf(DefCap::parse(k)?),
             ["deref", k] => C::Deref(DerefCap::parse(k)?),
             ["link", k] => C::Link(LinkCap::parse(k)?),
             _ => return None,
@@ -506,23 +506,23 @@ pub(super) fn check_links(query: &tree_sitter::Query, captures: &[Option<Capture
     Ok(())
 }
 
-impl DefKind {
+impl DefCap {
     /// The symbol kind a def of this kind projects to. A `UnionField` stays
     /// a Variable: its `union` marker drives the outline nesting.
     pub fn sym_kind(self) -> crate::model::file_analysis::SymKind {
         use crate::model::file_analysis::SymKind;
         match self {
-            DefKind::Package => SymKind::Package,
-            DefKind::Class | DefKind::Union => SymKind::Class,
+            DefCap::Package => SymKind::Package,
+            DefCap::Class | DefCap::Union => SymKind::Class,
             // A function-like `#define` is a real callable everywhere; its
             // `macro` marker lets hover say so.
-            DefKind::Sub | DefKind::Anon | DefKind::Constant | DefKind::Macro => SymKind::Sub,
+            DefCap::Sub | DefCap::Anon | DefCap::Constant | DefCap::Macro => SymKind::Sub,
             // `using Base::m;` is a Method on the class surface; its
             // `reexport` marker makes resolution see through it.
-            DefKind::Method | DefKind::Reexport => SymKind::Method,
-            DefKind::Field => SymKind::Field,
-            DefKind::Enumerator => SymKind::Enumerator,
-            DefKind::Var | DefKind::Local | DefKind::Label | DefKind::UnionField => SymKind::Variable,
+            DefCap::Method | DefCap::Reexport => SymKind::Method,
+            DefCap::Field => SymKind::Field,
+            DefCap::Enumerator => SymKind::Enumerator,
+            DefCap::Var | DefCap::Local | DefCap::Label | DefCap::UnionField => SymKind::Variable,
         }
     }
 
@@ -531,9 +531,9 @@ impl DefKind {
     /// the symbol rather than its kind.
     pub fn marker(self) -> Option<&'static str> {
         match self {
-            DefKind::Union | DefKind::UnionField => Some("union"),
-            DefKind::Reexport => Some("reexport"),
-            DefKind::Macro => Some("macro"),
+            DefCap::Union | DefCap::UnionField => Some("union"),
+            DefCap::Reexport => Some("reexport"),
+            DefCap::Macro => Some("macro"),
             _ => None,
         }
     }

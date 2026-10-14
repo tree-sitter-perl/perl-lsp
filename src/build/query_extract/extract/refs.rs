@@ -6,7 +6,7 @@ use super::*;
 pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     let Capture::Ref(ref_kind) = e.cap else { return };
     let pack = st.pack;
-    if ref_kind == RefKind::Label {
+    if ref_kind == RefCap::Label {
         st.out.label_refs.push(((pack.shape_name)(&e.text), st.cur_scope, e.span()));
         return;
     }
@@ -16,7 +16,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     // (`Widget make_widget();` starts at `Widget`), which is a
     // genuine use — its decl-name overlap is suppressed precisely
     // (exact selection-span match) in `into_file_analysis`.
-    let inside_def = ref_kind != RefKind::Type
+    let inside_def = ref_kind != RefCap::Type
         && st.defs.def_name_spans.iter().any(|&(s, en)| {
             e.start_byte >= s && e.end_byte <= en && {
                 // only suppress when it IS the def name region

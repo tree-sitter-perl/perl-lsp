@@ -76,12 +76,12 @@ fn query_skeleton_differential_report() {
     let mut parser = crate::build::builder::create_parser();
 
     // builder kind → skeleton kinds that may legitimately answer for it
-    let kind_map: &[(SymKind, &[DefKind], &str)] = &[
-        (SymKind::Package, &[DefKind::Package], "package"),
-        (SymKind::Class, &[DefKind::Package, DefKind::Class], "class"),
-        (SymKind::Sub, &[DefKind::Sub, DefKind::Method, DefKind::Anon, DefKind::Constant], "sub"),
-        (SymKind::Method, &[DefKind::Sub, DefKind::Method, DefKind::Anon], "method"),
-        (SymKind::Variable, &[DefKind::Var], "variable"),
+    let kind_map: &[(SymKind, &[DefCap], &str)] = &[
+        (SymKind::Package, &[DefCap::Package], "package"),
+        (SymKind::Class, &[DefCap::Package, DefCap::Class], "class"),
+        (SymKind::Sub, &[DefCap::Sub, DefCap::Method, DefCap::Anon, DefCap::Constant], "sub"),
+        (SymKind::Method, &[DefCap::Sub, DefCap::Method, DefCap::Anon], "method"),
+        (SymKind::Variable, &[DefCap::Var], "variable"),
     ];
 
     let mut tallies: std::collections::HashMap<&str, Tally> = Default::default();
@@ -106,7 +106,7 @@ fn query_skeleton_differential_report() {
         };
         files += 1;
 
-        let skel_defs: HashSet<(DefKind, usize, usize)> = skel
+        let skel_defs: HashSet<(DefCap, usize, usize)> = skel
             .symbols
             .iter()
             .map(|s| (s.kind, s.name_start.row, s.name_start.column))
@@ -319,14 +319,14 @@ y = x
     let skel = extract(&tree, src.as_bytes(), &python_pack()).unwrap();
 
     // outline: class + method + module-level vars
-    let names: Vec<(DefKind, String)> = skel
+    let names: Vec<(DefCap, String)> = skel
         .symbols
         .iter()
         .map(|s| (s.kind, s.name.clone()))
         .collect();
-    assert!(names.contains(&(DefKind::Class, "Greeter".into())), "{names:?}");
-    assert!(names.contains(&(DefKind::Sub, "greet".into())), "{names:?}");
-    assert!(names.contains(&(DefKind::Var, "x".into())), "{names:?}");
+    assert!(names.contains(&(DefCap::Class, "Greeter".into())), "{names:?}");
+    assert!(names.contains(&(DefCap::Sub, "greet".into())), "{names:?}");
+    assert!(names.contains(&(DefCap::Var, "x".into())), "{names:?}");
     assert_eq!(skel.imports, vec!["os"]);
 
     let fa = skel.into_file_analysis();
@@ -647,7 +647,7 @@ fn r_outline_imports_and_s3_names() {
     let subs: Vec<&str> = skel
         .symbols
         .iter()
-        .filter(|s| s.kind == DefKind::Sub)
+        .filter(|s| s.kind == DefCap::Sub)
         .map(|s| s.name.as_str())
         .collect();
     // S3 method names fall out of the def pattern verbatim — the
@@ -658,7 +658,7 @@ fn r_outline_imports_and_s3_names() {
     let vars: Vec<&str> = skel
         .symbols
         .iter()
-        .filter(|s| s.kind == DefKind::Var)
+        .filter(|s| s.kind == DefCap::Var)
         .map(|s| s.name.as_str())
         .collect();
     assert_eq!(vars, vec!["x", "y", "obj"]);
@@ -784,28 +784,28 @@ fn cmake_outline_targets_vars_and_interpolated_refs() {
                add_library(widgets STATIC a.c)\ntarget_link_libraries(widgets PRIVATE core)\nregister_widget(button)\n";
     let skel = cmake_skel(src);
 
-    let defs: Vec<(DefKind, String)> = skel
+    let defs: Vec<(DefCap, String)> = skel
         .symbols
         .iter()
         .map(|s| (s.kind, s.name.clone()))
         .collect();
-    assert!(defs.contains(&(DefKind::Var, "MY_FLAG".into())), "{defs:?}");
-    assert!(defs.contains(&(DefKind::Sub, "register_widget".into())), "{defs:?}");
-    assert!(defs.contains(&(DefKind::Sub, "widgets".into())), "target def: {defs:?}");
-    assert!(defs.contains(&(DefKind::Var, "name".into())), "param def: {defs:?}");
+    assert!(defs.contains(&(DefCap::Var, "MY_FLAG".into())), "{defs:?}");
+    assert!(defs.contains(&(DefCap::Sub, "register_widget".into())), "{defs:?}");
+    assert!(defs.contains(&(DefCap::Sub, "widgets".into())), "target def: {defs:?}");
+    assert!(defs.contains(&(DefCap::Var, "name".into())), "param def: {defs:?}");
     assert_eq!(skel.imports, vec!["util.cmake", "src"]);
 
     // ${MY_FLAG} INSIDE a quoted string is a real var ref — Perl's
     // regex-interpolation work, free.
     assert!(
-        skel.refs.iter().any(|r| r.kind == RefKind::Var && r.name == "MY_FLAG"),
+        skel.refs.iter().any(|r| r.kind == RefCap::Var && r.name == "MY_FLAG"),
         "interpolated var ref: {:?}",
-        skel.refs.iter().filter(|r| r.kind == RefKind::Var).collect::<Vec<_>>(),
+        skel.refs.iter().filter(|r| r.kind == RefCap::Var).collect::<Vec<_>>(),
     );
     // target_link_libraries args reference targets; PRIVATE is a
     // keyword and must not become a ref
-    assert!(skel.refs.iter().any(|r| r.kind == RefKind::Call && r.name == "widgets"));
-    assert!(skel.refs.iter().any(|r| r.kind == RefKind::Call && r.name == "core"));
+    assert!(skel.refs.iter().any(|r| r.kind == RefCap::Call && r.name == "widgets"));
+    assert!(skel.refs.iter().any(|r| r.kind == RefCap::Call && r.name == "core"));
     assert!(!skel.refs.iter().any(|r| r.name == "PRIVATE"));
 }
 
@@ -816,10 +816,10 @@ fn cmake_command_families_match_however_the_command_is_cased() {
     let skel = cmake_skel(
         "SET(MY_FLAG ON)\nAdd_Library(widgets STATIC a.c)\nTARGET_LINK_LIBRARIES(widgets PUBLIC core)\nINCLUDE(util.cmake)\n",
     );
-    let defs: Vec<(DefKind, String)> = skel.symbols.iter().map(|s| (s.kind, s.name.clone())).collect();
-    assert!(defs.contains(&(DefKind::Var, "MY_FLAG".into())), "{defs:?}");
-    assert!(defs.contains(&(DefKind::Sub, "widgets".into())), "{defs:?}");
-    assert!(skel.refs.iter().any(|r| r.kind == RefKind::Call && r.name == "core"));
+    let defs: Vec<(DefCap, String)> = skel.symbols.iter().map(|s| (s.kind, s.name.clone())).collect();
+    assert!(defs.contains(&(DefCap::Var, "MY_FLAG".into())), "{defs:?}");
+    assert!(defs.contains(&(DefCap::Sub, "widgets".into())), "{defs:?}");
+    assert!(skel.refs.iter().any(|r| r.kind == RefCap::Call && r.name == "core"));
     assert!(!skel.refs.iter().any(|r| r.name == "PUBLIC"));
     assert_eq!(skel.imports, vec!["util.cmake"]);
 }
@@ -833,7 +833,7 @@ fn cmake_a_command_def_spans_its_command() {
     assert_eq!((flag.start.column, flag.end.column), (0, 15), "the def is `set(MY_FLAG ON)`");
     assert_eq!((flag.name_start.column, flag.name_end.column), (4, 11));
     let calls: Vec<&str> =
-        skel.refs.iter().filter(|r| r.kind == RefKind::Call).map(|r| r.name.as_str()).collect();
+        skel.refs.iter().filter(|r| r.kind == RefCap::Call).map(|r| r.name.as_str()).collect();
     assert!(calls.contains(&"app") && calls.contains(&"main.c"), "{calls:?}");
     assert!(!calls.iter().any(|c| c.contains("${")), "{calls:?}");
 }
@@ -982,7 +982,7 @@ fn tok(src: &str, needle: &str, occ: usize) -> Point {
 
 /// Build a bare `SkelSymbol` at the named token, with the given kind/package —
 /// enough surface for `reanchor_truncated_containers` (name span + start).
-fn sksym(src: &str, kind: DefKind, name: &str, occ: usize, package: Option<&str>) -> super::SkelSymbol {
+fn sksym(src: &str, kind: DefCap, name: &str, occ: usize, package: Option<&str>) -> super::SkelSymbol {
     let ns = tok(src, name, occ);
     super::SkelSymbol {
         kind,
@@ -1018,14 +1018,14 @@ fn reanchor_recovers_members_after_truncated_class() {
     let src = "namespace ns {\nclass Widget {\n  int early;\n  int mid;\n  int late;\n  void tail() {}\n};\n}\n";
     let mut skel = SkeletonAnalysis::default();
     skel.symbols = vec![
-        sksym(src, DefKind::Package, "ns", 0, None),
-        sksym(src, DefKind::Class, "Widget", 0, Some("ns")),
+        sksym(src, DefCap::Package, "ns", 0, None),
+        sksym(src, DefCap::Class, "Widget", 0, Some("ns")),
         // early is correctly attributed; mid/late/tail fell through to `ns`
         // (a literal namespace = an ancestor container) — the truncation shape.
-        sksym(src, DefKind::Field, "early", 0, Some("Widget")),
-        sksym(src, DefKind::Field, "mid", 0, Some("ns")),
-        sksym(src, DefKind::Field, "late", 0, Some("ns")),
-        sksym(src, DefKind::Method, "tail", 0, Some("ns")),
+        sksym(src, DefCap::Field, "early", 0, Some("Widget")),
+        sksym(src, DefCap::Field, "mid", 0, Some("ns")),
+        sksym(src, DefCap::Field, "late", 0, Some("ns")),
+        sksym(src, DefCap::Method, "tail", 0, Some("ns")),
     ];
 
     skel.reanchor_truncated_containers(src);
@@ -1050,11 +1050,11 @@ fn reanchor_recovers_through_macro_namespace() {
     let src = "class Widget {\n  int early;\n  int late;\n};\n";
     let mut skel = SkeletonAnalysis::default();
     skel.symbols = vec![
-        sksym(src, DefKind::Class, "Widget", 0, Some("nlohmann")),
-        sksym(src, DefKind::Field, "early", 0, Some("Widget")),
+        sksym(src, DefCap::Class, "Widget", 0, Some("nlohmann")),
+        sksym(src, DefCap::Field, "early", 0, Some("Widget")),
         // `late` fell through to `nlohmann` — a name with no computable
         // container symbol in this file (macro-synthesized namespace).
-        sksym(src, DefKind::Field, "late", 0, Some("nlohmann")),
+        sksym(src, DefCap::Field, "late", 0, Some("nlohmann")),
     ];
     skel.reanchor_truncated_containers(src);
     let pkg = |name: &str| skel.symbols.iter().find(|s| s.name == name).and_then(|s| s.package.clone());
@@ -1074,10 +1074,10 @@ fn reanchor_preserves_out_of_line_qualifier() {
     let src = "namespace ns {\nclass Buf {\n  void run();\n};\nvoid Buf::run() { work(); }\n}\n";
     let mut skel = SkeletonAnalysis::default();
     skel.symbols = vec![
-        sksym(src, DefKind::Package, "ns", 0, None),
-        sksym(src, DefKind::Class, "Buf", 0, Some("ns")),
+        sksym(src, DefCap::Package, "ns", 0, None),
+        sksym(src, DefCap::Class, "Buf", 0, Some("ns")),
         // the out-of-line def (2nd `run`) attributed to Buf, sitting in `ns`.
-        sksym(src, DefKind::Method, "run", 1, Some("Buf")),
+        sksym(src, DefCap::Method, "run", 1, Some("Buf")),
     ];
     skel.reanchor_truncated_containers(src);
     let run = skel.symbols.iter().find(|s| s.name == "run").unwrap();
@@ -1091,8 +1091,8 @@ fn reanchor_ignores_forward_declarations() {
     let src = "namespace ns {\nclass Fwd;\nint free_var;\n}\n";
     let mut skel = SkeletonAnalysis::default();
     skel.symbols = vec![
-        sksym(src, DefKind::Class, "Fwd", 0, Some("ns")),
-        sksym(src, DefKind::Field, "free_var", 0, Some("ns")),
+        sksym(src, DefCap::Class, "Fwd", 0, Some("ns")),
+        sksym(src, DefCap::Field, "free_var", 0, Some("ns")),
     ];
     skel.reanchor_truncated_containers(src);
     let fv = skel.symbols.iter().find(|s| s.name == "free_var").unwrap();
@@ -1151,8 +1151,8 @@ void f() {
 fn cpp_declarator_leaf_names_its_def() {
     let skel = cpp_skel("struct S { Box* m; };\nvoid f() { Box* l; }\n");
     let kind = |name: &str| skel.symbols.iter().find(|s| s.name == name).map(|s| s.kind);
-    assert_eq!(kind("m"), Some(DefKind::Field));
-    assert_eq!(kind("l"), Some(DefKind::Local));
+    assert_eq!(kind("m"), Some(DefCap::Field));
+    assert_eq!(kind("l"), Some(DefCap::Local));
 }
 
 #[test]
@@ -1188,13 +1188,13 @@ fn cpp_tier1_extraction_report() {
 #[test]
 fn cpp_clean_baseline_outline() {
     let skel = cpp_skel(cpp_obstacle::SAMPLES[0].src);
-    let defs: Vec<(DefKind, String)> =
+    let defs: Vec<(DefCap, String)> =
         skel.symbols.iter().map(|s| (s.kind, s.name.clone())).collect();
-    assert!(defs.contains(&(DefKind::Class, "Shape".into())), "{defs:?}");
-    assert!(defs.contains(&(DefKind::Class, "Circle".into())), "{defs:?}");
-    assert!(defs.contains(&(DefKind::Method, "area".into())), "{defs:?}");
-    assert!(defs.contains(&(DefKind::Field, "radius".into())), "{defs:?}");
-    assert!(defs.contains(&(DefKind::Sub, "main".into())), "{defs:?}");
+    assert!(defs.contains(&(DefCap::Class, "Shape".into())), "{defs:?}");
+    assert!(defs.contains(&(DefCap::Class, "Circle".into())), "{defs:?}");
+    assert!(defs.contains(&(DefCap::Method, "area".into())), "{defs:?}");
+    assert!(defs.contains(&(DefCap::Field, "radius".into())), "{defs:?}");
+    assert!(defs.contains(&(DefCap::Sub, "main".into())), "{defs:?}");
     // namespace stickiness: Shape/Circle carry package=geo
     let shape = skel.symbols.iter().find(|s| s.name == "Shape").unwrap();
     assert_eq!(shape.package.as_deref(), Some("geo"), "namespace context");
@@ -1268,12 +1268,12 @@ int main() {
 ";
     // pre-reparse: the class SYMBOL evaporated (only its corrupted
     // remains), so navigation to `Box` and its `width` field is dead.
-    let raw_defs: Vec<(DefKind, String)> = cpp_skel(src)
+    let raw_defs: Vec<(DefCap, String)> = cpp_skel(src)
         .symbols
         .iter()
         .map(|s| (s.kind, s.name.clone()))
         .collect();
-    assert!(!raw_defs.contains(&(DefKind::Class, "Box".into())), "class lost pre-reparse: {raw_defs:?}");
+    assert!(!raw_defs.contains(&(DefCap::Class, "Box".into())), "class lost pre-reparse: {raw_defs:?}");
 
     // reparse (validated macro expansion), then extract + query
     let (rewritten, _map, _) = crate::build::cpp_reparse::preprocess_validated_with(
@@ -1282,9 +1282,9 @@ int main() {
         &crate::build::cpp_reparse::PreExpandedExternal::empty(),
     );
     let skel = cpp_skel(&rewritten);
-    let defs: Vec<(DefKind, String)> = skel.symbols.iter().map(|s| (s.kind, s.name.clone())).collect();
-    assert!(defs.contains(&(DefKind::Class, "Box".into())), "class recovered: {defs:?}");
-    assert!(defs.contains(&(DefKind::Field, "width".into())), "field recovered: {defs:?}");
+    let defs: Vec<(DefCap, String)> = skel.symbols.iter().map(|s| (s.kind, s.name.clone())).collect();
+    assert!(defs.contains(&(DefCap::Class, "Box".into())), "class recovered: {defs:?}");
+    assert!(defs.contains(&(DefCap::Field, "width".into())), "field recovered: {defs:?}");
 
     use crate::model::file_analysis::InferredType;
     let fa = skel.into_file_analysis();
@@ -2481,7 +2481,7 @@ fn cpp_out_of_line_pointer_return_def_extracted() {
         .iter()
         .find(|s| s.name == "Simplify")
         .expect("pointer-returning out-of-line def is extracted");
-    assert_eq!(m.kind, DefKind::Method);
+    assert_eq!(m.kind, DefCap::Method);
     assert_eq!(m.package.as_deref(), Some("Regexp"));
 }
 
@@ -2504,9 +2504,9 @@ fn cpp_out_of_line_constructors_extracted() {
     // A constructor has NO return type (`!type`); the multi-level form owns the
     // inner class.
     let skel = cpp_skel("RE2::RE2(const char* p) { }\nRE2::Options::Options(int x) { }\n");
-    let ctor = skel.symbols.iter().find(|s| s.name == "RE2" && s.kind == DefKind::Method);
+    let ctor = skel.symbols.iter().find(|s| s.name == "RE2" && s.kind == DefCap::Method);
     assert_eq!(ctor.map(|s| s.package.as_deref()), Some(Some("RE2")));
-    let nested = skel.symbols.iter().find(|s| s.name == "Options" && s.kind == DefKind::Method);
+    let nested = skel.symbols.iter().find(|s| s.name == "Options" && s.kind == DefCap::Method);
     assert_eq!(nested.map(|s| s.package.as_deref()), Some(Some("Options")));
 }
 
@@ -2531,10 +2531,10 @@ fn cpp_out_of_line_arbitrary_declarator_nesting_and_qualifier_depth() {
 #[test]
 fn reanchor_keeps_qualifier_owner_when_class_body_absent() {
     let src = "namespace re2 {\nvoid RE2::Init(const char* p) { }\n}\n";
-    let mut init = sksym(src, DefKind::Method, "Init", 0, Some("RE2"));
+    let mut init = sksym(src, DefCap::Method, "Init", 0, Some("RE2"));
     init.qualifier_owned = true;
     let mut skel = SkeletonAnalysis::default();
-    skel.symbols = vec![sksym(src, DefKind::Package, "re2", 0, None), init];
+    skel.symbols = vec![sksym(src, DefCap::Package, "re2", 0, None), init];
     skel.reanchor_truncated_containers(src);
     let got = skel.symbols.iter().find(|s| s.name == "Init").unwrap();
     assert_eq!(got.package.as_deref(), Some("RE2"), "qualifier owner survives re-anchor");

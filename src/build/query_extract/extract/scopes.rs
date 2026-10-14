@@ -79,7 +79,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         Capture::Parent => {
             // `@parent` (a base class) pairs with the `@def.class.name`
             // in the same match — record the inheritance edge.
-            if let Some(child) = st.defs.name_of(e.match_id, DefKind::Class) {
+            if let Some(child) = st.defs.name_of(e.match_id, DefCap::Class) {
                 // Shaped like the child's def name (cpp canonicalizes a
                 // template-spelled base) so the edge joins the identity
                 // the target class was filed under.

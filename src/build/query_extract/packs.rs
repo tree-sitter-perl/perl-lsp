@@ -20,7 +20,7 @@ pub struct LangPack {
     /// captured name alike.
     pub shape_name: fn(raw: &str) -> String,
     /// Name for defs with no name token (anonymous subs).
-    pub default_name: fn(kind: DefKind) -> Option<&'static str>,
+    pub default_name: fn(kind: DefCap) -> Option<&'static str>,
     /// Map a `@type.annot` token's text to a type — the pack predicate
     /// for languages whose ring 3 is partly in the tree (`x: int`).
     pub annot_type: fn(text: &str) -> Option<InferredType>,

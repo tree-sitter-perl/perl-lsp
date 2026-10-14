@@ -167,7 +167,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
             // guess). `docs/adr/macro-handling.md`.
             let callee = events
                 .iter()
-                .find(|x| x.match_id == e.match_id && x.cap == Capture::Ref(RefKind::Call))
+                .find(|x| x.match_id == e.match_id && x.cap == Capture::Ref(RefCap::Call))
                 .map(|x| x.text.clone());
             if let Some(callee) = callee {
                 let span = e.span();
@@ -235,7 +235,7 @@ pub(super) fn finish(st: &mut ExtractState, events: &[Event]) {
     let field_scope_span: HashMap<(String, ScopeId), Span> = out
         .symbols
         .iter()
-        .filter(|s| s.kind == DefKind::Field)
+        .filter(|s| s.kind == DefCap::Field)
         .filter_map(|s| out.scopes.get(s.scope.0 as usize).map(|sc| ((s.name.clone(), s.scope), sc.span)))
         .collect();
     for mid in flow_mids {

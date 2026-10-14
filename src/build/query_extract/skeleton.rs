@@ -7,7 +7,7 @@ use super::*;
 /// The skeleton's symbol row. Its kind is the `@def.<kind>` that minted it.
 #[derive(Debug, Clone)]
 pub struct SkelSymbol {
-    pub kind: DefKind,
+    pub kind: DefCap,
     pub name: String,
     pub start: Point,
     pub end: Point,
@@ -24,7 +24,7 @@ pub struct SkelSymbol {
     pub deref_stack: Vec<crate::model::file_analysis::DerefStep>,
     /// Structural markers carried onto `Symbol.attributes`: "anonymous" when
     /// the name came from the pack's `default_name` (not addressable by name —
-    /// completion skips it). The kind's own marker (`DefKind::marker`) is
+    /// completion skips it). The kind's own marker (`DefCap::marker`) is
     /// stamped in `into_file_analysis`.
     pub attributes: Vec<String>,
     /// Declared parameter arity for a callable, counted structurally from the
@@ -45,7 +45,7 @@ pub struct SkelSymbol {
 
 #[derive(Debug, Clone)]
 pub struct SkelRef {
-    pub kind: RefKind,
+    pub kind: RefCap,
     pub name: String,
     pub start: Point,
     pub end: Point,
@@ -318,7 +318,7 @@ impl SkeletonAnalysis {
         }
         let mut containers: Vec<Container> = Vec::new();
         for s in &self.symbols {
-            if !matches!(s.kind, DefKind::Class | DefKind::Union | DefKind::Package) {
+            if !matches!(s.kind, DefCap::Class | DefCap::Union | DefCap::Package) {
                 continue;
             }
             let (ns, ne) = (pt(s.name_start), pt(s.name_end));
@@ -403,13 +403,13 @@ impl SkeletonAnalysis {
             let union_keys: std::collections::HashSet<ClassKey> = self
                 .symbols
                 .iter()
-                .filter(|s| s.kind == DefKind::Union)
+                .filter(|s| s.kind == DefCap::Union)
                 .map(key_of)
                 .collect();
             let mut seen = std::collections::HashSet::new();
             self.symbols.retain(|s| match s.kind {
-                DefKind::Class => !union_keys.contains(&key_of(s)) && seen.insert(key_of(s)),
-                DefKind::Union => seen.insert(key_of(s)),
+                DefCap::Class => !union_keys.contains(&key_of(s)) && seen.insert(key_of(s)),
+                DefCap::Union => seen.insert(key_of(s)),
                 _ => true,
             });
         }
@@ -421,8 +421,8 @@ impl SkeletonAnalysis {
         // identical span). Per kind, so a sub and a method never cross-dedup.
         {
             use std::collections::HashMap;
-            let dedup = |k: DefKind| matches!(k, DefKind::Sub | DefKind::Method);
-            type Key = (DefKind, usize, usize, usize, usize);
+            let dedup = |k: DefCap| matches!(k, DefCap::Sub | DefCap::Method);
+            type Key = (DefCap, usize, usize, usize, usize);
             let key_of = |s: &SkelSymbol| -> Key {
                 (s.kind, s.name_start.row, s.name_start.column, s.name_end.row, s.name_end.column)
             };
@@ -459,7 +459,7 @@ impl SkeletonAnalysis {
             let param_sigs = std::mem::take(&mut self.param_sigs);
             let after = |a: Point, b: Point| (a.row, a.column) >= (b.row, b.column);
             for s in self.symbols.iter_mut() {
-                if !matches!(s.kind, DefKind::Sub | DefKind::Method) {
+                if !matches!(s.kind, DefCap::Sub | DefCap::Method) {
                     continue;
                 }
                 s.arity = param_sigs
@@ -562,7 +562,7 @@ impl SkeletonAnalysis {
                     && (i.end.row, i.end.column) <= (o.end.row, o.end.column)
             };
             for idx in 0..symbols.len() {
-                if self.symbols[idx].kind != DefKind::Enumerator {
+                if self.symbols[idx].kind != DefCap::Enumerator {
                     continue;
                 }
                 let esp = symbols[idx].span;
@@ -886,11 +886,11 @@ impl SkeletonAnalysis {
             .iter()
             .filter_map(|r| {
                 use crate::model::file_analysis::{RefBinding, RefKind};
-                use super::vocab::RefKind as SkelRefKind;
+                use super::vocab::RefCap;
                 let mut span = Span { start: r.start, end: r.end };
                 let mut binding = None;
                 let kind = match r.kind {
-                    SkelRefKind::Call => RefKind::FunctionCall,
+                    RefCap::Call => RefKind::FunctionCall,
                     // Qualified call (`fmt::format_to(...)`): Perl parity —
                     // the full path rides `target_name`, the qualifier the
                     // `Function` binding, and the span narrows to the bare
@@ -898,7 +898,7 @@ impl SkeletonAnalysis {
                     // suppresses the `@expr.read.var` duplicate at the same
                     // start). The tail segment is an identifier, so it never
                     // spans rows — the end-anchored column math is safe.
-                    SkelRefKind::QCall => {
+                    RefCap::QCall => {
                         let (pkg, bare) = crate::model::file_analysis::split_qualified(&r.name, &names);
                         let pkg = pkg?;
                         span.start = tree_sitter::Point {
@@ -911,7 +911,7 @@ impl SkeletonAnalysis {
                     // `recv.field` / `recv->field`: a value read. The
                     // invocant types query-time via
                     // `expr_type_at_span(invocant_span)`.
-                    SkelRefKind::MemberValue => {
+                    RefCap::MemberValue => {
                         let (inv_span, inv_text) = r.invocant.clone()?;
                         RefKind::FieldAccess {
                             invocant: crate::model::conventions::Invocant::assume_canonical(inv_text),
@@ -923,7 +923,7 @@ impl SkeletonAnalysis {
                     // `recv.f(…)`: the SAME MethodCall ref core resolves for
                     // Perl `$obj->m`; `find_definition`/`refs_to`/hover all
                     // flow from it.
-                    SkelRefKind::MemberCall => {
+                    RefCap::MemberCall => {
                         let (inv_span, inv_text) = r.invocant.clone()?;
                         RefKind::MethodCall {
                             invocant: crate::model::conventions::Invocant::assume_canonical(inv_text),
@@ -936,7 +936,7 @@ impl SkeletonAnalysis {
                     // A type-position name (`Widget w;`, `struct op* o`, a
                     // base-class clause): the same PackageRef a Perl package
                     // use carries, so type gd/gr ride the Package machinery.
-                    SkelRefKind::Type => {
+                    RefCap::Type => {
                         if decl_name_spans.contains(&(
                             r.start.row,
                             r.start.column,
@@ -949,10 +949,10 @@ impl SkeletonAnalysis {
                     }
                     // A `goto` label resolves through `label_refs`; the
                     // remaining kinds stay skeleton-only rows.
-                    SkelRefKind::Label
-                    | SkelRefKind::Method
-                    | SkelRefKind::Var
-                    | SkelRefKind::Key => return None,
+                    RefCap::Label
+                    | RefCap::Method
+                    | RefCap::Var
+                    | RefCap::Key => return None,
                 };
                 Some(crate::model::file_analysis::Ref {
                     kind,
@@ -1263,7 +1263,7 @@ impl SkeletonAnalysis {
 /// the pack's attribute vocabulary — the ONE place a pack's attribute
 /// spellings become model facts (rule #12: the model asks the flag, never
 /// the string).
-fn symbol_flags_of(kind: DefKind, attributes: &[String]) -> SymbolFlags {
+fn symbol_flags_of(kind: DefCap, attributes: &[String]) -> SymbolFlags {
     let mut flags = SymbolFlags::empty();
     if let Some(f) = kind.marker().and_then(|m| SymbolFlags::try_from(m).ok()) {
         flags.insert(f);

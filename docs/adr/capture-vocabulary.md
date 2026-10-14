@@ -12,9 +12,11 @@ on.
 
 `query_extract/vocab.rs` declares `Capture`: one variant per capture
 family, each carrying a sub-enum of exactly the suffixes the documents
-use. The families that name an entity kind stay typed past the driver:
-`DefKind` is `SkelSymbol.kind` and `RefKind` is `SkelRef.kind`, so the
-projection to `FileAnalysis` matches on the enum too.
+use, named `<Family>Cap`. The families that name an entity kind stay
+typed past the driver: `DefCap` is `SkelSymbol.kind` and `RefCap` is
+`SkelRef.kind`, so the projection to `FileAnalysis` matches on the enum
+too. The `Cap` suffix keeps them apart from the model's `RefKind` /
+`SymKind`, which they project to.
 
 Each enum's spelling table is written once, in a `spelled!` invocation,
 which generates `parse`, `spelling` and `Display` from it. The two
@@ -25,7 +27,7 @@ directions cannot disagree.
 `Capture::parse` turns a name into a `Capture`. Nothing else reads a
 capture name: the driver, the pack hooks and the projection all match on
 the enum. A pack hook that depends on a kind takes the typed kind
-(`default_name: fn(DefKind)`).
+(`default_name: fn(DefCap)`).
 
 ## Decision: the vocabulary is checked when the query compiles
 
@@ -65,7 +67,7 @@ structural predicate pay it.
 ## Decision: a kind's meaning lives on the kind
 
 What a kind means is a method on its enum, matched exhaustively:
-`DefKind::sym_kind` (the `SymKind` it projects to), `DefKind::marker`
+`DefCap::sym_kind` (the `SymKind` it projects to), `DefCap::marker`
 (the `union` / `reexport` / `macro` attribute and the `SymbolFlags` it
 implies), `LitKind::value_type`, `ObsKind::observation`. A new kind does
 not compile until it says what it is.

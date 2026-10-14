@@ -10,7 +10,7 @@ pub(super) struct State {
     /// capture unravelled to. Read by the `def.*` handler to stamp the symbol.
     nested_stacks: HashMap<usize, Vec<crate::model::file_analysis::DerefStep>>,
     /// A def's name token, joined to its def event by match.
-    names_by_match: HashMap<(usize, DefKind), (String, Point, Point)>,
+    names_by_match: HashMap<(usize, DefCap), (String, Point, Point)>,
     /// `@qualifier` (a `Class::` on an out-of-line def) and `@rettype` (a
     /// method's declared return type) — pre-collected like names because the
     /// `@def` event fires before these inner captures.
@@ -53,7 +53,7 @@ pub(super) struct State {
 
 impl State {
     /// The name token a match captured for its def of `kind`.
-    pub(super) fn name_of(&self, match_id: usize, kind: DefKind) -> Option<&str> {
+    pub(super) fn name_of(&self, match_id: usize, kind: DefCap) -> Option<&str> {
         self.names_by_match.get(&(match_id, kind)).map(|(n, _, _)| n.as_str())
     }
 }
@@ -77,7 +77,7 @@ pub(super) fn flatten_ool_def(
     let leaf_text = leaf.utf8_text(source).unwrap_or("").to_string();
     // the def symbol spans the whole function_definition; name +
     // owner come from the qualified declarator's leaf + scope.
-    let method = |part| Capture::Def { kind: DefKind::Method, part };
+    let method = |part| Capture::Def { kind: DefCap::Method, part };
     events.push(Event::at(node, method(DefPart::Node), leaf_text.clone(), match_id));
     events.push(Event::at(leaf, method(DefPart::Name), leaf_text, match_id));
     events.push(Event::at(node, Capture::Qualifier, owner, match_id));
@@ -229,7 +229,7 @@ pub(super) fn tag_inline_namespaces(st: &mut ExtractState) {
     }
     let same = |a: Point, b: Point| a.row == b.row && a.column == b.column;
     for s in st.out.symbols.iter_mut() {
-        if s.kind == DefKind::Package
+        if s.kind == DefCap::Package
             && spans.iter().any(|&(ns, ne)| same(ns, s.name_start) && same(ne, s.name_end))
         {
             s.attributes.push("inline".to_string());
@@ -252,7 +252,7 @@ pub(super) fn dedup(st: &mut ExtractState) {
                 best.insert(key, i);
             }
             Some(&j) => {
-                let (gen_i, gen_j) = (symbols[i].kind == DefKind::Var, symbols[j].kind == DefKind::Var);
+                let (gen_i, gen_j) = (symbols[i].kind == DefCap::Var, symbols[j].kind == DefCap::Var);
                 let upgrade_ret = symbols[i].kind == symbols[j].kind
                     && symbols[i].return_type.is_some()
                     && symbols[j].return_type.is_none();

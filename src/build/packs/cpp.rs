@@ -18,7 +18,7 @@ pub fn cpp_pack() -> LangPack {
         // synthetic container is outline structure, not an addressable
         // member (the "anonymous" attribute keeps it out of completion).
         default_name: |kind| match kind {
-            DefKind::UnionField => Some("(union)"),
+            DefCap::UnionField => Some("(union)"),
             _ => None,
         },
         // C++ declared types ARE the witness source. Primitives → the

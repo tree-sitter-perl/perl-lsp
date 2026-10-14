@@ -11,7 +11,7 @@ pub fn perl_pack() -> LangPack {
         // raw text already carries it.
         shape_name: |raw| raw.to_string(),
         default_name: |kind| match kind {
-            DefKind::Anon => Some("(anon)"),
+            DefCap::Anon => Some("(anon)"),
             _ => None,
         },
         annot_type: |_| None,

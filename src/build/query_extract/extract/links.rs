@@ -21,7 +21,7 @@ pub(crate) struct Links<'t> {
 #[derive(Clone, Copy)]
 enum Mark {
     Level(DerefCap),
-    Leaf(DefKind),
+    Leaf(DefCap),
 }
 
 /// A declarator chain read to its end: the name token, one step per level
@@ -30,7 +30,7 @@ enum Mark {
 pub(crate) struct Peeled<'t> {
     pub(crate) leaf: tree_sitter::Node<'t>,
     pub(crate) stack: Vec<crate::model::file_analysis::DerefStep>,
-    pub(crate) def: DefKind,
+    pub(crate) def: DefCap,
 }
 
 impl<'t> Links<'t> {
@@ -48,7 +48,7 @@ impl<'t> Links<'t> {
         self.marks.insert(node.id(), Mark::Level(cap));
     }
 
-    pub(super) fn mark_leaf(&mut self, node: tree_sitter::Node<'t>, def: DefKind) {
+    pub(super) fn mark_leaf(&mut self, node: tree_sitter::Node<'t>, def: DefCap) {
         self.marks.insert(node.id(), Mark::Leaf(def));
     }
 
