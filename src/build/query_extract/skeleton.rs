@@ -1108,6 +1108,14 @@ impl SkeletonAnalysis {
         // This and the return arms below are pushed before
         // `finalize_post_walk` seals the enrichment baseline; above it, the
         // first enrichment truncates them away.
+        //
+        // TODO(implicit-receiver-invoke): membership is read from THIS file's
+        // symbols only, so a member declared in a header (class in `buf.h`,
+        // body in `buf.cpp`) or inherited from a base stays free, and resolves
+        // to a same-named free function if an include has one. The fix is the
+        // implicit receiver as an Invoke hop resolved at query time: the
+        // class's members across files and up `GraphView`, then the free
+        // lookup.
         {
             use crate::model::file_analysis::{RefKind, ScopeId};
             use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
