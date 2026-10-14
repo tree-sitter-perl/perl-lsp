@@ -515,7 +515,7 @@ impl CrossFileLookup for ModuleIndex {
                     let frame = CallerFrame::of(fa);
                     if persisted {
                         if let Some(body) = crate::index::module_cache::encode_slice_body(&frame) {
-                            rows.push((path_str.to_string(), FRAME_KEY.to_string(), stamp, body));
+                            rows.push(crate::index::module_cache::CallerSliceRow::frame(path_str.to_string(), stamp, body));
                         }
                     }
                     frame
@@ -546,7 +546,13 @@ impl CrossFileLookup for ModuleIndex {
                         let s = CallerSlice::of(fa, &frame, key, Vec::new());
                         if persisted {
                             if let Some(body) = crate::index::module_cache::encode_slice_body(&s) {
-                                rows.push((path_str.to_string(), key.to_string(), stamp, body));
+                                rows.push(crate::index::module_cache::CallerSliceRow::slice(
+                                    path_str.to_string(),
+                                    key.to_string(),
+                                    stamp,
+                                    body,
+                                    &s,
+                                ));
                             }
                         }
                         s
@@ -566,6 +572,23 @@ impl CrossFileLookup for ModuleIndex {
             flush_answers_into(&self.core, self.workspace_root().as_deref());
         }
         CallerRead { frame, slice }
+    }
+
+    fn calls_plainly(&self, cached: &Arc<CachedModule>, key: &str) -> bool {
+        // The stored flag answers without decoding a slice: verifying a
+        // calls relation asks it of every file mentioning the name.
+        if let Some(SliceKeeping { stamp, persisted: true }) = self.slice_keeping(cached) {
+            if self.core.caller_slices.slice(&cached.path, key, stamp).is_none() {
+                let path = cached.path.to_string_lossy();
+                if let Some(Some(flag)) = self.with_rows_conn(|c| {
+                    crate::index::module_cache::caller_slice_plain_calls(c, &path, key, stamp)
+                }) {
+                    crate::model::witnesses::engine::note_file(self, &cached.path);
+                    return flag;
+                }
+            }
+        }
+        self.caller_slice(cached, key).slice.has_plain_call()
     }
 
     fn widen_caller_slice(
@@ -588,7 +611,14 @@ impl CrossFileLookup for ModuleIndex {
         let cache = &self.core.caller_slices;
         cache.keep_slice(&cached.path, key, stamp, Arc::clone(&wider.slice));
         if let Some(body) = crate::index::module_cache::encode_slice_body(&*wider.slice) {
-            if cache.queue((cached.path.to_string_lossy().into_owned(), key.to_string(), stamp, body)) {
+            let row = crate::index::module_cache::CallerSliceRow::slice(
+                cached.path.to_string_lossy().into_owned(),
+                key.to_string(),
+                stamp,
+                body,
+                &wider.slice,
+            );
+            if cache.queue(row) {
                 flush_answers_into(&self.core, self.workspace_root().as_deref());
             }
         }

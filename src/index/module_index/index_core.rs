@@ -481,7 +481,7 @@ impl CallerSliceCache {
 
     /// Queue a row for the next flush; `true` when the queue is full.
     pub(crate) fn queue(&self, row: crate::index::module_cache::CallerSliceRow) -> bool {
-        let bytes = row.1.len() + row.3.len();
+        let bytes = row.key.len() + row.body.len();
         if let Ok(mut p) = self.pending.lock() {
             p.push(row);
         }

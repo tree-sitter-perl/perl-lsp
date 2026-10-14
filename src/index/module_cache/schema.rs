@@ -136,6 +136,13 @@ mod fingerprint_tests {
 }
 
 pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
+    // A caller-slice table without the call flag is an older shape; its rows
+    // are a cache, so it goes and is recreated below.
+    if conn.prepare("SELECT 1 FROM caller_slice LIMIT 1").is_ok()
+        && conn.prepare("SELECT plain_calls, complete FROM caller_slice LIMIT 1").is_err()
+    {
+        conn.execute_batch("DROP TABLE caller_slice")?;
+    }
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS meta (
             key   TEXT PRIMARY KEY,
@@ -241,6 +248,8 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             stamp           INTEGER NOT NULL,
             extract_version INTEGER NOT NULL,
             body            BLOB NOT NULL,
+            plain_calls     INTEGER NOT NULL DEFAULT 0,
+            complete        INTEGER NOT NULL DEFAULT 0,
             UNIQUE (path, key)
         );
         CREATE INDEX IF NOT EXISTS idx_modules_path ON modules(path);

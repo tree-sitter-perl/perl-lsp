@@ -566,6 +566,11 @@ pub trait CrossFileLookup {
         crate::model::witnesses::caller_slice::CallerRead::cut(&self.whole_present(cached), key)
     }
 
+    /// Does `cached` hold a plain (non-method) call keyed `key`?
+    fn calls_plainly(&self, cached: &std::sync::Arc<CachedModule>, key: &str) -> bool {
+        self.caller_slice(cached, key).slice.has_plain_call()
+    }
+
     /// `read`, cut again to also hold `misses`.
     fn widen_caller_slice(
         &self,
@@ -1518,6 +1523,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     }
     fn caller_slice(&self, cached: &std::sync::Arc<CachedModule>, key: &str) -> crate::model::witnesses::caller_slice::CallerRead {
         self.inner.caller_slice(cached, key)
+    }
+    fn calls_plainly(&self, cached: &std::sync::Arc<CachedModule>, key: &str) -> bool {
+        self.inner.calls_plainly(cached, key)
     }
     fn widen_caller_slice(
         &self,

@@ -983,9 +983,7 @@ fn calls_among(idx: &dyn CrossFileLookup, store: Option<&AnswerStore>, key: &str
                     return verdict;
                 }
             }
-            // The caller slice records its file's calls of `key`, and the
-            // indexer cut it: a small row read instead of a refs rehydrate.
-            let verdict = idx.caller_slice(&cached, key).slice.calls.iter().any(|&(_, method)| !method);
+            let verdict = idx.calls_plainly(&cached, key);
             if let (Some(v), Some(store)) = (version, store) {
                 if let Ok(mut m) = store.call_verdicts.lock() {
                     let bytes = std::mem::size_of::<((String, PathBuf), (u64, bool))>() + key.len() + path_bytes(path);

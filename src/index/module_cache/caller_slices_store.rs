@@ -54,8 +54,48 @@ pub fn load_caller_slice(conn: &Connection, path: &str, key: &str, stamp: u64) -
     .flatten()
 }
 
-/// One row: `(path, key, stamp, body)`.
-pub type CallerSliceRow = (String, String, u64, Vec<u8>);
+/// One row: a file's frame or one call name's slice, cut from the text
+/// stamped `stamp`.
+pub struct CallerSliceRow {
+    pub path: String,
+    pub key: String,
+    pub stamp: u64,
+    pub body: Vec<u8>,
+    /// The slice holds a plain function call of `key`: what `calls_among`
+    /// asks, answerable without decoding `body`.
+    pub plain_calls: bool,
+    /// On a frame: every call name of the file has a row at this stamp, so
+    /// a name without one is called nowhere in it.
+    pub complete: bool,
+}
+
+impl CallerSliceRow {
+    pub fn frame(path: String, stamp: u64, body: Vec<u8>) -> CallerSliceRow {
+        CallerSliceRow { path, key: FRAME_KEY.to_string(), stamp, body, plain_calls: false, complete: false }
+    }
+
+    pub fn slice(path: String, key: String, stamp: u64, body: Vec<u8>, slice: &crate::model::witnesses::caller_slice::CallerSlice) -> CallerSliceRow {
+        CallerSliceRow { path, key, stamp, body, plain_calls: slice.has_plain_call(), complete: false }
+    }
+}
+
+/// Whether `path`'s text stamped `stamp` holds a plain function call keyed
+/// `key`, from the stored flags alone: the slice row's flag, or `false` when
+/// the file's frame says every call name has a row and `key` has none.
+/// `None` when the store cannot say.
+pub fn caller_slice_plain_calls(conn: &Connection, path: &str, key: &str, stamp: u64) -> Option<bool> {
+    let (flag, complete): (Option<bool>, Option<bool>) = conn
+        .prepare_cached(
+            "SELECT (SELECT plain_calls FROM caller_slice
+                      WHERE path = ?1 AND key = ?2 AND stamp = ?3 AND extract_version = ?4),
+                    (SELECT complete FROM caller_slice
+                      WHERE path = ?1 AND key = '' AND stamp = ?3 AND extract_version = ?4)",
+        )
+        .ok()?
+        .query_row(params![path, key, stamp as i64, EXTRACT_VERSION], |row| Ok((row.get(0)?, row.get(1)?)))
+        .ok()?;
+    flag.or_else(|| complete.filter(|&c| c).map(|_| false))
+}
 
 /// Write `rows` in one transaction.
 pub fn save_caller_slices(conn: &Connection, rows: &[CallerSliceRow]) -> rusqlite::Result<()> {
@@ -74,13 +114,14 @@ pub fn save_caller_slices(conn: &Connection, rows: &[CallerSliceRow]) -> rusqlit
 pub fn put_caller_slices(conn: &Connection, rows: &[CallerSliceRow]) -> rusqlite::Result<()> {
     let mut stale = conn.prepare_cached("DELETE FROM caller_slice WHERE path = ?1 AND stamp != ?2")?;
     let mut put = conn.prepare_cached(
-        "INSERT OR REPLACE INTO caller_slice (path, key, stamp, extract_version, body) VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT OR REPLACE INTO caller_slice (path, key, stamp, extract_version, body, plain_calls, complete) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )?;
-    for (path, key, stamp, body) in rows {
-        if key == FRAME_KEY {
-            stale.execute(params![path, *stamp as i64])?;
+    for r in rows {
+        if r.key == FRAME_KEY {
+            stale.execute(params![r.path, r.stamp as i64])?;
         }
-        put.execute(params![path, key, *stamp as i64, EXTRACT_VERSION, body])?;
+        put.execute(params![r.path, r.key, r.stamp as i64, EXTRACT_VERSION, r.body, r.plain_calls, r.complete])?;
     }
     Ok(())
 }
@@ -98,11 +139,11 @@ pub fn caller_slice_rows(path: &str, fa: &crate::model::file_analysis::FileAnaly
     let frame = CallerFrame::of(fa);
     let mut rows = Vec::new();
     if let Some(body) = encode_slice_body(&frame) {
-        rows.push((path.to_string(), FRAME_KEY.to_string(), stamp, body));
+        rows.push(CallerSliceRow { complete: true, ..CallerSliceRow::frame(path.to_string(), stamp, body) });
     }
     for (key, slice) in CallerSlice::all_of(fa, &frame) {
         if let Some(body) = encode_slice_body(&slice) {
-            rows.push((path.to_string(), key, stamp, body));
+            rows.push(CallerSliceRow::slice(path.to_string(), key, stamp, body, &slice));
         }
     }
     rows

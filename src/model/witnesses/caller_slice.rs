@@ -122,6 +122,11 @@ impl CallerSlice {
         CallerSlice { calls, witnesses, extra_roots }
     }
 
+    /// Does the slice hold a plain (non-method) call of its name?
+    pub fn has_plain_call(&self) -> bool {
+        self.calls.iter().any(|&(_, method)| !method)
+    }
+
     /// The slice of a file with no call of the name.
     pub fn empty(frame: &CallerFrame) -> CallerSlice {
         let mut s = CallerSlice::default();
