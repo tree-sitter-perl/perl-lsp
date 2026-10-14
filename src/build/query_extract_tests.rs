@@ -2242,6 +2242,53 @@ fn cpp_member_read_is_a_field_access_and_a_member_call_is_a_method_call() {
     );
 }
 
+/// Each call's `Invoke`: (callee, defined in this file, which arguments
+/// spread), in source order; `None` args when the call captured no list.
+fn call_invokes(fa: &crate::model::file_analysis::FileAnalysis) -> Vec<(String, bool, Option<Vec<bool>>)> {
+    use crate::model::witnesses::{CallArg, Callee, WitnessPayload};
+    fa.witnesses
+        .all()
+        .iter()
+        .filter_map(|w| match &w.payload {
+            WitnessPayload::Invoke { callee: Callee::Function { name, local }, args, .. } => Some((
+                name.clone(),
+                local.is_some(),
+                args.as_ref().map(|a| a.iter().map(|a| matches!(a, CallArg::Spread(_))).collect()),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A call's value is an `Invoke` of its callee on its written arguments: a
+/// comment between two arguments is not one, a pack expansion spreads, and a
+/// callee this file doesn't define is left for the cross-file lookup.
+#[test]
+fn cpp_call_is_an_invoke_on_its_arguments() {
+    let fa = cpp_fa(
+        "int f(int a, int b);\n\
+         template <class... T> int g(T... args) { return f(1 /* one */, 2) + f(args...) + h(3); }\n",
+    );
+    assert_eq!(
+        call_invokes(&fa),
+        vec![
+            ("f".into(), true, Some(vec![false, false])),
+            ("f".into(), true, Some(vec![true])),
+            ("h".into(), false, Some(vec![false])),
+        ]
+    );
+}
+
+#[test]
+fn python_call_is_an_invoke_on_its_arguments() {
+    let (fa, _) = python_fa("def f(*a, **k):\n    return 1\n\nx = f(1, *rest, **kw)\ny = f(i for i in rest)\n");
+    assert_eq!(
+        call_invokes(&fa),
+        vec![("f".into(), true, Some(vec![false, true, true])), ("f".into(), true, None)],
+        "a starred argument spreads; a generator argument is no argument list"
+    );
+}
+
 /// C++ classes hold ONE member namespace: the nearest declaration of a
 /// name answers a call and a value read alike, so a derived member
 /// function hides a base data member of its name for both asks, and a

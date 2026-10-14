@@ -10,10 +10,13 @@ pub(super) struct State {
     /// match_id → was the IMMEDIATE member-access receiver a simple variable?
     /// Recorded at construction (the un-peeled node); gates op-DX at the mint.
     pub(super) member_simple: HashMap<usize, bool>,
-    /// A call's written arg count, keyed by the match that captured both its
-    /// callee (`@ref.call` / `@ref.qcall` / `@ref.member.call`) and its
-    /// argument list (`@arity.args`).
-    pub(super) arg_counts_by_match: HashMap<usize, usize>,
+    /// A call's written arguments (span + byte range), keyed by the match
+    /// that captured both its callee (`@ref.call` / `@ref.qcall` /
+    /// `@ref.member.call`) and its argument list (`@arity.args`).
+    pub(super) args_by_match: HashMap<usize, Vec<(Span, usize, usize)>>,
+    /// `@arity.spread`: the byte ranges of arguments that flatten to any
+    /// number of values.
+    spreads: std::collections::HashSet<(usize, usize)>,
     /// A callable's declared parameter arity, keyed by the parameter_list span.
     /// Associated to its def symbol by span containment in `into_file_analysis`
     /// (`@arity.sig` fires a separate match from the def name).
@@ -31,6 +34,17 @@ pub(super) struct State {
 }
 
 impl State {
+    /// How many arguments the call in `match_id` wrote.
+    pub(super) fn arg_count(&self, match_id: usize) -> Option<usize> {
+        self.args_by_match.get(&match_id).map(Vec::len)
+    }
+
+    /// The call's arguments in order, each with whether it spreads.
+    pub(super) fn call_args(&self, match_id: usize) -> Option<Vec<(Span, bool)>> {
+        let args = self.args_by_match.get(&match_id)?;
+        Some(args.iter().map(|&(span, s, e)| (span, self.spreads.contains(&(s, e)))).collect())
+    }
+
     /// The operator a member match wrote, with its span.
     pub(super) fn op_of(&self, match_id: usize) -> Option<(MemberOp, Span)> {
         let span = *self.member_op_span.get(&match_id)?;
@@ -58,11 +72,17 @@ pub(super) fn flatten_recv(
     events.push(Event::at(inner, Capture::Member(MemberCap::Recv), text, match_id));
 }
 
-/// `@arity.args`: a call's argument_list — count its arguments (the named
-/// children; the C `...` at a CALL site never appears here). Keyed by the
-/// match, which also captured the callee.
-pub(super) fn count_args(members: &mut State, node: tree_sitter::Node<'_>, match_id: usize) {
-    members.arg_counts_by_match.insert(match_id, node.named_child_count());
+/// `@arity.args`: a call's argument list. Its arguments are its named
+/// children, less the grammar's extras (a comment between two arguments is
+/// not one). Keyed by the match, which also captured the callee.
+pub(super) fn record_args(members: &mut State, node: tree_sitter::Node<'_>, match_id: usize) {
+    let mut c = node.walk();
+    let args = node
+        .named_children(&mut c)
+        .filter(|a| !a.is_extra())
+        .map(|a| (Span { start: a.start_position(), end: a.end_position() }, a.start_byte(), a.end_byte()))
+        .collect();
+    members.args_by_match.insert(match_id, args);
 }
 
 /// `@arity.sig`: a callable's parameter_list — count declared params
@@ -96,8 +116,14 @@ pub(super) fn count_params(members: &mut State, node: tree_sitter::Node<'_>) {
 
 /// The span-keyed member facts, read before any handler asks them.
 pub(super) fn collect(st: &mut ExtractState, e: &Event) {
-    if let Capture::MemberOp(which) = e.cap {
-        st.members.ops_at.insert((e.start, e.end), which.op());
+    match e.cap {
+        Capture::MemberOp(which) => {
+            st.members.ops_at.insert((e.start, e.end), which.op());
+        }
+        Capture::Arity(ArityCap::Spread) => {
+            st.members.spreads.insert((e.start_byte, e.end_byte));
+        }
+        _ => {}
     }
 }
 

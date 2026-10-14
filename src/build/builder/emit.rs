@@ -377,6 +377,10 @@ impl<'a> Builder<'a> {
                         return Some(WitnessPayload::InferredType(c));
                     }
                 }
+                // TODO(perl-free-invoke): mint `Invoke { Callee::Function }`
+                // with the call's arguments, as pack calls do, so an imported
+                // callee resolves in the bag and the arity rides the call
+                // (`docs/adr/calls-are-invokes.md`).
                 let sid = self.find_callee_symbol(&called)?;
                 Some(WitnessPayload::Edge(WitnessAttachment::Symbol(sid)))
             }

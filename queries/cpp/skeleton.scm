@@ -672,7 +672,8 @@
 (goto_statement label: (statement_identifier) @ref.label)
 
 ; ---- calls. Each call pattern captures its argument list in the same match
-; (@arity.args), so the callee ref carries its written arg count — overload
+; (@arity.args), so the call's Invoke carries its arguments and the callee ref
+; its written arg count — overload
 ; arity ranking fuel (structural counts only; "which overload fits" is
 ; downstream interpretation, `ParamArity::fit`). A def's parameter list is
 ; joined to the def by span containment. ----
@@ -689,6 +690,8 @@
   arguments: (_) @arity.args) @expr.call
 
 (function_declarator parameters: (parameter_list) @arity.sig)
+; a pack expansion (`f(args...)`) passes any number of values.
+(argument_list (parameter_pack_expansion) @arity.spread)
 
 ; ---- member access (`recv.field` / `recv->field`): the receiver subtree is
 ; the invocant, carried (span+text) for query-time typing via
