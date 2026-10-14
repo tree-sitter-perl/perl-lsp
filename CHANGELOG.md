@@ -26,6 +26,16 @@ crate / VS Code extension versions.
   can't name (`$m = $self->pick`) clears it. `our @ISA` and
   `use constant` are per package, so in a file with several packages each
   one gets its own parents instead of every earlier package's.
+- **An assignment's left side is not part of its value.** `our @ISA =
+  (...)` listed the package itself among its parents, so method lookup
+  could reach a sibling's definition ahead of the real parent;
+  `@Other::EXPORT_OK = qw(x)` recorded a re-export from `Other`; and
+  `@names = qw(alpha); @names = qw(beta)` folded to both lists, so a glob
+  loop over it installed both sets of subs. Each now reads only the
+  right-hand side.
+- **A very long fluent chain no longer crashes the server.**
+  `P->new->step->step->…` with a few hundred steps could overflow the
+  stack; past the depth limit it now just gets no type.
 - **`shift` consumes `@_`; only the first read is the invocant.** A second
   `shift`, a `$_[0]` after shifts, a `shift` inside a callback, and
   `my $x = shift` in a plain helper all used to type as the enclosing
@@ -112,6 +122,38 @@ crate / VS Code extension versions.
   the inherited controller's action, and hover shows
   `Mojolicious::Routes::Route<controller=alerts, section=admin>`.
 
+### Diagnostics
+
+- **`AUTOLOAD` no longer satisfies a role's `requires`.** Role::Tiny and
+  Moose check `requires` with `can()`, which an `AUTOLOAD` never answers,
+  so a composer that relies on one fails at load time;
+  `role-requires-unfulfilled` now says so instead of staying silent.
+
+### Performance
+
+- **`--check` and `--heatmap` scale across cores on large projects.**
+  FHEM `--check` on 20 threads: 58 s → 22 s, with the same diagnostics;
+  heatmap reports are unchanged.
+- **Files with long fluent chains or many `return`s build faster.** A
+  chain of calls no longer costs time quadratic in its length.
+
+### C++, Python, R and CMake
+
+- **Folding.** Class bodies, function bodies and blocks fold in every
+  pack language; they used to return no folding ranges.
+- **C++ data members are fields, not calls.** `o.count` without an
+  argument list reads a field, so goto-def, hover and references land on
+  the data member, and a method and a field of the same name stay apart.
+- **C++ function-pointer members resolve.** `int (*read)(char *buf);`
+  is a field, and `d->read(buf)` reaches it.
+- **C++ bare member names inside a method keep their links.** A bare
+  field or sibling call in a method body (implicit `this`) used to lose
+  its resolution after the first cross-file refresh in the editor, and a
+  function's second `return` didn't count toward its return type.
+- **Python goto-def on `obj.m()` reaches the method.** A method call
+  through a receiver used to find nothing; `obj.m` without a call stays a
+  value read.
+
 ### Scoping
 
 - **A bare block is a lexical scope.** A `my` inside `{ ... }` used to
@@ -128,6 +170,8 @@ crate / VS Code extension versions.
   offered, because only declared keys were; `$h{` and `$self->{` now
   list them. On DateTime, `$self->{` used to offer 2 keys and now
   offers the slots its constructor writes.
+- **Lexical methods complete after `->`.** A `my method hidden` in scope
+  is offered as `&hidden`, the only spelling that dispatches to it.
 
 ## v0.7.0 — 2026-08-31
 
