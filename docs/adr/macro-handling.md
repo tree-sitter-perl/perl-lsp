@@ -123,7 +123,7 @@ unsigned short`). Abstraction for inference, concrete leaf for the human.
   The backward half is minted at the use: the build resolves each used
   macro name's transitive delegate chain through the file's own `#define`s
   and its gathered include closure (every config variant counts —
-  `Macro::variant_delegates`) and stores it per use site on the `RefTable`
+  `Macro::spans`) and stores it per use site on the `RefTable`
   (`MacroUses`). The use is indexed and row-shredded under each
   delegate's key, so references on `Perl_SvREFCNT_inc` find `SvREFCNT_inc(x)`
   through the ordinary key bucket, with no query-time macro scan and no
@@ -133,15 +133,24 @@ unsigned short`). Abstraction for inference, concrete leaf for the human.
 
 ### Position: a macro is defined from its `#define`, or its `#include`, until `#undef`
 
-The preprocessor reads top to bottom, so a name is a macro only below the
-line that defines it: its own `#define`, or for a gathered macro the
-`#include` line whose closure first defines it (`Macro::via_include`, an
-ordinal into the file's include lines; an include guard makes later
-includes of the same header no-ops, so the first one wins). The table
-keeps one body per name, but each config variant's delegate carries its
-own header's ordinal and counts only below that header's include. A file's
-own `#undef` ends a definition until the next `#define` (`definition_end`
-and `definition_counts_at` are the one rule). Three consumers read this:
+The preprocessor reads top to bottom, so a name is a macro only between
+the line that defines it and the next unconditional `#undef` of it. A
+file's own `#define` counts from its line. A gathered macro counts from
+the `#include` line whose header defines it: the gather replays the
+include closure in preprocessor order (each header's `#define`, `#undef`
+and `#include` lines in source order, descending into an include where it
+stands, each header once because an include guard makes later includes
+no-ops) and records each definition as a span of include ordinals
+(`Macro::spans`). A header that defines a helper and undefines it again
+leaves no span, so the name is no macro in its includers. The table keeps
+one body per name, but each config variant's delegate rides its own span.
+`definition_spans` and `definition_counts_at` are the one rule: a span
+ends at the file's own `#undef`, or at an include whose header undefines
+the name.
+
+An `#undef` under `#if`/`#ifdef` ends nothing. Every arm of a conditional
+is read as live, so a guarded `#undef` removes the macro on some configs
+only, and the rest still have it. Three consumers read this:
 
 - **Expansion** leaves a use where the name is not defined unexpanded
   (re2's `Regexp::Simplify` above `#define Simplify DontCallSimplify`).
@@ -153,9 +162,12 @@ and `definition_counts_at` are the one rule). Three consumers read this:
   the plain name it spells (`MacroUses::inactive`): the macro lane stands
   aside.
 
-An `#undef` inside a gathered header is not modeled: the gather keeps one
-table per include closure, not the order its headers define and undefine
-in.
+Spans count in include ordinals, so everything one include brings in
+happens at its line. A header that only undefines a name (no header in
+the closure defines it) is not recorded, so it never ends a `#define` the
+including file wrote above it (`TODO(undef-only-header)`). Pre-expanded
+bodies are baked once per closure, so a body naming a helper the closure
+undefines still expands the helper.
 
 ### Resolution visibility = the include-closure lie (generalizes beyond macros)
 

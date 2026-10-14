@@ -2343,6 +2343,61 @@ mod pack_symmetry {
         assert!(!results.iter().any(|r| r.span.start == tree_sitter::Point::new(4, 8)), "W(2) does not: {results:?}");
     }
 
+    /// Analyze `use_src` as `use.c` in a fresh dir holding `headers`.
+    fn cpp_with_headers(dir: &str, headers: &[(&str, &str)], use_src: &str) -> FileAnalysis {
+        let dir = std::env::temp_dir().join(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, body) in headers {
+            std::fs::write(dir.join(name), body).unwrap();
+        }
+        let use_path = dir.join("use.c");
+        std::fs::write(&use_path, use_src).unwrap();
+        crate::build::language_driver::LanguageRegistry::with_enabled()
+            .for_id("cpp")
+            .unwrap()
+            .analyze_with_path(use_src, Some(&use_path))
+    }
+
+    fn use_at(fa: &FileAnalysis, name: &str, row: usize) -> usize {
+        fa.refs()
+            .iter()
+            .position(|r| r.target_name == name && r.span.start == tree_sitter::Point::new(row, 8))
+            .unwrap_or_else(|| panic!("{name} use minted on row {row}: {:?}", fa.refs()))
+    }
+
+    #[test]
+    fn a_header_undef_ends_a_gathered_macro_below_its_include() {
+        // The include guard is no config conditional, so undef.h's `#undef`
+        // counts; helper.h defines and undefines `H` itself, so `H` is no
+        // macro in its includers at all.
+        let fa = cpp_with_headers(
+            "perl_lsp_header_undef",
+            &[
+                ("def.h", "int F(int x);\n#define W(x) F(x)\n"),
+                ("undef.h", "#ifndef UNDEF_H\n#define UNDEF_H\n#undef W\n#endif\n"),
+                ("helper.h", "#define H(x) F(x)\nint g(void);\n#undef H\n"),
+            ],
+            "#include \"def.h\"\nint a = W(1);\n#include \"undef.h\"\nint b = W(2);\n#include \"helper.h\"\nint c = H(3);\n",
+        );
+        assert_eq!(fa.ref_delegates(use_at(&fa, "W", 1)), ["F".to_string()]);
+        assert!(fa.is_inactive_macro_use(use_at(&fa, "W", 3)), "W below undef.h is not a macro use");
+        assert!(fa.ref_delegates(use_at(&fa, "W", 3)).is_empty());
+        assert!(fa.is_inactive_macro_use(use_at(&fa, "H", 5)), "helper.h's H never reaches use.c");
+    }
+
+    #[test]
+    fn an_undef_under_a_conditional_ends_nothing() {
+        // Both arms of `#ifdef` are read as live, so on the configs without
+        // `X` the macro is still defined below.
+        let fa = cpp_with_headers(
+            "perl_lsp_guarded_undef",
+            &[("undef.h", "#ifndef UNDEF_H\n#define UNDEF_H\n#ifdef X\n#undef V\n#endif\n#endif\n")],
+            "int F(int x);\n#define W(x) F(x)\n#define V(x) F(x)\n#ifdef X\n#undef W\n#endif\n#include \"undef.h\"\nint b = W(2);\nint c = V(3);\n",
+        );
+        assert_eq!(fa.ref_delegates(use_at(&fa, "W", 7)), ["F".to_string()]);
+        assert_eq!(fa.ref_delegates(use_at(&fa, "V", 8)), ["F".to_string()]);
+    }
+
     #[test]
     fn file_scope_global_def_reaches_bare_reads() {
         let store = FileStore::new();

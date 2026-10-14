@@ -50,20 +50,28 @@ pub struct Macro {
     /// 0-based line of the `#define` — the variant's def site.
     #[serde(default)]
     pub def_line: usize,
-    /// The delegates of every `#define` of this name a table holds one body
-    /// for (`absorb_variant`): a use forwards to each config variant's
-    /// callee, and the references see-through must count all of them. Each
-    /// carries the include ordinal (`via_include`) of the header it comes
-    /// from, so a variant counts only below its own `#include`; `None` is the
-    /// same place as this body.
+    /// For a gathered macro: where the gathering file has it defined, from
+    /// replaying the include closure in preprocessor order. Empty for a
+    /// file's own `#define`s, and for a gathered name every header that
+    /// defines it also undefines again.
     #[serde(default)]
-    pub variant_delegates: Vec<(String, Option<u32>)>,
-    /// For a gathered macro: the ordinal of the gathering file's `#include`
-    /// line (`include_lines`) after which the name is defined — the first
-    /// direct include whose closure defines it. `None` for a file's own
-    /// `#define`s, and for a gathered name visible from the top.
+    pub spans: Vec<GatheredSpan>,
+    /// For a gathered macro: the include ordinals whose headers `#undef` it
+    /// — where a definition the gathering file wrote above them ends.
     #[serde(default)]
-    pub via_include: Option<u32>,
+    pub undefined_at: Vec<u32>,
+}
+
+/// One stretch of the gathering file over which a gathered macro is
+/// defined, in include ordinals (`include_lines`): from the include line
+/// whose header defines it until the one whose header undefines it, and the
+/// callee that definition forwards to. Ordinals are coarse: a header
+/// defining and then undefining a name leaves no span at all.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GatheredSpan {
+    pub from: u32,
+    pub until: Option<u32>,
+    pub delegate: Option<String>,
 }
 
 /// One source replacement: original `[start,end)` → `replacement`.

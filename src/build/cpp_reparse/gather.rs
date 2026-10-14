@@ -98,31 +98,27 @@ impl PreExpandedExternal {
         self.raw.keys().map(|k| k.as_str())
     }
 
-    /// Every callee a use of gathered macro `name` may forward to, across
-    /// its config variants in the whole closure, each with the line its
-    /// variant is defined from (`activation_line`'s units) — the delegation
-    /// edges the build mints onto this file's use sites (`macro_uses`).
-    pub fn delegates_of(&self, name: &str, include_lines: &[usize]) -> Vec<(String, usize)> {
-        let Some(m) = self.raw.get(name) else { return Vec::new() };
-        let line = |via: Option<u32>| via.and_then(|i| include_lines.get(i as usize).copied()).unwrap_or(0);
-        let mut out: Vec<(String, usize)> =
-            m.variant_delegates.iter().map(|(d, via)| (d.clone(), line(via.or(m.via_include)))).collect();
-        if let Some(d) = m.delegate() {
-            if !out.iter().any(|(v, _)| *v == d) {
-                out.push((d, line(m.via_include)));
-            }
-        }
-        out
+    /// Where gathered macro `name` is defined in the gathering file, as
+    /// `(from, until, delegate)` per `Macro::spans` entry, over
+    /// `include_lines` — any per-line projection of `include_lines(src)`
+    /// (byte offsets, rows). `None` when the closure never defines it.
+    pub fn gathered_spans(&self, name: &str, include_lines: &[usize]) -> Option<Vec<(usize, Option<usize>, Option<String>)>> {
+        let m = self.raw.get(name)?;
+        let line = |o: u32| include_lines.get(o as usize).copied();
+        Some(m.spans.iter().map(|s| (line(s.from).unwrap_or(0), s.until.and_then(line), s.delegate.clone())).collect())
     }
 
-    /// Where gathered macro `name` becomes defined in the gathering file:
-    /// `include_lines[i]` for the `#include` line it arrives through, 0 when
-    /// it is visible from the top. `None` when
-    /// the closure does not define it. `include_lines` is any per-line
-    /// projection of `include_lines(src)` (byte offsets, rows).
-    pub fn activation_line(&self, name: &str, include_lines: &[usize]) -> Option<usize> {
-        let m = self.raw.get(name)?;
-        Some(m.via_include.and_then(|i| include_lines.get(i as usize).copied()).unwrap_or(0))
+    /// Whether the include closure `#define`s `name` anywhere, whether or
+    /// not that definition reaches the gathering file.
+    pub fn defines(&self, name: &str) -> bool {
+        self.raw.contains_key(name)
+    }
+
+    /// The include lines (as in `gathered_spans`) whose headers `#undef`
+    /// gathered macro `name`.
+    pub fn undefined_lines(&self, name: &str, include_lines: &[usize]) -> Vec<usize> {
+        let Some(m) = self.raw.get(name) else { return Vec::new() };
+        m.undefined_at.iter().filter_map(|&o| include_lines.get(o as usize).copied()).collect()
     }
 }
 
@@ -133,7 +129,7 @@ pub(super) fn is_include_line(line: &str) -> bool {
 }
 
 /// Every `#include` line as `(byte offset, row)` of its start, in source
-/// order — the ordinal space `Macro::via_include` indexes. It is the line
+/// order — the ordinal space `Macro::spans` indexes. It is the line
 /// set `include_set_hash` hashes, so an ordinal stays valid exactly as long
 /// as the gathered table cached under that hash does.
 pub fn include_lines(src: &str) -> Vec<(usize, usize)> {
@@ -270,11 +266,12 @@ pub(super) fn gather_included_macros(
     let Some(lang) = parser.language().map(|l| (*l).clone()) else {
         return (macros, headers);
     };
-    // Each header's index in `parsed`, and the include graph over those
-    // indices — what `via_include` is computed from once the walk is done.
+    // Each header's index in `parsed`, and which header each of its
+    // includes resolved to — what the preprocessor-order walk replays once
+    // every header is parsed.
     let mut index_of: std::collections::HashMap<std::path::PathBuf, usize> = std::collections::HashMap::new();
     let mut parsed: Vec<std::sync::Arc<CachedHeader>> = Vec::new();
-    let mut children: Vec<Vec<usize>> = Vec::new();
+    let mut included: Vec<Vec<Option<usize>>> = Vec::new();
     let mut roots: Vec<(u32, usize)> = Vec::new();
     let line_starts: Vec<usize> = include_lines(src).into_iter().map(|(b, _)| b).collect();
     let mut frontier: Vec<(std::path::PathBuf, Parent)> = include_sites(src, parser)
@@ -307,70 +304,128 @@ pub(super) fn gather_included_macros(
             let Some(info) = info else { continue };
             headers.push((canon.clone(), file_stamp(&canon)));
             for (k, v) in &info.macros {
-                macros.entry(k.clone()).or_insert_with(|| Macro { variant_delegates: Vec::new(), ..v.clone() });
+                macros.entry(k.clone()).or_insert_with(|| v.clone());
             }
-            for inc in &info.includes {
+            for (i, inc) in info.includes.iter().enumerate() {
                 if let Some(nx) = resolve_include(&canon, inc) {
-                    next.push((nx, Parent::Header(parsed.len())));
+                    next.push((nx, Parent::Header(parsed.len(), i)));
                 }
             }
             index_of.insert(canon.clone(), parsed.len());
+            included.push(vec![None; info.includes.len()]);
             parsed.push(info);
-            children.push(Vec::new());
             edges.push((parent, canon));
         }
         for (parent, canon) in edges {
             let Some(&child) = index_of.get(&canon) else { continue };
             match parent {
                 Parent::Line(o) => roots.push((o, child)),
-                Parent::Header(p) => children[p].push(child),
+                Parent::Header(p, i) => included[p][i] = Some(child),
             }
         }
         frontier = next;
     }
-    // A header's macros are defined from the FIRST include line whose
-    // closure reaches it (an include guard makes later includes no-ops):
-    // flood from the include lines in source order, first visit wins.
-    roots.sort_by_key(|&(o, _)| o);
-    let mut ordinal: Vec<Option<u32>> = vec![None; parsed.len()];
-    for (o, root) in roots {
-        let mut stack = vec![root];
-        while let Some(h) = stack.pop() {
-            if ordinal[h].is_some() {
-                continue;
-            }
-            ordinal[h] = Some(o);
-            stack.extend(children[h].iter().copied());
+    let order = replay_in_preprocessor_order(&parsed, &included, roots);
+    for (name, spans) in order.spans {
+        if let Some(m) = macros.get_mut(&name) {
+            m.spans = spans;
         }
     }
-    // Every header's definitions of a name join the table's one body: the
-    // name is defined from the earliest of them, and each variant's
-    // delegate from its own header's include line.
-    let earliest = |a: Option<u32>, b: Option<u32>| match (a, b) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    };
-    for (info, o) in parsed.iter().zip(ordinal) {
-        for (k, v) in &info.macros {
-            let Some(m) = macros.get_mut(k) else { continue };
-            m.via_include = earliest(m.via_include, o);
-            for d in v.all_delegates() {
-                match m.variant_delegates.iter_mut().find(|(e, _)| *e == d) {
-                    Some((_, via)) => *via = earliest(*via, o),
-                    None => m.variant_delegates.push((d, o)),
-                }
-            }
+    // TODO(undef-only-header): a name the closure only undefines has no
+    // table entry to carry it, so it ends no `#define` above the include.
+    for (name, ordinals) in order.undefined_at {
+        if let Some(m) = macros.get_mut(&name) {
+            m.undefined_at = ordinals;
         }
     }
     (macros, headers)
 }
 
+/// What replaying the include closure in preprocessor order says about
+/// each name: where it is defined, and where it is undefined.
+#[derive(Default)]
+struct PreprocessorOrder {
+    spans: std::collections::HashMap<String, Vec<GatheredSpan>>,
+    undefined_at: std::collections::HashMap<String, Vec<u32>>,
+}
+
+/// Replay every header's directives the way the preprocessor reads them:
+/// the gathering file's includes in source order, each header's
+/// `#define`/`#undef`/`#include` lines in its own order, descending into an
+/// include where it stands. A header is replayed once, at the first include
+/// reaching it, because an include guard makes the later ones no-ops. Every
+/// directive lands at the ordinal of the gathering file's include line it
+/// is replayed under (`roots`: `(ordinal, header)`).
+fn replay_in_preprocessor_order(
+    parsed: &[std::sync::Arc<CachedHeader>],
+    included: &[Vec<Option<usize>>],
+    mut roots: Vec<(u32, usize)>,
+) -> PreprocessorOrder {
+    let mut out = PreprocessorOrder::default();
+    // Definitions not yet undefined: `(delegate, from)` per name.
+    let mut open: std::collections::HashMap<&str, Vec<(Option<&str>, u32)>> = std::collections::HashMap::new();
+    let mut visited = vec![false; parsed.len()];
+    roots.sort_by_key(|&(o, _)| o);
+    for (o, root) in roots {
+        if std::mem::replace(&mut visited[root], true) {
+            continue;
+        }
+        let mut stack: Vec<(usize, usize)> = vec![(root, 0)];
+        while let Some((h, i)) = stack.pop() {
+            let Some(directive) = parsed[h].directives.get(i) else { continue };
+            stack.push((h, i + 1));
+            match directive {
+                Directive::Define { name, delegate } => {
+                    let defs = open.entry(name).or_default();
+                    if !defs.iter().any(|(d, _)| *d == delegate.as_deref()) {
+                        defs.push((delegate.as_deref(), o));
+                    }
+                }
+                Directive::Undef(name) => {
+                    let at = out.undefined_at.entry(name.clone()).or_default();
+                    if at.last() != Some(&o) {
+                        at.push(o);
+                    }
+                    // A definition from this same include line was made and
+                    // undone inside it: it never reaches the gathering file.
+                    for (d, from) in open.remove(name.as_str()).unwrap_or_default() {
+                        if from < o {
+                            push_span(&mut out.spans, name, GatheredSpan { from, until: Some(o), delegate: d.map(str::to_string) });
+                        }
+                    }
+                }
+                Directive::Include(k) => {
+                    if let Some(c) = included[h][*k] {
+                        if !std::mem::replace(&mut visited[c], true) {
+                            stack.push((c, 0));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (name, defs) in open {
+        for (d, from) in defs {
+            push_span(&mut out.spans, name, GatheredSpan { from, until: None, delegate: d.map(str::to_string) });
+        }
+    }
+    out
+}
+
+fn push_span(spans: &mut std::collections::HashMap<String, Vec<GatheredSpan>>, name: &str, span: GatheredSpan) {
+    let v = spans.entry(name.to_string()).or_default();
+    if !v.contains(&span) {
+        v.push(span);
+    }
+}
+
 /// Who included a frontier header: one of the gathering file's own
-/// `#include` lines (its ordinal), or an already-walked header.
+/// `#include` lines (its ordinal), or an already-walked header's `i`th
+/// include.
 #[derive(Clone, Copy)]
 enum Parent {
     Line(u32),
-    Header(usize),
+    Header(usize, usize),
 }
 
 /// The persisted macro table's per-header validation stamp: a hash of
@@ -397,9 +452,11 @@ fn header_info(canon: &std::path::Path, parser: &mut tree_sitter::Parser) -> Opt
     let mut build = |canon: &std::path::Path| -> Option<std::sync::Arc<CachedHeader>> {
         let src = std::fs::read_to_string(canon).ok()?;
         let tree = parser.parse(&src, None)?;
+        let sites = include_sites_tree(&tree, &src);
         Some(std::sync::Arc::new(CachedHeader {
             macros: collect_macros(&tree, src.as_bytes()),
-            includes: include_paths_tree(&tree, &src),
+            directives: header_directives(&tree, &src, &sites),
+            includes: sites.into_iter().map(|(p, _)| p).collect(),
         }))
     };
     // No mtime (metadata failed) ⇒ no stamp: compute uncached, as before.
@@ -417,7 +474,16 @@ fn header_info(canon: &std::path::Path, parser: &mut tree_sitter::Parser) -> Opt
 }
 
 fn header_heap_bytes(h: &CachedHeader) -> usize {
-    macro_table_heap_bytes(&h.macros) + strings_heap_bytes(&h.includes)
+    macro_table_heap_bytes(&h.macros)
+        + strings_heap_bytes(&h.includes)
+        + h.directives
+            .iter()
+            .map(|d| match d {
+                Directive::Define { name, delegate } => name.len() + delegate.as_ref().map_or(0, String::len) + 56,
+                Directive::Undef(name) => name.len() + 56,
+                Directive::Include(_) => 56,
+            })
+            .sum::<usize>()
 }
 
 /// A header's own #defines + its include edges — cached by (path, mtime)
@@ -427,6 +493,32 @@ fn header_heap_bytes(h: &CachedHeader) -> usize {
 struct CachedHeader {
     macros: BTreeMap<String, Macro>,
     includes: Vec<String>,
+    /// Its `#define`, unconditional `#undef` and `#include` lines in source
+    /// order — what `replay_in_preprocessor_order` reads.
+    directives: Vec<Directive>,
+}
+
+enum Directive {
+    Define { name: String, delegate: Option<String> },
+    Undef(String),
+    /// The `i`th entry of `CachedHeader::includes`.
+    Include(usize),
+}
+
+/// A header's directives in source order; `sites` are its includes as
+/// `include_sites_tree` lists them.
+fn header_directives(tree: &Tree, src: &str, sites: &[(String, usize)]) -> Vec<Directive> {
+    let mut row_start = vec![0];
+    row_start.extend(src.match_indices('\n').map(|(i, _)| i + 1));
+    let mut at: Vec<(usize, Directive)> = Vec::new();
+    walk_macro_defs(tree, src.as_bytes(), |name, m, (start, _)| {
+        let byte = row_start.get(start.row).map_or(0, |b| b + start.column);
+        at.push((byte, Directive::Define { delegate: m.delegate(), name }));
+    });
+    walk_macro_undefs(tree, src.as_bytes(), |name, node| at.push((node.start_byte(), Directive::Undef(name))));
+    at.extend(sites.iter().enumerate().map(|(i, (_, byte))| (*byte, Directive::Include(i))));
+    at.sort_by_key(|(byte, _)| *byte);
+    at.into_iter().map(|(_, d)| d).collect()
 }
 
 fn header_cache(
@@ -715,14 +807,10 @@ fn include_sites(src: &str, parser: &mut tree_sitter::Parser) -> Vec<(String, us
 }
 
 /// Every include's path, quoted (`"x/y.h"`) and angle-bracket
-/// (`<lib/y.h>`) alike — library headers write project includes with
-/// `<>`, and the walk-up resolver finds both (true system headers like
-/// `<vector>` simply don't resolve in the workspace, and are skipped).
-fn include_paths_tree(tree: &Tree, src: &str) -> Vec<String> {
-    include_sites_tree(tree, src).into_iter().map(|(p, _)| p).collect()
-}
-
-/// `include_paths_tree` with each path token's byte offset.
+/// (`<lib/y.h>`) alike, with its path token's byte offset — library
+/// headers write project includes with `<>`, and the walk-up resolver finds
+/// both (true system headers like `<vector>` simply don't resolve in the
+/// workspace, and are skipped).
 fn include_sites_tree(tree: &Tree, src: &str) -> Vec<(String, usize)> {
     let q = cached_query(&INCLUDE_Q, &tree.language(), INCLUDE_QUERY);
     let names = q.capture_names().to_vec();
