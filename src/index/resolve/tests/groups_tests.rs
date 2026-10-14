@@ -2283,6 +2283,30 @@ mod pack_symmetry {
     }
 
     #[test]
+    fn goto_def_above_a_function_like_define_never_lands_on_it() {
+        // No real function shares the name, so every gd lane would otherwise
+        // find the macro by name; above its `#define` none may.
+        let src = "int a = W(1);\n#define W(x) F(x)\nint b = W(2);\n";
+        let fa = cpp(src);
+        let idx = crate::index::module_index::ModuleIndex::new_for_test();
+        let store = FileStore::new();
+        let gd = |row: usize| {
+            resolve(
+                &store,
+                &fa,
+                FileKey::Path(PathBuf::from("/tmp/gd_position_fn.c")),
+                tree_sitter::Point::new(row, 8),
+                Some(&idx),
+                OverrideScope::default(),
+            )
+            .with_source(src)
+            .definitions()
+        };
+        assert!(!gd(0).iter().any(|d| d.span.start.row == 1), "above: {:?}", gd(0));
+        assert!(gd(2).iter().any(|d| d.span.start.row == 1), "below: {:?}", gd(2));
+    }
+
+    #[test]
     fn file_scope_global_def_reaches_bare_reads() {
         let store = FileStore::new();
         let a = cpp("int global_counter;\n");
