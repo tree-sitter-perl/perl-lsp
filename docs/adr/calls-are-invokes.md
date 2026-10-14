@@ -52,6 +52,14 @@ children less the grammar's extras, so a comment is not an argument.
 
 - Pack free calls (`@ref.call` beside `@expr.call`) mint `Function`. A
   qualified pack call (`@ref.qcall`) mints no call value yet.
+- A pack member call (`@ref.member.call` beside `@expr.call`) mints
+  `Method` with `Lookup::Receiver` on the receiver's own `Expr`, so a chain
+  (`w.get().spin()`) hops through each receiver's value. The dispatch
+  class is the receiver's `class_name()`, which is a template's BASE: an
+  explicit specialization (`Box<bool>`) answers the primary's return here.
+  `expr_type_at_span`'s member-chain arm still asks first, and it walks
+  the specializations, so a cursor on the chain sees the specialization;
+  a variable the chain flows into sees the primary.
 - Perl's free calls mint `Function` too. The walk resolves a callee defined
   above the call; `resolve_forward_expr_witnesses` resolves one defined
   below it, and only a name still unresolved after that goes to the

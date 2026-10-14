@@ -1023,6 +1023,8 @@ fn remap_spans(
         specializations: _,
         // name-keyed, ordered by byte position pre-remap — no spans to fix.
         template_params: _,
+        // name/scope-keyed — no spans to fix.
+        field_types: _,
         return_sites,
         param_sigs,
         // Populated later (enrich_skeleton) already in original coords — no remap.
@@ -1088,6 +1090,9 @@ fn remap_spans(
     // (the same call span) they land beside.
     for site in call_sites.iter_mut() {
         site.span = rspan(site.span);
+        if let Some(recv) = site.receiver.as_mut() {
+            *recv = rspan(*recv);
+        }
         for (arg, _) in site.args.iter_mut().flatten() {
             *arg = rspan(*arg);
         }

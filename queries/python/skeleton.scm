@@ -75,16 +75,17 @@
 ; the invocant, typed at query time through expr_type_at_span — the same
 ; MethodCall ref core resolves for Perl `$obj->m`. The document states the
 ; kind: an attribute that is a call's callee is a member call, any other is a
-; value read. ----
+; value read. The read's value is the receiver's slot (@expr.member); the
+; call's is an Invoke of the member on the receiver (@expr.call). ----
 ((attribute
   object: (_) @member.recv
-  attribute: (identifier) @ref.member.value) @_attr
- (#not-has-parent? @_attr call))
+  attribute: (identifier) @ref.member.value) @expr.member
+ (#not-has-parent? @expr.member call))
 (call
   function: (attribute
     object: (_) @member.recv
     attribute: (identifier) @ref.member.call)
-  arguments: [(argument_list) @arity.args (generator_expression)])
+  arguments: [(argument_list) @arity.args (generator_expression)]) @expr.call
 (identifier) @expr.read.var
 
 (string) @expr.lit.string

@@ -2289,6 +2289,72 @@ fn python_call_is_an_invoke_on_its_arguments() {
     );
 }
 
+/// A member call is an `Invoke` of the member on its receiver, and a member
+/// read projects the receiver's slot, so a chain types hop by hop through
+/// a flow edge with no intermediate variable.
+#[test]
+fn cpp_member_chains_type_through_their_receivers() {
+    use crate::model::file_analysis::InferredType;
+    let fa = cpp_fa(
+        "\
+struct Engine {
+    int spin() { return 7; }
+};
+struct Widget {
+    Engine get() { return Engine(); }
+    Engine motor;
+};
+template <typename T>
+struct Box { T item_; };
+int f(Widget w, Box<int> b) {
+    auto x = w.get().spin();
+    auto e = w.get();
+    auto m = w.motor;
+    auto n = w.motor.spin();
+    auto i = b.item_;
+    return x;
+}
+",
+    );
+    let at = tree_sitter::Point { row: 15, column: 4 };
+    let ty = |v: &str| fa.inferred_type_via_bag(v, at);
+    assert_eq!(ty("e"), Some(InferredType::ClassName("Engine".into())), "one call hop");
+    assert_eq!(ty("x"), Some(InferredType::Numeric), "two call hops");
+    assert_eq!(ty("m"), Some(InferredType::ClassName("Engine".into())), "a field read");
+    assert_eq!(ty("n"), Some(InferredType::Numeric), "a call on a field read");
+    assert_eq!(ty("i"), Some(InferredType::ClassName("int".into())), "a template-typed field substitutes");
+}
+
+#[test]
+fn python_member_call_is_an_invoke_on_its_receiver() {
+    use crate::model::witnesses::{CallArg, Callee, ProjectionStep, WitnessPayload};
+    let (fa, _) = python_fa("w = make()\nx = w.get(1, *rest)\ny = w.size\n");
+    let calls: Vec<_> = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter_map(|w| match &w.payload {
+            WitnessPayload::Invoke { callee: Callee::Method { name, .. }, receiver, args } => Some((
+                name.clone(),
+                receiver.is_some(),
+                args.as_ref().map(|a| a.iter().map(|a| matches!(a, CallArg::Spread(_))).collect::<Vec<_>>()),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls, vec![("get".into(), true, Some(vec![false, true]))]);
+    let reads: Vec<_> = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter_map(|w| match &w.payload {
+            WitnessPayload::Projected { step: ProjectionStep::ValueHop { member }, .. } => Some(member.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reads, vec!["size".to_string()]);
+}
+
 /// C++ classes hold ONE member namespace: the nearest declaration of a
 /// name answers a call and a value read alike, so a derived member
 /// function hides a base data member of its name for both asks, and a

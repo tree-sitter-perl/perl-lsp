@@ -71,6 +71,8 @@ pub struct SkelRef {
 pub struct CallSite {
     pub span: Span,
     pub callee: String,
+    /// A member call's receiver expression; `None` for a free call.
+    pub receiver: Option<Span>,
     /// The written arguments in order, each with whether it spreads
     /// (`@arity.spread`); `None` when the call's match captured no argument
     /// list.
@@ -101,6 +103,10 @@ pub struct SkeletonAnalysis {
     /// match. Sorted by position into `FileAnalysis.pack.template_params`
     /// (declaration order is the `ParamOf` index axis).
     pub template_params: Vec<(String, String, usize)>,
+    /// A data member's declared type, keyed by its (name, scope), for the
+    /// slot's value edge: a type that mentions its class's template
+    /// parameters substitutes the receiver's arguments.
+    pub field_types: Vec<(String, crate::model::file_analysis::ScopeId, InferredType)>,
     /// Variable reads (`@expr.read.var`): (name, scope, span). Each resolves
     /// to the nearest visible Variable declaration by lexical scope walk →
     /// local goto-def + hover. Resolution runs in `into_file_analysis`.
@@ -682,6 +688,29 @@ impl SkeletonAnalysis {
                     }
                 }
             }
+            // A data member's VALUE rides its own `Field` attachment, which a
+            // member read's `ValueHop` chases (`docs/adr/member-kinds.md`): an
+            // edge to the declaration's `Variable`, or, for a type that
+            // mentions the class's template parameters, the deferred shape
+            // that substitutes the receiver's arguments (`item_: T` read on a
+            // `Box<int>` is `int`).
+            let field_types: std::collections::HashMap<(&str, crate::model::file_analysis::ScopeId), &InferredType> =
+                self.field_types.iter().map(|(n, sc, t)| ((n.as_str(), *sc), t)).collect();
+            for sym in symbols.iter().filter(|s| matches!(s.kind, SymKind::Field)) {
+                let Some(class) = &sym.package else { continue };
+                let deferred = field_types
+                    .get(&(sym.name.as_str(), sym.scope))
+                    .zip(template_params.get(class))
+                    .and_then(|(t, ps)| param_return_expr(t, ps));
+                let pay = match deferred {
+                    Some(re) => WP::ReturnExpr(re),
+                    None => WP::Edge(WA::Variable { name: sym.name.clone(), scope: sym.scope }),
+                };
+                // Class-wide, like the declaration's own type witness: a
+                // method reads a member declared below it.
+                let span = self.scopes.get(sym.scope.0 as usize).map_or(sym.span, |sc| sc.span);
+                bag.push(mk(WA::Field { owner: class.clone(), name: sym.name.clone() }, pay, span));
+            }
             // A class VIEWED AS A CALLABLE (a functional cast / constructor,
             // `Widget(x)`) produces an instance of itself. Its `Symbol` answers
             // `ClassName(name)` so a call site edging to it materializes the
@@ -778,7 +807,9 @@ impl SkeletonAnalysis {
                 // Identity/projection macro: the call's value IS its n-th
                 // argument. Edge to the argument's own `Expr` witness rather
                 // than the param-agnostic Symbol return (edges-not-values).
-                if let Some(MacroReturnHint::Param(n)) = hint_of.get(name.as_str()).copied() {
+                if let Some(MacroReturnHint::Param(n)) =
+                    site.receiver.is_none().then(|| hint_of.get(name.as_str()).copied()).flatten()
+                {
                     if let Some(arg) = call_args.get(span).and_then(|a| a.get(*n as usize)) {
                         bag.push(mk(WA::Expr(*span), WP::Edge(WA::Expr(*arg)), *span));
                         continue;
@@ -795,11 +826,27 @@ impl SkeletonAnalysis {
                         })
                         .collect()
                 });
-                let callee = crate::model::witnesses::Callee::Function {
-                    name: name.clone(),
-                    local: callee_sid.get(name.as_str()).copied(),
+                // A member call dispatches on its receiver's type at query
+                // time; a free call's callee is the file's own definition
+                // when it has one.
+                let (callee, receiver) = match site.receiver {
+                    Some(recv) => (
+                        crate::model::witnesses::Callee::Method {
+                            name: name.clone(),
+                            lookup: crate::model::witnesses::Lookup::Receiver,
+                            constructs: false,
+                        },
+                        Some(WA::Expr(recv)),
+                    ),
+                    None => (
+                        crate::model::witnesses::Callee::Function {
+                            name: name.clone(),
+                            local: callee_sid.get(name.as_str()).copied(),
+                        },
+                        None,
+                    ),
                 };
-                bag.push(mk(WA::Expr(*span), WP::Invoke { callee, receiver: None, args }, *span));
+                bag.push(mk(WA::Expr(*span), WP::Invoke { callee, receiver, args }, *span));
             }
         }
         // ---- Local/param vars: a variable READ resolves to the nearest

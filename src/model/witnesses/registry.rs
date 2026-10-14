@@ -2465,41 +2465,21 @@ impl ReducerRegistry {
                                     })
                                 })
                             }
-                            ProjectionStep::MethodHop { member, arity: _ }
-                            | ProjectionStep::ValueHop { member } => {
-                                // The step's kind picks the attachment: a call
-                                // dispatches `PackageSymbol{class, member}` at
-                                // the call's own arity, a value read chases
-                                // `Field{class, member}` — the slot's own
-                                // subject — so a same-named callable's return
-                                // can never answer a read, nor a field a call.
-                                // The base type IS the dynamic receiver, so a
-                                // fluent `Receiver` return substitutes it
-                                // (`$q->where()->get()`).
-                                let (att_of, arity): (fn(String, String) -> WitnessAttachment, Option<u32>) =
-                                    match step {
-                                        ProjectionStep::MethodHop { arity, .. } => (
-                                            |class, name| WitnessAttachment::PackageSymbol {
-                                                package: class,
-                                                name,
-                                            },
-                                            Some(*arity),
-                                        ),
-                                        _ => (
-                                            |class, name| WitnessAttachment::Field {
-                                                owner: class,
-                                                name,
-                                            },
-                                            None,
-                                        ),
-                                    };
+                            ProjectionStep::ValueHop { member } => {
+                                // A value read chases `Field{class, member}`,
+                                // the slot's own subject, so a same-named
+                                // callable's return never answers it (a call
+                                // is an `Invoke`). The base type IS the
+                                // receiver, so a slot typed by the class's
+                                // template parameters substitutes the base's
+                                // arguments.
                                 t.class_name().map(str::to_string).and_then(|class| {
-                                    let att = att_of(class, member.clone());
+                                    let att = WitnessAttachment::Field { owner: class, name: member.clone() };
                                     let sub_q = ReducerQuery {
                                         attachment: &att,
                                         point: q.point,
                                         framework: q.framework,
-                                        arity_hint: arity,
+                                        arity_hint: None,
                                         receiver: Some(t.clone()),
                                         args: q.args.clone(),
                                         context: q.context,

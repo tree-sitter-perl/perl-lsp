@@ -151,6 +151,9 @@ pub enum ExprCap {
     ReturnValue,
     /// A keyed-value constructor call; `@shape.*` join it by span.
     Shape,
+    /// A member value read (`recv.field`): its `@member.recv` and
+    /// `@ref.member.value` share the match.
+    Member,
 }
 
 spelled! {
@@ -366,6 +369,7 @@ impl Capture {
             ["expr", "read", "var"] => C::Expr(ExprCap::ReadVar),
             ["expr", "return", "value"] => C::Expr(ExprCap::ReturnValue),
             ["expr", "shape"] => C::Expr(ExprCap::Shape),
+            ["expr", "member"] => C::Expr(ExprCap::Member),
             ["obs", k] => C::Obs(ObsKind::parse(k)?),
             ["narrow", k] => C::Narrow(NarrowCap::parse(k)?),
             ["move", k] => C::Move(MoveCap::parse(k)?),
@@ -425,6 +429,7 @@ impl fmt::Display for Capture {
             C::Expr(ExprCap::ReadVar) => f.write_str("expr.read.var"),
             C::Expr(ExprCap::ReturnValue) => f.write_str("expr.return.value"),
             C::Expr(ExprCap::Shape) => f.write_str("expr.shape"),
+            C::Expr(ExprCap::Member) => f.write_str("expr.member"),
             C::Obs(k) => write!(f, "obs.{k}"),
             C::Narrow(k) => write!(f, "narrow.{k}"),
             C::Move(k) => write!(f, "move.{k}"),
