@@ -405,12 +405,27 @@ fn encode_persisted(
     Some((encode_key(key)?, PersistedNode { value, value_hash, world, reads, kids }))
 }
 
+/// A persisted node that held.
+enum Adopted {
+    /// Read nothing open: stored as is.
+    Settled(Entry),
+    /// Read an open frame's assumption: a member of that frame's fixpoint,
+    /// promoted when the frame settles and retired when it moves.
+    Member(Entry, usize),
+}
+
 /// Adopt the persisted node for `key` when every read it records still
 /// holds and every child, answered now, hashes to the value it read. The
 /// children are asked under a frame of `key`'s own, so their edges land on
-/// the adopted entry; a child that reads back into `key` or into an open
-/// cycle refuses the node, which is then computed.
-fn adopt_persisted(idx: &dyn CrossFileLookup, key: &EngineKey, epoch: u64) -> Option<Entry> {
+/// the adopted entry.
+///
+/// A child that reads back into `key` reads the persisted value as `key`'s
+/// assumption: a cycle whose every member's reads hold and whose children
+/// reproduce the recorded hashes under the recorded values is the fixpoint
+/// it was, since nothing it computed from has moved. Refusing it instead
+/// recomputed the cycle once per member that tried to adopt (FHEM warm:
+/// 1.1M computations against 62k cold).
+fn adopt_persisted(idx: &dyn CrossFileLookup, key: &EngineKey, epoch: u64) -> Option<Adopted> {
     let node = idx.persisted_node(&encode_key(key)?)?;
     let digest = idx.world_digest()?;
     if node.world != digest {
@@ -437,8 +452,14 @@ fn adopt_persisted(idx: &dyn CrossFileLookup, key: &EngineKey, epoch: u64) -> Op
         }
     }
     let value: PersistedValue = bincode::deserialize(&node.value).ok()?;
+    let value = value.into_value();
     let members_mark = MEMBERS.with(|m| m.borrow().len());
-    FRAMES.with(|f| f.borrow_mut().push(Frame::open(key.clone(), members_mark, false)));
+    let depth = FRAMES.with(|f| {
+        let mut frames = f.borrow_mut();
+        frames.push(Frame::open(key.clone(), members_mark, false));
+        frames.len() - 1
+    });
+    ASSUMED.with(|a| a.borrow_mut().insert(key.clone(), value.clone()));
     let mut kids_hold = true;
     for (kid, hash) in &node.kids {
         let Ok(kid) = bincode::deserialize::<EngineKey>(kid) else {
@@ -468,14 +489,15 @@ fn adopt_persisted(idx: &dyn CrossFileLookup, key: &EngineKey, epoch: u64) -> Op
         }
     }
     let frame = FRAMES.with(|f| f.borrow_mut().pop())?;
-    if !kids_hold || frame.is_head || frame.tainted || frame.reads_open.is_some() {
+    ASSUMED.with(|a| a.borrow_mut().remove(key));
+    if !kids_hold || frame.tainted {
         // Whatever the children computed against this frame's assumption
         // is retired with it.
         next_round(members_mark);
         return None;
     }
-    Some(Entry {
-        value: Arc::new(value.into_value()),
+    let entry = Entry {
+        value: Arc::new(value),
         hash: Some(node.value_hash),
         epoch,
         world: idx.world_generation(),
@@ -483,7 +505,24 @@ fn adopt_persisted(idx: &dyn CrossFileLookup, key: &EngineKey, epoch: u64) -> Op
         children: frame.children.into_iter().collect::<Vec<_>>().into(),
         changed: next_changed(),
         digest: Some(digest),
-    })
+    };
+    if let Some(d) = frame.reads_open {
+        return Some(Adopted::Member(entry, d));
+    }
+    // Closed under this frame: the members read only its assumption, which
+    // held, so they stand with it.
+    let members = MEMBERS.with(|m| m.borrow_mut().split_off(members_mark));
+    if let Some(store) = idx.answer_store() {
+        promote(idx, store, &members);
+    }
+    ASSUMED.with(|a| {
+        let mut a = a.borrow_mut();
+        for m in &members {
+            a.remove(&m.key);
+        }
+    });
+    let _ = depth;
+    Some(Adopted::Settled(entry))
 }
 
 /// One open computation.
@@ -597,6 +636,9 @@ struct Member {
     /// Depth of the open frame whose assumption it read; `None` when it read
     /// a value from outside the fixpoint.
     reads_open: Option<usize>,
+    /// Computed here, so promoting it writes its row; an adopted member's
+    /// row is already the one it was read from.
+    persist: bool,
 }
 
 /// Retire the current round of the frame that opened at `mark`: the
@@ -1155,10 +1197,21 @@ fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey, check: Check) -> 
     if let Some(store) = store {
         let mut found = store.get(key);
         if found.is_none() {
-            if let Some(e) = crate::util::ghost_stats::timed("engine.adopt_time", || adopt_persisted(idx, key, epoch)) {
-                crate::util::ghost_stats::count("engine.persisted_adopt");
-                insert_entry(store, key, e.clone());
-                found = Some(e);
+            match crate::util::ghost_stats::timed("engine.adopt_time", || adopt_persisted(idx, key, epoch)) {
+                Some(Adopted::Settled(e)) => {
+                    crate::util::ghost_stats::count("engine.persisted_adopt");
+                    insert_entry(store, key, e.clone());
+                    found = Some(e);
+                }
+                Some(Adopted::Member(e, d)) => {
+                    crate::util::ghost_stats::count("engine.persisted_adopt_member");
+                    note_child(key, e.changed);
+                    mark_reads_open(d);
+                    let value = (*e.value).clone();
+                    MEMBERS.with(|m| m.borrow_mut().push(Member { key: key.clone(), entry: e, reads_open: Some(d), persist: false }));
+                    return value;
+                }
+                None => {}
             }
         }
         if let Some(e) = found {
@@ -1280,7 +1333,7 @@ fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey, check: Check) -> 
         };
         note_child(key, changed);
         if provisional {
-            MEMBERS.with(|m| m.borrow_mut().push(Member { key: key.clone(), entry, reads_open }));
+            MEMBERS.with(|m| m.borrow_mut().push(Member { key: key.clone(), entry, reads_open, persist: true }));
         } else {
             settled = Some(entry);
         }
@@ -1297,10 +1350,7 @@ fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey, check: Check) -> 
         } else if path_dependent {
             crate::util::ghost_stats::count("engine.settled_tainted");
         } else if let Some(store) = store {
-            for m in &members {
-                crate::util::ghost_stats::count("engine.promoted");
-                store_entry(idx, store, &m.key, m.entry.clone());
-            }
+            promote(idx, store, &members);
         }
         ASSUMED.with(|a| {
             let mut a = a.borrow_mut();
@@ -1332,6 +1382,17 @@ fn mark_reads_open(depth: usize) {
             fr.reads_open = Some(fr.reads_open.map_or(depth, |d| d.min(depth)));
         }
     });
+}
+
+fn promote(idx: &dyn CrossFileLookup, store: &AnswerStore, members: &[Member]) {
+    for m in members {
+        crate::util::ghost_stats::count("engine.promoted");
+        if m.persist {
+            store_entry(idx, store, &m.key, m.entry.clone());
+        } else {
+            insert_entry(store, &m.key, m.entry.clone());
+        }
+    }
 }
 
 fn store_entry(idx: &dyn CrossFileLookup, store: &AnswerStore, key: &EngineKey, entry: Entry) {
