@@ -10,12 +10,15 @@ pub(super) struct State {
     /// capture unravelled to. Read by the `def.*` handler to stamp the symbol.
     nested_stacks: HashMap<usize, Vec<crate::model::file_analysis::DerefStep>>,
     /// A def's name token, joined to its def event by match.
-    names_by_match: HashMap<(usize, DefKind), (String, Point, Point)>,
+    names_by_match: HashMap<(usize, DefCap), (String, Point, Point)>,
     /// `@qualifier` (a `Class::` on an out-of-line def) and `@rettype` (a
     /// method's declared return type) — pre-collected like names because the
     /// `@def` event fires before these inner captures.
     qualifier_by_match: HashMap<usize, String>,
     rettype_by_match: HashMap<usize, String>,
+    /// `@param.receiver` — a receiver parameter's name span; the symbol
+    /// declared at it carries `RECEIVER`.
+    receiver_spans: std::collections::HashSet<(Point, Point)>,
     /// `@sym.attr` — a token whose TEXT rides onto the match's def symbol as
     /// an attribute (cpp: a declaration's storage class, so "extern" is a
     /// symbol-borne fact goto-def's decl→def ranking can ask the value for).
@@ -50,7 +53,7 @@ pub(super) struct State {
 
 impl State {
     /// The name token a match captured for its def of `kind`.
-    pub(super) fn name_of(&self, match_id: usize, kind: DefKind) -> Option<&str> {
+    pub(super) fn name_of(&self, match_id: usize, kind: DefCap) -> Option<&str> {
         self.names_by_match.get(&(match_id, kind)).map(|(n, _, _)| n.as_str())
     }
 }
@@ -74,7 +77,7 @@ pub(super) fn flatten_ool_def(
     let leaf_text = leaf.utf8_text(source).unwrap_or("").to_string();
     // the def symbol spans the whole function_definition; name +
     // owner come from the qualified declarator's leaf + scope.
-    let method = |part| Capture::Def { kind: DefKind::Method, part };
+    let method = |part| Capture::Def { kind: DefCap::Method, part };
     events.push(Event::at(node, method(DefPart::Node), leaf_text.clone(), match_id));
     events.push(Event::at(leaf, method(DefPart::Name), leaf_text, match_id));
     events.push(Event::at(node, Capture::Qualifier, owner, match_id));
@@ -88,15 +91,15 @@ pub(super) fn flatten_ool_def(
 pub(super) fn flatten_nested(
     defs: &mut State,
     node: tree_sitter::Node<'_>,
-    pack: &LangPack,
+    links: &super::links::Links<'_>,
     source: &[u8],
     match_id: usize,
     events: &mut Vec<Event>,
 ) {
-    if let Some((leaf, stack, Some(def_kind))) = peel(node, &pack.nested_peel, source) {
+    if let Some(super::links::Peeled { leaf, stack, def }) = links.peel_declarator(node, source) {
         defs.nested_stacks.insert(match_id, stack);
         let ltext = leaf.utf8_text(source).unwrap_or("").to_string();
-        let def = Capture::Def { kind: def_kind, part: DefPart::Node };
+        let def = Capture::Def { kind: def, part: DefPart::Node };
         for syn in [Capture::Flow(FlowCap::Target), def] {
             events.push(Event::at(leaf, syn, ltext.clone(), match_id));
         }
@@ -114,6 +117,9 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
         }
         Capture::RetType => {
             d.rettype_by_match.insert(e.match_id, e.text.clone());
+        }
+        Capture::ParamReceiver => {
+            d.receiver_spans.insert((e.start, e.end));
         }
         Capture::SymAttr => {
             d.attrs_by_match.entry(e.match_id).or_default().push(e.text.clone());
@@ -189,6 +195,11 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         // `@arity.sig` match fires separately from this def name.
         arity: None,
         qualifier_owned: d.qualifier_by_match.contains_key(&e.match_id),
+        flags: if d.receiver_spans.contains(&(name_start, name_end)) {
+            crate::model::file_analysis::SymbolFlags::RECEIVER
+        } else {
+            crate::model::file_analysis::SymbolFlags::empty()
+        },
     });
 }
 
@@ -218,7 +229,7 @@ pub(super) fn tag_inline_namespaces(st: &mut ExtractState) {
     }
     let same = |a: Point, b: Point| a.row == b.row && a.column == b.column;
     for s in st.out.symbols.iter_mut() {
-        if s.kind == DefKind::Package
+        if s.kind == DefCap::Package
             && spans.iter().any(|&(ns, ne)| same(ns, s.name_start) && same(ne, s.name_end))
         {
             s.attributes.push("inline".to_string());
@@ -241,7 +252,7 @@ pub(super) fn dedup(st: &mut ExtractState) {
                 best.insert(key, i);
             }
             Some(&j) => {
-                let (gen_i, gen_j) = (symbols[i].kind == DefKind::Var, symbols[j].kind == DefKind::Var);
+                let (gen_i, gen_j) = (symbols[i].kind == DefCap::Var, symbols[j].kind == DefCap::Var);
                 let upgrade_ret = symbols[i].kind == symbols[j].kind
                     && symbols[i].return_type.is_some()
                     && symbols[j].return_type.is_none();

@@ -32,7 +32,7 @@ macro_rules! spelled {
 spelled! {
     /// What a `@def.<kind>` declares. The symbol model it projects to is
     /// `sym_kind`; the structural marker it carries is `marker`.
-    pub enum DefKind {
+    pub enum DefCap {
         Sub = "sub",
         Method = "method",
         /// `(anon)`-named callable (Perl `sub { ... }`).
@@ -60,13 +60,16 @@ spelled! {
 
 spelled! {
     /// What a `@ref.<kind>` refers through.
-    pub enum RefKind {
+    pub enum RefCap {
         Call = "call",
         /// A `::`-qualified call (`fmt::format_to(...)`).
         QCall = "qcall",
         Method = "method",
-        /// `recv.field` / `recv->field`; joins `@member.recv` by match.
-        Member = "member",
+        /// A member token READ as a value (`recv.field` / `recv->field`);
+        /// joins `@member.recv` by match.
+        MemberValue = "member.value",
+        /// A member token CALLED (`recv.f(…)`).
+        MemberCall = "member.call",
         /// A type-position name.
         Type = "type",
         Var = "var",
@@ -82,6 +85,8 @@ spelled! {
         Block = "",
         /// Sub-body content (function bodies, prototype signatures).
         Sub = "sub",
+        /// A sub body whose bare names may elide the member receiver.
+        SubImplicitReceiver = "sub.implicit_receiver",
     }
 }
 
@@ -96,6 +101,9 @@ spelled! {
         /// The whole import statement (pattern anchor).
         Statement = "",
         Name = "name",
+        /// An import token that is a source PATH, not a name: C/C++
+        /// `#include` splices a file and binds no name.
+        Path = "path",
         /// The module an import CALL names (R `library(pkg)`, CMake
         /// `include(f)`), as written.
         Arg = "arg",
@@ -162,6 +170,21 @@ spelled! {
 }
 
 spelled! {
+    /// Which member operator a token is; the suffix names the model's
+    /// `MemberOp`, so a token no pattern names claims no operator.
+    pub enum MemberOpCap { Arrow = "arrow", Dot = "dot" }
+}
+
+impl MemberOpCap {
+    pub fn op(self) -> crate::model::file_analysis::MemberOp {
+        match self {
+            MemberOpCap::Arrow => crate::model::file_analysis::MemberOp::Arrow,
+            MemberOpCap::Dot => crate::model::file_analysis::MemberOp::Dot,
+        }
+    }
+}
+
+spelled! {
     pub enum ArityCap { Args = "args", Sig = "sig" }
 }
 
@@ -190,6 +213,8 @@ spelled! {
         Ool = "ool",
         /// A `@qualifier` owner, to the base name a templated owner files under.
         Qualifier = "qualifier",
+        /// A `@nested.target` declarator chain, level by level to its leaf.
+        Deref = "deref",
     }
 }
 
@@ -199,6 +224,7 @@ impl LinkWalk {
         match self {
             LinkWalk::Ool => Capture::OolDef,
             LinkWalk::Qualifier => Capture::Qualifier,
+            LinkWalk::Deref => Capture::NestedTarget,
         }
     }
 }
@@ -221,6 +247,22 @@ spelled! {
     }
 }
 
+spelled! {
+    /// What one level of a `deref` walk is: the document marks the level node
+    /// (or, for a qualifier, its child), and the walk reads the marks.
+    pub enum DerefCap {
+        /// A pointer level (`*p`).
+        Pointer = "pointer",
+        /// A reference level (`&r`).
+        Ref = "ref",
+        /// A cv-qualifier on the level that is its parent (`* const`).
+        Annot = "annot",
+        /// A level the walk descends without a step of its own: grouping
+        /// parens, a function pointer's function declarator.
+        Pass = "pass",
+    }
+}
+
 /// Whether a `@def.<kind>` capture is the def node or its name token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DefPart {
@@ -231,8 +273,8 @@ pub enum DefPart {
 /// One capture of a pack query document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Capture {
-    Def { kind: DefKind, part: DefPart },
-    Ref(RefKind),
+    Def { kind: DefCap, part: DefPart },
+    Ref(RefCap),
     Scope(ScopeCap),
     Context(ContextKind),
     /// A base class, paired with the match's `@def.class.name`.
@@ -252,6 +294,11 @@ pub enum Capture {
     Unevaluated,
     ParamRegion,
     Member(MemberCap),
+    /// The operator token a member access wrote, by which operator it is.
+    MemberOp(MemberOpCap),
+    /// A method's receiver parameter (python `self`): the object, not a
+    /// member.
+    ParamReceiver,
     Arity(ArityCap),
     Domain(DomainCap),
     Shape(ShapeCap),
@@ -274,6 +321,10 @@ pub enum Capture {
     AnonAggMember,
     /// The node a pattern's links start from, and the walk they belong to.
     LinkFrom(LinkWalk),
+    /// One level of a declarator chain, as the `deref` walk reads it.
+    Deref(DerefCap),
+    /// A declarator chain's leaf; the suffix names the def the leaf mints.
+    DerefLeaf(DefCap),
     Link(LinkCap),
 }
 
@@ -296,10 +347,11 @@ impl Capture {
         use Capture as C;
         let segs: Vec<&str> = name.split('.').collect();
         Some(match segs.as_slice() {
-            ["def", k] => C::Def { kind: DefKind::parse(k)?, part: DefPart::Node },
-            ["def", k, "name"] => C::Def { kind: DefKind::parse(k)?, part: DefPart::Name },
-            ["ref", k] => C::Ref(RefKind::parse(k)?),
+            ["def", k] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Node },
+            ["def", k, "name"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Name },
+            ["ref", rest @ ..] => C::Ref(RefCap::parse(&rest.join("."))?),
             ["scope"] => C::Scope(ScopeCap::Block),
+            ["scope", "sub", "implicit_receiver"] => C::Scope(ScopeCap::SubImplicitReceiver),
             ["scope", k] if !k.is_empty() => C::Scope(ScopeCap::parse(k)?),
             ["context", k] => C::Context(ContextKind::parse(k)?),
             ["parent"] => C::Parent,
@@ -319,7 +371,12 @@ impl Capture {
             ["move", k] => C::Move(MoveCap::parse(k)?),
             ["guard", "region"] => C::GuardRegion,
             ["unevaluated"] => C::Unevaluated,
-            ["param", "region"] => C::ParamRegion,
+            ["param", k] => match *k {
+                "region" => C::ParamRegion,
+                "receiver" => C::ParamReceiver,
+                _ => return None,
+            },
+            ["member", "op", k] => C::MemberOp(MemberOpCap::parse(k)?),
             ["member", k] => C::Member(MemberCap::parse(k)?),
             ["arity", k] => C::Arity(ArityCap::parse(k)?),
             ["domain", k] => C::Domain(DomainCap::parse(k)?),
@@ -336,6 +393,8 @@ impl Capture {
             ["ns", "inline"] => C::NsInline,
             ["anonagg", "member"] => C::AnonAggMember,
             ["link", "from", w] => C::LinkFrom(LinkWalk::parse(w)?),
+            ["deref", "leaf", k] => C::DerefLeaf(DefCap::parse(k)?),
+            ["deref", k] => C::Deref(DerefCap::parse(k)?),
             ["link", k] => C::Link(LinkCap::parse(k)?),
             _ => return None,
         })
@@ -373,6 +432,8 @@ impl fmt::Display for Capture {
             C::Unevaluated => f.write_str("unevaluated"),
             C::ParamRegion => f.write_str("param.region"),
             C::Member(k) => write!(f, "member.{k}"),
+            C::MemberOp(k) => write!(f, "member.op.{k}"),
+            C::ParamReceiver => f.write_str("param.receiver"),
             C::Arity(k) => write!(f, "arity.{k}"),
             C::Domain(k) => write!(f, "domain.{k}"),
             C::Shape(k) => write!(f, "shape.{k}"),
@@ -387,6 +448,8 @@ impl fmt::Display for Capture {
             C::NsInline => f.write_str("ns.inline"),
             C::AnonAggMember => f.write_str("anonagg.member"),
             C::LinkFrom(w) => write!(f, "link.from.{w}"),
+            C::Deref(k) => write!(f, "deref.{k}"),
+            C::DerefLeaf(k) => write!(f, "deref.leaf.{k}"),
             C::Link(k) => write!(f, "link.{k}"),
         }
     }
@@ -443,23 +506,23 @@ pub(super) fn check_links(query: &tree_sitter::Query, captures: &[Option<Capture
     Ok(())
 }
 
-impl DefKind {
+impl DefCap {
     /// The symbol kind a def of this kind projects to. A `UnionField` stays
     /// a Variable: its `union` marker drives the outline nesting.
     pub fn sym_kind(self) -> crate::model::file_analysis::SymKind {
         use crate::model::file_analysis::SymKind;
         match self {
-            DefKind::Package => SymKind::Package,
-            DefKind::Class | DefKind::Union => SymKind::Class,
+            DefCap::Package => SymKind::Package,
+            DefCap::Class | DefCap::Union => SymKind::Class,
             // A function-like `#define` is a real callable everywhere; its
             // `macro` marker lets hover say so.
-            DefKind::Sub | DefKind::Anon | DefKind::Constant | DefKind::Macro => SymKind::Sub,
+            DefCap::Sub | DefCap::Anon | DefCap::Constant | DefCap::Macro => SymKind::Sub,
             // `using Base::m;` is a Method on the class surface; its
             // `reexport` marker makes resolution see through it.
-            DefKind::Method | DefKind::Reexport => SymKind::Method,
-            DefKind::Field => SymKind::Field,
-            DefKind::Enumerator => SymKind::Enumerator,
-            DefKind::Var | DefKind::Local | DefKind::Label | DefKind::UnionField => SymKind::Variable,
+            DefCap::Method | DefCap::Reexport => SymKind::Method,
+            DefCap::Field => SymKind::Field,
+            DefCap::Enumerator => SymKind::Enumerator,
+            DefCap::Var | DefCap::Local | DefCap::Label | DefCap::UnionField => SymKind::Variable,
         }
     }
 
@@ -468,9 +531,9 @@ impl DefKind {
     /// the symbol rather than its kind.
     pub fn marker(self) -> Option<&'static str> {
         match self {
-            DefKind::Union | DefKind::UnionField => Some("union"),
-            DefKind::Reexport => Some("reexport"),
-            DefKind::Macro => Some("macro"),
+            DefCap::Union | DefCap::UnionField => Some("union"),
+            DefCap::Reexport => Some("reexport"),
+            DefCap::Macro => Some("macro"),
             _ => None,
         }
     }

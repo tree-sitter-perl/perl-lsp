@@ -10,22 +10,32 @@ pub(super) struct State {
     /// match_id → was the IMMEDIATE member-access receiver a simple variable?
     /// Recorded at construction (the un-peeled node); gates op-DX at the mint.
     pub(super) member_simple: HashMap<usize, bool>,
-    /// A call's written arg count, keyed by its argument_list's START point
-    /// (the `(`), which is adjacent to the callee/method name token's END — so
-    /// a ref finds its arity by `ref.end == arglist.start` without a match join
-    /// (member calls fire a separate match from their arg list). One entry per
-    /// `@arity.args`.
-    pub(super) arg_counts_by_start: HashMap<(usize, usize), usize>,
+    /// A call's written arg count, keyed by the match that captured both its
+    /// callee (`@ref.call` / `@ref.qcall` / `@ref.member.call`) and its
+    /// argument list (`@arity.args`).
+    pub(super) arg_counts_by_match: HashMap<usize, usize>,
     /// A callable's declared parameter arity, keyed by the parameter_list span.
     /// Associated to its def symbol by span containment in `into_file_analysis`
     /// (`@arity.sig` fires a separate match from the def name).
     param_sigs: Vec<(Span, ParamArity)>,
     /// `@member.recv` → the receiver span of a `recv.field` access, joined to
-    /// its `@ref.member` by match_id so the minted MethodCall ref carries it.
+    /// its `@ref.member.*` by match_id so the minted MethodCall ref carries it.
     pub(super) member_recv: HashMap<usize, (Span, String)>,
-    /// `@member.op` → the written operator mapped through `pack.op_map` + its
-    /// span; joined to `@ref.member` so op-DX rides the minted ref.
-    pub(super) member_op_raw: HashMap<usize, (MemberOp, Span)>,
+    /// `@member.op` → the operator token's span, joined to `@ref.member.*` by
+    /// match_id; which operator it is comes from `ops_at`.
+    pub(super) member_op_span: HashMap<usize, Span>,
+    /// `@member.op.<which>` → the operator the document names at a token
+    /// span. A token no pattern names claims no operator, so op-DX stays
+    /// silent rather than guessing.
+    ops_at: HashMap<(Point, Point), MemberOp>,
+}
+
+impl State {
+    /// The operator a member match wrote, with its span.
+    pub(super) fn op_of(&self, match_id: usize) -> Option<(MemberOp, Span)> {
+        let span = *self.member_op_span.get(&match_id)?;
+        Some((*self.ops_at.get(&(span.start, span.end))?, span))
+    }
 }
 
 /// `@member.recv`: a member access receiver. Peel transparent wrappers
@@ -43,18 +53,16 @@ pub(super) fn flatten_recv(
     // op-DX applies only to a bare-variable immediate receiver
     // (its deref_stack resolves by name); a wrapper/chain doesn't.
     members.member_simple.insert(match_id, pack.simple_var_kinds.contains(&node.kind()));
-    let inner = peel(node, &pack.recv_peel, source).map(|(leaf, _, _)| leaf).unwrap_or(node);
+    let inner = peel_receiver(node, pack.recv_peel);
     let text = inner.utf8_text(source).unwrap_or("").to_string();
     events.push(Event::at(inner, Capture::Member(MemberCap::Recv), text, match_id));
 }
 
 /// `@arity.args`: a call's argument_list — count its arguments (the named
 /// children; the C `...` at a CALL site never appears here). Keyed by the
-/// list's start so the callee ref finds it by adjacency.
-pub(super) fn count_args(members: &mut State, node: tree_sitter::Node<'_>) {
-    members
-        .arg_counts_by_start
-        .insert((node.start_position().row, node.start_position().column), node.named_child_count());
+/// match, which also captured the callee.
+pub(super) fn count_args(members: &mut State, node: tree_sitter::Node<'_>, match_id: usize) {
+    members.arg_counts_by_match.insert(match_id, node.named_child_count());
 }
 
 /// `@arity.sig`: a callable's parameter_list — count declared params
@@ -86,18 +94,20 @@ pub(super) fn count_params(members: &mut State, node: tree_sitter::Node<'_>) {
     ));
 }
 
+/// The span-keyed member facts, read before any handler asks them.
+pub(super) fn collect(st: &mut ExtractState, e: &Event) {
+    if let Capture::MemberOp(which) = e.cap {
+        st.members.ops_at.insert((e.start, e.end), which.op());
+    }
+}
+
 pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     match e.cap {
         Capture::Member(MemberCap::Recv) => {
             st.members.member_recv.insert(e.match_id, (e.span(), e.text.clone()));
         }
         Capture::Member(MemberCap::Op) => {
-            // Map the operator token's KIND (== its text, an anonymous
-            // token) to a MemberOp via the pack's open op_map. Unmapped
-            // (`.*`) → no entry → no op-DX. No source-text re-decision.
-            if let Some((_, op)) = st.pack.op_map.iter().find(|(k, _)| *k == e.text) {
-                st.members.member_op_raw.insert(e.match_id, (*op, e.span()));
-            }
+            st.members.member_op_span.insert(e.match_id, e.span());
         }
         _ => {}
     }
@@ -105,4 +115,21 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
 
 pub(super) fn finish(st: &mut ExtractState) {
     st.out.param_sigs = std::mem::take(&mut st.members.param_sigs);
+}
+
+/// Drop transparent receiver wrappers (`(*p)` → `p`) through each one's
+/// first named child; the node itself when it is not a wrapper, or when a
+/// wrapper has no named child.
+fn peel_receiver<'a>(node: tree_sitter::Node<'a>, wrappers: &[&str]) -> tree_sitter::Node<'a> {
+    let mut inner = node;
+    for _ in 0..32 {
+        if !wrappers.contains(&inner.kind()) {
+            return inner;
+        }
+        match inner.named_child(0) {
+            Some(ch) => inner = ch,
+            None => return node,
+        }
+    }
+    node
 }

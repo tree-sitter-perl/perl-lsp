@@ -18,6 +18,12 @@ canonical names while the facts do not: a Corinna `:reader` and a Moo
 declarer like any pack; nothing about the flag set knows which language
 minted it.
 
+A flag that states a structural role rather than a declared attribute is
+minted from a capture, with no spelling in the table: `RECEIVER` is the
+symbol a document's `@param.receiver` names (python's leading `self` /
+`cls`), so the outline and the class-member lane ask the symbol instead
+of comparing its name against a per-language list.
+
 ## Why closed
 
 Every flag added so far has turned out to have a language-generic
