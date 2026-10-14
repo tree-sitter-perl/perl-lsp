@@ -23,6 +23,7 @@ pub mod plugin;
 pub mod pod;
 pub mod packs;
 pub mod query_cache;
+pub mod query_predicates;
 #[cfg_attr(not(feature = "pack-langs"), allow(dead_code))]
 pub mod query_extract;
 // Kept-as-spike: the Perl prototype reparenthesizer that proved the

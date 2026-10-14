@@ -95,6 +95,122 @@ pub(super) fn sweep_answers_read(
     SWEEP_ANSWERS.read().ok()
 }
 
+/// One rows-backed prefilter probe, keyed by exactly the arguments the
+/// `rows` probe takes besides the file — `candidate_may_declare` and the
+/// attributed consult prefilter ask the same `Member` question and share
+/// its entries.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(super) enum RowProbe {
+    /// `sym_member_row_exists`
+    Member { name: String, class: String },
+    /// `sym_name_row_exists`
+    SymName(String),
+    /// `name_row_exists`
+    Name(String),
+}
+
+/// The SWEEP-WIDE row-probe verdict store: (shape stamp, file, probe) → the
+/// store's proven answer, shared across files and rayon workers for one
+/// batch sweep. An ancestry walk re-asks the same few thousand probes from
+/// every file (networkx heatmap: 500k+ probes over ~5.8k distinct keys),
+/// and each probe steps statements under SQLite's process-global
+/// page-cache and malloc mutexes — the futex storm that flattens parallel
+/// scaling (#195). One map per index core, because each core is its own
+/// store and its own `shape_bumps` epoch.
+///
+/// The stamp sits IN the key: an entry minted from rows read before a
+/// shape bump is unreachable afterwards, even when its insert races the
+/// lazy clear. Only `Some(_)` verdicts are kept — "file never shredded" can
+/// change under a registration that hasn't bumped yet, and failing open on
+/// it again is the safe direction.
+pub(super) struct SweepProbes {
+    /// Admitted entries per core, a soft cap (counts race the clear).
+    cap: usize,
+    cores: DashMap<u64, Arc<CoreProbes>>,
+}
+
+pub(super) struct CoreProbes {
+    stamp: std::sync::atomic::AtomicU64,
+    len: std::sync::atomic::AtomicUsize,
+    map: DashMap<(u64, std::path::PathBuf, RowProbe), bool>,
+}
+
+static SWEEP_PROBES: std::sync::RwLock<Option<SweepProbes>> = std::sync::RwLock::new(None);
+
+impl CoreProbes {
+    pub(super) fn get(&self, key: &(u64, std::path::PathBuf, RowProbe)) -> Option<bool> {
+        self.map.get(key).map(|e| *e.value())
+    }
+
+    pub(super) fn insert(&self, key: (u64, std::path::PathBuf, RowProbe), verdict: bool, cap: usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if self.len.load(Relaxed) >= cap {
+            crate::util::ghost_stats::count("sweepprobe.full");
+            return;
+        }
+        if self.map.insert(key, verdict).is_none() {
+            self.len.fetch_add(1, Relaxed);
+        }
+    }
+}
+
+/// This core's probe store at `stamp`, if a sweep opened one — cleared
+/// first when the core's shape moved since the last access.
+pub(super) fn sweep_probes_for(core: u64, stamp: u64) -> Option<(Arc<CoreProbes>, usize)> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let guard = SWEEP_PROBES.read().ok()?;
+    let sp = guard.as_ref()?;
+    let cp = Arc::clone(
+        sp.cores
+            .entry(core)
+            .or_insert_with(|| {
+                Arc::new(CoreProbes {
+                    stamp: std::sync::atomic::AtomicU64::new(stamp),
+                    len: std::sync::atomic::AtomicUsize::new(0),
+                    map: DashMap::new(),
+                })
+            })
+            .value(),
+    );
+    if cp.stamp.load(Relaxed) != stamp {
+        // Dead entries only: the stamp in the key already hides them, the
+        // clear just frees them.
+        cp.map.clear();
+        cp.len.store(0, Relaxed);
+        cp.stamp.store(stamp, Relaxed);
+        crate::util::ghost_stats::count("sweepprobe.invalidated");
+    }
+    Some((cp, sp.cap))
+}
+
+/// Opens the sweep-wide row-probe store; drops it on drop.
+/// `PERL_LSP_SWEEP_PROBE_MEMO_ENTRIES` caps admitted entries per index
+/// (default 1M, ~200 B each; 0 leaves it closed — the A/B control).
+pub struct SweepProbeGuard(());
+
+impl SweepProbeGuard {
+    pub fn open() -> Self {
+        let cap = std::env::var("PERL_LSP_SWEEP_PROBE_MEMO_ENTRIES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1_000_000);
+        if cap != 0 {
+            if let Ok(mut slot) = SWEEP_PROBES.write() {
+                *slot = Some(SweepProbes { cap, cores: DashMap::new() });
+            }
+        }
+        SweepProbeGuard(())
+    }
+}
+
+impl Drop for SweepProbeGuard {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = SWEEP_PROBES.write() {
+            *slot = None;
+        }
+    }
+}
+
 /// The sweep-wide shared PROVIDER cache: decoded provider analyses, shared
 /// across files and rayon workers for one batch sweep. The per-file
 /// `SweepMemo` shields one file's sweep from LRU thrash but holds providers

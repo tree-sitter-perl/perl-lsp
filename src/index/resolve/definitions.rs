@@ -614,8 +614,8 @@ impl<'a> CandidateSet<'a> {
         // both offer.
         if self.pack {
             if let Some(r) = analysis.ref_at(point) {
-                if let RefKind::MethodCall { invocant_span: Some(inv), .. } = &r.kind {
-                    if let Some(recv_ty) = analysis.expr_type_at_span(*inv, self.idx()) {
+                if let Some(inv) = r.member_site().and_then(|m| m.invocant_span) {
+                    if let Some(recv_ty) = analysis.expr_type_at_span(inv, self.idx()) {
                         if recv_ty.as_parametric().is_some() {
                             let member = r.unqualified_target_name(analysis.names());
                             let mut out: Vec<RefLocation> = Vec::new();
@@ -938,9 +938,11 @@ impl<'a> CandidateSet<'a> {
                 }
             }
 
-            // Cross-file method goto-def: inherited methods through the index.
-            if matches!(r.kind, RefKind::MethodCall { .. }) {
+            // Cross-file member goto-def: inherited methods and fields
+            // through the index, walking the family the use's syntax names.
+            if let Some(want) = MemberKind::of_ref(&r.kind) {
                 use crate::model::file_analysis::MethodResolution;
+                let namespace = analysis.names().member_namespace;
                 // FQ `$o->Foo::Bar::m` dispatches the bare `m` on the named class.
                 let method = r.unqualified_target_name(analysis.names());
                 if let Some(cn) = analysis.method_call_invocant_class(r, Some(idx)) {
@@ -950,15 +952,14 @@ impl<'a> CandidateSet<'a> {
                     // freeze normally serves same-file dispatch, but a bridged
                     // invocant is never frozen (its class needs the index), so
                     // re-resolve here.
-                    if let Some(MethodResolution::Local { sym_id, .. }) =
-                        analysis.resolve_method_in_ancestors(&cn, method, Some(idx))
-                    {
+                    let resolution = analysis.resolve_member_in_ancestors(&cn, method, Some(idx), want);
+                    if let Some(MethodResolution::Local { sym_id, .. }) = resolution {
                         if let Some(sym) = analysis.symbols().iter().find(|s| s.id == sym_id) {
                             return vec![self.origin_decl(sym.selection_span)];
                         }
                     }
                     if let Some(MethodResolution::CrossFile { ref class, ref def_module, .. }) =
-                        analysis.resolve_method_in_ancestors(&cn, method, Some(idx))
+                        resolution
                     {
                         // One path for both: a real inherited method lives in
                         // `class`'s own module; a plugin-bridged helper lives
@@ -981,7 +982,35 @@ impl<'a> CandidateSet<'a> {
                             // completion (`materialize_gated_emissions`), so the
                             // whole view carries it — no per-query enrichment.
                             let whole = idx.whole_present(&cached);
-                            if let Some(sub_info) = whole.sub_info_view(method) {
+                            // A stored member of the class: a data field or
+                            // an enum constant, not a sub.
+                            let stored_member = || {
+                                whole.symbols().iter().find(|s| {
+                                    MemberKind::of_sym(s.kind) == MemberKind::Value
+                                        && s.name == method
+                                        && s.package.as_deref() == Some(class.as_str())
+                                        && whole.symbol_is_class_content(s)
+                                })
+                            };
+                            let stored_loc = |sym: &crate::model::file_analysis::Symbol| {
+                                Url::from_file_path(&cached.path).is_ok().then(|| RefLocation {
+                                    key: FileKey::Path(cached.path.clone()),
+                                    span: sym.selection_span,
+                                    access: AccessKind::Declaration,
+                                    rewritable: true,
+                                    label: None,
+                                })
+                            };
+                            // A value read lands on the stored member first.
+                            if want == MemberKind::Value {
+                                if let Some(loc) = stored_member().and_then(stored_loc) {
+                                    return vec![loc];
+                                }
+                            }
+                            let callable = want.admits_decl(SymKind::Sub, namespace)
+                                .then(|| whole.sub_info_view(method))
+                                .flatten();
+                            if let Some(sub_info) = callable {
                                 if Url::from_file_path(&cached.path).is_ok() {
                                     // A pack member call lands on the class
                                     // module's DECLARATION; hop to the
@@ -1012,24 +1041,11 @@ impl<'a> CandidateSet<'a> {
                                     )];
                                 }
                             }
-                            // cpp data field (or enum constant): a
-                            // Variable/Field/Enumerator member, not a sub.
-                            if let Some(sym) = whole.symbols().iter().find(|s| {
-                                matches!(
-                                    s.kind,
-                                    SymKind::Variable | SymKind::Field | SymKind::Enumerator
-                                ) && s.name == method
-                                    && s.package.as_deref() == Some(class.as_str())
-                                    && whole.symbol_is_class_content(s)
-                            }) {
-                                if Url::from_file_path(&cached.path).is_ok() {
-                                    return vec![RefLocation {
-                                        key: FileKey::Path(cached.path.clone()),
-                                        span: sym.selection_span,
-                                        access: AccessKind::Declaration,
-                                        rewritable: true,
-                                        label: None
-                                    }];
+                            // A call reaches a stored member where the
+                            // language keeps one member namespace.
+                            if want.admits_decl(SymKind::Field, namespace) {
+                                if let Some(loc) = stored_member().and_then(stored_loc) {
+                                    return vec![loc];
                                 }
                             }
                         }

@@ -27,6 +27,8 @@ pub(super) fn group_from_projections(
             TargetRef::method(
                 p.bare.clone(),
                 p.class.clone(),
+                // a reader is called, whatever backs it
+                Some(MemberKind::Callable),
                 class_analysis,
                 module_index,
                 OverrideScope::Dispatch,
@@ -322,6 +324,18 @@ fn ref_rows_enabled() -> bool {
 struct RetrievalMemo {
     candidates: dashmap::DashMap<(usize, u64, Vec<String>), std::sync::Arc<Vec<PathBuf>>>,
     indexed: dashmap::DashMap<(usize, u64), std::sync::Arc<std::collections::HashSet<PathBuf>>>,
+    /// The dependency sweep's file partition, per index: every walk visited
+    /// every cached file only to skip the shredded non-candidates (networkx
+    /// heatmap: 693 files × 8,287 walks, 20.6 s of a 51 s gather).
+    dep_files: dashmap::DashMap<(usize, u64), std::sync::Arc<DepFiles>>,
+}
+
+/// One cached-file snapshot split by the rows narrowing: files the rows
+/// don't cover (always swept) and every file by path (candidates are looked
+/// up, never scanned for).
+struct DepFiles {
+    unindexed: Vec<std::sync::Arc<crate::model::file_analysis::CachedModule>>,
+    by_path: std::collections::HashMap<PathBuf, std::sync::Arc<crate::model::file_analysis::CachedModule>>,
 }
 
 static RETRIEVAL_MEMO: std::sync::RwLock<Option<RetrievalMemo>> = std::sync::RwLock::new(None);
@@ -338,6 +352,7 @@ impl RetrievalMemoGuard {
                 *slot = Some(RetrievalMemo {
                     candidates: dashmap::DashMap::new(),
                     indexed: dashmap::DashMap::new(),
+                    dep_files: dashmap::DashMap::new(),
                 });
             }
         }
@@ -394,6 +409,33 @@ fn retrieve_indexed(idx: &dyn CrossFileLookup) -> std::sync::Arc<std::collection
     std::sync::Arc::new(idx.ref_indexed_paths())
 }
 
+/// The dependency sweep's partition against `rows_indexed`, while a sweep
+/// memo is open. Keyed like `retrieve_indexed`, which `rows_indexed` came
+/// from, so the two always describe the same index state.
+fn retrieve_dep_files(
+    idx: &dyn CrossFileLookup,
+    rows_indexed: &std::collections::HashSet<PathBuf>,
+) -> Option<std::sync::Arc<DepFiles>> {
+    let slot = RETRIEVAL_MEMO.read().ok()?;
+    let memo = slot.as_ref()?;
+    let k = index_identity(idx);
+    if let Some(hit) = memo.dep_files.get(&k) {
+        return Some(std::sync::Arc::clone(hit.value()));
+    }
+    let mut df = DepFiles { unindexed: Vec::new(), by_path: Default::default() };
+    idx.for_each_cached_file(&mut |cached| {
+        if !rows_indexed.contains(&cached.path) {
+            df.unindexed.push(std::sync::Arc::clone(cached));
+        }
+        df.by_path
+            .entry(cached.path.clone())
+            .or_insert_with(|| std::sync::Arc::clone(cached));
+    });
+    let df = std::sync::Arc::new(df);
+    memo.dep_files.insert(k, std::sync::Arc::clone(&df));
+    Some(df)
+}
+
 /// The name keys the relational retrieval probes for `target`: its match
 /// key — the same `name_match_key` spelling rows are written under, so
 /// retrieval is exactly as generous as the matcher's name checks. A use
@@ -426,7 +468,7 @@ pub(super) fn matcher_view(
     let needs_whole = match &target.kind {
         TargetKind::Handler { .. } => !view.provisional_dispatches.is_empty(),
         TargetKind::Sub { .. } | TargetKind::Method { .. } => refs_keyed(&view, &target.name).any(|r| {
-            matches!(r.kind, RefKind::MethodCall { .. })
+            r.member_site().is_some()
                 && r.unqualified_target_name(view.names()) == target.name
                 && !r.match_verdict_baked()
         }),
@@ -722,14 +764,14 @@ fn walk_refs(
     if mask.contains(RoleMask::DEPENDENCY) {
         let _t = crate::util::ghost_stats::ScopedNs::start("refs.sweep.deps");
         if let Some(idx) = module_index {
-            idx.for_each_cached_file(&mut |cached| {
-                if !covered_paths.insert(cached.path.clone()) {
-                    return;
-                }
+            let mut visit = |cached: &std::sync::Arc<crate::model::file_analysis::CachedModule>| {
                 // Same row-narrowing skip as the workspace sweep: shredded
                 // but not a candidate ⇒ provably matchless; candidates
                 // always fall through.
                 if rows_indexed.contains(&cached.path) && !candidate_set.contains(&cached.path) {
+                    return;
+                }
+                if !covered_paths.insert(cached.path.clone()) {
                     return;
                 }
                 let key = FileKey::Path(cached.path.clone());
@@ -742,7 +784,28 @@ fn walk_refs(
                 // the matcher needs refs + symbols, so take the rows view.
                 let full = matcher_view(idx, cached, target);
                 collect_from_analysis(&key, &full, target, module_index, &memo, &mut out);
-            });
+            };
+            // Narrowed, a sweep visits exactly the unshredded files plus the
+            // candidates — so a sweep memo enumerates those instead of
+            // every cached file.
+            let partition = if rows_indexed.is_empty() {
+                None
+            } else {
+                retrieve_dep_files(idx, &rows_indexed)
+            };
+            match partition {
+                Some(df) => {
+                    for cached in &df.unindexed {
+                        visit(cached);
+                    }
+                    for path in &candidate_set {
+                        if let Some(cached) = df.by_path.get(path) {
+                            visit(cached);
+                        }
+                    }
+                }
+                None => idx.for_each_cached_file(&mut |cached| visit(cached)),
+            }
         }
     }
 
@@ -857,7 +920,7 @@ pub fn implementations_of(
     // PARENT of a shared descendant (DBIC's `Ordered` sits alongside `Row` in
     // `Track`'s MRO, not beneath it), which an INHERITS_INV sweep alone never
     // reaches. `dispatch_participants` is that gather, shared with
-    // `method_override_family` — while each had its own walk, this verb found
+    // `member_override_family` — while each had its own walk, this verb found
     // the sibling and `references` did not, from the same cursor.
     let mut implementers = origin.dispatch_participants(class, Some(idx));
     // The target and its own ancestry are the CONTRACT side, not an

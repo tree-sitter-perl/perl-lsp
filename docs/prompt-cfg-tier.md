@@ -341,10 +341,9 @@ conventions disagree about what a parameter even is:
   default arguments make trailing indices optional at the site.
 - **The invocant** — Perl's `my ($self) = @_` / shift, Python's
   explicit `self`, cpp's implicit `this`. Is the receiver "param 0" or
-  its own axis? (`emit_return_fuel`'s `implicit_this_members`
-  capability and `conventions.rs::is_conventional_invocant_scalar`
-  already model invocant-ness — the effect key must agree with them,
-  not re-derive.)
+  its own axis? (`Scope::implicit_receiver` and
+  `conventions.rs::is_conventional_invocant_scalar` already model
+  invocant-ness — the effect key must agree with them, not re-derive.)
 - **Perl `@_` flattening + aliasing** — there are no declared
   positions; the builder infers params from unpacking idioms, and `@_`
   elements alias caller storage, so an effect on `$_[0]` IS an effect

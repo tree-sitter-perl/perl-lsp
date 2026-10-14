@@ -66,7 +66,6 @@ impl FileAnalysis {
                     include_directives,
                     // File-internal pack lanes: read LIVE from the
                     // provider's re-registered analysis per query.
-                    receiver_names: _receiver_names, // LangPack-wide convention, identical across the pack's files
                     import_rows: _import_rows, // editing aid, not cross-file-visible
                     import_template: _import_template, // pack-wide convention
                     native_type_spellings: _native_type_spellings, // pack-wide convention
