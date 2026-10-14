@@ -331,7 +331,7 @@ fn macro_heap_bytes(m: &Macro) -> usize {
     m.body.capacity()
         + m.params.as_ref().map_or(0, |p| p.iter().map(|s| s.capacity() + 24).sum())
         + m.guards.iter().map(|s| s.capacity() + 24).sum::<usize>()
-        + m.variant_delegates.iter().map(|s| s.capacity() + 24).sum::<usize>()
+        + m.variant_delegates.iter().map(|(s, _)| s.capacity() + 32).sum::<usize>()
         + 72
 }
 

@@ -1375,12 +1375,12 @@ struct MacroLane {
 
 /// What this file's preprocessor makes of each macro-spelled use
 /// (`MacroUses`): the use's transitive delegate chain (`#define A(x) B(x)`,
-/// `#define B(x) F(x)` gives `A → [B, F]`), or that it precedes the macro's
-/// definition. A macro is defined from its own `#define` line, or for a
-/// gathered one from the `#include` line bringing it in; a chain follows a
+/// `#define B(x) F(x)` gives `A → [B, F]`), or that the name is no macro
+/// there. A definition counts from its own `#define` line, or for a gathered
+/// one from the `#include` line bringing its header in; a chain follows a
 /// link only while that link's macro is defined at the use, which is when
 /// the preprocessor would rescan it. Every config variant of a name
-/// contributes (`Macro::variant_delegates`).
+/// contributes, each from its own line (`Macro::variant_delegates`).
 #[cfg(feature = "pack-langs")]
 fn macro_uses(
     fa: &FileAnalysis,
@@ -1391,96 +1391,120 @@ fn macro_uses(
     use std::collections::HashMap;
     let include_rows: Vec<usize> =
         crate::build::cpp_reparse::include_lines(source).into_iter().map(|(_, row)| row).collect();
-    let mut own: HashMap<&str, (usize, Vec<String>)> = HashMap::new();
+    // Every definition of a name this file sees: `(row it counts from,
+    // delegate)`. A gathered name is defined from its include line even
+    // when no variant delegates.
+    let mut own: HashMap<&str, Vec<(usize, Option<String>)>> = HashMap::new();
     for m in &fa.pack.macro_defs {
-        let e = own.entry(m.name.as_str()).or_insert((usize::MAX, Vec::new()));
-        e.0 = e.0.min(m.selection_span.start.row);
-        if let Some(d) = &m.delegate {
-            e.1.push(d.clone());
-        }
+        own.entry(m.name.as_str()).or_default().push((m.selection_span.start.row, m.delegate.clone()));
     }
-    let activation = |name: &str| -> Option<usize> {
-        let local = own.get(name).map(|(row, _)| *row);
-        let gathered = external.activation_line(name, &include_rows);
-        match (local, gathered) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+    let mut defs: HashMap<String, Vec<(usize, Option<String>)>> = HashMap::new();
+    let mut defs_of = |name: &str| -> Vec<(usize, Option<String>)> {
+        defs.entry(name.to_string())
+            .or_insert_with(|| {
+                let mut v = own.get(name).cloned().unwrap_or_default();
+                if let Some(row) = external.activation_line(name, &include_rows) {
+                    v.push((row, None));
+                }
+                v.extend(external.delegates_of(name, &include_rows).into_iter().map(|(d, row)| (row, Some(d))));
+                v
+            })
+            .clone()
     };
-    let direct = |name: &str| -> Vec<String> {
-        let mut v = own.get(name).map(|(_, d)| d.clone()).unwrap_or_default();
-        v.extend(external.delegates_of(name));
-        v
-    };
-    // The chain at `row`: every name the expansion spells, following a link
-    // only while its macro is defined there.
-    let chain_at = |name: &str, row: usize| -> Vec<String> {
-        let mut chain: Vec<String> = Vec::new();
-        let mut frontier = direct(name);
-        while let Some(d) = frontier.pop() {
-            if d == name || chain.contains(&d) {
-                continue;
-            }
-            if activation(&d).is_some_and(|act| act <= row) {
-                frontier.extend(direct(&d));
-            }
-            chain.push(d);
-        }
-        chain.sort();
-        chain
-    };
-    // A name's chain only changes where one of its links becomes defined, so
-    // it is computed once per such step: `(from row, chain index)`.
-    let mut steps: HashMap<String, Vec<(usize, Option<u32>)>> = HashMap::new();
+    let mut steps: HashMap<&str, Vec<(usize, Option<u32>)>> = HashMap::new();
+    // A use inside a `#define` body is expanded wherever its macro is used,
+    // so every definition counts.
+    let mut body_chains: HashMap<&str, Option<u32>> = HashMap::new();
     let mut chains: Vec<Box<[String]>> = Vec::new();
     let mut chain_ids: HashMap<Box<[String]>, u32> = HashMap::new();
-    let mut steps_of = |name: &str, act: usize| -> Vec<(usize, Option<u32>)> {
-        let mut rows = vec![act];
-        let mut every = chain_at(name, usize::MAX);
-        while let Some(d) = every.pop() {
-            if let Some(a) = activation(&d).filter(|&a| a > act) {
-                rows.push(a);
-            }
-        }
-        rows.sort_unstable();
-        rows.dedup();
-        let mut out: Vec<(usize, Option<u32>)> = Vec::new();
-        for row in rows.into_iter().chain(std::iter::once(usize::MAX)) {
-            let chain = chain_at(name, row);
-            let id = (!chain.is_empty()).then(|| {
-                let chain = chain.into_boxed_slice();
-                *chain_ids.entry(chain.clone()).or_insert_with(|| {
-                    chains.push(chain);
-                    (chains.len() - 1) as u32
-                })
-            });
-            if out.last().is_none_or(|&(_, last)| last != id) {
-                out.push((row, id));
-            }
-        }
-        out
-    };
     let names = &fa.pack.names;
     let mut delegated: Vec<(u32, u32)> = Vec::new();
-    let mut premature: Vec<u32> = Vec::new();
+    let mut inactive: Vec<u32> = Vec::new();
     for (i, r) in fa.refs().iter().enumerate() {
         if !r.can_spell_macro_use() {
             continue;
         }
         let name = r.unqualified_target_name(names);
-        let Some(act) = activation(name) else { continue };
-        let row = if body_uses.binary_search(&r.span.start).is_ok() { usize::MAX } else { r.span.start.row };
-        if row < act {
-            premature.push(i as u32);
+        let own_defs = defs_of(name);
+        if own_defs.is_empty() {
             continue;
         }
-        let steps = steps.entry(name.to_string()).or_insert_with(|| steps_of(name, act));
-        let at = steps.partition_point(|&(from, _)| from <= row) - 1;
-        if let Some(id) = steps[at].1 {
+        let row = if body_uses.binary_search(&r.span.start).is_ok() { usize::MAX } else { r.span.start.row };
+        if !own_defs.iter().any(|(from, _)| *from <= row) {
+            inactive.push(i as u32);
+            continue;
+        }
+        let mut intern = |chain: Vec<String>| -> Option<u32> {
+            (!chain.is_empty()).then(|| {
+                let chain = chain.into_boxed_slice();
+                *chain_ids.entry(chain.clone()).or_insert_with(|| {
+                    chains.push(chain);
+                    (chains.len() - 1) as u32
+                })
+            })
+        };
+        let id = if row == usize::MAX {
+            *body_chains.entry(name).or_insert_with(|| intern(chain_at(name, usize::MAX, &mut defs_of)))
+        } else {
+            let steps = steps.entry(name).or_insert_with(|| {
+                // The chain only changes where a reachable definition starts
+                // counting, so it is computed once per such row.
+                let mut rows: Vec<usize> = vec![0];
+                let mut seen: Vec<String> = vec![name.to_string()];
+                let mut frontier = vec![name.to_string()];
+                while let Some(n) = frontier.pop() {
+                    for (from, d) in defs_of(&n) {
+                        rows.push(from);
+                        if let Some(d) = d {
+                            if !seen.contains(&d) {
+                                seen.push(d.clone());
+                                frontier.push(d);
+                            }
+                        }
+                    }
+                }
+                rows.sort_unstable();
+                rows.dedup();
+                let mut out: Vec<(usize, Vec<String>)> = Vec::new();
+                for row in rows {
+                    let chain = chain_at(name, row, &mut defs_of);
+                    if out.last().is_none_or(|(_, last)| *last != chain) {
+                        out.push((row, chain));
+                    }
+                }
+                out.into_iter().map(|(from, chain)| (from, intern(chain))).collect()
+            });
+            steps[steps.partition_point(|&(from, _)| from <= row) - 1].1
+        };
+        if let Some(id) = id {
             delegated.push((i as u32, id));
         }
     }
-    crate::model::file_analysis::MacroUses::from_parts(chains, delegated, premature)
+    crate::model::file_analysis::MacroUses::from_parts(chains, delegated, inactive)
+}
+
+/// The names a use of macro `name` at `row` spells through delegation:
+/// every delegate of a definition counting at `row`, then theirs, sorted.
+#[cfg(feature = "pack-langs")]
+fn chain_at(
+    name: &str,
+    row: usize,
+    defs_of: &mut impl FnMut(&str) -> Vec<(usize, Option<String>)>,
+) -> Vec<String> {
+    let mut chain: Vec<String> = Vec::new();
+    let mut frontier = vec![name.to_string()];
+    while let Some(n) = frontier.pop() {
+        for (from, d) in defs_of(&n) {
+            let Some(d) = d else { continue };
+            if from > row || d == name || chain.contains(&d) {
+                continue;
+            }
+            chain.push(d.clone());
+            frontier.push(d);
+        }
+    }
+    chain.sort();
+    chain
 }
 
 /// Re-mint a variable read at every macro use the transform ERASED from the

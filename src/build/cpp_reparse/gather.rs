@@ -99,10 +99,20 @@ impl PreExpandedExternal {
     }
 
     /// Every callee a use of gathered macro `name` may forward to, across
-    /// its config variants in the whole closure — the delegation edges the
-    /// build mints onto this file's use sites (`macro_uses`).
-    pub fn delegates_of(&self, name: &str) -> Vec<String> {
-        self.raw.get(name).map(|m| m.all_delegates().collect()).unwrap_or_default()
+    /// its config variants in the whole closure, each with the line its
+    /// variant is defined from (`activation_line`'s units) — the delegation
+    /// edges the build mints onto this file's use sites (`macro_uses`).
+    pub fn delegates_of(&self, name: &str, include_lines: &[usize]) -> Vec<(String, usize)> {
+        let Some(m) = self.raw.get(name) else { return Vec::new() };
+        let line = |via: Option<u32>| via.and_then(|i| include_lines.get(i as usize).copied()).unwrap_or(0);
+        let mut out: Vec<(String, usize)> =
+            m.variant_delegates.iter().map(|(d, via)| (d.clone(), line(via.or(m.via_include)))).collect();
+        if let Some(d) = m.delegate() {
+            if !out.iter().any(|(v, _)| *v == d) {
+                out.push((d, line(m.via_include)));
+            }
+        }
+        out
     }
 
     /// Where gathered macro `name` becomes defined in the gathering file:
@@ -297,12 +307,7 @@ pub(super) fn gather_included_macros(
             let Some(info) = info else { continue };
             headers.push((canon.clone(), file_stamp(&canon)));
             for (k, v) in &info.macros {
-                match macros.entry(k.clone()) {
-                    std::collections::btree_map::Entry::Vacant(e) => {
-                        e.insert(v.clone());
-                    }
-                    std::collections::btree_map::Entry::Occupied(mut e) => e.get_mut().absorb_variant(v),
-                }
+                macros.entry(k.clone()).or_insert_with(|| Macro { variant_delegates: Vec::new(), ..v.clone() });
             }
             for inc in &info.includes {
                 if let Some(nx) = resolve_include(&canon, inc) {
@@ -338,13 +343,22 @@ pub(super) fn gather_included_macros(
             stack.extend(children[h].iter().copied());
         }
     }
+    // Every header's definitions of a name join the table's one body: the
+    // name is defined from the earliest of them, and each variant's
+    // delegate from its own header's include line.
+    let earliest = |a: Option<u32>, b: Option<u32>| match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
     for (info, o) in parsed.iter().zip(ordinal) {
-        for k in info.macros.keys() {
-            if let Some(m) = macros.get_mut(k) {
-                m.via_include = match (m.via_include, o) {
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    (a, b) => a.or(b),
-                };
+        for (k, v) in &info.macros {
+            let Some(m) = macros.get_mut(k) else { continue };
+            m.via_include = earliest(m.via_include, o);
+            for d in v.all_delegates() {
+                match m.variant_delegates.iter_mut().find(|(e, _)| *e == d) {
+                    Some((_, via)) => *via = earliest(*via, o),
+                    None => m.variant_delegates.push((d, o)),
+                }
             }
         }
     }

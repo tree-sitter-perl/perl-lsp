@@ -235,15 +235,15 @@ impl Macro {
     /// Every callee a use of this name may forward to, across all its
     /// config variants.
     pub fn all_delegates(&self) -> impl Iterator<Item = String> + '_ {
-        self.delegate().into_iter().chain(self.variant_delegates.iter().cloned())
+        self.delegate().into_iter().chain(self.variant_delegates.iter().map(|(d, _)| d.clone()))
     }
 
     /// Fold a shadowed same-named definition's delegates into this one.
     pub fn absorb_variant(&mut self, other: &Macro) {
         let own = self.delegate();
         for d in other.all_delegates() {
-            if own.as_ref() != Some(&d) && !self.variant_delegates.contains(&d) {
-                self.variant_delegates.push(d);
+            if own.as_ref() != Some(&d) && !self.variant_delegates.iter().any(|(v, _)| *v == d) {
+                self.variant_delegates.push((d, None));
             }
         }
     }

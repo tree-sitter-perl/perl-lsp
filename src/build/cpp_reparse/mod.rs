@@ -50,12 +50,14 @@ pub struct Macro {
     /// 0-based line of the `#define` — the variant's def site.
     #[serde(default)]
     pub def_line: usize,
-    /// The delegates of every OTHER `#define` of this name that a merge
-    /// shadowed (`absorb_variant`): a table keeps one body per name, but a
-    /// use forwards to each config variant's callee, and the references
-    /// see-through must count all of them.
+    /// The delegates of every `#define` of this name a table holds one body
+    /// for (`absorb_variant`): a use forwards to each config variant's
+    /// callee, and the references see-through must count all of them. Each
+    /// carries the include ordinal (`via_include`) of the header it comes
+    /// from, so a variant counts only below its own `#include`; `None` is the
+    /// same place as this body.
     #[serde(default)]
-    pub variant_delegates: Vec<String>,
+    pub variant_delegates: Vec<(String, Option<u32>)>,
     /// For a gathered macro: the ordinal of the gathering file's `#include`
     /// line (`include_lines`) after which the name is defined — the first
     /// direct include whose closure defines it. `None` for a file's own
