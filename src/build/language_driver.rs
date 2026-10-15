@@ -1086,8 +1086,11 @@ fn remap_spans(
     // Call-site spans feed the call-value edge (`into_file_analysis`, after
     // this remap) and must speak original coords like the flow-edge source
     // (the same call span) they land beside.
-    for (span, _) in call_sites.iter_mut() {
-        *span = rspan(*span);
+    for site in call_sites.iter_mut() {
+        site.span = rspan(site.span);
+        for (arg, _) in site.args.iter_mut().flatten() {
+            *arg = rspan(*arg);
+        }
     }
     for (_, span) in return_sites.iter_mut() {
         *span = rspan(*span);

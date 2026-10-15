@@ -233,7 +233,7 @@ impl WitnessPayload {
             WitnessPayload::Invoke { callee, receiver, args } => {
                 match callee {
                     Callee::Value(t) => f(t),
-                    Callee::Method { .. } => {}
+                    Callee::Method { .. } | Callee::Function { .. } => {}
                 }
                 if let Some(t) = receiver {
                     f(t);
@@ -426,6 +426,12 @@ pub enum Callee {
     /// Whatever callable this attachment holds (`$cb->(…)`, `$obj->$cb(…)`):
     /// its `CodeRef` return edge is the call's value.
     Value(WitnessAttachment),
+    /// A free function named `name`. `local` is the in-file definition the
+    /// producer resolved the name to (a class named as a callable included);
+    /// `None` looks the name up across files, by the same visibility the
+    /// definition lookup uses. Kept at the END for bincode variant-index
+    /// stability (bump `EXTRACT_VERSION`).
+    Function { name: String, local: Option<SymbolId> },
 }
 
 /// Where a named method's lookup starts.

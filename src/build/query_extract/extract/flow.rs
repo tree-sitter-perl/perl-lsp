@@ -172,7 +172,8 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
             if let Some(callee) = callee {
                 let span = e.span();
                 f.lit_spans.push((e.start_byte, e.end_byte, span));
-                out.call_sites.push((span, callee));
+                let args = st.members.call_args(e.match_id);
+                out.call_sites.push(crate::build::query_extract::CallSite { span, callee, args });
             }
         }
         // The assignment node anchors its pattern; its target and source

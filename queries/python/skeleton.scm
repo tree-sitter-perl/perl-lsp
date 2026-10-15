@@ -61,8 +61,13 @@
 (for_statement
   left: (identifier) @flow.rebind)
 
+; ---- calls: a call's value is an Invoke of its callee on its arguments. The
+; argument list rides the callee's match, and a starred argument spreads. A
+; generator argument (`f(x for x in xs)`) is one value, not a list. ----
 (call
-  function: (identifier) @ref.call) @expr.call
+  function: (identifier) @ref.call
+  arguments: [(argument_list ((_) @arity.arg ","?)*) @arity.args (generator_expression)]) @expr.call
+(argument_list [(list_splat) (dictionary_splat)] @arity.spread)
 (call
   function: (attribute attribute: (identifier) @ref.method))
 
@@ -79,7 +84,7 @@
   function: (attribute
     object: (_) @member.recv
     attribute: (identifier) @ref.member.call)
-  arguments: (argument_list) @arity.args)
+  arguments: [(argument_list ((_) @arity.arg ","?)*) @arity.args (generator_expression)])
 (identifier) @expr.read.var
 
 (string) @expr.lit.string

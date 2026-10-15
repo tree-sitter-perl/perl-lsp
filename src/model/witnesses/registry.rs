@@ -2685,6 +2685,18 @@ impl ReducerRegistry {
                     .map(|package| WitnessAttachment::PackageSymbol { package, name: name.clone() })
                     .collect()
             }
+            Callee::Function { name, local: None } => {
+                let Some(ctx) = q.context.filter(|c| c.module_index.is_some()) else {
+                    // The definition is in another file, and no conclusion
+                    // key names a free function, so a bake can't link it.
+                    super::note_bake_exit("free_function", false);
+                    state.note_exit(None);
+                    return None;
+                };
+                let arity = exact.then_some(arg_types.len() as u32);
+                return self.free_function_cross_file(ctx, name, arity, recv, &arg_types, state);
+            }
+            Callee::Function { local: Some(sid), .. } => vec![WitnessAttachment::Symbol(*sid)],
             Callee::Value(att) => {
                 let target = self.operand_type(bag, q, state, att)?.callable_return_edge()?.clone();
                 // Invoking a method through a coderef passes its invocant as
@@ -2721,6 +2733,142 @@ impl ReducerRegistry {
                 .then(|| recv?.class_name().map(|c| InferredType::ClassName(c.to_string())))
                 .flatten()
         })
+    }
+
+    /// The free function `name` as the files `ctx` can see it: a module
+    /// exporting it, then a pack's linkage-visible definitions. One ladder
+    /// for both entries — `query_sub_return_type`'s cross-file half and an
+    /// unresolved `Callee::Function` — and the chase shares `state`, so a
+    /// call that crosses back into a file already on the path stops at the
+    /// cycle guard instead of recursing through a fresh query.
+    pub(super) fn free_function_cross_file(
+        &self,
+        ctx: &BagContext,
+        name: &str,
+        arity_hint: Option<u32>,
+        receiver: Option<InferredType>,
+        args: &[InferredType],
+        state: &mut QueryState,
+    ) -> Option<InferredType> {
+        use crate::model::file_analysis::{FileAnalysis, SymKind};
+        use std::sync::Arc;
+        let idx = ctx.module_index?;
+        if !super::session::budget_available(idx) {
+            return None;
+        }
+        let is_callable = |s: &crate::model::file_analysis::Symbol| {
+            s.name == name && matches!(s.kind, SymKind::Sub | SymKind::Method)
+        };
+        // The callable's answer in its own file, under the caller's arity,
+        // receiver and arguments. The copy is pinned: the memo keys on its
+        // bag's address for the rest of this query.
+        let ask = |full: &Arc<FileAnalysis>, sym: SymbolId, state: &mut QueryState| {
+            state.pins.push(Arc::clone(full));
+            let cached_ctx = BagContext {
+                scopes: &full.scopes,
+                package_framework: &full.packages,
+                module_index: Some(idx),
+                package_parents: &full.packages,
+                app_surface_consumers: &full.plugin.app_surface_consumers,
+            };
+            let att = WitnessAttachment::Symbol(sym);
+            let q = ReducerQuery {
+                attachment: &att,
+                point: None,
+                framework: FrameworkFact::Plain,
+                arity_hint,
+                receiver: receiver.clone(),
+                args: args.to_vec(),
+                context: Some(&cached_ctx),
+            };
+            match &*self.query_rec(&full.witnesses, &q, state) {
+                ReducedValue::Type(t) => Some(t.clone()),
+                ReducedValue::FactMap(_) | ReducedValue::None => None,
+            }
+        };
+        // Two passes so the R4 retry can never SHADOW a later exporter's raw
+        // answer: every exporter answers from its raw bag first; only when
+        // ALL raw bags miss do the ones that declare the name consult the
+        // enrichment overlay (fallback-on-miss — the raw bag dead-ends when
+        // the closed file's return chains through ITS OWN imports).
+        let mut retryable = Vec::new();
+        for module_name in idx.find_exporters(name) {
+            // Every candidate file registered under the exporter's name — a
+            // split exporter's sub lives in whichever file defines it.
+            for cached in idx.visible_def_candidates(&module_name) {
+                let full = idx.bag_present(&cached);
+                let Some(sym) = full.symbols().iter().find(|s| is_callable(s)).map(|s| s.id) else {
+                    continue;
+                };
+                match ask(&full, sym, state) {
+                    Some(t) => return Some(t),
+                    None => retryable.push(cached),
+                }
+            }
+        }
+        for cached in retryable {
+            crate::util::ghost_stats::count("consult.imported_sub_return");
+            if !idx.serves_enriched() {
+                break;
+            }
+            let full = idx.bag_present(&cached);
+            let enriched = idx.enriched_present(&cached);
+            if Arc::ptr_eq(&enriched, &full) {
+                continue;
+            }
+            let Some(sym) = enriched.symbols().iter().find(|s| is_callable(s)).map(|s| s.id) else {
+                continue;
+            };
+            if let Some(t) = ask(&enriched, sym, state) {
+                return Some(t);
+            }
+        }
+        // A pack callee defined in an INCLUDED file carries no export edge (C
+        // free functions never populate `@EXPORT`). It crosses the boundary
+        // by the include-closure visibility goto-def uses (`pack_def_paths`):
+        // a candidate is reachable iff the querying file sees its path or the
+        // candidate includes the querying file — never a bare name match, so
+        // a same-named function in an unrelated TU can't contaminate. A Flat
+        // scope (a name-keyed pack) has no closure to gate by: every
+        // candidate is reachable by rule. Disagreeing candidates are a
+        // genuine ambiguity and answer nothing; a prototype and its
+        // definition agree. Transparent hosts (no rule known) skip the arm.
+        let scope = idx.visibility_scope().map(|(p, v)| (p.to_string_lossy().into_owned(), v));
+        if scope.is_none() && !idx.flat_scope() {
+            return None;
+        }
+        let mut answer: Option<InferredType> = None;
+        for cached in idx.def_candidates(name) {
+            let p = cached.path.to_string_lossy();
+            // Reachability reads pinned fields (path + include_closure), so
+            // gate BEFORE rehydrating: an unreachable candidate never pays a
+            // bag decode.
+            let reachable = match &scope {
+                Some((self_str, visible)) => {
+                    visible.contains(p.as_ref())
+                        || cached.analysis.pack.include_closure.contains(self_str)
+                }
+                None => true,
+            };
+            if !reachable {
+                continue;
+            }
+            let full = idx.bag_present(&cached);
+            let Some(sym) = full
+                .symbols()
+                .iter()
+                .find(|s| is_callable(s) && full.is_linkage_visible(s))
+                .map(|s| s.id)
+            else {
+                continue;
+            };
+            match (ask(&full, sym, state), &answer) {
+                (Some(t), Some(existing)) if *existing != t => return None,
+                (Some(t), None) => answer = Some(t),
+                _ => {}
+            }
+        }
+        answer
     }
 
     /// Scope-chain variable lookup with an explicit visited set.

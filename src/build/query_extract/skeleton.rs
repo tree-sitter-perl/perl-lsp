@@ -66,6 +66,17 @@ pub struct SkelRef {
     pub arg_count: Option<usize>,
 }
 
+/// One `@expr.call` site.
+#[derive(Debug, Clone)]
+pub struct CallSite {
+    pub span: Span,
+    pub callee: String,
+    /// The written arguments in order, each with whether it spreads
+    /// (`@arity.spread`); `None` when the call's match captured no argument
+    /// list.
+    pub args: Option<Vec<(Span, bool)>>,
+}
+
 #[derive(Debug, Default)]
 pub struct SkeletonAnalysis {
     pub symbols: Vec<SkelSymbol>,
@@ -145,13 +156,14 @@ pub struct SkeletonAnalysis {
     /// driver's macro lane (it holds the tree); empty for languages with no
     /// macro model.
     pub macro_call_arg_spans: Vec<(Span, Vec<Span>)>,
-    /// Call sites (`@expr.call`): (call-expression span, callee name). The
-    /// call's VALUE is the callee's own resolution — resolved in
-    /// `into_file_analysis` against the symbol table: a `Class` callee is a
-    /// functional cast / constructor (→ an instance of that class), a
-    /// callable (sub / function-like macro) flows its return, an unresolvable
-    /// name yields NO witness (no name-case guess — `docs/adr/macro-handling.md`).
-    pub call_sites: Vec<(Span, String)>,
+    /// Call sites (`@expr.call`). The call's VALUE is an `Invoke` of the
+    /// callee on its arguments, minted in `into_file_analysis` against the
+    /// symbol table: a `Class` callee is a functional cast / constructor (→
+    /// an instance of that class), a callable (sub / function-like macro)
+    /// flows its return, and a name this file doesn't define is looked up
+    /// across files at query time (no name-case guess —
+    /// `docs/adr/macro-handling.md`).
+    pub call_sites: Vec<CallSite>,
     /// `return EXPR;` sites (`@expr.return.value`): (enclosing scope, the
     /// returned expression's span). Purely structural — this tier doesn't
     /// know what a `return` MEANS for any given language; the interpretation
@@ -731,15 +743,16 @@ impl SkeletonAnalysis {
                     bag.push(mk(WA::Symbol(sid), pay, span));
                 }
             }
-            // Call-site value resolution: a call's value IS the callee's own
-            // resolution. A callee that names a symbol — a `Class` (functional
-            // cast / constructor → the class instance), a sub, or a function-
-            // like macro — edges `Expr(call) → Edge(Symbol(callee))`; the
+            // Call-site value resolution: a call's value is an `Invoke` of
+            // its callee on its arguments. A callee this file defines — a
+            // `Class` (functional cast / constructor → the class instance), a
+            // sub, or a function-like macro — is resolved here, and its
             // Symbol answers `ClassName` for a class and its return for a
-            // callable. A callee that resolves to NOTHING mints no witness (no
-            // name-case guess — an unknown uppercase macro leaves the enclosing
-            // `auto x = F(..)` honestly untyped). Prefer a `Class` over a
-            // like-named callable (the constructor is the stronger claim).
+            // callable. Any other name is looked up across files at query
+            // time; one nothing defines answers nothing (no name-case guess —
+            // an unknown uppercase macro leaves the enclosing `auto x =
+            // F(..)` honestly untyped). Prefer a `Class` over a like-named
+            // callable (the constructor is the stronger claim).
             let callee_sid: std::collections::HashMap<&str, SymbolId> = {
                 let mut m: std::collections::HashMap<&str, SymbolId> =
                     std::collections::HashMap::new();
@@ -760,7 +773,8 @@ impl SkeletonAnalysis {
             // call resolves to its n-th argument's value witness.
             let call_args: std::collections::HashMap<Span, &Vec<Span>> =
                 self.macro_call_arg_spans.iter().map(|(s, a)| (*s, a)).collect();
-            for (span, name) in &self.call_sites {
+            for site in &self.call_sites {
+                let (span, name) = (&site.span, &site.callee);
                 // Identity/projection macro: the call's value IS its n-th
                 // argument. Edge to the argument's own `Expr` witness rather
                 // than the param-agnostic Symbol return (edges-not-values).
@@ -770,9 +784,22 @@ impl SkeletonAnalysis {
                         continue;
                     }
                 }
-                if let Some(&sid) = callee_sid.get(name.as_str()) {
-                    bag.push(mk(WA::Expr(*span), WP::Edge(WA::Symbol(sid)), *span));
-                }
+                let args = site.args.as_ref().map(|args| {
+                    args.iter()
+                        .map(|&(arg, spread)| {
+                            if spread {
+                                crate::model::witnesses::CallArg::Spread(WA::Expr(arg))
+                            } else {
+                                crate::model::witnesses::CallArg::One(WA::Expr(arg))
+                            }
+                        })
+                        .collect()
+                });
+                let callee = crate::model::witnesses::Callee::Function {
+                    name: name.clone(),
+                    local: callee_sid.get(name.as_str()).copied(),
+                };
+                bag.push(mk(WA::Expr(*span), WP::Invoke { callee, receiver: None, args }, *span));
             }
         }
         // ---- Local/param vars: a variable READ resolves to the nearest

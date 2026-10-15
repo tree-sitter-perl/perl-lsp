@@ -185,7 +185,7 @@ impl MemberOpCap {
 }
 
 spelled! {
-    pub enum ArityCap { Args = "args", Sig = "sig" }
+    pub enum ArityCap { Args = "args", Arg = "arg", Sig = "sig", Spread = "spread" }
 }
 
 spelled! {

@@ -1,0 +1,66 @@
+# A call's value is an `Invoke`
+
+## Context
+
+A call's value is what its callee returns for its receiver and arguments.
+The bag states that as one payload, `WitnessPayload::Invoke { callee,
+receiver, args }`, on the call's own attachment. Every operand is an
+attachment the registry materializes under the query that holds the index,
+so the callee is chosen at query time, never fixed when the file was built.
+
+## Decision: one call shape, three callees
+
+`Callee` names what is called:
+
+- `Method { name, lookup, constructs }`: a named method, looked up on the
+  receiver's class, the writer's parents (`SUPER::`), or a named class.
+- `Value(att)`: whatever callable `att` holds (`$cb->(…)`).
+- `Function { name, local }`: a free function. `local` is the in-file
+  definition the producer resolved the name to, a class named as a
+  callable included (a functional cast or constructor). `None` sends the
+  lookup across files.
+
+The producer resolves the local half because it holds the symbol table, and
+a cross-file chase into a file whose symbols are evicted still finds the
+edge in that file's bag (rule #11). The cross-file half is one ladder,
+`ReducerRegistry::free_function_cross_file`: a module exporting the name,
+then a pack's linkage-visible definitions gated by include-closure
+reachability. `query_sub_return_type` walks the same ladder for a bare
+name, so a call and a name probe cannot disagree. The ladder shares the
+query's `QueryState`, so a call chain that crosses back into a file already
+on the path stops at the cycle guard.
+
+A bake has no index, so an unresolved `Function` is an exit no conclusion
+key can name. The bake records it and poisons, and the file's answer for
+that chase is decoded at query time.
+
+## Decision: arguments are operands, and arity is read from them
+
+`args` lists `CallArg::One(att)` per written argument and `CallArg::Spread`
+for one that flattens to any number of values. The registry materializes
+each `One` into the positional types `ReturnExpr::Arg(n)` substitutes, and
+the call's arity is exact only when no argument spreads. `args: None` means
+the arguments were not walked, so there is no arity and there are no
+argument types.
+
+A pack's document says what an argument list holds. `@arity.args` is the
+list and `@arity.arg` each argument in it, both captured in the same match as
+the callee: `(argument_list ((_) @arity.arg ","?)*)`. The separator has to be
+in the quantified group, because a bare `(_)*` stops at the first comma. A
+wildcard also matches the grammar's extras, and a predicate filters a whole
+match rather than one capture, so the extractor drops a captured comment.
+`@arity.spread` marks the children that spread (`*xs`, `**kw`, `args...`).
+
+## Current state
+
+- Pack free calls (`@ref.call` beside `@expr.call`) mint `Function`. A
+  qualified pack call (`@ref.qcall`) mints no call value yet.
+- Perl's free calls still edge to the local `Symbol` and carry no arguments
+  (`TODO(perl-free-invoke)` in `emit.rs`).
+- A keyword argument (`f(x=1)`) is a positional `One`; nothing yet binds it
+  by name.
+- A function-like macro whose return is its n-th argument keeps its
+  call-site edge to that argument's own `Expr` (`docs/adr/macro-handling.md`),
+  which carries more than the argument's type.
+- `Ref::arg_count` stays the navigation lanes' arity source and counts every
+  argument, spreads included.
