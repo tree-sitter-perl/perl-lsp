@@ -2207,6 +2207,22 @@ int d(struct crate* c) { return c->kind == 7; }
     assert_eq!(fa.field_domain("crate", "kind", None), None, "no cross-struct pooling");
 }
 
+#[test]
+fn cpp_domain_vote_never_answers_the_slot_value() {
+    // A slot with no usage sites has no domain, even with an index that
+    // reaches the slot's declared value: hover showed `argv: robj` (the
+    // value, minus its stars) as a "domain" for `robj **argv`.
+    let src = "\
+struct robj { int type; };
+struct client { struct robj **argv; };
+void f(struct client* c) { struct robj *o = c->argv[1]; }
+";
+    let fa = std::sync::Arc::new(cpp_skel(src).into_file_analysis());
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.register_symbols(std::path::PathBuf::from("/t/client.cpp"), fa.clone());
+    assert_eq!(fa.field_domain("client", "argv", Some(&idx)), None);
+}
+
 // ---- C++ template extraction hygiene (specializations, instantiations,
 // out-of-line members, aliases, concepts, unions) ----
 
@@ -2287,6 +2303,72 @@ fn python_call_is_an_invoke_on_its_arguments() {
         vec![("f".into(), true, Some(vec![false, true, true])), ("f".into(), true, None)],
         "a starred argument spreads; a generator argument is no argument list"
     );
+}
+
+/// A member call is an `Invoke` of the member on its receiver, and a member
+/// read projects the receiver's slot, so a chain types hop by hop through
+/// a flow edge with no intermediate variable.
+#[test]
+fn cpp_member_chains_type_through_their_receivers() {
+    use crate::model::file_analysis::InferredType;
+    let fa = cpp_fa(
+        "\
+struct Engine {
+    int spin() { return 7; }
+};
+struct Widget {
+    Engine get() { return Engine(); }
+    Engine motor;
+};
+template <typename T>
+struct Box { T item_; };
+int f(Widget w, Box<int> b) {
+    auto x = w.get().spin();
+    auto e = w.get();
+    auto m = w.motor;
+    auto n = w.motor.spin();
+    auto i = b.item_;
+    return x;
+}
+",
+    );
+    let at = tree_sitter::Point { row: 15, column: 4 };
+    let ty = |v: &str| fa.inferred_type_via_bag(v, at);
+    assert_eq!(ty("e"), Some(InferredType::ClassName("Engine".into())), "one call hop");
+    assert_eq!(ty("x"), Some(InferredType::Numeric), "two call hops");
+    assert_eq!(ty("m"), Some(InferredType::ClassName("Engine".into())), "a field read");
+    assert_eq!(ty("n"), Some(InferredType::Numeric), "a call on a field read");
+    assert_eq!(ty("i"), Some(InferredType::ClassName("int".into())), "a template-typed field substitutes");
+}
+
+#[test]
+fn python_member_call_is_an_invoke_on_its_receiver() {
+    use crate::model::witnesses::{CallArg, Callee, ProjectionStep, WitnessPayload};
+    let (fa, _) = python_fa("w = make()\nx = w.get(1, *rest)\ny = w.size\n");
+    let calls: Vec<_> = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter_map(|w| match &w.payload {
+            WitnessPayload::Invoke { callee: Callee::Method { name, .. }, receiver, args } => Some((
+                name.clone(),
+                receiver.is_some(),
+                args.as_ref().map(|a| a.iter().map(|a| matches!(a, CallArg::Spread(_))).collect::<Vec<_>>()),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls, vec![("get".into(), true, Some(vec![false, true]))]);
+    let reads: Vec<_> = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter_map(|w| match &w.payload {
+            WitnessPayload::Projected { step: ProjectionStep::ValueHop { member }, .. } => Some(member.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reads, vec!["size".to_string()]);
 }
 
 /// C++ classes hold ONE member namespace: the nearest declaration of a

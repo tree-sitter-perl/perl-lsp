@@ -777,7 +777,9 @@ impl FileAnalysis {
             });
         }
         let reg = ReducerRegistry::with_defaults();
-        let ctx = self.bag_context(module_index);
+        // No context: the vote is these sites and nothing else. With one, a
+        // slot whose vote fails falls through to the registry's cross-file
+        // `Field` ladder and answers the slot's declared VALUE as its domain.
         let q = ReducerQuery {
             attachment: &att,
             point: None,
@@ -785,7 +787,7 @@ impl FileAnalysis {
             arity_hint: None,
             receiver: None,
             args: Vec::new(),
-            context: Some(&ctx),
+            context: None,
         };
         let domain = match reg.query(&bag, &q) {
             ReducedValue::Type(InferredType::ClassName(d)) => d,

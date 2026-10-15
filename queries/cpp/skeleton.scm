@@ -699,18 +699,20 @@
 ; (`recv.f(...)`) mints the same MethodCall ref core resolves for Perl
 ; `$obj->m`, so goto-def / hover / references / rename flow from it. A
 ; call_expression's only children are its callee and its argument_list, so a
-; field_expression whose parent is a call is the callee.
+; field_expression whose parent is a call is the callee. The read's value is
+; the receiver's slot (@expr.member); the call's is an Invoke of the member
+; on the receiver (@expr.call).
 ((field_expression
   argument: (_) @member.recv
   operator: _ @member.op
-  field: (field_identifier) @ref.member.value) @_fe
- (#not-has-parent? @_fe call_expression))
+  field: (field_identifier) @ref.member.value) @expr.member
+ (#not-has-parent? @expr.member call_expression))
 (call_expression
   function: (field_expression
     argument: (_) @member.recv
     operator: _ @member.op
     field: (field_identifier) @ref.member.call)
-  arguments: (argument_list ((_) @arity.arg ","?)*) @arity.args)
+  arguments: (argument_list ((_) @arity.arg ","?)*) @arity.args) @expr.call
 
 ; which operator a member access wrote, so op-DX can name the other one. A
 ; token no pattern names here claims no operator.
