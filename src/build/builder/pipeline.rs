@@ -297,8 +297,7 @@ fn build_once(
         imports: Vec::new(),
         return_infos: Vec::new(),
         pending_array_pushes: Vec::new(),
-        last_expr_span: std::collections::HashMap::new(),
-        last_stmt_exit: std::collections::HashMap::new(),
+        sub_tail: std::collections::HashMap::new(),
         slot_write_rhs_span: std::collections::HashMap::new(),
         call_bindings: Vec::new(),
         method_call_bindings: Vec::new(),
@@ -940,11 +939,10 @@ impl<'a> Builder<'a> {
             }
             // A `return` tail means control cannot fall off the end: no tail
             // arm, and the return already contributed its own.
-            let exit = self.last_stmt_exit.get(&scope.id).copied().unwrap_or(TailExit::Value);
+            let Some((span, exit)) = self.sub_tail.get(&scope.id).copied() else { continue };
             if exit == TailExit::Return {
                 continue;
             }
-            let Some(span) = self.last_expr_span.get(&scope.id).copied() else { continue };
             let Some(sym_id) = self.find_sub_symbol_for_scope(scope.id) else { continue };
             tail_arms.push((sym_id, span, exit));
         }

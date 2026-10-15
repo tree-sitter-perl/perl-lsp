@@ -994,6 +994,44 @@ fn test_return_type_undef_arm_before_explicit_return_still_undef() {
 }
 
 #[test]
+fn test_return_type_compound_tail_is_not_the_statement_before_it() {
+    // The tail is the body's LAST statement, whatever its kind. A trailing
+    // `if`/`unless`/loop is not an expression statement, and the tail arm
+    // must not fall back to the expression statement before it: here that
+    // is `my $self = shift`, which would type the sub as returning its
+    // invocant. The compound tail's value isn't modelled, so: unknown.
+    for tail in [
+        "if ($self->{x}) {\n        $self->{y} = 1;\n    }",
+        "if ($self->{x}) { 1 } else { 2 }",
+        "unless ($self->{x}) { $self->{y} = 1 }",
+        "for my $k (1, 2) { $self->{$k} = 1 }",
+    ] {
+        let src = format!("package A;\nsub new {{ bless {{}}, shift }}\nsub before {{\n    my $self = shift;\n    {tail}\n}}\n");
+        let fa = build_fa(&src);
+        assert_eq!(fa.sub_return_type_at_arity("before", None), None, "{tail}");
+    }
+}
+
+#[test]
+fn test_return_type_compound_tail_keeps_bare_return_from_reading_undef() {
+    // A compound tail is still a way out: falling past this `if` yields the
+    // condition's value, not undef. Without its arm the only arm left is
+    // the bare `return`, and the sub would read as definitively `Undef`.
+    let fa = build_fa("sub f {\n    if ($_[0]) {\n        return;\n    }\n}");
+    assert_ne!(fa.sub_return_type_at_arity("f", None), Some(InferredType::Undef));
+}
+
+#[test]
+fn test_return_type_tail_skips_trailing_comment() {
+    // A comment after the last statement is not the tail.
+    let fa = build_fa("package A;\nsub new { bless {}, shift }\nsub make {\n    A->new;\n    # done\n}");
+    assert_eq!(
+        fa.sub_return_type_at_arity("make", None),
+        Some(InferredType::ClassName("A".into())),
+    );
+}
+
+#[test]
 fn test_return_type_empty_list_return_optional() {
     // `return ()` beside a typed arm lifts to Optional<T>, same as bare
     // `return;` — the `{T, undef}` join, not the all-undef verdict.

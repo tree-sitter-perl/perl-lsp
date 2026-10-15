@@ -282,15 +282,12 @@ struct Builder<'a> {
     /// types. Clear-and-emit on `source_tag = "array_push"`. Tuple
     /// shape only; cross-scope and conditional branches not handled.
     pending_array_pushes: Vec<(ScopeId, String, Vec<Span>)>,
-    /// For each Sub/Method scope, the body span of the last
-    /// top-level expression statement. Used as the implicit-return
-    /// query key — `seed_return_types_from_bag` reads `Expr(span)` via
-    /// `bag_query_expr_span` for scopes without an explicit `return`.
-    /// Types ride the bag; this map only carries the structural
-    /// pointer to the source span.
-    last_expr_span: std::collections::HashMap<ScopeId, Span>,
-    /// How the sub's last body-top-level statement exits — see [`TailExit`].
-    last_stmt_exit: std::collections::HashMap<ScopeId, TailExit>,
+    /// For each Sub/Method scope, its fallthrough tail: the span of the
+    /// body's last statement (the inner expression for an expression
+    /// statement) and how it exits. The tail-arm pass reads it to mint the
+    /// sub's implicit-return arm; types ride the bag, this only points at
+    /// the source span.
+    sub_tail: std::collections::HashMap<ScopeId, (Span, TailExit)>,
     /// For each `$obj->{k} = <rhs>` hash-key WRITE, maps the key node's
     /// span (the span the matching `HashKeyAccess` Write ref carries) to
     /// the RHS expression's span. `populate_witness_bag`'s mutation loop

@@ -616,6 +616,12 @@ pub(crate) fn string_content_span(node: Node) -> Span {
     node_to_span(node)
 }
 
+/// A block's last statement, skipping comments and POD — the statement
+/// whose value the block yields when control falls off its end.
+pub(crate) fn tail_statement<'a>(block: Node<'a>) -> Option<Node<'a>> {
+    block.named().filter(|c| !matches!(c.kind(), "comment" | "pod")).last()
+}
+
 /// The template node a `map` callback contributes. `map EXPR, LIST` is
 /// the callback itself; `map { ... } LIST` (the block form — at least
 /// as idiomatic) yields the block's tail expression, since Perl
