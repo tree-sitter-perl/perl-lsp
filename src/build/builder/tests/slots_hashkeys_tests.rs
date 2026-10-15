@@ -170,11 +170,13 @@ fn slot_type_two_agreeing_writes() {
 }
 
 #[test]
-fn slot_type_two_disagreeing_writes_none() {
+fn slot_type_two_disagreeing_writes_union() {
     let src = "package Foo;\nsub a {\n  my $self = shift;\n  $self->{h} = Helper->new;\n}\nsub b {\n  my $self = shift;\n  $self->{h} = Other->new;\n}\n";
     let fa = build_fa(src);
-    // Disagreeing writes → honest None (no guess).
-    assert_eq!(slot_type(&fa, "Foo", "h"), None);
+    // Disagreeing writes → the union of the written classes.
+    let t = slot_type(&fa, "Foo", "h").expect("disagreeing writes fold to their union");
+    let InferredType::Union(arms) = &t else { panic!("expected a union, got {t:?}") };
+    assert_eq!(arms.iter().filter_map(|a| a.class_name()).collect::<Vec<_>>(), ["Helper", "Other"]);
 }
 
 #[test]

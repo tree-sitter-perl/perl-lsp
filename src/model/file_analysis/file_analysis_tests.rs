@@ -196,7 +196,7 @@ fn test_resolve_return_type_all_agree() {
 fn test_resolve_return_type_disagreement() {
     assert_eq!(
         resolve_return_type(&[InferredType::HashRef, InferredType::ArrayRef]),
-        None,
+        Some(join(&InferredType::HashRef, &InferredType::ArrayRef, &Unordered)),
     );
 }
 
@@ -231,33 +231,92 @@ fn an_undef_arm_does_not_wrap_unknown_in_optional() {
     );
 }
 
-/// `Dog isa Animal`, nothing else.
-struct DogIsAnimal;
+/// `Dog`, `Cat`, `Cow`, `Pig`, `Hen` isa `Animal`; nothing else.
+struct Farm;
 
-impl ClassOrder for DogIsAnimal {
+impl ClassOrder for Farm {
     fn isa(&self, child: &str, ancestor: &str) -> bool {
-        child == ancestor || (child == "Dog" && ancestor == "Animal")
+        child == ancestor || (ancestor == "Animal" && ["Dog", "Cat", "Cow", "Pig", "Hen"].contains(&child))
     }
+
+    fn common_class(&self, classes: &[&str]) -> Option<String> {
+        if classes.iter().all(|c| self.isa(c, "Animal")) {
+            Some("Animal".into())
+        } else {
+            Unordered.common_class(classes)
+        }
+    }
+}
+
+fn class(c: &str) -> InferredType {
+    InferredType::ClassName(c.into())
 }
 
 #[test]
 fn join_takes_the_ancestor_of_related_classes() {
-    let dog = InferredType::ClassName("Dog".into());
-    let animal = InferredType::ClassName("Animal".into());
-    assert_eq!(join(&dog, &animal, &DogIsAnimal), Some(animal.clone()));
-    assert_eq!(join(&animal, &dog, &DogIsAnimal), Some(animal.clone()));
-    // Unrelated classes have no element above both short of a union.
-    assert_eq!(join(&dog, &InferredType::ClassName("Cat".into()), &DogIsAnimal), None);
-    // Without an order, distinct classes stay unrelated.
-    assert_eq!(join(&dog, &animal, &Unordered), None);
+    assert_eq!(join(&class("Dog"), &class("Animal"), &Farm), class("Animal"));
+    assert_eq!(join(&class("Animal"), &class("Dog"), &Farm), class("Animal"));
+    // An ancestor arriving later folds the union's arms into it.
+    let dog_or_cat = join(&class("Dog"), &class("Cat"), &Farm);
+    assert_eq!(join(&dog_or_cat, &class("Animal"), &Farm), class("Animal"));
+}
+
+#[test]
+fn unrelated_arms_join_to_a_canonical_union() {
+    let ab = join(&class("Bar"), &class("Foo"), &Unordered);
+    let ba = join(&class("Foo"), &class("Bar"), &Unordered);
+    assert_eq!(ab, ba);
+    let InferredType::Union(arms) = &ab else { panic!("expected a union, got {ab:?}") };
+    assert_eq!(&arms[..], &[class("Bar"), class("Foo")]);
+    // Associative: grouping doesn't move the answer.
+    let n = InferredType::Numeric;
+    assert_eq!(join(&ab, &n, &Unordered), join(&class("Bar"), &join(&class("Foo"), &n, &Unordered), &Unordered));
+    // Idempotent, and a union never nests.
+    assert_eq!(join(&ab, &ab, &Unordered), ab);
+    assert_eq!(join(&ab, &class("Foo"), &Unordered), ab);
+}
+
+#[test]
+fn an_undef_arm_wraps_the_union_in_optional() {
+    let ab = join(&class("Bar"), &class("Foo"), &Unordered);
+    let opt = join(&ab, &InferredType::Undef, &Unordered);
+    assert_eq!(opt, InferredType::Optional(Box::new(ab.clone())));
+    assert_eq!(join(&InferredType::Optional(Box::new(class("Bar"))), &class("Foo"), &Unordered), opt);
+}
+
+#[test]
+fn unknown_absorbs_a_union() {
+    let ab = join(&class("Bar"), &class("Foo"), &Unordered);
+    assert_eq!(join(&ab, &InferredType::Unknown, &Unordered), InferredType::Unknown);
+}
+
+#[test]
+fn past_the_cap_classes_widen_to_their_common_class() {
+    let animals: Vec<InferredType> = ["Dog", "Cat", "Cow", "Pig"].iter().map(|c| class(c)).collect();
+    // At the cap: still a union.
+    assert!(matches!(join_all(&animals, &Farm), Some(InferredType::Union(_))));
+    let mut five = animals.clone();
+    five.push(class("Hen"));
+    let (t, steps) = join_all_traced(&five, &Farm).unwrap();
+    assert_eq!(t, class("Animal"));
+    assert!(matches!(&steps[..], [Widening::CommonClass { to, .. }] if to == "Animal"));
+    // No common class: top, and the trace says so.
+    let wild: Vec<InferredType> = ["A", "B", "C", "D", "E"].iter().map(|c| class(c)).collect();
+    let (t, steps) = join_all_traced(&wild, &Farm).unwrap();
+    assert_eq!(t, InferredType::Unknown);
+    assert!(matches!(&steps[..], [Widening::Top { members }] if members.len() == 5));
+    // The cap is a function of the set: any order lands the same.
+    let mut rev = five.clone();
+    rev.reverse();
+    assert_eq!(join_all(&rev, &Farm), Some(class("Animal")));
 }
 
 #[test]
 fn join_lifts_a_plain_arm_into_an_optional() {
-    let foo = InferredType::ClassName("Foo".into());
+    let foo = class("Foo");
     let opt = InferredType::Optional(Box::new(foo.clone()));
-    assert_eq!(join(&opt, &foo, &Unordered), Some(opt.clone()));
-    assert_eq!(join(&foo, &opt, &Unordered), Some(opt));
+    assert_eq!(join(&opt, &foo, &Unordered), opt.clone());
+    assert_eq!(join(&foo, &opt, &Unordered), opt);
 }
 
 #[test]
@@ -268,23 +327,15 @@ fn join_of_keyed_hashes_is_commutative_and_sorted() {
     };
     let a = hash(&[("port", Some(InferredType::Numeric)), ("host", Some(InferredType::String))]);
     let b = hash(&[("user", None), ("port", Some(InferredType::String))]);
-    let ab = join(&a, &b, &Unordered).unwrap();
-    assert_eq!(Some(ab.clone()), join(&b, &a, &Unordered));
-    // A key whose values disagree is `Unknown`, so a third arm can't
-    // resurrect a type for it: the join stays associative.
+    let ab = join(&a, &b, &Unordered);
+    assert_eq!(ab, join(&b, &a, &Unordered));
+    let num_or_str = join(&InferredType::Numeric, &InferredType::String, &Unordered);
     assert_eq!(
         ab,
-        hash(&[
-            ("host", Some(InferredType::String)),
-            ("port", Some(InferredType::Unknown)),
-            ("user", None),
-        ])
+        hash(&[("host", Some(InferredType::String)), ("port", Some(num_or_str)), ("user", None)])
     );
     let c = hash(&[("port", Some(InferredType::Numeric))]);
-    assert_eq!(
-        join(&ab, &c, &Unordered),
-        join(&a, &join(&b, &c, &Unordered).unwrap(), &Unordered)
-    );
+    assert_eq!(join(&ab, &c, &Unordered), join(&a, &join(&b, &c, &Unordered), &Unordered));
 }
 
 #[test]
@@ -303,25 +354,21 @@ fn test_resolve_return_type_object_subsumes_hashref() {
 
 #[test]
 fn test_resolve_return_type_object_does_not_subsume_arrayref() {
-    // Object + ArrayRef → disagreement
-    assert_eq!(
-        resolve_return_type(&[
-            InferredType::ClassName("Foo".into()),
-            InferredType::ArrayRef,
-        ]),
-        None,
-    );
+    // Object + ArrayRef → their union, not the object
+    let t = resolve_return_type(&[InferredType::ClassName("Foo".into()), InferredType::ArrayRef]).unwrap();
+    assert!(matches!(&t, InferredType::Union(arms) if arms.len() == 2), "got {t:?}");
 }
 
 #[test]
 fn test_resolve_return_type_two_classes_disagree() {
+    // Two classes union; the hash folds into them.
     assert_eq!(
         resolve_return_type(&[
             InferredType::ClassName("Foo".into()),
             InferredType::HashRef,
             InferredType::ClassName("Bar".into()),
         ]),
-        None,
+        Some(join(&InferredType::ClassName("Bar".into()), &InferredType::ClassName("Foo".into()), &Unordered)),
     );
 }
 
@@ -1629,8 +1676,9 @@ sub disagree {
         .expect("sub disagree");
     let return_type = fa.symbol_return_type_via_bag(disagree.id, None);
     assert_eq!(
-        return_type, None,
-        "disagree: arms Numeric vs String → None"
+        return_type,
+        Some(join(&InferredType::Numeric, &InferredType::String, &Unordered)),
+        "disagree: arms Numeric vs String → their union"
     );
 }
 
@@ -1657,13 +1705,13 @@ my $x = $c ? 10 : "oops";
     let t_s = fa.inferred_type_via_bag("$s", p_s);
     assert_eq!(t_s, Some(InferredType::String), "agreeing string arms");
 
-    // $x: disagreeing — reducer returns None. The legacy
-    // fallback doesn't handle ternaries either, so overall None.
+    // $x: disagreeing arms join to their union.
     let p_x = Point { row: 4, column: 22 };
     let t_x = fa.inferred_type_via_bag("$x", p_x);
     assert_eq!(
-        t_x, None,
-        "disagreeing arms: bag returns None, legacy has no answer"
+        t_x,
+        Some(join(&InferredType::Numeric, &InferredType::String, &Unordered)),
+        "disagreeing arms: their union"
     );
 }
 
@@ -1702,8 +1750,8 @@ sub mix {
         .expect("sub mix");
 
     // Query the bag for the sub's Symbol attachment, expect the
-    // BranchArmFold to produce Numeric for `pick` and None for
-    // `mix` (disagreement).
+    // BranchArmFold to produce Numeric for `pick` and the arms' union
+    // for `mix`.
     use crate::model::witnesses::{
         FrameworkFact, ReducedValue, ReducerQuery, ReducerRegistry, WitnessAttachment,
     };
@@ -1731,8 +1779,8 @@ sub mix {
     };
     assert_eq!(
         reg.query(&fa.witnesses, &q_m),
-        ReducedValue::None,
-        "mix: disagreement (Numeric vs String) → None"
+        ReducedValue::Type(join(&InferredType::Numeric, &InferredType::String, &Unordered)),
+        "mix: Numeric vs String → their union"
     );
 }
 

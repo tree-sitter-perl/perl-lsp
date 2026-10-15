@@ -314,15 +314,19 @@ fn optional_ternary_then_defined_narrows() {
 }
 
 #[test]
-fn optional_ternary_conflict_stays_none() {
-    // Two distinct concrete arms (no undef) still disagree → None.
+fn optional_ternary_conflict_is_a_union() {
+    // Two distinct concrete arms (no undef) are a union, not Optional.
     let fa = build_fa(
         "package P;\nsub f {\n    my ($c) = @_;\n    my $x = $c ? Foo->new : Bar->new;\n    $x;\n}",
     );
     assert_eq!(
         fa.inferred_type_via_bag("$x", Point::new(4, 4)),
-        None,
-        "Foo vs Bar is genuine disagreement, not Optional",
+        Some(crate::model::file_analysis::join(
+            &InferredType::ClassName("Foo".into()),
+            &InferredType::ClassName("Bar".into()),
+            &crate::model::file_analysis::Unordered,
+        )),
+        "Foo vs Bar is a union, not Optional",
     );
 }
 

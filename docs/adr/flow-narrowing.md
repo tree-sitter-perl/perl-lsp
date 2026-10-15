@@ -193,7 +193,7 @@ where a guard narrows the variable (SSA's π), and a read edges to its
 reaching writes' value attachments instead of to `Variable@point`. Each
 write's value is then computed once per fold iteration, and the chase
 needs no temporal rule at all. A loop makes the reaching set plural, which
-is the same join as `TODO(union-join)`. Until then, `TODO(def-use)` marks
+is the one join (`docs/adr/union-types.md`). Until then, `TODO(def-use)` marks
 the query-time window.
 
 ## Forward work

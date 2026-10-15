@@ -164,6 +164,56 @@ pub fn class_isa(
     )
 }
 
+/// The one least class every class in `classes` is an instance of, through
+/// the same local+cross-file isa seam as [`class_isa`]. `None` when they
+/// share no ancestor, or when the least shared ancestors are several
+/// (multiple inheritance): the answer must not depend on which parent a
+/// walk happened to reach first, or two processes would join differently.
+pub fn least_common_class(
+    classes: &[&str],
+    local: &dyn LocalParents,
+    module_index: Option<&dyn CrossFileLookup>,
+) -> Option<String> {
+    let (first, rest) = classes.split_first()?;
+    let mut common: Vec<String> = Vec::new();
+    walk_ancestry(
+        first,
+        crate::model::graph::WalkBound::ISA,
+        |cur| isa_parents(cur, local, module_index),
+        |c| {
+            if !common.iter().any(|have| have == c) && rest.iter().all(|other| class_isa(other, c, local, module_index)) {
+                common.push(c.to_string());
+            }
+            WalkVerdict::Miss
+        },
+    );
+    let least: Vec<&String> = common
+        .iter()
+        .filter(|c| !common.iter().any(|d| d != *c && class_isa(d, c, local, module_index)))
+        .collect();
+    match least.as_slice() {
+        [one] => Some((*one).clone()),
+        _ => None,
+    }
+}
+
+/// The class order a join reads off the isa graph: local declared parents
+/// plus the cross-file graph, through [`class_isa`] / [`least_common_class`].
+pub struct IsaOrder<'a> {
+    pub local: &'a dyn LocalParents,
+    pub module_index: Option<&'a dyn CrossFileLookup>,
+}
+
+impl ClassOrder for IsaOrder<'_> {
+    fn isa(&self, child: &str, ancestor: &str) -> bool {
+        class_isa(child, ancestor, self.local, self.module_index)
+    }
+
+    fn common_class(&self, classes: &[&str]) -> Option<String> {
+        least_common_class(classes, self.local, self.module_index)
+    }
+}
+
 /// Does `class`, or any of its transitive ancestors (cross-file), satisfy
 /// a plugin `ClassIsa(prefix)` trigger? The trigger's PREFIX semantics —
 /// exact match OR a `prefix::`-namespaced descendant — mirror

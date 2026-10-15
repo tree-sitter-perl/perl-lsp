@@ -405,9 +405,8 @@ impl<'a> Builder<'a> {
             // as a short-circuit. `=` / `&&=` produce the RHS, unless
             // the target is an aggregate: a list assignment in scalar context
             // is a count, and the list type is `@flow`'s business.
-            // TODO(union-join): `&&=` is the false old value ⊔ the RHS; it
-            // types as the RHS until the lattice can join them
-            // (docs/open-forks.md "Union types in the lattice").
+            // TODO(falsy-part): `&&=` is the false old value ⊔ the RHS; it
+            // types as the RHS until a value's false part has a type.
             "assignment_expression" => match crate::cst::assign_op(node)? {
                 crate::cst::AssignOp::Plain | crate::cst::AssignOp::AndThen => {
                     let left = node.child_by_field_name("left")?;
@@ -830,8 +829,8 @@ impl<'a> Builder<'a> {
     /// whenever the env var is unset), so it rides a distinct `fallback_arm`
     /// source; `BranchArmFold` prefers it when the arms disagree or the LHS
     /// can't be typed. Reuses the ternary's BranchArm machinery — one speller
-    /// for "this expression's value is one of these arms." The arms' union
-    /// would be built in `BranchArmFold` (its `TODO(union-join)`).
+    /// for "this expression's value is one of these arms"; `BranchArmFold`
+    /// joins them.
     fn push_fallback_arms(&mut self, span: Span, lhs: Node<'a>, rhs: Node<'a>) {
         use crate::model::witnesses::{tags, Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let arm_att = WitnessAttachment::BranchArm(span);

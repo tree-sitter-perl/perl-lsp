@@ -17,7 +17,7 @@ pub struct Witness {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum WitnessAttachment {
     /// Variable-in-scope facts — what `TypeConstraint` / `CallBinding`
     /// index by.
@@ -160,7 +160,7 @@ pub enum WitnessAttachment {
 }
 
 /// Index into `FileAnalysis::refs`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
 pub struct RefIdx(pub u32);
 
 /// What a `WitnessSource::Annotation` was declared BY — a closed set, so

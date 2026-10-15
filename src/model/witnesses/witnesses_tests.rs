@@ -424,7 +424,7 @@ fn branch_arms_agree_folds_to_that_type() {
 }
 
 #[test]
-fn branch_arms_disagree_folds_to_none() {
+fn branch_arms_disagree_fold_to_a_union() {
     let mut bag = WitnessBag::new();
     bag.push(wbranch(InferredType::Numeric));
     bag.push(wbranch(InferredType::String));
@@ -436,7 +436,7 @@ fn branch_arms_disagree_folds_to_none() {
         framework: FrameworkFact::Plain,
         arity_hint: None, receiver: None, context: None,
     };
-    assert_eq!(reg.query(&bag, &q), ReducedValue::None);
+    assert_eq!(reg.query(&bag, &q), ReducedValue::Type(crate::model::file_analysis::join(&InferredType::Numeric, &InferredType::String, &crate::model::file_analysis::Unordered)));
 }
 
 // Edge-shaped branch arm: walker emits `Edge(Variable{...})` for a

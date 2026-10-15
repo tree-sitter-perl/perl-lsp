@@ -35,7 +35,7 @@ pub(crate) mod point_opt_serde {
 
 // ---- Shared types ----
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
 pub struct Span {
     #[serde(with = "PointDef")]
     pub start: Point,
@@ -87,7 +87,7 @@ pub enum FoldKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ScopeId(pub u32);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
 pub struct SymbolId(pub u32);
 
 // ---- Scope ----
