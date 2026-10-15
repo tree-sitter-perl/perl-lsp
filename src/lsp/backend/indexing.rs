@@ -457,7 +457,7 @@ impl Backend {
                     )),
                 }));
             }
-            // H9-2: the pack sub-indexes are now attached — the invalidator
+            // H9-2: the pack bulk index is done — the invalidator
             // reconciles every save deferred during the index exactly once
             // (its own lock + H9-1 generation guard; open docs are covered by
             // `heal_open_docs` below, so no per-path refresh set is needed).

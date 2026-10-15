@@ -59,11 +59,10 @@ impl QueryCx {
         &self.module_index
     }
 
-    /// Routed store for the origin's language (pack sub-index or hub).
-    /// Bind it, then construct the set via `set()` — the binding must
-    /// outlive the set, hence the two-step spelling.
-    pub(super) fn routed(&self, language: &str) -> crate::index::module_index::RoutedIndex<'_> {
-        self.module_index.lookup_for(language)
+    /// The process index as the lookup trait `set()` and the slot-shaped
+    /// pre-set lanes (include tokens, raw-word fallbacks) consume.
+    pub(super) fn lookup(&self) -> &dyn crate::model::file_analysis::CrossFileLookup {
+        &*self.module_index
     }
 
     /// The one set-construction spelling behind the blocking hop.
@@ -98,7 +97,7 @@ impl QueryCx {
         crate::index::resolve::resolve(&self.files, analysis, key, point, Some(lookup), scope)
     }
 
-    /// The analysis + key + language a hierarchy ITEM re-anchors at.
+    /// The analysis + key a hierarchy ITEM re-anchors at.
     /// Hierarchy requests (supertypes/subtypes/incoming/outgoing) hand back
     /// an item pointing at a file that need not be open; this resolves it
     /// across the same tiers the reference walk sweeps (open doc, workspace
@@ -107,30 +106,20 @@ impl QueryCx {
     pub(super) fn item_anchor(
         &self,
         uri: &Url,
-    ) -> Option<(
-        Arc<crate::model::file_analysis::FileAnalysis>,
-        FileKey,
-        String,
-    )> {
+    ) -> Option<(Arc<crate::model::file_analysis::FileAnalysis>, FileKey)> {
         if let Some(doc) = self.files.get_open(uri) {
-            return Some((
-                Arc::clone(&doc.analysis),
-                FileKey::Url(uri.clone()),
-                doc.language.to_string(),
-            ));
+            return Some((Arc::clone(&doc.analysis), FileKey::Url(uri.clone())));
         }
         let path = uri.to_file_path().ok()?;
-        let lang = crate::build::language_driver::LanguageRegistry::served().id().to_string();
-        let routed = self.module_index.lookup_for(&lang);
         let key = FileKey::Path(path);
         let analysis =
-            crate::index::resolve::analysis_for_key(&self.files, Some(routed.as_lookup()), &key)?;
-        Some((analysis, key, lang))
+            crate::index::resolve::analysis_for_key(&self.files, Some(&*self.module_index), &key)?;
+        Some((analysis, key))
     }
 
-    /// workspace/symbol's relational pass (SQLite over every attached tier).
+    /// workspace/symbol's relational pass (SQLite over the served language's rows).
     pub(super) fn sym_rows(&self, query: &str) -> Vec<crate::index::module_cache::SymRowHit> {
-        symbols::sym_row_search(&self.module_index, query)
+        self.module_index.sym_search(query)
     }
 
     /// A bare identifier at the cursor that names a CROSS-FILE top-level

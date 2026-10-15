@@ -545,9 +545,9 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn cached_by_path(&self, path: &std::path::Path) -> Option<Arc<CachedModule>> {
-        // Pack sub-indexes: the per-path registry is O(1). The Perl hub's
-        // cache is name-keyed with unique paths — linear fallback (hub
-        // candidate sets are @INC-sized, not tree-sized).
+        // Registered files: the per-path registry is O(1). The @INC cache is
+        // name-keyed with unique paths — linear fallback (its candidate sets
+        // are @INC-sized, not tree-sized).
         if let Some(cm) = self.all_files.get(path) {
             return Some(cm.value().clone());
         }

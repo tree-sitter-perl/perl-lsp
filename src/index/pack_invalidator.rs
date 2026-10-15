@@ -75,10 +75,10 @@ impl InvalidationOutcome {
 }
 
 /// Coordinates watcher invalidations against the INITIAL pack bulk index
-/// (`index_pack_language`) — H9-2. While that index is in flight the pack
-/// sub-indexes aren't attached to the hub yet, so an invalidation would
-/// find no `pack_index` and silently drop the save (and even once attached,
-/// racing the bulk cone re-analyzes it twice, uncoordinated). Instead a save
+/// (`index_pack_language`) — H9-2. While that index is in flight, an
+/// invalidation would race the bulk cone and re-analyze it twice,
+/// uncoordinated (and its registration could be overwritten by the bulk
+/// pass's older read). Instead a save
 /// arriving during the index is DEFERRED into a bounded set (one entry per
 /// distinct path changed during the index) and reconciled ONCE at
 /// completion: `finish_bulk_index` re-runs the worker per deferred path
@@ -187,7 +187,7 @@ impl PackInvalidator {
     pub fn file_changed(
         &self,
         root_uri: Option<&str>,
-        hub: &ModuleIndex,
+        index: &ModuleIndex,
         open_docs: &FileStore,
         path: &Path,
         deleted: bool,
@@ -198,7 +198,7 @@ impl PackInvalidator {
         }
         let skip_consumers = {
             let _g = self.change_lock.lock().unwrap_or_else(|e| e.into_inner());
-            self.pack_file_changed(root_uri, hub, &canon, deleted)
+            self.pack_file_changed(root_uri, index, &canon, deleted)
         };
         // Open consumers re-analyze AFTER the eviction so their gather runs
         // cold against the new bytes. Off the serialization lock — the sweep
@@ -208,14 +208,14 @@ impl PackInvalidator {
         InvalidationOutcome { deferred: false, refresh_open }
     }
 
-    /// The pack sub-indexes are attached; reconcile every save deferred
+    /// The pack bulk index finished; reconcile every save deferred
     /// during the bulk index (H9-2) exactly once, off the same serialization
     /// lock steady-state invalidations use. The H9-1 generation guard makes
     /// this safe: each reconcile reads current disk (the freshest
     /// generation) and outranks whatever the bulk pass registered from
     /// earlier bytes. Open-doc refresh is NOT computed here — the
     /// end-of-index heal re-publishes every open pack doc anyway.
-    pub fn finish_bulk_index(&self, root_uri: Option<&str>, hub: &ModuleIndex) {
+    pub fn finish_bulk_index(&self, root_uri: Option<&str>, index: &ModuleIndex) {
         let deferred = self.coord.finish_index();
         if deferred.is_empty() {
             return;
@@ -226,7 +226,7 @@ impl PackInvalidator {
         );
         let _g = self.change_lock.lock().unwrap_or_else(|e| e.into_inner());
         for (path, deleted) in deferred {
-            self.pack_file_changed(root_uri, hub, &path, deleted);
+            self.pack_file_changed(root_uri, index, &path, deleted);
         }
     }
 
@@ -303,21 +303,20 @@ impl PackInvalidator {
     fn pack_file_changed(
         &self,
         root_uri: Option<&str>,
-        hub: &ModuleIndex,
+        index: &ModuleIndex,
         path: &Path,
         deleted: bool,
     ) -> bool {
         use rayon::prelude::*;
         let driver = self.driver;
-        // Only invalidator-owned languages route here; a hub-indexed
-        // language's changes are the direct re-index path's business.
+        // Only invalidator-owned languages route here; Perl's changes are the direct re-index path's business.
         if !driver.caps().pack_invalidation {
             return false;
         }
         let lang = driver.id();
         let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let canon_str = canon.to_string_lossy().into_owned();
-        let pack = hub.pack_index(lang);
+        let pack = index;
 
         // The source generation this invalidation registers under (H9-1): the
         // changed file's mtime, captured at call time. Every result (the changed
@@ -340,24 +339,20 @@ impl PackInvalidator {
         // gate prevents in-session comes back at restart.
         let mut consumer_closures: Vec<(PathBuf, crate::model::file_analysis::path_intern::ClosureList)> =
             Vec::new();
-        if let Some(ref pack) = pack {
-            pack.for_each_registered_file(&mut |cm| {
-                if is_consumer(&cm.analysis, &canon_str) {
-                    consumers.push(cm.path.clone());
-                    consumer_closures.push((cm.path.clone(), cm.analysis.pack.include_closure.clone()));
-                }
-            });
-        }
+        pack.for_each_registered_file(&mut |cm| {
+            if is_consumer(&cm.analysis, &canon_str) {
+                consumers.push(cm.path.clone());
+                consumer_closures.push((cm.path.clone(), cm.analysis.pack.include_closure.clone()));
+            }
+        });
 
         if deleted {
             // The departed file's own header/macro/closure caches go too — a
             // consumer re-gather resolving the deleted header from its
             // still-warm entry would make the deletion invisible.
             crate::build::cpp_reparse::evict_analysis_caches(&std::iter::once(canon.clone()).collect());
-            if let Some(ref pack) = pack {
-                pack.unregister_file(&canon);
-                pack.remove_surface(&canon);
-            }
+            pack.unregister_file(&canon);
+            pack.remove_surface(&canon);
             self.forget_source_gen(&canon);
         }
 
@@ -372,7 +367,7 @@ impl PackInvalidator {
         let mut changed_fa: Option<Arc<FileAnalysis>> = None;
         if !deleted {
             crate::build::cpp_reparse::evict_analysis_caches(&std::iter::once(canon.clone()).collect());
-            if let (Some(ref pack), Ok(source)) = (&pack, std::fs::read_to_string(&canon)) {
+            if let Ok(source) = std::fs::read_to_string(&canon) {
                 let probe = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     driver.analyze_with_path(&source, Some(&canon))
                 }));
@@ -489,10 +484,10 @@ impl PackInvalidator {
                     },
                     |(p, arc): (PathBuf, Arc<FileAnalysis>)| {
                         let ok = landed.borrow().contains(&p);
-                        self.register_after_swap(pack.as_ref(), &p, &arc, ok, event_gen);
+                        self.register_after_swap(pack, &p, &arc, ok, event_gen);
                     },
                     |(p, arc): (PathBuf, Arc<FileAnalysis>)| {
-                        self.register_after_swap(pack.as_ref(), &p, &arc, false, event_gen);
+                        self.register_after_swap(pack, &p, &arc, false, event_gen);
                     },
                 );
             }
@@ -501,7 +496,7 @@ impl PackInvalidator {
             // its channel unregistered, which would drop these files.)
             None => {
                 for (p, arc) in &results {
-                    self.register_after_swap(pack.as_ref(), p, arc, false, event_gen);
+                    self.register_after_swap(pack, p, arc, false, event_gen);
                 }
             }
         }
@@ -516,13 +511,12 @@ impl PackInvalidator {
     /// with no rehydration miss counted and no strict-residency panic.
     fn register_after_swap(
         &self,
-        pack: Option<&Arc<ModuleIndex>>,
+        pack: &ModuleIndex,
         path: &Path,
         arc: &Arc<FileAnalysis>,
         landed: bool,
         event_gen: i64,
     ) {
-        let Some(pack) = pack else { return };
         // H9-1 generation guard: claim BEFORE unregistering, so a rejected
         // (strictly-older) result leaves the fresher registration intact rather
         // than tearing it down. A stale re-analysis that read pre-save bytes

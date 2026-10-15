@@ -313,8 +313,6 @@ fn cli_full_startup(root: &str) -> (file_store::FileStore, module_index::ModuleI
             module_resolver::index_workspace_with_index(&root_path, &ws, Some(&module_index), None, None)
         })
     } else {
-        // A pack language → its own sub-index (separate cache), attached to
-        // the hub for routing.
         timings::phase("cli::index_pack", || {
             module_resolver::index_pack_language(
                 served,

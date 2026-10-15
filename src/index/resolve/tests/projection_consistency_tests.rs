@@ -241,10 +241,9 @@ fn projection_contracts_hold_at_every_corpus_cursor() {
 /// The pack instance of the same net — #141 and #142 (goto-def vs
 /// references vs implementations disagreeing) both lived in this lane.
 /// Corpus: the real cpp fixture trees, analyzed with their real paths so
-/// include closures gather from disk; analyses register into a cpp
-/// sub-index attached to a hub, the production topology (`lookup_for`
-/// routes pack asks to the sub-index — pack symbols never live in the
-/// Perl FileStore workspace map). The queried origin is staged in the
+/// include closures gather from disk; analyses register into the index, the
+/// production topology (pack symbols never live in the FileStore workspace
+/// map). The queried origin is staged in the
 /// workspace store for its cursors, exactly as the CLI's
 /// `ScopedWorkspaceEntry` / the LSP's open doc does — without it the
 /// backward walk cannot see the queried file and every cursor flags a
@@ -252,7 +251,6 @@ fn projection_contracts_hold_at_every_corpus_cursor() {
 #[cfg(feature = "cpp")]
 #[test]
 fn projection_contracts_hold_at_every_pack_cursor() {
-    use std::sync::Arc;
     let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
 
@@ -273,8 +271,7 @@ fn projection_contracts_hold_at_every_pack_cursor() {
     assert!(files.len() >= 40, "cpp corpus went missing: {} files", files.len());
 
     let store = FileStore::new();
-    let hub = crate::index::module_index::ModuleIndex::new_for_test();
-    let sub = Arc::new(crate::index::module_index::ModuleIndex::new_for_test());
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let mut analyses: Vec<(PathBuf, std::sync::Arc<FileAnalysis>)> = Vec::new();
     for p in &files {
         let Ok(src) = std::fs::read_to_string(p) else { continue };
@@ -288,10 +285,9 @@ fn projection_contracts_hold_at_every_pack_cursor() {
             crate::model::file_analysis::Residency::Whole,
         );
         let arc = std::sync::Arc::clone(parts.arc());
-        sub.register_symbols_inner(p.clone(), parts);
+        idx.register_symbols_inner(p.clone(), parts);
         analyses.push((p.clone(), arc));
     }
-    hub.attach_pack_index("cpp", Arc::clone(&sub));
 
     let mut violations: Vec<String> = Vec::new();
     let mut cursors = 0usize;
@@ -303,7 +299,7 @@ fn projection_contracts_hold_at_every_pack_cursor() {
         dropped += refs.len() - refs.len().div_ceil(stride);
         for r in refs.iter().step_by(stride) {
             cursors += 1;
-            violations.extend(check_cursor_contracts(&store, fa, path, r, &hub));
+            violations.extend(check_cursor_contracts(&store, fa, path, r, &idx));
         }
         store.remove_workspace(path);
     }

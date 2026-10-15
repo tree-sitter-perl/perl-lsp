@@ -73,8 +73,7 @@ pub struct CandidateSet<'a> {
     origin: &'a FileAnalysis,
     origin_key: FileKey,
     point: tree_sitter::Point,
-    /// The routed base index (the Perl hub, or a per-language pack
-    /// sub-index). Backward walks (`refs_to`, group walks) take THIS —
+    /// The process's base index. Backward walks (`refs_to`, group walks) take THIS —
     /// `collect_from_analysis` re-scopes per scanned file.
     module_index: Option<&'a dyn CrossFileLookup>,
     /// The origin's include-closure scope over `module_index`, built once at

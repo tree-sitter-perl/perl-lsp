@@ -529,7 +529,7 @@ pub trait CrossFileLookup {
     /// a key being absent from a returned map means, and conflating the two
     /// turns an unbaked file into a file that concludes nothing.
     ///
-    /// Defaulted so an index with no store (tests, pack sub-indexes) is
+    /// Defaulted so an index with no store (tests, pack languages) is
     /// unaffected and simply keeps decoding.
     fn conclusions_for(
         &self,
@@ -846,7 +846,7 @@ pub trait CrossFileLookup {
     /// visible to references but never rewritten by rename. The Perl hub's
     /// whole cache is dependency BY CONSTRUCTION (workspace Perl files live
     /// in the FileStore, so anything here came from `@INC`) — hence the
-    /// default. A pack sub-index holds the workspace's own files too, so it
+    /// default. A pack language's index holds the workspace's own files too, so it
     /// overrides with membership in its registered dependency-root set
     /// (composer's vendor packages).
     fn is_dependency_path(&self, _path: &std::path::Path) -> bool {
