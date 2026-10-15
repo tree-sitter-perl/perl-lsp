@@ -153,6 +153,10 @@ async fn main() {
             cli_languages();
             return;
         }
+        Some("--suggest-st") if args.len() >= 3 => {
+            cli_suggest_st(&args[2..]);
+            return;
+        }
         Some("--concepts") if args.len() >= 3 => {
             cli_concepts(&args[2..]);
             return;

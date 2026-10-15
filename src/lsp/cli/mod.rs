@@ -790,3 +790,32 @@ fn walkdir_perl(p: &std::path::Path) -> Vec<std::path::PathBuf> {
     }
     out
 }
+
+/// SPIKE (throwaway): `--suggest-st <path>...` finds naive sorts that a
+/// Schwartzian transform would speed up and prints the rewrite.
+pub(crate) fn cli_suggest_st(args: &[String]) {
+    let show_rejects = args.iter().any(|a| a == "--rejects");
+    let mut files = Vec::new();
+    for a in args.iter().filter(|a| !a.starts_with("--")) {
+        files.extend(walkdir_perl(std::path::Path::new(a)));
+    }
+    let (mut hits, mut rejects) = (0, std::collections::BTreeMap::<&str, usize>::new());
+    for f in &files {
+        let Ok(src) = std::fs::read_to_string(f) else { continue };
+        let (cands, rej) = crate::build::idiom_rewrite::find_schwartzian(&src);
+        for c in cands {
+            hits += 1;
+            println!("{}:{}\n  - {}\n  + {}", f.display(), c.row + 1, c.original.replace('\n', " "), c.rewritten.replace('\n', " "));
+        }
+        for r in rej {
+            *rejects.entry(r.reason).or_default() += 1;
+            if show_rejects {
+                println!("REJECT {}:{} ({}) {}", f.display(), r.row + 1, r.reason, r.original.replace('\n', " "));
+            }
+        }
+    }
+    println!("\n# {} files, {hits} rewrites", files.len());
+    for (r, n) in rejects {
+        println!("  {n:>5}  rejected: {r}");
+    }
+}

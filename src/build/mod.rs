@@ -30,3 +30,4 @@ pub mod query_extract;
 // pre-extraction reparse seam (whose production form is cpp_reparse).
 #[allow(dead_code)]
 pub mod reparse;
+pub mod idiom_rewrite;
