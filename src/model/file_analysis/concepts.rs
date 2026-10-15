@@ -31,6 +31,8 @@ pub enum Term {
     Lit,
     /// A plain function call.
     FnCall,
+    /// A bare `return` (undef / empty list).
+    Undef,
     Opaque,
 }
 
@@ -91,6 +93,9 @@ impl FileAnalysis {
                 .iter_attachment(&WitnessAttachment::SymbolReturnArm(sym.id))
                 .filter_map(|w| match &w.payload {
                     WitnessPayload::Edge(att) => Some(n.norm(att, w.span.start)),
+                    // A bare `return;` has no rvalue, so the builder mints it
+                    // as a fact rather than an edge.
+                    WitnessPayload::Fact { family, .. } if family == "undef_arm" => Some(Term::Undef),
                     _ => None,
                 })
                 .collect();

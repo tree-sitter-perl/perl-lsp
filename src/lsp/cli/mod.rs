@@ -768,6 +768,7 @@ fn term_shape(t: &crate::model::file_analysis::Term) -> String {
         Join(v) => format!("join[{}]", v.iter().map(term_shape).collect::<Vec<_>>().join(",")),
         Lit => "lit".into(),
         FnCall => "f()".into(),
+        Undef => "undef".into(),
         Opaque => "?".into(),
     }
 }
