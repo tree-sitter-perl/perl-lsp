@@ -45,7 +45,7 @@ strictly, ahead of the lenient peel.
 ## The undef arm is a marker, not a lattice value
 
 `undef` has no rvalue type to ride an `Edge`, and a private `Undef`
-*return* type would leak into every `resolve_return_type` consumer. So an
+*return* type would leak into every return-arm join. So an
 undef arm — `return undef`, bare `return;`, an `undef` ternary branch —
 is marked with a `Builder("undef_arm")` Fact on the
 `SymbolReturnArm` / `BranchArm` attachment. `join_return_arms(value_arms,

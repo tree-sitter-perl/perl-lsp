@@ -95,8 +95,7 @@ pub enum WitnessAttachment {
     /// Typed-slot collector: "what type does instance slot `key` hold on
     /// class `class`?" Seeded from typed hash-key WRITEs
     /// (`$obj->{key} = <rhs>`) as one `Edge(Expr(rhs_span))` per write;
-    /// `SlotTypeFold` agrees the arms via `resolve_return_type` (1+ agree
-    /// → that type, disagree → None). Class-keyed so `$self->{h}` and a
+    /// `SlotTypeFold` joins the arms (`types.rs::join`). Class-keyed so `$self->{h}` and a
     /// differently-typed `$other->{h}` don't cross-contaminate. Nothing
     /// consumes this yet — `$obj->{h}->m()` typing through it is a later
     /// step.

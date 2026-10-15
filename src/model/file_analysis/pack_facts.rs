@@ -109,6 +109,16 @@ pub struct PackFacts {
     #[serde(default)]
     pub names: NameSpellings,
 
+    /// The language's subsumption rules — which cross-family types its joins
+    /// fold into one another (`docs/adr/union-types.md`). Perl's builder
+    /// bakes `conventions::PERL_LATTICE`; a pack bakes `LangPack::lattice`.
+    /// A per-language constant carried per file for the same reason as
+    /// `names`: a join runs wherever a bag is in hand, including a cached
+    /// module's bag reached mid-recursion, and only the bag's own analysis
+    /// can say which language it is. A few bytes per blob.
+    #[serde(default)]
+    pub lattice: LatticeRules,
+
     /// This file's transitive `#include` closure — canonical header paths it
     /// reaches. The cross-file VISIBILITY key: a name resolves preferentially to
     /// a definition in a file this set contains (`ScopedLookup` ranks

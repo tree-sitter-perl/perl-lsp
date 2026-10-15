@@ -183,7 +183,7 @@ pub(super) fn classify_relational_arity(
 
 /// Do the return arms agree in a way that is the sub's genuine return type —
 /// as opposed to the lossy Object-subsumes-HashRef *dominance* that
-/// `resolve_return_type` also accepts? Decides whether an arity-discriminated
+/// the lattice join (`types.rs::join`) also accepts? Decides whether an arity-discriminated
 /// sub keeps its non-arity `return_arm_chain` fallback (agree → the arm-join
 /// is the right answer at every arity and at a no-hint query) or retracts it
 /// (disagree → a gap arity must answer None, not the fluent-class leak).

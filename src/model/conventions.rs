@@ -15,7 +15,7 @@
 //! whose name they handle: nothing in the model assumes a separator or a
 //! sigil (CLAUDE.md rule #12).
 
-use crate::model::file_analysis::{ClassSpelling, MemberNamespace, NameSpellings};
+use crate::model::file_analysis::{ClassSpelling, LatticeRules, MemberNamespace, NameSpellings, Subsumption};
 
 /// Perl's name spellings: `::` qualifies, `$` / `@` / `%` lead variables.
 pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
@@ -26,6 +26,11 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     // A call reaches a sub, never a `field` of the same name.
     member_namespace: MemberNamespace::PerFamily,
 };
+
+/// Perl's subsumption rules: an object is a blessed hash, and truth is a
+/// number (`1` / `''`).
+pub static PERL_LATTICE: LatticeRules =
+    LatticeRules::new(&[Subsumption::ObjectAbsorbsHash, Subsumption::BoolIntoNumeric]);
 
 /// Split a possibly-qualified name into `(Option<package>, basename)`.
 ///

@@ -159,6 +159,7 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
         },
         pack: crate::model::file_analysis::PackFacts {
             names: crate::model::conventions::PERL_SPELLINGS,
+            lattice: crate::model::conventions::PERL_LATTICE.clone(),
             ..Default::default()
         },
         ..Default::default()
@@ -682,6 +683,7 @@ fn build_once(
         // no template params, no `std::move`.
         pack: crate::model::file_analysis::PackFacts {
             names: crate::model::conventions::PERL_SPELLINGS,
+            lattice: crate::model::conventions::PERL_LATTICE.clone(),
             ..Default::default()
         },
         type_provenance: b.type_provenance,

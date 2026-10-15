@@ -9,6 +9,8 @@ pub fn python_pack() -> LangPack {
         // One member namespace: the nearest declaration of a name wins,
         // whether it is a data member or a member function.
         names: NameSpellings { member_namespace: MemberNamespace::Shared, ..NameSpellings::NONE },
+        // `bool` is a subclass of `int`.
+        lattice: crate::model::file_analysis::LatticeRules::new(&[crate::model::file_analysis::Subsumption::BoolIntoNumeric]),
         shape_name: |raw| raw.to_string(),
         default_name: |_| None,
         annot_type: |text| match text.trim() {

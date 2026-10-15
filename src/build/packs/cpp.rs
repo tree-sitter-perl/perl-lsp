@@ -9,6 +9,8 @@ pub fn cpp_pack() -> LangPack {
         // One member namespace: the nearest declaration of a name wins,
         // whether it is a data member or a member function.
         names: NameSpellings { member_namespace: MemberNamespace::Shared, ..NameSpellings::with_separator("::") },
+        // `bool` promotes to `int`.
+        lattice: crate::model::file_analysis::LatticeRules::new(&[crate::model::file_analysis::Subsumption::BoolIntoNumeric]),
         // Template spellings get ONE canonical whitespace form so a
         // specialization's identity (`formatter<int, char>`) matches
         // however the source wrapped it. Identity for every non-template

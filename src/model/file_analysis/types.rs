@@ -230,7 +230,7 @@ pub enum InferredType {
     /// Perl has no distinct boolean value — truth is `1` / `''`, so Bool
     /// is a *sub-lattice of Numeric*: it prints and dispatches like a
     /// number, and a return-arm fold that sees `{Bool, Numeric}` joins to
-    /// `Numeric` (see `resolve_return_type`) rather than degrading to
+    /// `Numeric` (`Subsumption::BoolIntoNumeric`) rather than degrading to
     /// Unknown. The variant lets the analyzer *say* "this is a truth
     /// value" where it knows one — hover, inlay hints, future
     /// boolean-context diagnostics — without lying that it's a general
@@ -1161,20 +1161,52 @@ pub enum TypeProvenance {
 /// the lattice's height, which a fixpoint over cycles needs.
 pub const UNION_WIDTH_CAP: usize = 4;
 
-/// The class order a join reads. The lattice itself knows nothing of
-/// inheritance.
-pub trait ClassOrder {
+/// A language's claim that one family of types sits above another in a
+/// join. The lattice's core (equality, unions, undef, the cap, structural
+/// shape merges) is the same in every language; these are what differ.
+/// Closed so a new rule makes every language decide whether it holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Subsumption {
+    /// An object absorbs a hash shape: the object IS the hash (Perl's
+    /// blessed hashref, read by `$obj->{k}`).
+    ObjectAbsorbsHash,
+    /// `Bool` folds into `Numeric`: truth is a number (Perl's `1`/`''`,
+    /// Python's `bool <: int`, C++ integral promotion).
+    BoolIntoNumeric,
+}
+
+/// The subsumption rules one language declares (`PackFacts::lattice`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatticeRules(std::borrow::Cow<'static, [Subsumption]>);
+
+impl LatticeRules {
+    pub const fn new(rules: &'static [Subsumption]) -> Self {
+        LatticeRules(std::borrow::Cow::Borrowed(rules))
+    }
+
+    pub fn holds(&self, rule: Subsumption) -> bool {
+        self.0.contains(&rule)
+    }
+}
+
+/// What a join reads beyond the types themselves: the class order and the
+/// language's subsumption rules. The lattice knows neither inheritance nor
+/// languages; it asks.
+pub trait TypeOrder {
     /// `child` is `ancestor` or inherits from it.
     fn isa(&self, child: &str, ancestor: &str) -> bool;
     /// The one least class every class in `classes` is an instance of;
     /// `None` when there is none or it is not unique.
     fn common_class(&self, classes: &[&str]) -> Option<String>;
+    /// The language whose values are joined declares `rule`.
+    fn holds(&self, rule: Subsumption) -> bool;
 }
 
-/// No inheritance in hand: a class is an instance only of itself.
+/// No inheritance and no language rules in hand: a class is an instance
+/// only of itself, and no family absorbs another.
 pub struct Unordered;
 
-impl ClassOrder for Unordered {
+impl TypeOrder for Unordered {
     fn isa(&self, child: &str, ancestor: &str) -> bool {
         child == ancestor
     }
@@ -1182,6 +1214,10 @@ impl ClassOrder for Unordered {
     fn common_class(&self, classes: &[&str]) -> Option<String> {
         let (first, rest) = classes.split_first()?;
         rest.iter().all(|c| c == first).then(|| first.to_string())
+    }
+
+    fn holds(&self, _: Subsumption) -> bool {
+        false
     }
 }
 
@@ -1195,7 +1231,7 @@ impl ClassOrder for Unordered {
 /// - otherwise each arm folds into an arm it joins precisely with
 ///   ([`join_precise`]) and the rest stay side by side as a union, widened
 ///   past [`UNION_WIDTH_CAP`]
-pub fn join(a: &InferredType, b: &InferredType, order: &dyn ClassOrder) -> InferredType {
+pub fn join(a: &InferredType, b: &InferredType, order: &dyn TypeOrder) -> InferredType {
     join_traced(a, b, order, &mut |_| {})
 }
 
@@ -1218,7 +1254,7 @@ pub enum Widening {
 pub fn join_traced(
     a: &InferredType,
     b: &InferredType,
-    order: &dyn ClassOrder,
+    order: &dyn TypeOrder,
     trace: &mut dyn FnMut(&dyn Fn() -> Widening),
 ) -> InferredType {
     if a == b {
@@ -1268,13 +1304,13 @@ impl InferredType {
 fn from_arms(
     arms: Vec<InferredType>,
     maybe_undef: bool,
-    order: &dyn ClassOrder,
+    order: &dyn TypeOrder,
     trace: &mut dyn FnMut(&dyn Fn() -> Widening),
 ) -> InferredType {
     fn insert(
         out: &mut Vec<InferredType>,
         mut t: InferredType,
-        order: &dyn ClassOrder,
+        order: &dyn TypeOrder,
         trace: &mut dyn FnMut(&dyn Fn() -> Widening),
     ) {
         while let Some((i, joined)) =
@@ -1323,17 +1359,18 @@ fn from_arms(
 /// has one:
 /// - equal → that type
 /// - a class and one of its ancestors → the ancestor
-/// - an object over a hash shape → the object (overloaded hash access is
-///   common in Perl)
+/// - an object over a hash shape → the object, where the language declares
+///   [`Subsumption::ObjectAbsorbsHash`]
 /// - two keyed hashes → every key either holds, sorted by key so the join
 ///   is commutative and its bytes don't depend on arm order; each key's
 ///   values [`join`]ed. Other hash shapes → `HashRef`; array shapes →
 ///   `ArrayRef`
-/// - `Bool` ⊔ `Numeric` → `Numeric` (truth is `1`/`''`)
+/// - `Bool` ⊔ `Numeric` → `Numeric`, where the language declares
+///   [`Subsumption::BoolIntoNumeric`]
 fn join_precise(
     a: &InferredType,
     b: &InferredType,
-    order: &dyn ClassOrder,
+    order: &dyn TypeOrder,
     trace: &mut dyn FnMut(&dyn Fn() -> Widening),
 ) -> Option<InferredType> {
     use InferredType as T;
@@ -1348,8 +1385,12 @@ fn join_precise(
         (Some(x), Some(y)) if order.isa(x, y) => return Some(b.clone()),
         (Some(x), Some(y)) if order.isa(y, x) => return Some(a.clone()),
         (Some(_), Some(_)) => return None,
-        (Some(_), None) if b.is_hash_shaped() => return Some(a.clone()),
-        (None, Some(_)) if a.is_hash_shaped() => return Some(b.clone()),
+        (Some(_), None) if b.is_hash_shaped() && order.holds(Subsumption::ObjectAbsorbsHash) => {
+            return Some(a.clone())
+        }
+        (None, Some(_)) if a.is_hash_shaped() && order.holds(Subsumption::ObjectAbsorbsHash) => {
+            return Some(b.clone())
+        }
         (Some(_), None) | (None, Some(_)) => return None,
         (None, None) => {}
     }
@@ -1372,32 +1413,27 @@ fn join_precise(
         }
         _ if a.is_hash_shaped() && b.is_hash_shaped() => Some(T::HashRef),
         _ if a.is_array_shaped() && b.is_array_shaped() => Some(T::ArrayRef),
-        (T::Bool | T::Numeric, T::Bool | T::Numeric) => Some(T::Numeric),
+        (T::Bool, T::Numeric) | (T::Numeric, T::Bool) if order.holds(Subsumption::BoolIntoNumeric) => {
+            Some(T::Numeric)
+        }
         _ => None,
     }
 }
 
 /// `join` over every type in `types`; `None` for an empty list.
-pub fn join_all(types: &[InferredType], order: &dyn ClassOrder) -> Option<InferredType> {
+pub fn join_all(types: &[InferredType], order: &dyn TypeOrder) -> Option<InferredType> {
     let (first, rest) = types.split_first()?;
     Some(rest.iter().fold(first.clone(), |acc, t| join(&acc, t, order)))
 }
 
 /// [`join_all`], with every widening step it took.
-pub fn join_all_traced(types: &[InferredType], order: &dyn ClassOrder) -> Option<(InferredType, Vec<Widening>)> {
+pub fn join_all_traced(types: &[InferredType], order: &dyn TypeOrder) -> Option<(InferredType, Vec<Widening>)> {
     let (first, rest) = types.split_first()?;
     let mut steps = Vec::new();
     let t = rest
         .iter()
         .fold(first.clone(), |acc, t| join_traced(&acc, t, order, &mut |w| steps.push(w())));
     Some((t, steps))
-}
-
-/// The return type of a sub whose return statements yield `return_types`
-/// (bare returns / undef filtered out): their `join_all`, with no class
-/// order in hand.
-pub fn resolve_return_type(return_types: &[InferredType]) -> Option<InferredType> {
-    join_all(return_types, &Unordered)
 }
 
 /// Join return/branch arms where some arm may be `undef` (a bare
@@ -1409,7 +1445,7 @@ pub fn resolve_return_type(return_types: &[InferredType]) -> Option<InferredType
 pub fn join_return_arms(
     value_types: &[InferredType],
     has_undef_arm: bool,
-    order: &dyn ClassOrder,
+    order: &dyn TypeOrder,
 ) -> Option<InferredType> {
     let base = join_all(value_types, order)?;
     Some(if has_undef_arm { join(&base, &InferredType::Undef, order) } else { base })
