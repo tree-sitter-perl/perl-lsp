@@ -1380,6 +1380,7 @@ pub fn inferred_type_to_tag(ty: &InferredType) -> String {
         InferredType::Undef => "Undef".to_string(),
         InferredType::Bool => "Bool".to_string(),
         InferredType::Unknown => "Unknown".to_string(),
+        InferredType::Union(arms) => arms.iter().map(inferred_type_to_tag).collect::<Vec<_>>().join("|"),
     }
 }
 
@@ -1462,6 +1463,7 @@ pub(crate) fn format_type_with(ty: &InferredType, vocab: TypeVocab) -> String {
         InferredType::Undef => tag("Undef"),
         InferredType::Bool => tag("Bool"),
         InferredType::Unknown => tag("unknown"),
+        InferredType::Union(arms) => arms.iter().map(|a| format_type_with(a, vocab)).collect::<Vec<_>>().join("|"),
     }
 }
 

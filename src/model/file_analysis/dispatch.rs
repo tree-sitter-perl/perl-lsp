@@ -300,7 +300,7 @@ impl<T> ReceiverGated<T> {
 
 // ---- Hash key owner (for scope graph) ----
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Ord, Eq, Hash, Serialize, Deserialize)]
 pub enum HashKeyOwner {
     Class(String),
     /// A plugin-owned COLUMN namespace bridged to a class (DBIC /

@@ -8,8 +8,9 @@ one story — `Optional` creates the
 imprecision, a `defined`/`blessed` guard resolves it, the negative side
 knows it's `Undef`.
 
-Scoped to `Optional<T>` and a bottom `Undef`, **not** arbitrary unions:
-`Foo | Bar` stays `None` until a motivating case lands. Both variants are
+Scoped to `Optional<T>` and a bottom `Undef`; general `Foo | Bar` is
+`Union` (`union-types.md`), and a maybe-undef union is spelled
+`Optional(Union)`, so everything here holds for it. Both variants are
 appended at the **END** of the enum for bincode variant-index stability
 (bump `EXTRACT_VERSION`); exhaustive matches are confined to
 `file_analysis.rs` and use `_ =>`, so the blast radius is small.
