@@ -269,8 +269,8 @@ fn html_view_is_self_contained_and_embeds_the_report() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// C/C++ symbols live in a per-language sub-index, not the Perl FileStore.
-/// The heatmap must gather them the same way (`for_each_pack_registered_file`)
+/// Under `--lang cpp`, C/C++ symbols live in the index, not the FileStore.
+/// The heatmap must gather them (`for_each_pack_registered_file`)
 /// and project fan-in through the SAME `references()` set the cpp
 /// references/rename verbs use. `main` is the ABI entry point (shielded), an
 /// unreferenced free function IS a dead candidate, and a called function's
@@ -306,7 +306,9 @@ fn cpp_fan_in_entry_point_and_dead_code() {
     )
     .unwrap();
 
-    let report = run_heatmap(&dir);
+    let stdout = run_heatmap_raw(&dir, &["--lang", "cpp"]);
+    let report: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("heatmap JSON parse ({e}): {stdout}"));
     assert_eq!(
         report["files_indexed"].as_u64(),
         Some(3),
