@@ -1095,9 +1095,8 @@ impl LanguageServer for Backend {
         // Rename is the references image + policy, projected from the same
         // set: cross-file walk for workspace-stable targets, per-member texts
         // for groups, the origin file's rename machinery for lexicals. Pack
-        // routing is a construction fact on the set: it widens the walk to
-        // the per-language cache and REFUSES on alias-spelled sites instead
-        // of emitting a partial edit.
+        // routing is a construction fact on the set: it REFUSES on
+        // alias-spelled sites instead of emitting a partial edit.
         let uri = uri.clone();
         let new_name = new_name.clone();
         let scope = self.override_scope();

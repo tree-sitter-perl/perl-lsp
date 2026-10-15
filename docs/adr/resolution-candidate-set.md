@@ -167,10 +167,15 @@ The spike's axes live in CandidateSet construction:
   origin's stamped `FileAnalysis.language` (`is_pack_language`), so no
   handler declares or can forget it; there is no store selection, since a
   process serves one language through one index.
-  The set owns the consequences: visibility widens to VISIBLE (pack
-  workspace files ride the DEPENDENCY role), and `rename_edits` →
-  `Result` REFUSES on alias-spelled sites (full-or-refuse) instead of
-  silently skipping.
+  The set owns the consequences: the name-supply model (closure-keyed
+  identity and completion), and `rename_edits` → `Result` REFUSES on
+  alias-spelled sites (full-or-refuse) instead of silently skipping.
+- **file roles** — one rule for every language: an open document is OPEN,
+  a FileStore workspace entry or a front-door index registration
+  (`CrossFileLookup::is_dependency_path` false) is WORKSPACE, the rest
+  (@INC) is DEPENDENCY. Each index-held file is admitted by its own tier,
+  so EDITABLE rename and VISIBLE references mean the same thing for a pack
+  workspace as for a Perl one.
 - **delegation / `Specializes` / domain edges** — consumers declare
   traversal: references walks delegation aliases (never the domain
   bridge); `implementations()` walks `Specializes` families and the
