@@ -801,43 +801,88 @@ impl<'a> Builder<'a> {
         });
     }
 
-    /// Record the sub's fallthrough tail: Perl yields the value of the
+    /// Record the sub's fallthrough arms: Perl yields the value of the
     /// body's LAST statement, whatever kind it is. Read off the body at
     /// close rather than accumulated per expression statement, because a
-    /// trailing `if`/loop/block is not an expression statement, and
-    /// accumulating left the tail pinned to the statement before it.
+    /// trailing `if`/loop/block is not an expression statement.
     ///
-    /// A compound tail (`if` without `else`, a loop) is an untyped value
-    /// arm: it is a way out whose value we don't model, which is still a
-    /// way out — it must keep an early `return;` from reading as all-undef.
+    /// A compound tail is read the way perl compiles it (`newCONDOP` in
+    /// op.c): `if (C) {B} else {E}` is `C ? B : E`, `if (C) {B}` is `C && B`
+    /// and `unless (C) {B}` is `C || B`, so each branch's own tail is an arm
+    /// and a missing `else` adds the condition — falsy (an undef arm) behind
+    /// `if`/`elsif`, its own value behind a lone `unless`. A trailing loop's
+    /// value is unspecified (perlsub), so it is an undef arm. Anything else
+    /// is an untyped value arm: still a way out, which keeps an early
+    /// `return;` from reading as all-undef.
+    ///
     /// Runs before the scope pops, so the enclosing sub scope is this sub's.
     pub(super) fn record_sub_tail(&mut self, sub: Node<'a>) {
+        use crate::model::witnesses::tags::UndefArm;
         let Some(scope) = self.enclosing_sub_scope() else { return };
-        let Some(stmt) = sub.child_by_field_name("body").and_then(crate::cst::tail_statement) else {
+        let Some(last) = sub.child_by_field_name("body").and_then(crate::cst::tail_statement) else {
             return;
         };
-        let tail = match (stmt.kind(), stmt.named_child(0)) {
-            ("expression_statement", Some(expr)) => {
-                // `bag_query_expr_span` resolves the tail arm through these
-                // witnesses; no-op for nodes whose payload doesn't bake.
-                self.emit_expr_witness(expr);
-                // A `return` reaches here too — the grammar wraps it in an
-                // `expression_statement` like any other — while a
-                // postfix-conditional return (`return undef if $x`) is a
-                // `postfix_conditional_expression`, which is the right
-                // answer: the sub can still fall past it.
-                use crate::model::witnesses::tags::UndefArm;
-                let exit = match expr.kind() {
-                    "return_expression" => TailExit::Return,
-                    "undef_expression" => TailExit::Undef(UndefArm::Scalar),
-                    "stub_expression" => TailExit::Undef(UndefArm::EmptyList),
-                    _ => TailExit::Value,
-                };
-                (node_to_span(expr), exit)
+        let mut arms = Vec::new();
+        // A worklist, not recursion: `if` chains nest as deep as the source.
+        let mut pending = vec![last];
+        while let Some(stmt) = pending.pop() {
+            match stmt.kind() {
+                "expression_statement" => {
+                    let Some(expr) = stmt.named_child(0) else { continue };
+                    // `bag_query_expr_span` resolves the arm through these
+                    // witnesses; no-op for nodes whose payload doesn't bake.
+                    self.emit_expr_witness(expr);
+                    // A `return` already minted its own arm. A postfix
+                    // `return undef if $x` is a `postfix_conditional_expression`,
+                    // which is right: the sub can still fall past it.
+                    match expr.kind() {
+                        "return_expression" => {}
+                        "undef_expression" => {
+                            arms.push(TailArm::Undef(node_to_span(expr), UndefArm::Scalar))
+                        }
+                        "stub_expression" => {
+                            arms.push(TailArm::Undef(node_to_span(expr), UndefArm::EmptyList))
+                        }
+                        _ => arms.push(TailArm::Value(node_to_span(expr))),
+                    }
+                }
+                "conditional_statement" => {
+                    let chain = crate::cst::conditional_arms(stmt);
+                    let Some(last_arm) = chain.last().copied() else {
+                        arms.push(TailArm::Value(node_to_span(stmt)));
+                        continue;
+                    };
+                    if let Some(cond) = last_arm.cond {
+                        if chain.len() == 1 && !last_arm.enter {
+                            self.emit_expr_witness(cond);
+                            arms.push(TailArm::Value(node_to_span(cond)));
+                        } else {
+                            arms.push(TailArm::Undef(node_to_span(cond), UndefArm::Scalar));
+                        }
+                    }
+                    for arm in chain.iter().rev() {
+                        self.push_block_tail(arm.block, &mut pending, &mut arms);
+                    }
+                }
+                "block_statement" => self.push_block_tail(stmt, &mut pending, &mut arms),
+                "for_statement" | "cstyle_for_statement" | "loop_statement" => {
+                    arms.push(TailArm::Undef(node_to_span(stmt), UndefArm::Scalar))
+                }
+                _ => arms.push(TailArm::Value(node_to_span(stmt))),
             }
-            _ => (node_to_span(stmt), TailExit::Value),
-        };
-        self.sub_tail.insert(scope, tail);
+        }
+        self.sub_tail.insert(scope, arms);
+    }
+
+    /// A block's tail joins the worklist; an empty block yields the empty list.
+    fn push_block_tail(&self, block: Node<'a>, pending: &mut Vec<Node<'a>>, arms: &mut Vec<TailArm>) {
+        match crate::cst::tail_statement(block) {
+            Some(tail) => pending.push(tail),
+            None => arms.push(TailArm::Undef(
+                node_to_span(block),
+                crate::model::witnesses::tags::UndefArm::EmptyList,
+            )),
+        }
     }
 
     /// Ensure an `(anon)` Symbol exists for the given anon-sub node
