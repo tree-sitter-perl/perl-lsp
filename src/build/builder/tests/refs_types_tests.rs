@@ -1048,6 +1048,19 @@ fn test_return_type_trailing_bare_block_is_its_tail() {
 }
 
 #[test]
+fn test_anon_sub_return_reads_the_same_tail_arms() {
+    // A coderef's return is the anon sub's own return arms — a trailing
+    // `if` is `C && B`, and a trailing comment is not the tail.
+    let fa = build_fa(
+        "package A;\nsub new { bless {}, shift }\nmy $cb = sub {\n    if ($_[0]) { A->new }\n    # done\n};\nmy $r = $cb->(1);\nprint $r;\n",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$r", Point::new(7, 6)),
+        Some(InferredType::Optional(Box::new(InferredType::ClassName("A".into())))),
+    );
+}
+
+#[test]
 fn test_return_type_tail_skips_trailing_comment() {
     // A comment after the last statement is not the tail.
     let fa = build_fa("package A;\nsub new { bless {}, shift }\nsub make {\n    A->new;\n    # done\n}");
