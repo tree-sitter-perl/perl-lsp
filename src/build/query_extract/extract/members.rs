@@ -11,8 +11,9 @@ pub(super) struct State {
     /// Recorded at construction (the un-peeled node); gates op-DX at the mint.
     pub(super) member_simple: HashMap<usize, bool>,
     /// A call's written arguments (span + byte range), keyed by the match
-    /// that captured both its callee (`@ref.call` / `@ref.qcall` /
-    /// `@ref.member.call`) and its argument list (`@arity.args`).
+    /// that captured its callee (`@ref.call` / `@ref.qcall` /
+    /// `@ref.member.call`), its argument list (`@arity.args`) and each
+    /// argument (`@arity.arg`).
     pub(super) args_by_match: HashMap<usize, Vec<(Span, usize, usize)>>,
     /// `@arity.spread`: the byte ranges of arguments that flatten to any
     /// number of values.
@@ -72,17 +73,24 @@ pub(super) fn flatten_recv(
     events.push(Event::at(inner, Capture::Member(MemberCap::Recv), text, match_id));
 }
 
-/// `@arity.args`: a call's argument list. Its arguments are its named
-/// children, less the grammar's extras (a comment between two arguments is
-/// not one). Keyed by the match, which also captured the callee.
-pub(super) fn record_args(members: &mut State, node: tree_sitter::Node<'_>, match_id: usize) {
-    let mut c = node.walk();
-    let args = node
-        .named_children(&mut c)
-        .filter(|a| !a.is_extra())
-        .map(|a| (Span { start: a.start_position(), end: a.end_position() }, a.start_byte(), a.end_byte()))
-        .collect();
-    members.args_by_match.insert(match_id, args);
+/// `@arity.args`: the call wrote an argument list, so its arity is known
+/// even when the list is empty. Keyed by the match, which also captured the
+/// callee.
+pub(super) fn open_args(members: &mut State, match_id: usize) {
+    members.args_by_match.entry(match_id).or_default();
+}
+
+/// `@arity.arg`: one argument of the match's list, kept in source order. A
+/// wildcard in a query also matches the grammar's extras, and a predicate
+/// filters a whole match rather than one quantified capture, so a comment
+/// between two arguments is dropped here.
+pub(super) fn record_arg(members: &mut State, node: tree_sitter::Node<'_>, match_id: usize) {
+    if node.is_extra() {
+        return;
+    }
+    let args = members.args_by_match.entry(match_id).or_default();
+    let at = args.partition_point(|&(_, s, _)| s < node.start_byte());
+    args.insert(at, (Span { start: node.start_position(), end: node.end_position() }, node.start_byte(), node.end_byte()));
 }
 
 /// `@arity.sig`: a callable's parameter_list — count declared params
