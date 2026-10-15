@@ -48,8 +48,11 @@ the arguments were not walked, so there is no arity and there are no
 argument types.
 
 A pack's document says what an argument list holds. `@arity.args` is the
-list, captured in the same match as the callee. Its arguments are its named
-children less the grammar's extras, so a comment is not an argument.
+list and `@arity.arg` each argument in it, both captured in the same match as
+the callee: `(argument_list ((_) @arity.arg ","?)*)`. The separator has to be
+in the quantified group, because a bare `(_)*` stops at the first comma. A
+wildcard also matches the grammar's extras, and a predicate filters a whole
+match rather than one capture, so the extractor drops a captured comment.
 `@arity.spread` marks the children that spread (`*xs`, `**kw`, `args...`).
 
 ## Current state
