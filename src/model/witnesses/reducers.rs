@@ -540,7 +540,8 @@ impl WitnessReducer for BranchArmFold {
             // operator is a hint and both arms count, whatever the LHS's
             // truthiness: the value is `left ⊔ right`, the left minus its
             // undef half. With no typed left the RHS floor stands alone:
-            // that is what lets `$ENV{X} || 10` type to `Numeric`.
+            // that is what lets `$ENV{X} || 10` type to `Numeric`. An
+            // untyped RHS is an arm the join can't see, so it answers nothing.
             // TODO(dead-fallback-lint): an LHS that can't be false (a
             // reference, an object without `bool` overloading) makes the
             // fallback dead; that belongs in a diagnostic, not in the type.
@@ -548,6 +549,9 @@ impl WitnessReducer for BranchArmFold {
                 InferredType::Optional(inner) => (**inner).clone(),
                 t => t.clone(),
             });
+            if fallback.is_empty() {
+                return ReducedValue::None;
+            }
             let all: Vec<InferredType> = defined.chain(fallback).collect();
             return match crate::model::file_analysis::join_all(&all, &*class_order(_q)) {
                 Some(t) => ReducedValue::Type(t),
