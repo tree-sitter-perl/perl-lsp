@@ -696,12 +696,11 @@ fn walk_refs(
                 if covered_paths.contains(path) {
                     continue;
                 }
-                // Tier attribution: a FileStore workspace entry rides the
-                // WORKSPACE role (Perl project files); everything else the
-                // rows name lives in a module-index tier (DEPENDENCY —
-                // @INC and the pack caches). The mask must admit the
-                // candidate's OWN tier, or an EDITABLE rename would walk
-                // read-only deps (and vice versa).
+                // Tier attribution: a FileStore workspace entry or a
+                // front-door index registration rides WORKSPACE; the rest
+                // (@INC) is DEPENDENCY. The mask must admit the candidate's
+                // OWN tier, or an EDITABLE rename would walk read-only deps
+                // (and vice versa).
                 let ws_arc = files
                     .workspace_raw()
                     .get(path)
@@ -717,7 +716,7 @@ fn walk_refs(
                         ))
                     }
                     None => {
-                        if !mask.contains(RoleMask::DEPENDENCY) {
+                        if !mask.contains(index_role(idx, path)) {
                             continue;
                         }
                         match idx.cached_by_path(path) {
@@ -781,14 +780,19 @@ fn walk_refs(
         }
     }
 
-    // Dependencies (read-only modules from @INC / the pack-language cache).
-    // Per-FILE sweep (`for_each_cached_file`): the name-keyed view both
-    // repeats files and HIDES a file that lost every name tie. Skip paths an
-    // open/workspace copy already covered — those are fresher.
-    if mask.contains(RoleMask::DEPENDENCY) {
+    // The index's files, each admitted by its OWN tier (`index_role`): the
+    // front-door registrations FileStore doesn't hold (a pack language's
+    // whole workspace) and the @INC dependencies. Per-FILE sweep
+    // (`for_each_cached_file`): the name-keyed view both repeats files and
+    // HIDES a file that lost every name tie. Skip paths an open/workspace
+    // copy already covered — those are fresher.
+    if mask.intersects(RoleMask::WORKSPACE | RoleMask::DEPENDENCY) {
         let _t = crate::util::ghost_stats::ScopedNs::start("refs.sweep.deps");
         if let Some(idx) = module_index {
             let mut visit = |cached: &std::sync::Arc<crate::model::file_analysis::CachedModule>| {
+                if !mask.contains(index_role(idx, &cached.path)) {
+                    return;
+                }
                 // Same row-narrowing skip as the workspace sweep: shredded
                 // but not a candidate ⇒ provably matchless; candidates
                 // always fall through.
@@ -834,6 +838,16 @@ fn walk_refs(
     }
 
     sorted_deduped(out)
+}
+
+/// The tier an index-held file rides: WORKSPACE for a front-door
+/// registration, DEPENDENCY otherwise.
+pub(super) fn index_role(idx: &dyn CrossFileLookup, path: &std::path::Path) -> RoleMask {
+    if idx.is_dependency_path(path) {
+        RoleMask::DEPENDENCY
+    } else {
+        RoleMask::WORKSPACE
+    }
 }
 
 /// Stable output order + (path, span) dedup — the one spelling both walk
@@ -1204,11 +1218,14 @@ fn scan_alias_pairs(
     for entry in files.workspace_raw().iter() {
         add(entry.value(), &entry.key().to_string_lossy());
     }
-    if dep {
-        if let Some(idx) = module_index {
-            idx.for_each_cached_file(&mut |cached| {
-                add(&cached.analysis, &cached.path.to_string_lossy());
-            });
+    if let Some(idx) = module_index {
+        let mut add_cached = |cached: &std::sync::Arc<crate::model::file_analysis::CachedModule>| {
+            add(&cached.analysis, &cached.path.to_string_lossy());
+        };
+        if dep {
+            idx.for_each_cached_file(&mut add_cached);
+        } else {
+            idx.for_each_workspace_file(&mut add_cached);
         }
     }
     pairs

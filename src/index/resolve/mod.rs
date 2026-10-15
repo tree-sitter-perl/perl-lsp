@@ -83,12 +83,10 @@ pub struct CandidateSet<'a> {
     /// root shape). Transparent for Perl (empty closure).
     scoped: Option<crate::model::file_analysis::ScopedLookup<'a>>,
     /// The origin is pack-served — derived at construction from the
-    /// stamped `FileAnalysis.language`, never declared by a caller. Two
-    /// policy consequences, applied at the set level so every projection
-    /// agrees: visibility widens to VISIBLE (pack workspace files ride
-    /// the DEPENDENCY role — a storage artifact of the per-language
-    /// cache, which registers only workspace-walk files), and rename
-    /// REFUSES on alias-spelled sites instead of silently skipping.
+    /// stamped `FileAnalysis.language`, never declared by a caller. It
+    /// selects the language's name-supply model (closure-keyed identity and
+    /// completion) and makes rename REFUSE on alias-spelled sites instead
+    /// of silently skipping, at the set level so every projection agrees.
     pack: bool,
     /// The origin document's raw text, when the caller has it. Feeds the
     /// raw-word candidate lanes (macro variants): a macro use can vanish
