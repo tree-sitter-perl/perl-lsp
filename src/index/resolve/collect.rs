@@ -447,20 +447,28 @@ pub(super) fn pack_def_paths(
     if origin_defines {
         out.push(self_str.clone());
     }
+    let mut macro_out_of_sight = false;
     for c in idx.def_candidates(name) {
         let p = c.path.to_string_lossy().into_owned();
+        let connected = visible.contains(&p) || c.analysis.pack.include_closure.contains(&self_str);
         // A `#define` of the name anywhere joins unconditionally — config
         // variants of one conceptual macro live in disjoint headers (win32.h
         // vs the unix header) and the forward lane's never-prune rule keeps
         // them one identity. Non-macro values (globals, statics) stay
         // closure-strict: two unrelated `static int counter` TUs are two
         // targets.
-        if c.analysis.names_macro_def(name, None)
-            || visible.contains(&p)
-            || c.analysis.pack.include_closure.contains(&self_str)
-        {
+        if c.analysis.names_macro_def(name, None) {
+            macro_out_of_sight |= !connected;
+            out.push(p);
+        } else if connected {
             out.push(p);
         }
+    }
+    // Only out-of-closure defines joined: the origin's closure gate would
+    // then refuse the origin's OWN uses — the very sites the identity was
+    // minted from (highlights would see them, references not).
+    if macro_out_of_sight && !out.iter().any(|p| *p == self_str || visible.contains(p)) {
+        out.push(self_str);
     }
     out.sort();
     out.dedup();
