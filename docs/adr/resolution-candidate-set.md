@@ -165,8 +165,8 @@ The spike's axes live in CandidateSet construction:
   projection that walks inherits the gate.
 - **pack routing** — a construction fact: `resolve()` derives it from the
   origin's stamped `FileAnalysis.language` (`is_pack_language`), so no
-  handler declares or can forget it; store selection has its own single
-  speller (`ModuleIndex::lookup_for`, tripwired out of the LSP layer).
+  handler declares or can forget it; there is no store selection, since a
+  process serves one language through one index.
   The set owns the consequences: visibility widens to VISIBLE (pack
   workspace files ride the DEPENDENCY role), and `rename_edits` →
   `Result` REFUSES on alias-spelled sites (full-or-refuse) instead of

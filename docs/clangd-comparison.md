@@ -53,7 +53,7 @@ result is the reverse for *this specific* shape of query (goto-def to a
 symbol reachable through the file's own `#include` chain): clangd's
 preamble build answers in the low hundreds of ms; our pack-language
 architecture gates **every** cross-file answer on the full bulk workspace
-scan finishing (`ensure_workspace_indexed` → `index_pack_languages`, one
+scan finishing (`ensure_workspace_indexed` → `index_pack_language`, one
 `par_iter` pass over the whole tree — see `main.rs`/`backend.rs`), which
 takes seconds even though the specific file you opened only needed one
 header. `DEFAULT_COLD_WAIT_MS = 400` in `backend.rs` is exactly why the

@@ -105,9 +105,7 @@ fn surface_gate_covers_registered_and_open_consumers() {
 
     let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
-    let hub = ModuleIndex::new_for_test();
     let pack = Arc::new(ModuleIndex::new_for_test());
-    hub.attach_pack_index("cpp", pack.clone());
     register_pair(driver, &pack, &[&hdr, &tu]);
     let canon_tu = std::fs::canonicalize(&tu).unwrap();
     let canon_hdr = std::fs::canonicalize(&hdr).unwrap();
@@ -126,7 +124,7 @@ fn surface_gate_covers_registered_and_open_consumers() {
 
     // Body-only edit: return value changes, surface identical.
     std::fs::write(&hdr, "class Box { public: int width() { return 2; } };\n").unwrap();
-    let outcome = inv.file_changed(None, &hub, &files, &hdr, false);
+    let outcome = inv.file_changed(None, &pack, &files, &hdr, false);
     assert!(!outcome.deferred);
     assert_ne!(arc_of(&pack, &canon_hdr), hdr_before, "changed file re-registered");
     assert_eq!(
@@ -147,7 +145,7 @@ fn surface_gate_covers_registered_and_open_consumers() {
         "class Box { public: int width() { return 2; } int height() { return 3; } };\n",
     )
     .unwrap();
-    let outcome = inv.file_changed(None, &hub, &files, &hdr, false);
+    let outcome = inv.file_changed(None, &pack, &files, &hdr, false);
     assert_ne!(
         arc_of(&pack, &canon_tu),
         tu_before,
@@ -162,7 +160,7 @@ fn surface_gate_covers_registered_and_open_consumers() {
     // The changed file's OWN open doc refreshes regardless of verdict.
     assert!(files.open(hdr_url.clone(), std::fs::read_to_string(&hdr).unwrap()));
     std::fs::write(&hdr, "class Box { public: int width() { return 3; } int height() { return 3; } };\n").unwrap();
-    let outcome = inv.file_changed(None, &hub, &files, &hdr, false);
+    let outcome = inv.file_changed(None, &pack, &files, &hdr, false);
     assert!(
         outcome.refresh_open.contains(&hdr_url),
         "the edited file's own open doc always refreshes"
@@ -187,9 +185,7 @@ fn pack_swap_skips_stale_generation() {
 
     let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
-    let hub = ModuleIndex::new_for_test();
     let pack = Arc::new(ModuleIndex::new_for_test());
-    hub.attach_pack_index("cpp", pack.clone());
     register_pair(driver, &pack, &[&hdr, &tu]);
     let canon_hdr = std::fs::canonicalize(&hdr).unwrap();
     let canon_tu = std::fs::canonicalize(&tu).unwrap();
@@ -208,7 +204,7 @@ fn pack_swap_skips_stale_generation() {
         "class Box { public: int width() { return 2; } int height() { return 3; } };\n",
     )
     .unwrap();
-    inv.file_changed(None, &hub, &FileStore::serving(driver), &hdr, false);
+    inv.file_changed(None, &pack, &FileStore::serving(driver), &hdr, false);
     assert_eq!(arc_of(&pack, &canon_hdr), hdr_before, "stale header re-register skipped");
     assert_eq!(arc_of(&pack, &canon_tu), tu_before, "stale consumer re-register skipped");
     let _ = std::fs::remove_dir_all(&dir);
@@ -229,9 +225,7 @@ fn file_changed_defers_during_bulk_index_and_reconciles() {
 
     let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
-    let hub = ModuleIndex::new_for_test();
     let pack = Arc::new(ModuleIndex::new_for_test());
-    hub.attach_pack_index("cpp", pack.clone());
     register_pair(driver, &pack, &[&hdr]);
     let canon_hdr = std::fs::canonicalize(&hdr).unwrap();
     let before = arc_of(&pack, &canon_hdr);
@@ -239,12 +233,12 @@ fn file_changed_defers_during_bulk_index_and_reconciles() {
     let inv = PackInvalidator::serving(driver);
     inv.begin_bulk_index();
     std::fs::write(&hdr, "class Box { public: int width() { return 1; } int h(); };\n").unwrap();
-    let outcome = inv.file_changed(None, &hub, &FileStore::serving(driver), &hdr, false);
+    let outcome = inv.file_changed(None, &pack, &FileStore::serving(driver), &hdr, false);
     assert!(outcome.deferred, "mid-index change defers");
     assert!(outcome.refresh_open.is_empty());
     assert_eq!(arc_of(&pack, &canon_hdr), before, "deferred: no swap yet");
 
-    inv.finish_bulk_index(None, &hub);
+    inv.finish_bulk_index(None, &pack);
     assert_ne!(arc_of(&pack, &canon_hdr), before, "reconcile lands the deferred change");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -263,7 +257,6 @@ struct SwapFixture {
     dir: PathBuf,
     hdr: PathBuf,
     tu: PathBuf,
-    hub: ModuleIndex,
     pack: Arc<ModuleIndex>,
     inv: PackInvalidator,
     files: FileStore,
@@ -281,12 +274,10 @@ fn swap_fixture(tag: &str) -> SwapFixture {
 
     let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
-    let hub = ModuleIndex::new_for_test();
     let pack = Arc::new(ModuleIndex::new_for_test());
-    hub.attach_pack_index("cpp", pack.clone());
     register_pair(driver, &pack, &[&hdr, &tu]);
 
-    SwapFixture { dir, hdr, tu, hub, pack, inv: PackInvalidator::serving(driver), files: FileStore::serving(driver) }
+    SwapFixture { dir, hdr, tu, pack, inv: PackInvalidator::serving(driver), files: FileStore::serving(driver) }
 }
 
 /// The registered analysis for `path` — the residency question these tests
@@ -315,7 +306,7 @@ fn a_landed_persist_licenses_the_strip() {
     let f = swap_fixture("ok");
     std::fs::write(&f.hdr, "class Box { public: int width() { return 2; } int h() { return 3; } };\n").unwrap();
     module_cache::with_test_cache_dir(&f.dir, TEST_BUSY, || {
-        f.inv.file_changed(None, &f.hub, &f.files, &f.hdr, false);
+        f.inv.file_changed(None, &f.pack, &f.files, &f.hdr, false);
     });
     assert!(
         registered(&f.pack, &f.hdr).symbols_are_evicted(),
@@ -344,7 +335,7 @@ fn a_rolled_back_transaction_leaves_every_copy_whole() {
             )
             .unwrap();
         }
-        f.inv.file_changed(None, &f.hub, &f.files, &f.hdr, false);
+        f.inv.file_changed(None, &f.pack, &f.files, &f.hdr, false);
     });
     for p in [&f.hdr, &f.tu] {
         let a = registered(&f.pack, p);
@@ -379,7 +370,7 @@ fn a_file_whose_blob_did_not_land_is_not_stripped() {
             ))
             .unwrap();
         }
-        f.inv.file_changed(None, &f.hub, &f.files, &f.hdr, false);
+        f.inv.file_changed(None, &f.pack, &f.files, &f.hdr, false);
     });
     assert!(
         !registered(&f.pack, &f.hdr).symbols_are_evicted(),

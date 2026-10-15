@@ -467,6 +467,10 @@ never consults pack data; the XS `.c` beside a `.pm` is not what `--definition`
 on a Perl symbol resolves through. The server defers workspace indexing to the
 first `didOpen`; the CLI eagerly indexes *every* language it serves.
 
+> Superseded: a process now serves one language (`--lang`,
+> `docs/prompt-multi-language.md`), so `LanguageScope` and the
+> unattached-sub-index routing below are gone. The measurements stand.
+
 **Fixed by scoping the startup, not by deferring it.** `LanguageScope` is
 declared by the VERB and read by the indexer, which never asks what kind of
 query it is serving: a verb with a target file wants only that file's family

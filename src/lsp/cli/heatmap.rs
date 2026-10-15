@@ -71,8 +71,8 @@ fn heatmap_symbol_row(
     // dead-export test: an export used only by its own module is dead to
     // consumers). Both project from the ONE `references()` set minted at the
     // declaration — identity is never re-derived heatmap-side. Pack routing
-    // is a construction fact (which sub-index, VISIBLE-wide walk), declared
-    // here exactly as the references/goto-def CLI mirrors declare it.
+    // is a construction fact (VISIBLE-wide walk), declared here exactly as
+    // the references/goto-def CLI mirrors declare it.
     //
     // The relational pre-prune (`forced_fan_in`) may skip this walk only when
     // the row store proved it empty; a computed count always comes from here.
@@ -217,19 +217,15 @@ pub(crate) fn cli_refs_parity(root: &str, sample: Option<usize>) {
     let mut pack_entries: Vec<(
         std::path::PathBuf,
         std::sync::Arc<file_analysis::FileAnalysis>,
-        std::sync::Arc<module_index::ModuleIndex>,
     )> = Vec::new();
-    idx.for_each_pack_index(|_lang, pack| {
-        pack.for_each_registered_file(&mut |cached| {
-            // Index copies are refs-evicted; fan-out scans + set minting read
-            // refs, so take the refs-present view (resident when not evicted,
-            // rehydrated otherwise). Batch-CLI-sized cost, not a query path.
-            pack_entries.push((
-                cached.path.clone(),
-                file_analysis::CrossFileLookup::whole_present(pack.as_ref(), cached),
-                std::sync::Arc::clone(pack),
-            ));
-        });
+    idx.for_each_pack_registered_file(&mut |cached| {
+        // Index copies are refs-evicted; fan-out scans + set minting read
+        // refs, so take the refs-present view (resident when not evicted,
+        // rehydrated otherwise). Batch-CLI-sized cost, not a query path.
+        pack_entries.push((
+            cached.path.clone(),
+            file_analysis::CrossFileLookup::whole_present(&idx, cached),
+        ));
     });
     pack_entries.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -277,7 +273,7 @@ pub(crate) fn cli_refs_parity(root: &str, sample: Option<usize>) {
     // per symbol, so it is heatmap×2-shaped by construction.
     let mut seen_symbols = 0usize;
     let total_symbols: usize = entries.iter().map(|(_, a)| a.symbols().len()).sum::<usize>()
-        + pack_entries.iter().map(|(_, a, _)| a.symbols().len()).sum::<usize>();
+        + pack_entries.iter().map(|(_, a)| a.symbols().len()).sum::<usize>();
     let stride = sample
         .map(|n| (total_symbols / n.max(1)).max(1))
         .unwrap_or(1);
@@ -341,9 +337,9 @@ pub(crate) fn cli_refs_parity(root: &str, sample: Option<usize>) {
     for (path, analysis) in &entries {
         check(&ws, &idx, path, analysis, Some(resolve::RoleMask::VISIBLE), &mut checked, &mut mismatched);
     }
-    for (path, analysis, pack) in &pack_entries {
+    for (path, analysis) in &pack_entries {
         // Pack routing widens to VISIBLE at set construction — no override.
-        check(&ws, pack.as_ref(), path, analysis, None, &mut checked, &mut mismatched);
+        check(&ws, &idx, path, analysis, None, &mut checked, &mut mismatched);
     }
 
     println!(
@@ -463,28 +459,21 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
 
     let (ws, idx) = cli_full_startup(root);
 
-    // Pack-language (C/C++/…) files live in per-language sub-indexes, not the
-    // Perl `FileStore` — `workspace/symbol` and Mode-B diagnostics sweep these
-    // separately, and the heatmap gathers them the same way. Each entry keeps
-    // its sub-index so fan-in routes through it (identity minting + the
-    // backward reference walk both need the pack cache, not the Perl hub).
+    // Pack-language (C/C++/…) files live in the index, not the `FileStore` —
+    // `workspace/symbol` and Mode-B diagnostics sweep them the same way.
     // Snapshot to a Vec for a stable order and to sum dynamic dispatch below.
     let mut pack_entries: Vec<(
         std::path::PathBuf,
         std::sync::Arc<file_analysis::FileAnalysis>,
-        std::sync::Arc<module_index::ModuleIndex>,
     )> = Vec::new();
-    idx.for_each_pack_index(|_lang, pack| {
-        pack.for_each_registered_file(&mut |cached| {
-            // Index copies are refs-evicted; fan-out scans + set minting read
-            // refs, so take the refs-present view (resident when not evicted,
-            // rehydrated otherwise). Batch-CLI-sized cost, not a query path.
-            pack_entries.push((
-                cached.path.clone(),
-                file_analysis::CrossFileLookup::whole_present(pack.as_ref(), cached),
-                std::sync::Arc::clone(pack),
-            ));
-        });
+    idx.for_each_pack_registered_file(&mut |cached| {
+        // Index copies are refs-evicted; fan-out scans + set minting read
+        // refs, so take the refs-present view (resident when not evicted,
+        // rehydrated otherwise). Batch-CLI-sized cost, not a query path.
+        pack_entries.push((
+            cached.path.clone(),
+            file_analysis::CrossFileLookup::whole_present(&idx, cached),
+        ));
     });
     pack_entries.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -496,7 +485,7 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
     for entry in ws.workspace_raw().iter() {
         dynamic_dispatch_sites += entry.value().dynamic_dispatch_sites as u64;
     }
-    for (_p, analysis, _pack) in &pack_entries {
+    for (_p, analysis) in &pack_entries {
         dynamic_dispatch_sites += analysis.dynamic_dispatch_sites as u64;
     }
     let has_dynamic_dispatch = dynamic_dispatch_sites > 0;
@@ -589,16 +578,9 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
     // Every walk's ancestry prefilter re-asks the same row probes, each under
     // SQLite's process-global mutexes — memoized for the sweep (#195).
     let _probes = crate::index::module_index::SweepProbeGuard::open();
-    // Every index the sweep rehydrates through: the Perl hub AND each
-    // pack-language sub-index (its own LRU over its own DB).
     if let Some(cap) = idx.size_bag_cache_for_sweep() {
         eprintln!("Rehydration cache: {} MiB for the sweep", cap / (1024 * 1024));
     }
-    idx.for_each_pack_index(|lang, pack| {
-        if let Some(cap) = pack.size_bag_cache_for_sweep() {
-            eprintln!("Rehydration cache ({lang}): {} MiB for the sweep", cap / (1024 * 1024));
-        }
-    });
 
     // One work item per eligible declaration, through `heatmap_symbol_row`
     // — the one place fan-in/fan-out/dead are computed, so Perl and pack
@@ -615,16 +597,15 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
             items.push(HeatmapItem { routing: &idx, path, analysis, sym, prune: perl_prune.as_ref(), visibility: Some(mask) });
         }
     }
-    // Pack languages route through their own sub-index (VISIBLE-wide —
-    // pack workspace files ride the DEPENDENCY role); the set derives that
-    // from the origin's stamped language, so no visibility override — and
-    // no pre-prune: their refs aren't in the hub's row store.
-    for (path, analysis, pack) in &pack_entries {
+    // Pack languages widen VISIBLE (pack workspace files ride the
+    // DEPENDENCY role); the set derives that from the origin's stamped
+    // language, so no visibility override — and no pre-prune.
+    for (path, analysis) in &pack_entries {
         for sym in analysis.symbols() {
             if sym.hidden_in_outline() || !heatmap_symbol_eligible(sym) {
                 continue;
             }
-            items.push(HeatmapItem { routing: pack.as_ref(), path, analysis, sym, prune: None, visibility: None });
+            items.push(HeatmapItem { routing: &idx, path, analysis, sym, prune: None, visibility: None });
         }
     }
 

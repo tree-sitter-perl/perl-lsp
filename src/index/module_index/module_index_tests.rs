@@ -1141,64 +1141,6 @@ fn rehydration_miss_is_counted_and_serves_resident() {
     );
 }
 
-/// The foreign-route half of rehydration: a sweep minting `CachedModule`s
-/// from FileStore entries asks whatever index the query routed to — a cpp
-/// query's workspace sweep hands PERL paths to the cpp sub-index, whose own
-/// loader can never serve them (first caught live by the strict-residency
-/// tripwire: cross-TU cpp references silently dropped every Perl workspace
-/// file's matches). The sub-index must route a hub-owned path to the hub's
-/// rehydration cell instead of degrading to the stripped resident.
-#[test]
-fn foreign_path_rehydrates_through_the_owning_sibling() {
-    let hub = ModuleIndex::new_for_test();
-
-    // A whole analysis the "hub blob store" can serve, and its stripped twin
-    // the sweep would otherwise read empty.
-    let src = "package Ghost;\nsub boo { return 1 }\n1;\n";
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&ts_parser_perl::LANGUAGE.into())
-        .unwrap();
-    let tree = parser.parse(src, None).unwrap();
-    let whole = crate::build::builder::build(&tree, src.as_bytes());
-    let whole_arc = Arc::new(whole);
-    let mut stripped = (*whole_arc).clone();
-    stripped.evict_to(crate::model::file_analysis::Residency::Skeleton);
-    let path = PathBuf::from("/fake/hub/Ghost.pm");
-
-    // Install the hub's rehydration cell with a loader that serves the
-    // whole copy (stands in for the modules.db blob load).
-    let served = Arc::clone(&whole_arc);
-    hub.set_bag_cache(Arc::new(crate::index::pack_bag_cache::PackBagCache::new(
-        128 * 1024 * 1024,
-        move |p: &std::path::Path, _want_bag: bool| {
-            if p == std::path::Path::new("/fake/hub/Ghost.pm") {
-                Ok((*served).clone())
-            } else {
-                Err(crate::index::module_cache::RehydrateMiss::NoRow)
-            }
-        },
-    )));
-
-    // Attach a pack sub-index (its own bag cache can never serve the path).
-    let sub = Arc::new(ModuleIndex::new_for_test());
-    hub.attach_pack_index("cpp", Arc::clone(&sub));
-
-    // The misrouted ask: the sub-index handed a hub-owned stripped copy.
-    let cm = Arc::new(CachedModule::new(path, Arc::new(stripped)));
-    let before = crate::index::module_index::rehydration_miss_count();
-    let full = crate::model::file_analysis::CrossFileLookup::whole_present(sub.as_ref(), &cm);
-    assert!(
-        full.symbols().iter().any(|s| s.name == "boo"),
-        "foreign route must serve the owner's WHOLE copy, not the stripped resident"
-    );
-    assert_eq!(
-        crate::index::module_index::rehydration_miss_count(),
-        before,
-        "a foreign-routed answer is a hit, not a residency miss"
-    );
-}
-
 /// Build a FileAnalysis from source (whole, never registered).
 fn build_fa(src: &str) -> crate::model::file_analysis::FileAnalysis {
     let mut parser = tree_sitter::Parser::new();

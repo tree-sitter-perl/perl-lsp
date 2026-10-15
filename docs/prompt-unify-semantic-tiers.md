@@ -339,15 +339,13 @@ corpus asks, keep the cpp policy MINIMAL (providers-only, empty
 enrich) and record that as the honest boundary — the seam still buys
 the overlay's freshness keying for cpp.
 
-**Step 3c — overlay on sub-indexes.** `enriched_snapshot` +
-`enriched_present` today live on the hub and gate on `long_lived`. Lift
-the overlay cell to a per-index member (it already is — the DashMap is
-per-`ModuleIndex`), wire `enriched_present` override for pack sub-indexes
-under the SAME `long_lived` gate (thread the flag at
-`attach_pack_index`, like the foreign bag cache cell), and byte-account
-against the same `ENRICHED_BYTE_CAP` PER INDEX (document: N languages =
-N caps; if that's too loose, one shared `AtomicUsize` budget — decide by
-measuring abseil warm RSS, budget is flat ±10 MB).
+**Step 3c — overlay for pack languages.** `enriched_snapshot` +
+`enriched_present` gate on `long_lived` and serve Perl today. The overlay
+cell is already per-`ModuleIndex`, and a process serves one language
+through one index, so the step is wiring `enriched_present` for pack
+analyses under the SAME `long_lived` gate and byte-accounting against the
+same `ENRICHED_BYTE_CAP` (decide by measuring abseil warm RSS, budget is
+flat ±10 MB).
 
 **Honest boundaries to ledger (do not fix in this brief):** pack has no
 open-doc surface recorder, so `SurfaceWrite` provenance stays hub-only;
