@@ -118,7 +118,7 @@ fn free_calls(src: &str) -> Vec<(String, bool, Vec<bool>)> {
         .all()
         .iter()
         .filter_map(|w| match &w.payload {
-            WitnessPayload::Invoke { callee: Callee::Function { name, local }, args, .. } => Some((
+            WitnessPayload::Invoke { callee: Callee::Function { name, local, .. }, args, .. } => Some((
                 w.span.start,
                 name.clone(),
                 local.is_some(),

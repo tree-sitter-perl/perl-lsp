@@ -175,7 +175,13 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
                 let span = e.span();
                 f.lit_spans.push((e.start_byte, e.end_byte, span));
                 let args = st.members.call_args(e.match_id);
-                out.call_sites.push(crate::build::query_extract::CallSite { span, callee, receiver, args });
+                out.call_sites.push(crate::build::query_extract::CallSite {
+                    span,
+                    callee,
+                    receiver,
+                    scope: cur_scope,
+                    args,
+                });
             }
         }
         Capture::Expr(ExprCap::Member) => {

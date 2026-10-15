@@ -2266,7 +2266,7 @@ fn call_invokes(fa: &crate::model::file_analysis::FileAnalysis) -> Vec<(String, 
         .all()
         .iter()
         .filter_map(|w| match &w.payload {
-            WitnessPayload::Invoke { callee: Callee::Function { name, local }, args, .. } => Some((
+            WitnessPayload::Invoke { callee: Callee::Function { name, local, .. }, args, .. } => Some((
                 name.clone(),
                 local.is_some(),
                 args.as_ref().map(|a| a.iter().map(|a| matches!(a, CallArg::Spread(_))).collect()),
@@ -2339,6 +2339,37 @@ int f(Widget w, Box<int> b) {
     assert_eq!(ty("m"), Some(InferredType::ClassName("Engine".into())), "a field read");
     assert_eq!(ty("n"), Some(InferredType::Numeric), "a call on a field read");
     assert_eq!(ty("i"), Some(InferredType::ClassName("int".into())), "a template-typed field substitutes");
+}
+
+/// A bare name in a member body is the class's member when one answers,
+/// inherited ones included, and the member hides a free function of the
+/// same name.
+#[test]
+fn cpp_bare_names_in_a_member_body_reach_inherited_members() {
+    use crate::model::file_analysis::InferredType;
+    let fa = cpp_fa(
+        "\
+struct Engine { int spin() { return 7; } };
+struct Base {
+    Engine motor;
+    Engine make() { return Engine(); }
+};
+int make();
+struct Car : Base {
+    int drive() {
+        auto m = motor;
+        auto e = make();
+        auto n = make().spin();
+        return n;
+    }
+};
+",
+    );
+    let at = tree_sitter::Point { row: 11, column: 8 };
+    let ty = |v: &str| fa.inferred_type_via_bag(v, at);
+    assert_eq!(ty("m"), Some(InferredType::ClassName("Engine".into())), "an inherited field");
+    assert_eq!(ty("e"), Some(InferredType::ClassName("Engine".into())), "the member hides `int make()`");
+    assert_eq!(ty("n"), Some(InferredType::Numeric), "a chain off an implicit call");
 }
 
 #[test]

@@ -429,9 +429,12 @@ pub enum Callee {
     /// A free function named `name`. `local` is the in-file definition the
     /// producer resolved the name to (a class named as a callable included);
     /// `None` looks the name up across files, by the same visibility the
-    /// definition lookup uses. Kept at the END for bincode variant-index
-    /// stability (bump `EXTRACT_VERSION`).
-    Function { name: String, local: Option<SymbolId> },
+    /// definition lookup uses. `member_of`: the call is written in a body
+    /// of this class that elides the receiver, so a member of the class
+    /// (its own or inherited, in any file) answers before any free
+    /// function. Kept at the END for bincode variant-index stability (bump
+    /// `EXTRACT_VERSION`).
+    Function { name: String, local: Option<SymbolId>, member_of: Option<String> },
 }
 
 /// Where a named method's lookup starts.

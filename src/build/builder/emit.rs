@@ -883,7 +883,7 @@ impl<'a> Builder<'a> {
     ) -> crate::model::witnesses::WitnessPayload {
         let args = self.extract_call_args(node);
         crate::model::witnesses::WitnessPayload::Invoke {
-            callee: crate::model::witnesses::Callee::Function { name, local },
+            callee: crate::model::witnesses::Callee::Function { name, local, member_of: None },
             receiver: None,
             args: Some(self.call_operands(&args)),
         }

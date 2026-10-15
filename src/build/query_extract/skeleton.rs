@@ -73,6 +73,9 @@ pub struct CallSite {
     pub callee: String,
     /// A member call's receiver expression; `None` for a free call.
     pub receiver: Option<Span>,
+    /// The scope the call is written in, which says whether a bare callee
+    /// may be a member of the body's class.
+    pub scope: crate::model::file_analysis::ScopeId,
     /// The written arguments in order, each with whether it spreads
     /// (`@arity.spread`); `None` when the call's match captured no argument
     /// list.
@@ -624,6 +627,46 @@ impl SkeletonAnalysis {
                 s.kind = SymKind::Method;
             }
         }
+        // A callable's body scope names the callable (`Scope::owner`). The
+        // document mints `@scope.sub` and `@def.sub` / `@def.method` on the
+        // same `function_definition` node, so the spans are equal; a shape
+        // that declares on another node keeps no owner.
+        {
+            let by_span: std::collections::HashMap<(Point, Point), SymbolId> = symbols
+                .iter()
+                .rev()
+                .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method))
+                .map(|s| ((s.span.start, s.span.end), s.id))
+                .collect();
+            for sc in &mut self.scopes {
+                if matches!(sc.kind, crate::model::file_analysis::ScopeKind::Sub { .. }) {
+                    sc.owner = by_span.get(&(sc.span.start, sc.span.end)).copied();
+                }
+            }
+        }
+        // Implicit receiver: where the document says a body elides it, a bare
+        // name is a member of the class the body belongs to. That class is
+        // the package of the eliding scope's owning METHOD, in-class and
+        // out-of-line alike: a `void Buf<T>::reserve(…)` body is lexically at
+        // file scope, and only the method symbol carries `Buf`. A function in
+        // a namespace is a `Sub`, so its namespace is no receiver. Scopes are
+        // pushed in id order, so a parent's answer is in hand before its
+        // children's.
+        let elided_class: Vec<Option<String>> = {
+            let mut out: Vec<Option<String>> = Vec::with_capacity(self.scopes.len());
+            for sc in &self.scopes {
+                let class = if sc.implicit_receiver {
+                    sc.owner
+                        .and_then(|sid| symbols.get(sid.0 as usize))
+                        .filter(|s| matches!(s.kind, SymKind::Method))
+                        .and_then(|s| s.package.clone())
+                } else {
+                    sc.parent.and_then(|p| out.get(p.0 as usize).cloned().flatten())
+                };
+                out.push(class);
+            }
+            out
+        };
         // Per-class template parameter lists (declaration order) — the
         // `ParamOf` index axis. Built here so the writeback below can route
         // param-mentioning member returns through the deferred shape; rides
@@ -781,7 +824,9 @@ impl SkeletonAnalysis {
             // time; one nothing defines answers nothing (no name-case guess —
             // an unknown uppercase macro leaves the enclosing `auto x =
             // F(..)` honestly untyped). Prefer a `Class` over a like-named
-            // callable (the constructor is the stronger claim).
+            // callable (the constructor is the stronger claim). A method is
+            // never a free callee: a bare call in a member body reaches it
+            // through `member_of`, with the class as its receiver.
             let callee_sid: std::collections::HashMap<&str, SymbolId> = {
                 let mut m: std::collections::HashMap<&str, SymbolId> =
                     std::collections::HashMap::new();
@@ -790,7 +835,7 @@ impl SkeletonAnalysis {
                         SymKind::Class => {
                             m.insert(s.name.as_str(), s.id);
                         }
-                        SymKind::Sub | SymKind::Method => {
+                        SymKind::Sub => {
                             m.entry(s.name.as_str()).or_insert(s.id);
                         }
                         _ => {}
@@ -842,6 +887,7 @@ impl SkeletonAnalysis {
                         crate::model::witnesses::Callee::Function {
                             name: name.clone(),
                             local: callee_sid.get(name.as_str()).copied(),
+                            member_of: elided_class.get(site.scope.0 as usize).cloned().flatten(),
                         },
                         None,
                     ),
@@ -1156,51 +1202,25 @@ impl SkeletonAnalysis {
                 }
             }
         }
-        // A callable's body scope names the callable (`Scope::owner`). The
-        // document mints `@scope.sub` and `@def.sub` / `@def.method` on the
-        // same `function_definition` node, so the spans are equal; a shape
-        // that declares on another node keeps no owner.
-        {
-            let by_span: std::collections::HashMap<(Point, Point), SymbolId> = symbols
-                .iter()
-                .rev()
-                .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method))
-                .map(|s| ((s.span.start, s.span.end), s.id))
-                .collect();
-            for sc in &mut self.scopes {
-                if matches!(sc.kind, crate::model::file_analysis::ScopeKind::Sub { .. }) {
-                    sc.owner = by_span.get(&(sc.span.start, sc.span.end)).copied();
-                }
-            }
-        }
-        // Implicit receiver: where the document says a body elides it, a bare
-        // name is a member of the class the body belongs to. That class is
-        // the package of the eliding scope's owner, in-class and out-of-line
-        // alike: a `void Buf<T>::reserve(…)` body is lexically at file scope,
-        // and only the method symbol carries `Buf`.
+        // Implicit receiver (`elided_class`): a bare name in a member body.
+        // Its VALUE is the class's member when one answers, looked up at
+        // query time across files and up the ancestry: a read projects the
+        // class's slot, and a call is an `Invoke` with `member_of` (minted
+        // with the call sites above). A field this file declares on the class
+        // itself edges straight to its declaration, which keeps a template
+        // class's own parameters spelled as themselves.
         //
         // This and the return arms below are pushed before
         // `finalize_post_walk` seals the enrichment baseline; above it, the
         // first enrichment truncates them away.
         //
-        // TODO(implicit-receiver-invoke): membership is read from THIS file's
-        // symbols only, so a member declared in a header (class in `buf.h`,
-        // body in `buf.cpp`) or inherited from a base stays free, and resolves
-        // to a same-named free function if an include has one. The fix is the
-        // implicit receiver as an Invoke hop resolved at query time: the
-        // class's members across files and up `GraphView`, then the free
-        // lookup.
+        // TODO(implicit-receiver-nav): the BINDINGS below read this file's
+        // symbols only, so goto-def / references on a bare use of a member
+        // declared in a header or a base resolve it as a free name.
         {
             use crate::model::file_analysis::{RefKind, ScopeId};
             use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
-            let scopes = &self.scopes;
-            let implicit_class = |scope: ScopeId| -> Option<&str> {
-                std::iter::successors(Some(scope), |sc| scope_parent.get(sc).copied().flatten())
-                    .find(|sc| scopes[sc.0 as usize].implicit_receiver)
-                    .and_then(|sc| scopes[sc.0 as usize].owner)
-                    .and_then(|sid| symbols.get(sid.0 as usize))
-                    .and_then(|s| s.package.as_deref())
-            };
+            let implicit_class = |scope: ScopeId| elided_class.get(scope.0 as usize).and_then(|c| c.as_deref());
             let mut fields: std::collections::HashMap<(&str, &str), (ScopeId, SymbolId)> = Default::default();
             let mut methods: std::collections::HashSet<(&str, &str)> = Default::default();
             for s in &symbols {
@@ -1215,14 +1235,13 @@ impl SkeletonAnalysis {
                     _ => {}
                 }
             }
-            let mut field_reads: Vec<(usize, SymbolId, ScopeId)> = Vec::new();
+            let mut bare_reads: Vec<(usize, String, Option<(SymbolId, ScopeId)>)> = Vec::new();
             let mut sibling_calls: Vec<(usize, String)> = Vec::new();
             for (i, r) in refs.iter().enumerate() {
                 if matches!(r.kind, RefKind::Variable) && r.resolved_symbol().is_none() {
                     let Some(class) = implicit_class(r.scope) else { continue };
-                    if let Some(&(fscope, fsym)) = fields.get(&(class, r.target_name.as_str())) {
-                        field_reads.push((i, fsym, fscope));
-                    }
+                    let local = fields.get(&(class, r.target_name.as_str())).map(|&(fscope, fsym)| (fsym, fscope));
+                    bare_reads.push((i, class.to_string(), local));
                 } else if matches!(r.kind, RefKind::FunctionCall) && r.binding.is_none() {
                     let Some(class) = implicit_class(r.scope) else { continue };
                     if methods.contains(&(class, r.target_name.as_str())) {
@@ -1230,16 +1249,28 @@ impl SkeletonAnalysis {
                     }
                 }
             }
-            for (i, fsym, fscope) in field_reads {
-                // The binding answers goto-def / references / rename; the edge
-                // onto the field's own `Variable` types the read. One without
-                // the other is the projection disagreement the consistency
-                // net flags as I4.
-                refs[i].bind_symbol(fsym);
+            for (i, class, local) in bare_reads {
+                // Pushed after the read's own edge to the name's `Variable`,
+                // so the member answers first and a name no member answers (a
+                // global, an enumerator) keeps that edge's value. The binding
+                // answers goto-def / references / rename; one without the
+                // other is the projection disagreement the consistency net
+                // flags as I4.
+                let name = refs[i].target_name.clone();
+                let payload = match local {
+                    Some((fsym, fscope)) => {
+                        refs[i].bind_symbol(fsym);
+                        WP::Edge(WA::Variable { name, scope: fscope })
+                    }
+                    None => WP::Projected {
+                        base: WA::TypeName(class),
+                        step: crate::model::witnesses::ProjectionStep::ValueHop { member: name },
+                    },
+                };
                 bag.push(Witness {
                     attachment: WA::Expr(refs[i].span),
                     source: WitnessSource::Builder("implicit_field_read".into()),
-                    payload: WP::Edge(WA::Variable { name: refs[i].target_name.clone(), scope: fscope }),
+                    payload,
                     span: refs[i].span,
                 });
             }

@@ -2636,6 +2636,28 @@ impl ReducerRegistry {
             }
         }
         let exact = args.is_some() && !spread;
+        // A bare call in a body that elides the receiver: the class's member
+        // (its own or inherited, in any file) hides every free function of
+        // the name, with the class itself as the receiver.
+        if let Callee::Function { name, member_of: Some(class), .. } = callee {
+            let att = WitnessAttachment::PackageSymbol { package: class.clone(), name: name.clone() };
+            let sub_q = ReducerQuery {
+                attachment: &att,
+                point: q.point,
+                framework: q.framework,
+                arity_hint: exact.then_some(arg_types.len() as u32),
+                receiver: Some(InferredType::ClassName(class.clone())),
+                args: arg_types.clone(),
+                context: q.context,
+            };
+            let member = state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
+                ReducedValue::Type(t) => Some(t.clone()),
+                ReducedValue::FactMap(_) | ReducedValue::None => None,
+            });
+            if member.is_some() {
+                return member;
+            }
+        }
         let lookups: Vec<WitnessAttachment> = match callee {
             Callee::Method { name, lookup, .. } => {
                 let classes: Vec<String> = match lookup {
@@ -2665,7 +2687,7 @@ impl ReducerRegistry {
                     .map(|package| WitnessAttachment::PackageSymbol { package, name: name.clone() })
                     .collect()
             }
-            Callee::Function { name, local: None } => {
+            Callee::Function { name, local: None, .. } => {
                 let Some(ctx) = q.context.filter(|c| c.module_index.is_some()) else {
                     // The definition is in another file, and no conclusion
                     // key names a free function, so a bake can't link it.

@@ -15,10 +15,14 @@ so the callee is chosen at query time, never fixed when the file was built.
 - `Method { name, lookup, constructs }`: a named method, looked up on the
   receiver's class, the writer's parents (`SUPER::`), or a named class.
 - `Value(att)`: whatever callable `att` holds (`$cb->(…)`).
-- `Function { name, local }`: a free function. `local` is the in-file
-  definition the producer resolved the name to, a class named as a
+- `Function { name, local, member_of }`: a free name. `local` is the
+  in-file definition the producer resolved the name to, a class named as a
   callable included (a functional cast or constructor). `None` sends the
-  lookup across files.
+  lookup across files. `member_of` is the class whose body the call is
+  written in, where the language elides the receiver: a member of that
+  class, its own or inherited and in any file, answers first, with the
+  class as the receiver. A method is never `local`; it is reached only
+  through `member_of`.
 
 The producer resolves the local half because it holds the symbol table, and
 a cross-file chase into a file whose symbols are evicted still finds the
@@ -55,6 +59,13 @@ match rather than one capture, so the extractor drops a captured comment.
 
 - Pack free calls (`@ref.call` beside `@expr.call`) mint `Function`. A
   qualified pack call (`@ref.qcall`) mints no call value yet.
+- A body elides its receiver where the document marks its scope
+  `@scope.sub.implicit_receiver` and the body belongs to a method. There a
+  bare call carries `member_of`, and a bare read the file can't resolve to
+  a local projects the class's slot (`ValueHop` on `TypeName(class)`),
+  pushed after the read's own `Variable` edge so a name no member answers
+  keeps that edge's value. Navigation still binds only members this file
+  declares (`TODO(implicit-receiver-nav)`).
 - A pack member call (`@ref.member.call` beside `@expr.call`) mints
   `Method` with `Lookup::Receiver` on the receiver's own `Expr`, so a chain
   (`w.get().spin()`) hops through each receiver's value. The dispatch
