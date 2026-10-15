@@ -286,6 +286,7 @@ Format per entry:
 - **Discussion needed:** is B worth its blast radius? `?T` (`Optional`) already exists as a one-armed union; the general case is the question.
 - **Perl consumers (2026-09-30):** `BranchArmFold` answers two Perl shapes with a
   stand-in until B exists — `||` / `//` (and `||=` / `//=`) fall back to the RHS
-  floor (`Optional<Bar> || Baz` reads `Baz`, not `Bar|Baz`), and a ternary whose
-  arms disagree answers nothing. Both sites carry `TODO(union-join)`, and Epic 16's
+  floor when the arms don't join (`Optional<Bar> || Baz` reads `Baz`, not
+  `Bar|Baz`), and a ternary whose arms don't join answers nothing. Both read
+  `types.rs::join`, the one place a union enters once it exists. Both sites carry `TODO(union-join)`, and Epic 16's
   `JoinFold` needs the same element; `Optional` becomes B's `undef` arm.

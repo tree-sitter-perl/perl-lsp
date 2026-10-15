@@ -223,11 +223,67 @@ fn unknown_absorbs_in_return_arm_agreement() {
 #[test]
 fn an_undef_arm_does_not_wrap_unknown_in_optional() {
     // `Optional<Unknown>` would claim a value half nothing supports.
-    assert_eq!(join_return_arms(&[InferredType::Unknown], true), Some(InferredType::Unknown));
+    assert_eq!(join_return_arms(&[InferredType::Unknown], true, &Unordered), Some(InferredType::Unknown));
     // The rule for a KNOWN value arm is untouched.
     assert_eq!(
-        join_return_arms(&[InferredType::ClassName("Foo".into())], true),
+        join_return_arms(&[InferredType::ClassName("Foo".into())], true, &Unordered),
         Some(InferredType::Optional(Box::new(InferredType::ClassName("Foo".into())))),
+    );
+}
+
+/// `Dog isa Animal`, nothing else.
+struct DogIsAnimal;
+
+impl ClassOrder for DogIsAnimal {
+    fn isa(&self, child: &str, ancestor: &str) -> bool {
+        child == ancestor || (child == "Dog" && ancestor == "Animal")
+    }
+}
+
+#[test]
+fn join_takes_the_ancestor_of_related_classes() {
+    let dog = InferredType::ClassName("Dog".into());
+    let animal = InferredType::ClassName("Animal".into());
+    assert_eq!(join(&dog, &animal, &DogIsAnimal), Some(animal.clone()));
+    assert_eq!(join(&animal, &dog, &DogIsAnimal), Some(animal.clone()));
+    // Unrelated classes have no element above both short of a union.
+    assert_eq!(join(&dog, &InferredType::ClassName("Cat".into()), &DogIsAnimal), None);
+    // Without an order, distinct classes stay unrelated.
+    assert_eq!(join(&dog, &animal, &Unordered), None);
+}
+
+#[test]
+fn join_lifts_a_plain_arm_into_an_optional() {
+    let foo = InferredType::ClassName("Foo".into());
+    let opt = InferredType::Optional(Box::new(foo.clone()));
+    assert_eq!(join(&opt, &foo, &Unordered), Some(opt.clone()));
+    assert_eq!(join(&foo, &opt, &Unordered), Some(opt));
+}
+
+#[test]
+fn join_of_keyed_hashes_is_commutative_and_sorted() {
+    let hash = |ks: &[(&str, Option<InferredType>)]| InferredType::HashWithKeys {
+        keys: ks.iter().map(|(k, v)| (k.to_string(), v.clone().map(Box::new))).collect(),
+        open: false,
+    };
+    let a = hash(&[("port", Some(InferredType::Numeric)), ("host", Some(InferredType::String))]);
+    let b = hash(&[("user", None), ("port", Some(InferredType::String))]);
+    let ab = join(&a, &b, &Unordered).unwrap();
+    assert_eq!(Some(ab.clone()), join(&b, &a, &Unordered));
+    // A key whose values disagree is `Unknown`, so a third arm can't
+    // resurrect a type for it: the join stays associative.
+    assert_eq!(
+        ab,
+        hash(&[
+            ("host", Some(InferredType::String)),
+            ("port", Some(InferredType::Unknown)),
+            ("user", None),
+        ])
+    );
+    let c = hash(&[("port", Some(InferredType::Numeric))]);
+    assert_eq!(
+        join(&ab, &c, &Unordered),
+        join(&a, &join(&b, &c, &Unordered).unwrap(), &Unordered)
     );
 }
 

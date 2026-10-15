@@ -1097,67 +1097,111 @@ pub enum TypeProvenance {
     FrameworkSynthesis { framework: String, reason: String },
 }
 
-/// Resolve a return type from a list of inferred types (one per return statement).
-///
-/// Rules (from spec):
-/// - All agree → that type
-/// - Object subsumes HashRef (overloaded objects are common)
-/// - Disagreement → None (Unknown)
-///
-/// The input should already have bare returns / undef filtered out.
-pub fn resolve_return_type(return_types: &[InferredType]) -> Option<InferredType> {
-    if return_types.is_empty() {
-        return None;
+/// The class order a join reads: whether one class is an instance of
+/// another. The lattice itself knows nothing of inheritance.
+pub trait ClassOrder {
+    /// `child` is `ancestor` or inherits from it.
+    fn isa(&self, child: &str, ancestor: &str) -> bool;
+}
+
+/// No inheritance in hand: a class is an instance only of itself.
+pub struct Unordered;
+
+impl ClassOrder for Unordered {
+    fn isa(&self, child: &str, ancestor: &str) -> bool {
+        child == ancestor
     }
-    let first = &return_types[0];
-    if return_types.iter().all(|t| t == first) {
-        return Some(first.clone());
+}
+
+/// The least upper bound of two types: the one value-flow join every fold
+/// reads (return arms, ternary and `||` arms, slot writes). `None`: the
+/// lattice has no element above both short of a union.
+///
+/// - equal → that type; `Unknown` absorbs (an arm nothing can name makes the
+///   join something nothing can name)
+/// - `Optional<T>` ⊔ U → `Optional<T ⊔ U>`
+/// - a class and one of its ancestors → the ancestor
+/// - an object over a hash shape → the object (overloaded hash access is
+///   common in Perl)
+/// - two keyed hashes → every key either holds, sorted by key so the join
+///   is commutative and its bytes don't depend on arm order; each key's
+///   values joined (values that don't join are `Unknown`, which absorbs, so
+///   a later arm can't resurrect a type the key disagreed on). Other
+///   hash shapes → `HashRef`; array shapes → `ArrayRef`
+/// - `Bool` ⊔ `Numeric` → `Numeric` (truth is `1`/`''`)
+pub fn join(a: &InferredType, b: &InferredType, order: &dyn ClassOrder) -> Option<InferredType> {
+    use InferredType as T;
+    if a == b {
+        return Some(a.clone());
     }
-    // `Unknown` absorbs: an arm nothing can name makes the join something
-    // nothing can name. Not `None` — that reads as "no arms agree" and lets
-    // a lone typed arm answer for the sub — and not a candidate for the
-    // coarse joins below, which would dress it up as `HashRef` or `Numeric`.
-    if return_types.iter().any(|t| !t.is_known()) {
+    if !a.is_known() || !b.is_known() {
+        return Some(T::Unknown);
+    }
+    match (a, b) {
+        (T::Optional(x), T::Optional(y)) => return join(x, y, order).map(|t| T::Optional(Box::new(t))),
+        (T::Optional(x), y) | (y, T::Optional(x)) => {
+            return join(x, y, order).map(|t| match t {
+                T::Optional(_) => t,
+                t => T::Optional(Box::new(t)),
+            })
+        }
+        _ => {}
+    }
+    match (a.class_name(), b.class_name()) {
+        // TODO(brand-join): one class spelled two ways (a mark, a
+        // parametric flavor) is a disagreement until the join agrees on
+        // the base and keeps the shared marks (docs/adr/brands.md).
+        (Some(x), Some(y)) if x == y => return None,
+        (Some(x), Some(y)) if order.isa(x, y) => return Some(b.clone()),
+        (Some(x), Some(y)) if order.isa(y, x) => return Some(a.clone()),
+        (Some(_), Some(_)) => return None,
+        (Some(_), None) if b.is_hash_shaped() => return Some(a.clone()),
+        (None, Some(_)) if a.is_hash_shaped() => return Some(b.clone()),
+        (Some(_), None) | (None, Some(_)) => return None,
+        (None, None) => {}
+    }
+    match (a, b) {
+        (T::HashWithKeys { keys: ka, open: oa }, T::HashWithKeys { keys: kb, open: ob }) => {
+            let mut keys: Vec<(String, Option<Box<T>>)> = ka.iter().cloned().collect();
+            for (k, vb) in kb.iter() {
+                match keys.iter_mut().find(|(have, _)| have == k) {
+                    Some(slot) => {
+                        slot.1 = match (&slot.1, vb) {
+                            (Some(x), Some(y)) => Some(Box::new(join(x, y, order).unwrap_or(T::Unknown))),
+                            (x, y) => x.clone().or_else(|| y.clone()),
+                        }
+                    }
+                    None => keys.push((k.clone(), vb.clone())),
+                }
+            }
+            keys.sort_by(|x, y| x.0.cmp(&y.0));
+            Some(T::HashWithKeys { keys: SharedKeys::new(keys), open: *oa || *ob })
+        }
+        _ if a.is_hash_shaped() && b.is_hash_shaped() => Some(T::HashRef),
+        _ if a.is_array_shaped() && b.is_array_shaped() => Some(T::ArrayRef),
+        (T::Bool | T::Numeric, T::Bool | T::Numeric) => Some(T::Numeric),
+        // TODO(union-join): the one place a union enters the lattice
+        // (docs/open-forks.md, "Union types in the lattice").
+        _ => None,
+    }
+}
+
+/// `join` over every type in `types`; `None` for an empty list.
+pub fn join_all(types: &[InferredType], order: &dyn ClassOrder) -> Option<InferredType> {
+    let (first, rest) = types.split_first()?;
+    // Absorption first: an unnameable value anywhere decides the join even
+    // where two others would not join.
+    if types.iter().any(|t| !t.is_known()) {
         return Some(InferredType::Unknown);
     }
-    // All arms hash-shaped but structurally different (`{a=>1}` vs
-    // `{b=>2}`) → degrade to the coarse HashRef rather than Unknown.
-    if return_types.iter().all(|t| t.is_hash_shaped()) {
-        return Some(InferredType::HashRef);
-    }
-    // Same rule for arrays: structurally different tuples agree on the
-    // coarse ArrayRef.
-    if return_types.iter().all(|t| t.is_array_shaped()) {
-        return Some(InferredType::ArrayRef);
-    }
-    // Bool is a sub-lattice of Numeric in Perl (truth is `1`/`''`), so a
-    // sub whose arms mix a comparison (`Bool`) with a plain number
-    // (`Numeric`) is coherently number-ish — join to the coarser Numeric
-    // rather than degrading to Unknown. All-Bool already returned via the
-    // exact-equal check above, so this only fires on a genuine mix.
-    if return_types
-        .iter()
-        .all(|t| matches!(t, InferredType::Bool | InferredType::Numeric))
-    {
-        return Some(InferredType::Numeric);
-    }
-    // Object subsumes HashRef: if some returns are Object(X) and others are
-    // hash-shaped, the Object wins (overloaded hash access is common in Perl).
-    let mut object: Option<InferredType> = None;
-    for t in return_types {
-        if t.is_object() {
-            // Two different classes are a disagreement, not a choice of the
-            // arm that came last (`WP_Term` vs `WP_Error`).
-            if object.as_ref().is_some_and(|o| o != t) {
-                return None;
-            }
-            object = Some(t.clone());
-        } else if !t.is_hash_shaped() {
-            // Non-hash, non-Object disagreement → Unknown
-            return None;
-        }
-    }
-    object
+    rest.iter().try_fold(first.clone(), |acc, t| join(&acc, t, order))
+}
+
+/// The return type of a sub whose return statements yield `return_types`
+/// (bare returns / undef filtered out): their `join_all`, with no class
+/// order in hand.
+pub fn resolve_return_type(return_types: &[InferredType]) -> Option<InferredType> {
+    join_all(return_types, &Unordered)
 }
 
 /// Join return/branch arms where some arm may be `undef` (a bare
@@ -1168,8 +1212,12 @@ pub fn resolve_return_type(return_types: &[InferredType]) -> Option<InferredType
 /// unchanged; genuinely-conflicting value arms (`Foo` vs `Bar`) stay
 /// `None` (no arbitrary union); only-undef arms stay `None` (no useful
 /// value type). See `docs/adr/optional-types.md`.
-pub fn join_return_arms(value_types: &[InferredType], has_undef_arm: bool) -> Option<InferredType> {
-    let base = resolve_return_type(value_types);
+pub fn join_return_arms(
+    value_types: &[InferredType],
+    has_undef_arm: bool,
+    order: &dyn ClassOrder,
+) -> Option<InferredType> {
+    let base = join_all(value_types, order);
     match base {
         // `Optional<Unknown>` would be a claim ("maybe undef, else a value")
         // whose value half nothing supports; the undef arm folds into the
