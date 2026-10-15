@@ -181,14 +181,13 @@ impl Backend {
             files,
             change_debounce: Arc::new(dashmap::DashMap::new()),
             diag_debounce: Arc::new(dashmap::DashMap::new()),
-            perl_indexed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            pack_indexed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            indexed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             work_done_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             type_hierarchy_dynamic: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pack_invalidator: Arc::new(crate::index::pack_invalidator::PackInvalidator::default()),
             diag_options,
             rename_options: Arc::new(std::sync::Mutex::new(crate::index::resolve::RenameOptions::default())),
-            index_ready: Arc::new(IndexReady::default()),
+            index_ready: Arc::new(ReadyGate::default()),
             cold_wait_ms: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_COLD_WAIT_MS)),
             max_cache_mb: Arc::new(std::sync::atomic::AtomicU64::new(max_cache_mb_default())),
             opening: Arc::new(dashmap::DashMap::new()),
@@ -333,7 +332,7 @@ impl Backend {
             module_index: Arc::clone(&self.module_index),
             client: self.client.clone(),
             options: self.diagnostic_options(),
-            perl_indexed: Arc::clone(&self.perl_indexed),
+            indexed: Arc::clone(&self.indexed),
             index_ready: Arc::clone(&self.index_ready),
         }
     }
@@ -400,8 +399,8 @@ pub(super) struct DiagCtx {
     module_index: Arc<ModuleIndex>,
     client: Client,
     options: symbols::DiagnosticOptions,
-    perl_indexed: Arc<std::sync::atomic::AtomicBool>,
-    index_ready: Arc<IndexReady>,
+    indexed: Arc<std::sync::atomic::AtomicBool>,
+    index_ready: Arc<ReadyGate>,
 }
 
 impl DiagCtx {
@@ -485,8 +484,7 @@ impl DiagCtx {
                 // publish deferred is in the store by the time the sweep
                 // runs — nothing can slip between.
                 use std::sync::atomic::Ordering;
-                if self.perl_indexed.load(Ordering::Relaxed)
-                    && !self.index_ready.perl.is_open()
+                if self.indexed.load(Ordering::Relaxed) && !self.index_ready.is_open()
                 {
                     crate::util::ghost_stats::count("publish_diagnostics.deferred");
                     return;
@@ -578,7 +576,7 @@ fn make_on_refresh(
                 let files = Arc::clone(&files);
                 let module_index = Arc::clone(module_index);
                 tokio::task::spawn_blocking(move || {
-                    refresh_open_diagnostics(&files, &module_index, options, OpenDocScope::All)
+                    refresh_open_diagnostics(&files, &module_index, options)
                 })
                 .await
                 .unwrap_or_default()
@@ -590,16 +588,6 @@ fn make_on_refresh(
     }
 }
 
-/// Which open docs a bulk diagnostics refresh covers.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum OpenDocScope {
-    /// Every open doc (the resolver refresh storm — hub-enriched docs
-    /// re-enrich, the rest re-read).
-    All,
-    /// Hub-enriched docs only (the hub-family cold-open heal).
-    PerlFamily,
-}
-
 /// Re-derive diagnostics for open docs: hub-enriched docs re-enrich through
 /// `FileStore::enrich_open` (the one enrichment writer) and are read from
 /// the returned artifact; the rest are read as-is. URIs are collected
@@ -609,7 +597,6 @@ pub(super) fn refresh_open_diagnostics(
     files: &FileStore,
     module_index: &ModuleIndex,
     options: symbols::DiagnosticOptions,
-    scope: OpenDocScope,
 ) -> Vec<(Url, Vec<Diagnostic>)> {
     crate::util::ghost_stats::count("refresh_open_diagnostics");
     let mut docs: Vec<(Url, &'static str)> = Vec::new();
@@ -617,9 +604,7 @@ pub(super) fn refresh_open_diagnostics(
         crate::build::language_driver::LanguageRegistry::caps(language).hub_enrichment
     };
     files.for_each_open(|uri, doc| {
-        if scope == OpenDocScope::All || hub(doc.language) {
-            docs.push((uri.clone(), doc.language));
-        }
+        docs.push((uri.clone(), doc.language));
     });
     let mut pending: Vec<(Url, Vec<Diagnostic>)> = Vec::new();
     for (uri, language) in docs {

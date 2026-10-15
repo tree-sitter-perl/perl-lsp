@@ -23,7 +23,7 @@ mod query;
 mod server;
 
 /// Default bounded-wait cap for the cold-open pull-verb heal (ms). A gd/hover/
-/// references issued while the family index is in-flight blocks up to this long
+/// references issued while the workspace index is in-flight blocks up to this long
 /// awaiting completion, then resolves warm; 0 opts out. Overridable via
 /// `initializationOptions.coldWaitMs`.
 const DEFAULT_COLD_WAIT_MS: u64 = 400;
@@ -44,34 +44,17 @@ pub fn max_cache_mb_default() -> u64 {
         .unwrap_or(DEFAULT_MAX_CACHE_MB)
 }
 
-/// Per-language-family completion signal for the cold-open bounded wait. The
-/// KICKOFF latch (`perl_indexed`/`pack_indexed`) flips synchronously on the
-/// first `did_open`; these gates open on COMPLETION — the workspace/pack index
-/// has attached and `heal_open_docs` ran. A pull verb arriving in the
-/// in-flight window (latch set, gate closed) arms the family's `ReadyGate`
-/// and waits bounded. Touched only via the gate's atomics + `Notify` — never
-/// behind a FileStore guard — so the wait is deadlock-safe by construction.
-#[derive(Default)]
-struct IndexReady {
-    perl: ReadyGate,
-    pack: ReadyGate,
-}
-
-/// Fires the family's completion signal on EVERY exit path of the indexing
-/// task (including the no-root early-out and a panic), so a bounded waiter is
-/// never left blocking for an index that will never announce.
+/// Fires the index's completion signal (`Backend::index_ready`) on EVERY exit
+/// path of the indexing task (including the no-root early-out and a panic),
+/// so a bounded waiter is never left blocking for an index that will never
+/// announce.
 struct IndexDoneGuard {
-    ready: Arc<IndexReady>,
-    want_perl: bool,
+    ready: Arc<ReadyGate>,
 }
 
 impl Drop for IndexDoneGuard {
     fn drop(&mut self) {
-        if self.want_perl {
-            self.ready.perl.open();
-        } else {
-            self.ready.pack.open();
-        }
+        self.ready.open();
     }
 }
 
@@ -91,13 +74,9 @@ pub struct Backend {
     /// sharing one `DebouncedLatest` would let a diagnostics fire supersede
     /// a pending pack rebuild (and vice versa).
     diag_debounce: Arc<dashmap::DashMap<Url, Arc<ChangeGate>>>,
-    /// Workspace indexing is LAZY + per-language: a family's index runs on the
-    /// first `did_open` of a file in it, not eagerly at `initialized`. So a C++
-    /// session in a mixed tree (e.g. perl5) never pays to index the 4000+ `.pm`
-    /// files it can't use — that eager perl scan was the multi-minute first-open
-    /// stall. One-shot latches, swap-guarded.
-    perl_indexed: Arc<std::sync::atomic::AtomicBool>,
-    pack_indexed: Arc<std::sync::atomic::AtomicBool>,
+    /// Workspace indexing is LAZY: it runs on the first `did_open`, not
+    /// eagerly at `initialized`. The KICKOFF latch — one-shot, swap-guarded.
+    indexed: Arc<std::sync::atomic::AtomicBool>,
     /// Did the client advertise `window.workDoneProgress`? Server-initiated
     /// progress (`window/workDoneProgress/create`) is only legal — and only
     /// useful — when it did; sending it anyway wedges indexing behind a
@@ -126,8 +105,13 @@ pub struct Backend {
     /// same pattern as `diag_options`). `overrideScope = "dispatch"` picks the
     /// precise method-override scope; default is the whole-hierarchy family.
     rename_options: Arc<std::sync::Mutex<crate::index::resolve::RenameOptions>>,
-    /// Cold-open bounded-wait completion signals per language family.
-    index_ready: Arc<IndexReady>,
+    /// Cold-open bounded-wait completion signal. `indexed` flips at kickoff;
+    /// this opens on COMPLETION — the index has landed and `heal_open_docs`
+    /// ran. A pull verb arriving in between (latch set, gate closed) arms it
+    /// and waits bounded. Touched only via the gate's atomics + `Notify` —
+    /// never behind a FileStore guard — so the wait is deadlock-safe by
+    /// construction.
+    index_ready: Arc<ReadyGate>,
     /// Bounded-wait cap (ms) for the cold-open pull-verb heal; 0 disables it.
     /// Set from `initializationOptions.coldWaitMs`, default `DEFAULT_COLD_WAIT_MS`.
     cold_wait_ms: Arc<std::sync::atomic::AtomicU64>,
