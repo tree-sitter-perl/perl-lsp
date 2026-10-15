@@ -354,25 +354,21 @@ fn test_resolve_return_type_object_subsumes_hashref() {
 
 #[test]
 fn test_resolve_return_type_object_does_not_subsume_arrayref() {
-    // Object + ArrayRef → disagreement
-    assert_eq!(
-        resolve_return_type(&[
-            InferredType::ClassName("Foo".into()),
-            InferredType::ArrayRef,
-        ]),
-        None,
-    );
+    // Object + ArrayRef → their union, not the object
+    let t = resolve_return_type(&[InferredType::ClassName("Foo".into()), InferredType::ArrayRef]).unwrap();
+    assert!(matches!(&t, InferredType::Union(arms) if arms.len() == 2), "got {t:?}");
 }
 
 #[test]
 fn test_resolve_return_type_two_classes_disagree() {
+    // Two classes union; the hash folds into them.
     assert_eq!(
         resolve_return_type(&[
             InferredType::ClassName("Foo".into()),
             InferredType::HashRef,
             InferredType::ClassName("Bar".into()),
         ]),
-        None,
+        Some(join(&InferredType::ClassName("Bar".into()), &InferredType::ClassName("Foo".into()), &Unordered)),
     );
 }
 

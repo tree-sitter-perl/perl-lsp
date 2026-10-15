@@ -14,6 +14,14 @@ fn class(t: Option<InferredType>) -> Option<String> {
     t.and_then(|t| t.class_name().map(str::to_string))
 }
 
+fn either(a: &str, b: &str) -> InferredType {
+    crate::model::file_analysis::join(
+        &InferredType::ClassName(a.into()),
+        &InferredType::ClassName(b.into()),
+        &crate::model::file_analysis::Unordered,
+    )
+}
+
 #[test]
 fn an_assignment_is_worth_the_value_it_stores() {
     for body in [
@@ -78,8 +86,8 @@ fn a_fallback_assignment_is_its_short_circuit_spelling() {
         let spelled = format!("my $s = Bar->new; $s = $s {op} Baz->new; return $s");
         assert_eq!(returns(&compound), returns(&spelled), "{compound}");
         // Writing the fallback says the author expects it to run, so the
-        // arms join; with no union yet, disagreeing arms answer the floor.
-        assert_eq!(class(returns(&compound)).as_deref(), Some("Baz"), "{compound}");
+        // arms join: either value can be what the target holds.
+        assert_eq!(returns(&compound), Some(either("Bar", "Baz")), "{compound}");
         // An untypeable fallback leaves the join unknown.
         let untyped = format!("my $s = Bar->new; $s {op}= nothing(); return $s");
         assert_eq!(class(returns(&untyped)), None, "{untyped}");
@@ -94,7 +102,7 @@ fn an_overloaded_bool_reaches_the_fallback() {
 package Foo; sub new { bless {}, shift }\n\
 sub probe { my $f = FalseObj->new; return $f || Foo->new }\n1;\n";
     let got = build_fa(src).sub_return_type_at_arity("probe", None);
-    assert_eq!(class(got).as_deref(), Some("Foo"));
+    assert_eq!(got, Some(either("FalseObj", "Foo")));
 }
 
 #[test]
@@ -151,9 +159,8 @@ sub g6 { my $x = maybe(1); return unless defined $x; $x ||= Baz->new; return $x 
     let fa = build_fa(src);
     let ret = |s: &str| fa.sub_return_type_at_arity(s, None);
     let bar = || InferredType::ClassName("Bar".into());
-    // The implicit read sees the guard's narrowing, and the arms join to
-    // the floor.
-    assert_eq!(ret("g1"), Some(InferredType::ClassName("Baz".into())));
+    // The implicit read sees the guard's narrowing, and the arms join.
+    assert_eq!(ret("g1"), Some(either("Bar", "Baz")));
     // The RHS reads the narrowed value; the write then ends the region.
     assert_eq!(ret("g2"), Some(InferredType::ClassName("Baz".into())));
     assert_eq!(ret("g3"), Some(InferredType::String));
@@ -162,9 +169,8 @@ sub g6 { my $x = maybe(1); return unless defined $x; $x ||= Baz->new; return $x 
     // An optional LHS falls back to the RHS floor.
     assert_eq!(ret("g5"), Some(bar()));
     // `defined` strips the Optional up to the write, then the `||=` arms
-    // join to the floor; the sub is Optional only because of its bare
-    // `return`.
-    assert_eq!(ret("g6"), Some(InferredType::Optional(Box::new(InferredType::ClassName("Baz".into())))));
+    // join; the sub is Optional only because of its bare `return`.
+    assert_eq!(ret("g6"), Some(InferredType::Optional(Box::new(either("Bar", "Baz")))));
 }
 
 
@@ -176,12 +182,15 @@ fn element_writes_extend_an_empty_hash() {
         ("my %h = (); $h{k} = Bar->new; return $h{k};", Some("Bar")),
         ("my $h = {}; $h->{k} ||= Bar->new; return $h->{k};", Some("Bar")),
         ("my $h = {}; $h->{k} //= Bar->new; return $h->{k};", Some("Bar")),
-        ("my $h = {}; $h->{k} = Bar->new; $h->{k} ||= Baz->new; return $h->{k};", Some("Baz")),
         // A write the walk can't pin to one key leaves the key untyped.
         ("my $h = {}; $h->{$_} = Bar->new for 1; return $h->{k};", None),
     ] {
         assert_eq!(class(returns(body)).as_deref(), want, "{body}");
     }
+    assert_eq!(
+        returns("my $h = {}; $h->{k} = Bar->new; $h->{k} ||= Baz->new; return $h->{k};"),
+        Some(either("Bar", "Baz")),
+    );
     assert_eq!(returns("my $h = {}; $h->{k} .= 'x'; return $h->{k};"), Some(InferredType::String));
     // The memoized-accessor idiom on a file-level cache.
     let src = format!("{PRELUDE}my $cache = {{}};\nsub user {{ $cache->{{user}} ||= Bar->new }}\n1;\n");

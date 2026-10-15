@@ -770,10 +770,11 @@ fn test_return_type_implicit_last_expr() {
 }
 
 #[test]
-fn test_return_type_conflicting_returns_unknown() {
-    // Two returns with different types → None (unknown)
+fn test_return_type_conflicting_returns_union() {
+    // Two returns with different shapes → their union
     let fa = build_fa("sub ambiguous {\n    if (1) { return {} }\n    return [];\n}");
-    assert_eq!(fa.sub_return_type_at_arity("ambiguous", None), None);
+    let t = fa.sub_return_type_at_arity("ambiguous", None).unwrap();
+    assert!(matches!(&t, InferredType::Union(arms) if arms.len() == 2), "got {t:?}");
 }
 
 #[test]
