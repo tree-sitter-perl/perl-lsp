@@ -18,14 +18,14 @@
 # load); post-fix it is 0/N.
 #
 # Usage:  N=20 e2e/cold-start-repro.sh          # N defaults to 20
-#         Assumes a `--features all-langs` release build already exists.
+#         Assumes a `--features cpp` release build already exists.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 N="${N:-20}"
 BIN="${PERL_LSP_BIN:-$PWD/target/release/perl-lsp}"
 if [[ ! -x "$BIN" ]]; then
-  echo "missing binary $BIN — run: cargo build --release --features all-langs" >&2
+  echo "missing binary $BIN — run: cargo build --release --features cpp" >&2
   exit 2
 fi
 

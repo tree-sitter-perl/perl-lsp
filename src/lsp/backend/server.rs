@@ -181,11 +181,12 @@ impl LanguageServer for Backend {
                 // --linked-editing.
                 linked_editing_range_provider: None,
                 completion_provider: Some(CompletionOptions {
-                    // Union of every served language's trigger chars — Perl
-                    // sigils/`->`/`{`, plus a pack language's `.`/`::` etc.
-                    // A perl-only build is byte-identical to the old list.
                     trigger_characters: Some(
-                        crate::build::language_driver::LanguageRegistry::with_enabled().trigger_chars(),
+                        crate::build::language_driver::LanguageRegistry::served()
+                            .trigger_chars()
+                            .iter()
+                            .map(|c| c.to_string())
+                            .collect(),
                     ),
                     ..Default::default()
                 }),
@@ -231,7 +232,7 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        // Pre-warm each pack language's skeleton-query compilation OFF the
+        // Pre-warm a pack language's skeleton-query compilation OFF the
         // message loop, FIRST — before any `.await` that depends on the client
         // answering (register_capability), so the warm-up starts even if the
         // client is slow to respond. `Query::new` is a ~180ms one-time cost
@@ -243,10 +244,10 @@ impl LanguageServer for Backend {
         // into the driver's `OnceLock`; Perl's query warms on its normal first
         // build. Correctness-inert: it only populates the cache earlier.
         tokio::task::spawn_blocking(|| {
-            let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
-            // Only pack-served drivers compile a query engine worth warming
-            // (the reference driver warms on its normal first build).
-            for driver in reg.pack_drivers() {
+            let driver = crate::build::language_driver::LanguageRegistry::served();
+            // Only a pack driver compiles a query engine worth warming (Perl
+            // warms on its normal first build).
+            if driver.lang_pack().is_some() {
                 // A non-trivial snippet so `parser.parse` yields a tree and
                 // the analyze reaches `query_extract::extract` (which is
                 // where `Query::new` fires); empty source can parse to
@@ -259,21 +260,18 @@ impl LanguageServer for Backend {
             .log_message(MessageType::INFO, "perl-lsp initialized")
             .await;
 
-        // Register file watchers for workspace indexing — every served
-        // language's extensions (Perl + pack languages), so out-of-editor
-        // changes to a header/pack file reach the invalidation path too.
-        let watchers: Vec<FileSystemWatcher> = {
-            let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
-            reg.languages()
-                .into_iter()
-                .filter_map(|id| reg.for_id(id))
-                .flat_map(|d| d.extensions().iter())
+        // Register file watchers for workspace indexing — the served
+        // language's extensions, so out-of-editor changes reach the
+        // re-index / invalidation path too.
+        let watchers: Vec<FileSystemWatcher> =
+            crate::build::language_driver::LanguageRegistry::served()
+                .extensions()
+                .iter()
                 .map(|ext| FileSystemWatcher {
                     glob_pattern: GlobPattern::String(format!("**/*.{ext}")),
                     kind: None,
                 })
-                .collect()
-        };
+                .collect();
         let mut registrations = vec![Registration {
             id: "perl-file-watcher".to_string(),
             method: "workspace/didChangeWatchedFiles".to_string(),
@@ -1628,24 +1626,20 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
-        // Route by the driver's declared invalidation owner: an
+        // Route by the served driver's declared invalidation owner: an
         // invalidator-owned language goes through the invalidation seam
-        // (re-register + reverse-closure eviction); the rest take the hub's
+        // (re-register + reverse-closure eviction); otherwise the hub's
         // direct re-index.
+        let invalidator_owned = crate::build::language_driver::LanguageRegistry::served()
+            .caps()
+            .pack_invalidation;
         let mut perl_changes: Vec<(PathBuf, FileChangeType)> = Vec::new();
-        {
-            let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
-            for change in params.changes {
-                let Ok(path) = change.uri.to_file_path() else { continue };
-                match reg.for_path(&path) {
-                    Some(d) if d.caps().pack_invalidation => {
-                        self.schedule_pack_invalidate(
-                            path,
-                            change.typ == FileChangeType::DELETED,
-                        );
-                    }
-                    _ => perl_changes.push((path, change.typ)),
-                }
+        for change in params.changes {
+            let Ok(path) = change.uri.to_file_path() else { continue };
+            if invalidator_owned {
+                self.schedule_pack_invalidate(path, change.typ == FileChangeType::DELETED);
+            } else {
+                perl_changes.push((path, change.typ));
             }
         }
         self.reindex_saved_perl(perl_changes).await;

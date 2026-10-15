@@ -34,8 +34,10 @@ path = "src/main.rs"
 default = []
 # Pack-language drivers, opt-in. Perl is always built (the reference
 # driver + the gold-corpus regression net). A `cpp-lsp` distribution is
-# `--features cpp`; the grammar is a runtime dep only under its feature,
-# so the default Perl build never links it.
+# `--features cpp`, run as `perl-lsp --lang cpp`: a process serves ONE
+# language, so a build with several features is several servers in one
+# binary, never one server for several languages. The grammar is a runtime
+# dep only under its feature, so the default Perl build never links it.
 cpp = ["dep:tree-sitter-cpp", "pack-langs"]
 python = ["dep:tree-sitter-python", "pack-langs"]
 r = ["dep:tree-sitter-r", "pack-langs"]
@@ -45,8 +47,6 @@ cmake = ["dep:tree-sitter-cmake", "pack-langs"]
 # extractor, the pack drivers' shared plumbing) is gated on this, so a new
 # language is one feature row and no cfg edits.
 pack-langs = []
-# All pack languages — a maximal multi-language build.
-all-langs = ["cpp", "python", "r", "cmake"]
 # Compile the workspace-scale `refs_to` perf bench
 # (`bench_refs_to_invocant_resolution`). Off by default so the
 # regular `cargo test` doesn't carry a long-running synthetic

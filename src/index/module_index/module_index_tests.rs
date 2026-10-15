@@ -464,7 +464,7 @@ fn test_children_index_survives_warm_rebuild_and_purge() {
 #[test]
 fn get_cached_scoped_prefers_reachable_same_name_class() {
     use std::collections::HashSet;
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
     let a = Arc::new(driver.analyze_with_path(
         "class Box { public: void a_only(); };\n",
@@ -501,7 +501,7 @@ fn get_cached_scoped_prefers_reachable_same_name_class() {
 #[test]
 fn visible_defs_with_prefix_gates_on_closure() {
     use std::collections::HashSet;
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
     let header = Arc::new(driver.analyze_with_path(
         "enum opcode { OP_NULL, OP_SCOPE };\nint op_name(int t);\n",
@@ -540,7 +540,7 @@ fn visible_defs_with_prefix_gates_on_closure() {
 #[test]
 fn unregister_file_removes_defs_and_repicks_winner() {
     use std::collections::HashSet;
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
     let a = Arc::new(driver.analyze_with_path(
         "class Box { public: void a_only(); };\n",
@@ -578,7 +578,7 @@ fn unregister_file_removes_defs_and_repicks_winner() {
 #[cfg(feature = "cpp")]
 #[test]
 fn edit_swap_drops_names_the_new_version_lost() {
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
     let v1 = Arc::new(driver.analyze_with_path(
         "class Box { public: int w; };\nint helper();\n",

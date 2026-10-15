@@ -31,13 +31,10 @@ order.
 existing position-taking subcommand EXACTLY; `positions.rs` owns the
 conversion and has its own tests.
 
-**2. `LanguageScope`, declared by the verb.** `cli_full_startup` takes
-it. `of_file(path)` for a verb with a target; `All` for one that sweeps
-the workspace. Over-indexing is wasted work; **UNDER-indexing is a
-quiet wrong answer**, because an unattached pack sub-index does not
-answer empty — `lookup_for` routes that language to the Perl hub.
-Adding a verb means choosing its scope, deliberately, and saying why in
-the code.
+**2. One language per process.** `cli_full_startup` indexes the served
+language only. A verb with a target file calls `lock_for_file` before
+startup (its file picks the language unless `--lang` did); a sweep verb
+serves the `--lang` language, Perl without one.
 
 **3. Streams.** Chatter to stderr, data to stdout — the heatmap's
 pattern.
@@ -50,11 +47,11 @@ Each a small `cli_*` fn + a `--help` entry + tests; separate commits, in
 this order:
 
 1. `--completions <root> <file> <line> <col>` — the completion engine at
-   a position. Mirror `--signature-help`'s plumbing.
-   `LanguageScope::of_file`.
+   a position. Mirror `--signature-help`'s plumbing (`lock_for_file`).
 2. `--dependency-graph <root> [--format dot|json|list]` — module import
    edges from each FA's `imports`, plus parent edges as a distinct edge
-   kind; cycles via DFS, reported in all formats. `LanguageScope::All`.
+   kind; cycles via DFS, reported in all formats. Sweeps the served
+   language.
 3. `--export-api <root> <module> [--format json|markdown]` — exports,
    params, return types, parents, framework, from the cached FA.
    `--dump-package` is the debugging sibling; this is the user-facing
@@ -71,8 +68,8 @@ this order:
    Lowest priority; drop if time-boxed out.
 
 **Acceptance per subcommand:** a golden-output test on a fixture
-workspace; `--help` updated; stream discipline preserved; the
-`LanguageScope` choice justified in a comment.
+workspace; `--help` updated; stream discipline preserved; a file-target
+verb locks to its file's language (`lock_for_file`).
 
 ### Phase B — `--migrate` step 1: `use base` → `use parent`
 
@@ -128,16 +125,15 @@ phase — and record the measurement either way.**
 **Phase A is where a language decision gets made per verb, and Phases
 B–E are Perl-only by their nature. Both need saying out loud.**
 
-1. **Every Phase-A verb picks a `LanguageScope`, and three of them are
-   genuinely multi-language.** `--dependency-graph`, `--impact` and
-   `--framework-report` sweep the workspace and will encounter pack
-   files. Decide per verb whether the answer spans languages:
-   - `--dependency-graph`: a C++ `#include` edge and a Perl `use` edge
-     are both dependency edges. Emitting them in one graph is the
-     RIGHT answer for a mixed workspace, and it needs the edge kind
-     labeled. `LanguageScope::All`.
-   - `--impact`: same. The reverse index is per-language, so the verb
-     must ask each.
+1. **Every Phase-A verb answers in the served language.** A process
+   serves one language, so `--dependency-graph`, `--impact` and
+   `--framework-report` sweep that language's files only; a mixed
+   workspace runs the verb once per `--lang`. Decide per verb what the
+   answer means outside Perl:
+   - `--dependency-graph`: a C++ `#include` edge is a dependency edge
+     like a Perl `use`; under `--lang cpp` the graph is the include
+     graph.
+   - `--impact`: the served language's reverse index.
    - `--export-api`: `of_file`-ish — it names one module. But "module"
      is a Perl noun; for a pack language the addressable unit is a
      file/header. Either accept a path for pack languages or scope the
@@ -172,14 +168,10 @@ workspace-scale tools**. Warm LSP ready, by contrast, is scale-free
 
 Obligations:
 
-1. **Pick the narrowest honest `LanguageScope`.** This is not a
-   micro-optimization — the pack-indexing row (Tier 1 #6) measured a
-   synthetic Perl query at **−52% CPU** and the pack phase at
-   **936 ms → 0.11 ms** once the verb declared its scope. A new verb
-   defaulting to `All` when `of_file` would do is that cost, re-added.
-2. **Position-taking verbs (`--completions`) must use `of_file`** and
-   should be *fast* — they are the ones a user might script in a loop.
-3. **Sweeping verbs inherit the batch-verb caveat, and their `--help`
+1. **Position-taking verbs (`--completions`) lock to their file's
+   language** and should be *fast* — they are the ones a user might
+   script in a loop.
+2. **Sweeping verbs inherit the batch-verb caveat, and their `--help`
    should not pretend otherwise.** Match the honest framing already in
    `scaling-limits.md` §5 for `--heatmap`.
 4. **`--migrate --dry-run` over the gold substrate is both the honesty

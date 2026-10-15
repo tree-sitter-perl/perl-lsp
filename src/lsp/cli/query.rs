@@ -30,9 +30,7 @@ pub(crate) fn cli_check(args: &[String]) {
     // see `declare_enrichment_profile`. A server verb must not do this.
     file_analysis::declare_enrichment_profile(file_analysis::EnrichmentProfile::diagnostics());
 
-    // `--check` reports diagnostics for pack files too (the pack-index
-    // sweep below), so it needs every family.
-    let (ws, module_index) = cli_full_startup(root, language_driver::LanguageScope::All);
+    let (ws, module_index) = cli_full_startup(root);
 
     // Dump the per-module breakdown before diagnostics output so the table
     // isn't buried under (and the early `exit(1)` below doesn't swallow it).
@@ -127,8 +125,7 @@ pub(crate) fn cli_hover_single_file(file: &str, line_str: &str, col_str: &str) {
     // language-agnostic set projection (matches the LSP); no index here, so
     // cross-file function hover is unavailable in this form (use the root
     // form for that).
-    let reg = language_driver::LanguageRegistry::with_enabled();
-    let driver = reg.driver_or_fallback(std::path::Path::new(file), &source);
+    let driver = language_driver::LanguageRegistry::served();
     let markdown = if !driver.caps().hover_info {
         let files = file_store::FileStore::new();
         let cs = resolve::resolve(
@@ -209,10 +206,8 @@ pub(crate) fn cli_cursor(q: &str, root: &str, rest: &[String]) {
         super::exit_with(2, "exit");
     });
     emit_pos_annotation(&target);
-    let (ws, idx) = cli_full_startup(
-        root,
-        language_driver::LanguageScope::of_file(std::path::Path::new(&target.file)),
-    );
+    super::lock_for_file(std::path::Path::new(&target.file));
+    let (ws, idx) = cli_full_startup(root);
     let req = BatchReq {
         id: String::new(),
         q: q.to_string(),
@@ -228,8 +223,8 @@ pub(crate) fn cli_cursor(q: &str, root: &str, rest: &[String]) {
 /// --document-link <root> <file> — the non-symbol clickable ranges (POD
 /// L<> links, comment URLs, string-path loads).
 pub(crate) fn cli_document_link(root: &str, file: &str) {
-    let (ws, idx) =
-        cli_full_startup(root, language_driver::LanguageScope::of_file(std::path::Path::new(file)));
+    super::lock_for_file(std::path::Path::new(file));
+    let (ws, idx) = cli_full_startup(root);
     let req = BatchReq {
         id: String::new(),
         q: "document-link".into(),
@@ -244,8 +239,8 @@ pub(crate) fn cli_document_link(root: &str, file: &str) {
 
 /// --semantic-tokens <root> <file> — token classification for the file.
 pub(crate) fn cli_semantic_tokens(root: &str, file: &str) {
-    let (ws, idx) =
-        cli_full_startup(root, language_driver::LanguageScope::of_file(std::path::Path::new(file)));
+    super::lock_for_file(std::path::Path::new(file));
+    let (ws, idx) = cli_full_startup(root);
     let req = BatchReq {
         id: String::new(),
         q: "semantic-tokens".into(),
@@ -268,13 +263,11 @@ fn cli_open_document(file: &str, idx: &module_index::ModuleIndex) -> document::D
         eprintln!("Cannot read {}: {}", file, e);
         super::exit_with(1, "exit");
     });
-    // Route by driver so the CLI cursor handlers (definition/references/
-    // highlight/…) match the LSP server. A hub-enriched language keeps the
-    // native constructor + enrichment (`Document::new` is the reference
+    // The served driver, as the LSP server opens it. A hub-enriched
+    // language keeps the native constructor + enrichment (`Document::new` is the reference
     // pipeline the hub's freshness/enrichment lanes are built around);
     // everything else goes through the generic driver constructor.
-    let reg = language_driver::LanguageRegistry::with_enabled();
-    let driver = reg.driver_or_fallback(std::path::Path::new(file), &text);
+    let driver = language_driver::LanguageRegistry::served();
     if !driver.caps().hub_enrichment {
         return tphase!("Document::new_routed", document::Document::new_routed(text, driver, Some(std::path::PathBuf::from(file))).unwrap_or_else(|| {
             eprintln!("Parse failed: {}", file);
@@ -394,6 +387,12 @@ fn run_one(
     if needs_file && (file.is_empty() || !std::path::Path::new(file).exists()) {
         return Err(format!("file not found: {}", file));
     }
+    if needs_file {
+        language_driver::LanguageRegistry::admits(
+            language_driver::LanguageRegistry::served(),
+            std::path::Path::new(file),
+        )?;
+    }
 
     match req.q.as_str() {
         "definition" => {
@@ -404,10 +403,8 @@ fn run_one(
             let uri = tower_lsp::lsp_types::Url::from_file_path(&abs)
                 .unwrap_or_else(|_| tower_lsp::lsp_types::Url::parse("file:///unknown").unwrap());
             // Store selection by driver id — `lookup_for` is the one
-            // speller (a language's own sub-index when attached, else the
-            // hub).
-            let reg = language_driver::LanguageRegistry::with_enabled();
-            let lang_id = reg.driver_or_fallback(std::path::Path::new(file), &source).id();
+            // speller.
+            let lang_id = language_driver::LanguageRegistry::served().id();
             let routed = idx.lookup_for(lang_id);
             let base_idx = routed.as_lookup();
             // `#include "x.h"` path → the resolved header (`#include` = `use`).
@@ -457,7 +454,7 @@ fn run_one(
             Err(format!("No definition found at {}:{}", req.line, req.col))
         }
         "references" => {
-            let (s, _t, mut analysis) = parse_file(file);
+            let (_s, _t, mut analysis) = parse_file(file);
             resolve_imports_blocking(idx, &analysis);
             analysis.enrich_imported_types_with_keys(Some(idx));
             let file_path = std::path::Path::new(file).canonicalize()
@@ -468,8 +465,7 @@ fn run_one(
             // server): a sub-indexed language must route to its own store —
             // the hub only knows Perl modules, so resolving/collecting
             // against it silently misses every cross-file cpp use.
-            let reg = language_driver::LanguageRegistry::with_enabled();
-            let lang_id = reg.driver_or_fallback(std::path::Path::new(file), &s).id();
+            let lang_id = language_driver::LanguageRegistry::served().id();
             let routed = idx.lookup_for(lang_id);
             let base_idx = routed.as_lookup();
             // `#include` reverse — "who includes this header" — owns the path
@@ -512,7 +508,7 @@ fn run_one(
             Ok(serde_json::to_string_pretty(&results).unwrap())
         }
         "implementations" => {
-            let (s, _t, mut analysis) = parse_file(file);
+            let (_s, _t, mut analysis) = parse_file(file);
             resolve_imports_blocking(idx, &analysis);
             analysis.enrich_imported_types_with_keys(Some(idx));
             let file_path = std::path::Path::new(file).canonicalize()
@@ -522,8 +518,7 @@ fn run_one(
             // Same store routing as the LSP handler, so the CLI mirror can't
             // diverge: the domain bridge (enum def → field-slot sites) and
             // the family/spec walks are one projection.
-            let reg = language_driver::LanguageRegistry::with_enabled();
-            let lang_id = reg.driver_or_fallback(std::path::Path::new(file), &s).id();
+            let lang_id = language_driver::LanguageRegistry::served().id();
             let routed = idx.lookup_for(lang_id);
             let _staged = ScopedWorkspaceEntry::insert(ws, file_path.clone(), analysis);
             let origin = ws.workspace_raw().get(&file_path).map(|r| r.value().clone())
@@ -550,8 +545,7 @@ fn run_one(
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
             // Same store routing + staging as goto-def; the projection is the
             // type axis of the same set (value type → dispatch class → def).
-            let reg = language_driver::LanguageRegistry::with_enabled();
-            let lang_id = reg.driver_or_fallback(std::path::Path::new(file), &s).id();
+            let lang_id = language_driver::LanguageRegistry::served().id();
             let routed = idx.lookup_for(lang_id);
             let _staged = ScopedWorkspaceEntry::insert(ws, abs.clone(), analysis);
             let origin = ws.workspace_raw().get(&abs).map(|r| r.value().clone())
@@ -575,12 +569,11 @@ fn run_one(
             Ok(lines.join("\n"))
         }
         "type-hierarchy" | "call-hierarchy" => {
-            let (s, _t, mut analysis) = parse_file(file);
+            let (_s, _t, mut analysis) = parse_file(file);
             resolve_imports_blocking(idx, &analysis);
             analysis.enrich_imported_types_with_keys(Some(idx));
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
-            let reg = language_driver::LanguageRegistry::with_enabled();
-            let lang_id = reg.driver_or_fallback(std::path::Path::new(file), &s).id();
+            let lang_id = language_driver::LanguageRegistry::served().id();
             let routed = idx.lookup_for(lang_id);
             let _staged = ScopedWorkspaceEntry::insert(ws, abs.clone(), analysis);
             let origin = ws.workspace_raw().get(&abs).map(|r| r.value().clone())
@@ -665,8 +658,7 @@ fn run_one(
             // A language without the analysis-native `hover_info` renderer
             // presents the CandidateSet's hover projection (matches the LSP
             // server — the same construction goto-def uses).
-            let reg = language_driver::LanguageRegistry::with_enabled();
-            let driver = reg.driver_or_fallback(std::path::Path::new(file), &source);
+            let driver = language_driver::LanguageRegistry::served();
             if !driver.caps().hover_info {
                 let lang = driver.id();
                 let routed = idx.lookup_for(lang);
@@ -840,8 +832,7 @@ fn run_one(
             let text = std::fs::read_to_string(file)
                 .map_err(|e| format!("Cannot read {}: {}", file, e))?;
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
-            let reg = language_driver::LanguageRegistry::with_enabled();
-            let lang_id = reg.driver_or_fallback(std::path::Path::new(file), &text).id();
+            let lang_id = language_driver::LanguageRegistry::served().id();
             let routed = idx.lookup_for(lang_id);
             let root = idx
                 .workspace_root()
@@ -1090,13 +1081,12 @@ fn run_rename(
     }
     let file_path = std::path::Path::new(file).canonicalize()
         .unwrap_or_else(|_| std::path::PathBuf::from(file));
-    let (s, _t, mut analysis) = parse_file(file);
+    let (_s, _t, mut analysis) = parse_file(file);
     analysis.enrich_imported_types_with_keys(Some(idx));
     // Same shape as the LSP handler: stage the origin, construct the set
     // once, project the rename — the per-arm policy (cross-file vs group vs
     // single-file, rewritability, the pack full-or-refuse) lives on the set.
-    let reg = language_driver::LanguageRegistry::with_enabled();
-    let lang_id = reg.driver_or_fallback(std::path::Path::new(file), &s).id();
+    let lang_id = language_driver::LanguageRegistry::served().id();
     let routed = idx.lookup_for(lang_id);
     let _staged = ScopedWorkspaceEntry::insert(ws, file_path.clone(), analysis);
     let origin = ws.workspace_raw().get(&file_path).map(|r| r.value().clone())
@@ -1429,10 +1419,10 @@ fn batch_diagnostics(ws: &file_store::FileStore, idx: &module_index::ModuleIndex
 /// + @INC cost across every query instead of paying it per process.
 pub(crate) fn cli_batch(root: &str) {
     use std::io::{BufRead, Write};
-    // The requests arrive on stdin AFTER startup, so their languages are not
-    // knowable here — and a batch legitimately mixes them (the gold harness
-    // groups rows by ROOT, not by language).
-    let (ws, idx) = cli_full_startup(root, language_driver::LanguageScope::All);
+    // The requests arrive on stdin AFTER startup, so the batch serves the
+    // `--lang` language (Perl without one); the gold harness groups rows by
+    // root AND language.
+    let (ws, idx) = cli_full_startup(root);
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -1482,12 +1472,10 @@ pub(crate) fn cli_rename(root: &str, cursor: &[String], new_name: &str) {
         super::exit_with(2, "exit");
     });
     emit_pos_annotation(&target);
+    super::lock_for_file(std::path::Path::new(&target.file));
     // Full startup so workspace files are built with the same plugins, type
     // inference, and enrichment that the LSP backend would use.
-    let (ws, idx) = cli_full_startup(
-        root,
-        language_driver::LanguageScope::of_file(std::path::Path::new(&target.file)),
-    );
+    let (ws, idx) = cli_full_startup(root);
     match run_rename(&ws, &idx, &target.file, target.point, new_name, target.fmt) {
         Ok(s) => println!("{}", s),
         Err(e) => {
@@ -1519,9 +1507,7 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
     use std::sync::Arc;
     use file_analysis::{SymKind, SymbolDetail};
 
-    // A package's type inference is a reference-language question; no pack
-    // store can hold one.
-    let (ws, module_index) = cli_full_startup(root, language_driver::LanguageScope::reference_only());
+    let (ws, module_index) = cli_full_startup(root);
 
     // Find a FileAnalysis whose package matches. Workspace first; fall
     // back to cached @INC modules. No bespoke discovery — only what
@@ -1808,8 +1794,7 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
 pub(crate) fn cli_workspace_symbol(root: &str, query: &str) {
     // Full startup so workspace symbols reflect plugin-synthesized entities
     // (helpers, routes, accessors), built with `root`'s plugins not cwd's.
-    // `sym_row_search` fans across the hub AND every pack sub-index.
-    let (ws, idx) = cli_full_startup(root, language_driver::LanguageScope::All);
+    let (ws, idx) = cli_full_startup(root);
     let req = BatchReq {
         id: String::new(), q: "workspace-symbol".into(),
         file: String::new(), line: 0, col: 0,
