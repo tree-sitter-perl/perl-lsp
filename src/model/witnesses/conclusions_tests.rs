@@ -400,6 +400,7 @@ fn residuals_for(fa: &FileAnalysis, class: &str, name: &str) -> Option<Vec<Concl
         module_index: None,
         package_parents: &fa.packages,
         app_surface_consumers: &fa.plugin.app_surface_consumers,
+        lattice: crate::model::conventions::lattice_for(&fa.language),
     };
     let att = WitnessAttachment::PackageSymbol {
         package: class.to_string(),

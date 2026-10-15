@@ -32,33 +32,37 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
 pub static PERL_LATTICE: LatticeRules =
     LatticeRules::new(&[Subsumption::ObjectAbsorbsHash, Subsumption::BoolIntoNumeric]);
 
-/// A process serves one language, so its subsumption rules are process-wide,
-/// latched by the first analysis a driver builds (`docs/adr/union-types.md`).
-static PROCESS_LATTICE: std::sync::OnceLock<LatticeRules> = std::sync::OnceLock::new();
+/// Each language's subsumption rules, by `FileAnalysis::language`. The model
+/// cannot see the packs that declare them, so the build layer registers each
+/// served language's set (`docs/adr/union-types.md`). Append-only slots, not a
+/// locked map: every bag query reads this, and a shared lock's reader count is
+/// one contended cache line across a sweep's workers.
+static LANGUAGE_LATTICES: [std::sync::OnceLock<(&'static str, LatticeRules)>; 16] =
+    [const { std::sync::OnceLock::new() }; 16];
 
-/// Latch `rules` as the process's. First wins; a later, different language
-/// is the one-language-per-process rule broken, said once and not obeyed.
-/// A no-op under `cargo test`, whose one process runs every language's
-/// tests: a first-wins latch there would let test order pick the rules.
-pub fn latch_process_lattice(rules: &LatticeRules) {
-    if cfg!(test) {
-        return;
+/// Register `language`'s rules once; later calls are no-ops, so `rules` is
+/// built only on the first.
+pub fn register_lattice(language: &'static str, rules: impl FnOnce() -> LatticeRules) {
+    let mut rules = Some(rules);
+    for slot in &LANGUAGE_LATTICES {
+        // A racing registration of another language can take this slot
+        // between the check and the init; the loop then moves on.
+        let (id, _) = slot.get_or_init(|| (language, (rules.take().expect("init runs once"))()));
+        if *id == language {
+            return;
+        }
     }
-    let held = PROCESS_LATTICE.get_or_init(|| rules.clone());
-    if held != rules {
-        static SAID: std::sync::Once = std::sync::Once::new();
-        SAID.call_once(|| {
-            eprintln!(
-                "perl-lsp: a second language's analysis reached a process latched to \
-                 another's type rules; it joins under the first language's rules"
-            )
-        });
-    }
+    panic!("more than {} languages registered", LANGUAGE_LATTICES.len());
 }
 
-/// The process's subsumption rules; Perl's until a driver latches.
-pub fn process_lattice() -> &'static LatticeRules {
-    PROCESS_LATTICE.get().unwrap_or(&PERL_LATTICE)
+/// The subsumption rules of the language an analysis was built in. An
+/// unregistered language joins under Perl's, the reference language.
+pub fn lattice_for(language: &str) -> &'static LatticeRules {
+    LANGUAGE_LATTICES
+        .iter()
+        .map_while(|slot| slot.get())
+        .find(|(id, _)| *id == language)
+        .map_or(&PERL_LATTICE, |(_, rules)| rules)
 }
 
 /// Split a possibly-qualified name into `(Option<package>, basename)`.

@@ -40,13 +40,13 @@ another, and that is a closed set, `Subsumption`:
   (`bool <: int`), C++ (promotion), R (logical arithmetic).
 
 A language declares its set as data: Perl in `conventions::PERL_LATTICE`,
-a pack on `LangPack::lattice`. A process serves one language, so the rules
-are process-wide, not per-file: the first analysis a driver builds latches
-its language's set (`conventions::latch_process_lattice`) and every join
-reads `process_lattice()`. A second language reaching a latched process is
-the one-language rule broken; it is said once and joins under the first
-language's rules. `cargo test` runs every language in one process, so the
-latch is off there and every test joins under Perl's rules.
+a pack on `LangPack::lattice`. The build layer registers each served
+language's set by id (`conventions::register_lattice`, from the driver
+registry and from each pack analysis), and a `BagContext` reads the set of
+the analysis it queries (`lattice_for(&fa.language)`). Nothing is stored per
+file beyond the language id the analysis already carries, and a cross-file
+recursion into a cached module's bag joins under that module's language.
+An unregistered language joins under Perl's.
 `TypeOrder::holds` is how the join asks; it never asks which language it
 serves. A context-free join (`Unordered`) holds no
 rule. A new rule is a new variant, and every language's declaration is

@@ -224,7 +224,6 @@ pub(super) fn build_with_plugins_inner(
     plugins: Arc<PluginRegistry>,
     extra_re_fold: bool,
 ) -> FileAnalysis {
-    crate::model::conventions::latch_process_lattice(&crate::model::conventions::PERL_LATTICE);
     let _scope = crate::util::ghost_stats::BuildScope::start(
         crate::util::timings::current_file(),
         source.len(),
