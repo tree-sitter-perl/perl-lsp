@@ -194,7 +194,6 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     let root = tree.root_node();
     let mut out = SkeletonAnalysis::default();
     out.names = pack.names.clone();
-    out.lattice = pack.lattice.clone();
     out.scopes.push(Scope {
         id: ScopeId(0),
         parent: None,

@@ -199,11 +199,10 @@ pub fn least_common_class(
 
 /// The type order a join reads: the isa graph (local declared parents plus
 /// the cross-file graph, through [`class_isa`] / [`least_common_class`]) and
-/// the bag's language's subsumption rules.
+/// the process's subsumption rules.
 pub struct IsaOrder<'a> {
     pub local: &'a dyn LocalParents,
     pub module_index: Option<&'a dyn CrossFileLookup>,
-    pub rules: &'a LatticeRules,
 }
 
 impl TypeOrder for IsaOrder<'_> {
@@ -216,7 +215,7 @@ impl TypeOrder for IsaOrder<'_> {
     }
 
     fn holds(&self, rule: Subsumption) -> bool {
-        self.rules.holds(rule)
+        crate::model::conventions::process_lattice().holds(rule)
     }
 }
 

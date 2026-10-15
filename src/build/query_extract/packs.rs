@@ -16,7 +16,8 @@ pub struct LangPack {
     /// reads it there.
     pub names: NameSpellings,
     /// Which cross-family types the language's joins fold into one another
-    /// (`docs/adr/union-types.md`). Baked onto `PackFacts::lattice`.
+    /// (`docs/adr/union-types.md`). Latched as the process's rules by the
+    /// first analysis this pack builds.
     pub lattice: crate::model::file_analysis::LatticeRules,
     /// Shape a captured name token's text into the identity it is filed
     /// under (cpp canonicalizes template spellings). Applied to every

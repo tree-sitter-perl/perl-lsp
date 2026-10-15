@@ -104,7 +104,6 @@ pub fn query_sub_return_type(
                     module_index: Some(idx),
                     package_parents: &full.packages,
                     app_surface_consumers: &full.plugin.app_surface_consumers,
-                    lattice: &full.pack.lattice,
                 };
                 let att = WitnessAttachment::Symbol(sym.id);
                 let q = ReducerQuery {
@@ -207,7 +206,6 @@ pub fn query_sub_return_type(
                         module_index: Some(idx),
                         package_parents: &full.packages,
                         app_surface_consumers: &full.plugin.app_surface_consumers,
-                        lattice: &full.pack.lattice,
                     };
                     let att = WitnessAttachment::Symbol(sym.id);
                     let q = ReducerQuery {

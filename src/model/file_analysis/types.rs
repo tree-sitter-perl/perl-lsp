@@ -1175,7 +1175,7 @@ pub enum Subsumption {
     BoolIntoNumeric,
 }
 
-/// The subsumption rules one language declares (`PackFacts::lattice`).
+/// The subsumption rules one language declares (`LangPack::lattice`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatticeRules(std::borrow::Cow<'static, [Subsumption]>);
 

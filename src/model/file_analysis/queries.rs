@@ -312,7 +312,6 @@ impl FileAnalysis {
             module_index,
             package_parents: &self.packages,
             app_surface_consumers: &self.plugin.app_surface_consumers,
-            lattice: &self.pack.lattice,
         }
     }
 

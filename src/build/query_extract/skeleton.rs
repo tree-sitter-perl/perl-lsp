@@ -111,9 +111,6 @@ pub struct SkeletonAnalysis {
     /// The language's name spellings (`LangPack::names`), baked onto
     /// `PackFacts::names`.
     pub names: crate::model::file_analysis::NameSpellings,
-    /// The language's subsumption rules (`LangPack::lattice`), baked onto
-    /// `PackFacts::lattice`.
-    pub lattice: crate::model::file_analysis::LatticeRules,
     /// Value-flow edges minted from `@flow` captures (`source → target`,
     /// extraction). Lowered to type witnesses here; carried onto the FA as the
     /// provenance tier.
@@ -1226,7 +1223,6 @@ impl SkeletonAnalysis {
         }
         let pack = crate::model::file_analysis::PackFacts {
             names: std::mem::take(&mut self.names),
-            lattice: std::mem::take(&mut self.lattice),
             // Specialization family edges (spec → primary). NOT an inheritance
             // edge: a spec inherits nothing from its primary (it replaces
             // wholesale), so member resolution must never fall through this

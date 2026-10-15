@@ -1222,7 +1222,6 @@ impl ReducerRegistry {
                                     module_index: Some(idx),
                                     package_parents: &full.packages,
                                     app_surface_consumers: &full.plugin.app_surface_consumers,
-                                    lattice: &full.pack.lattice,
                                 };
                                 let sub_q = ReducerQuery {
                                     attachment: q.attachment,
@@ -1383,7 +1382,6 @@ impl ReducerRegistry {
                                 module_index: Some(idx),
                                 package_parents: &full.packages,
                                 app_surface_consumers: &full.plugin.app_surface_consumers,
-                                lattice: &full.pack.lattice,
                             };
                             let sub_q = ReducerQuery {
                                 attachment: q.attachment,
@@ -1503,7 +1501,6 @@ impl ReducerRegistry {
                     module_index: Some(idx),
                     package_parents: &full.packages,
                     app_surface_consumers: &full.plugin.app_surface_consumers,
-                    lattice: &full.pack.lattice,
                 };
                 let sub_q = ReducerQuery {
                     attachment: q.attachment,
@@ -1601,7 +1598,6 @@ impl ReducerRegistry {
                         module_index: Some(idx),
                         package_parents: &full.packages,
                         app_surface_consumers: &full.plugin.app_surface_consumers,
-                        lattice: &full.pack.lattice,
                     };
                     let sub_q = ReducerQuery {
                         attachment: q.attachment,
@@ -1984,7 +1980,6 @@ impl ReducerRegistry {
                         module_index: None,
                         package_parents: &full.packages,
                         app_surface_consumers: &full.plugin.app_surface_consumers,
-                        lattice: &full.pack.lattice,
                     };
                     let sub_q = ReducerQuery {
                         attachment: q.attachment,

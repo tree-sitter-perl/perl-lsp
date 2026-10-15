@@ -32,6 +32,35 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
 pub static PERL_LATTICE: LatticeRules =
     LatticeRules::new(&[Subsumption::ObjectAbsorbsHash, Subsumption::BoolIntoNumeric]);
 
+/// A process serves one language, so its subsumption rules are process-wide,
+/// latched by the first analysis a driver builds (`docs/adr/union-types.md`).
+static PROCESS_LATTICE: std::sync::OnceLock<LatticeRules> = std::sync::OnceLock::new();
+
+/// Latch `rules` as the process's. First wins; a later, different language
+/// is the one-language-per-process rule broken, said once and not obeyed.
+/// A no-op under `cargo test`, whose one process runs every language's
+/// tests: a first-wins latch there would let test order pick the rules.
+pub fn latch_process_lattice(rules: &LatticeRules) {
+    if cfg!(test) {
+        return;
+    }
+    let held = PROCESS_LATTICE.get_or_init(|| rules.clone());
+    if held != rules {
+        static SAID: std::sync::Once = std::sync::Once::new();
+        SAID.call_once(|| {
+            eprintln!(
+                "perl-lsp: a second language's analysis reached a process latched to \
+                 another's type rules; it joins under the first language's rules"
+            )
+        });
+    }
+}
+
+/// The process's subsumption rules; Perl's until a driver latches.
+pub fn process_lattice() -> &'static LatticeRules {
+    PROCESS_LATTICE.get().unwrap_or(&PERL_LATTICE)
+}
+
 /// Split a possibly-qualified name into `(Option<package>, basename)`.
 ///
 /// A name token may carry a `Pkg::` qualifier (`Foo::Bar::baz`, `@Pkg::EXPORT`,

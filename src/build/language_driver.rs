@@ -373,6 +373,7 @@ impl LanguageDriver for PackDriver {
     /// phase's body.
     fn analyze_with_path(&self, source: &str, path: Option<&Path>) -> FileAnalysis {
         let _file = crate::util::timings::current_file_scope(path);
+        crate::model::conventions::latch_process_lattice(&(self.pack)().lattice);
         // Every exit stamps the driver id (degraded stand-ins included — a
         // failed cpp parse is still a cpp file): `resolve()` derives pack
         // routing from this origin-identity fact at construction.
@@ -1028,7 +1029,6 @@ fn remap_spans(
         // Populated later (enrich_skeleton) already in original coords — no remap.
         macro_body_member_reads: _,
         names: _,
-        lattice: _,
     } = skel;
 
     for s in symbols.iter_mut() {

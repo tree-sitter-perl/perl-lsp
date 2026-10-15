@@ -939,7 +939,6 @@ fn query_memo_keeps_inherited_receiver_per_child_in_one_query() {
         module_index: None,
         package_parents: &package_parents,
         app_surface_consumers: &consumers,
-        lattice: &crate::model::conventions::PERL_LATTICE,
     };
 
     let reg = ReducerRegistry::with_defaults();
@@ -1438,7 +1437,6 @@ fn a_parent_class_aliased_position_answers_the_child_dispatch() {
         module_index: None,
         package_parents: &packages,
         app_surface_consumers: &[],
-        lattice: &crate::model::conventions::PERL_LATTICE,
     };
     let att = var("$out");
     let q = ReducerQuery {
