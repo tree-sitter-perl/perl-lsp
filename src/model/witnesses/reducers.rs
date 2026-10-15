@@ -541,9 +541,9 @@ impl WitnessReducer for BranchArmFold {
             }
             // Writing a fallback says the author expects it to run, so the
             // operator is a hint and both arms count, whatever the LHS's
-            // truthiness: two typed arms that agree answer, else the RHS
-            // floor. That floor is what lets `$ENV{X} || 10` type to
-            // `Numeric` when the LHS can't be resolved.
+            // truthiness: the arms' join answers, else the RHS floor. That
+            // floor is what lets `$ENV{X} || 10` type to `Numeric` when the
+            // LHS can't be resolved.
             // TODO(dead-fallback-lint): an LHS that can't be false (a
             // reference, an object without `bool` overloading) makes the
             // fallback dead; that belongs in a diagnostic, not in the type.
@@ -575,9 +575,7 @@ impl WitnessReducer for BranchArmFold {
         if typed.len() + undef_arms < 2 {
             return ReducedValue::None;
         }
-        // Strict agreement among the typed arms (a ternary wants exact
-        // agreement, NOT the loose hash/object subsumption the return-arm
-        // join uses). An `undef` arm then lifts the agreed `T` to
+        // The typed arms' join; an `undef` arm then lifts the joined `T` to
         // `Optional<T>`.
         // TODO(brand-join): arms compare whole types, marks included, so one
         // plugin's disagreeing mark costs every other plugin's agreeing ones.
