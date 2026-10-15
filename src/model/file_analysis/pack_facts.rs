@@ -109,6 +109,7 @@ pub struct PackFacts {
     #[serde(default)]
     pub names: NameSpellings,
 
+
     /// This file's transitive `#include` closure — canonical header paths it
     /// reaches. The cross-file VISIBILITY key: a name resolves preferentially to
     /// a definition in a file this set contains (`ScopedLookup` ranks

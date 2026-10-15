@@ -15,7 +15,7 @@
 //! whose name they handle: nothing in the model assumes a separator or a
 //! sigil (CLAUDE.md rule #12).
 
-use crate::model::file_analysis::{ClassSpelling, MemberNamespace, NameSpellings};
+use crate::model::file_analysis::{ClassSpelling, LatticeRules, MemberNamespace, NameSpellings, Subsumption};
 
 /// Perl's name spellings: `::` qualifies, `$` / `@` / `%` lead variables.
 pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
@@ -26,6 +26,44 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     // A call reaches a sub, never a `field` of the same name.
     member_namespace: MemberNamespace::PerFamily,
 };
+
+/// Perl's subsumption rules: an object is a blessed hash, and truth is a
+/// number (`1` / `''`).
+pub static PERL_LATTICE: LatticeRules =
+    LatticeRules::new(&[Subsumption::ObjectAbsorbsHash, Subsumption::BoolIntoNumeric]);
+
+/// Each language's subsumption rules, by `FileAnalysis::language`. The model
+/// cannot see the packs that declare them, so the build layer registers each
+/// served language's set (`docs/adr/union-types.md`). Append-only slots, not a
+/// locked map: every bag query reads this, and a shared lock's reader count is
+/// one contended cache line across a sweep's workers.
+static LANGUAGE_LATTICES: [std::sync::OnceLock<(&'static str, LatticeRules)>; 16] =
+    [const { std::sync::OnceLock::new() }; 16];
+
+/// Register `language`'s rules once; later calls are no-ops, so `rules` is
+/// built only on the first.
+pub fn register_lattice(language: &'static str, rules: impl FnOnce() -> LatticeRules) {
+    let mut rules = Some(rules);
+    for slot in &LANGUAGE_LATTICES {
+        // A racing registration of another language can take this slot
+        // between the check and the init; the loop then moves on.
+        let (id, _) = slot.get_or_init(|| (language, (rules.take().expect("init runs once"))()));
+        if *id == language {
+            return;
+        }
+    }
+    panic!("more than {} languages registered", LANGUAGE_LATTICES.len());
+}
+
+/// The subsumption rules of the language an analysis was built in. An
+/// unregistered language joins under Perl's, the reference language.
+pub fn lattice_for(language: &str) -> &'static LatticeRules {
+    LANGUAGE_LATTICES
+        .iter()
+        .map_while(|slot| slot.get())
+        .find(|(id, _)| *id == language)
+        .map_or(&PERL_LATTICE, |(_, rules)| rules)
+}
 
 /// Split a possibly-qualified name into `(Option<package>, basename)`.
 ///

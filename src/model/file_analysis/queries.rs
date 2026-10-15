@@ -312,6 +312,7 @@ impl FileAnalysis {
             module_index,
             package_parents: &self.packages,
             app_surface_consumers: &self.plugin.app_surface_consumers,
+            lattice: crate::model::conventions::lattice_for(&self.language),
         }
     }
 

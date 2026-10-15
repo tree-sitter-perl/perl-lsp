@@ -15,6 +15,10 @@ pub struct LangPack {
     /// variable sigils. Baked onto `PackFacts::names`; every key function
     /// reads it there.
     pub names: NameSpellings,
+    /// Which cross-family types the language's joins fold into one another
+    /// (`docs/adr/union-types.md`). Registered by language id
+    /// (`conventions::register_lattice`).
+    pub lattice: crate::model::file_analysis::LatticeRules,
     /// Shape a captured name token's text into the identity it is filed
     /// under (cpp canonicalizes template spellings). Applied to every
     /// captured name alike.
@@ -109,6 +113,7 @@ impl LangPack {
         let LangPack {
             query_source: _,
             names: _,
+            lattice: _,
             shape_name: _,
             default_name: _,
             annot_type: _,

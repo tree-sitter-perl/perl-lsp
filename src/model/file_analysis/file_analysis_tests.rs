@@ -184,10 +184,27 @@ fn test_resolve_sub_return_type() {
 
 // ---- Return type resolution tests (decoupled, pure function) ----
 
+/// Perl's rules with no class order: the join the return-arm tests pin.
+struct Perl;
+
+impl TypeOrder for Perl {
+    fn isa(&self, child: &str, ancestor: &str) -> bool {
+        Unordered.isa(child, ancestor)
+    }
+
+    fn common_class(&self, classes: &[&str]) -> Option<String> {
+        Unordered.common_class(classes)
+    }
+
+    fn holds(&self, rule: Subsumption) -> bool {
+        crate::model::conventions::PERL_LATTICE.holds(rule)
+    }
+}
+
 #[test]
 fn test_resolve_return_type_all_agree() {
     assert_eq!(
-        resolve_return_type(&[InferredType::HashRef, InferredType::HashRef]),
+        join_all(&[InferredType::HashRef, InferredType::HashRef], &Perl),
         Some(InferredType::HashRef),
     );
 }
@@ -195,14 +212,14 @@ fn test_resolve_return_type_all_agree() {
 #[test]
 fn test_resolve_return_type_disagreement() {
     assert_eq!(
-        resolve_return_type(&[InferredType::HashRef, InferredType::ArrayRef]),
+        join_all(&[InferredType::HashRef, InferredType::ArrayRef], &Perl),
         Some(join(&InferredType::HashRef, &InferredType::ArrayRef, &Unordered)),
     );
 }
 
 #[test]
 fn test_resolve_return_type_empty() {
-    assert_eq!(resolve_return_type(&[]), None);
+    assert_eq!(join_all(&[], &Perl), None);
 }
 
 #[test]
@@ -211,11 +228,11 @@ fn unknown_absorbs_in_return_arm_agreement() {
     // not `None` (a lone typed arm would answer for the sub) and not the
     // coarse HashRef/Numeric joins below it.
     assert_eq!(
-        resolve_return_type(&[InferredType::ClassName("Foo".into()), InferredType::Unknown]),
+        join_all(&[InferredType::ClassName("Foo".into()), InferredType::Unknown], &Perl),
         Some(InferredType::Unknown),
     );
     assert_eq!(
-        resolve_return_type(&[InferredType::HashRef, InferredType::Unknown]),
+        join_all(&[InferredType::HashRef, InferredType::Unknown], &Perl),
         Some(InferredType::Unknown),
     );
 }
@@ -234,7 +251,7 @@ fn an_undef_arm_does_not_wrap_unknown_in_optional() {
 /// `Dog`, `Cat`, `Cow`, `Pig`, `Hen` isa `Animal`; nothing else.
 struct Farm;
 
-impl ClassOrder for Farm {
+impl TypeOrder for Farm {
     fn isa(&self, child: &str, ancestor: &str) -> bool {
         child == ancestor || (ancestor == "Animal" && ["Dog", "Cat", "Cow", "Pig", "Hen"].contains(&child))
     }
@@ -245,6 +262,10 @@ impl ClassOrder for Farm {
         } else {
             Unordered.common_class(classes)
         }
+    }
+
+    fn holds(&self, rule: Subsumption) -> bool {
+        Perl.holds(rule)
     }
 }
 
@@ -312,6 +333,17 @@ fn past_the_cap_classes_widen_to_their_common_class() {
 }
 
 #[test]
+fn subsumption_is_the_languages_call() {
+    let foo = class("Foo");
+    // Perl: an object is a blessed hash, truth is a number.
+    assert_eq!(join(&foo, &InferredType::HashRef, &Perl), foo);
+    assert_eq!(join(&InferredType::Bool, &InferredType::Numeric, &Perl), InferredType::Numeric);
+    // A language declaring neither keeps both arms.
+    assert!(matches!(join(&foo, &InferredType::HashRef, &Unordered), InferredType::Union(_)));
+    assert!(matches!(join(&InferredType::Bool, &InferredType::Numeric, &Unordered), InferredType::Union(_)));
+}
+
+#[test]
 fn join_lifts_a_plain_arm_into_an_optional() {
     let foo = class("Foo");
     let opt = InferredType::Optional(Box::new(foo.clone()));
@@ -342,12 +374,12 @@ fn join_of_keyed_hashes_is_commutative_and_sorted() {
 fn test_resolve_return_type_object_subsumes_hashref() {
     // Object + HashRef → Object wins (overloaded objects)
     assert_eq!(
-        resolve_return_type(&[InferredType::ClassName("Foo".into()), InferredType::HashRef,]),
+        join_all(&[InferredType::ClassName("Foo".into()), InferredType::HashRef,], &Perl),
         Some(InferredType::ClassName("Foo".into())),
     );
     // Order shouldn't matter
     assert_eq!(
-        resolve_return_type(&[InferredType::HashRef, InferredType::ClassName("Foo".into()),]),
+        join_all(&[InferredType::HashRef, InferredType::ClassName("Foo".into()),], &Perl),
         Some(InferredType::ClassName("Foo".into())),
     );
 }
@@ -355,27 +387,26 @@ fn test_resolve_return_type_object_subsumes_hashref() {
 #[test]
 fn test_resolve_return_type_object_does_not_subsume_arrayref() {
     // Object + ArrayRef → their union, not the object
-    let t = resolve_return_type(&[InferredType::ClassName("Foo".into()), InferredType::ArrayRef]).unwrap();
+    let t = join_all(&[InferredType::ClassName("Foo".into()), InferredType::ArrayRef], &Perl).unwrap();
     assert!(matches!(&t, InferredType::Union(arms) if arms.len() == 2), "got {t:?}");
 }
 
 #[test]
-fn test_resolve_return_type_two_classes_disagree() {
-    // Two classes union; the hash folds into them.
+fn test_resolve_return_type_two_classes_union_and_absorb_the_hash() {
     assert_eq!(
-        resolve_return_type(&[
+        join_all(&[
             InferredType::ClassName("Foo".into()),
             InferredType::HashRef,
             InferredType::ClassName("Bar".into()),
-        ]),
-        Some(join(&InferredType::ClassName("Bar".into()), &InferredType::ClassName("Foo".into()), &Unordered)),
+        ], &Perl),
+        Some(join(&InferredType::ClassName("Bar".into()), &InferredType::ClassName("Foo".into()), &Perl)),
     );
 }
 
 #[test]
 fn test_resolve_return_type_single() {
     assert_eq!(
-        resolve_return_type(&[InferredType::CodeRef { return_edge: None }]),
+        join_all(&[InferredType::CodeRef { return_edge: None }], &Perl),
         Some(InferredType::CodeRef { return_edge: None }),
     );
 }

@@ -373,6 +373,7 @@ impl LanguageDriver for PackDriver {
     /// phase's body.
     fn analyze_with_path(&self, source: &str, path: Option<&Path>) -> FileAnalysis {
         let _file = crate::util::timings::current_file_scope(path);
+        crate::model::conventions::register_lattice(self.id, || (self.pack)().lattice);
         // Every exit stamps the driver id (degraded stand-ins included — a
         // failed cpp parse is still a cpp file): `resolve()` derives pack
         // routing from this origin-identity fact at construction.
@@ -1318,6 +1319,13 @@ impl LanguageRegistry {
             drivers.push(Box::new(r_driver()));
             #[cfg(feature = "cmake")]
             drivers.push(Box::new(cmake_driver()));
+            // Registered here too, not only on analysis, because a warm start
+            // answers from cached analyses no driver has built this process.
+            for d in &drivers {
+                if let Some(pack) = d.lang_pack() {
+                    crate::model::conventions::register_lattice(d.id(), || pack.lattice);
+                }
+            }
             LanguageRegistry { drivers }
         })
     }

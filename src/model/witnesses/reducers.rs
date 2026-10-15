@@ -58,14 +58,18 @@ pub struct BagContext<'a> {
     /// parent via `parents_of`, matching the FA-side ancestor walks.
     /// Empty for in-file callers that don't carry consumer state.
     pub app_surface_consumers: &'a [String],
+    /// The bag's language's subsumption rules (`conventions::lattice_for`): which
+    /// cross-family types its joins fold into one another.
+    pub lattice: &'a crate::model::file_analysis::LatticeRules,
 }
 
 /// The class order a query's joins read: its context's, else none.
-pub(crate) fn class_order<'q>(q: &'q ReducerQuery) -> Box<dyn crate::model::file_analysis::ClassOrder + 'q> {
+pub(crate) fn class_order<'q>(q: &'q ReducerQuery) -> Box<dyn crate::model::file_analysis::TypeOrder + 'q> {
     match q.context {
         Some(ctx) => Box::new(crate::model::file_analysis::IsaOrder {
             local: ctx.package_parents,
             module_index: ctx.module_index,
+            rules: ctx.lattice,
         }),
         None => Box::new(crate::model::file_analysis::Unordered),
     }

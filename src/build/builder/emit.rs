@@ -923,8 +923,7 @@ impl<'a> Builder<'a> {
     ///   recursively with per-arm `branch_arm` Edges for ternary.
     /// - `SymbolReturnArm(sub_id)` gets one `Edge(Expr(body_span))`
     ///   witness per arm. `SymbolReturnArmFold` claims this
-    ///   attachment and folds arms via `resolve_return_type`
-    ///   (agreement / disagreement / single-arm).
+    ///   attachment and joins the arms (`join_return_arms`).
     /// - `Symbol(sub_id)` carries one `Edge(SymbolReturnArm(sub_id))`
     ///   per sub (`link_return_arms`) so consumers querying the
     ///   symbol's return walk through to the arm-fold.

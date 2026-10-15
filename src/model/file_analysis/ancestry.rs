@@ -197,20 +197,26 @@ pub fn least_common_class(
     }
 }
 
-/// The class order a join reads off the isa graph: local declared parents
-/// plus the cross-file graph, through [`class_isa`] / [`least_common_class`].
+/// The type order a join reads: the isa graph (local declared parents plus
+/// the cross-file graph, through [`class_isa`] / [`least_common_class`]) and
+/// the bag's language's subsumption rules.
 pub struct IsaOrder<'a> {
     pub local: &'a dyn LocalParents,
     pub module_index: Option<&'a dyn CrossFileLookup>,
+    pub rules: &'a LatticeRules,
 }
 
-impl ClassOrder for IsaOrder<'_> {
+impl TypeOrder for IsaOrder<'_> {
     fn isa(&self, child: &str, ancestor: &str) -> bool {
         class_isa(child, ancestor, self.local, self.module_index)
     }
 
     fn common_class(&self, classes: &[&str]) -> Option<String> {
         least_common_class(classes, self.local, self.module_index)
+    }
+
+    fn holds(&self, rule: Subsumption) -> bool {
+        self.rules.holds(rule)
     }
 }
 
