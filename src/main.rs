@@ -153,6 +153,14 @@ async fn main() {
             cli_languages();
             return;
         }
+        Some("--concepts") if args.len() >= 3 => {
+            cli_concepts(&args[2..]);
+            return;
+        }
+        Some("--concepts-dump") if args.len() >= 3 => {
+            cli_concepts_dump(&args[2]);
+            return;
+        }
         Some("--lang-analyze") if args.len() >= 3 => {
             // Multiple files analyze in ONE process, sharing the process-global
             // header/macro caches — so a second C++ file's gather reuses the

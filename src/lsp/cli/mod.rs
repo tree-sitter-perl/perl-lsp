@@ -668,3 +668,125 @@ pub(crate) fn cli_parse(path: &str, lang: Option<&str>) {
     walk(tree.root_node(), None, 0, color);
     println!();
 }
+
+/// SPIKE (throwaway): `--concepts-dump <file>` prints every witness so the
+/// idiom recognizer's input shapes can be read off a toy.
+pub(crate) fn cli_concepts_dump(file: &str) {
+    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let path = std::path::Path::new(file);
+    let src = std::fs::read_to_string(path).unwrap();
+    let driver = reg.for_path_sniffed(path, &src).unwrap();
+    let fa = driver.analyze_with_path(&src, Some(path));
+    for w in fa.witnesses.all() {
+        println!("{}:{} {:?}\n    <- {:?} [{:?}]", w.span.start.row + 1, w.span.start.column, w.attachment, w.payload, w.source);
+    }
+    for s in fa.scopes.iter() {
+        println!("scope {:?} parent={:?} kind={:?} owner={:?} {}:{}-{}:{}", s.id, s.parent, s.kind, s.owner, s.span.start.row+1, s.span.start.column, s.span.end.row+1, s.span.end.column);
+    }
+}
+
+/// SPIKE (throwaway): `--concepts <path>... [--miss]` runs the flow-level
+/// idiom recognizer over every Perl file under the paths, one file at a
+/// time with no workspace, and prints each hit plus a census.
+pub(crate) fn cli_concepts(args: &[String]) {
+    use std::collections::BTreeMap;
+    let show_miss = args.iter().any(|a| a == "--miss");
+    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let mut files = Vec::new();
+    for a in args.iter().filter(|a| !a.starts_with("--")) {
+        for e in walkdir_perl(std::path::Path::new(a)) {
+            files.push(e);
+        }
+    }
+    let mut by_concept: BTreeMap<String, usize> = BTreeMap::new();
+    let mut by_hops: BTreeMap<(String, u32), usize> = BTreeMap::new();
+    let mut miss_shapes: BTreeMap<String, usize> = BTreeMap::new();
+    let (mut subs_with_arms, mut nfiles) = (0usize, 0usize);
+    let t0 = std::time::Instant::now();
+    let mut recog_time = std::time::Duration::ZERO;
+    for f in &files {
+        let Ok(src) = std::fs::read_to_string(f) else { continue };
+        if src.len() > 1 << 20 {
+            continue;
+        }
+        let Some(driver) = reg.for_path_sniffed(f, &src) else { continue };
+        let Ok(fa) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            driver.analyze_with_path(&src, Some(f))
+        })) else {
+            continue;
+        };
+        nfiles += 1;
+        let t = std::time::Instant::now();
+        let (hits, misses) = fa.recognize_concepts();
+        recog_time += t.elapsed();
+        subs_with_arms += hits.len() + misses.len();
+        for h in &hits {
+            let mut kind = format!("{:?}", h.concept).split([' ', '{']).next().unwrap().to_string();
+            if let crate::model::file_analysis::Concept::Forwards { forwards_args: true, .. } = h.concept {
+                kind = "Alias".into();
+            }
+            *by_concept.entry(format!("{kind}/{}", if h.side_calls == 0 { "pure" } else { "tail" })).or_default() += 1;
+            *by_hops.entry((kind, h.hops.min(5))).or_default() += 1;
+            println!(
+                "{}:{} {}::{} {:?} hops={} side_calls={}",
+                f.display(), h.line, h.package.as_deref().unwrap_or("main"), h.sub, h.concept, h.hops, h.side_calls
+            );
+        }
+        for m in &misses {
+            let shape = m.arms.iter().map(term_shape).collect::<Vec<_>>().join(" | ");
+            *miss_shapes.entry(shape.clone()).or_default() += 1;
+            if show_miss {
+                println!("MISS {}:{} {} :: {shape}", f.display(), m.line, m.sub);
+            }
+        }
+    }
+    println!("\n# {nfiles} files, {subs_with_arms} subs with return arms, wall {:?}, recognizer {:?}", t0.elapsed(), recog_time);
+    for (k, n) in &by_concept {
+        println!("  {k:<12} {n}");
+    }
+    println!("# hops histogram (5 = 5+)");
+    for ((k, h), n) in &by_hops {
+        println!("  {k:<12} hops={h} {n}");
+    }
+    println!("# top unmatched arm shapes");
+    let mut ms: Vec<_> = miss_shapes.into_iter().collect();
+    ms.sort_by(|a, b| b.1.cmp(&a.1));
+    for (s, n) in ms.into_iter().take(25) {
+        println!("  {n:>6}  {s}");
+    }
+}
+
+fn term_shape(t: &crate::model::file_analysis::Term) -> String {
+    use crate::model::file_analysis::Term::*;
+    match t {
+        Arg(i) => format!("arg{i}"),
+        Args => "@_".into(),
+        Field(b, _) => format!("{}{{k}}", term_shape(b)),
+        Call { recv, .. } => format!("{}->m()", term_shape(recv)),
+        Blessed => "bless".into(),
+        Alt(v) => format!("({})", v.iter().map(term_shape).collect::<Vec<_>>().join("||")),
+        Join(v) => format!("join[{}]", v.iter().map(term_shape).collect::<Vec<_>>().join(",")),
+        Lit => "lit".into(),
+        FnCall => "f()".into(),
+        Opaque => "?".into(),
+    }
+}
+
+fn walkdir_perl(p: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if p.is_file() {
+        out.push(p.to_path_buf());
+        return out;
+    }
+    let Ok(rd) = std::fs::read_dir(p) else { return out };
+    let mut ents: Vec<_> = rd.flatten().map(|e| e.path()).collect();
+    ents.sort();
+    for e in ents {
+        if e.is_dir() {
+            out.extend(walkdir_perl(&e));
+        } else if matches!(e.extension().and_then(|x| x.to_str()), Some("pm" | "pl")) {
+            out.push(e);
+        }
+    }
+    out
+}

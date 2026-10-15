@@ -47,6 +47,8 @@ mod invocants;
 mod hover;
 mod sym_index;
 mod completion;
+mod concepts;
+pub use concepts::*;
 pub use completion::*;
 
 // ---- FileAnalysis ----

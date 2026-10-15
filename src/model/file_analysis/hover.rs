@@ -579,6 +579,10 @@ impl FileAnalysis {
                 if let Some(rt) = self.symbol_return_type_via_bag(sym.id, None) {
                     text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
                 }
+                // SPIKE: the recognized idiom, asked of the fact, never the text.
+                if let Some(c) = self.concept_of(sym) {
+                    text.push_str(&format!("\n\n*{}*", c.describe()));
+                }
                 if let Some(d) = doc {
                     text.push_str(&format!("\n\n{}", d));
                 }
