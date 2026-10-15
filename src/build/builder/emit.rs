@@ -301,18 +301,12 @@ impl<'a> Builder<'a> {
                 ))))
             }
 
-            // Function call — Edge to the matching local
-            // `Symbol(sid)`. For names that resolve to a local sub
-            // (or to a plugin-synthesized sub, since plugin synths
-            // also push into `self.symbols` before walk-time use),
-            // the chase resolves through. Cross-file imports without
-            // a local sym don't pin the Expr(span); chain typing's
-            // own resolvers cover the chain-receiver case.
-            // Function / bareword / scoped-identifier call — extract the
-            // callee's bare name and Edge to its `Symbol(sid)`. Failures
-            // (target not yet in symbol table) are recovered post-walk by
-            // `resolve_forward_expr_witnesses`, which re-calls this same
-            // `expr_payload` against the final symbol table.
+            // Function / bareword / scoped-identifier call — an `Invoke`
+            // of the local sub the name resolves to (plugin-synthesized
+            // subs included: they push into `self.symbols` before
+            // walk-time use) on the call's arguments. Failures (target not
+            // yet in the symbol table) are recovered post-walk by
+            // `resolve_forward_expr_witnesses`.
             // `bless $ref, $class` is a value of type `ClassName($class)`
             // — closed under syntax when the class resolves. Covers the
             // anonymous-ref forms (`return bless {}, $class`) that have no
@@ -377,12 +371,12 @@ impl<'a> Builder<'a> {
                         return Some(WitnessPayload::InferredType(c));
                     }
                 }
-                // TODO(perl-free-invoke): mint `Invoke { Callee::Function }`
-                // with the call's arguments, as pack calls do, so an imported
-                // callee resolves in the bag and the arity rides the call
-                // (`docs/adr/calls-are-invokes.md`).
+                // A callee this file doesn't define yet answers None here, so
+                // the node queues for `resolve_forward_expr_witnesses`: a sub
+                // defined further down resolves locally there, and only what
+                // is still unresolved is looked up across files.
                 let sid = self.find_callee_symbol(&called)?;
-                Some(WitnessPayload::Edge(WitnessAttachment::Symbol(sid)))
+                Some(self.call_invoke(node, called, Some(sid)))
             }
 
             // `$arr[N]` projects off `@arr` at the read's own point, so
@@ -879,8 +873,43 @@ impl<'a> Builder<'a> {
         });
     }
 
-    /// Callee name for an expression node whose `expr_payload` arm resolves
-    /// to `Edge(Symbol(sid))`, **as written** — a qualifier is kept, because
+    /// A free call's `Invoke`: the callee as written, the local sub it
+    /// resolved to (`None` = look it up across files), and its arguments.
+    fn call_invoke(
+        &mut self,
+        node: Node<'a>,
+        name: String,
+        local: Option<SymbolId>,
+    ) -> crate::model::witnesses::WitnessPayload {
+        let args = self.extract_call_args(node);
+        crate::model::witnesses::WitnessPayload::Invoke {
+            callee: crate::model::witnesses::Callee::Function { name, local },
+            receiver: None,
+            args: Some(self.call_operands(&args)),
+        }
+    }
+
+    /// A call this file never defines the callee of, once the symbol table is
+    /// final: an `Invoke` the registry resolves through the callee's
+    /// exporters at query time. A qualified call (`Foo::bar()`) names its
+    /// package, which no exporter lookup asks, and a builtin is not a sub.
+    fn imported_call_payload(&mut self, node: Node<'a>) -> Option<crate::model::witnesses::WitnessPayload> {
+        if !matches!(node.kind(), "function_call_expression" | "ambiguous_function_call_expression")
+            || self.is_bless_call(node)
+        {
+            return None;
+        }
+        let called = self.forward_callee_name(node)?;
+        let (qualifier, _) =
+            crate::model::file_analysis::split_qualified(&called, &crate::model::conventions::PERL_SPELLINGS);
+        if qualifier.is_some() || crate::model::builtins::is_builtin(&called) {
+            return None;
+        }
+        Some(self.call_invoke(node, called, None))
+    }
+
+    /// Callee name for an expression node whose `expr_payload` arm mints a
+    /// free call's `Invoke`, **as written** — a qualifier is kept, because
     /// `Foo::bar()` and `bar()` do not name the same sub and only the
     /// qualifier says which. `None` for any other kind. Sole source of truth
     /// for "what sub does this node reference" — `expr_payload`'s call arm
@@ -911,7 +940,10 @@ impl<'a> Builder<'a> {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessSource};
         let queued = std::mem::take(&mut self.unresolved_expr_nodes);
         for node in queued {
-            let Some(payload) = self.expr_payload(node) else { continue };
+            let Some(payload) = self.expr_payload(node).or_else(|| self.imported_call_payload(node))
+            else {
+                continue;
+            };
             let span = node_to_span(node);
             self.bag.push(Witness {
                 attachment: WitnessAttachment::Expr(span),

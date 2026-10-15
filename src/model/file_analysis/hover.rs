@@ -87,7 +87,7 @@ impl FileAnalysis {
                                             cn.to_string()
                                         };
                                         let mut text = format!("```perl\n{}\n```\n\n*class {} — resolved from `{}`*", line.trim(), class_label, r.target_name);
-                                        if let Some(ref rt) = self.find_method_return_type(cn, mname, module_index, None) {
+                                        if let Some(ref rt) = self.find_method_return_type(cn, mname, module_index, None).filter(InferredType::is_known) {
                                             text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
                                         }
                                         if let SymbolDetail::Sub { ref doc, .. } = sym.detail {
@@ -111,7 +111,7 @@ impl FileAnalysis {
                                                 if let Some(sub_info) = whole.sub_info_view(mname) {
                                                     let sig = format_cross_file_signature(mname, &sub_info);
                                                     let mut text = format!("```perl\n{}\n```\n\n*class {} — resolved from `{}`*", sig, class, r.target_name);
-                                                    if let Some(rt) = sub_info.return_type(Some(idx)) {
+                                                    if let Some(rt) = sub_info.return_type(Some(idx)).filter(InferredType::is_known) {
                                                         text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
                                                     }
                                                     if let Some(doc) = sub_info.doc() {
@@ -170,7 +170,7 @@ impl FileAnalysis {
                                 .collect::<Vec<_>>()
                                 .join(", ");
                             let mut sig = format!("sub {}({})", r.target_name, sig_params);
-                            if let Some(rt) = sub_info.return_type(Some(idx)) {
+                            if let Some(rt) = sub_info.return_type(Some(idx)).filter(InferredType::is_known) {
                                 sig.push_str(&format!(" → {}", self.render_type(&rt)));
                             }
                             let mut text = format!("```perl\n{}\n```", sig);
@@ -210,7 +210,7 @@ impl FileAnalysis {
                                     cn.to_string()
                                 };
                                 let mut text = format!("```perl\n{}\n```\n\n*class {}*", line.trim(), class_label);
-                                if let Some(ref rt) = self.find_method_return_type(cn, method, module_index, None) {
+                                if let Some(ref rt) = self.find_method_return_type(cn, method, module_index, None).filter(InferredType::is_known) {
                                     text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
                                 }
                                 return Some(text);
@@ -234,7 +234,7 @@ impl FileAnalysis {
                                             };
                                             let sig = format_cross_file_signature(method, &sub_info);
                                             let mut text = format!("```perl\n{}\n```\n\n*class {}*", sig, class_label);
-                                            if let Some(rt) = sub_info.return_type(Some(idx)) {
+                                            if let Some(rt) = sub_info.return_type(Some(idx)).filter(InferredType::is_known) {
                                                 text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
                                             }
                                             if let Some(doc) = sub_info.doc() {
@@ -576,7 +576,7 @@ impl FileAnalysis {
                 text.push_str(&format!("\n\n*package {}*", pkg));
             }
             if let SymbolDetail::Sub { ref doc, .. } = sym.detail {
-                if let Some(rt) = self.symbol_return_type_via_bag(sym.id, None) {
+                if let Some(rt) = self.symbol_return_type_via_bag(sym.id, None).filter(InferredType::is_known) {
                     text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
                 }
                 if let Some(d) = doc {
