@@ -6,6 +6,21 @@ crate / VS Code extension versions.
 
 ## Unreleased
 
+### One language per process
+
+- **A perl-lsp process now serves exactly one language.** `perl-lsp --lang
+  cpp` starts a C/C++ server; with no `--lang` it serves Perl. An editor with
+  Perl and C++ open runs two servers. Editor configs for a pack language must
+  add `--lang <id>`. CLI verbs that name a file pick its language
+  themselves; `--batch`, `--check`, `--heatmap` and `--workspace-symbol`
+  take `--lang`. A file of another compiled language is refused with a
+  message naming the `--lang` to use, rather than read in the wrong one.
+- `--check` / `--heatmap` on a Perl tree no longer index the C/XS files
+  beside it, so those numbers drop on mixed trees.
+- `--parse <file> <lang>` is now `--parse <file> --lang <lang>`.
+- The `all-langs` build feature is gone; enable the languages you want
+  (`--features cpp,python`).
+
 ### Heatmap
 
 - **`--heatmap` is 4–14× faster and uses every core.** BMO (739 files)

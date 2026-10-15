@@ -2,11 +2,12 @@ use super::*;
 
 #[cfg(feature = "cpp")]
 #[test]
-fn open_routes_cpp_file_to_the_cpp_driver() {
-    // The backend seam: opening a .cpp routes through the C++ driver,
+fn open_analyzes_through_the_store_driver() {
+    // The backend seam: a store serving C++ opens through the C++ driver,
     // so the document is language-tagged "cpp" and its analysis is the
-    // C++ outline (here, a macro-recovered class). A .pm stays Perl.
-    let store = FileStore::new();
+    // C++ outline (here, a macro-recovered class). A Perl store opens Perl.
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
+    let store = FileStore::serving(reg.for_id("cpp").unwrap());
     let cpp = Url::parse("file:///tmp/route_test.cpp").unwrap();
     assert!(store.open(
         cpp.clone(),
@@ -22,6 +23,7 @@ fn open_routes_cpp_file_to_the_cpp_driver() {
         assert!(doc.analysis.symbols().iter().any(|s| s.name == "Box"), "cpp class via the driver");
     }
 
+    let store = FileStore::serving(reg.for_id("perl").unwrap());
     let perl = Url::parse("file:///tmp/route_test.pm").unwrap();
     assert!(store.open(perl.clone(), "package Foo; sub bar { 1 }\n".to_string()));
     assert_eq!(store.get_open(&perl).unwrap().language, "perl");
@@ -108,7 +110,8 @@ my $b = make_b();
 #[test]
 fn enrich_open_leaves_pack_docs_untouched() {
     use crate::index::module_index::ModuleIndex;
-    let store = FileStore::new();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
+    let store = FileStore::serving(reg.for_id("cpp").unwrap());
     let url = Url::parse("file:///tmp/enrich_open_pack.cpp").unwrap();
     assert!(store.open(url.clone(), "class Box { public: int width; };\n".to_string()));
     let base = Arc::clone(&store.get_open(&url).unwrap().analysis);

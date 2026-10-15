@@ -94,7 +94,7 @@ impl PackHealCtx {
         // Full analyze on a blocking thread so the ~1.5 s gather never stalls
         // the executor.
         let analysis = tokio::task::spawn_blocking(move || {
-            crate::build::language_driver::LanguageRegistry::with_enabled()
+            crate::build::language_driver::LanguageRegistry::compiled()
                 .for_id(language)
                 .map(|d| d.analyze_with_path(&text, path.as_deref()))
         })
@@ -245,7 +245,7 @@ impl Backend {
             // for perl. See docs/open-forks.md.
             let analysis = tokio::task::spawn_blocking(move || {
                 crate::build::cpp_reparse::set_gather_cached_only(true);
-                let a = crate::build::language_driver::LanguageRegistry::with_enabled()
+                let a = crate::build::language_driver::LanguageRegistry::compiled()
                     .for_id(language)
                     .map(|d| d.analyze_with_path(&text, path.as_deref()));
                 crate::build::cpp_reparse::set_gather_cached_only(false);

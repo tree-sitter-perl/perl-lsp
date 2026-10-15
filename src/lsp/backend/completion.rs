@@ -236,7 +236,7 @@ fn macro_completion(
         return false; // the pack declares its preprocessor; asked, never named
     }
     let Some(p) = path else { return false };
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let Some(driver) = reg.for_id(language) else { return false };
     let cursor = crate::build::cursor_sentinel::point_to_byte(source, point);
     let prefix = identifier_prefix(source, cursor);

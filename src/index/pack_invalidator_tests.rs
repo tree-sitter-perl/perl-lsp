@@ -103,7 +103,7 @@ fn surface_gate_covers_registered_and_open_consumers() {
     std::fs::write(&hdr, "class Box { public: int width() { return 1; } };\n").unwrap();
     std::fs::write(&tu, "#include \"box.h\"\nint f() { Box b; return b.width(); }\n").unwrap();
 
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
     let hub = ModuleIndex::new_for_test();
     let pack = Arc::new(ModuleIndex::new_for_test());
@@ -113,7 +113,7 @@ fn surface_gate_covers_registered_and_open_consumers() {
     let canon_hdr = std::fs::canonicalize(&hdr).unwrap();
 
     // The TU is also OPEN — the outcome must answer the open half too.
-    let files = FileStore::new();
+    let files = FileStore::serving(driver);
     let tu_url = Url::from_file_path(&canon_tu).unwrap();
     let hdr_url = Url::from_file_path(&canon_hdr).unwrap();
     assert!(files.open(tu_url.clone(), std::fs::read_to_string(&tu).unwrap()));
@@ -122,7 +122,7 @@ fn surface_gate_covers_registered_and_open_consumers() {
     let tu_before = arc_of(&pack, &canon_tu);
     let hdr_before = arc_of(&pack, &canon_hdr);
 
-    let inv = PackInvalidator::default();
+    let inv = PackInvalidator::serving(driver);
 
     // Body-only edit: return value changes, surface identical.
     std::fs::write(&hdr, "class Box { public: int width() { return 2; } };\n").unwrap();
@@ -185,7 +185,7 @@ fn pack_swap_skips_stale_generation() {
     std::fs::write(&hdr, "class Box { public: int width() { return 1; } };\n").unwrap();
     std::fs::write(&tu, "#include \"box.h\"\nint f() { Box b; return b.width(); }\n").unwrap();
 
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
     let hub = ModuleIndex::new_for_test();
     let pack = Arc::new(ModuleIndex::new_for_test());
@@ -196,7 +196,7 @@ fn pack_swap_skips_stale_generation() {
     let hdr_before = arc_of(&pack, &canon_hdr);
     let tu_before = arc_of(&pack, &canon_tu);
 
-    let inv = PackInvalidator::default();
+    let inv = PackInvalidator::serving(driver);
     // A fresher writer already claimed the maximum generation for both paths.
     assert!(inv.claim_source_gen(&canon_hdr, i64::MAX));
     assert!(inv.claim_source_gen(&canon_tu, i64::MAX));
@@ -208,7 +208,7 @@ fn pack_swap_skips_stale_generation() {
         "class Box { public: int width() { return 2; } int height() { return 3; } };\n",
     )
     .unwrap();
-    inv.file_changed(None, &hub, &FileStore::new(), &hdr, false);
+    inv.file_changed(None, &hub, &FileStore::serving(driver), &hdr, false);
     assert_eq!(arc_of(&pack, &canon_hdr), hdr_before, "stale header re-register skipped");
     assert_eq!(arc_of(&pack, &canon_tu), tu_before, "stale consumer re-register skipped");
     let _ = std::fs::remove_dir_all(&dir);
@@ -227,7 +227,7 @@ fn file_changed_defers_during_bulk_index_and_reconciles() {
     let hdr = dir.join("box.h");
     std::fs::write(&hdr, "class Box { public: int width() { return 1; } };\n").unwrap();
 
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
     let hub = ModuleIndex::new_for_test();
     let pack = Arc::new(ModuleIndex::new_for_test());
@@ -236,10 +236,10 @@ fn file_changed_defers_during_bulk_index_and_reconciles() {
     let canon_hdr = std::fs::canonicalize(&hdr).unwrap();
     let before = arc_of(&pack, &canon_hdr);
 
-    let inv = PackInvalidator::default();
+    let inv = PackInvalidator::serving(driver);
     inv.begin_bulk_index();
     std::fs::write(&hdr, "class Box { public: int width() { return 1; } int h(); };\n").unwrap();
-    let outcome = inv.file_changed(None, &hub, &FileStore::new(), &hdr, false);
+    let outcome = inv.file_changed(None, &hub, &FileStore::serving(driver), &hdr, false);
     assert!(outcome.deferred, "mid-index change defers");
     assert!(outcome.refresh_open.is_empty());
     assert_eq!(arc_of(&pack, &canon_hdr), before, "deferred: no swap yet");
@@ -279,14 +279,14 @@ fn swap_fixture(tag: &str) -> SwapFixture {
     std::fs::write(&hdr, "class Box { public: int width() { return 1; } };\n").unwrap();
     std::fs::write(&tu, "#include \"box.h\"\nint f() { Box b; return b.width(); }\n").unwrap();
 
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
     let hub = ModuleIndex::new_for_test();
     let pack = Arc::new(ModuleIndex::new_for_test());
     hub.attach_pack_index("cpp", pack.clone());
     register_pair(driver, &pack, &[&hdr, &tu]);
 
-    SwapFixture { dir, hdr, tu, hub, pack, inv: PackInvalidator::default(), files: FileStore::new() }
+    SwapFixture { dir, hdr, tu, hub, pack, inv: PackInvalidator::serving(driver), files: FileStore::serving(driver) }
 }
 
 /// The registered analysis for `path` — the residency question these tests

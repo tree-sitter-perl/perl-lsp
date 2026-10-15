@@ -58,6 +58,9 @@ pub struct FileStore {
     /// URL → canonical path, for open files. Lets us demote cleanly and
     /// prevents duplicate workspace entries for open files.
     url_to_path: DashMap<Url, PathBuf>,
+    /// The driver every opened file is analyzed by — the process's served
+    /// language, fixed for the store's life.
+    driver: &'static dyn crate::build::language_driver::LanguageDriver,
 }
 
 impl Default for FileStore {
@@ -67,11 +70,19 @@ impl Default for FileStore {
 }
 
 impl FileStore {
+    /// A store for the process's served language.
     pub fn new() -> Self {
+        Self::serving(crate::build::language_driver::LanguageRegistry::served())
+    }
+
+    /// A store for `driver`'s language. Production stores serve the process
+    /// language (`new`); tests reach a pack language through here.
+    pub fn serving(driver: &'static dyn crate::build::language_driver::LanguageDriver) -> Self {
         FileStore {
             open: DashMap::new(),
             workspace: DashMap::new(),
             url_to_path: DashMap::new(),
+            driver,
         }
     }
 
@@ -80,18 +91,18 @@ impl FileStore {
     /// Open a file from text. Parses and builds analysis. If a workspace entry
     /// exists for the same path, it's replaced by the Open entry.
     pub fn open(&self, url: Url, text: String) -> bool {
-        // Route by extension, falling back to a content sniff when no driver
-        // claims it. A hub-enriched language (and a truly-unrecognized file,
-        // which the fallback driver serves) keeps the native constructor —
+        // A hub-enriched language keeps the native constructor —
         // `Document::new` is the reference pipeline the hub's freshness/
         // enrichment lanes are built around; the rest go through the generic
         // driver constructor.
-        let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
         let path = url.to_file_path().ok();
-        let driver = path
-            .as_ref()
-            .map(|p| reg.driver_or_fallback(p, &text))
-            .unwrap_or_else(|| reg.fallback());
+        let driver = self.driver;
+        if let Some(p) = &path {
+            if let Err(why) = crate::build::language_driver::LanguageRegistry::admits(driver, p) {
+                log::info!("not opening: {why}");
+                return false;
+            }
+        }
         let doc = if !driver.caps().hub_enrichment {
             match Document::new_routed(text, driver, path.clone()) {
                 Some(d) => d,

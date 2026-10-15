@@ -49,6 +49,7 @@
 #   gold-corpus/run.pl --emit <cap> <file> <line> <col> [newname]
 #   gold-corpus/run.pl --emit workspace-symbol <query>
 #   gold-corpus/run.pl --emit diagnostics
+#   gold-corpus/run.pl --emit [--root <dir>] [--lang cpp] <cap> ...   # a non-Perl row
 #   BIN=path CORPUS=<lib> gold-corpus/run.pl definition
 # CORPUS defaults to gold-corpus/local/lib/perl5; <file> is a path under it.
 
@@ -69,12 +70,12 @@ my $fxdir  = "$RealBin/fixtures";
 
 die "binary not found: $bin (cargo build --release)\n" unless -x $bin;
 
-# Languages this binary serves — `perl-lsp --languages` prints e.g.
+# Languages this binary can serve — `perl-lsp --languages` prints e.g.
 # "perl-lsp 0.5.3 — languages: perl, cpp". A fixture row tagged with a
-# `lang` the binary does NOT serve is SKIPPED, so a default perl-only
+# `lang` the binary does NOT carry is SKIPPED, so a default perl-only
 # build's gold run stays clean while a `--features cpp` build exercises
-# the C++ fixtures from the SAME harness. (Untagged rows are Perl —
-# always run.) This is the multi-language seam for the gold corpus.
+# the C++ fixtures from the SAME harness, each language in its own
+# `--lang` batch. (Untagged rows are Perl — always run.)
 my %served = do {
     my $out = qx{$bin --languages 2>/dev/null};
     # Entries may carry a maturity parenthetical ("cpp (beta)"); the id is
@@ -207,9 +208,12 @@ sub batch_req {
     return \%r;
 }
 # Run a batch of requests through ONE --batch process (one startup) against a
-# given root, return id -> response. Rows are grouped by root by the caller.
+# given root, return id -> response. Rows are grouped by root AND language by
+# the caller: a process serves one language (`--lang`), so a C++ row in a Perl
+# batch is refused, never answered in Perl.
 sub run_batch {
-    my ($reqs, $root, $p5lib, $rename_scope) = @_;
+    my ($reqs, $root, $p5lib, $rename_scope, $lang) = @_;
+    $lang //= 'perl';
     $root  //= $corpus;
     $p5lib //= p5lib_for($root);
     my $jsonl = join("\n", map { encode_json($_) } @$reqs) . "\n";
@@ -236,7 +240,7 @@ sub run_batch {
         $ENV{PERL5LIB} = $p5lib if defined $p5lib;
         if ($rename_scope) { $ENV{PERL_LSP_RENAME_SCOPE} = $rename_scope; }
         else { delete $ENV{PERL_LSP_RENAME_SCOPE}; }
-        exec($bin, '--batch', $root) or exit 127;
+        exec($bin, '--lang', $lang, '--batch', $root) or exit 127;
     }
     # Read line-by-line (the binary flushes per response): each arrival
     # delta is that query's processing cost; the first arrival also
@@ -292,9 +296,10 @@ sub run_batch {
 # ---- --emit: canonical output for one ad-hoc query (fixture authoring) ----
 if (@ARGV && $ARGV[0] eq '--emit') {
     shift @ARGV;
-    my $emit_root;
-    if (@ARGV && $ARGV[0] eq '--root') {
-        shift @ARGV;
+    my ($emit_root, $emit_lang);
+    while (@ARGV && $ARGV[0] =~ /^--(root|lang)$/) {
+        my $opt = shift @ARGV;
+        if ($opt eq '--lang') { $emit_lang = shift @ARGV; next; }
         $emit_root = shift @ARGV;
         $emit_root = File::Spec->rel2abs("$RealBin/../$emit_root") unless $emit_root =~ m{^/};
     }
@@ -306,7 +311,7 @@ if (@ARGV && $ARGV[0] eq '--emit') {
             : $spec->{qarg}  ? { query => $rest[0] }
             :                  { file => $rest[0], line => ($rest[1] // 0) + 0, col => ($rest[2] // 0) + 0, newname => $rest[3] };
     my $req = batch_req($cap, $spec, $row, 'emit', $emit_root);
-    my $resp = run_batch([ $req ], $emit_root, $emit_root ? p5lib_for($emit_root) : undef);
+    my $resp = run_batch([ $req ], $emit_root, $emit_root ? p5lib_for($emit_root) : undef, undef, $emit_lang);
     my $r = $resp->{emit};
     if    (!$r)        { print "<<CRASH: process aborted>>\n"; }
     elsif (!$r->{ok})  { print "<<ERR: $r->{err}>>\n"; }
@@ -360,8 +365,10 @@ for my $r (@rows) {
     my $scope = $r->{renameScope} // '';
     # PERL5LIB is process-wide per batch, so rows differing in @INC group apart.
     my $inc = inc_roots_for($r);
-    my $gkey = "$root\x00$scope\x00$inc";
-    $gctx{$gkey} //= { root => $root, scope => $scope, inc => $inc };
+    # One language per process: untagged rows are Perl.
+    my $lang = $r->{lang} // 'perl';
+    my $gkey = "$root\x00$scope\x00$inc\x00$lang";
+    $gctx{$gkey} //= { root => $root, scope => $scope, inc => $inc, lang => $lang };
     push @{ $groups{$gkey} }, batch_req($r->{capability}, $spec, $r, $key, $root);
 }
 
@@ -383,8 +390,8 @@ my $n_roots = scalar keys %distinct_roots;
 sub run_all_batches {
     my %by; my @mets;
     for my $gkey (sort keys %groups) {
-        my ($root, $scope, $inc) = @{ $gctx{$gkey} }{qw(root scope inc)};
-        my ($b, $met) = run_batch($groups{$gkey}, $root, p5lib_for($root, $inc), $scope);
+        my ($root, $scope, $inc, $lang) = @{ $gctx{$gkey} }{qw(root scope inc lang)};
+        my ($b, $met) = run_batch($groups{$gkey}, $root, p5lib_for($root, $inc), $scope, $lang);
         %by = (%by, %$b);
         push @mets, $met;
     }

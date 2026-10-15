@@ -75,7 +75,7 @@ impl InvalidationOutcome {
 }
 
 /// Coordinates watcher invalidations against the INITIAL pack bulk index
-/// (`index_pack_languages`) — H9-2. While that index is in flight the pack
+/// (`index_pack_language`) — H9-2. While that index is in flight the pack
 /// sub-indexes aren't attached to the hub yet, so an invalidation would
 /// find no `pack_index` and silently drop the save (and even once attached,
 /// racing the bulk cone re-analyzes it twice, uncoordinated). Instead a save
@@ -135,8 +135,10 @@ impl PackChangeCoordinator {
 /// The owner. One per server/CLI session, shared by the save/watcher event
 /// forwarders and the bulk-index lifecycle. See the module doc for what it
 /// owns and why.
-#[derive(Default)]
 pub struct PackInvalidator {
+    /// The language whose files this invalidator re-analyzes — the
+    /// process's served language in production.
+    driver: &'static dyn crate::build::language_driver::LanguageDriver,
     change_lock: std::sync::Mutex<()>,
     coord: PackChangeCoordinator,
     /// The SOURCE generation (`module_cache::file_mtime_nanos`) the currently
@@ -153,7 +155,23 @@ pub struct PackInvalidator {
     registered_source_gen: DashMap<PathBuf, i64>,
 }
 
+impl Default for PackInvalidator {
+    fn default() -> Self {
+        Self::serving(crate::build::language_driver::LanguageRegistry::served())
+    }
+}
+
 impl PackInvalidator {
+    /// An invalidator for `driver`'s files.
+    pub fn serving(driver: &'static dyn crate::build::language_driver::LanguageDriver) -> Self {
+        PackInvalidator {
+            driver,
+            change_lock: Default::default(),
+            coord: Default::default(),
+            registered_source_gen: Default::default(),
+        }
+    }
+
     /// Mark the initial pack bulk index in flight (H9-2). Call synchronously
     /// before the index task is scheduled so a save racing the scheduling
     /// still defers into the reconcile set.
@@ -290,8 +308,7 @@ impl PackInvalidator {
         deleted: bool,
     ) -> bool {
         use rayon::prelude::*;
-        let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
-        let Some(driver) = reg.for_path(path) else { return false };
+        let driver = self.driver;
         // Only invalidator-owned languages route here; a hub-indexed
         // language's changes are the direct re-index path's business.
         if !driver.caps().pack_invalidation {
@@ -390,8 +407,6 @@ impl PackInvalidator {
         let mut results: Vec<(PathBuf, Arc<FileAnalysis>)> = targets
             .par_iter()
             .filter_map(|p| {
-                let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
-                let driver = reg.for_path(p).filter(|d| d.id() == lang)?;
                 let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let source = std::fs::read_to_string(p).ok()?;
                     Some(driver.analyze_with_path(&source, Some(p)))

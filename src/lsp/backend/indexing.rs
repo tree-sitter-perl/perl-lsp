@@ -413,15 +413,13 @@ impl Backend {
                     walk_done_ref,
                 )
             } else {
-                crate::index::module_resolver::index_pack_languages(
+                crate::index::module_resolver::index_pack_language(
+                    crate::build::language_driver::LanguageRegistry::served(),
                     &root_path,
                     Some(root_uri.as_str()),
                     &module_index,
                     cb_ref,
                     bag_cache_bytes,
-                    // The server's latch is already per-FAMILY; inside the
-                    // pack family it indexes every pack language, as before.
-                    &crate::build::language_driver::LanguageScope::All,
                 )
             };
             // Everything from here to `open_perl_gate_then_heal` is still
@@ -447,12 +445,13 @@ impl Backend {
                             message: Some(if want_perl {
                                 format!("Indexed {} Perl files", count)
                             } else {
-                                let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
-                                let langs: Vec<&str> = reg
-                                    .pack_drivers()
-                                    .map(|d| crate::build::language_driver::LanguageRegistry::display_name(d.id()))
-                                    .collect();
-                                format!("Indexed {} {} files", count, langs.join("/"))
+                                format!(
+                                    "Indexed {} {} files",
+                                    count,
+                                    crate::build::language_driver::LanguageRegistry::display_name(
+                                        crate::build::language_driver::LanguageRegistry::served().id(),
+                                    ),
+                                )
                             }),
                         },
                     )),
