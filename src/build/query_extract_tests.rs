@@ -2207,6 +2207,22 @@ int d(struct crate* c) { return c->kind == 7; }
     assert_eq!(fa.field_domain("crate", "kind", None), None, "no cross-struct pooling");
 }
 
+#[test]
+fn cpp_domain_vote_never_answers_the_slot_value() {
+    // A slot with no usage sites has no domain, even with an index that
+    // reaches the slot's declared value: hover showed `argv: robj` (the
+    // value, minus its stars) as a "domain" for `robj **argv`.
+    let src = "\
+struct robj { int type; };
+struct client { struct robj **argv; };
+void f(struct client* c) { struct robj *o = c->argv[1]; }
+";
+    let fa = std::sync::Arc::new(cpp_skel(src).into_file_analysis());
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.register_symbols(std::path::PathBuf::from("/t/client.cpp"), fa.clone());
+    assert_eq!(fa.field_domain("client", "argv", Some(&idx)), None);
+}
+
 // ---- C++ template extraction hygiene (specializations, instantiations,
 // out-of-line members, aliases, concepts, unions) ----
 
