@@ -100,6 +100,16 @@ fn a_comment_before_a_has_options_close_paren_keeps_the_attribute() {
     assert_eq!(fa.sub_return_type_at_arity("typed", Some(0)), Some(InferredType::Numeric));
 }
 
+// A comment between pairs is not an element: the pairs after it stay aligned.
+#[test]
+fn a_comment_between_hash_pairs_keeps_the_pairing() {
+    let fa = build_fa("package Foo;\nsub f { return {\n    host => 'h',  # note\n    port => 1,\n} }\n1;\n");
+    let t = fa.sub_return_type_at_arity("f", None);
+    let Some(InferredType::HashWithKeys { keys, .. }) = t else { panic!("{t:?}") };
+    let names: Vec<&str> = keys.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(names, ["host", "port"]);
+}
+
 // A string literal is one shape however it is quoted.
 #[test]
 fn as_alias_on_a_double_quoted_name() {

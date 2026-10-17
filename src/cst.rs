@@ -282,14 +282,14 @@ pub(crate) fn call_args<'a>(call_node: Node<'a>) -> Vec<Node<'a>> {
 /// `key, a, b`; the grouped-value spelling is the ref `[a, b]`). So we descend
 /// nested groups wherever they appear, yielding the flat sibling sequence a
 /// single linear scan can pair over. Ref literals (`[...]`, `{...}`) are NOT
-/// groups and stay whole.
+/// groups and stay whole. Comments and POD are skipped ([`is_trivia`]).
 pub(crate) fn flatten_list<'a>(list: Node<'a>, out: &mut Vec<Node<'a>>) {
     let count = list.child_count();
     for i in 0..count {
         let Some(child) = list.child(i) else { continue };
         if is_list_literal(child) {
             flatten_list(child, out);
-        } else {
+        } else if !is_trivia(child) {
             out.push(child);
         }
     }
@@ -345,13 +345,13 @@ pub(crate) fn pair_nodes_in<'a>(children: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a
     while i < count {
         let k_node = children[i];
         i += 1;
-        if !k_node.is_named() {
+        if !is_list_element(k_node) {
             continue;
         }
         // Skip the comma / fat comma to the next named node (the value).
         let val = loop {
             match children.get(i) {
-                Some(c) if c.is_named() => break Some(*c),
+                Some(c) if is_list_element(*c) => break Some(*c),
                 Some(_) => i += 1,
                 None => break None,
             }
@@ -361,6 +361,16 @@ pub(crate) fn pair_nodes_in<'a>(children: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a
         out.push((k_node, val));
     }
     out
+}
+
+/// A comment or POD: a named node that is not an element of the list it
+/// sits in. Counting one as an element shifts every later pair (#268).
+fn is_trivia(node: Node) -> bool {
+    matches!(node.kind(), "comment" | "pod")
+}
+
+fn is_list_element(node: Node) -> bool {
+    node.is_named() && !is_trivia(node)
 }
 
 /// The list a `{…}` / `[…]` literal holds, in either spelling: `{ a => 1 }`
