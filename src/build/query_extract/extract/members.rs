@@ -59,10 +59,13 @@ pub(super) fn flatten_recv(
 }
 
 /// `@arity.args`: a call's argument_list — count its arguments (the named
-/// children; the C `...` at a CALL site never appears here). Keyed by the
+/// children; the C `...` at a CALL site never appears here). A comment is a
+/// named child too, so the grammar's own extras are left out. Keyed by the
 /// match, which also captured the callee.
 pub(super) fn count_args(members: &mut State, node: tree_sitter::Node<'_>, match_id: usize) {
-    members.arg_counts_by_match.insert(match_id, node.named_child_count());
+    let mut c = node.walk();
+    let count = node.named_children(&mut c).filter(|ch| !ch.is_extra()).count();
+    members.arg_counts_by_match.insert(match_id, count);
 }
 
 /// `@arity.sig`: a callable's parameter_list — count declared params
@@ -126,7 +129,9 @@ fn peel_receiver<'a>(node: tree_sitter::Node<'a>, wrappers: &[&str]) -> tree_sit
         if !wrappers.contains(&inner.kind()) {
             return inner;
         }
-        match inner.named_child(0) {
+        let mut c = inner.walk();
+        let first = inner.named_children(&mut c).find(|ch| !ch.is_extra());
+        match first {
             Some(ch) => inner = ch,
             None => return node,
         }

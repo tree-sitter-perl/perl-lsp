@@ -2902,3 +2902,30 @@ void go() {
     assert_eq!(gd(11, 13), Some((1, 9)), "w.get().spin() resolves spin on Widget");
     assert_eq!(gd(12, 9), Some((1, 9)), "w.v_.spin() resolves through the field's type");
 }
+
+// A comment inside a C++ argument list is not an argument.
+#[test]
+fn cpp_call_arg_count_skips_comments() {
+    let skel = cpp_skel("void f(int, int);\nvoid g() { f(a, /* c */ b); }\n");
+    let call = skel.refs.iter().find(|r| r.name == "f").expect("f call ref");
+    assert_eq!(call.arg_count, Some(2));
+}
+
+// A comment ahead of a parenthesized C++ receiver is peeled with the parens.
+#[test]
+fn cpp_receiver_peel_skips_comments() {
+    let skel = cpp_skel("struct W { void spin(); };\nvoid g() { W w; (/* c */ w).spin(); }\n");
+    let call = skel.refs.iter().find(|r| r.name == "spin" && r.invocant.is_some()).expect("spin member ref");
+    assert_eq!(call.invocant.as_ref().unwrap().1, "w");
+}
+
+// A comment inside a Python argument list is not an argument.
+#[test]
+fn python_call_arg_count_skips_comments() {
+    let src = "o.f(a,  # c\n    b)\n";
+    let mut parser = python_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &python_pack()).unwrap();
+    let call = skel.refs.iter().find(|r| r.name == "f" && r.invocant.is_some()).expect("f member call ref");
+    assert_eq!(call.arg_count, Some(2));
+}
