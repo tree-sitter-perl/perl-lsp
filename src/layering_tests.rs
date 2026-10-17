@@ -1649,6 +1649,46 @@ fn pack_fields_name_no_grammar_shapes() {
 /// are ratcheted by count instead. `trigger_chars` is not here: the LSP
 /// protocol's trigger characters are the client's vocabulary, not the
 /// language's.
+/// A comment or POD is a grammar extra and a named child, so a raw
+/// `named_child(i)` / `named_child_count()` read of a list, argument list
+/// or block counts it as an element (#268). Positional reads go through
+/// `NodeExt::elements` and `cst::nth_element`; the raw sites left are inside
+/// nodes that cannot hold an extra, or kind-gated. Shrink-only.
+#[test]
+fn positional_reads_skip_grammar_extras() {
+    let files = layer_files(&[Layer::Build, Layer::Cst, Layer::Lsp]);
+    let seen = count_lines(&files, &|l| {
+        l.contains(".named_child(") || l.contains(".named_child_count(") || l.contains(".named_children(")
+    });
+    let allow: &[(&str, usize, &str)] = &[
+        ("build/builder/arity.rs", 9, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/chain.rs", 4, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/emit.rs", 13, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/extract.rs", 7, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/fold.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/frameworks.rs", 5, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/narrowing.rs", 6, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/pipeline.rs", 3, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/plugin_emit.rs", 2, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/visit_bless.rs", 3, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/visit_calls.rs", 45, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/visit_decl.rs", 20, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/visit_method.rs", 4, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/visit_use.rs", 17, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/cpp_reparse/defs.rs", 7, "C++ reparse spike: legacy"),
+        ("build/cpp_reparse/synthetic.rs", 2, "C++ reparse spike: legacy"),
+        ("build/cpp_reparse/validate.rs", 2, "C++ reparse spike: legacy"),
+        ("build/cursor_sentinel.rs", 11, "pack member-access probes over the sentinel reparse: legacy"),
+        ("build/pod.rs", 21, "the POD grammar: legacy"),
+        ("build/query_extract/extract/members.rs", 2, "arg count and receiver peel, each filtering `is_extra()` itself"),
+        ("cst.rs", 26, "the typed view: `elements()` itself, and reads inside nodes that hold no extra"),
+        ("lsp/cursor_context.rs", 10, "the Perl cursor detector (rule #6): legacy"),
+        ("lsp/symbols/signature.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),
+    ];
+    let drift = allowlist_drift("positional reads (NodeExt::elements)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 #[test]
 fn pack_string_tables_are_ratcheted() {
     let seen = pack_string_sites(&|value, kinds, fields| {
