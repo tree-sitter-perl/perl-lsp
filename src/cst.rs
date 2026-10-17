@@ -37,6 +37,9 @@ pub(crate) trait NodeExt<'a>: Sized {
     fn span(&self) -> Span;
     /// Named children, by index (no `TreeCursor` borrow gymnastics).
     fn named(&self) -> NamedChildren<'a>;
+    /// Named children minus trivia ([`is_trivia`]): what a positional read
+    /// ("the first argument", "the last statement", "the k-th pair") means.
+    fn elements(&self) -> Elements<'a>;
 }
 
 impl<'a> NodeExt<'a> for Node<'a> {
@@ -51,6 +54,9 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
     fn named(&self) -> NamedChildren<'a> {
         NamedChildren { node: *self, idx: 0 }
+    }
+    fn elements(&self) -> Elements<'a> {
+        Elements(self.named())
     }
 }
 
@@ -108,6 +114,16 @@ impl<'a> Iterator for NamedChildren<'a> {
             }
         }
         None
+    }
+}
+
+/// [`NodeExt::elements`].
+pub(crate) struct Elements<'a>(NamedChildren<'a>);
+
+impl<'a> Iterator for Elements<'a> {
+    type Item = Node<'a>;
+    fn next(&mut self) -> Option<Node<'a>> {
+        self.0.by_ref().find(|c| !is_trivia(*c))
     }
 }
 
@@ -268,7 +284,7 @@ pub(crate) fn call_args<'a>(call_node: Node<'a>) -> Vec<Node<'a>> {
         return Vec::new();
     };
     if is_list_literal(args) {
-        args.named().collect()
+        args.elements().collect()
     } else {
         vec![args]
     }
@@ -315,7 +331,7 @@ pub(crate) fn list_elements<'a>(list: Node<'a>) -> Vec<Node<'a>> {
 /// Loops, so nested `(($x))` collapse.
 pub(crate) fn peel_groups(mut node: Node) -> Node {
     while is_list_literal(node) {
-        let mut named = node.named();
+        let mut named = node.elements();
         match (named.next(), named.next()) {
             (Some(inner), None) => node = inner,
             _ => break, // empty, or a real multi-element list
@@ -363,10 +379,30 @@ pub(crate) fn pair_nodes_in<'a>(children: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a
     out
 }
 
-/// A comment or POD: a named node that is not an element of the list it
-/// sits in. Counting one as an element shifts every later pair (#268).
-fn is_trivia(node: Node) -> bool {
-    matches!(node.kind(), "comment" | "pod")
+/// A node the grammar declares an extra (Perl: comment, POD, heredoc body):
+/// it can sit between any two tokens, so it is never an element of the list,
+/// argument or block around it. Counting one shifts every later position.
+pub(crate) fn is_trivia(node: Node) -> bool {
+    node.is_extra()
+}
+
+/// The `n`-th element of `node` ([`NodeExt::elements`]).
+pub(crate) fn nth_element(node: Node, n: usize) -> Option<Node> {
+    node.elements().nth(n)
+}
+
+/// The last element of `node` ([`NodeExt::elements`]).
+pub(crate) fn last_element(node: Node) -> Option<Node> {
+    node.elements().last()
+}
+
+/// Every child of `node`, punctuation included, minus trivia: the token
+/// stream a separator-aware scan walks.
+pub(crate) fn children_without_trivia(node: Node) -> Vec<Node> {
+    (0..node.child_count())
+        .filter_map(|i| node.child(i))
+        .filter(|c| !is_trivia(*c))
+        .collect()
 }
 
 fn is_list_element(node: Node) -> bool {
@@ -641,10 +677,7 @@ fn map_callback_template<'a>(cb: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
     if cb.kind() != "block" {
         return Some(cb);
     }
-    let stmts: Vec<Node> = cb
-        .named()
-        .filter(|c| !matches!(c.kind(), "comment" | "pod"))
-        .collect();
+    let stmts: Vec<Node> = cb.elements().collect();
     if stmts.is_empty() || !stmts.iter().all(|s| s.kind() == "expression_statement") {
         return None;
     }
@@ -814,7 +847,7 @@ pub(crate) fn string_list_with_residue(
                 // Separators and parens are anonymous; anything NAMED we
                 // didn't fold is a real list item we couldn't read.
                 _ => {
-                    if child.is_named() && !matches!(child.kind(), "comment" | "pod") {
+                    if is_list_element(child) {
                         residue = true;
                     }
                 }

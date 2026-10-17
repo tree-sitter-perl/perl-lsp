@@ -359,7 +359,7 @@ impl<'a> Builder<'a> {
             return None;
         }
         let body = node.child_by_field_name("body")?;
-        let mut node = body.named_child(body.named_child_count().checked_sub(1)?)?;
+        let mut node = crate::cst::last_element(body)?;
         // Peel through `expression_statement` and `return_expression`
         // wrappers (an explicit `return $expr;` shows up as
         // `expression_statement → return_expression → $expr` in
@@ -367,7 +367,7 @@ impl<'a> Builder<'a> {
         loop {
             match node.kind() {
                 "expression_statement" | "return_expression" => {
-                    node = node.named_child(0)?;
+                    node = crate::cst::nth_element(node, 0)?;
                 }
                 _ => break,
             }
