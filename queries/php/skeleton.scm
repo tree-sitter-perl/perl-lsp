@@ -12,12 +12,17 @@
   body: (compound_statement) @scope) @def.package
 
 ; ---- classes, interfaces, traits ----
-; One model kind; the body's members file under the class's identity.
+; One model kind; the body's members file under the class's identity. The
+; keyword or modifier that says which flavour of class it is rides
+; @sym.attr, whose spelling is the flag it mints.
 (class_declaration
+  (abstract_modifier)? @sym.attr
   name: (name) @def.class.name @context.class) @def.class @scope
 (interface_declaration
+  "interface" @sym.attr
   name: (name) @def.class.name @context.class) @def.class @scope
 (trait_declaration
+  "trait" @sym.attr
   name: (name) @def.class.name @context.class) @def.class @scope
 
 ; ---- parents ----
@@ -40,6 +45,16 @@
   name: (name) @def.class.name
   body: (declaration_list (use_declaration [(name) (qualified_name)] @parent)))
 
+; A parent's name is a class reference: goto-def, references and rename
+; reach it. A qualified spelling references by the whole spelling and
+; rewrites only its leaf.
+(base_clause (name) @ref.type)
+(base_clause (qualified_name (name) @ref.type) @ref.spelled)
+(class_interface_clause (name) @ref.type)
+(class_interface_clause (qualified_name (name) @ref.type) @ref.spelled)
+(use_declaration (name) @ref.type)
+(use_declaration (qualified_name (name) @ref.type) @ref.spelled)
+
 ; ---- the use-map ----
 ; A row binds a class unless its keyword says it binds a function or a
 ; constant; those rows name no class, so they never enter the map. The
@@ -60,4 +75,19 @@
       . (name) @import.name
       alias: (name)? @import.alias) @_clause)) @_group
  (#not-match? @_group "^use\\s+(function|const)\\s")
+ (#not-match? @_clause "^(function|const)\\s"))
+
+; An imported class's leaf references the class the row names, so a
+; rename of the class rewrites the `use` line too.
+((namespace_use_declaration
+  (namespace_use_clause . (qualified_name (name) @ref.type)) @_clause)
+ (#not-match? @_clause "^(function|const)\\s"))
+((namespace_use_declaration
+  (namespace_use_clause . (name) @ref.type) @_clause) @_decl
+ (#not-match? @_decl "^use\\s+(function|const)\\s")
+ (#not-match? @_clause "^(function|const)\\s"))
+((namespace_use_declaration
+  body: (namespace_use_group
+    (namespace_use_clause . (name) @ref.type) @_clause)) @_decl
+ (#not-match? @_decl "^use\\s+(function|const)\\s")
  (#not-match? @_clause "^(function|const)\\s"))

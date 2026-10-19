@@ -151,3 +151,120 @@ fn the_php_driver_serves_php_files() {
     let fa = driver.analyze("<?php\nnamespace App;\nuse Base\\Model;\nclass User extends Model {}\n");
     assert_eq!(fa.declared_parents("App\\User"), ["Base\\Model"]);
 }
+
+#[test]
+fn the_class_keyword_or_modifier_is_its_flavour_flag() {
+    use crate::model::file_analysis::SymbolFlags;
+    let fa = php("<?php
+abstract class Shape {}
+final class Square {}
+interface Drawable {}
+trait Named {}
+");
+    let flags = |name: &str| fa.symbols().iter().find(|s| s.name == name).unwrap().flags;
+    assert_eq!(flags("Shape"), SymbolFlags::ABSTRACT);
+    assert_eq!(flags("Square"), SymbolFlags::empty());
+    assert_eq!(flags("Drawable"), SymbolFlags::INTERFACE);
+    assert_eq!(flags("Named"), SymbolFlags::TRAIT);
+}
+
+#[test]
+fn parent_names_and_imported_leaves_are_class_references() {
+    use crate::model::file_analysis::RefKind;
+    let src = "<?php
+namespace App;
+use Lib\\Model;
+use Lib\\Contracts\\{Speaker};
+use function Lib\\helper;
+class User extends Model implements Speaker, \\Countable, Sub\\Local {
+    use Traits\\Stamps;
+}
+";
+    let fa = php(src);
+    let lines: Vec<&str> = src.lines().collect();
+    // (written spelling, the token the span covers, the identity it names)
+    let refs: Vec<(String, &str, String)> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::PackageRef))
+        .map(|r| {
+            let token = &lines[r.span.start.row][r.span.start.column..r.span.end.column];
+            (r.target_name.clone(), token, fa.spelled_identity(r))
+        })
+        .collect();
+    let want: Vec<(String, &str, String)> = [
+        ("Model", "Model", "Lib\\Model"),
+        ("Speaker", "Speaker", "Lib\\Contracts\\Speaker"),
+        ("Model", "Model", "Lib\\Model"),
+        ("Speaker", "Speaker", "Lib\\Contracts\\Speaker"),
+        ("\\Countable", "Countable", "Countable"),
+        ("Sub\\Local", "Local", "App\\Sub\\Local"),
+        ("Traits\\Stamps", "Stamps", "App\\Traits\\Stamps"),
+    ]
+    .iter()
+    .map(|(n, t, i)| (n.to_string(), *t, i.to_string()))
+    .collect();
+    assert_eq!(refs, want);
+}
+
+/// A class's uses in another file are found by the identity they name:
+/// goto-def from a parent clause lands on the declaration, and rename
+/// rewrites the declaration, the import's leaf and the parent's leaf.
+#[test]
+fn a_class_renames_across_files_through_its_identity() {
+    use crate::index::file_store::{FileKey, FileStore};
+    use crate::index::resolve::{resolve, OverrideScope};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    let src_model = "<?php\nnamespace Lib;\nclass Model {}\n";
+    // `Other\Model` shares the leaf and must never be renamed with it.
+    let src_user = "<?php\nnamespace App;\nuse Lib\\Model;\nclass User extends Model {}\nclass Twin extends Other\\Model {}\n";
+    let (p_model, p_user) = (PathBuf::from("/fake/php/Lib/Model.php"), PathBuf::from("/fake/php/App/User.php"));
+
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.register_symbols(p_model.clone(), Arc::new(php(src_model)));
+    let store = FileStore::new();
+    store.insert_workspace(p_model.clone(), php(src_model));
+    store.insert_workspace(p_user.clone(), php(src_user));
+
+    let user = store.workspace_raw().get(&p_user).unwrap().clone();
+    let on_extends = tree_sitter::Point { row: 3, column: 21 };
+    let cs = resolve(&store, &user, FileKey::Path(p_user.clone()), on_extends, Some(&idx), OverrideScope::default());
+    let defs = cs.definitions();
+    assert!(
+        defs.iter().any(|d| matches!(&d.key, FileKey::Path(p) if *p == p_model) && d.span.start.row == 2),
+        "gd lands on the declaration: {defs:?}"
+    );
+
+    let mut sites: Vec<(String, usize, usize)> = cs
+        .rename_edits("Entity")
+        .unwrap()
+        .into_iter()
+        .map(|(loc, _)| {
+            let FileKey::Path(p) = &loc.key else { panic!() };
+            (p.file_name().unwrap().to_string_lossy().to_string(), loc.span.start.row, loc.span.start.column)
+        })
+        .collect();
+    sites.sort();
+    assert_eq!(
+        sites,
+        [
+            ("Model.php".to_string(), 2, 6),
+            ("User.php".to_string(), 2, 8),
+            ("User.php".to_string(), 3, 19),
+        ]
+    );
+}
+
+#[test]
+fn an_aliased_imports_leaf_renames_the_imported_class() {
+    use crate::model::file_analysis::RenameKind;
+    // the file's own `Model` is a different class from the one it imports
+    let fa = php("<?php\nnamespace App;\nuse Lib\\Model as Base;\nclass Model extends Base {}\n");
+    let on_leaf = tree_sitter::Point { row: 2, column: 9 };
+    assert!(matches!(
+        fa.rename_kind_at(on_leaf, None),
+        Some(RenameKind::Package(ref c)) if c == "Lib\\Model"
+    ));
+    assert_eq!(fa.declared_parents("App\\Model"), ["Lib\\Model"]);
+}

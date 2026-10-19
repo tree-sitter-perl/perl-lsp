@@ -1046,6 +1046,10 @@ pub(super) fn collect_from_analysis(
         // every other ref kind matches by exact name.
         let name_matches = if matches!(r.kind, RefKind::FunctionCall { .. }) || r.member_site().is_some() {
             r.unqualified_target_name(analysis.names()) == target.name
+        } else if matches!(r.kind, RefKind::PackageRef) {
+            // A class token names the class its file's use-map says it
+            // does; the target is that identity.
+            analysis.spelled_identity(r) == target.name
         } else {
             r.target_name == target.name
         };

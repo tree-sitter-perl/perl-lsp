@@ -19,8 +19,10 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
 1. **Identity is the FQN, spelled with the language's own separator.**
    `ClassName("App\\Support\\Collection")`, method symbols with
    `package = "App\\Support\\Collection"`, `PackageSymbol{package: FQN}`,
-   refs carrying the FQN as `target_name` when the origin can name it. The
-   index registers the FQN; C's flat linkage is its own identity (the hook
+   while a class token's ref keeps the spelling as written (a qualified
+   one in full, its span on the leaf alone, so a rename rewrites only the
+   leaf) and names its identity through `spelled_identity`. The index
+   registers the FQN; C's flat linkage is its own identity (the hook
    is the identity function there).
 2. **The relational key stays the leaf.** `split_qualified` / `name_match_key`
    know the namespace separator, so SQLite `refs`/`syms` rows and
@@ -66,8 +68,8 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    (`identity_namespace`), the origin's pin only for a bare spelling.
 7. **A class token references the target iff it names its identity.** The
    matcher resolves a `PackageRef` / construction-site spelling through the
-   file's use-map (a token inside an import row names the row's class in
-   full) and compares identities — `use B\Collection; new Collection()`
+   file's use-map (`spelled_identity`: a token inside an import row names
+   the row's class in full) and compares identities — `use B\Collection; new Collection()`
    reaches `B\Collection` and never the same-leaf stranger.
 
 ## Retired with it

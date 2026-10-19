@@ -282,6 +282,10 @@ pub enum DefPart {
 pub enum Capture {
     Def { kind: DefCap, part: DefPart },
     Ref(RefCap),
+    /// The whole written spelling of the match's reference when its token
+    /// is only the leaf (`Base\Model` around `Model`): the reference
+    /// resolves by the spelling and rewrites only the leaf.
+    RefSpelled,
     Scope(ScopeCap),
     Context(ContextKind),
     /// A base class, paired with the match's `@def.class.name`.
@@ -356,6 +360,7 @@ impl Capture {
         Some(match segs.as_slice() {
             ["def", k] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Node },
             ["def", k, "name"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Name },
+            ["ref", "spelled"] => C::RefSpelled,
             ["ref", rest @ ..] => C::Ref(RefCap::parse(&rest.join("."))?),
             ["scope"] => C::Scope(ScopeCap::Block),
             ["scope", "sub", "implicit_receiver"] => C::Scope(ScopeCap::SubImplicitReceiver),
@@ -419,6 +424,7 @@ impl fmt::Display for Capture {
             C::Def { kind, part: DefPart::Node } => write!(f, "def.{kind}"),
             C::Def { kind, part: DefPart::Name } => write!(f, "def.{kind}.name"),
             C::Ref(k) => write!(f, "ref.{k}"),
+            C::RefSpelled => f.write_str("ref.spelled"),
             C::Scope(k) => family(f, "scope", k.spelling()),
             C::Context(k) => write!(f, "context.{k}"),
             C::Parent => f.write_str("parent"),

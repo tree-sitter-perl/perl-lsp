@@ -1214,10 +1214,11 @@ impl FileAnalysis {
                     // fallback below; if that also has no class, bail rather
                     // than return a class-less Method rename.
                 }
-                // the written spelling names an identity (a namespaced
-                // pack resolves it through the file's use-map)
+                // the class the token names as its file spells it: an
+                // aliased import's own leaf is the imported class, not
+                // whatever the leaf would resolve to elsewhere in the file
                 RefKind::PackageRef => {
-                    return Some(RenameKind::Package(self.class_spelling_identity(&r.target_name)))
+                    return Some(RenameKind::Package(self.spelled_identity(r)))
                 }
                 RefKind::HashKeyAccess { .. } => return Some(RenameKind::HashKey(r.target_name.clone())),
                 RefKind::DispatchCall { .. } if r.handler_owner().is_some() => {

@@ -368,6 +368,10 @@ bitflags::bitflags! {
         /// not a member, though it sits inside the class body. Minted from
         /// a capture, never spelled as an attribute.
         const RECEIVER = 1 << 15;
+        /// A `Class` symbol that is a trait (php): its members are composed
+        /// into the class that uses it, which never makes the trait an
+        /// instance's class.
+        const TRAIT = 1 << 16;
     }
 }
 
@@ -418,6 +422,7 @@ impl TryFrom<&str> for SymbolFlags {
             "param" => SymbolFlags::PARAM,
             "reader" => SymbolFlags::READER,
             "writer" => SymbolFlags::WRITER,
+            "trait" => SymbolFlags::TRAIT,
             other => return Err(UnknownAttribute(other.to_string())),
         })
     }

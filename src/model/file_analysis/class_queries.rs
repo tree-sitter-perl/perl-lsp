@@ -1167,6 +1167,9 @@ impl FileAnalysis {
     /// (`own_namespace`); `use_map_with` takes the namespace from a caller
     /// that already derived it.
     pub fn use_map(&self) -> Option<UseMap<'_>> {
+        // The pins are a whole-file pass; a language without a use-map has
+        // no answer to build them for.
+        self.pack.names.use_map_sep()?;
         let pins = self
             .use_map_pins
             .get_or_init(|| std::sync::Arc::new(self.leaf_namespace_pins()));

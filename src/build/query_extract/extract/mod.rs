@@ -82,7 +82,7 @@ fn family(cap: Capture) -> Family {
         | C::MacroAlias(_)
         | C::Tmpl(_)
         | C::ParamReceiver => Family::Defs,
-        C::Ref(_) => Family::Refs,
+        C::Ref(_) | C::RefSpelled => Family::Refs,
         C::Member(_) | C::MemberOp(_) | C::Arity(_) => Family::Members,
         C::Flow(_)
         | C::Expr(_)
@@ -118,6 +118,7 @@ struct ExtractState<'p> {
     package: Option<String>,
     scopes: scopes::State,
     defs: defs::State,
+    refs: refs::State,
     members: members::State,
     flow: flow::State,
     narrowing: narrowing::State,
@@ -237,6 +238,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         package: None,
         scopes: Default::default(),
         defs: Default::default(),
+        refs: Default::default(),
         members: Default::default(),
         flow: Default::default(),
         narrowing: Default::default(),
@@ -288,7 +290,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             Family::Narrowing => narrowing::collect(&mut st, e),
             Family::Members => members::collect(&mut st, e),
             Family::Imports => imports::collect(&mut st, e),
-            Family::Refs | Family::Commands | Family::Links => {}
+            Family::Refs => refs::collect(&mut st, e),
+            Family::Commands | Family::Links => {}
         }
     }
 
