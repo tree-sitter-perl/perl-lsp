@@ -80,7 +80,16 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 while st.context_stack.last().is_some_and(|&(d, ..)| d >= st.scope_stack.len()) {
                     st.context_stack.pop();
                 }
-                st.context_stack.push((st.scope_stack.len(), kind, identity.unwrap_or_else(|| e.text.clone())));
+                let value = identity.unwrap_or_else(|| e.text.clone());
+                // A scope opened by this same match is the container the
+                // context names (php's class node), so a point anywhere in
+                // it, header included, is in that package.
+                if st.scopes.scope_start_by_match.contains_key(&e.match_id) {
+                    if let Some(&(_, id)) = st.scope_stack.last() {
+                        st.out.scopes[id.0 as usize].package = Some(value.clone());
+                    }
+                }
+                st.context_stack.push((st.scope_stack.len(), kind, value));
             }
         }
         Capture::Parent => {

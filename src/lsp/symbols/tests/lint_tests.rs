@@ -125,6 +125,51 @@ fn test_role_requires_dynamic_parent_honest_silence() {
     );
 }
 
+/// A namespaced composer's warning sits on the parent it names, written
+/// however the file spells it.
+#[test]
+fn test_role_requires_unfulfilled_anchors_on_a_php_parent_spelling() {
+    let src = "<?php
+namespace App;
+use App\\Contracts\\Store as Storage;
+
+class Disk implements Storage {
+    public function load() {}
+}
+";
+    let contract = "<?php
+namespace App\\Contracts;
+interface Store { public function load(); public function save(); }
+";
+    let php = |s: &str| {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&tree_sitter_php::LANGUAGE_PHP.into()).unwrap();
+        let tree = parser.parse(s, None).unwrap();
+        crate::build::query_extract::extract(&tree, s.as_bytes(), &crate::build::packs::php_pack())
+            .unwrap()
+            .into_file_analysis()
+    };
+    let module_index = crate::index::module_index::ModuleIndex::new_for_test();
+    module_index.register_symbols(std::path::PathBuf::from("/ws/Store.php"), std::sync::Arc::new(php(contract)));
+    let diags: Vec<_> = collect_diagnostics(&php(src), &module_index, Default::default())
+        .into_iter()
+        .filter(|d| {
+            matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(c))
+                if c == "role-requires-unfulfilled")
+        })
+        .map(|d| (d.message, d.range.start.line, d.range.start.character, d.range.end.character))
+        .collect();
+    assert_eq!(
+        diags,
+        vec![(
+            "role App\\Contracts\\Store requires 'save'; App\\Disk does not provide it".to_string(),
+            4,
+            22,
+            29
+        )]
+    );
+}
+
 // ---- helper-not-loaded (entrypoint-scan lint) ----
 
 fn helper_lint_setup() -> (crate::index::module_index::ModuleIndex, String) {

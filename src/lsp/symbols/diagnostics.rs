@@ -547,14 +547,15 @@ pub fn collect_diagnostics(
     // check (docs/adr/role-contracts.md). WARNING, not HINT: Perl
     // dies at composition time for this. Anchored to the `with 'Role'`
     // PackageRef inside the composing package; the package decl is the
-    // fallback (e.g. the parent edge came from a raw `@ISA` push).
+    // fallback (e.g. the parent edge came from a raw `@ISA` push). The
+    // parent edge carries the identity, so the ref's spelling resolves first.
     for u in analysis.unfulfilled_role_requires(Some(module_index)) {
         let span = analysis
             .refs()
             .iter()
             .find(|r| {
                 matches!(r.kind, RefKind::PackageRef)
-                    && r.target_name == u.via_parent
+                    && analysis.spelled_identity(r) == u.via_parent
                     && analysis.package_at(r.span.start) == Some(u.package.as_str())
             })
             .map(|r| r.span)
