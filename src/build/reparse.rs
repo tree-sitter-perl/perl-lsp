@@ -152,9 +152,10 @@ fn plan_edits(tree: &Tree, src: &[u8], protos: &HashMap<String, Proto>) -> Vec<I
             let name = callee.utf8_text(src).unwrap_or("");
             if let Some(p) = protos.get(name) {
                 if p.fixed_arity >= 1 {
-                    let n = p.fixed_arity.min(args.named_child_count());
+                    let elems: Vec<Node> = crate::cst::NodeExt::elements(&args).collect();
+                    let n = p.fixed_arity.min(elems.len());
                     if n >= 1 {
-                        let last = args.named_child(n - 1).unwrap();
+                        let last = elems[n - 1];
                         edits.push(Insertion { at: callee.end_byte(), bytes: "(" });
                         edits.push(Insertion { at: last.end_byte(), bytes: ")" });
                     }

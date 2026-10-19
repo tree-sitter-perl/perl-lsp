@@ -808,7 +808,7 @@ pub(super) fn format_imported_signature(name: &str, sub_info: &SubInfo<'_>) -> S
         .collect::<Vec<_>>()
         .join(", ");
     let mut sig = format!("sub {}({})", name, params_str);
-    if let Some(rt) = sub_info.return_type(None) {
+    if let Some(rt) = sub_info.return_type(None).filter(InferredType::is_known) {
         sig.push_str(&format!(" → {}", format_inferred_type(&rt)));
     }
     sig

@@ -1340,7 +1340,7 @@ impl<'a> Builder<'a> {
     /// `Symbol(sub_id)` through the registry; the registry
     /// materializes through whatever edge chain the bag carries
     /// (`Edge(SymbolReturnArm(_))` for explicit returns,
-    /// `Edge(Expr(last_expr_span))` for implicit returns —
+    /// `Edge(Expr(tail_span))` for implicit returns —
     /// pushed by `populate_witness_bag`,
     /// `ReturnExpr(UnionOnArgs{..})` for arity-discriminated subs,
     /// `Plugin + InferredType` for plugin overrides). No bag
@@ -1395,7 +1395,7 @@ impl<'a> Builder<'a> {
             // Single source: registry query on `Symbol(sub_id)`.
             // Materialization handles every edge:
             //   - `Edge(SymbolReturnArm(_))` for explicit returns
-            //   - `Edge(Expr(last_expr_span))` for implicit returns
+            //   - `Edge(Expr(tail_span))` for implicit returns
             //     (pushed by `populate_witness_bag`)
             //   - `ReturnExpr(UnionOnArgs{...})` for framework /
             //     arity-discriminated subs
