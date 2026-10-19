@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use tree_sitter::{Node, Point, Tree};
 
-use crate::cst::{extract_call_name, node_to_span};
+use crate::cst::{extract_call_name, node_to_span, NodeExt};
 use crate::model::file_analysis::{CrossFileLookup, FileAnalysis, InferredType, Span};
 
 // ---- Types ----
@@ -724,7 +724,7 @@ pub fn find_call_context(tree: &Tree, source: &[u8], point: Point) -> Option<Cal
 /// its content. Used for string-dispatch signature help.
 fn first_arg_as_string(args: Node, source: &[u8]) -> Option<String> {
     let first = if args.kind() == "list_expression" || args.kind() == "parenthesized_expression" {
-        args.named_child(0)?
+        crate::cst::nth_element(args, 0)?
     } else {
         args
     };
@@ -998,8 +998,7 @@ pub fn active_slot_in_node(node: Node, cursor: Point) -> usize {
     }
     let mut count = 0;
     let c_pos = (cursor.row, cursor.column);
-    let mut walker = scope.walk();
-    for child in scope.named_children(&mut walker) {
+    for child in scope.elements() {
         let e = child.end_position();
         if (e.row, e.column) <= c_pos {
             // Child has ended at-or-before the cursor — cursor is
@@ -1020,8 +1019,7 @@ pub fn active_slot_in_node(node: Node, cursor: Point) -> usize {
 /// `list_expression` holding the items. Callers want to iterate the
 /// items directly — descend through that single-child wrapper.
 fn item_scope(node: Node) -> Node {
-    let mut walker = node.walk();
-    let named: Vec<_> = node.named_children(&mut walker).collect();
+    let named: Vec<_> = node.elements().collect();
     if named.len() == 1 && named[0].kind() == "list_expression" {
         return named[0];
     }
@@ -1091,14 +1089,10 @@ pub fn used_keys_in_enclosing_hash(tree: &Tree, source: &[u8], point: Point) -> 
 
 fn collect_used_keys_at_callsite(args: Node, source: &[u8]) -> HashSet<String> {
     let mut used = HashSet::new();
-    for i in 0..args.child_count() {
-        if let Some(child) = args.child(i) {
-            if let Some(next) = child.next_sibling() {
-                if next.kind() == "=>" {
-                    if let Some(key) = extract_key_text(child, source) {
-                        used.insert(key);
-                    }
-                }
+    for pair in crate::cst::children_without_trivia(args).windows(2) {
+        if pair[1].kind() == "=>" {
+            if let Some(key) = extract_key_text(pair[0], source) {
+                used.insert(key);
             }
         }
     }

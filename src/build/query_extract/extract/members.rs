@@ -160,7 +160,9 @@ fn peel_receiver<'a>(node: tree_sitter::Node<'a>, wrappers: &[&str]) -> tree_sit
         if !wrappers.contains(&inner.kind()) {
             return inner;
         }
-        match inner.named_child(0) {
+        let mut c = inner.walk();
+        let first = inner.named_children(&mut c).find(|ch| !ch.is_extra());
+        match first {
             Some(ch) => inner = ch,
             None => return node,
         }
