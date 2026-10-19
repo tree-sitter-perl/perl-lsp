@@ -147,7 +147,7 @@
       "col": 11,
       "expect": {
         "all": [
-          "sub uri_unescape()",
+          "sub uri_unescape($str)",
           "Returns a string with each %XX sequence replaced",
           "imported from `URI::Escape`"
         ],

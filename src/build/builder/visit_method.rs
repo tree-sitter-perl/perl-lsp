@@ -76,7 +76,7 @@ impl<'a> Builder<'a> {
     pub(super) fn first_call_arg(&self, call_node: Node<'a>) -> Option<Node<'a>> {
         let args = call_node.child_by_field_name("arguments")?;
         match crate::cst::literal_shape(args) {
-            Some(LiteralShape::List) => args.named_child(0),
+            Some(LiteralShape::List) => crate::cst::nth_element(args, 0),
             _ => Some(args), // single arg (ambiguous_function_call_expression)
         }
     }
@@ -411,11 +411,7 @@ impl<'a> Builder<'a> {
         };
         let Some(args) = node.child_by_field_name("arguments") else { return };
         let arg_nodes: Vec<Node> = match crate::cst::literal_shape(args) {
-            Some(LiteralShape::List) => {
-                (0..args.named_child_count())
-                    .filter_map(|i| args.named_child(i))
-                    .collect()
-            }
+            Some(LiteralShape::List) => crate::cst::NodeExt::elements(&args).collect(),
             // Single bare arg, e.g. `mk_classdata('config')`.
             _ => vec![args],
         };
@@ -686,16 +682,7 @@ impl<'a> Builder<'a> {
         // value. Same one-level unwrap rule as the literal helper.
         let arg_node = match (crate::cst::literal_shape(args), args.kind()) {
             (None, "scalar") => Some(args),
-            (Some(LiteralShape::List), _) => {
-                let mut found: Option<Node<'a>> = None;
-                for i in 0..args.named_child_count() {
-                    if let Some(c) = args.named_child(i) {
-                        found = Some(c);
-                        break;
-                    }
-                }
-                found
-            }
+            (Some(LiteralShape::List), _) => crate::cst::nth_element(args, 0),
             _ => None,
         }?;
         if arg_node.kind() != "scalar" {
@@ -751,14 +738,12 @@ impl<'a> Builder<'a> {
                 return self.extract_string_content(args);
             }
             Some(LiteralShape::List) => {
-                for i in 0..args.named_child_count() {
-                    let child = args.named_child(i)?;
-                    return match crate::cst::literal_shape(child) {
-                        Some(LiteralShape::Str) => self.extract_string_content(child),
-                        Some(LiteralShape::List) => self.first_string_literal_arg(child),
-                        _ => None,
-                    };
-                }
+                let child = crate::cst::nth_element(args, 0)?;
+                return match crate::cst::literal_shape(child) {
+                    Some(LiteralShape::Str) => self.extract_string_content(child),
+                    Some(LiteralShape::List) => self.first_string_literal_arg(child),
+                    _ => None,
+                };
             }
             _ => {}
         }

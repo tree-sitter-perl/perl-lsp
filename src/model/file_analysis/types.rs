@@ -97,9 +97,9 @@ pub enum InferredType {
     /// witness-bag attachment whose type IS the callable's return
     /// when invoked. Two shapes populate it:
     ///
-    ///   - Anonymous-sub literals (`sub { ... }`) →
-    ///     `Expr(body_last_expr_span)`. The bag walks that span's
-    ///     own witnesses at query time, after the body is built.
+    ///   - Anonymous-sub literals (`sub { ... }`) → the anon sub's
+    ///     `Symbol(sub_id)`, whose return arms the bag folds like any
+    ///     named sub's.
     ///   - Named-sub references (`\&foo`, `\&Foo::bar`) →
     ///     `PackageSymbol { package, name }`. Same attachment the
     ///     bag's existing edge-chase uses for method dispatch —

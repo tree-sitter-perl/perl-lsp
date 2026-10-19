@@ -354,36 +354,6 @@ impl<'a> Builder<'a> {
         out.into_iter().filter(|n| n.is_named()).collect()
     }
 
-    /// Span of the body's last expression on an
-    /// `anonymous_subroutine_expression`. Mirrors
-    /// `infer_anonymous_sub_return_type`'s body-walk — the last
-    /// statement, unwrapped from `expression_statement` /
-    /// `return_expression` if necessary, gives us the expression
-    /// whose type IS the sub's return when called. Plugins use
-    /// this to emit a back-edge from the synthesized Method's
-    /// Symbol to that Expr, deferring return-type inference to
-    /// query time.
-    pub(super) fn anonymous_sub_body_last_expr_span(&self, node: Node<'a>) -> Option<Span> {
-        if node.kind() != "anonymous_subroutine_expression" {
-            return None;
-        }
-        let body = node.child_by_field_name("body")?;
-        let mut node = body.named_child(body.named_child_count().checked_sub(1)?)?;
-        // Peel through `expression_statement` and `return_expression`
-        // wrappers (an explicit `return $expr;` shows up as
-        // `expression_statement → return_expression → $expr` in
-        // tree-sitter-perl). One unwrap isn't enough.
-        loop {
-            match node.kind() {
-                "expression_statement" | "return_expression" => {
-                    node = node.named_child(0)?;
-                }
-                _ => break,
-            }
-        }
-        Some(node_to_span(node))
-    }
-
     /// Single derivation site for a CodeRef-shaped value's
     /// `return_edge`, given the source node. Used by `expr_payload`
     /// when emitting the bag witness for `anonymous_subroutine_expression`
@@ -397,10 +367,8 @@ impl<'a> Builder<'a> {
     ///     `SubReturnReducer`) all see anon subs the same way they
     ///     see named subs — uniform attachment shape, no
     ///     special-case for "this is anonymous."
-    ///     Falls back to `Expr(body_last_expr_span)` only when the
-    ///     symbol stash misses, which would mean a parse-error /
-    ///     ERROR-recovery path where `visit_anonymous_sub` didn't
-    ///     run; the body-span chase is still meaningful in that case.
+    ///     The symbol carries the body's return arms (`record_sub_tail`),
+    ///     so an anon sub's return is read exactly as a named sub's.
     ///   - `refgen_expression` (`\&foo`, `\&Foo::bar`,
     ///     `\&$const_folded`) → `PackageSymbol { package, name }`.
     ///     Bag's MRO + `module_index` machinery resolves it,
@@ -418,12 +386,10 @@ impl<'a> Builder<'a> {
     ) -> Option<crate::model::witnesses::WitnessAttachment> {
         match node.kind() {
             "anonymous_subroutine_expression" => {
-                let span = node_to_span(node);
-                if let Some(sym_id) = self.anon_sub_symbol_by_span.get(&span) {
-                    return Some(crate::model::witnesses::WitnessAttachment::Symbol(*sym_id));
-                }
-                self.anonymous_sub_body_last_expr_span(node)
-                    .map(crate::model::witnesses::WitnessAttachment::Expr)
+                // The only caller (`expr_payload`) mints the symbol first.
+                self.anon_sub_symbol_by_span
+                    .get(&node_to_span(node))
+                    .map(|sym_id| crate::model::witnesses::WitnessAttachment::Symbol(*sym_id))
             }
             "refgen_expression" => {
                 let names = self.extract_names_from_refgen(node);

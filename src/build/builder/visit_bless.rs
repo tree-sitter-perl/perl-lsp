@@ -123,8 +123,7 @@ impl<'a> Builder<'a> {
             // `ref <invocant>`
             "func1op_call_expression" => {
                 node.child(0).and_then(|c| c.utf8_text(self.source).ok()) == Some("ref")
-                    && node
-                        .named_child(0)
+                    && crate::cst::nth_element(node, 0)
                         .map_or(false, |op| self.bless_class_is_receiver(op))
             }
             // `<a> || <b>` / `<a> // <b>` — receiver if either side is.
