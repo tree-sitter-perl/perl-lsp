@@ -1,0 +1,89 @@
+# A call's value is an `Invoke`
+
+## Context
+
+A call's value is what its callee returns for its receiver and arguments.
+The bag states that as one payload, `WitnessPayload::Invoke { callee,
+receiver, args }`, on the call's own attachment. Every operand is an
+attachment the registry materializes under the query that holds the index,
+so the callee is chosen at query time, never fixed when the file was built.
+
+## Decision: one call shape, three callees
+
+`Callee` names what is called:
+
+- `Method { name, lookup, constructs }`: a named method, looked up on the
+  receiver's class, the writer's parents (`SUPER::`), or a named class.
+- `Value(att)`: whatever callable `att` holds (`$cb->(…)`).
+- `Function { name, local, member_of }`: a free name. `local` is the
+  in-file definition the producer resolved the name to, a class named as a
+  callable included (a functional cast or constructor). `None` sends the
+  lookup across files. `member_of` is the class whose body the call is
+  written in, where the language elides the receiver: a member of that
+  class, its own or inherited and in any file, answers first, with the
+  class as the receiver. A method is never `local`; it is reached only
+  through `member_of`.
+
+The producer resolves the local half because it holds the symbol table, and
+a cross-file chase into a file whose symbols are evicted still finds the
+edge in that file's bag (rule #11). The cross-file half is one ladder,
+`ReducerRegistry::free_function_cross_file`: a module exporting the name,
+then a pack's linkage-visible definitions gated by include-closure
+reachability. `query_sub_return_type` walks the same ladder for a bare
+name, so a call and a name probe cannot disagree. The ladder shares the
+query's `QueryState`, so a call chain that crosses back into a file already
+on the path stops at the cycle guard.
+
+A bake has no index, so an unresolved `Function` is an exit no conclusion
+key can name. The bake records it and poisons, and the file's answer for
+that chase is decoded at query time.
+
+## Decision: arguments are operands, and arity is read from them
+
+`args` lists `CallArg::One(att)` per written argument and `CallArg::Spread`
+for one that flattens to any number of values. The registry materializes
+each `One` into the positional types `ReturnExpr::Arg(n)` substitutes, and
+the call's arity is exact only when no argument spreads. `args: None` means
+the arguments were not walked, so there is no arity and there are no
+argument types.
+
+A pack's document says what an argument list holds. `@arity.args` is the
+list and `@arity.arg` each argument in it, both captured in the same match as
+the callee: `(argument_list ((_) @arity.arg ","?)*)`. The separator has to be
+in the quantified group, because a bare `(_)*` stops at the first comma. A
+wildcard also matches the grammar's extras, and a predicate filters a whole
+match rather than one capture, so the extractor drops a captured comment.
+`@arity.spread` marks the children that spread (`*xs`, `**kw`, `args...`).
+
+## Current state
+
+- Pack free calls (`@ref.call` beside `@expr.call`) mint `Function`. A
+  qualified pack call (`@ref.qcall`) mints no call value yet.
+- A body elides its receiver where the document marks its scope
+  `@scope.sub.implicit_receiver` and the body belongs to a method. There a
+  bare call carries `member_of`, and a bare read the file can't resolve to
+  a local projects the class's slot (`ValueHop` on `TypeName(class)`),
+  pushed after the read's own `Variable` edge so a name no member answers
+  keeps that edge's value. Navigation still binds only members this file
+  declares (`TODO(implicit-receiver-nav)`).
+- A pack member call (`@ref.member.call` beside `@expr.call`) mints
+  `Method` with `Lookup::Receiver` on the receiver's own `Expr`, so a chain
+  (`w.get().spin()`) hops through each receiver's value. The dispatch
+  class is the receiver's `class_name()`, which is a template's BASE: an
+  explicit specialization (`Box<bool>`) answers the primary's return here.
+  `expr_type_at_span`'s member-chain arm still asks first, and it walks
+  the specializations, so a cursor on the chain sees the specialization;
+  a variable the chain flows into sees the primary.
+- Perl's free calls mint `Function` too. The walk resolves a callee defined
+  above the call; `resolve_forward_expr_witnesses` resolves one defined
+  below it, and only a name still unresolved after that goes to the
+  exporters. A qualified call that names another package (`Other::f()`)
+  and a builtin mint no call value: the exporter lookup asks by bare name,
+  and a builtin is not a sub.
+- A keyword argument (`f(x=1)`) is a positional `One`; nothing yet binds it
+  by name.
+- A function-like macro whose return is its n-th argument keeps its
+  call-site edge to that argument's own `Expr` (`docs/adr/macro-handling.md`),
+  which carries more than the argument's type.
+- `Ref::arg_count` stays the navigation lanes' arity source and counts every
+  argument, spreads included.

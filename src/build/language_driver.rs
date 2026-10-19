@@ -1018,6 +1018,8 @@ fn remap_spans(
         specializations: _,
         // name-keyed, ordered by byte position pre-remap — no spans to fix.
         template_params: _,
+        // name/scope-keyed — no spans to fix.
+        field_types: _,
         return_sites,
         param_sigs,
         // Populated later (enrich_skeleton) already in original coords — no remap.
@@ -1081,8 +1083,14 @@ fn remap_spans(
     // Call-site spans feed the call-value edge (`into_file_analysis`, after
     // this remap) and must speak original coords like the flow-edge source
     // (the same call span) they land beside.
-    for (span, _) in call_sites.iter_mut() {
-        *span = rspan(*span);
+    for site in call_sites.iter_mut() {
+        site.span = rspan(site.span);
+        if let Some(recv) = site.receiver.as_mut() {
+            *recv = rspan(*recv);
+        }
+        for (arg, _) in site.args.iter_mut().flatten() {
+            *arg = rspan(*arg);
+        }
     }
     for (_, span) in return_sites.iter_mut() {
         *span = rspan(*span);

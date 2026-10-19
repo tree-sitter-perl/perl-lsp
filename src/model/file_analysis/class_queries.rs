@@ -45,29 +45,6 @@ impl FileAnalysis {
         Some((Point { row: line, column: 0 }, format!("{lead}{stmt}")))
     }
 
-    /// The inferred return ONLY when every return arm accounts for it: each
-    /// arm's expression carries a witness and none of them is `null`. The
-    /// arm fold drops an untyped or null arm and answers from the rest,
-    /// which is right for a hover and wrong for anything that would WRITE
-    /// the type (`string` over `return "a"; … return null;`).
-    pub fn total_inferred_return(&self, sym_id: SymbolId) -> Option<InferredType> {
-        use crate::model::witnesses::{WitnessAttachment as WA, WitnessPayload as WP};
-        let arms = self.witnesses.for_attachment(&WA::SymbolReturnArm(sym_id));
-        if arms.is_empty() {
-            return None;
-        }
-        for arm in &arms {
-            let WP::Edge(WA::Expr(span)) = &arm.payload else { return None };
-            let at = self.witnesses.for_attachment(&WA::Expr(*span));
-            if at.is_empty()
-                || at.iter().any(|w| matches!(w.payload, WP::InferredType(InferredType::Undef)))
-            {
-                return None;
-            }
-        }
-        self.symbol_return_type_via_bag(sym_id, None)
-    }
-
     /// As `symbol_return_type_via_bag`, but with a `ModuleIndex` so the
     /// reducer chase can cross module boundaries — the sub's body may return
     /// a value typed by a cross-file method chain (`my $m = Foo->new->bar; …;
@@ -218,7 +195,7 @@ impl FileAnalysis {
         } else {
             class_name.to_string()
         };
-        if let Some(ref rt) = self.find_method_return_type(class_name, method_name, module_index, None) {
+        if let Some(ref rt) = self.find_method_return_type(class_name, method_name, module_index, None).filter(InferredType::is_known) {
             // `opaque_return` lets the declaring plugin say "this chain
             // link is internal plumbing — don't render the class name OR
             // the return type". The chain still resolves; the user just
@@ -777,7 +754,9 @@ impl FileAnalysis {
             });
         }
         let reg = ReducerRegistry::with_defaults();
-        let ctx = self.bag_context(module_index);
+        // No context: the vote is these sites and nothing else. With one, a
+        // slot whose vote fails falls through to the registry's cross-file
+        // `Field` ladder and answers the slot's declared VALUE as its domain.
         let q = ReducerQuery {
             attachment: &att,
             point: None,
@@ -785,7 +764,7 @@ impl FileAnalysis {
             arity_hint: None,
             receiver: None,
             args: Vec::new(),
-            context: Some(&ctx),
+            context: None,
         };
         let domain = match reg.query(&bag, &q) {
             ReducedValue::Type(InferredType::ClassName(d)) => d,

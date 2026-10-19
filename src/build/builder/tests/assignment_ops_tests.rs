@@ -152,11 +152,14 @@ sub g6 { my $x = maybe(1); return unless defined $x; $x ||= Baz->new; return $x 
     let ret = |s: &str| fa.sub_return_type_at_arity(s, None);
     let bar = || InferredType::ClassName("Bar".into());
     // The implicit read sees the guard's narrowing, and the arms join to
-    // the floor.
-    assert_eq!(ret("g1"), Some(InferredType::ClassName("Baz".into())));
+    // the floor. Each sub ENDS in its guard `if` with no `else`, which perl
+    // compiles to `C && B`: a false guard falls through with C's falsy value,
+    // so the return is optional.
+    let opt = |t: InferredType| Some(InferredType::Optional(Box::new(t)));
+    assert_eq!(ret("g1"), opt(InferredType::ClassName("Baz".into())));
     // The RHS reads the narrowed value; the write then ends the region.
-    assert_eq!(ret("g2"), Some(InferredType::ClassName("Baz".into())));
-    assert_eq!(ret("g3"), Some(InferredType::String));
+    assert_eq!(ret("g2"), opt(InferredType::ClassName("Baz".into())));
+    assert_eq!(ret("g3"), opt(InferredType::String));
     // `my $x;` is undef, so `||=` always takes the RHS.
     assert_eq!(ret("g4"), Some(bar()));
     // An optional LHS falls back to the RHS floor.

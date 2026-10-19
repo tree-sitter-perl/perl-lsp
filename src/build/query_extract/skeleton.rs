@@ -66,6 +66,22 @@ pub struct SkelRef {
     pub arg_count: Option<usize>,
 }
 
+/// One `@expr.call` site.
+#[derive(Debug, Clone)]
+pub struct CallSite {
+    pub span: Span,
+    pub callee: String,
+    /// A member call's receiver expression; `None` for a free call.
+    pub receiver: Option<Span>,
+    /// The scope the call is written in, which says whether a bare callee
+    /// may be a member of the body's class.
+    pub scope: crate::model::file_analysis::ScopeId,
+    /// The written arguments in order, each with whether it spreads
+    /// (`@arity.spread`); `None` when the call's match captured no argument
+    /// list.
+    pub args: Option<Vec<(Span, bool)>>,
+}
+
 #[derive(Debug, Default)]
 pub struct SkeletonAnalysis {
     pub symbols: Vec<SkelSymbol>,
@@ -93,6 +109,10 @@ pub struct SkeletonAnalysis {
     /// match. Sorted by position into `FileAnalysis.pack.template_params`
     /// (declaration order is the `ParamOf` index axis).
     pub template_params: Vec<(String, String, usize)>,
+    /// A data member's declared type, keyed by its (name, scope), for the
+    /// slot's value edge: a type that mentions its class's template
+    /// parameters substitutes the receiver's arguments.
+    pub field_types: Vec<(String, crate::model::file_analysis::ScopeId, InferredType)>,
     /// Variable reads (`@expr.read.var`): (name, scope, span). Each resolves
     /// to the nearest visible Variable declaration by lexical scope walk →
     /// local goto-def + hover. Resolution runs in `into_file_analysis`.
@@ -148,13 +168,14 @@ pub struct SkeletonAnalysis {
     /// driver's macro lane (it holds the tree); empty for languages with no
     /// macro model.
     pub macro_call_arg_spans: Vec<(Span, Vec<Span>)>,
-    /// Call sites (`@expr.call`): (call-expression span, callee name). The
-    /// call's VALUE is the callee's own resolution — resolved in
-    /// `into_file_analysis` against the symbol table: a `Class` callee is a
-    /// functional cast / constructor (→ an instance of that class), a
-    /// callable (sub / function-like macro) flows its return, an unresolvable
-    /// name yields NO witness (no name-case guess — `docs/adr/macro-handling.md`).
-    pub call_sites: Vec<(Span, String)>,
+    /// Call sites (`@expr.call`). The call's VALUE is an `Invoke` of the
+    /// callee on its arguments, minted in `into_file_analysis` against the
+    /// symbol table: a `Class` callee is a functional cast / constructor (→
+    /// an instance of that class), a callable (sub / function-like macro)
+    /// flows its return, and a name this file doesn't define is looked up
+    /// across files at query time (no name-case guess —
+    /// `docs/adr/macro-handling.md`).
+    pub call_sites: Vec<CallSite>,
     /// `return EXPR;` sites (`@expr.return.value`): (enclosing scope, the
     /// returned expression's span). Purely structural — this tier doesn't
     /// know what a `return` MEANS for any given language; the interpretation
@@ -609,6 +630,46 @@ impl SkeletonAnalysis {
                 s.kind = SymKind::Method;
             }
         }
+        // A callable's body scope names the callable (`Scope::owner`). The
+        // document mints `@scope.sub` and `@def.sub` / `@def.method` on the
+        // same `function_definition` node, so the spans are equal; a shape
+        // that declares on another node keeps no owner.
+        {
+            let by_span: std::collections::HashMap<(Point, Point), SymbolId> = symbols
+                .iter()
+                .rev()
+                .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method))
+                .map(|s| ((s.span.start, s.span.end), s.id))
+                .collect();
+            for sc in &mut self.scopes {
+                if matches!(sc.kind, crate::model::file_analysis::ScopeKind::Sub { .. }) {
+                    sc.owner = by_span.get(&(sc.span.start, sc.span.end)).copied();
+                }
+            }
+        }
+        // Implicit receiver: where the document says a body elides it, a bare
+        // name is a member of the class the body belongs to. That class is
+        // the package of the eliding scope's owning METHOD, in-class and
+        // out-of-line alike: a `void Buf<T>::reserve(…)` body is lexically at
+        // file scope, and only the method symbol carries `Buf`. A function in
+        // a namespace is a `Sub`, so its namespace is no receiver. Scopes are
+        // pushed in id order, so a parent's answer is in hand before its
+        // children's.
+        let elided_class: Vec<Option<String>> = {
+            let mut out: Vec<Option<String>> = Vec::with_capacity(self.scopes.len());
+            for sc in &self.scopes {
+                let class = if sc.implicit_receiver {
+                    sc.owner
+                        .and_then(|sid| symbols.get(sid.0 as usize))
+                        .filter(|s| matches!(s.kind, SymKind::Method))
+                        .and_then(|s| s.package.clone())
+                } else {
+                    sc.parent.and_then(|p| out.get(p.0 as usize).cloned().flatten())
+                };
+                out.push(class);
+            }
+            out
+        };
         // Per-class template parameter lists (declaration order) — the
         // `ParamOf` index axis. Built here so the writeback below can route
         // param-mentioning member returns through the deferred shape; rides
@@ -673,6 +734,29 @@ impl SkeletonAnalysis {
                     }
                 }
             }
+            // A data member's VALUE rides its own `Field` attachment, which a
+            // member read's `ValueHop` chases (`docs/adr/member-kinds.md`): an
+            // edge to the declaration's `Variable`, or, for a type that
+            // mentions the class's template parameters, the deferred shape
+            // that substitutes the receiver's arguments (`item_: T` read on a
+            // `Box<int>` is `int`).
+            let field_types: std::collections::HashMap<(&str, crate::model::file_analysis::ScopeId), &InferredType> =
+                self.field_types.iter().map(|(n, sc, t)| ((n.as_str(), *sc), t)).collect();
+            for sym in symbols.iter().filter(|s| matches!(s.kind, SymKind::Field)) {
+                let Some(class) = &sym.package else { continue };
+                let deferred = field_types
+                    .get(&(sym.name.as_str(), sym.scope))
+                    .zip(template_params.get(class))
+                    .and_then(|(t, ps)| param_return_expr(t, ps));
+                let pay = match deferred {
+                    Some(re) => WP::ReturnExpr(re),
+                    None => WP::Edge(WA::Variable { name: sym.name.clone(), scope: sym.scope }),
+                };
+                // Class-wide, like the declaration's own type witness: a
+                // method reads a member declared below it.
+                let span = self.scopes.get(sym.scope.0 as usize).map_or(sym.span, |sc| sc.span);
+                bag.push(mk(WA::Field { owner: class.clone(), name: sym.name.clone() }, pay, span));
+            }
             // A class VIEWED AS A CALLABLE (a functional cast / constructor,
             // `Widget(x)`) produces an instance of itself. Its `Symbol` answers
             // `ClassName(name)` so a call site edging to it materializes the
@@ -734,15 +818,18 @@ impl SkeletonAnalysis {
                     bag.push(mk(WA::Symbol(sid), pay, span));
                 }
             }
-            // Call-site value resolution: a call's value IS the callee's own
-            // resolution. A callee that names a symbol — a `Class` (functional
-            // cast / constructor → the class instance), a sub, or a function-
-            // like macro — edges `Expr(call) → Edge(Symbol(callee))`; the
+            // Call-site value resolution: a call's value is an `Invoke` of
+            // its callee on its arguments. A callee this file defines — a
+            // `Class` (functional cast / constructor → the class instance), a
+            // sub, or a function-like macro — is resolved here, and its
             // Symbol answers `ClassName` for a class and its return for a
-            // callable. A callee that resolves to NOTHING mints no witness (no
-            // name-case guess — an unknown uppercase macro leaves the enclosing
-            // `auto x = F(..)` honestly untyped). Prefer a `Class` over a
-            // like-named callable (the constructor is the stronger claim).
+            // callable. Any other name is looked up across files at query
+            // time; one nothing defines answers nothing (no name-case guess —
+            // an unknown uppercase macro leaves the enclosing `auto x =
+            // F(..)` honestly untyped). Prefer a `Class` over a like-named
+            // callable (the constructor is the stronger claim). A method is
+            // never a free callee: a bare call in a member body reaches it
+            // through `member_of`, with the class as its receiver.
             let callee_sid: std::collections::HashMap<&str, SymbolId> = {
                 let mut m: std::collections::HashMap<&str, SymbolId> =
                     std::collections::HashMap::new();
@@ -751,7 +838,7 @@ impl SkeletonAnalysis {
                         SymKind::Class => {
                             m.insert(s.name.as_str(), s.id);
                         }
-                        SymKind::Sub | SymKind::Method => {
+                        SymKind::Sub => {
                             m.entry(s.name.as_str()).or_insert(s.id);
                         }
                         _ => {}
@@ -763,19 +850,52 @@ impl SkeletonAnalysis {
             // call resolves to its n-th argument's value witness.
             let call_args: std::collections::HashMap<Span, &Vec<Span>> =
                 self.macro_call_arg_spans.iter().map(|(s, a)| (*s, a)).collect();
-            for (span, name) in &self.call_sites {
+            for site in &self.call_sites {
+                let (span, name) = (&site.span, &site.callee);
                 // Identity/projection macro: the call's value IS its n-th
                 // argument. Edge to the argument's own `Expr` witness rather
                 // than the param-agnostic Symbol return (edges-not-values).
-                if let Some(MacroReturnHint::Param(n)) = hint_of.get(name.as_str()).copied() {
+                if let Some(MacroReturnHint::Param(n)) =
+                    site.receiver.is_none().then(|| hint_of.get(name.as_str()).copied()).flatten()
+                {
                     if let Some(arg) = call_args.get(span).and_then(|a| a.get(*n as usize)) {
                         bag.push(mk(WA::Expr(*span), WP::Edge(WA::Expr(*arg)), *span));
                         continue;
                     }
                 }
-                if let Some(&sid) = callee_sid.get(name.as_str()) {
-                    bag.push(mk(WA::Expr(*span), WP::Edge(WA::Symbol(sid)), *span));
-                }
+                let args = site.args.as_ref().map(|args| {
+                    args.iter()
+                        .map(|&(arg, spread)| {
+                            if spread {
+                                crate::model::witnesses::CallArg::Spread(WA::Expr(arg))
+                            } else {
+                                crate::model::witnesses::CallArg::One(WA::Expr(arg))
+                            }
+                        })
+                        .collect()
+                });
+                // A member call dispatches on its receiver's type at query
+                // time; a free call's callee is the file's own definition
+                // when it has one.
+                let (callee, receiver) = match site.receiver {
+                    Some(recv) => (
+                        crate::model::witnesses::Callee::Method {
+                            name: name.clone(),
+                            lookup: crate::model::witnesses::Lookup::Receiver,
+                            constructs: false,
+                        },
+                        Some(WA::Expr(recv)),
+                    ),
+                    None => (
+                        crate::model::witnesses::Callee::Function {
+                            name: name.clone(),
+                            local: callee_sid.get(name.as_str()).copied(),
+                            member_of: elided_class.get(site.scope.0 as usize).cloned().flatten(),
+                        },
+                        None,
+                    ),
+                };
+                bag.push(mk(WA::Expr(*span), WP::Invoke { callee, receiver, args }, *span));
             }
         }
         // ---- Local/param vars: a variable READ resolves to the nearest
@@ -1085,51 +1205,25 @@ impl SkeletonAnalysis {
                 }
             }
         }
-        // A callable's body scope names the callable (`Scope::owner`). The
-        // document mints `@scope.sub` and `@def.sub` / `@def.method` on the
-        // same `function_definition` node, so the spans are equal; a shape
-        // that declares on another node keeps no owner.
-        {
-            let by_span: std::collections::HashMap<(Point, Point), SymbolId> = symbols
-                .iter()
-                .rev()
-                .filter(|s| matches!(s.kind, SymKind::Sub | SymKind::Method))
-                .map(|s| ((s.span.start, s.span.end), s.id))
-                .collect();
-            for sc in &mut self.scopes {
-                if matches!(sc.kind, crate::model::file_analysis::ScopeKind::Sub { .. }) {
-                    sc.owner = by_span.get(&(sc.span.start, sc.span.end)).copied();
-                }
-            }
-        }
-        // Implicit receiver: where the document says a body elides it, a bare
-        // name is a member of the class the body belongs to. That class is
-        // the package of the eliding scope's owner, in-class and out-of-line
-        // alike: a `void Buf<T>::reserve(…)` body is lexically at file scope,
-        // and only the method symbol carries `Buf`.
+        // Implicit receiver (`elided_class`): a bare name in a member body.
+        // Its VALUE is the class's member when one answers, looked up at
+        // query time across files and up the ancestry: a read projects the
+        // class's slot, and a call is an `Invoke` with `member_of` (minted
+        // with the call sites above). A field this file declares on the class
+        // itself edges straight to its declaration, which keeps a template
+        // class's own parameters spelled as themselves.
         //
         // This and the return arms below are pushed before
         // `finalize_post_walk` seals the enrichment baseline; above it, the
         // first enrichment truncates them away.
         //
-        // TODO(implicit-receiver-invoke): membership is read from THIS file's
-        // symbols only, so a member declared in a header (class in `buf.h`,
-        // body in `buf.cpp`) or inherited from a base stays free, and resolves
-        // to a same-named free function if an include has one. The fix is the
-        // implicit receiver as an Invoke hop resolved at query time: the
-        // class's members across files and up `GraphView`, then the free
-        // lookup.
+        // TODO(implicit-receiver-nav): the BINDINGS below read this file's
+        // symbols only, so goto-def / references on a bare use of a member
+        // declared in a header or a base resolve it as a free name.
         {
             use crate::model::file_analysis::{RefKind, ScopeId};
             use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
-            let scopes = &self.scopes;
-            let implicit_class = |scope: ScopeId| -> Option<&str> {
-                std::iter::successors(Some(scope), |sc| scope_parent.get(sc).copied().flatten())
-                    .find(|sc| scopes[sc.0 as usize].implicit_receiver)
-                    .and_then(|sc| scopes[sc.0 as usize].owner)
-                    .and_then(|sid| symbols.get(sid.0 as usize))
-                    .and_then(|s| s.package.as_deref())
-            };
+            let implicit_class = |scope: ScopeId| elided_class.get(scope.0 as usize).and_then(|c| c.as_deref());
             let mut fields: std::collections::HashMap<(&str, &str), (ScopeId, SymbolId)> = Default::default();
             let mut methods: std::collections::HashSet<(&str, &str)> = Default::default();
             for s in &symbols {
@@ -1144,14 +1238,13 @@ impl SkeletonAnalysis {
                     _ => {}
                 }
             }
-            let mut field_reads: Vec<(usize, SymbolId, ScopeId)> = Vec::new();
+            let mut bare_reads: Vec<(usize, String, Option<(SymbolId, ScopeId)>)> = Vec::new();
             let mut sibling_calls: Vec<(usize, String)> = Vec::new();
             for (i, r) in refs.iter().enumerate() {
                 if matches!(r.kind, RefKind::Variable) && r.resolved_symbol().is_none() {
                     let Some(class) = implicit_class(r.scope) else { continue };
-                    if let Some(&(fscope, fsym)) = fields.get(&(class, r.target_name.as_str())) {
-                        field_reads.push((i, fsym, fscope));
-                    }
+                    let local = fields.get(&(class, r.target_name.as_str())).map(|&(fscope, fsym)| (fsym, fscope));
+                    bare_reads.push((i, class.to_string(), local));
                 } else if matches!(r.kind, RefKind::FunctionCall) && r.binding.is_none() {
                     let Some(class) = implicit_class(r.scope) else { continue };
                     if methods.contains(&(class, r.target_name.as_str())) {
@@ -1159,16 +1252,28 @@ impl SkeletonAnalysis {
                     }
                 }
             }
-            for (i, fsym, fscope) in field_reads {
-                // The binding answers goto-def / references / rename; the edge
-                // onto the field's own `Variable` types the read. One without
-                // the other is the projection disagreement the consistency
-                // net flags as I4.
-                refs[i].bind_symbol(fsym);
+            for (i, class, local) in bare_reads {
+                // Pushed after the read's own edge to the name's `Variable`,
+                // so the member answers first and a name no member answers (a
+                // global, an enumerator) keeps that edge's value. The binding
+                // answers goto-def / references / rename; one without the
+                // other is the projection disagreement the consistency net
+                // flags as I4.
+                let name = refs[i].target_name.clone();
+                let payload = match local {
+                    Some((fsym, fscope)) => {
+                        refs[i].bind_symbol(fsym);
+                        WP::Edge(WA::Variable { name, scope: fscope })
+                    }
+                    None => WP::Projected {
+                        base: WA::TypeName(class),
+                        step: crate::model::witnesses::ProjectionStep::ValueHop { member: name },
+                    },
+                };
                 bag.push(Witness {
                     attachment: WA::Expr(refs[i].span),
                     source: WitnessSource::Builder("implicit_field_read".into()),
-                    payload: WP::Edge(WA::Variable { name: refs[i].target_name.clone(), scope: fscope }),
+                    payload,
                     span: refs[i].span,
                 });
             }
