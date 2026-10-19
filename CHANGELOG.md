@@ -4,7 +4,7 @@ All notable changes to perl-lsp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the published
 crate / VS Code extension versions.
 
-## Unreleased
+## v0.8.0 — 2026-10-19
 
 ### Heatmap
 
