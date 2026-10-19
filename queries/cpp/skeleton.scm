@@ -671,14 +671,15 @@
 (labeled_statement label: (statement_identifier) @def.label)
 (goto_statement label: (statement_identifier) @ref.label)
 
-; ---- calls. Each call pattern captures its argument list in the same match
-; (@arity.args), so the callee ref carries its written arg count — overload
+; ---- calls. Each call pattern captures its argument list (@arity.args) and
+; each argument in it (@arity.arg) in the same match, so the call's Invoke
+; carries its arguments and the callee ref its written arg count — overload
 ; arity ranking fuel (structural counts only; "which overload fits" is
 ; downstream interpretation, `ParamArity::fit`). A def's parameter list is
 ; joined to the def by span containment. ----
 (call_expression
   function: (identifier) @ref.call
-  arguments: (_) @arity.args) @expr.call
+  arguments: (argument_list ((_) @arity.arg ","?)*) @arity.args) @expr.call
 
 ; qualified calls (`fmt::format_to(...)`, `detail::vformat_to(...)`,
 ; `Widget::create(...)`): the whole path is captured; extraction narrows the
@@ -686,9 +687,11 @@
 ; `resolved_package` — the namespace-participation half of gr identity.
 (call_expression
   function: (qualified_identifier) @ref.qcall
-  arguments: (_) @arity.args) @expr.call
+  arguments: (argument_list ((_) @arity.arg ","?)*) @arity.args) @expr.call
 
 (function_declarator parameters: (parameter_list) @arity.sig)
+; a pack expansion (`f(args...)`) passes any number of values.
+(argument_list (parameter_pack_expansion) @arity.spread)
 
 ; ---- member access (`recv.field` / `recv->field`): the receiver subtree is
 ; the invocant, carried (span+text) for query-time typing via
@@ -696,18 +699,20 @@
 ; (`recv.f(...)`) mints the same MethodCall ref core resolves for Perl
 ; `$obj->m`, so goto-def / hover / references / rename flow from it. A
 ; call_expression's only children are its callee and its argument_list, so a
-; field_expression whose parent is a call is the callee.
+; field_expression whose parent is a call is the callee. The read's value is
+; the receiver's slot (@expr.member); the call's is an Invoke of the member
+; on the receiver (@expr.call).
 ((field_expression
   argument: (_) @member.recv
   operator: _ @member.op
-  field: (field_identifier) @ref.member.value) @_fe
- (#not-has-parent? @_fe call_expression))
+  field: (field_identifier) @ref.member.value) @expr.member
+ (#not-has-parent? @expr.member call_expression))
 (call_expression
   function: (field_expression
     argument: (_) @member.recv
     operator: _ @member.op
     field: (field_identifier) @ref.member.call)
-  arguments: (_) @arity.args)
+  arguments: (argument_list ((_) @arity.arg ","?)*) @arity.args) @expr.call
 
 ; which operator a member access wrote, so op-DX can name the other one. A
 ; token no pattern names here claims no operator.
