@@ -30,7 +30,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     let m = &st.members;
     let simple = m.member_simple.get(&e.match_id).copied().unwrap_or(false);
     let member_op = simple.then(|| m.op_of(e.match_id)).flatten();
-    let arg_count = m.arg_counts_by_match.get(&e.match_id).copied();
+    let arg_count = m.arg_count(e.match_id);
     st.out.refs.push(SkelRef {
         kind: ref_kind,
         name: (pack.shape_name)(&e.text),
