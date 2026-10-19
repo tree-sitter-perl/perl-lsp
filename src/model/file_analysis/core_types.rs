@@ -372,6 +372,18 @@ bitflags::bitflags! {
         /// into the class that uses it, which never makes the trait an
         /// instance's class.
         const TRAIT = 1 << 16;
+        /// The method a construction invokes (Perl's `new`, php
+        /// `__construct`). A construction can reach it without naming it, so
+        /// no reference to it is not evidence that it is dead.
+        const CONSTRUCTOR = 1 << 17;
+        /// A callable declared for a composer to provide (a Perl role's
+        /// `requires`, an interface's method, an abstract method): a require
+        /// of the role its container is, never a provision of it.
+        const CONTRACT = 1 << 18;
+        /// A `Class` symbol that answers ANY member name at runtime (php's
+        /// `__call` / `__get`): it has no closed member surface to check a
+        /// name against.
+        const DYNAMIC_MEMBERS = 1 << 19;
     }
 }
 
@@ -814,6 +826,12 @@ impl Symbol {
     /// member resolution sees through it to the origin ancestor.
     pub fn is_reexport(&self) -> bool {
         self.flags.contains(SymbolFlags::REEXPORT)
+    }
+
+    /// The method a construction invokes, whichever language's convention
+    /// named it.
+    pub fn is_constructor(&self) -> bool {
+        self.flags.contains(SymbolFlags::CONSTRUCTOR)
     }
 
     /// Bare variable/field name without the sigil. Uses the sigil stored

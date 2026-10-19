@@ -546,10 +546,6 @@ struct Builder<'a> {
     /// `FileAnalysis.role_requires`.
     role_requires: std::collections::HashMap<String, Vec<String>>,
 
-    /// SymbolIds of `requires`-synthesized contract markers. Flushed
-    /// into `FileAnalysis.contract_symbols`.
-    contract_symbols: std::collections::HashSet<crate::model::file_analysis::SymbolId>,
-
     /// Packages with at least one parent edge we could not fold to a
     /// literal name (runtime-generated roles). Flushed into
     /// `FileAnalysis.dynamic_parent_packages`.

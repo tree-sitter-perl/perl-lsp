@@ -133,11 +133,8 @@ fn query_skeleton_differential_report() {
                     // recall number speaks only about syntactic defs:
                     // plugin namespace, requires markers, and the
                     // has-accessor projection families.
-                    let sym_id = crate::model::file_analysis::SymbolId(
-                        fa.symbols().iter().position(|s2| std::ptr::eq(s2, sym)).unwrap() as u32,
-                    );
                     let plugin_or_marker = !matches!(sym.namespace, crate::model::file_analysis::Namespace::Language)
-                        || fa.contract_symbols.contains(&sym_id)
+                        || sym.flags.contains(crate::model::file_analysis::SymbolFlags::CONTRACT)
                         || fa.attr_projections.iter().any(|pr| {
                             pr.attr == sym.name
                                 && Some(pr.class.as_str()) == sym.package.as_deref()

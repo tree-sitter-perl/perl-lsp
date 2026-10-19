@@ -262,7 +262,6 @@ pub(super) fn assert_analyses_agree(
 #[cfg(test)]
 const SET_FIELDS: &[&str] = &[
     "column_keyed_verbs",
-    "contract_symbols",
     "export_lookup",
     "framework_imports",
     "reassigned_scalars",

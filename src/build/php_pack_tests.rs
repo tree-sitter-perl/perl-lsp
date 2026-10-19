@@ -268,3 +268,87 @@ fn an_aliased_imports_leaf_renames_the_imported_class() {
     ));
     assert_eq!(fa.declared_parents("App\\Model"), ["Lib\\Model"]);
 }
+
+#[test]
+fn functions_and_methods_are_callables_of_their_namespace_and_class() {
+    let fa = php("<?php
+namespace App;
+
+function helper() {}
+
+class User {
+    public function name() { $local = 1; }
+}
+");
+    assert_eq!(declared(&fa, SymKind::Sub), owned(&[("helper", Some("App"))]));
+    assert_eq!(declared(&fa, SymKind::Method), owned(&[("name", Some("App\\User"))]));
+    // a body's variables are not members of the class
+    assert!(fa.symbols().iter().all(|s| s.kind != SymKind::Field));
+}
+
+#[test]
+fn what_the_document_states_about_a_method_is_its_flag() {
+    use crate::model::file_analysis::SymbolFlags as F;
+    let fa = php("<?php
+abstract class Repo {
+    public function __construct() {}
+    static private function make() {}
+    protected static function find() {}
+    abstract public function save();
+    public function plain() {}
+}
+interface Store { public function load(); }
+class Magic { public function __call($n, $a) {} }
+trait Proxy { public function __get($n) {} }
+");
+    let flags = |name: &str| fa.symbols().iter().find(|s| s.name.ends_with(name)).unwrap().flags;
+    assert_eq!(flags("__construct"), F::CONSTRUCTOR);
+    assert_eq!(flags("make"), F::STATIC | F::NON_PUBLIC);
+    assert_eq!(flags("find"), F::STATIC | F::NON_PUBLIC);
+    assert_eq!(flags("save"), F::ABSTRACT | F::CONTRACT);
+    assert_eq!(flags("plain"), F::empty());
+    assert_eq!(flags("load"), F::CONTRACT);
+    assert!(fa.symbols().iter().find(|s| s.name == "__construct").unwrap().is_constructor());
+    // a catch-all member is a fact about the class that declares it
+    assert_eq!(flags("Magic"), F::DYNAMIC_MEMBERS);
+    assert_eq!(flags("Proxy"), F::TRAIT | F::DYNAMIC_MEMBERS);
+    assert_eq!(flags("Repo"), F::ABSTRACT);
+}
+
+#[test]
+fn an_interface_or_abstract_class_is_a_role_its_contracts_require() {
+    let fa = php("<?php
+namespace App;
+
+interface Store { public function load(); public function save(); }
+abstract class Base implements Store {
+    public function load() {}
+    abstract protected function key();
+}
+class Disk extends Base {
+    public function save() {}
+}
+class Broken implements Store {
+    public function load() {}
+}
+");
+    assert!(fa.is_role_package("App\\Store"));
+    assert!(fa.is_role_package("App\\Base"));
+    assert!(!fa.is_role_package("App\\Disk"));
+    assert_eq!(fa.role_requires("App\\Store"), ["load", "save"]);
+    assert_eq!(fa.role_requires("App\\Base"), ["key"]);
+    // Disk gets `load` from Base and states `save`, but nothing provides
+    // Base's `key`; Broken provides `load` and not `save`. A contract never
+    // provides itself, so Store's own declarations satisfy nothing.
+    let mut missing: Vec<(String, String, String)> = fa
+        .unfulfilled_role_requires(None)
+        .into_iter()
+        .map(|u| (u.package, u.role, u.name))
+        .collect();
+    missing.sort();
+    let row = |p: &str, r: &str, n: &str| (p.to_string(), r.to_string(), n.to_string());
+    assert_eq!(
+        missing,
+        vec![row("App\\Broken", "App\\Store", "save"), row("App\\Disk", "App\\Base", "key")]
+    );
+}

@@ -69,8 +69,10 @@ structural predicate pay it.
 What a kind means is a method on its enum, matched exhaustively:
 `DefCap::sym_kind` (the `SymKind` it projects to), `DefCap::marker`
 (the `union` / `reexport` / `macro` attribute and the `SymbolFlags` it
-implies), `LitKind::value_type`, `ObsKind::observation`. A new kind does
-not compile until it says what it is.
+implies), `MarkCap::flag` (the `SymbolFlags` a `@mark.<flag>` states about
+the declaration whose name token it captures), `LitKind::value_type`,
+`ObsKind::observation`. A new kind does not compile until it says what it
+is.
 
 ## Decision: each capture family has one handler file
 

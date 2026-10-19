@@ -1224,6 +1224,23 @@ impl SkeletonAnalysis {
         for (child, parent) in &self.parents {
             packages.entry(child.clone()).or_default().parents.push(parent.clone());
         }
+        // A class that defers its obligations to a composer (an interface, a
+        // trait, an abstract class) is a role, and each contract it declares
+        // is a require of it (docs/adr/role-contracts.md).
+        for sym in &symbols {
+            let defers = SymbolFlags::INTERFACE | SymbolFlags::TRAIT | SymbolFlags::ABSTRACT;
+            if sym.kind == SymKind::Class && sym.flags.intersects(defers) {
+                packages.entry(sym.name.clone()).or_default().is_role = true;
+            }
+            if sym.flags.contains(SymbolFlags::CONTRACT) {
+                if let Some(pkg) = &sym.package {
+                    let requires = &mut packages.entry(pkg.clone()).or_default().requires;
+                    if !requires.contains(&sym.name) {
+                        requires.push(sym.name.clone());
+                    }
+                }
+            }
+        }
         let pack = crate::model::file_analysis::PackFacts {
             names: std::mem::take(&mut self.names),
             // Specialization family edges (spec → primary). NOT an inheritance

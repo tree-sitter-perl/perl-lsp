@@ -59,6 +59,18 @@ fn predicate_only_captures_are_skipped() {
     );
 }
 
+/// A mark spelled like an attribute means that attribute's flag, so the
+/// two ways a document states one fact cannot drift apart.
+#[test]
+fn a_mark_spelled_as_an_attribute_mints_that_attribute() {
+    use crate::model::file_analysis::SymbolFlags;
+    for &mark in MarkCap::ALL {
+        if let Ok(flag) = SymbolFlags::try_from(mark.spelling()) {
+            assert_eq!(mark.flag(), flag, "@mark.{mark}");
+        }
+    }
+}
+
 #[test]
 fn malformed_names_do_not_parse() {
     for name in ["def", "def.sub.name.x", "scope.", "import.", "ref", "expr.lit.float", "flow"] {

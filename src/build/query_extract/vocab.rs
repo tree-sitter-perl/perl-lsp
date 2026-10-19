@@ -14,6 +14,8 @@ macro_rules! spelled {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         pub enum $name { $($(#[$vm])* $var),* }
         impl $name {
+            #[cfg(test)]
+            pub const ALL: &'static [Self] = &[$($name::$var),*];
             pub fn spelling(self) -> &'static str {
                 match self { $($name::$var => $s),* }
             }
@@ -55,6 +57,22 @@ spelled! {
         Union = "union",
         /// An anonymous inline union's member container.
         UnionField = "unionfield",
+    }
+}
+
+spelled! {
+    /// What a `@mark.<flag>` states about the declaration whose NAME token
+    /// it captures. The document says it in a pattern of its own, so a
+    /// modifier in any order, a keyword that is not the flag's spelling
+    /// (`private` → non-public) and a fact about a class read off its body
+    /// all reach the symbol as the flag `flag` names.
+    pub enum MarkCap {
+        Static = "static",
+        Abstract = "abstract",
+        NonPublic = "non_public",
+        Constructor = "constructor",
+        Contract = "contract",
+        DynamicMembers = "dynamic_members",
     }
 }
 
@@ -310,6 +328,8 @@ pub enum Capture {
     /// A method's receiver parameter (python `self`): the object, not a
     /// member.
     ParamReceiver,
+    /// A fact the document states about the declaration at this name token.
+    Mark(MarkCap),
     Arity(ArityCap),
     Domain(DomainCap),
     Shape(ShapeCap),
@@ -388,6 +408,7 @@ impl Capture {
                 "receiver" => C::ParamReceiver,
                 _ => return None,
             },
+            ["mark", k] => C::Mark(MarkCap::parse(k)?),
             ["member", "op", k] => C::MemberOp(MemberOpCap::parse(k)?),
             ["member", k] => C::Member(MemberCap::parse(k)?),
             ["arity", k] => C::Arity(ArityCap::parse(k)?),
@@ -447,6 +468,7 @@ impl fmt::Display for Capture {
             C::Member(k) => write!(f, "member.{k}"),
             C::MemberOp(k) => write!(f, "member.op.{k}"),
             C::ParamReceiver => f.write_str("param.receiver"),
+            C::Mark(k) => write!(f, "mark.{k}"),
             C::Arity(k) => write!(f, "arity.{k}"),
             C::Domain(k) => write!(f, "domain.{k}"),
             C::Shape(k) => write!(f, "shape.{k}"),
@@ -548,6 +570,20 @@ impl DefCap {
             DefCap::Reexport => Some("reexport"),
             DefCap::Macro => Some("macro"),
             _ => None,
+        }
+    }
+}
+
+impl MarkCap {
+    pub fn flag(self) -> crate::model::file_analysis::SymbolFlags {
+        use crate::model::file_analysis::SymbolFlags as F;
+        match self {
+            MarkCap::Static => F::STATIC,
+            MarkCap::Abstract => F::ABSTRACT,
+            MarkCap::NonPublic => F::NON_PUBLIC,
+            MarkCap::Constructor => F::CONSTRUCTOR,
+            MarkCap::Contract => F::CONTRACT,
+            MarkCap::DynamicMembers => F::DYNAMIC_MEMBERS,
         }
     }
 }

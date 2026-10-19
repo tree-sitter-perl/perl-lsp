@@ -25,6 +25,38 @@
   "trait" @sym.attr
   name: (name) @def.class.name @context.class) @def.class @scope
 
+; ---- callables ----
+(function_definition name: (name) @def.sub.name) @def.sub
+(method_declaration name: (name) @def.method.name) @def.method
+; Parameters and locals are body content, not members.
+(function_definition) @scope.sub
+(method_declaration) @scope.sub
+
+; ---- what a declaration is, stated on its name ----
+; Modifiers come in any order, so each fact is a pattern of its own.
+(method_declaration
+  (visibility_modifier) @_visibility
+  name: (name) @mark.non_public
+  (#any-of? @_visibility "private" "protected"))
+(method_declaration (static_modifier) name: (name) @mark.static)
+(method_declaration (abstract_modifier) name: (name) @mark.abstract)
+; A method declared without a body (an interface's, an abstract one) is
+; a contract the composing class must provide.
+(method_declaration name: (name) @mark.contract !body)
+; The one method `new Foo(...)` invokes; its name belongs to the language.
+((method_declaration name: (name) @mark.constructor)
+ (#eq? @mark.constructor "__construct"))
+; A class declaring one of these answers ANY member name at runtime, so it
+; has no closed member surface to check a name against.
+((class_declaration
+  name: (name) @mark.dynamic_members
+  body: (declaration_list (method_declaration name: (name) @_catch_all)))
+ (#any-of? @_catch_all "__call" "__callStatic" "__get"))
+((trait_declaration
+  name: (name) @mark.dynamic_members
+  body: (declaration_list (method_declaration name: (name) @_catch_all)))
+ (#any-of? @_catch_all "__call" "__callStatic" "__get"))
+
 ; ---- parents ----
 ; `extends`, `implements` and a trait `use` are all parents for member
 ; lookup. The whole written spelling is the capture: it resolves through

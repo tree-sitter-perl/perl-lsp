@@ -1302,3 +1302,16 @@ fn stamp_pass_sharing_matches_lone_resolutions() {
             .unwrap();
     }
 }
+
+/// Perl names its constructor by convention; the builder reads the
+/// convention where it mints the callable, and a `requires` marker is a
+/// contract, so consumers ask the symbol for both.
+#[test]
+fn a_perl_constructor_and_a_requires_marker_are_flags() {
+    use crate::model::file_analysis::SymbolFlags;
+    let fa = build_fa("package R; use Moo::Role; requires 'fetch';\npackage C; sub new { bless {}, shift } sub newer {}\n");
+    let flags = |name: &str| fa.symbols().iter().find(|s| s.name == name).unwrap().flags;
+    assert!(fa.symbols().iter().find(|s| s.name == "new").unwrap().is_constructor());
+    assert!(!flags("newer").contains(SymbolFlags::CONSTRUCTOR));
+    assert!(flags("fetch").contains(SymbolFlags::CONTRACT));
+}

@@ -128,7 +128,6 @@ impl FileAnalysis {
             loader_config_params: _loader_config_params, // callee markers joined by this file's OWN enrichment
             framework_imports: _framework_imports, // local diagnostic suppression set
             type_provenance: _type_provenance,   // read-only debugging aid (`--dump-package`)
-            contract_symbols: _contract_symbols, // SymbolIds (banned from the Surface); the markers they tag project as methods
             column_keyed_verbs: _column_keyed_verbs, // baked from the plugin registry, not this file's source; the plugin fingerprint owns invalidation
             language: _language,                 // the origin's serving-language identity; `resolve()` reads it live per query, never baked into a consumer's cached state
             lib_roots: _lib_roots,               // `use lib` changes what THIS file sees of @INC, never what a consumer sees of this file

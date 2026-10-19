@@ -242,15 +242,6 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub key_writes: Vec<KeyWrite>,
 
-    /// SymbolIds of `requires`-synthesized contract markers. A marker
-    /// resolves like a Method (in-role `$self->name` dispatch, hover,
-    /// goto-def land on the contract) but is NOT a provision — the
-    /// composer-mismatch check excludes these by id, so a role that
-    /// both requires AND defines a name (the default-implementation
-    /// pattern) still counts the real def.
-    #[serde(default)]
-    pub contract_symbols: HashSet<SymbolId>,
-
     /// DBIC `__PACKAGE__->source_name('X')` override for this file's result
     /// class — the registered SOURCE moniker when it differs from the class
     /// basename. `None` = the moniker is the basename (the common case).
@@ -614,7 +605,6 @@ pub struct FileAnalysisParts {
     pub attr_projections: Vec<AttrProjection>,
     pub reassigned_scalars: HashSet<String>,
     pub key_writes: Vec<KeyWrite>,
-    pub contract_symbols: HashSet<SymbolId>,
     pub dbic_source_name: Option<String>,
     pub column_keyed_verbs: HashSet<String>,
     pub dynamic_dispatch_sites: u32,
