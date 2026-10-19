@@ -562,10 +562,10 @@ fn build_once(
     // `function_call_expression` / `bareword` / `scoped_identifier` did
     // a `self.symbols.iter().find` against a partial symbol table.
     // Forward-defined callees (Perl's `sub a { b() } sub b {…}` pattern,
-    // canonically Carp's `longmess` → `longmess_heavy`) silently
-    // produced no witness. The walk queued each missing lookup; resolve
-    // them now against the final symbol table and push the
-    // `Expr(span) → Edge(Symbol(sid))` witness the walk would have.
+    // canonically Carp's `longmess` → `longmess_heavy`) produced no
+    // witness. The walk queued each missing lookup; resolve them now
+    // against the final symbol table, and leave what is still unresolved
+    // to the cross-file lookup (`Callee::Function { local: None }`).
     bphase!("resolve_fwd_expr_witnesses", b.resolve_forward_expr_witnesses());
 
     // Worklist driver: one fixed-point loop over chain typing +
