@@ -662,6 +662,42 @@ pub(crate) fn string_content_span(node: Node) -> Span {
     node_to_span(node)
 }
 
+/// One arm of an `if`/`unless` statement chain.
+#[derive(Clone, Copy)]
+pub(crate) struct CondArm<'a> {
+    /// `None` for the trailing `else`.
+    pub cond: Option<Node<'a>>,
+    pub block: Node<'a>,
+    /// The truth value `cond` must take for `block` to run: `false` only
+    /// for the leading arm of an `unless`. An `else` arm carries `true`.
+    pub enter: bool,
+}
+
+/// A `conditional_statement`'s arms in order: the leading `if`/`unless`,
+/// each `elsif`, then the `else`. The `elsif`/`else` nodes nest inside one
+/// another, so the chain is the walk down them.
+pub(crate) fn conditional_arms(stmt: Node<'_>) -> Vec<CondArm<'_>> {
+    let mut arms = Vec::new();
+    let (Some(cond), Some(block)) =
+        (stmt.child_by_field_name("condition"), stmt.child_by_field_name("block"))
+    else {
+        return arms;
+    };
+    let enter = stmt.child(0).is_none_or(|k| k.kind() != "unless");
+    arms.push(CondArm { cond: Some(cond), block, enter });
+    let mut tail = stmt;
+    while let Some(next) = tail.elements().find(|c| matches!(c.kind(), "elsif" | "else")) {
+        let Some(block) = next.child_by_field_name("block") else { break };
+        let cond = next.child_by_field_name("condition");
+        arms.push(CondArm { cond, block, enter: true });
+        if cond.is_none() {
+            break;
+        }
+        tail = next;
+    }
+    arms
+}
+
 /// The template node a `map` callback contributes. `map EXPR, LIST` is
 /// the callback itself; `map { ... } LIST` (the block form — at least
 /// as idiomatic) yields the block's tail expression, since Perl

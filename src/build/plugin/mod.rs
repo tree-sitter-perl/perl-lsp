@@ -141,7 +141,7 @@ pub struct ArgInfo {
     /// $app->helper(name => \&Foo::bar);           # named ref (cross-file ok)
     /// ```
     ///
-    /// Anon-sub origins yield `Expr(body_last_expr_span)`; named-
+    /// Anon-sub origins yield the anon sub's `Symbol(sub_id)`; named-
     /// sub references yield `PackageSymbol{package, name}`, which
     /// resolves through the bag's MRO + `module_index` machinery
     /// — so cross-file `\&Foo::bar` works without any consumer-
