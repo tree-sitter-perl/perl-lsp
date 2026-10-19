@@ -187,6 +187,27 @@ fn test_call_context_key_position() {
     assert!(ctx.used_keys.contains("host"));
 }
 
+// A comma is a fat comma minus the autoquote: `'host', 'x'` names `host`.
+#[test]
+fn test_call_context_used_keys_with_plain_commas() {
+    let source = "sub foo { }\nfoo('host', 'x', port => 8080);";
+    let tree = parse(source);
+    let ctx = find_call_context(&tree, source.as_bytes(), Point::new(1, 17)).unwrap();
+    assert!(ctx.at_key_position);
+    assert!(ctx.used_keys.contains("host"), "{:?}", ctx.used_keys);
+    assert!(!ctx.used_keys.contains("x"), "a value is not a key: {:?}", ctx.used_keys);
+}
+
+#[test]
+fn test_hash_used_keys_with_plain_commas() {
+    let source = "my $h = { 'host', 1, port => 2, 'user', 3 };";
+    let tree = parse(source);
+    let used = used_keys_in_enclosing_hash(&tree, source.as_bytes(), Point::new(0, 22));
+    let mut keys: Vec<_> = used.into_iter().collect();
+    keys.sort();
+    assert_eq!(keys, ["host", "port", "user"]);
+}
+
 #[test]
 fn test_selection_ranges_basic() {
     let source = "my $x = 1;";

@@ -703,7 +703,7 @@ pub fn find_call_context(tree: &Tree, source: &[u8], point: Point) -> Option<Cal
     };
 
     let used_keys = match args_node {
-        Some(args) => collect_used_keys_at_callsite(args, source),
+        Some(args) => used_keys_in_pairs(args, source),
         None => HashSet::new(),
     };
 
@@ -1051,7 +1051,6 @@ fn count_separators_before(node: Node, cursor: Point) -> usize {
     count
 }
 
-/// Collect keys already used at the call site (barewords/strings before `=>`).
 /// Collect keys already present in the innermost hash literal at
 /// the cursor position. Returns an empty set when the cursor isn't
 /// inside one. Completion uses this to avoid re-offering a key the
@@ -1066,20 +1065,7 @@ pub fn used_keys_in_enclosing_hash(tree: &Tree, source: &[u8], point: Point) -> 
         else { return HashSet::new() };
     for _ in 0..16 {
         if node.kind() == "anonymous_hash_expression" {
-            // Child layout varies: sometimes the pairs are direct
-            // children of the hash node (`{ x => 1 }`); sometimes
-            // they're wrapped in a list_expression (`{ x => 1, y
-            // => 2 }`). Probe both — the pair-detector is the same
-            // shape regardless.
-            let mut used = collect_used_keys_at_callsite(node, source);
-            for i in 0..node.named_child_count() {
-                if let Some(inner) = node.named_child(i) {
-                    if inner.kind() == "list_expression" {
-                        used.extend(collect_used_keys_at_callsite(inner, source));
-                    }
-                }
-            }
-            return used;
+            return used_keys_in_pairs(node, source);
         }
         let Some(parent) = node.parent() else { break };
         node = parent;
@@ -1087,16 +1073,13 @@ pub fn used_keys_in_enclosing_hash(tree: &Tree, source: &[u8], point: Point) -> 
     HashSet::new()
 }
 
-fn collect_used_keys_at_callsite(args: Node, source: &[u8]) -> HashSet<String> {
-    let mut used = HashSet::new();
-    for pair in crate::cst::children_without_trivia(args).windows(2) {
-        if pair[1].kind() == "=>" {
-            if let Some(key) = extract_key_text(pair[0], source) {
-                used.insert(key);
-            }
-        }
-    }
-    used
+/// The keys of a pair list — call arguments or a hash literal — paired by
+/// position, so `'a', 1` names `a` exactly as `a => 1` does.
+fn used_keys_in_pairs(container: Node, source: &[u8]) -> HashSet<String> {
+    crate::cst::pair_nodes(container)
+        .into_iter()
+        .filter_map(|(key, _)| extract_key_text(key, source))
+        .collect()
 }
 
 /// Extract the text of a key node (bareword, string literal, etc.)
