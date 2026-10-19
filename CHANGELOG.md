@@ -4,7 +4,7 @@ All notable changes to perl-lsp are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are the published
 crate / VS Code extension versions.
 
-## v0.8.0 — 2026-10-19
+## Unreleased
 
 ### One language per process
 
@@ -20,6 +20,8 @@ crate / VS Code extension versions.
 - `--parse <file> <lang>` is now `--parse <file> --lang <lang>`.
 - The `all-langs` build feature is gone; enable the languages you want
   (`--features cpp,python`).
+
+## v0.8.0 — 2026-10-19
 
 ### Heatmap
 
