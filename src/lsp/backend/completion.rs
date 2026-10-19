@@ -24,11 +24,7 @@ pub fn pack_completion(
     path: Option<&std::path::Path>,
     module_index: &ModuleIndex,
 ) -> (Vec<CompletionItem>, bool) {
-    // Cross-file resolves against THIS language's sub-index (its own
-    // cache — no cross-language overlap), falling back to the hub when
-    // none is attached.
-    let routed = module_index.lookup_for(language);
-    let base_idx = routed.as_lookup();
+    let base_idx: &dyn crate::model::file_analysis::CrossFileLookup = module_index;
     // Scope member/type resolution to the file's include closure.
     let scoped = crate::model::file_analysis::ScopedLookup::new(
         base_idx,
@@ -108,7 +104,7 @@ pub fn pack_completion(
                 let mut items = symbols::in_scope_completion(analysis, point);
                 let macros_live = macro_completion(source, point, language, path, &mut items);
                 let closure_live = closure_symbol_completion(
-                    files, analysis, source, point, language, path, module_index, &mut items);
+                    files, analysis, source, point, path, module_index, &mut items);
                 rank_domain_members(&mut items, &members, &enum_name);
                 return symbols::finish_completion(
                     items, &slot, false, macros_live || closure_live,
@@ -119,7 +115,7 @@ pub fn pack_completion(
     let mut items = symbols::in_scope_completion(analysis, point);
     let macros_live = macro_completion(source, point, language, path, &mut items);
     let closure_live = closure_symbol_completion(
-        files, analysis, source, point, language, path, module_index, &mut items);
+        files, analysis, source, point, path, module_index, &mut items);
     // The shared finisher — the same cap, prefix rule, and flag
     // composition the Perl assembly exits through.
     symbols::finish_completion(items, &slot, false, macros_live || closure_live)
@@ -172,7 +168,6 @@ fn closure_symbol_completion(
     analysis: &crate::model::file_analysis::FileAnalysis,
     source: &str,
     point: tree_sitter::Point,
-    language: &str,
     path: Option<&std::path::Path>,
     module_index: &ModuleIndex,
     items: &mut Vec<CompletionItem>,
@@ -185,7 +180,6 @@ fn closure_symbol_completion(
     if prefix.is_empty() {
         return true; // live source, waiting for a prefix
     }
-    let routed = module_index.lookup_for(language);
     let seen: std::collections::HashSet<String> =
         items.iter().map(|i| i.label.clone()).collect();
     // The closure-gated identifier universe is the set's completion
@@ -197,7 +191,7 @@ fn closure_symbol_completion(
         analysis,
         crate::index::file_store::FileKey::Path(path.map(|p| p.to_path_buf()).unwrap_or_default()),
         point,
-        Some(routed.as_lookup()),
+        Some(module_index),
         crate::index::resolve::OverrideScope::default(),
     );
     let candidates =

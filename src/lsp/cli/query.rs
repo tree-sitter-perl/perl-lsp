@@ -402,11 +402,8 @@ fn run_one(
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
             let uri = tower_lsp::lsp_types::Url::from_file_path(&abs)
                 .unwrap_or_else(|_| tower_lsp::lsp_types::Url::parse("file:///unknown").unwrap());
-            // Store selection by driver id — `lookup_for` is the one
-            // speller.
             let lang_id = language_driver::LanguageRegistry::served().id();
-            let routed = idx.lookup_for(lang_id);
-            let base_idx = routed.as_lookup();
+            let base_idx: &dyn file_analysis::CrossFileLookup = idx;
             // `#include "x.h"` path → the resolved header (`#include` = `use`).
             // A path token, not a name — slot-shaped, stays ahead of the set.
             // The pack declares whether it has include tokens; asked, never
@@ -461,13 +458,8 @@ fn run_one(
                 .unwrap_or_else(|_| std::path::PathBuf::from(file));
             let mut sources = SourceCache::new(fmt);
             let mut results = Vec::new();
-            // Store selection by driver id (matches goto-def and the LSP
-            // server): a sub-indexed language must route to its own store —
-            // the hub only knows Perl modules, so resolving/collecting
-            // against it silently misses every cross-file cpp use.
             let lang_id = language_driver::LanguageRegistry::served().id();
-            let routed = idx.lookup_for(lang_id);
-            let base_idx = routed.as_lookup();
+            let base_idx: &dyn file_analysis::CrossFileLookup = idx;
             // `#include` reverse — "who includes this header" — owns the path
             // token exclusively (its backward mirror of include goto-def).
             // The pack declares whether it has include tokens; asked, never
@@ -518,14 +510,12 @@ fn run_one(
             // Same store routing as the LSP handler, so the CLI mirror can't
             // diverge: the domain bridge (enum def → field-slot sites) and
             // the family/spec walks are one projection.
-            let lang_id = language_driver::LanguageRegistry::served().id();
-            let routed = idx.lookup_for(lang_id);
             let _staged = ScopedWorkspaceEntry::insert(ws, file_path.clone(), analysis);
             let origin = ws.workspace_raw().get(&file_path).map(|r| r.value().clone())
                 .expect("origin staged above");
             let cs = resolve::resolve(
                 ws, &origin, file_store::FileKey::Path(file_path), point,
-                Some(routed.as_lookup()), resolve::OverrideScope::default(),
+                Some(idx), resolve::OverrideScope::default(),
             );
             for loc in cs.implementations() {
                 let path = match &loc.key {
@@ -545,14 +535,12 @@ fn run_one(
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
             // Same store routing + staging as goto-def; the projection is the
             // type axis of the same set (value type → dispatch class → def).
-            let lang_id = language_driver::LanguageRegistry::served().id();
-            let routed = idx.lookup_for(lang_id);
             let _staged = ScopedWorkspaceEntry::insert(ws, abs.clone(), analysis);
             let origin = ws.workspace_raw().get(&abs).map(|r| r.value().clone())
                 .expect("origin staged above");
             let cs = resolve::resolve(
                 ws, &origin, file_store::FileKey::Path(abs), point,
-                Some(routed.as_lookup()), resolve::OverrideScope::default(),
+                Some(idx), resolve::OverrideScope::default(),
             )
             .with_source(&s);
             let locs = cs.type_definitions();
@@ -573,14 +561,12 @@ fn run_one(
             resolve_imports_blocking(idx, &analysis);
             analysis.enrich_imported_types_with_keys(Some(idx));
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
-            let lang_id = language_driver::LanguageRegistry::served().id();
-            let routed = idx.lookup_for(lang_id);
             let _staged = ScopedWorkspaceEntry::insert(ws, abs.clone(), analysis);
             let origin = ws.workspace_raw().get(&abs).map(|r| r.value().clone())
                 .expect("origin staged above");
             let cs = resolve::resolve(
                 ws, &origin, file_store::FileKey::Path(abs), point,
-                Some(routed.as_lookup()), resolve::OverrideScope::default(),
+                Some(idx), resolve::OverrideScope::default(),
             );
             let is_type = req.q == "type-hierarchy";
             let item = if is_type { cs.hierarchy_type_item() } else { cs.hierarchy_call_item() };
@@ -599,11 +585,11 @@ fn run_one(
             // refs); the cursor file only had the call/use site.
             let anchor = item.location.clone();
             let anchor_analysis =
-                resolve::analysis_for_key(ws, Some(routed.as_lookup()), &anchor.key)
+                resolve::analysis_for_key(ws, Some(idx), &anchor.key)
                     .unwrap_or_else(|| std::sync::Arc::clone(&origin));
             let acs = resolve::resolve(
                 ws, &anchor_analysis, anchor.key.clone(), anchor.span.start,
-                Some(routed.as_lookup()), resolve::OverrideScope::default(),
+                Some(idx), resolve::OverrideScope::default(),
             );
             let mut sources = SourceCache::new(fmt);
             let mut item_json = |sources: &mut SourceCache, it: &resolve::HierarchyItem| {
@@ -661,7 +647,6 @@ fn run_one(
             let driver = language_driver::LanguageRegistry::served();
             if !driver.caps().hover_info {
                 let lang = driver.id();
-                let routed = idx.lookup_for(lang);
                 let abs = std::fs::canonicalize(file)
                     .unwrap_or_else(|_| std::path::PathBuf::from(file));
                 let _staged = ScopedWorkspaceEntry::insert(ws, abs.clone(), analysis);
@@ -669,7 +654,7 @@ fn run_one(
                     .expect("origin staged above");
                 let cs = resolve::resolve(
                     ws, &origin, file_store::FileKey::Path(abs), point,
-                    Some(routed.as_lookup()), resolve::OverrideScope::default(),
+                    Some(idx), resolve::OverrideScope::default(),
                 )
                 .with_source(&source);
                 return symbols::pack_hover_markdown(&cs, lang)
@@ -774,18 +759,17 @@ fn run_one(
         }
         "document-highlight" => {
             let doc = cli_open_document(file, idx);
-            // Same construction as the LSP handler (routed index, origin
+            // Same construction as the LSP handler (process index, origin
             // key): highlights is the set's origin-narrowed projection.
             // Staging classifies the origin as workspace tier, matching how
             // the references verb attributes the queried file.
             let abs = std::fs::canonicalize(file)
                 .unwrap_or_else(|_| std::path::PathBuf::from(file));
-            let routed = idx.lookup_for(doc.language);
             let _staged = ScopedWorkspaceEntry::insert_arc(
                 ws, abs.clone(), std::sync::Arc::clone(&doc.analysis));
             let cs = resolve::resolve(
                 ws, &doc.analysis, file_store::FileKey::Path(abs), point,
-                Some(routed.as_lookup()), override_scope_from_env(),
+                Some(idx), override_scope_from_env(),
             );
             let highlights = symbols::document_highlights(&cs);
             let mut sources = SourceCache::new(fmt);
@@ -808,12 +792,11 @@ fn run_one(
                 .unwrap_or_else(|_| file.to_string());
             let abs = std::fs::canonicalize(file)
                 .unwrap_or_else(|_| std::path::PathBuf::from(file));
-            let routed = idx.lookup_for(doc.language);
             let _staged = ScopedWorkspaceEntry::insert_arc(
                 ws, abs.clone(), std::sync::Arc::clone(&doc.analysis));
             let cs = resolve::resolve(
                 ws, &doc.analysis, file_store::FileKey::Path(abs), point,
-                Some(routed.as_lookup()), override_scope_from_env(),
+                Some(idx), override_scope_from_env(),
             );
             match symbols::linked_editing_ranges(&cs) {
                 Some(ranges) => {
@@ -832,8 +815,6 @@ fn run_one(
             let text = std::fs::read_to_string(file)
                 .map_err(|e| format!("Cannot read {}: {}", file, e))?;
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
-            let lang_id = language_driver::LanguageRegistry::served().id();
-            let routed = idx.lookup_for(lang_id);
             let root = idx
                 .workspace_root()
                 .and_then(|r| tower_lsp::lsp_types::Url::parse(&r).ok())
@@ -842,7 +823,7 @@ fn run_one(
                 &text,
                 abs.parent(),
                 root.as_deref(),
-                Some(routed.as_lookup()),
+                Some(idx),
             );
             let mut sources = SourceCache::new(fmt);
             let path = abs.display().to_string();
@@ -917,10 +898,9 @@ fn run_one(
                     push(&sym.name, &sym.kind, file.clone(), sym.selection_span);
                 }
             }
-            // Pack-language (C/C++/…) symbols live in per-language sub-indexes,
-            // not the Perl workspace map — sweep them so a C typedef/class/free
-            // function surfaces in workspace search too.
-            idx.for_each_pack_registered_file(&mut |path, analysis| {
+            // A pack language's files live in the index, not the FileStore.
+            idx.for_each_pack_registered_file(&mut |cached| {
+                let (path, analysis) = (cached.path.as_path(), &cached.analysis);
                 let file = path.display().to_string();
                 if !analysis.symbols_are_evicted() {
                     covered.insert(path.to_path_buf());
@@ -932,7 +912,7 @@ fn run_one(
                     push(&sym.name, &sym.kind, file.clone(), sym.selection_span);
                 }
             });
-            for hit in symbols::sym_row_search(idx, &q) {
+            for hit in idx.sym_search(&q) {
                 let path = std::path::PathBuf::from(&hit.path);
                 if covered.contains(&path) {
                     continue;
@@ -1086,14 +1066,12 @@ fn run_rename(
     // Same shape as the LSP handler: stage the origin, construct the set
     // once, project the rename — the per-arm policy (cross-file vs group vs
     // single-file, rewritability, the pack full-or-refuse) lives on the set.
-    let lang_id = language_driver::LanguageRegistry::served().id();
-    let routed = idx.lookup_for(lang_id);
     let _staged = ScopedWorkspaceEntry::insert(ws, file_path.clone(), analysis);
     let origin = ws.workspace_raw().get(&file_path).map(|r| r.value().clone())
         .expect("origin staged above");
     let cs = resolve::resolve(
         ws, &origin, file_store::FileKey::Path(file_path), point,
-        Some(routed.as_lookup()), override_scope_from_env(),
+        Some(idx), override_scope_from_env(),
     );
     if cs.resolution().is_none() {
         return Err(format!("Nothing renameable at {}:{}", point.row, point.column));
@@ -1370,20 +1348,18 @@ fn for_each_enriched_diagnostic(
         peak_pending.load(std::sync::atomic::Ordering::Relaxed).max(0) as u64,
     );
 
-    // Pack-language files (C++/…) live in the per-language sub-indexes, not the
-    // Perl-only `FileStore` above. Mirror the backend's language dispatch: they
+    // Pack-language files (C++/…) live in the index, not the `FileStore`
+    // above. Mirror the backend's language dispatch: they
     // get `pack_diagnostics` (Mode B — member-op swap + peel), so `--batch
     // diagnostics` / `--check` / gold see the same Mode-B answers the LSP
     // publishes. No enrichment (pack files aren't cross-file-enriched).
-    idx.for_each_pack_index(|_lang, pack| {
-        pack.for_each_registered_file(&mut |cm| {
-            let file = cm.path.display().to_string();
-            // Same whole-view routing: pack index copies are evicted.
-            let whole = file_analysis::CrossFileLookup::whole_present(pack.as_ref(), cm);
-            for d in symbols::pack_diagnostics(&whole, options) {
-                emit(&file, d);
-            }
-        });
+    idx.for_each_pack_registered_file(&mut |cm| {
+        let file = cm.path.display().to_string();
+        // Same whole-view routing: pack index copies are evicted.
+        let whole = file_analysis::CrossFileLookup::whole_present(idx, cm);
+        for d in symbols::pack_diagnostics(&whole, options) {
+            emit(&file, d);
+        }
     });
 }
 

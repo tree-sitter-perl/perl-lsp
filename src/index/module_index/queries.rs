@@ -9,7 +9,6 @@ impl ModuleIndex {
         ModuleIndex {
             core,
             loaded_modules: Arc::new(DashMap::new()),
-            pack_indexes: Arc::new(DashMap::new()),
             open_doc_paths: Arc::new(DashMap::new()),
             closedness: Arc::new(Default::default()),
             all_files: Arc::new(DashMap::new()),
@@ -21,7 +20,6 @@ impl ModuleIndex {
                 "enriched-overlay".into(),
             ),
             enrichment_key_memo: Arc::new(DashMap::new()),
-            foreign_bag_cache: std::sync::RwLock::new(None),
             ref_rows_opener: std::sync::RwLock::new(None),
             ref_rows_conn: crate::index::module_cache::RetainedReader::new(),
             workspace_modules: Arc::new(DashMap::new()),
@@ -30,11 +28,13 @@ impl ModuleIndex {
 
     pub fn new(client: Client, on_diagnostics_refresh: impl Fn() + Send + Sync + 'static) -> Self {
         let core = Arc::new(IndexCore::new());
-        module_resolver::spawn_resolver(
-            Arc::clone(&core),
-            client,
-            Box::new(on_diagnostics_refresh),
-        );
+        if serves_perl() {
+            module_resolver::spawn_resolver(
+                Arc::clone(&core),
+                client,
+                Box::new(on_diagnostics_refresh),
+            );
+        }
         Self::from_core(core)
     }
 
@@ -54,6 +54,11 @@ impl ModuleIndex {
         *guard = Some(root.map(String::from));
         self.core.workspace_root.condvar.notify_one();
         drop(guard);
+        // Everything below reads `modules.db`. A pack process's store is
+        // installed by its indexer (`index_pack_language`) instead.
+        if !serves_perl() {
+            return;
+        }
         // The hub's relational-ref-index reader: the SAME cache key the
         // resolver thread writes under (both spell it as this root string),
         // so retrieval and shred always address one DB.
@@ -66,7 +71,7 @@ impl ModuleIndex {
         }
         // The hub's rehydration LRU: Perl workspace copies are refs/bag-
         // evicted once persisted; queries that need the whole analysis
-        // rehydrate through this, same as the pack sub-indexes. Fixed
+        // rehydrate through this, same as a pack language's. Fixed
         // 128 MiB cap (Perl analyses are 10-100x smaller than cpp ones).
         let ckey = key.clone();
         // Retained across rehydrates — a per-call open was the same disease
@@ -478,7 +483,9 @@ impl ModuleIndex {
 
     pub fn new_for_cli() -> Self {
         let core = Arc::new(IndexCore::new());
-        module_resolver::spawn_test_resolver(Arc::clone(&core));
+        if serves_perl() {
+            module_resolver::spawn_test_resolver(Arc::clone(&core));
+        }
         Self::from_core(core)
     }
 
@@ -486,8 +493,14 @@ impl ModuleIndex {
     /// enriched retries turn on (the overlay amortizes them; one-shot CLI
     /// modes never recoup the deep-copies — bisected at 2x warm-harness
     /// wall), and the resolver strips warm-loaded @INC copies (their
-    /// rehydration cost amortizes the same way).
+    /// rehydration cost amortizes the same way). Both are Perl's: a pack
+    /// language's index never served the overlay (its wiring is
+    /// `prompt-unify-semantic-tiers.md` Step 3c), so a pack process stays
+    /// short-lived here rather than start deep-copying its analyses.
     pub fn mark_long_lived(&self) {
+        if !serves_perl() {
+            return;
+        }
         self.core.long_lived
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
@@ -580,4 +593,10 @@ impl ModuleIndex {
             self.register_materialized_whole(name, path, cm);
         }
     }
+}
+
+/// The resolver thread is the Perl `@INC` tier: a pack process has no
+/// dependency tier for it to scan, so it never spawns.
+fn serves_perl() -> bool {
+    crate::build::language_driver::LanguageRegistry::served().caps().hub_enrichment
 }

@@ -1,12 +1,12 @@
-//! Pack-language bulk indexing: per-language sub-indexes, the
+//! Pack-language bulk indexing: the served pack language's walk, the
 //! stub-first warm lane, and the deferred persist-writer drain.
 
 use super::*;
 
-/// Index the served pack language's files (C++/Python/…) into its own
-/// sub-index attached to `hub`. GENERIC: driver-driven, so every pack
-/// language gets cross-file from this one walk. The language keeps its OWN
-/// `ModuleIndex` (separate cache), files registered by CLASS name.
+/// Index the served pack language's files (C++/Python/…) into the process
+/// `index`. GENERIC: driver-driven, so every pack language gets cross-file
+/// from this one walk; files register by CLASS name. Installs the index's
+/// rehydration LRU and row-store reader on the language's DB.
 /// PERSISTED to a separate `modules-{lang}.db`: warm valid analyses from disk
 /// (mtime/size + EXTRACT_VERSION validated), re-analyze only new/changed/stale
 /// files, and write the fresh ones back — so a big monorepo doesn't
@@ -16,7 +16,7 @@ pub fn index_pack_language(
     driver: &'static dyn crate::build::language_driver::LanguageDriver,
     root: &std::path::Path,
     cache_key: Option<&str>,
-    hub: &crate::index::module_index::ModuleIndex,
+    index: &crate::index::module_index::ModuleIndex,
     // Per-file progress tick (done, total), so the pack token's percentage
     // is monotone. Called once per path (warm-skip OR analyzed) — `done`
     // reaches the total at the end.
@@ -98,11 +98,10 @@ pub fn index_pack_language(
                 loader,
             ))
         };
-        let pack_index = Arc::new(
-            crate::index::module_index::ModuleIndex::new_for_cli().with_bag_cache(bag_cache),
-        );
-        // This sub-index's relational-ref-index reader — same per-language DB
-        // the drain below writes blobs + rows into.
+        let pack_index = index;
+        pack_index.set_bag_cache(bag_cache);
+        // The relational-ref-index reader — same per-language DB the drain
+        // below writes blobs + rows into.
         {
             let cache_key_owned = cache_key.map(|s| s.to_string());
             pack_index.set_ref_rows_opener(Arc::new(move || {
@@ -295,7 +294,7 @@ pub fn index_pack_language(
         // can't account for (a silent RAM pin no functional test sees).
         let expected_whole = Arc::new(AtomicUsize::new(0));
         let writer_conn = conn;
-        let pack_index_writer = Arc::clone(&pack_index);
+        let pack_index_writer = pack_index;
         let expected_whole_writer = Arc::clone(&expected_whole);
         std::thread::scope(|scope| {
             let writer = scope.spawn(move || {
@@ -497,7 +496,6 @@ pub fn index_pack_language(
                 expected_whole.load(Ordering::Relaxed),
             );
         }
-        hub.attach_pack_index(lang, pack_index);
     }
     if std::env::var_os("PERL_LSP_MEM_REPORT").is_some() {
         eprintln!("[mem-report] {}", crate::build::cpp_reparse::cache_size_report());
@@ -511,9 +509,9 @@ pub fn index_pack_language(
     {
         let mut agg = crate::model::file_analysis::HeapBreakdown::default();
         let mut hj = crate::model::file_analysis::HeapJson::new();
-        hub.for_each_pack_registered_file(&mut |path, fa| {
-            agg.add(&fa.heap_estimate());
-            hj.push(path, fa);
+        index.for_each_pack_registered_file(&mut |cached| {
+            agg.add(&cached.analysis.heap_estimate());
+            hj.push(&cached.path, &cached.analysis);
         });
         hj.finish();
         eprintln!("[heap-dump] {agg}");

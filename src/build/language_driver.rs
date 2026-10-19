@@ -56,9 +56,9 @@ pub struct DriverCaps {
     /// cached-only is degraded until the heal lane re-gathers, and index
     /// completion re-runs open docs through the gather.
     pub context_gather: bool,
-    /// Disk-change lifecycle is owned by `PackInvalidator` (per-language
-    /// sub-index registration + include-closure consumer eviction). Off =
-    /// the hub's direct re-index path handles watcher/save events.
+    /// Disk-change lifecycle is owned by `PackInvalidator` (re-registration
+    /// + include-closure consumer eviction). Off = the Perl direct re-index
+    /// path handles watcher/save events.
     pub pack_invalidation: bool,
     /// A bare identifier can name a CROSS-FILE entity with no import
     /// binding (macro / enum constant / global reached through the include

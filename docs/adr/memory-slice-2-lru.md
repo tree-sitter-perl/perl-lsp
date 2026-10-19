@@ -116,7 +116,7 @@ open set holds the fat copy, the index copy is thin.)
 
 ### The eviction seam
 
-In `module_resolver::index_pack_languages`, both feed paths converge on
+In `module_resolver::index_pack_language`, both feed paths converge on
 `pack_index.register_symbols(path, Arc<FileAnalysis>)`. Strip the bag on the
 resident copy immediately before that `Arc::new`, **after** the full blob is
 serialized to disk:
@@ -230,7 +230,7 @@ lifecycle* (strip after persist; rehydrate on demand) and adds a `#[serde(skip)]
   across files; `Display` prints the table above.
 - `WitnessBag::heap_bytes_estimate()` (`witnesses.rs`) — `(vec, index)` bytes.
 - `PERL_LSP_HEAP_DUMP`-gated aggregate at the end of
-  `index_pack_languages`, walking `hub.for_each_pack_registered_file`.
+  `index_pack_language`, walking `index.for_each_pack_registered_file`.
 
 Methodology (honest bounds): flat `size_of<T>() × capacity` for every
 collection (so `Vec`/`HashMap` slack is counted) plus deep `String` capacities
