@@ -579,7 +579,7 @@ impl<'a> Builder<'a> {
             let arg0 = if effective.kind() == "anonymous_hash_expression" {
                 Some(effective)
             } else {
-                effective.named_child(0)
+                crate::cst::nth_element(effective, 0)
             };
             match arg0 {
                 // Hashref cond/cols (`search({…})`, `create({…})`): narrow to it.
@@ -773,11 +773,7 @@ impl<'a> Builder<'a> {
         } else {
             return false;
         }
-        // Check this is the last named child in the block
-        if let Some(last) = parent.named_child(parent.named_child_count().saturating_sub(1)) {
-            last.id() == node.id()
-        } else {
-            false
-        }
+        // Check this is the block's last statement
+        crate::cst::last_element(parent).is_some_and(|last| last.id() == node.id())
     }
 }

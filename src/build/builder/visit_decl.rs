@@ -166,7 +166,7 @@ impl<'a> Builder<'a> {
             // refidx requires the ref to exist, which requires the
             // walker to have visited the method-call expression.
             "return_expression" => {
-                let body_span = node.named_child(0).map(node_to_span);
+                let body_span = crate::cst::nth_element(node, 0).map(node_to_span);
                 let scope = self.enclosing_sub_scope();
                 if let Some(scope) = scope {
                     let arity_branch = classify_arity_branch(node, self.source);
@@ -187,66 +187,6 @@ impl<'a> Builder<'a> {
                 self.queue_children_then(node, move |b| {
                     if let Some(scope) = scope {
                         b.publish_return_arm_witnesses(node, scope);
-                    }
-                });
-            }
-
-            // Expression statements inside sub bodies → track last
-            // expression's body span for the implicit-return path.
-            // Perl returns the last statement's value, so this IS
-            // the sub's implicit return when there's no explicit
-            // `return`. Each top-level statement we visit overwrites
-            // the prior entry, so when the walk leaves the sub the
-            // map points at the genuinely-last statement.
-            //
-            // IMPORTANT: only statements at the sub body's TOP
-            // level count — the outer block must be the sub/method's
-            // direct body. The bag-routed delegation chain (`Symbol(_) ←
-            // branch_arm Edge → Expr(body) → Edge(call_target)`) handles
-            // self-method tails for type inference; no separate map.
-            "expression_statement" => {
-                self.queue_children_then(node, move |b| {
-                    let Some(scope) = b.enclosing_sub_scope() else { return };
-                    let is_body_top_level = node
-                        .parent()
-                        .filter(|p| p.kind() == "block")
-                        .and_then(|block| block.parent())
-                        .map(|gp| {
-                            matches!(
-                                gp.kind(),
-                                "subroutine_declaration_statement"
-                                    | "method_declaration_statement"
-                                    | "anonymous_subroutine_expression"
-                            )
-                        })
-                        .unwrap_or(false);
-                    if !is_body_top_level {
-                        return;
-                    }
-                    if let Some(child) = node.named_child(0) {
-                        // Make sure the expression has Expr(span)
-                        // witnesses populated — `bag_query_expr_span`
-                        // resolves through them in the implicit-return
-                        // fallback. No-op for compound nodes whose
-                        // payload doesn't bake to a witness shape.
-                        b.emit_expr_witness(child);
-                        b.last_expr_span.insert(scope, node_to_span(child));
-                        // Classify how this statement exits, using the SAME
-                        // undef vocabulary the return side uses. A `return`
-                        // reaches here too — the grammar wraps it in an
-                        // `expression_statement` like any other — while a
-                        // postfix-conditional return (`return undef if $x`)
-                        // is a `postfix_conditional_expression`, NOT a
-                        // `return_expression`, which is the right answer:
-                        // the sub can still fall past it.
-                        use crate::model::witnesses::tags::UndefArm;
-                        let exit = match child.kind() {
-                            "return_expression" => TailExit::Return,
-                            "undef_expression" => TailExit::Undef(UndefArm::Scalar),
-                            "stub_expression" => TailExit::Undef(UndefArm::EmptyList),
-                            _ => TailExit::Value,
-                        };
-                        b.last_stmt_exit.insert(scope, exit);
                     }
                 });
             }
@@ -807,7 +747,10 @@ impl<'a> Builder<'a> {
         self.apply_param_type_manifest(&name, &params, node);
 
         // Visit children (body, etc.)
-        self.queue_children_then(node, |b| { b.pop_scope(); });
+        self.queue_children_then(node, move |b| {
+            b.record_sub_tail(node);
+            b.pop_scope();
+        });
     }
 
     /// Walk an `anonymous_subroutine_expression` (a `sub { ... }`
@@ -852,7 +795,94 @@ impl<'a> Builder<'a> {
         self.push_callable_scope(ScopeKind::Sub { name: "(anon)".into() }, span, sub_id);
         self.record_signature_params(node, &params);
         self.detect_first_param_type(&params, node);
-        self.queue_children_then(node, |b| { b.pop_scope(); });
+        self.queue_children_then(node, move |b| {
+            b.record_sub_tail(node);
+            b.pop_scope();
+        });
+    }
+
+    /// Record the sub's fallthrough arms: Perl yields the value of the
+    /// body's LAST statement, whatever kind it is. Read off the body at
+    /// close rather than accumulated per expression statement, because a
+    /// trailing `if`/loop/block is not an expression statement.
+    ///
+    /// A compound tail is read the way perl compiles it (`newCONDOP` in
+    /// op.c): `if (C) {B} else {E}` is `C ? B : E`, `if (C) {B}` is `C && B`
+    /// and `unless (C) {B}` is `C || B`, so each branch's own tail is an arm
+    /// and a missing `else` adds the condition — falsy (an undef arm) behind
+    /// `if`/`elsif`, its own value behind a lone `unless`. A trailing loop's
+    /// value is unspecified (perlsub), so it is an undef arm. Anything else
+    /// is an untyped value arm: still a way out, which keeps an early
+    /// `return;` from reading as all-undef.
+    ///
+    /// Runs before the scope pops, so the enclosing sub scope is this sub's.
+    pub(super) fn record_sub_tail(&mut self, sub: Node<'a>) {
+        use crate::model::witnesses::tags::UndefArm;
+        let Some(scope) = self.enclosing_sub_scope() else { return };
+        let Some(last) = sub.child_by_field_name("body").and_then(crate::cst::last_element) else {
+            return;
+        };
+        let mut arms = Vec::new();
+        // A worklist, not recursion: `if` chains nest as deep as the source.
+        let mut pending = vec![last];
+        while let Some(stmt) = pending.pop() {
+            match stmt.kind() {
+                "expression_statement" => {
+                    let Some(expr) = crate::cst::nth_element(stmt, 0) else { continue };
+                    // `bag_query_expr_span` resolves the arm through these
+                    // witnesses; no-op for nodes whose payload doesn't bake.
+                    self.emit_expr_witness(expr);
+                    // A `return` already minted its own arm. A postfix
+                    // `return undef if $x` is a `postfix_conditional_expression`,
+                    // which is right: the sub can still fall past it.
+                    match expr.kind() {
+                        "return_expression" => {}
+                        "undef_expression" => {
+                            arms.push(TailArm::Undef(node_to_span(expr), UndefArm::Scalar))
+                        }
+                        "stub_expression" => {
+                            arms.push(TailArm::Undef(node_to_span(expr), UndefArm::EmptyList))
+                        }
+                        _ => arms.push(TailArm::Value(node_to_span(expr))),
+                    }
+                }
+                "conditional_statement" => {
+                    let chain = crate::cst::conditional_arms(stmt);
+                    let Some(last_arm) = chain.last().copied() else {
+                        arms.push(TailArm::Value(node_to_span(stmt)));
+                        continue;
+                    };
+                    if let Some(cond) = last_arm.cond {
+                        if chain.len() == 1 && !last_arm.enter {
+                            self.emit_expr_witness(cond);
+                            arms.push(TailArm::Value(node_to_span(cond)));
+                        } else {
+                            arms.push(TailArm::Undef(node_to_span(cond), UndefArm::Scalar));
+                        }
+                    }
+                    for arm in chain.iter().rev() {
+                        self.push_block_tail(arm.block, &mut pending, &mut arms);
+                    }
+                }
+                "block_statement" => self.push_block_tail(stmt, &mut pending, &mut arms),
+                "for_statement" | "cstyle_for_statement" | "loop_statement" => {
+                    arms.push(TailArm::Undef(node_to_span(stmt), UndefArm::Scalar))
+                }
+                _ => arms.push(TailArm::Value(node_to_span(stmt))),
+            }
+        }
+        self.sub_tail.insert(scope, arms);
+    }
+
+    /// A block's tail joins the worklist; an empty block yields the empty list.
+    fn push_block_tail(&self, block: Node<'a>, pending: &mut Vec<Node<'a>>, arms: &mut Vec<TailArm>) {
+        match crate::cst::last_element(block) {
+            Some(tail) => pending.push(tail),
+            None => arms.push(TailArm::Undef(
+                node_to_span(block),
+                crate::model::witnesses::tags::UndefArm::EmptyList,
+            )),
+        }
     }
 
     /// Ensure an `(anon)` Symbol exists for the given anon-sub node
@@ -922,13 +952,9 @@ impl<'a> Builder<'a> {
         if let Some(body) = sub_node.child_by_field_name("body") {
             let mut shift_params: Vec<ParamInfo> = Vec::new();
 
-            for i in 0..body.named_child_count() {
-                let stmt = match body.named_child(i) {
-                    Some(s) => s,
-                    None => continue,
-                };
+            for stmt in crate::cst::NodeExt::elements(&body) {
                 let assign = if stmt.kind() == "expression_statement" {
-                    stmt.named_child(0).filter(|n| n.kind() == "assignment_expression")
+                    crate::cst::nth_element(stmt, 0).filter(|n| n.kind() == "assignment_expression")
                 } else if stmt.kind() == "assignment_expression" {
                     Some(stmt)
                 } else {
@@ -1035,9 +1061,9 @@ impl<'a> Builder<'a> {
             // my $var = shift || default  or  my $var = shift // default
             let op = self.get_operator_text(right);
             if matches!(op.as_deref(), Some("||" | "//")) {
-                let lhs = right.named_child(0)?;
+                let lhs = crate::cst::nth_element(right, 0)?;
                 if self.is_shift_call(lhs) {
-                    let default_node = right.named_child(1)?;
+                    let default_node = crate::cst::nth_element(right, 1)?;
                     let default_text = default_node.utf8_text(self.source).ok()?.to_string();
                     (lhs, Some(default_text))
                 } else {
@@ -1081,7 +1107,7 @@ impl<'a> Builder<'a> {
         match node.kind() {
             "bareword" => node.utf8_text(self.source).ok() == Some("shift"),
             "func1op_call_expression" => {
-                node.named_child_count() == 0
+                crate::cst::nth_element(node, 0).is_none()
                     && node.child(0).and_then(|c| c.utf8_text(self.source).ok()) == Some("shift")
             }
             "ambiguous_function_call_expression" | "function_call_expression" => {
@@ -1585,7 +1611,7 @@ impl<'a> Builder<'a> {
         // list payload is read off the second named child instead — `[call,
         // list]`. `extract_string_list` folds qw / paren-list / constants.
         let mut topic_values: Vec<String> = Vec::new();
-        if let (Some(call), Some(list_node)) = (node.named_child(0), node.named_child(1)) {
+        if let (Some(call), Some(list_node)) = (crate::cst::nth_element(node, 0), crate::cst::nth_element(node, 1)) {
             let names = self.extract_string_list(list_node);
             if !names.is_empty() && self.is_class_accessor_loop_body(call) {
                 self.emit_class_accessor_symbols(call, &names);
