@@ -77,8 +77,9 @@ jobs:
 
       # Changes no test TODAY — `run.sh` drives a fixed, Perl-only suite list, so
       # the pack suites (`e2e/run-cpp.sh`, its own lane) are unaffected by the
-      # flag. It is here so the four build lines do not diverge and invite the
-      # question of why this one is different.
+      # flag. It is here so CI's three build lines do not diverge and invite the
+      # question of why this one is different. `release.yml` builds only the
+      # languages a release ships, so it carries fewer features than these.
       - name: Build release binary
         run: cargo build --release --features cpp,php
 
