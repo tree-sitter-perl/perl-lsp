@@ -102,3 +102,12 @@ fn no_prototypes_is_identity() {
     assert_eq!(rewritten, src, "no protos → no rewrite");
     assert_eq!(map.to_original(5), 5, "identity anchor map");
 }
+
+// The closing paren lands after the last real argument, not after a comment.
+#[test]
+fn fixed_arity_close_paren_skips_comment_among_args() {
+    let mut p = perl_parser();
+    let src = "sub pair ($$) { 0 }\npair 1, # c\n 2, 3;\n";
+    let (rewritten, _) = reparenthesize(&mut p, src);
+    assert!(rewritten.contains("pair( 1, # c\n 2), 3"), "rewritten: {rewritten:?}");
+}

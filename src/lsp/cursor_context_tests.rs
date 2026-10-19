@@ -187,6 +187,27 @@ fn test_call_context_key_position() {
     assert!(ctx.used_keys.contains("host"));
 }
 
+// A comma is a fat comma minus the autoquote: `'host', 'x'` names `host`.
+#[test]
+fn test_call_context_used_keys_with_plain_commas() {
+    let source = "sub foo { }\nfoo('host', 'x', port => 8080);";
+    let tree = parse(source);
+    let ctx = find_call_context(&tree, source.as_bytes(), Point::new(1, 17)).unwrap();
+    assert!(ctx.at_key_position);
+    assert!(ctx.used_keys.contains("host"), "{:?}", ctx.used_keys);
+    assert!(!ctx.used_keys.contains("x"), "a value is not a key: {:?}", ctx.used_keys);
+}
+
+#[test]
+fn test_hash_used_keys_with_plain_commas() {
+    let source = "my $h = { 'host', 1, port => 2, 'user', 3 };";
+    let tree = parse(source);
+    let used = used_keys_in_enclosing_hash(&tree, source.as_bytes(), Point::new(0, 22));
+    let mut keys: Vec<_> = used.into_iter().collect();
+    keys.sort();
+    assert_eq!(keys, ["host", "port", "user"]);
+}
+
 #[test]
 fn test_selection_ranges_basic() {
     let source = "my $x = 1;";
@@ -474,4 +495,44 @@ fn test_resolve_node_type_scalar_threads_module_index() {
         "scalar arm with module_index should resolve $c to Foo, got {:?}",
         ctx,
     );
+}
+
+// A leading comment inside a parenthesized arg doesn't hide the string first arg.
+#[test]
+fn test_call_context_first_arg_string_skips_leading_comment() {
+    let source = "foo(( # c\n 'name'));";
+    let tree = parse(source);
+    let ctx = find_call_context(&tree, source.as_bytes(), Point::new(1, 3)).unwrap();
+    assert_eq!(ctx.first_arg_string.as_deref(), Some("name"));
+}
+
+// A comment between args is not a slot.
+#[test]
+fn test_call_context_comment_between_args_is_not_a_slot() {
+    let source = "f('a', # c\n 'b', );";
+    let tree = parse(source);
+    let ctx = find_call_context(&tree, source.as_bytes(), Point::new(1, 6)).unwrap();
+    assert_eq!(ctx.active_param, 2);
+}
+
+// A leading comment in `[ ... ]` still descends into the inner item list.
+#[test]
+fn test_active_slot_arrayref_skips_leading_comment() {
+    let source = "my $x = [ # c\n a, b ];";
+    let tree = parse(source);
+    let point = Point::new(1, 4);
+    let mut node = tree.root_node().descendant_for_point_range(point, point).unwrap();
+    while node.kind() != "anonymous_array_expression" {
+        node = node.parent().unwrap();
+    }
+    assert_eq!(active_slot_in_node(node, point), 1);
+}
+
+// A comment between a key and its `=>` still marks the key as used.
+#[test]
+fn test_call_context_used_key_with_comment_before_fat_comma() {
+    let source = "sub f { }\nf(key # c\n => 1, );";
+    let tree = parse(source);
+    let ctx = find_call_context(&tree, source.as_bytes(), Point::new(2, 7)).unwrap();
+    assert!(ctx.used_keys.contains("key"), "{:?}", ctx.used_keys);
 }

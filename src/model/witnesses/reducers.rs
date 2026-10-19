@@ -1058,15 +1058,17 @@ impl WitnessReducer for ReturnExprReducer {
         // edge chase; `Variable{..}` carries a statement-position
         // receiver bless (`bless $obj, $class; ...; return $obj` — the
         // deferred class rides the VARIABLE so the return-arm chase
-        // substitutes the call site's receiver). Claiming all four lets a
-        // self-returning method substitute the call's receiver at
-        // arbitrary chain depth.
+        // substitutes the call site's receiver); `Field{..}` a data member
+        // typed by its class's template parameters, substituted against the
+        // `ValueHop`'s receiver. Claiming these lets a self-returning method
+        // substitute the call's receiver at arbitrary chain depth.
         matches!(
             w.attachment,
             WitnessAttachment::Symbol(_)
                 | WitnessAttachment::PackageSymbol { .. }
                 | WitnessAttachment::Expr(_)
                 | WitnessAttachment::Variable { .. }
+                | WitnessAttachment::Field { .. }
         ) && matches!(w.payload, WitnessPayload::ReturnExpr(_))
     }
 

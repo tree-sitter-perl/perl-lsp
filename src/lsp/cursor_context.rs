@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use tree_sitter::{Node, Point, Tree};
 
-use crate::cst::{extract_call_name, node_to_span};
+use crate::cst::{extract_call_name, node_to_span, NodeExt};
 use crate::model::file_analysis::{CrossFileLookup, FileAnalysis, InferredType, Span};
 
 // ---- Types ----
@@ -703,7 +703,7 @@ pub fn find_call_context(tree: &Tree, source: &[u8], point: Point) -> Option<Cal
     };
 
     let used_keys = match args_node {
-        Some(args) => collect_used_keys_at_callsite(args, source),
+        Some(args) => used_keys_in_pairs(args, source),
         None => HashSet::new(),
     };
 
@@ -724,7 +724,7 @@ pub fn find_call_context(tree: &Tree, source: &[u8], point: Point) -> Option<Cal
 /// its content. Used for string-dispatch signature help.
 fn first_arg_as_string(args: Node, source: &[u8]) -> Option<String> {
     let first = if args.kind() == "list_expression" || args.kind() == "parenthesized_expression" {
-        args.named_child(0)?
+        crate::cst::nth_element(args, 0)?
     } else {
         args
     };
@@ -998,8 +998,7 @@ pub fn active_slot_in_node(node: Node, cursor: Point) -> usize {
     }
     let mut count = 0;
     let c_pos = (cursor.row, cursor.column);
-    let mut walker = scope.walk();
-    for child in scope.named_children(&mut walker) {
+    for child in scope.elements() {
         let e = child.end_position();
         if (e.row, e.column) <= c_pos {
             // Child has ended at-or-before the cursor — cursor is
@@ -1020,8 +1019,7 @@ pub fn active_slot_in_node(node: Node, cursor: Point) -> usize {
 /// `list_expression` holding the items. Callers want to iterate the
 /// items directly — descend through that single-child wrapper.
 fn item_scope(node: Node) -> Node {
-    let mut walker = node.walk();
-    let named: Vec<_> = node.named_children(&mut walker).collect();
+    let named: Vec<_> = node.elements().collect();
     if named.len() == 1 && named[0].kind() == "list_expression" {
         return named[0];
     }
@@ -1053,7 +1051,6 @@ fn count_separators_before(node: Node, cursor: Point) -> usize {
     count
 }
 
-/// Collect keys already used at the call site (barewords/strings before `=>`).
 /// Collect keys already present in the innermost hash literal at
 /// the cursor position. Returns an empty set when the cursor isn't
 /// inside one. Completion uses this to avoid re-offering a key the
@@ -1068,20 +1065,7 @@ pub fn used_keys_in_enclosing_hash(tree: &Tree, source: &[u8], point: Point) -> 
         else { return HashSet::new() };
     for _ in 0..16 {
         if node.kind() == "anonymous_hash_expression" {
-            // Child layout varies: sometimes the pairs are direct
-            // children of the hash node (`{ x => 1 }`); sometimes
-            // they're wrapped in a list_expression (`{ x => 1, y
-            // => 2 }`). Probe both — the pair-detector is the same
-            // shape regardless.
-            let mut used = collect_used_keys_at_callsite(node, source);
-            for i in 0..node.named_child_count() {
-                if let Some(inner) = node.named_child(i) {
-                    if inner.kind() == "list_expression" {
-                        used.extend(collect_used_keys_at_callsite(inner, source));
-                    }
-                }
-            }
-            return used;
+            return used_keys_in_pairs(node, source);
         }
         let Some(parent) = node.parent() else { break };
         node = parent;
@@ -1089,20 +1073,13 @@ pub fn used_keys_in_enclosing_hash(tree: &Tree, source: &[u8], point: Point) -> 
     HashSet::new()
 }
 
-fn collect_used_keys_at_callsite(args: Node, source: &[u8]) -> HashSet<String> {
-    let mut used = HashSet::new();
-    for i in 0..args.child_count() {
-        if let Some(child) = args.child(i) {
-            if let Some(next) = child.next_sibling() {
-                if next.kind() == "=>" {
-                    if let Some(key) = extract_key_text(child, source) {
-                        used.insert(key);
-                    }
-                }
-            }
-        }
-    }
-    used
+/// The keys of a pair list — call arguments or a hash literal — paired by
+/// position, so `'a', 1` names `a` exactly as `a => 1` does.
+fn used_keys_in_pairs(container: Node, source: &[u8]) -> HashSet<String> {
+    crate::cst::pair_nodes(container)
+        .into_iter()
+        .filter_map(|(key, _)| extract_key_text(key, source))
+        .collect()
 }
 
 /// Extract the text of a key node (bareword, string literal, etc.)
