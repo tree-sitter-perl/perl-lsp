@@ -194,6 +194,9 @@ crate / VS Code extension versions.
   offered, because only declared keys were; `$h{` and `$self->{` now
   list them. On DateTime, `$self->{` used to offer 2 keys and now
   offers the slots its constructor writes.
+- **A key already written with a plain comma isn't offered again.**
+  Key completion skipped keys spelled `host => 1` but offered `host`
+  again after `'host', 1`; both spellings count now.
 - **Lexical methods complete after `->`.** A `my method hidden` in scope
   is offered as `&hidden`, the only spelling that dispatches to it.
 
