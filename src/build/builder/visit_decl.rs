@@ -166,7 +166,7 @@ impl<'a> Builder<'a> {
             // refidx requires the ref to exist, which requires the
             // walker to have visited the method-call expression.
             "return_expression" => {
-                let body_span = node.named_child(0).map(node_to_span);
+                let body_span = crate::cst::nth_element(node, 0).map(node_to_span);
                 let scope = self.enclosing_sub_scope();
                 if let Some(scope) = scope {
                     let arity_branch = classify_arity_branch(node, self.source);
@@ -819,7 +819,7 @@ impl<'a> Builder<'a> {
     pub(super) fn record_sub_tail(&mut self, sub: Node<'a>) {
         use crate::model::witnesses::tags::UndefArm;
         let Some(scope) = self.enclosing_sub_scope() else { return };
-        let Some(last) = sub.child_by_field_name("body").and_then(crate::cst::tail_statement) else {
+        let Some(last) = sub.child_by_field_name("body").and_then(crate::cst::last_element) else {
             return;
         };
         let mut arms = Vec::new();
@@ -828,7 +828,7 @@ impl<'a> Builder<'a> {
         while let Some(stmt) = pending.pop() {
             match stmt.kind() {
                 "expression_statement" => {
-                    let Some(expr) = stmt.named_child(0) else { continue };
+                    let Some(expr) = crate::cst::nth_element(stmt, 0) else { continue };
                     // `bag_query_expr_span` resolves the arm through these
                     // witnesses; no-op for nodes whose payload doesn't bake.
                     self.emit_expr_witness(expr);
@@ -876,7 +876,7 @@ impl<'a> Builder<'a> {
 
     /// A block's tail joins the worklist; an empty block yields the empty list.
     fn push_block_tail(&self, block: Node<'a>, pending: &mut Vec<Node<'a>>, arms: &mut Vec<TailArm>) {
-        match crate::cst::tail_statement(block) {
+        match crate::cst::last_element(block) {
             Some(tail) => pending.push(tail),
             None => arms.push(TailArm::Undef(
                 node_to_span(block),
@@ -952,13 +952,9 @@ impl<'a> Builder<'a> {
         if let Some(body) = sub_node.child_by_field_name("body") {
             let mut shift_params: Vec<ParamInfo> = Vec::new();
 
-            for i in 0..body.named_child_count() {
-                let stmt = match body.named_child(i) {
-                    Some(s) => s,
-                    None => continue,
-                };
+            for stmt in crate::cst::NodeExt::elements(&body) {
                 let assign = if stmt.kind() == "expression_statement" {
-                    stmt.named_child(0).filter(|n| n.kind() == "assignment_expression")
+                    crate::cst::nth_element(stmt, 0).filter(|n| n.kind() == "assignment_expression")
                 } else if stmt.kind() == "assignment_expression" {
                     Some(stmt)
                 } else {
@@ -1065,9 +1061,9 @@ impl<'a> Builder<'a> {
             // my $var = shift || default  or  my $var = shift // default
             let op = self.get_operator_text(right);
             if matches!(op.as_deref(), Some("||" | "//")) {
-                let lhs = right.named_child(0)?;
+                let lhs = crate::cst::nth_element(right, 0)?;
                 if self.is_shift_call(lhs) {
-                    let default_node = right.named_child(1)?;
+                    let default_node = crate::cst::nth_element(right, 1)?;
                     let default_text = default_node.utf8_text(self.source).ok()?.to_string();
                     (lhs, Some(default_text))
                 } else {
@@ -1111,7 +1107,7 @@ impl<'a> Builder<'a> {
         match node.kind() {
             "bareword" => node.utf8_text(self.source).ok() == Some("shift"),
             "func1op_call_expression" => {
-                node.named_child_count() == 0
+                crate::cst::nth_element(node, 0).is_none()
                     && node.child(0).and_then(|c| c.utf8_text(self.source).ok()) == Some("shift")
             }
             "ambiguous_function_call_expression" | "function_call_expression" => {
@@ -1615,7 +1611,7 @@ impl<'a> Builder<'a> {
         // list payload is read off the second named child instead — `[call,
         // list]`. `extract_string_list` folds qw / paren-list / constants.
         let mut topic_values: Vec<String> = Vec::new();
-        if let (Some(call), Some(list_node)) = (node.named_child(0), node.named_child(1)) {
+        if let (Some(call), Some(list_node)) = (crate::cst::nth_element(node, 0), crate::cst::nth_element(node, 1)) {
             let names = self.extract_string_list(list_node);
             if !names.is_empty() && self.is_class_accessor_loop_body(call) {
                 self.emit_class_accessor_symbols(call, &names);

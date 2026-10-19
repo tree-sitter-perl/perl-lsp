@@ -967,7 +967,7 @@ impl<'a> Builder<'a> {
     ///   symbol's return walk through to the arm-fold.
     pub(super) fn publish_return_arm_witnesses(&mut self, return_node: Node<'a>, scope: ScopeId) {
         use crate::model::witnesses::tags;
-        let body = return_node.named_child(0);
+        let body = crate::cst::nth_element(return_node, 0);
         let arm_span = body.map(node_to_span).unwrap_or_else(|| node_to_span(return_node));
 
         let Some(sub_name) = self.enclosing_sub_name() else { return };
@@ -1047,9 +1047,9 @@ impl<'a> Builder<'a> {
             return None;
         }
         let body = node.child_by_field_name("body")?;
-        let last_stmt = body.named_child(body.named_child_count().checked_sub(1)?)?;
+        let last_stmt = crate::cst::last_element(body)?;
         let expr = match last_stmt.kind() {
-            "expression_statement" | "return_expression" => last_stmt.named_child(0)?,
+            "expression_statement" | "return_expression" => crate::cst::nth_element(last_stmt, 0)?,
             _ => last_stmt,
         };
         self.emit_expr_witness(expr);
@@ -1184,10 +1184,10 @@ impl<'a> Builder<'a> {
             }
             // Regex match: LHS is String, RHS is Regexp
             Some("=~" | "!~") => {
-                if let Some(lhs) = node.named_child(0) {
+                if let Some(lhs) = crate::cst::nth_element(node, 0) {
                     self.push_var_type_constraint(lhs, node, InferredType::String);
                 }
-                if let Some(rhs) = node.named_child(1) {
+                if let Some(rhs) = crate::cst::nth_element(node, 1) {
                     self.push_var_type_constraint(rhs, node, InferredType::Regexp);
                 }
             }
