@@ -37,22 +37,28 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    stamp and reports "member `m` found on `X\Y`, not on the class this
    file names (`A\B`)". Same silence rules as `unresolved-method` (the
    receiver is THE dispatch projection; an unknown receiver says nothing).
-5. **Spellings resolve once, in extraction.** The extractor resolves every
-   class spelling AS IT MINTS it, through one `ident` resolver built from
-   the pre-collected `use` rows, aliases and the namespace in force at the
-   spelling's position: the pure `UseMap::resolve` ladder
-   (`model/file_analysis/use_map.rs`) — absolute spelling → itself; head
-   segment → its alias, else its `use` row (an aliased row binds the alias,
-   never its leaf), else the file's own namespace; the rest hangs off that.
-   A declaration joins its namespace directly (`decl_ident`); a template
-   parameter name and the current-class tokens are exempt. Every type the
-   pack's annotation predicate returns passes through
+5. **Spellings resolve once, in extraction.** A class declaration joins
+   the namespace in force at its position, the innermost
+   `@context.namespace` (`ExtractState::class_identity`), so a class is
+   filed under one key whatever container it is written in, and its
+   symbol's `package` is that namespace. A written spelling resolves
+   through the pure `UseMap::resolve` ladder
+   (`model/file_analysis/use_map.rs`) over the file's import rows and
+   aliases (`@import.name`, `@import.prefix`, `@import.alias`) at the
+   namespace it was written in, once every row is in: absolute spelling
+   → itself; head segment → its alias, else its `use` row (an aliased row
+   binds the alias, never its leaf), else the file's own namespace; the
+   rest hangs off that. Parent clauses resolve this way
+   (`scopes::resolve_parents`); every other class spelling the extractor
+   mints goes through the same ladder — an annotation type through
    `InferredType::map_class_names`, so a qualified element inside
-   `array<int, \App\User>` resolves like a bare one. The query side's
+   `array<int, \App\User>` resolves like a bare one — with template
+   parameter names and the current-class tokens exempt. The query side's
    `leaf_namespace_pins` and `class_spelling_identity` call the same
    ladder, so the pins, the identities and a written receiver's class
-   cannot disagree. The capability is the separator in `LangPack::names`, baked
-   into `PackFacts::names`; a pack without one is untouched.
+   cannot disagree. The capability is `ClassSpelling::UseMap` in
+   `LangPack::names`, baked into `PackFacts::names`; a pack without it is
+   untouched.
 6. **The index registers the identity AND its leaf.** `collect_linkage_feed`
    feeds a namespaced symbol under both keys: the identity is the exact
    key, the leaf the widening one (`ScopedLookup::use_map_candidates`).

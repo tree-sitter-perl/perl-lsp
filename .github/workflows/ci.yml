@@ -53,16 +53,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # `--features cpp` everywhere the gate builds: a plain build serves Perl
-      # only, so the pack half of the repo goes unchecked while the run stays
+      # `--features cpp,php` everywhere the gate builds: a plain build serves
+      # Perl only, so the pack half of the repo goes unchecked while the run stays
       # green — 61 unit tests never compiled, and gold reports its 255 pack rows
       # as lang-SKIPS rather than failures, which is the mode that hides a
       # regression behind a passing check.
       - name: Build
-        run: cargo build --features cpp
+        run: cargo build --features cpp,php
 
       - name: Test
-        run: cargo test --features cpp
+        run: cargo test --features cpp,php
 
   e2e-tests:
     name: E2E tests (headless nvim)
@@ -80,7 +80,7 @@ jobs:
       # flag. It is here so the four build lines do not diverge and invite the
       # question of why this one is different.
       - name: Build release binary
-        run: cargo build --release --features cpp
+        run: cargo build --release --features cpp,php
 
       - name: Install Neovim
         uses: rhysd/action-setup-vim@v1
@@ -167,7 +167,7 @@ jobs:
           cpm install -L local --resolver snapshot
 
       - name: Build release binary
-        run: cargo build --release --features cpp   # see rust-tests' Build step
+        run: cargo build --release --features cpp,php   # see rust-tests' Build step
 
       - name: Run gold-corpus harness
         run: perl gold-corpus/run.pl

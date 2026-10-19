@@ -1,5 +1,5 @@
 use super::*;
-use crate::build::packs::{cmake_pack, cpp_pack, perl_pack, python_pack, r_pack};
+use crate::build::packs::{cmake_pack, cpp_pack, perl_pack, php_pack, python_pack, r_pack};
 use crate::build::query_extract::{extract, LangPack};
 
 fn bundled() -> Vec<(&'static str, LangPack, tree_sitter::Language)> {
@@ -9,6 +9,7 @@ fn bundled() -> Vec<(&'static str, LangPack, tree_sitter::Language)> {
         ("python", python_pack(), tree_sitter_python::LANGUAGE.into()),
         ("r", r_pack(), tree_sitter_r::LANGUAGE.into()),
         ("cmake", cmake_pack(), tree_sitter_cmake::LANGUAGE.into()),
+        ("php", php_pack(), tree_sitter_php::LANGUAGE_PHP.into()),
     ]
 }
 

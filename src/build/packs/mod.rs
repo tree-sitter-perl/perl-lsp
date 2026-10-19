@@ -12,6 +12,8 @@ mod cpp;
 // tests measure this pack against it.
 #[cfg(test)]
 mod perl;
+#[cfg(any(test, feature = "php"))]
+mod php;
 #[cfg(any(test, feature = "python"))]
 mod python;
 #[cfg(any(test, feature = "r"))]
@@ -22,6 +24,8 @@ pub use cmake::cmake_pack;
 pub use cpp::cpp_pack;
 #[cfg(test)]
 pub use perl::perl_pack;
+#[cfg(any(test, feature = "php"))]
+pub use php::php_pack;
 #[cfg(any(test, feature = "python"))]
 pub use python::python_pack;
 #[cfg(any(test, feature = "r"))]

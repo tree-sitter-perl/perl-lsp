@@ -109,10 +109,10 @@ struct ExtractState<'p> {
     /// (end_byte, ScopeId) — real Scope rows are minted as we go so the
     /// resulting FileAnalysis carries a genuine lexical tree.
     scope_stack: Vec<(usize, ScopeId)>,
-    /// (registered_at_depth, value) — a context set inside a scope pops
-    /// with it (Python class blocks); one set at file depth is sticky
+    /// (registered_at_depth, kind, value) — a context set inside a scope
+    /// pops with it (Python class blocks); one set at file depth is sticky
     /// (Perl's flat `package Foo;`).
-    context_stack: Vec<(usize, String)>,
+    context_stack: Vec<(usize, ContextKind, String)>,
     /// The innermost scope and sticky context at the current event.
     cur_scope: ScopeId,
     package: Option<String>,
@@ -123,6 +123,31 @@ struct ExtractState<'p> {
     narrowing: narrowing::State,
     commands: commands::State,
     imports: imports::State,
+}
+
+impl ExtractState<'_> {
+    /// The innermost namespace context in force at the current event.
+    fn namespace(&self) -> Option<&str> {
+        self.context_stack
+            .iter()
+            .rev()
+            .find(|(_, kind, _)| *kind == ContextKind::Namespace)
+            .map(|(.., ns)| ns.as_str())
+    }
+
+    /// The identity a class named `leaf` and declared at the current event
+    /// is filed under. Under a use-map it is the leaf joined to the
+    /// namespace in force, whatever container the class is written in, so
+    /// every spelling of the class resolves to the key it is filed under.
+    /// Otherwise the spelling is the identity.
+    fn class_identity(&self, leaf: &str) -> String {
+        match self.pack.names.use_map_sep() {
+            Some(sep) => {
+                crate::model::conventions::join_qualified(self.namespace().unwrap_or(""), leaf, sep)
+            }
+            None => leaf.to_string(),
+        }
+    }
 }
 
 /// Run the document over `root`. Links and `@deref` marks are recorded
@@ -262,7 +287,8 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             Family::Flow => flow::collect(&mut st, e),
             Family::Narrowing => narrowing::collect(&mut st, e),
             Family::Members => members::collect(&mut st, e),
-            Family::Refs | Family::Commands | Family::Imports | Family::Links => {}
+            Family::Imports => imports::collect(&mut st, e),
+            Family::Refs | Family::Commands | Family::Links => {}
         }
     }
 
@@ -272,12 +298,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             && st.scope_stack.last().is_some_and(|&(end, _)| e.start_byte >= end)
         {
             st.scope_stack.pop();
-            while st.context_stack.last().is_some_and(|&(d, _)| d > st.scope_stack.len()) {
+            while st.context_stack.last().is_some_and(|&(d, ..)| d > st.scope_stack.len()) {
                 st.context_stack.pop();
             }
         }
         st.cur_scope = st.scope_stack.last().unwrap().1;
-        st.package = st.context_stack.last().map(|(_, p)| p.clone());
+        st.package = st.context_stack.last().map(|(.., p)| p.clone());
         match family(e.cap) {
             Family::Scopes => scopes::handle(&mut st, e),
             Family::Defs => defs::handle(&mut st, e),
@@ -296,6 +322,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     defs::tag_inline_namespaces(&mut st);
     flow::emit_keyed_shapes(&mut st);
     imports::finish(&mut st);
+    // A parent may be written above the import that names it, so it
+    // resolves once every row is in.
+    scopes::resolve_parents(&mut st);
     defs::dedup(&mut st);
     commands::finish(&mut st);
     defs::emit_type_aliases(&mut st);

@@ -656,6 +656,32 @@ fn python_driver() -> PackDriver {
     }
 }
 
+#[cfg(feature = "php")]
+fn php_driver() -> PackDriver {
+    PackDriver {
+        id: "php",
+        maturity: Maturity::Alpha,
+        // `.phtml` templates parse under the same HTML-interleaved grammar.
+        exts: &["php", "phtml"],
+        filenames: &[],
+        make_parser: || {
+            let mut p = tree_sitter::Parser::new();
+            // The `php` flavor, not `php_only`: real files open with `<?php`
+            // and may interleave HTML, which this grammar keeps as inert text.
+            p.set_language(&tree_sitter_php::LANGUAGE_PHP.into()).expect("php grammar");
+            p
+        },
+        pack: crate::build::packs::php_pack,
+        transform: None,
+        gather_macros: None,
+        collect_macro_defs: None,
+        member_blocks: None,
+        include_closure: None,
+        input_fingerprint: None,
+        access_regions: None,
+    }
+}
+
 #[cfg(feature = "r")]
 fn r_driver() -> PackDriver {
     PackDriver {
@@ -972,6 +998,8 @@ fn remap_spans(
         refs,
         imports: _,
         import_sites,
+        // names, no spans
+        use_aliases: _,
         scope_count: _,
         scopes,
         witnesses,
@@ -1293,6 +1321,8 @@ impl LanguageRegistry {
             drivers.push(Box::new(r_driver()));
             #[cfg(feature = "cmake")]
             drivers.push(Box::new(cmake_driver()));
+            #[cfg(feature = "php")]
+            drivers.push(Box::new(php_driver()));
             LanguageRegistry { drivers }
         })
     }
@@ -1462,6 +1492,7 @@ impl LanguageRegistry {
             "python" => "Python",
             "r" => "R",
             "cmake" => "CMake",
+            "php" => "PHP",
             _ => id,
         }
     }

@@ -98,3 +98,7 @@ mod tests;
 #[cfg(test)]
 #[path = "../cpp_typedef_alias_tests.rs"]
 mod cpp_typedef_alias_tests;
+
+#[cfg(test)]
+#[path = "../php_pack_tests.rs"]
+mod php_pack_tests;

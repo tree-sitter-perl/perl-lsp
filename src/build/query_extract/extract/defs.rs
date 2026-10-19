@@ -153,7 +153,8 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
 pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     let Capture::Def { kind, part: DefPart::Node } = e.cap else { return };
     let pack = st.pack;
-    let d = &mut st.defs;
+    st.defs.def_name_spans.push((e.start_byte, e.end_byte));
+    let d = &st.defs;
     let (name, name_start, name_end, defaulted) = d
         .names_by_match
         .get(&(e.match_id, kind))
@@ -161,11 +162,16 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         .map(|(n, s, en)| (n, s, en, false))
         .or_else(|| (pack.default_name)(kind).map(|n| (n.to_string(), e.start, e.start, true)))
         .unwrap_or((e.text.clone(), e.start, e.end, false));
-    d.def_name_spans.push((e.start_byte, e.end_byte));
     // An out-of-line def's qualifier names its owning class (the innermost
     // scope), overriding the enclosing-namespace context.
     let pkg = d.qualifier_by_match.get(&e.match_id).cloned().or_else(|| st.package.clone());
     let shaped = (pack.shape_name)(&name);
+    // Under a use-map a class is filed under its identity, and its package
+    // is the namespace that identity carries.
+    let (shaped, pkg) = match (kind, pack.names.use_map_sep()) {
+        (DefCap::Class, Some(_)) => (st.class_identity(&shaped), st.namespace().map(str::to_string)),
+        _ => (shaped, pkg),
+    };
     // A class-spec def carries its primary's name — the
     // (spec, primary) family edge `Specializes` derives from.
     if let Some(primary) = d.spec_primary_by_match.get(&e.match_id) {

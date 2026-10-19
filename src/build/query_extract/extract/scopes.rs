@@ -12,7 +12,11 @@ pub(super) struct State {
     /// sticky and leaks past the closing brace. Each match's scope start,
     /// pre-indexed; such contexts defer to the scope push.
     scope_start_by_match: HashMap<usize, usize>,
-    pending_context: HashMap<usize, String>,
+    pending_context: HashMap<usize, (ContextKind, String)>,
+    /// Parent edges whose parent is still the written spelling: its index
+    /// in `out.parents` and the namespace in force where it was written.
+    /// Resolved through the use-map once every import row is in.
+    written_parents: Vec<(usize, Option<String>)>,
 }
 
 pub(super) fn collect(st: &mut ExtractState, e: &Event) {
@@ -49,31 +53,34 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             st.out.scope_count += 1;
             // a context deferred to THIS scope (C++ namespace) →
             // register at the body depth so it pops with the block.
-            if let Some(text) = st.scopes.pending_context.remove(&e.match_id) {
-                while st.context_stack.last().is_some_and(|&(d, _)| d >= st.scope_stack.len()) {
+            if let Some((kind, text)) = st.scopes.pending_context.remove(&e.match_id) {
+                while st.context_stack.last().is_some_and(|&(d, ..)| d >= st.scope_stack.len()) {
                     st.context_stack.pop();
                 }
-                st.context_stack.push((st.scope_stack.len(), text));
+                st.context_stack.push((st.scope_stack.len(), kind, text));
             }
             narrowing::on_scope_push(st, e, id);
         }
-        Capture::Context(_) => {
+        Capture::Context(kind) => {
             // Shape the context like a def name (cpp canonicalizes a
             // spec's template spelling) so members' `package` matches
             // the container Symbol's identity exactly.
             let text = (pack.shape_name)(&e.text);
+            // A class body's members file under the class's identity.
+            let identity = (kind == ContextKind::Class && pack.names.use_map_sep().is_some())
+                .then(|| st.class_identity(&text));
             // If this match's `@scope` starts AFTER this context, the
             // context belongs to that (not-yet-pushed) body — defer it
             // so it registers at the body depth and pops with the block.
             if st.scopes.scope_start_by_match.get(&e.match_id).is_some_and(|&s| s > e.start_byte) {
-                st.scopes.pending_context.insert(e.match_id, text);
+                st.scopes.pending_context.insert(e.match_id, (kind, identity.unwrap_or(text)));
             } else {
                 // Replace any context at the same depth; deeper ones
                 // were already popped with their scopes.
-                while st.context_stack.last().is_some_and(|&(d, _)| d >= st.scope_stack.len()) {
+                while st.context_stack.last().is_some_and(|&(d, ..)| d >= st.scope_stack.len()) {
                     st.context_stack.pop();
                 }
-                st.context_stack.push((st.scope_stack.len(), e.text.clone()));
+                st.context_stack.push((st.scope_stack.len(), kind, identity.unwrap_or_else(|| e.text.clone())));
             }
         }
         Capture::Parent => {
@@ -82,11 +89,35 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             if let Some(child) = st.defs.name_of(e.match_id, DefCap::Class) {
                 // Shaped like the child's def name (cpp canonicalizes a
                 // template-spelled base) so the edge joins the identity
-                // the target class was filed under.
-                let edge = (child.to_string(), (pack.shape_name)(&e.text));
+                // the target class was filed under. The parent pattern is a
+                // match of its own, so the child's identity is minted here
+                // the way the def handler mints it.
+                let edge = (st.class_identity(child), (pack.shape_name)(&e.text));
+                if pack.names.use_map_sep().is_some() {
+                    let ns = st.namespace().map(str::to_string);
+                    st.scopes.written_parents.push((st.out.parents.len(), ns));
+                }
                 st.out.parents.push(edge);
             }
         }
         _ => {}
+    }
+}
+
+/// Resolve each written parent spelling to the identity it names, through
+/// the file's use-map at the namespace it was written in: `extends Model`
+/// after `use Illuminate\Database\Eloquent\Model;` is that class, an
+/// unimported leaf is the namespace's own.
+pub(super) fn resolve_parents(st: &mut ExtractState) {
+    let Some(sep) = st.pack.names.use_map_sep() else { return };
+    let rows: Vec<(Span, String)> = st.out.import_sites.iter().map(|(raw, span)| (*span, raw.clone())).collect();
+    for (i, ns) in std::mem::take(&mut st.scopes.written_parents) {
+        let map = crate::model::file_analysis::UseMap {
+            rows: &rows,
+            aliases: &st.out.use_aliases,
+            own_namespace: ns.as_deref(),
+            sep,
+        };
+        st.out.parents[i].1 = map.resolve(&st.out.parents[i].1);
     }
 }

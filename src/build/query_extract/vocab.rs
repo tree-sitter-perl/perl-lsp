@@ -91,8 +91,9 @@ spelled! {
 }
 
 spelled! {
-    /// A sticky container context. The kinds are handled alike; the
-    /// spelling says what the document means.
+    /// A sticky container context. A `Namespace` is also the namespace a
+    /// class declared inside it joins when spellings resolve through a
+    /// use-map; otherwise the kinds are handled alike.
     pub enum ContextKind { Class = "class", Namespace = "namespace", Package = "package" }
 }
 
@@ -107,6 +108,12 @@ spelled! {
         /// The module an import CALL names (R `library(pkg)`, CMake
         /// `include(f)`), as written.
         Arg = "arg",
+        /// The namespace a group import's names hang off (php's
+        /// `use A\B\{C, D}`), joined to each name by match.
+        Prefix = "prefix",
+        /// The name an import binds in place of its own leaf
+        /// (`use A\B as C`), joined to the import name by match.
+        Alias = "alias",
     }
 }
 
