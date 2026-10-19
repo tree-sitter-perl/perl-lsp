@@ -211,7 +211,7 @@ pub(crate) fn cli_refs_parity(root: &str, sample: Option<usize>) {
     // The A/B needs the resident side complete: keep refs + bags resident
     // (rows are still written — eviction and persistence are independent).
     std::env::set_var("PERL_LSP_NO_EVICT", "1");
-    let (ws, idx) = cli_full_startup(root, crate::build::language_driver::LanguageScope::All);
+    let (ws, idx) = cli_full_startup(root);
     let scope = override_scope_from_env();
 
     let mut pack_entries: Vec<(
@@ -461,7 +461,7 @@ pub(crate) fn cli_heatmap(root: &str, opts: &[String]) {
     // body) are listed; `--all` keeps every counted symbol in `symbols`.
     let emit_all = opts.iter().any(|a| a == "--all");
 
-    let (ws, idx) = cli_full_startup(root, crate::build::language_driver::LanguageScope::All);
+    let (ws, idx) = cli_full_startup(root);
 
     // Pack-language (C/C++/…) files live in per-language sub-indexes, not the
     // Perl `FileStore` — `workspace/symbol` and Mode-B diagnostics sweep these

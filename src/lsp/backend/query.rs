@@ -120,11 +120,7 @@ impl QueryCx {
             ));
         }
         let path = uri.to_file_path().ok()?;
-        let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
-        let lang = reg
-            .for_path(&path)
-            .map(|d| d.id().to_string())
-            .unwrap_or_else(|| reg.fallback().id().to_string());
+        let lang = crate::build::language_driver::LanguageRegistry::served().id().to_string();
         let routed = self.module_index.lookup_for(&lang);
         let key = FileKey::Path(path);
         let analysis =

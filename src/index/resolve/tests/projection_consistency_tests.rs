@@ -253,7 +253,7 @@ fn projection_contracts_hold_at_every_corpus_cursor() {
 #[test]
 fn projection_contracts_hold_at_every_pack_cursor() {
     use std::sync::Arc;
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
 
     let mut files: Vec<PathBuf> = Vec::new();

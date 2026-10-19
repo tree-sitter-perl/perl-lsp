@@ -5,6 +5,7 @@
 -- Usage (from a `-u` init script):
 --   local here = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":h")
 --   dofile(here .. "/dev_lsp.lua")({
+--     lang = "cpp",                  -- omit for Perl; passed as `--lang`
 --     filetypes = { "perl" },
 --     root_markers = { ".git", "cpanfile" },
 --     attach_message = "perl-lsp attached! ...",
@@ -148,14 +149,22 @@ return function(opts)
   -- Debug mode: PERL_LSP_DEBUG=1 → RUST_LOG to /tmp/perl-lsp.log
   local debug_mode = vim.env.PERL_LSP_DEBUG == "1"
   local log_file = "/tmp/perl-lsp.log"
+  -- One language per server process: a pack config names its language.
+  -- Only perl-lsp takes `--lang`; compare-clangd.sh drives this same config
+  -- with clangd as PERL_LSP_BIN.
+  local args = {}
+  if opts.lang and vim.fn.fnamemodify(lsp_bin, ":t") == "perl-lsp" then
+    args = { "--lang", opts.lang }
+  end
   local cmd
   if debug_mode then
     cmd = {
       "sh", "-c",
-      "RUST_LOG=perl_lsp=debug exec " .. vim.fn.shellescape(lsp_bin) .. " 2>>" .. log_file,
+      "RUST_LOG=perl_lsp=debug exec " .. vim.fn.shellescape(lsp_bin) .. " "
+        .. table.concat(args, " ") .. " 2>>" .. log_file,
     }
   else
-    cmd = { lsp_bin }
+    cmd = vim.list_extend({ lsp_bin }, args)
   end
 
   -- initializationOptions. PERL_LSP_COLD_WAIT_MILLISECONDS overrides the cold-open

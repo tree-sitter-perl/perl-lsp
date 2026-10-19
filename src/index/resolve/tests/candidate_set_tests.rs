@@ -275,7 +275,7 @@ fn candidate_set_definitions_local() {
 #[cfg(feature = "cpp")]
 #[test]
 fn complete_qualified_path_pack_gathers_owner_members_only() {
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
     let src = "namespace fmtx {\n\
                void format_to(int v);\n\

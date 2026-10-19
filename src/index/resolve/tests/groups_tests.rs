@@ -1726,7 +1726,7 @@ mod pack_symmetry {
     }
 
     fn cpp(source: &str) -> FileAnalysis {
-        crate::build::language_driver::LanguageRegistry::with_enabled()
+        crate::build::language_driver::LanguageRegistry::compiled()
             .for_id("cpp")
             .unwrap()
             .analyze(source)

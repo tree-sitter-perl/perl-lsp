@@ -106,13 +106,6 @@ pub trait LanguageDriver: Send + Sync {
     fn caps(&self) -> DriverCaps {
         DriverCaps::default()
     }
-    /// Does this driver serve files NO driver claims (the registry's
-    /// unclaimed-file fallback)? Exactly one registered driver answers true
-    /// — the reference driver. A property, not a position: reordering the
-    /// registry can't silently move the fallback.
-    fn claims_unclaimed(&self) -> bool {
-        false
-    }
     /// Source + the file's path → `FileAnalysis`. The path lets a driver
     /// resolve cross-file context (C++ gathers `#define`s from `#include`d
     /// headers so namespace/export macros expand); every implementation
@@ -122,9 +115,9 @@ pub trait LanguageDriver: Send + Sync {
         let _file = crate::util::timings::current_file_scope(path);
         self.analyze(source)
     }
-    /// Completion trigger characters for this language — the registry
-    /// unions them into the LSP `completionProvider` slot, so the client
-    /// auto-fires completion (e.g. on `.`/`->`) for the right files.
+    /// Completion trigger characters for this language — the LSP
+    /// `completionProvider` slot, so the client auto-fires completion (e.g.
+    /// on `.`/`->`).
     fn trigger_chars(&self) -> &[&'static str];
     /// The language's `LangPack` — the ONE per-language config (grammar facts
     /// the query engine AND the cursor-completion path both read). `None` for
@@ -141,16 +134,6 @@ pub trait LanguageDriver: Send + Sync {
     /// served under another. 0 = no external inputs.
     fn analysis_input_fingerprint(&self) -> u64 {
         0
-    }
-    /// Content sniff for a file whose extension no driver claims (the
-    /// `for_path` registry lookup came up empty) — a structural signature
-    /// over the first ~1KB, never a name/extension list (rule #10:
-    /// `commands.def` is C, a Windows `.def` module-definition file isn't,
-    /// same extension). Default: no opinion: an unclaimed extension is a
-    /// weak, ambiguous signal, so only a driver that positively recognizes
-    /// its own shape should claim it.
-    fn sniff(&self, _prefix: &str) -> bool {
-        false
     }
 }
 
@@ -224,9 +207,6 @@ impl LanguageDriver for PerlDriver {
             ..Default::default()
         }
     }
-    fn claims_unclaimed(&self) -> bool {
-        true
-    }
     fn trigger_chars(&self) -> &[&'static str] {
         // Sigils open variable completion; `>`/`:`/`{` open
         // method/pkg/hash-key slots; `(`/`,` are signature-help adjacent.
@@ -291,12 +271,6 @@ pub struct PackDriver {
     /// `LanguageDriver::analysis_input_fingerprint`). `None` = no external
     /// inputs (fingerprint 0).
     input_fingerprint: Option<fn() -> u64>,
-    /// Content-sniff for the unknown-extension fallback (see
-    /// `LanguageDriver::sniff`). `None` = this driver never claims an
-    /// extension it doesn't already list (python/R/cmake have unambiguous
-    /// extensions; only C/C++ shares its extension space with unrelated
-    /// formats).
-    sniff: Option<fn(&str) -> bool>,
     /// `public:`/`private:`/`protected:` region scan (C preprocessor-free
     /// languages only; `None` when the language has no access-specifier
     /// concept). Stamps a `non_public` attribute on member symbols so
@@ -402,9 +376,6 @@ impl LanguageDriver for PackDriver {
     }
     fn analysis_input_fingerprint(&self) -> u64 {
         self.input_fingerprint.map(|f| f()).unwrap_or(0)
-    }
-    fn sniff(&self, prefix: &str) -> bool {
-        self.sniff.is_some_and(|f| f(prefix))
     }
 }
 
@@ -658,7 +629,6 @@ fn cpp_driver() -> PackDriver {
         member_blocks: Some(crate::build::cpp_reparse::plan_member_blocks),
         include_closure: Some(crate::build::cpp_reparse::include_closure),
         input_fingerprint: Some(crate::build::cpp_reparse::toolchain_fingerprint),
-        sniff: Some(crate::build::cpp_reparse::looks_like_c_family),
         access_regions: Some(crate::build::cpp_reparse::access_regions),
     }
 }
@@ -682,7 +652,6 @@ fn python_driver() -> PackDriver {
         member_blocks: None,
         include_closure: None,
         input_fingerprint: None,
-        sniff: None,
         access_regions: None,
     }
 }
@@ -706,7 +675,6 @@ fn r_driver() -> PackDriver {
         member_blocks: None,
         include_closure: None,
         input_fingerprint: None,
-        sniff: None,
         access_regions: None,
     }
 }
@@ -731,7 +699,6 @@ fn cmake_driver() -> PackDriver {
         member_blocks: None,
         include_closure: None,
         input_fingerprint: None,
-        sniff: None,
         access_regions: None,
     }
 }
@@ -1300,17 +1267,25 @@ impl LineIndex {
     }
 }
 
-/// The drivers this binary was compiled to serve. Perl always; pack
-/// languages per feature.
+/// The drivers this binary was compiled with. Perl always; pack languages
+/// per feature. A process SERVES exactly one of them (`served`), chosen once
+/// at startup; the rest of the catalog answers id lookups (capabilities,
+/// `--languages`, `--parse`) and nothing else.
 pub struct LanguageRegistry {
     drivers: Vec<Box<dyn LanguageDriver>>,
 }
 
+/// The language this process serves, latched by the first `served()` read or
+/// `lock_process_language` call — whichever comes first. A later lock to a
+/// DIFFERENT language is refused, so nothing can answer one request in one
+/// language and the next in another.
+static PROCESS_LANGUAGE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
 impl LanguageRegistry {
-    /// The registry, built once per process. Which drivers a binary serves
+    /// The catalog, built once per process. Which drivers a binary carries
     /// is fixed at compile time, and capability asks reach for it on the
     /// keystroke path, several per diagnostics publish.
-    pub fn with_enabled() -> &'static Self {
+    pub fn compiled() -> &'static Self {
         static REGISTRY: std::sync::OnceLock<LanguageRegistry> = std::sync::OnceLock::new();
         REGISTRY.get_or_init(|| {
             #[cfg_attr(
@@ -1330,18 +1305,63 @@ impl LanguageRegistry {
         })
     }
 
-    /// The id of the driver that serves files no other driver claims —
-    /// the reference language. A property, not a literal: a verb that is
-    /// intrinsically about this language (`--dump-package` dumps Perl type
-    /// inference) names it through here rather than spelling "perl".
-    pub fn reference_language(&self) -> &'static str {
-        self.drivers
-            .iter()
-            .find(|d| d.claims_unclaimed())
-            .map(|d| d.id())
-            .unwrap_or("perl")
+    /// The driver this process serves. Every file the process is handed —
+    /// opened, watched, walked, named on the command line — is analyzed by
+    /// it; the client's document selector decides which files arrive, not a
+    /// per-path route here. Unlocked, the process serves Perl.
+    pub fn served() -> &'static dyn LanguageDriver {
+        let id = *PROCESS_LANGUAGE.get_or_init(|| PerlDriver.id());
+        Self::compiled().for_id(id).expect("the locked language is compiled in")
     }
 
+    /// Fix the process language. Called once, at startup, before anything
+    /// reads `served()`. Refuses an id this binary was not compiled with,
+    /// and a second lock to a different language.
+    pub fn lock_process_language(id: &str) -> Result<&'static dyn LanguageDriver, String> {
+        let reg = Self::compiled();
+        let Some(driver) = reg.for_id(id) else {
+            return Err(format!(
+                "unknown language `{id}`; this build serves: {}",
+                reg.languages().join(", ")
+            ));
+        };
+        let locked = *PROCESS_LANGUAGE.get_or_init(|| driver.id());
+        if locked != driver.id() {
+            return Err(format!("this process already serves `{locked}`, not `{id}`"));
+        }
+        Ok(driver)
+    }
+
+    /// `lock_process_language` for a verb whose subject is one file and
+    /// whose caller named no `--lang`: the file's language, by extension,
+    /// Perl when no compiled driver claims it. A process already locked
+    /// keeps its language.
+    pub fn lock_process_language_for(path: &Path) -> Result<&'static dyn LanguageDriver, String> {
+        if let Some(id) = PROCESS_LANGUAGE.get() {
+            return Self::lock_process_language(id);
+        }
+        let id = Self::compiled().for_path(path).map(|d| d.id()).unwrap_or(PerlDriver.id());
+        Self::lock_process_language(id)
+    }
+
+    /// May `driver` analyze `path`? Refused only when ANOTHER compiled driver
+    /// claims it — an unclaimed path (an extensionless script, a `.def`
+    /// handed over by the client) is the driver's to try. A refused file
+    /// answers nothing rather than being read in the wrong language.
+    pub fn admits(driver: &dyn LanguageDriver, path: &Path) -> Result<(), String> {
+        match Self::compiled().for_path(path) {
+            Some(owner) if owner.id() != driver.id() => Err(format!(
+                "{} is a {} file; this process serves {} (run a separate `perl-lsp --lang {}`)",
+                path.display(),
+                Self::display_name(owner.id()),
+                Self::display_name(driver.id()),
+                owner.id(),
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// The compiled driver claiming `path` by filename or extension.
     pub fn for_path(&self, path: &Path) -> Option<&dyn LanguageDriver> {
         // Exact filename first (CMakeLists.txt has no extension), then ext.
         if let Some(name) = path.file_name().and_then(|f| f.to_str()) {
@@ -1357,20 +1377,7 @@ impl LanguageRegistry {
         self.drivers.iter().find(|d| d.id() == id).map(|d| d.as_ref())
     }
 
-    /// `for_path`, falling back to a content sniff when no driver claims the
-    /// extension. `source` is the file text the caller
-    /// already has in hand — no extra I/O. Only a driver that positively
-    /// recognizes its own shape votes (`sniff` defaults to no-opinion); the
-    /// fallback driver serves whatever no sniff claims.
-    pub fn for_path_sniffed(&self, path: &Path, source: &str) -> Option<&dyn LanguageDriver> {
-        if let Some(d) = self.for_path(path) {
-            return Some(d);
-        }
-        let prefix = crate::util::text::truncate_on_char_boundary(source, 1024);
-        self.drivers.iter().find(|d| d.sniff(prefix)).map(|d| d.as_ref())
-    }
-
-    /// Configured language ids — what this distribution serves.
+    /// Compiled language ids — what `--lang` accepts.
     pub fn languages(&self) -> Vec<&'static str> {
         self.drivers.iter().map(|d| d.id()).collect()
     }
@@ -1384,7 +1391,7 @@ impl LanguageRegistry {
         static PACK_IDS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
         PACK_IDS
             .get_or_init(|| {
-                LanguageRegistry::with_enabled()
+                LanguageRegistry::compiled()
                     .drivers
                     .iter()
                     .filter(|d| d.lang_pack().is_some())
@@ -1401,7 +1408,7 @@ impl LanguageRegistry {
     /// (everything off), which is also what every serving site's generic
     /// arm assumed of an unknown language before the capabilities existed.
     pub fn caps(id: &str) -> DriverCaps {
-        LanguageRegistry::with_enabled()
+        LanguageRegistry::compiled()
             .for_id(id)
             .map(|d| d.caps())
             .unwrap_or_default()
@@ -1441,7 +1448,7 @@ impl LanguageRegistry {
             return caps.contains(&capture);
         }
         let caps: Arc<Vec<Capture>> = Arc::new(
-            LanguageRegistry::with_enabled()
+            LanguageRegistry::compiled()
                 .for_id(id)
                 .and_then(|d| Some((d.make_parser().language()?.clone(), d.lang_pack()?)))
                 .map(|(language, pack)| crate::build::query_extract::document_captures(&language, &pack))
@@ -1451,39 +1458,6 @@ impl LanguageRegistry {
         caps.contains(&capture)
     }
 
-    /// The driver that serves files no driver claims — found by asking each
-    /// driver (`claims_unclaimed`), never by registry position. Exactly one
-    /// registered driver declares it (the reference driver), enforced by
-    /// the registry tests.
-    pub fn fallback(&self) -> &dyn LanguageDriver {
-        self.drivers
-            .iter()
-            .find(|d| d.claims_unclaimed())
-            .expect("a fallback driver is always registered")
-            .as_ref()
-    }
-
-    /// `for_path_sniffed`, resolving to the fallback driver when no driver
-    /// claims the file — the one speller of "every file is served by SOME
-    /// driver" for callers that route by driver id (store selection,
-    /// capability asks).
-    pub fn driver_or_fallback(&self, path: &Path, source: &str) -> &dyn LanguageDriver {
-        self.for_path_sniffed(path, source).unwrap_or_else(|| self.fallback())
-    }
-
-    /// The pack-served drivers (those carrying a `LangPack`) — the bulk
-    /// pack indexer's universe, the warm-up set, and the progress-message
-    /// roster. Asked of each driver, never an id filter.
-    pub fn pack_drivers(&self) -> impl Iterator<Item = &dyn LanguageDriver> {
-        self.drivers.iter().filter(|d| d.lang_pack().is_some()).map(|d| d.as_ref())
-    }
-
-    /// Every id this build can serve — the feature-dependent set, so a caller
-    /// enumerating languages never carries its own list to drift.
-    pub fn ids(&self) -> Vec<&'static str> {
-        self.drivers.iter().map(|d| d.id()).collect()
-    }
-
     /// Human-facing name for a pack language id, for startup banners and
     /// progress messages. Purely cosmetic — `for_id` still speaks the short
     /// id everywhere else. Falls back to the id itself for a language this
@@ -1491,6 +1465,7 @@ impl LanguageRegistry {
     /// display string).
     pub fn display_name(id: &str) -> &str {
         match id {
+            "perl" => "Perl",
             "cpp" => "C/C++",
             "python" => "Python",
             "r" => "R",
@@ -1498,75 +1473,8 @@ impl LanguageRegistry {
             _ => id,
         }
     }
-
-    /// Union of every served language's completion trigger characters,
-    /// for the LSP `completionProvider.triggerCharacters` slot.
-    pub fn trigger_chars(&self) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        for d in &self.drivers {
-            for c in d.trigger_chars() {
-                if !out.iter().any(|s| s == c) {
-                    out.push((*c).to_string());
-                }
-            }
-        }
-        out
-    }
 }
 
 #[cfg(test)]
 #[path = "language_driver_tests.rs"]
 mod tests;
-
-
-/// Which language families a startup must index for an answer to be honest.
-///
-/// The VERB declares this; the indexer never asks what kind of query it is
-/// serving. A verb with a target file needs only what that file's language
-/// can consult — the same per-family rule the server's `didOpen` latch
-/// already applies (`ensure_workspace_indexed(language)` is latched per
-/// family, so opening a `.cc` never walks the Perl tree). A verb with no
-/// single origin sweeps every language's store and needs them all.
-///
-/// The asymmetry that makes this worth getting right: over-indexing is
-/// only wasted work, but UNDER-indexing is a wrong answer, and a quiet
-/// one. An unattached pack sub-index does not answer empty — `lookup_for`
-/// routes that language's queries to the Perl hub instead, so a C++
-/// goto-def would resolve against Perl and look plausible.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LanguageScope {
-    /// Every served language. A verb that sweeps the workspace
-    /// (`--check`, `--heatmap`, `--workspace-symbol`, `--batch` — whose
-    /// requests arrive after startup, so their languages are unknowable
-    /// here) reads every store.
-    All,
-    /// Only this language's family.
-    Only(&'static str),
-}
-
-impl LanguageScope {
-    /// The family serving `path`. An extension no driver claims falls to
-    /// the reference language, exactly as analysis routing does.
-    pub fn of_file(path: &Path) -> Self {
-        let reg = LanguageRegistry::with_enabled();
-        let id = reg
-            .for_path(path)
-            .map(|d| d.id())
-            .unwrap_or_else(|| reg.reference_language());
-        LanguageScope::Only(id)
-    }
-
-    /// The reference language alone — for a verb that is intrinsically
-    /// about it rather than about a file the caller named.
-    pub fn reference_only() -> Self {
-        LanguageScope::Only(LanguageRegistry::with_enabled().reference_language())
-    }
-
-    /// Must `lang`'s workspace index be built for this scope?
-    pub fn wants(&self, lang: &str) -> bool {
-        match self {
-            LanguageScope::All => true,
-            LanguageScope::Only(id) => *id == lang,
-        }
-    }
-}

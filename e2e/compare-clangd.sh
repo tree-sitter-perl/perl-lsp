@@ -29,7 +29,7 @@ if [ -z "$CLANGD" ]; then
   CLANGD="$(command -v clangd 2>/dev/null || true)"
   [ -z "$CLANGD" ] && CLANGD="$(ls -d "$HOME"/.local/share/nvim/mason/packages/clangd/*/bin/clangd 2>/dev/null | head -1)"
 fi
-[ -x "$OURS" ] || { echo "build the release binary first: cargo build --release --features all-langs"; exit 1; }
+[ -x "$OURS" ] || { echo "build the release binary first: cargo build --release --features cpp"; exit 1; }
 [ -n "$CLANGD" ] && [ -x "$CLANGD" ] || { echo "clangd not found — set CLANGD=/path/to/clangd"; exit 1; }
 command -v nvim >/dev/null || { echo "nvim required"; exit 1; }
 

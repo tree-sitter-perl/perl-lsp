@@ -115,7 +115,7 @@ impl Document {
         {
             return;
         }
-        let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+        let reg = crate::build::language_driver::LanguageRegistry::compiled();
         if let Some(driver) = reg.for_id(self.language) {
             let mut parser = driver.make_parser();
             if let Some(tree) = parser.parse(&new_text, None) {
@@ -148,7 +148,7 @@ impl Document {
             .synchronous_rebuild
         {
             self.update_text_only(new_text);
-            let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+            let reg = crate::build::language_driver::LanguageRegistry::compiled();
             if let Some(driver) = reg.for_id(self.language) {
                 self.analysis = Arc::new(driver.analyze_with_path(&self.text, self.path.as_deref()));
                 self.stable_outline.update(&self.analysis, &self.text);

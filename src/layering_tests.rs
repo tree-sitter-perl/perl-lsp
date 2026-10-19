@@ -579,8 +579,8 @@ fn slot_detection_dispatches_on_driver_caps_not_language_names() {
         .join("src/lsp/cursor_slot.rs");
     let text = fs::read_to_string(&path).unwrap();
     // Every id the registry can hand this file, whatever features are on.
-    let ids = crate::build::language_driver::LanguageRegistry::with_enabled()
-        .ids()
+    let ids = crate::build::language_driver::LanguageRegistry::compiled()
+        .languages()
         .into_iter()
         .collect::<Vec<_>>();
     let mut violations = Vec::new();
@@ -1714,7 +1714,7 @@ fn packs_with_grammars() -> Vec<(&'static str, crate::build::query_extract::Lang
         crate::build::packs::perl_pack(),
         (*perl_parser.language().expect("the perl grammar")).clone(),
     )];
-    let registry = LanguageRegistry::with_enabled();
+    let registry = LanguageRegistry::compiled();
     for id in registry.languages() {
         let Some(driver) = registry.for_id(id) else { continue };
         let Some(pack) = driver.lang_pack() else { continue };
