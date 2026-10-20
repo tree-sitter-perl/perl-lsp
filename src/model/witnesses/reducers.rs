@@ -60,6 +60,20 @@ pub struct BagContext<'a> {
     pub app_surface_consumers: &'a [String],
 }
 
+impl crate::model::file_analysis::ClassOrder for BagContext<'_> {
+    fn isa(&self, child: &str, ancestor: &str) -> bool {
+        crate::model::file_analysis::class_isa(child, ancestor, self.package_parents, self.module_index)
+    }
+}
+
+/// The class order a query's joins read: its context's, else none.
+pub(crate) fn class_order<'q>(q: &'q ReducerQuery) -> &'q dyn crate::model::file_analysis::ClassOrder {
+    match q.context {
+        Some(ctx) => ctx,
+        None => &crate::model::file_analysis::Unordered,
+    }
+}
+
 /// A reducer's answer.
 ///
 /// **Adding a variant here is not additive** — so every `match` on it names
@@ -527,16 +541,22 @@ impl WitnessReducer for BranchArmFold {
             }
             // Writing a fallback says the author expects it to run, so the
             // operator is a hint and both arms count, whatever the LHS's
-            // truthiness: two typed arms that agree answer, else the RHS
-            // floor. That floor is what lets `$ENV{X} || 10` type to
-            // `Numeric` when the LHS can't be resolved.
+            // truthiness: the arms' join answers, else the RHS floor. That
+            // floor is what lets `$ENV{X} || 10` type to `Numeric` when the
+            // LHS can't be resolved.
             // TODO(dead-fallback-lint): an LHS that can't be false (a
             // reference, an object without `bool` overloading) makes the
             // fallback dead; that belongs in a diagnostic, not in the type.
-            let all: Vec<&InferredType> = typed.iter().chain(fallback.iter()).collect();
-            if let Some((first, rest)) = all.split_first() {
-                if !typed.is_empty() && !rest.is_empty() && rest.iter().all(|t| *t == *first) {
-                    return ReducedValue::Type((*first).clone());
+            if !typed.is_empty() && !fallback.is_empty() {
+                // The LHS is the value only when it is defined (and true),
+                // so its undef half never reaches the join.
+                let defined = typed.iter().map(|t| match t {
+                    InferredType::Optional(inner) => (**inner).clone(),
+                    t => t.clone(),
+                });
+                let all: Vec<InferredType> = defined.chain(fallback.iter().cloned()).collect();
+                if let Some(t) = crate::model::file_analysis::join_all(&all, class_order(_q)) {
+                    return ReducedValue::Type(t);
                 }
             }
             // TODO(union-join): the value is `left ⊔ right`, e.g.
@@ -555,18 +575,13 @@ impl WitnessReducer for BranchArmFold {
         if typed.len() + undef_arms < 2 {
             return ReducedValue::None;
         }
-        // Strict agreement among the typed arms (a ternary wants exact
-        // agreement, NOT the loose hash/object subsumption the return-arm
-        // join uses). An `undef` arm then lifts the agreed `T` to
+        // The typed arms' join; an `undef` arm then lifts the joined `T` to
         // `Optional<T>`.
         // TODO(brand-join): arms compare whole types, marks included, so one
         // plugin's disagreeing mark costs every other plugin's agreeing ones.
         // Agree on the unbranded base, then keep each namespace's marks the
         // arms share (docs/adr/brands.md, "Joins and the fold").
-        let agreed = match typed.split_first() {
-            Some((first, rest)) if rest.iter().all(|t| t == first) => Some(first.clone()),
-            _ => None,
-        };
+        let agreed = crate::model::file_analysis::join_all(&typed, class_order(_q));
         match agreed {
             Some(t) if undef_arms > 0 && !matches!(t, InferredType::Optional(_)) => {
                 ReducedValue::Type(InferredType::Optional(Box::new(t)))
@@ -583,8 +598,7 @@ impl WitnessReducer for BranchArmFold {
 //
 // Claims `SymbolReturnArm(sub_id)` attachments carrying `InferredType`
 // payloads (Edges materialized into types). Each witness is one return
-// arm; `resolve_return_type` agrees them (1 arm → that type, agreeing →
-// that type, disagreeing → None, HashRef subsumed by Object).
+// arm; `join_return_arms` joins them under the query's class order.
 // `Symbol(sub_id)` carries an `Edge(SymbolReturnArm(sub_id))` chain so
 // consumers querying the symbol see the arm-fold answer via standard
 // edge materialization.
@@ -638,7 +652,7 @@ impl WitnessReducer for SymbolReturnArmFold {
         if arms.is_empty() && has_undef_arm && value_arms == 0 {
             return ReducedValue::Type(InferredType::Undef);
         }
-        match crate::model::file_analysis::join_return_arms(&arms, has_undef_arm) {
+        match crate::model::file_analysis::join_return_arms(&arms, has_undef_arm, class_order(_q)) {
             Some(t) => ReducedValue::Type(t),
             None => ReducedValue::None,
         }
@@ -650,16 +664,9 @@ impl WitnessReducer for SymbolReturnArmFold {
 // Claims `SlotType{class, key}` attachments carrying `InferredType`
 // payloads (per-write `Edge(Expr(rhs_span))` witnesses, materialized to
 // types by the registry). Each witness is one `$obj->{key} = <rhs>`
-// WRITE; the per-write arms agree via `resolve_return_type` (1+ agree →
-// that type, HashRef subsumed by an Object) with one added guard: two
-// DISTINCT concrete classes are honest disagreement → None. The guard
-// matters here because `resolve_return_type`'s Object/HashRef
-// subsumption was tuned for return arms (one Object absorbs sibling
-// HashRefs) and otherwise picks the last of two different classes —
-// the wrong answer when `$self->{h} = A->new` in one method and
-// `= B->new` in another genuinely conflict. Nothing consumes this
-// attachment yet — it's the typed half of the hash-key-write seed,
-// paired with the untyped `mutation` Fact.
+// WRITE; the per-write arms join under the query's class order. Nothing
+// consumes this attachment yet — it's the typed half of the hash-key-write
+// seed, paired with the untyped `mutation` Fact.
 
 pub struct SlotTypeFold;
 
@@ -681,20 +688,7 @@ impl WitnessReducer for SlotTypeFold {
                 _ => None,
             })
             .collect();
-        // Two distinct class identities never agree: a slot can't be
-        // both `A` and `B`. `class_name()` is the value's own "what
-        // class am I" answer (rule #10) — distinct answers → None.
-        let mut seen_class: Option<String> = None;
-        for t in &arms {
-            if let Some(cn) = t.class_name() {
-                match &seen_class {
-                    None => seen_class = Some(cn.to_string()),
-                    Some(prev) if prev != cn => return ReducedValue::None,
-                    _ => {}
-                }
-            }
-        }
-        match crate::model::file_analysis::resolve_return_type(&arms) {
+        match crate::model::file_analysis::join_all(&arms, class_order(_q)) {
             Some(t) => ReducedValue::Type(t),
             None => ReducedValue::None,
         }
