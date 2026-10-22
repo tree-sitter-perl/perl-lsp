@@ -663,7 +663,7 @@ sub run {
 /// `refs_to`; references on the const lists the def + every usage.
 #[test]
 fn const_usage_goto_def_and_references() {
-    use crate::index::file_store::FileStore;
+    use crate::index::open_docs::OpenDocs;
     use crate::index::resolve::{refs_to, RoleMask, TargetKind, TargetRef};
     use std::path::PathBuf;
 
@@ -685,7 +685,7 @@ sub retry {
     assert_eq!(r.target_name, "MAX_RETRIES");
     assert!(matches!(r.kind, RefKind::FunctionCall { .. }));
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/qa_const.pm");
     idx.insert_workspace_for_test(path.clone(), fa);
@@ -772,7 +772,7 @@ sub opt_c { 'c' }
 /// goto-def / references on an export-list member resolve to the sub def.
 #[test]
 fn export_member_goto_def_and_references() {
-    use crate::index::file_store::FileStore;
+    use crate::index::open_docs::OpenDocs;
     use crate::index::resolve::{refs_to, RoleMask, TargetKind, TargetRef};
     use std::path::PathBuf;
 
@@ -806,7 +806,7 @@ sub opt_b { 'b' }
         .expect("ref_at the export member token");
     assert_eq!(r.target_name, "opt_a");
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/qa_export.pm");
     idx.insert_workspace_for_test(path.clone(), fa);

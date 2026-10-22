@@ -74,7 +74,7 @@ $d->ping;
     let mut consumer_fa = parse(consumer_src);
     consumer_fa.enrich_imported_types_with_keys(Some(&idx));
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     idx.insert_workspace_for_test(base_path.clone(), parse(base_src));
     idx.insert_workspace_for_test(child_path.clone(), parse(child_src));
     idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa);
@@ -154,7 +154,7 @@ $b->ping;
 "#;
     let consumer_path = PathBuf::from("/tmp/rename_dep_consumer.pm");
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     idx.insert_workspace_for_test(consumer_path.clone(), parse(consumer_src));
 
     let target = TargetRef {
@@ -224,7 +224,7 @@ $g->hello;
     let mut consumer_fa = parse(consumer_src);
     consumer_fa.enrich_imported_types_with_keys(Some(&idx));
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     idx.insert_workspace_for_test(base_path.clone(), parse(base_src));
     idx.insert_workspace_for_test(child_path.clone(), parse(child_src));
     idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa);
@@ -324,7 +324,7 @@ fn rename_from_child_call_site_includes_inherited_base_declaration() {
         target.method_classes,
     );
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     idx.insert_workspace_for_test(base_path.clone(), parse(base_src));
     idx.insert_workspace_for_test(child_path.clone(), parse(child_src));
     idx.insert_workspace_for_test(script_path.clone(), script_fa);

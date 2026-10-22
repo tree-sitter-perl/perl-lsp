@@ -111,7 +111,7 @@ fn surface_gate_covers_registered_and_open_consumers() {
     let canon_hdr = std::fs::canonicalize(&hdr).unwrap();
 
     // The TU is also OPEN — the outcome must answer the open half too.
-    let files = FileStore::serving(driver);
+    let files = OpenDocs::serving(driver);
     let tu_url = Url::from_file_path(&canon_tu).unwrap();
     let hdr_url = Url::from_file_path(&canon_hdr).unwrap();
     assert!(files.open(tu_url.clone(), std::fs::read_to_string(&tu).unwrap()));
@@ -204,7 +204,7 @@ fn pack_swap_skips_stale_generation() {
         "class Box { public: int width() { return 2; } int height() { return 3; } };\n",
     )
     .unwrap();
-    inv.file_changed(None, &pack, &FileStore::serving(driver), &hdr, false);
+    inv.file_changed(None, &pack, &OpenDocs::serving(driver), &hdr, false);
     assert_eq!(arc_of(&pack, &canon_hdr), hdr_before, "stale header re-register skipped");
     assert_eq!(arc_of(&pack, &canon_tu), tu_before, "stale consumer re-register skipped");
     let _ = std::fs::remove_dir_all(&dir);
@@ -233,7 +233,7 @@ fn file_changed_defers_during_bulk_index_and_reconciles() {
     let inv = PackInvalidator::serving(driver);
     inv.begin_bulk_index();
     std::fs::write(&hdr, "class Box { public: int width() { return 1; } int h(); };\n").unwrap();
-    let outcome = inv.file_changed(None, &pack, &FileStore::serving(driver), &hdr, false);
+    let outcome = inv.file_changed(None, &pack, &OpenDocs::serving(driver), &hdr, false);
     assert!(outcome.deferred, "mid-index change defers");
     assert!(outcome.refresh_open.is_empty());
     assert_eq!(arc_of(&pack, &canon_hdr), before, "deferred: no swap yet");
@@ -259,7 +259,7 @@ struct SwapFixture {
     tu: PathBuf,
     pack: Arc<ModuleIndex>,
     inv: PackInvalidator,
-    files: FileStore,
+    files: OpenDocs,
 }
 
 #[cfg(feature = "cpp")]
@@ -277,7 +277,7 @@ fn swap_fixture(tag: &str) -> SwapFixture {
     let pack = Arc::new(ModuleIndex::new_for_test());
     register_pair(driver, &pack, &[&hdr, &tu]);
 
-    SwapFixture { dir, hdr, tu, pack, inv: PackInvalidator::serving(driver), files: FileStore::serving(driver) }
+    SwapFixture { dir, hdr, tu, pack, inv: PackInvalidator::serving(driver), files: OpenDocs::serving(driver) }
 }
 
 /// The registered analysis for `path` — the residency question these tests

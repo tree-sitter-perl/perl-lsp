@@ -94,7 +94,7 @@ fork ledger.
 synthesis, the cross-file `inheritance_cross` edge projection, and
 the MCB→bag bridge `emit_method_call_binding_edges`) is called ONLY for:
 
-- OPEN documents — through `FileStore::enrich_open`, the one open-doc
+- OPEN documents — through `OpenDocs::enrich_open`, the one open-doc
   enrichment writer (invoked by `publish_diagnostics`, the resolver refresh,
   and the cold-open heal).
 - The CLI focus file — `lsp/cli/query.rs` (`cli_open_document` + the
@@ -105,7 +105,7 @@ and **workspace-index files** (`index_workspace_with_index:655`) are built
 via `crate::builder::build(...)` which ends at `finalize_post_walk()` —
 they NEVER get `enrich_imported_types_with_keys`. The resolver refresh
 callback re-enriches only open docs (`refresh_open_diagnostics` →
-`FileStore::enrich_open`).
+`OpenDocs::enrich_open`).
 
 What this means per enrichment pass:
 

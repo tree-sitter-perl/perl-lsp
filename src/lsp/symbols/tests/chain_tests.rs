@@ -210,7 +210,7 @@ fn test_demo_file_chain_to_resolves_on_line_71() {
     // Cross-file enrichment — same step the backend runs on open.
     // Re-runs the MCB→bag bridge so `my $r = $app->routes;` carries a
     // `Variable → Edge(PackageSymbol)` witness the registry chases with
-    // the index. Without this, `FileStore::enrich_open` hasn't fired
+    // the index. Without this, `OpenDocs::enrich_open` hasn't fired
     // yet and the whole chain is un-typed.
     analysis.enrich_imported_types_with_keys(Some(&idx));
 
@@ -900,7 +900,7 @@ sub action ($c) {\n\
     };
 
     let uri = Url::parse("file:///consumer.pl").unwrap();
-    let resp = find_definition(&crate::index::file_store::FileStore::new(), &consumer, pos, &uri, &idx);
+    let resp = find_definition(&crate::index::open_docs::OpenDocs::new(), &consumer, pos, &uri, &idx);
 
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
@@ -960,7 +960,7 @@ sub action ($c) {\n\
     };
 
     let uri = Url::parse("file:///consumer.pl").unwrap();
-    let resp = find_definition(&crate::index::file_store::FileStore::new(), &consumer, pos, &uri, &idx);
+    let resp = find_definition(&crate::index::open_docs::OpenDocs::new(), &consumer, pos, &uri, &idx);
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => v.remove(0),
@@ -1029,7 +1029,7 @@ sub day_of_week {\n\
     };
 
     let uri = Url::parse("file:///datetime.pl").unwrap();
-    let resp = find_definition(&crate::index::file_store::FileStore::new(), &consumer, pos, &uri, &idx);
+    let resp = find_definition(&crate::index::open_docs::OpenDocs::new(), &consumer, pos, &uri, &idx);
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => v.remove(0),
@@ -1079,7 +1079,7 @@ my @s = @My::Vars::servers;\n\
     };
 
     let uri = Url::parse("file:///consumer.pl").unwrap();
-    let resp = find_definition(&crate::index::file_store::FileStore::new(), &consumer, pos, &uri, &idx);
+    let resp = find_definition(&crate::index::open_docs::OpenDocs::new(), &consumer, pos, &uri, &idx);
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         other => panic!("expected goto-def for FQ var, got {other:?}"),
@@ -1111,7 +1111,7 @@ fn fq_variable_read_unknown_package_is_honest_miss() {
         character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
     };
     let uri = Url::parse("file:///consumer.pl").unwrap();
-    let resp = find_definition(&crate::index::file_store::FileStore::new(), &consumer, pos, &uri, &idx);
+    let resp = find_definition(&crate::index::open_docs::OpenDocs::new(), &consumer, pos, &uri, &idx);
     assert!(resp.is_none(), "unknown package must be an honest miss, got {resp:?}");
 }
 
@@ -1526,7 +1526,7 @@ sub startup {
         line: pre.matches('\n').count() as u32,
         character: (list_at - pre.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
     };
-    let resp = find_definition(&crate::index::file_store::FileStore::new(), &fa, pos, &uri, &idx);
+    let resp = find_definition(&crate::index::open_docs::OpenDocs::new(), &fa, pos, &uri, &idx);
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => v.remove(0),

@@ -218,9 +218,9 @@ mod pack_macro_goto {
             .for_id("cpp")
             .unwrap()
             .analyze(src);
-        let store = crate::index::file_store::FileStore::new();
+        let store = crate::index::open_docs::OpenDocs::new();
         let idx = crate::index::module_index::ModuleIndex::new_for_test();
-        let key = crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/fake/macro.c"));
+        let key = crate::index::open_docs::FileKey::Path(std::path::PathBuf::from("/fake/macro.c"));
         crate::index::resolve::resolve(
             &store,
             &fa,

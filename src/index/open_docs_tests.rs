@@ -7,7 +7,7 @@ fn open_analyzes_through_the_store_driver() {
     // so the document is language-tagged "cpp" and its analysis is the
     // C++ outline (here, a macro-recovered class). A Perl store opens Perl.
     let reg = crate::build::language_driver::LanguageRegistry::compiled();
-    let store = FileStore::serving(reg.for_id("cpp").unwrap());
+    let store = OpenDocs::serving(reg.for_id("cpp").unwrap());
     let cpp = Url::parse("file:///tmp/route_test.cpp").unwrap();
     assert!(store.open(
         cpp.clone(),
@@ -23,7 +23,7 @@ fn open_analyzes_through_the_store_driver() {
         assert!(doc.analysis.symbols().iter().any(|s| s.name == "Box"), "cpp class via the driver");
     }
 
-    let store = FileStore::serving(reg.for_id("perl").unwrap());
+    let store = OpenDocs::serving(reg.for_id("perl").unwrap());
     let perl = Url::parse("file:///tmp/route_test.pm").unwrap();
     assert!(store.open(perl.clone(), "package Foo; sub bar { 1 }\n".to_string()));
     assert_eq!(store.get_open(&perl).unwrap().language, "perl");
@@ -64,7 +64,7 @@ my $b = make_b();
         Arc::new(parse(producer_src)),
     );
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let url = Url::parse("file:///tmp/enrich_open_consumer.pm").unwrap();
     assert!(store.open(url.clone(), consumer_src.to_string()));
     let base = Arc::clone(&store.get_open(&url).unwrap().analysis);
@@ -111,7 +111,7 @@ my $b = make_b();
 fn enrich_open_leaves_pack_docs_untouched() {
     use crate::index::module_index::ModuleIndex;
     let reg = crate::build::language_driver::LanguageRegistry::compiled();
-    let store = FileStore::serving(reg.for_id("cpp").unwrap());
+    let store = OpenDocs::serving(reg.for_id("cpp").unwrap());
     let url = Url::parse("file:///tmp/enrich_open_pack.cpp").unwrap();
     assert!(store.open(url.clone(), "class Box { public: int width; };\n".to_string()));
     let base = Arc::clone(&store.get_open(&url).unwrap().analysis);
@@ -123,7 +123,7 @@ fn enrich_open_leaves_pack_docs_untouched() {
 
 #[test]
 fn test_close_forgets_the_document() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let url = Url::parse("file:///tmp/close_test.pm").unwrap();
 
     assert!(store.open(url.clone(), "package Foo; 1;\n".to_string()));

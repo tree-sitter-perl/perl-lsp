@@ -1223,7 +1223,7 @@ impl ModuleIndex {
     /// WHOLE analysis, then evict the requested axes, then store the
     /// stripped arc — so a feed can never read an already-emptied `symbols`
     /// (the ordering bug a caller-side strip invites). Returns the stored
-    /// arc for the caller's FileStore mirror. Synchronous-persistence
+    /// arc for the caller's OpenDocs mirror. Synchronous-persistence
     /// callers only (the warm path — the blob already exists on disk);
     /// the bulk fresh path splits the halves around the writer's COMMIT.
     /// `persisted` is the surface the COLD lane recorded for this file, when

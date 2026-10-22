@@ -60,7 +60,7 @@ const CURSORS_PER_FILE: usize = 250;
 /// instance (a drifted copy of the drift-detector would be the joke that
 /// writes itself). Returns the violations found at this cursor.
 fn check_cursor_contracts(
-    store: &FileStore,
+    store: &OpenDocs,
     fa: &std::sync::Arc<FileAnalysis>,
     path: &std::path::Path,
     r: &crate::model::file_analysis::Ref,
@@ -188,8 +188,8 @@ fn projection_contracts_hold_at_every_corpus_cursor() {
     let files = corpus_files();
     assert!(files.len() >= 20, "corpus went missing: {} files", files.len());
 
-    let store = FileStore::new();
-    // Production wiring: the workspace bulk index feeds both the FileStore
+    let store = OpenDocs::new();
+    // Production wiring: the workspace bulk index feeds both the OpenDocs
     // AND the module index, so the forward lanes (method resolution,
     // package->file) see the same universe the backward walk does. A
     // store-only harness flags gd-empty asymmetries production never has.
@@ -266,7 +266,7 @@ fn projection_contracts_hold_at_every_pack_cursor() {
     files.sort();
     assert!(files.len() >= 40, "cpp corpus went missing: {} files", files.len());
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let mut analyses: Vec<(PathBuf, std::sync::Arc<FileAnalysis>)> = Vec::new();
     for p in &files {
@@ -362,7 +362,7 @@ fn projection_contracts_broad_corpus() {
     let fstride = total_files.div_ceil(FILE_CAP).max(1);
     let files: Vec<PathBuf> = files.into_iter().step_by(fstride).collect();
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let mut analyses: Vec<(PathBuf, std::sync::Arc<FileAnalysis>)> = Vec::new();
     for p in &files {
@@ -476,7 +476,7 @@ fn projection_contracts_broad_corpus() {
 #[test]
 fn requires_round_trip_holds_on_the_contract_fixtures() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_files/lib/Contract");
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let mut by_path: Vec<(PathBuf, std::sync::Arc<FileAnalysis>, String)> = Vec::new();
     for name in ["Role.pm", "SubRole.pm", "Composer.pm", "Deep.pm", "Broken.pm"] {

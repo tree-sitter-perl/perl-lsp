@@ -40,7 +40,7 @@ pub struct CallEdge {
 /// an item's own file (LSP hierarchy requests hand back an item, not a
 /// cursor in an open document).
 pub fn analysis_for_key(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     key: &FileKey,
 ) -> Option<Arc<FileAnalysis>> {

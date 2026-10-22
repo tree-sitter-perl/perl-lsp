@@ -43,7 +43,7 @@ LANDED (additive, Perl path untouched, default suite 1062/0):
   (a process serves one language). `--languages` / `--lang-analyze <file>`
   prove it at the CLI (a macro-heavy `.cpp` goes through the reparse seam
   and outlines).
-- **Async LSP backend.** `FileStore::open` analyzes through the served
+- **Async LSP backend.** `OpenDocs::open` analyzes through the served
   driver; `did_change` and watched-file events dispatch on its declared
   capabilities — `cpp-lsp` works *in an editor*, not just the CLI.
 - **Per-language `ModuleIndex`** (keyspace isolation): a process serves one

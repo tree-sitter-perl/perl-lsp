@@ -127,11 +127,11 @@ pub(crate) fn cli_hover_single_file(file: &str, line_str: &str, col_str: &str) {
     // form for that).
     let driver = language_driver::LanguageRegistry::served();
     let markdown = if !driver.caps().hover_info {
-        let files = file_store::FileStore::new();
+        let files = open_docs::OpenDocs::new();
         let cs = resolve::resolve(
             &files,
             &analysis,
-            file_store::FileKey::Path(std::path::PathBuf::from(file)),
+            open_docs::FileKey::Path(std::path::PathBuf::from(file)),
             point,
             None,
             resolve::OverrideScope::default(),
@@ -177,7 +177,7 @@ pub(crate) fn cli_type_at(file: &str, line_str: &str, col_str: &str) {
 /// `Err` to stderr with exit-1 (preserves the "miss → exit 1" behavior every
 /// single-mode command had). `fmt` selects the output coordinate dialect.
 fn print_run_one(
-    ws: &file_store::FileStore,
+    ws: &open_docs::OpenDocs,
     idx: &module_index::ModuleIndex,
     req: &BatchReq,
     fmt: CoordFmt,
@@ -304,17 +304,17 @@ struct BatchReq {
 /// would otherwise leave its enrichment-synthesized symbols behind for a
 /// later workspace-symbol or diagnostics request).
 struct ScopedOpenDoc<'a> {
-    ws: &'a file_store::FileStore,
+    ws: &'a open_docs::OpenDocs,
     url: tower_lsp::lsp_types::Url,
 }
 
 impl<'a> ScopedOpenDoc<'a> {
     /// Returns the guard, the staged analysis, and its origin key.
     fn stage(
-        ws: &'a file_store::FileStore,
+        ws: &'a open_docs::OpenDocs,
         path: &std::path::Path,
         analysis: std::sync::Arc<file_analysis::FileAnalysis>,
-    ) -> (Self, std::sync::Arc<file_analysis::FileAnalysis>, file_store::FileKey) {
+    ) -> (Self, std::sync::Arc<file_analysis::FileAnalysis>, open_docs::FileKey) {
         let url = tower_lsp::lsp_types::Url::from_file_path(path)
             .unwrap_or_else(|_| tower_lsp::lsp_types::Url::parse("file:///unknown").unwrap());
         let text = std::fs::read_to_string(path).unwrap_or_default();
@@ -333,7 +333,7 @@ impl<'a> ScopedOpenDoc<'a> {
             path: Some(path.to_path_buf()),
         };
         ws.insert_open(url.clone(), doc);
-        let key = file_store::FileKey::Url(url.clone());
+        let key = open_docs::FileKey::Url(url.clone());
         (Self { ws, url }, analysis, key)
     }
 }
@@ -375,7 +375,7 @@ fn resolve_imports_blocking(
 }
 
 fn run_one(
-    ws: &file_store::FileStore,
+    ws: &open_docs::OpenDocs,
     idx: &module_index::ModuleIndex,
     req: &BatchReq,
     fmt: CoordFmt,
@@ -438,8 +438,8 @@ fn run_one(
                 let mut lines = Vec::new();
                 for loc in locs {
                     let path = match &loc.key {
-                        file_store::FileKey::Path(p) => p.display().to_string(),
-                        file_store::FileKey::Url(u) => u.to_file_path()
+                        open_docs::FileKey::Path(p) => p.display().to_string(),
+                        open_docs::FileKey::Url(u) => u.to_file_path()
                             .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
                     };
                     let (line, col) = sources.display(
@@ -489,8 +489,8 @@ fn run_one(
             );
             for loc in cs.references() {
                 let path = match &loc.key {
-                    file_store::FileKey::Path(p) => p.display().to_string(),
-                    file_store::FileKey::Url(u) => u.to_file_path()
+                    open_docs::FileKey::Path(p) => p.display().to_string(),
+                    open_docs::FileKey::Url(u) => u.to_file_path()
                         .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
                 };
                 let (line, col) = sources.display(&path, loc.span.start.row, loc.span.start.column);
@@ -516,8 +516,8 @@ fn run_one(
             );
             for loc in cs.implementations() {
                 let path = match &loc.key {
-                    file_store::FileKey::Path(p) => p.display().to_string(),
-                    file_store::FileKey::Url(u) => u.to_file_path()
+                    open_docs::FileKey::Path(p) => p.display().to_string(),
+                    open_docs::FileKey::Url(u) => u.to_file_path()
                         .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
                 };
                 let (line, col) = sources.display(&path, loc.span.start.row, loc.span.start.column);
@@ -696,7 +696,7 @@ fn run_one(
                 let file_path = std::path::Path::new(file).canonicalize()
                     .unwrap_or_else(|_| std::path::PathBuf::from(file));
                 tphase!("completion_items", symbols::completion_items(
-                    ws, &file_store::FileKey::Path(file_path),
+                    ws, &open_docs::FileKey::Path(file_path),
                     &doc.analysis, &doc.tree, &doc.text, pos, idx,
                     Some(doc.stable_outline.package_lines())))
             };
@@ -916,10 +916,10 @@ fn run_one(
 
 /// Render a `FileKey` as a display path (the repeated match every
 /// location-emitting arm needs).
-fn key_display(key: &file_store::FileKey) -> String {
+fn key_display(key: &open_docs::FileKey) -> String {
     match key {
-        file_store::FileKey::Path(p) => p.display().to_string(),
-        file_store::FileKey::Url(u) => u
+        open_docs::FileKey::Path(p) => p.display().to_string(),
+        open_docs::FileKey::Url(u) => u
             .to_file_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| u.to_string()),
@@ -1019,7 +1019,7 @@ pub(super) fn override_scope_from_env() -> resolve::OverrideScope {
 /// Cross-file rename edit-set as the pretty-JSON object string (shared by
 /// `cli_rename` and `run_one`). `file` is the originating file; `point` the cursor.
 fn run_rename(
-    ws: &file_store::FileStore,
+    ws: &open_docs::OpenDocs,
     idx: &module_index::ModuleIndex,
     file: &str,
     point: tree_sitter::Point,
@@ -1049,8 +1049,8 @@ fn run_rename(
     let mut all_edits: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
     for (loc, text) in cs.rename_edits(new_name)? {
         let path = match &loc.key {
-            file_store::FileKey::Path(p) => p.display().to_string(),
-            file_store::FileKey::Url(u) => u.to_file_path()
+            open_docs::FileKey::Path(p) => p.display().to_string(),
+            open_docs::FileKey::Url(u) => u.to_file_path()
                 .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
         };
         let edit = span_to_json(&mut sources, &path, loc.span, text);
