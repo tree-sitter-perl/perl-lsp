@@ -169,11 +169,9 @@ fn test_demo_file_chain_to_resolves_on_line_71() {
     // Index the project's test_files/ as the workspace.
     let idx = ModuleIndex::new_for_test();
     idx.set_workspace_root(Some(root.to_str().unwrap()));
-    let files = crate::index::file_store::FileStore::new();
     let _indexed = crate::index::module_resolver::index_workspace_with_index(
         &root.join("test_files"),
-        &files,
-        Some(&idx),
+        &idx,
         None,
         None,
     );
@@ -578,11 +576,9 @@ fn test_demo_chain_empirical_truth_table() {
 
     let idx = ModuleIndex::new_for_test();
     idx.set_workspace_root(Some(root.to_str().unwrap()));
-    let files = crate::index::file_store::FileStore::new();
     let _ = crate::index::module_resolver::index_workspace_with_index(
         &root.join("test_files"),
-        &files,
-        Some(&idx),
+        &idx,
         None,
         None,
     );

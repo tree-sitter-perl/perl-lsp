@@ -198,7 +198,7 @@ fn projection_contracts_hold_at_every_corpus_cursor() {
     for p in &files {
         let src = std::fs::read_to_string(p).unwrap();
         let fa = std::sync::Arc::new(parse(&src));
-        store.insert_workspace_arc(p.clone(), fa.clone());
+        idx.insert_workspace_arc_for_test(p.clone(), fa.clone());
         idx.register_workspace_module(p.clone(), fa.clone());
         analyses.push((p.clone(), fa));
     }
@@ -242,12 +242,8 @@ fn projection_contracts_hold_at_every_corpus_cursor() {
 /// references vs implementations disagreeing) both lived in this lane.
 /// Corpus: the real cpp fixture trees, analyzed with their real paths so
 /// include closures gather from disk; analyses register into the index, the
-/// production topology (pack symbols never live in the FileStore workspace
-/// map). The queried origin is staged in the
-/// workspace store for its cursors, exactly as the CLI's
-/// `ScopedWorkspaceEntry` / the LSP's open doc does — without it the
-/// backward walk cannot see the queried file and every cursor flags a
-/// false I1.
+/// production topology — the index is the one home for project files, so
+/// the backward walk sees every queried origin there.
 #[cfg(feature = "cpp")]
 #[test]
 fn projection_contracts_hold_at_every_pack_cursor() {
@@ -293,7 +289,6 @@ fn projection_contracts_hold_at_every_pack_cursor() {
     let mut cursors = 0usize;
     let mut dropped = 0usize;
     for (path, fa) in &analyses {
-        store.insert_workspace_arc(path.clone(), fa.clone());
         let refs = fa.refs();
         let stride = refs.len().div_ceil(CURSORS_PER_FILE).max(1);
         dropped += refs.len() - refs.len().div_ceil(stride);
@@ -301,7 +296,6 @@ fn projection_contracts_hold_at_every_pack_cursor() {
             cursors += 1;
             violations.extend(check_cursor_contracts(&store, fa, path, r, &idx));
         }
-        store.remove_workspace(path);
     }
 
     let (provisional, violations): (Vec<String>, Vec<String>) =
@@ -377,7 +371,7 @@ fn projection_contracts_broad_corpus() {
             continue; // the walk's own 1MB cap
         }
         let fa = std::sync::Arc::new(parse(&src));
-        store.insert_workspace_arc(p.clone(), fa.clone());
+        idx.insert_workspace_arc_for_test(p.clone(), fa.clone());
         idx.register_workspace_module(p.clone(), fa.clone());
         analyses.push((p.clone(), fa));
     }
@@ -489,7 +483,7 @@ fn requires_round_trip_holds_on_the_contract_fixtures() {
         let p = root.join(name);
         let src = std::fs::read_to_string(&p).unwrap();
         let fa = std::sync::Arc::new(parse(&src));
-        store.insert_workspace_arc(p.clone(), fa.clone());
+        idx.insert_workspace_arc_for_test(p.clone(), fa.clone());
         idx.register_workspace_module(p.clone(), fa.clone());
         by_path.push((p, fa, src));
     }

@@ -629,7 +629,7 @@ fn walk_refs(
     let mut rows_indexed: std::sync::Arc<std::collections::HashSet<PathBuf>> = Default::default();
     let mut candidate_set: std::collections::HashSet<PathBuf> = Default::default();
 
-    // Open files (canonical — workspace entries for open paths are skipped).
+    // Open docs (canonical — their index entries are skipped).
     let mut covered_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     if mask.contains(RoleMask::OPEN) {
         files.for_each_open(|url, doc| {
@@ -696,35 +696,14 @@ fn walk_refs(
                 if covered_paths.contains(path) {
                     continue;
                 }
-                // Tier attribution: a FileStore workspace entry or a
-                // front-door index registration rides WORKSPACE; the rest
-                // (@INC) is DEPENDENCY. The mask must admit the candidate's
-                // OWN tier, or an EDITABLE rename would walk read-only deps
-                // (and vice versa).
-                let ws_arc = files
-                    .workspace_raw()
-                    .get(path)
-                    .map(|e| std::sync::Arc::clone(e.value()));
-                let cached = match ws_arc {
-                    Some(arc) => {
-                        if !mask.contains(RoleMask::WORKSPACE) {
-                            continue;
-                        }
-                        std::sync::Arc::new(crate::model::file_analysis::CachedModule::new(
-                            path.clone(),
-                            arc,
-                        ))
-                    }
-                    None => {
-                        if !mask.contains(index_role(idx, path)) {
-                            continue;
-                        }
-                        match idx.cached_by_path(path) {
-                            Some(cm) => cm,
-                            None => continue,
-                        }
-                    }
-                };
+                // Tier attribution: a front-door registration rides
+                // WORKSPACE, the rest (@INC) DEPENDENCY. The mask must admit
+                // the candidate's OWN tier, or an EDITABLE rename would walk
+                // read-only deps (and vice versa).
+                if !mask.contains(index_role(idx, path)) {
+                    continue;
+                }
+                let Some(cached) = idx.cached_by_path(path) else { continue };
                 covered_paths.insert(path.clone());
                 let key = FileKey::Path(cached.path.clone());
                 let file_str = canonical_file_str(&key);
@@ -742,50 +721,11 @@ fn walk_refs(
         }
     }
 
-    // Workspace files.
-    if mask.contains(RoleMask::WORKSPACE) {
-        let _t = crate::util::ghost_stats::ScopedNs::start("refs.sweep.workspace");
-        for entry in files.workspace_raw().iter() {
-            if covered_paths.contains(entry.key()) {
-                continue;
-            }
-            // Shredded AND not a candidate → holds no matching row; skip
-            // the whole-view rehydration. Candidates always fall through
-            // (the relational block may have failed to resolve them).
-            if rows_indexed.contains(entry.key()) && !candidate_set.contains(entry.key()) {
-                continue;
-            }
-            covered_paths.insert(entry.key().clone());
-            let key = FileKey::Path(entry.key().clone());
-            let file_str = canonical_file_str(&key);
-            if !gate(entry.value(), &file_str) {
-                continue;
-            }
-            // Same rows-axes routing as the sibling sweeps: a workspace
-            // copy with rows persisted is refs+symbols-STRIPPED, and the
-            // matcher reading it raw silently drops the file's matches.
-            let full = match module_index {
-                Some(idx) => {
-                    let cached = std::sync::Arc::new(
-                        crate::model::file_analysis::CachedModule::new(
-                            entry.key().clone(),
-                            std::sync::Arc::clone(entry.value()),
-                        ),
-                    );
-                    matcher_view(idx, &cached, target)
-                }
-                None => std::sync::Arc::clone(entry.value()),
-            };
-            collect_from_analysis(&key, &full, target, &aliases, module_index, &file_str, &memo, &mut out);
-        }
-    }
-
     // The index's files, each admitted by its OWN tier (`index_role`): the
-    // front-door registrations FileStore doesn't hold (a pack language's
-    // whole workspace) and the @INC dependencies. Per-FILE sweep
-    // (`for_each_cached_file`): the name-keyed view both repeats files and
-    // HIDES a file that lost every name tie. Skip paths an open/workspace
-    // copy already covered — those are fresher.
+    // project's front-door registrations and the @INC dependencies. Per-FILE
+    // sweep (`for_each_cached_file`): the name-keyed view both repeats files
+    // and HIDES a file that lost every name tie. Skip paths an open doc
+    // already covered — it is fresher.
     if mask.intersects(RoleMask::WORKSPACE | RoleMask::DEPENDENCY) {
         let _t = crate::util::ghost_stats::ScopedNs::start("refs.sweep.deps");
         if let Some(idx) = module_index {
@@ -793,9 +733,9 @@ fn walk_refs(
                 if !mask.contains(index_role(idx, &cached.path)) {
                     return;
                 }
-                // Same row-narrowing skip as the workspace sweep: shredded
-                // but not a candidate ⇒ provably matchless; candidates
-                // always fall through.
+                // Shredded but not a candidate ⇒ provably matchless; skip the
+                // rehydration. Candidates always fall through (the relational
+                // block may have failed to resolve them).
                 if rows_indexed.contains(&cached.path) && !candidate_set.contains(&cached.path) {
                     return;
                 }
@@ -1215,9 +1155,6 @@ fn scan_alias_pairs(
             .unwrap_or_else(|_| url.to_string());
         add(&doc.analysis, &path);
     });
-    for entry in files.workspace_raw().iter() {
-        add(entry.value(), &entry.key().to_string_lossy());
-    }
     if let Some(idx) = module_index {
         let mut add_cached = |cached: &std::sync::Arc<crate::model::file_analysis::CachedModule>| {
             add(&cached.analysis, &cached.path.to_string_lossy());

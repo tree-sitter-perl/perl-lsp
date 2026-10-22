@@ -417,10 +417,8 @@ eviction").
 
 What is genuinely missing is narrower, and worth having the real list:
 
-1. **`FileStore.workspace`** is not part of either unregister; the caller must
-   pair `files.remove_workspace(path)`. Today the only unregister callers are
-   deletion paths that do. A budget-overrun retraction is a new caller and will
-   forget unless the two are fused.
+1. *(Closed: FileStore holds open documents only; the index is the one home
+   for project files, so unregister has no second map to pair.)*
 2. **`IndexCore.loader_config_shapes` has no removal.** Entries are keyed by
    contributor path string and retired *only* by that contributor
    re-registering (`record_loader_shapes`'s opening `retain`). A retracted file
@@ -462,8 +460,8 @@ writes".
 4. **The overlay holds encoded blobs**, byte-capped, so it is neutral against
    today's channel backlog rather than additive; and overflow of *that* cap is
    the budget-overrun lane, so cap and lane are one mechanism.
-5. **Retraction is one function** that fuses `unregister_workspace_path`,
-   `FileStore::remove_workspace`, and removal of the `loader_config_shapes` /
+5. **Retraction is one function** that fuses `unregister_workspace_path`
+   and removal of the `loader_config_shapes` /
    `loaded_modules` contributions — and its concurrency window is either closed
    or explicitly bounded (4 above).
 6. **The `attached`/`durable` classification is declared, not chosen per call

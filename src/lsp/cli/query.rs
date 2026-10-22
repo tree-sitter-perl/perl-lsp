@@ -30,7 +30,7 @@ pub(crate) fn cli_check(args: &[String]) {
     // see `declare_enrichment_profile`. A server verb must not do this.
     file_analysis::declare_enrichment_profile(file_analysis::EnrichmentProfile::diagnostics());
 
-    let (ws, module_index) = cli_full_startup(root);
+    let (_ws, module_index) = cli_full_startup(root);
 
     // Dump the per-module breakdown before diagnostics output so the table
     // isn't buried under (and the early `exit(1)` below doesn't swallow it).
@@ -47,7 +47,7 @@ pub(crate) fn cli_check(args: &[String]) {
     if json_mode {
         println!("[");
     }
-    for_each_enriched_diagnostic(&ws, &module_index, options, &mut |file, d| {
+    for_each_enriched_diagnostic(&module_index, options, &mut |file, d| {
         let sev = match d.severity {
             Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::ERROR => "error",
             Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::WARNING => "warning",
@@ -96,7 +96,7 @@ pub(crate) fn cli_check(args: &[String]) {
         }
         println!("]");
     } else {
-        eprintln!("{} diagnostics in {} files", total, ws.workspace_len());
+        eprintln!("{} diagnostics in {} files", total, module_index.registered_file_count());
     }
 
     if total > 0 {
@@ -297,47 +297,50 @@ struct BatchReq {
 /// single-mode `cli_*` wrappers and `--batch` call this, so their stdout can
 /// never drift. The expensive startup state (`ws` + `idx`) is built once by the
 /// caller and shared; this re-parses only the one target file per call. Returns
-/// Stage an analysis in the workspace store for the lifetime of one cross-file
-/// query (references/rename need `refs_to` to see the freshly-enriched target),
-/// restoring the prior entry on drop. `--batch` shares one FileStore across all
-/// requests; without this restore a references/rename request would leave its
-/// enrichment-synthesized symbols in the store, so a later workspace-symbol or
-/// diagnostics request in the same batch would see different results depending
-/// on ordering.
-struct ScopedWorkspaceEntry<'a> {
+/// Stage the query file as an OPEN doc for one cross-file query: the CLI
+/// answers what the server answers with the file open in the editor, where
+/// the open doc shadows the file's index copy. Closed on drop, so `--batch`
+/// requests never see each other's staging (a references/rename request
+/// would otherwise leave its enrichment-synthesized symbols behind for a
+/// later workspace-symbol or diagnostics request).
+struct ScopedOpenDoc<'a> {
     ws: &'a file_store::FileStore,
-    path: std::path::PathBuf,
-    prior: Option<std::sync::Arc<file_analysis::FileAnalysis>>,
+    url: tower_lsp::lsp_types::Url,
 }
 
-impl<'a> ScopedWorkspaceEntry<'a> {
-    fn insert(
+impl<'a> ScopedOpenDoc<'a> {
+    /// Returns the guard, the staged analysis, and its origin key.
+    fn stage(
         ws: &'a file_store::FileStore,
-        path: std::path::PathBuf,
-        analysis: file_analysis::FileAnalysis,
-    ) -> Self {
-        let prior = ws.workspace_raw().get(&path).map(|r| r.value().clone());
-        ws.insert_workspace(path.clone(), analysis);
-        Self { ws, path, prior }
-    }
-
-    fn insert_arc(
-        ws: &'a file_store::FileStore,
-        path: std::path::PathBuf,
+        path: &std::path::Path,
         analysis: std::sync::Arc<file_analysis::FileAnalysis>,
-    ) -> Self {
-        let prior = ws.workspace_raw().get(&path).map(|r| r.value().clone());
-        ws.insert_workspace_arc(path.clone(), analysis);
-        Self { ws, path, prior }
+    ) -> (Self, std::sync::Arc<file_analysis::FileAnalysis>, file_store::FileKey) {
+        let url = tower_lsp::lsp_types::Url::from_file_path(path)
+            .unwrap_or_else(|_| tower_lsp::lsp_types::Url::parse("file:///unknown").unwrap());
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let driver = language_driver::LanguageRegistry::served();
+        let tree = driver.make_parser().parse(&text, None).unwrap_or_else(|| {
+            eprintln!("Parse failed: {}", path.display());
+            super::exit_with(1, "exit");
+        });
+        let doc = document::Document {
+            stable_outline: document::StableOutline::from_analysis(&analysis),
+            text,
+            tree,
+            analysis: std::sync::Arc::clone(&analysis),
+            language: driver.id(),
+            baseline_surface: None,
+            path: Some(path.to_path_buf()),
+        };
+        ws.insert_open(url.clone(), doc);
+        let key = file_store::FileKey::Url(url.clone());
+        (Self { ws, url }, analysis, key)
     }
 }
 
-impl Drop for ScopedWorkspaceEntry<'_> {
+impl Drop for ScopedOpenDoc<'_> {
     fn drop(&mut self) {
-        match self.prior.take() {
-            Some(arc) => self.ws.insert_workspace_arc(self.path.clone(), arc),
-            None => self.ws.remove_workspace(&self.path),
-        }
+        self.ws.close(&self.url);
     }
 }
 
@@ -423,11 +426,9 @@ fn run_one(
             // Print EVERY offered location (one per line), ranked as
             // returned — macro variants config-active first (labels shown),
             // a domain-typed field decl FIRST then its domain enum def.
-            let _staged = ScopedWorkspaceEntry::insert(ws, abs.clone(), analysis);
-            let origin = ws.workspace_raw().get(&abs).map(|r| r.value().clone())
-                .expect("origin staged above");
+            let (_staged, origin, origin_key) = ScopedOpenDoc::stage(ws, &abs, std::sync::Arc::new(analysis));
             let cs = resolve::resolve(
-                ws, &origin, file_store::FileKey::Path(abs), point,
+                ws, &origin, origin_key, point,
                 Some(base_idx), resolve::OverrideScope::default(),
             )
             .with_source(&source);
@@ -481,11 +482,9 @@ fn run_one(
             // shape as the LSP handler, so CLI and editor answers can't
             // diverge. Pack routing + the origin's closure scope are
             // construction facts on the set.
-            let _staged = ScopedWorkspaceEntry::insert(ws, file_path.clone(), analysis);
-            let origin = ws.workspace_raw().get(&file_path).map(|r| r.value().clone())
-                .expect("origin staged above");
+            let (_staged, origin, origin_key) = ScopedOpenDoc::stage(ws, &file_path, std::sync::Arc::new(analysis));
             let cs = resolve::resolve(
-                ws, &origin, file_store::FileKey::Path(file_path), point,
+                ws, &origin, origin_key, point,
                 Some(base_idx), override_scope_from_env(),
             );
             for loc in cs.references() {
@@ -510,11 +509,9 @@ fn run_one(
             // Same store routing as the LSP handler, so the CLI mirror can't
             // diverge: the domain bridge (enum def → field-slot sites) and
             // the family/spec walks are one projection.
-            let _staged = ScopedWorkspaceEntry::insert(ws, file_path.clone(), analysis);
-            let origin = ws.workspace_raw().get(&file_path).map(|r| r.value().clone())
-                .expect("origin staged above");
+            let (_staged, origin, origin_key) = ScopedOpenDoc::stage(ws, &file_path, std::sync::Arc::new(analysis));
             let cs = resolve::resolve(
-                ws, &origin, file_store::FileKey::Path(file_path), point,
+                ws, &origin, origin_key, point,
                 Some(idx), resolve::OverrideScope::default(),
             );
             for loc in cs.implementations() {
@@ -535,11 +532,9 @@ fn run_one(
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
             // Same store routing + staging as goto-def; the projection is the
             // type axis of the same set (value type → dispatch class → def).
-            let _staged = ScopedWorkspaceEntry::insert(ws, abs.clone(), analysis);
-            let origin = ws.workspace_raw().get(&abs).map(|r| r.value().clone())
-                .expect("origin staged above");
+            let (_staged, origin, origin_key) = ScopedOpenDoc::stage(ws, &abs, std::sync::Arc::new(analysis));
             let cs = resolve::resolve(
-                ws, &origin, file_store::FileKey::Path(abs), point,
+                ws, &origin, origin_key, point,
                 Some(idx), resolve::OverrideScope::default(),
             )
             .with_source(&s);
@@ -561,11 +556,9 @@ fn run_one(
             resolve_imports_blocking(idx, &analysis);
             analysis.enrich_imported_types_with_keys(Some(idx));
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
-            let _staged = ScopedWorkspaceEntry::insert(ws, abs.clone(), analysis);
-            let origin = ws.workspace_raw().get(&abs).map(|r| r.value().clone())
-                .expect("origin staged above");
+            let (_staged, origin, origin_key) = ScopedOpenDoc::stage(ws, &abs, std::sync::Arc::new(analysis));
             let cs = resolve::resolve(
-                ws, &origin, file_store::FileKey::Path(abs), point,
+                ws, &origin, origin_key, point,
                 Some(idx), resolve::OverrideScope::default(),
             );
             let is_type = req.q == "type-hierarchy";
@@ -649,11 +642,9 @@ fn run_one(
                 let lang = driver.id();
                 let abs = std::fs::canonicalize(file)
                     .unwrap_or_else(|_| std::path::PathBuf::from(file));
-                let _staged = ScopedWorkspaceEntry::insert(ws, abs.clone(), analysis);
-                let origin = ws.workspace_raw().get(&abs).map(|r| r.value().clone())
-                    .expect("origin staged above");
+                let (_staged, origin, origin_key) = ScopedOpenDoc::stage(ws, &abs, std::sync::Arc::new(analysis));
                 let cs = resolve::resolve(
-                    ws, &origin, file_store::FileKey::Path(abs), point,
+                    ws, &origin, origin_key, point,
                     Some(idx), resolve::OverrideScope::default(),
                 )
                 .with_source(&source);
@@ -668,11 +659,9 @@ fn run_one(
             // fallback are both reachable here or in neither.
             let abs = std::fs::canonicalize(file)
                 .unwrap_or_else(|_| std::path::PathBuf::from(file));
-            let _staged = ScopedWorkspaceEntry::insert(ws, abs.clone(), analysis);
-            let origin = ws.workspace_raw().get(&abs).map(|r| r.value().clone())
-                .expect("origin staged above");
+            let (_staged, origin, origin_key) = ScopedOpenDoc::stage(ws, &abs, std::sync::Arc::new(analysis));
             let cs = resolve::resolve(
-                ws, &origin, file_store::FileKey::Path(abs), point,
+                ws, &origin, origin_key, point,
                 Some(idx), resolve::OverrideScope::default(),
             )
             .with_source(&source);
@@ -761,14 +750,12 @@ fn run_one(
             let doc = cli_open_document(file, idx);
             // Same construction as the LSP handler (process index, origin
             // key): highlights is the set's origin-narrowed projection.
-            // Staging classifies the origin as workspace tier, matching how
-            // the references verb attributes the queried file.
             let abs = std::fs::canonicalize(file)
                 .unwrap_or_else(|_| std::path::PathBuf::from(file));
-            let _staged = ScopedWorkspaceEntry::insert_arc(
-                ws, abs.clone(), std::sync::Arc::clone(&doc.analysis));
+            let (_staged, origin, origin_key) =
+                ScopedOpenDoc::stage(ws, &abs, std::sync::Arc::clone(&doc.analysis));
             let cs = resolve::resolve(
-                ws, &doc.analysis, file_store::FileKey::Path(abs), point,
+                ws, &origin, origin_key, point,
                 Some(idx), override_scope_from_env(),
             );
             let highlights = symbols::document_highlights(&cs);
@@ -792,10 +779,10 @@ fn run_one(
                 .unwrap_or_else(|_| file.to_string());
             let abs = std::fs::canonicalize(file)
                 .unwrap_or_else(|_| std::path::PathBuf::from(file));
-            let _staged = ScopedWorkspaceEntry::insert_arc(
-                ws, abs.clone(), std::sync::Arc::clone(&doc.analysis));
+            let (_staged, origin, origin_key) =
+                ScopedOpenDoc::stage(ws, &abs, std::sync::Arc::clone(&doc.analysis));
             let cs = resolve::resolve(
-                ws, &doc.analysis, file_store::FileKey::Path(abs), point,
+                ws, &origin, origin_key, point,
                 Some(idx), override_scope_from_env(),
             );
             match symbols::linked_editing_ranges(&cs) {
@@ -883,23 +870,7 @@ fn run_one(
             // rows-guaranteed and answer from the store.
             let mut covered: std::collections::HashSet<std::path::PathBuf> =
                 std::collections::HashSet::new();
-            for entry in ws.workspace_raw().iter() {
-                let file = entry.key().display().to_string();
-                if !entry.value().symbols_are_evicted() {
-                    if let Ok(canon) = std::fs::canonicalize(entry.key()) {
-                        covered.insert(canon);
-                    }
-                    covered.insert(entry.key().clone());
-                }
-                for sym in entry.value().symbols() {
-                    if sym.hidden_in_outline() {
-                        continue;
-                    }
-                    push(&sym.name, &sym.kind, file.clone(), sym.selection_span);
-                }
-            }
-            // A pack language's files live in the index, not the FileStore.
-            idx.for_each_pack_registered_file(&mut |cached| {
+            idx.for_each_registered_file(&mut |cached| {
                 let (path, analysis) = (cached.path.as_path(), &cached.analysis);
                 let file = path.display().to_string();
                 if !analysis.symbols_are_evicted() {
@@ -938,7 +909,7 @@ fn run_one(
             // `run_rename` directly and passes the input dialect instead.
             run_rename(ws, idx, file, point, &new_name, CoordFmt::ZeroBasedByte)
         }
-        "diagnostics" => Ok(batch_diagnostics(ws, idx)),
+        "diagnostics" => Ok(batch_diagnostics(idx)),
         other => Err(format!("unknown query: {}", other)),
     }
 }
@@ -1066,11 +1037,9 @@ fn run_rename(
     // Same shape as the LSP handler: stage the origin, construct the set
     // once, project the rename — the per-arm policy (cross-file vs group vs
     // single-file, rewritability, the pack full-or-refuse) lives on the set.
-    let _staged = ScopedWorkspaceEntry::insert(ws, file_path.clone(), analysis);
-    let origin = ws.workspace_raw().get(&file_path).map(|r| r.value().clone())
-        .expect("origin staged above");
+    let (_staged, origin, origin_key) = ScopedOpenDoc::stage(ws, &file_path, std::sync::Arc::new(analysis));
     let cs = resolve::resolve(
-        ws, &origin, file_store::FileKey::Path(file_path), point,
+        ws, &origin, origin_key, point,
         Some(idx), override_scope_from_env(),
     );
     if cs.resolution().is_none() {
@@ -1099,12 +1068,11 @@ fn run_rename(
 /// Collected form for callers that need the whole set at once (`--batch`
 /// diagnostics answers one JSON payload per request by protocol).
 fn enriched_tree_diagnostics(
-    ws: &file_store::FileStore,
     idx: &module_index::ModuleIndex,
     options: symbols::DiagnosticOptions,
 ) -> Vec<(String, tower_lsp::lsp_types::Diagnostic)> {
     let mut all = Vec::new();
-    for_each_enriched_diagnostic(ws, idx, options, &mut |file, d| {
+    for_each_enriched_diagnostic(idx, options, &mut |file, d| {
         all.push((file.to_string(), d));
     });
     all
@@ -1238,7 +1206,6 @@ fn sweep_one_file(
 /// — a 0-byte output file at hour two answers "has anything been
 /// PRINTED", not "has anything been found").
 fn for_each_enriched_diagnostic(
-    ws: &file_store::FileStore,
     idx: &module_index::ModuleIndex,
     options: symbols::DiagnosticOptions,
     emit: &mut dyn FnMut(&str, tower_lsp::lsp_types::Diagnostic),
@@ -1246,12 +1213,17 @@ fn for_each_enriched_diagnostic(
     // Snapshot before working: values are `Arc`s, so this is a pointer copy
     // per file, and it releases the DashMap shard guards an `iter()` would
     // otherwise hold closed to writers for the whole sweep.
+    // A pack language's files take `pack_diagnostics` instead (below) —
+    // the backend's language dispatch, on the process's one language.
+    let hub = language_driver::LanguageRegistry::served().caps().hub_enrichment;
     let _g_snap = crate::util::timings::PhaseGuard::start("cli::diag_snapshot");
-    let entries: Vec<(std::path::PathBuf, std::sync::Arc<file_analysis::FileAnalysis>)> = ws
-        .workspace_raw()
-        .iter()
-        .map(|e| (e.key().clone(), std::sync::Arc::clone(e.value())))
-        .collect();
+    let mut entries: Vec<(std::path::PathBuf, std::sync::Arc<file_analysis::FileAnalysis>)> =
+        Vec::new();
+    if hub {
+        idx.for_each_registered_file(&mut |cm| {
+            entries.push((cm.path.clone(), std::sync::Arc::clone(&cm.analysis)));
+        });
+    }
     // Streaming survives the parallelism: workers send as each file finishes
     // and the calling thread drains, so `--check` still produces output
     // THROUGHOUT the run rather than buffering it into a final print a
@@ -1348,12 +1320,14 @@ fn for_each_enriched_diagnostic(
         peak_pending.load(std::sync::atomic::Ordering::Relaxed).max(0) as u64,
     );
 
-    // Pack-language files (C++/…) live in the index, not the `FileStore`
-    // above. Mirror the backend's language dispatch: they
-    // get `pack_diagnostics` (Mode B — member-op swap + peel), so `--batch
-    // diagnostics` / `--check` / gold see the same Mode-B answers the LSP
-    // publishes. No enrichment (pack files aren't cross-file-enriched).
-    idx.for_each_pack_registered_file(&mut |cm| {
+    // Pack-language files (C++/…) get `pack_diagnostics` (Mode B —
+    // member-op swap + peel), so `--batch diagnostics` / `--check` / gold
+    // see the same Mode-B answers the LSP publishes. No enrichment (pack
+    // files aren't cross-file-enriched).
+    if hub {
+        return;
+    }
+    idx.for_each_registered_file(&mut |cm| {
         let file = cm.path.display().to_string();
         // Same whole-view routing: pack index copies are evicted.
         let whole = file_analysis::CrossFileLookup::whole_present(idx, cm);
@@ -1366,10 +1340,10 @@ fn for_each_enriched_diagnostic(
 /// Whole-tree diagnostics as the pretty-JSON array string (warning+; shared by
 /// `--batch` diagnostics requests). Mirrors `cli_check`'s JSON path.
 
-fn batch_diagnostics(ws: &file_store::FileStore, idx: &module_index::ModuleIndex) -> String {
+fn batch_diagnostics(idx: &module_index::ModuleIndex) -> String {
     let options = symbols::DiagnosticOptions::default();
     let mut all = Vec::new();
-    for (file, d) in enriched_tree_diagnostics(ws, idx, options) {
+    for (file, d) in enriched_tree_diagnostics(idx, options) {
         let sev = match d.severity {
             Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::ERROR => "error",
             Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::WARNING => "warning",
@@ -1414,11 +1388,11 @@ pub(crate) fn cli_batch(root: &str) {
             }
         };
         // Whole-tree diagnostics are request-independent within one
-        // batch process (ScopedWorkspaceEntry restores any staging) —
+        // batch process (ScopedOpenDoc closes any staging) —
         // compute the enriched pass once, replay it for every row.
         let result = if req.q == "diagnostics" {
             Ok(diag_memo
-                .get_or_insert_with(|| batch_diagnostics(&ws, &idx))
+                .get_or_insert_with(|| batch_diagnostics(&idx))
                 .clone())
         } else {
             // The batch protocol's input is engine-native (0-based/byte) and its
@@ -1465,7 +1439,7 @@ pub(crate) fn cli_rename(root: &str, cursor: &[String], new_name: &str) {
 ///
 /// Extracted so the property has a name and a test: this verb must collect
 /// ALL declaring files and order them, never take whichever one an unordered
-/// map yields first. `workspace_raw()` is a `DashMap`, so a `break` on the
+/// map yields first. The registry is a `DashMap`, so a `break` on the
 /// first hit made the answer for any reopened package vary run to run.
 fn order_declaring_files<T>(mut matches: Vec<(String, T)>) -> Vec<(String, T)> {
     matches.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1483,7 +1457,7 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
     use std::sync::Arc;
     use file_analysis::{SymKind, SymbolDetail};
 
-    let (ws, module_index) = cli_full_startup(root);
+    let (_ws, module_index) = cli_full_startup(root);
 
     // Find a FileAnalysis whose package matches. Workspace first; fall
     // back to cached @INC modules. No bespoke discovery — only what
@@ -1491,7 +1465,7 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
     //
     // EVERY match, then sorted — not the first the iteration reaches. A Perl
     // package is open: `PPI::XSAccessor` reopens `PPI::Token`, so two
-    // workspace files declare it, and `workspace_raw()` is a `DashMap` whose
+    // workspace files declare it, and the index's registry is a `DashMap` whose
     // iteration order varies run to run. This verb used to `break` on the
     // first hit, which made its answer for any reopened package a coin flip —
     // `--dump-package PPI::Token` alternated between `Token.pm` and
@@ -1502,20 +1476,16 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
     // project's own measurement notes). A flaky oracle silently launders a
     // real difference into noise, and noise into a real difference.
     let mut matches: Vec<(String, Arc<file_analysis::CachedModule>)> = Vec::new();
-    for entry in ws.workspace_raw().iter() {
-        let cm = std::sync::Arc::new(file_analysis::CachedModule::new(
-            entry.key().clone(),
-            std::sync::Arc::clone(entry.value()),
-        ));
-        let analysis = file_analysis::CrossFileLookup::whole_present(&module_index, &cm);
+    module_index.for_each_registered_file(&mut |cm| {
+        let analysis = file_analysis::CrossFileLookup::whole_present(&module_index, cm);
         let has_package = analysis.symbols().iter().any(|s| {
             matches!(s.kind, SymKind::Package | SymKind::Class)
                 && s.name == package_name
         });
         if has_package {
-            matches.push((entry.key().display().to_string(), cm));
+            matches.push((cm.path.display().to_string(), Arc::clone(cm)));
         }
-    }
+    });
     let matches = order_declaring_files(matches);
     if matches.len() > 1 {
         // Named, not just deduped. A reopened package is exactly the situation

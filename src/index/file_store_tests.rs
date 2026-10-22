@@ -122,63 +122,14 @@ fn enrich_open_leaves_pack_docs_untouched() {
 }
 
 #[test]
-fn test_open_then_close_demotes_to_workspace() {
+fn test_close_forgets_the_document() {
     let store = FileStore::new();
-    let url = Url::parse("file:///tmp/demote_test.pm").unwrap();
+    let url = Url::parse("file:///tmp/close_test.pm").unwrap();
 
     assert!(store.open(url.clone(), "package Foo; 1;\n".to_string()));
     assert_eq!(store.open_count(), 1);
-    assert_eq!(store.workspace_count(), 0);
 
     store.close(&url);
     assert_eq!(store.open_count(), 0);
-    assert_eq!(store.workspace_count(), 1);
-}
-
-#[test]
-fn test_open_shadows_workspace_for_same_path() {
-    let store = FileStore::new();
-    let path = PathBuf::from("/tmp/shadow_test.pm");
-    let url = Url::from_file_path(&path).unwrap();
-
-    // Pre-populate as workspace.
-    let analysis = {
-        let src = "package Stale; 1;\n";
-        let mut parser = crate::build::builder::create_parser();
-        let tree = parser.parse(src, None).unwrap();
-        crate::build::builder::build(&tree, src.as_bytes())
-    };
-    store.insert_workspace(path.clone(), analysis);
-    assert_eq!(store.workspace_count(), 1);
-
-    // Opening the same path removes the workspace entry.
-    assert!(store.open(url.clone(), "package Fresh; 1;\n".to_string()));
-    assert_eq!(store.open_count(), 1);
-    assert_eq!(store.workspace_count(), 0);
-
-    // for_each_analysis yields exactly one entry (the open one).
-    let mut count = 0;
-    store.for_each_analysis(|_, _| count += 1);
-    assert_eq!(count, 1);
-}
-
-#[test]
-fn test_insert_workspace_skipped_when_already_open() {
-    let store = FileStore::new();
-    let path = PathBuf::from("/tmp/skip_test.pm");
-    let url = Url::from_file_path(&path).unwrap();
-
-    store.open(url, "package Open; 1;\n".to_string());
-
-    // Try to insert workspace entry for the same path — should be ignored.
-    let analysis = {
-        let src = "package Workspace; 1;\n";
-        let mut parser = crate::build::builder::create_parser();
-        let tree = parser.parse(src, None).unwrap();
-        crate::build::builder::build(&tree, src.as_bytes())
-    };
-    store.insert_workspace(path, analysis);
-
-    assert_eq!(store.open_count(), 1);
-    assert_eq!(store.workspace_count(), 0, "workspace insert should be skipped");
+    assert!(store.get_open(&url).is_none());
 }
