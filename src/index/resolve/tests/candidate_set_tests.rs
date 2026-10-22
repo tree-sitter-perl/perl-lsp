@@ -9,13 +9,13 @@ use super::*;
 /// projections must agree with each other: rename is the references image
 /// (minus policy-excluded sites), never an independent walk.
 fn candidate_fixture() -> (
-    FileStore,
+    OpenDocs,
     crate::index::module_index::ModuleIndex,
     std::sync::Arc<FileAnalysis>,
     PathBuf,
     PathBuf,
 ) {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_a = PathBuf::from("/tmp/cs_test_a.pm");
     let path_b = PathBuf::from("/tmp/cs_test_b.pm");
@@ -172,7 +172,7 @@ fn candidate_set_visibility_axis_flows_to_every_projection() {
 /// machinery — handlers no longer branch on resolution shape themselves.
 #[test]
 fn candidate_set_local_projections() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let src = "my $count = 0;\n$count++;\nprint $count;\n";
     let fa = parse(src);
     let key = FileKey::Path(PathBuf::from("/tmp/cs_local.pl"));
@@ -196,7 +196,7 @@ fn candidate_set_local_projections() {
 /// corrupt the affix, exactly as rename re-derives rather than bare-writes.
 #[test]
 fn candidate_set_highlights_and_linked_editing_at_field_group_cursor() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let src = "\
 package Widget;
 use Moo;
@@ -259,7 +259,7 @@ print $w->size;
 /// definitions() lands on the decl in the origin file.
 #[test]
 fn candidate_set_definitions_local() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let src = "sub greet { 1 }\ngreet();\n";
     let fa = parse(src);
     let key = FileKey::Path(PathBuf::from("/tmp/cs_defs.pl"));
@@ -294,7 +294,7 @@ fn complete_qualified_path_pack_gathers_owner_members_only() {
                    fmtx::f\n\
                }\n";
     let fa = driver.analyze_with_path(src, Some(std::path::Path::new("/fake/use.cpp")));
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let cs = resolve(
         &store,
@@ -374,7 +374,7 @@ fn collect_from_analysis_still_finds_sub_refs_after_scope_hardening() {
         def_paths: Vec::new(),
         bare_constant: false, member_kind: None,
     };
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/resolve_test_scope_hardening.pm");
     idx.insert_workspace_for_test(path.clone(), fa);
@@ -401,7 +401,7 @@ fn goto_def_agrees_with_references_on_inherited_slot() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let widget = PathBuf::from("/tmp/cs_inh_widget.pm");
     let gadget = PathBuf::from("/tmp/cs_inh_gadget.pm");
     let widget_src = "package Widget;\nuse Moo;\nhas size => (is => 'ro');\nhas color => (is => 'ro');\n1;\n";
@@ -455,7 +455,7 @@ fn goto_def_agrees_with_references_on_template_method() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let base = PathBuf::from("/tmp/cs_tmpl_base.pm");
     let child = PathBuf::from("/tmp/cs_tmpl_child.pm");
     let base_src = "package Base;\nsub run {\n    my $self = shift;\n    return $self->step_one() + 1;\n}\n1;\n";

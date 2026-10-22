@@ -143,7 +143,7 @@ Deliberately NOT on the set (the seam's edge, kept honest):
   Completion has no resolved target for `references_mask_for` to judge, so
   its default visibility is the full VISIBLE universe; the construction
   override narrows it like every other projection.
-- Projections only READ the stores (`FileStore::for_each_open`), so an LSP
+- Projections only READ the stores (`OpenDocs::for_each_open`), so an LSP
   handler may hold its open-doc guard across a projection — the old
   `drop(doc)`-before-walking discipline (a deadlock trap) is gone.
 - Each projection reproduces the exact composition of the verb it serves.

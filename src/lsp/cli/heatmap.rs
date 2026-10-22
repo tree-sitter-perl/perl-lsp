@@ -43,7 +43,7 @@ fn heatmap_symbol_eligible(sym: &file_analysis::Symbol) -> bool {
 /// over-approximate real references.
 #[allow(clippy::too_many_arguments)]
 fn heatmap_symbol_row(
-    ws: &file_store::FileStore,
+    ws: &open_docs::OpenDocs,
     routing_idx: &dyn file_analysis::CrossFileLookup,
     path: &std::path::Path,
     analysis: &file_analysis::FileAnalysis,
@@ -80,7 +80,7 @@ fn heatmap_symbol_row(
             let mut cs = crate::util::ghost_stats::timed("heatmap.mint", || resolve::resolve(
                 ws,
                 analysis,
-                file_store::FileKey::Path(path.to_path_buf()),
+                open_docs::FileKey::Path(path.to_path_buf()),
                 sym.selection_span.start,
                 Some(routing_idx),
                 scope,
@@ -92,13 +92,13 @@ fn heatmap_symbol_row(
                 .filter(|l| l.access != AccessKind::Declaration)
                 .filter(|l| {
                     !(l.span == sym.selection_span
-                        && matches!(&l.key, file_store::FileKey::Path(p) if p == path))
+                        && matches!(&l.key, open_docs::FileKey::Path(p) if p == path))
                 })
                 .count();
             let cross_file = locs
                 .iter()
                 .filter(|l| l.access != AccessKind::Declaration)
-                .filter(|l| !matches!(&l.key, file_store::FileKey::Path(p) if p == path))
+                .filter(|l| !matches!(&l.key, open_docs::FileKey::Path(p) if p == path))
                 .count();
             (fan_in, cross_file)
         }
@@ -244,7 +244,7 @@ pub(crate) fn cli_refs_parity(root: &str, sample: Option<usize>) {
         .unwrap_or(1);
     let mut checked = 0usize;
     let mut mismatched = 0usize;
-    let mut check = |ws: &file_store::FileStore,
+    let mut check = |ws: &open_docs::OpenDocs,
                      routing: &dyn file_analysis::CrossFileLookup,
                      path: &std::path::Path,
                      analysis: &file_analysis::FileAnalysis,
@@ -265,7 +265,7 @@ pub(crate) fn cli_refs_parity(root: &str, sample: Option<usize>) {
             let mut cs = resolve::resolve(
                 ws,
                 analysis,
-                file_store::FileKey::Path(path.to_path_buf()),
+                open_docs::FileKey::Path(path.to_path_buf()),
                 sym.selection_span.start,
                 Some(routing),
                 scope,

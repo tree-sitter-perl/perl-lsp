@@ -2,7 +2,7 @@
 //! helpers, usage text, and the utility commands `main()` dispatches to.
 
 use crate::build::{language_driver, plugin};
-use crate::index::{document, file_store, module_cache, module_index, module_resolver, resolve};
+use crate::index::{document, open_docs, module_cache, module_index, module_resolver, resolve};
 use crate::lsp::{backend, symbols};
 use crate::model::{conventions, file_analysis, witnesses};
 use crate::util::timings;
@@ -285,7 +285,7 @@ fn canonical_root_and_uri(root: &str) -> (std::path::PathBuf, String) {
 /// minus the resolver thread (one-shot, synchronous). Used by every
 /// CLI command that needs cross-file resolution to behave like the
 /// running server.
-fn cli_full_startup(root: &str) -> (file_store::FileStore, module_index::ModuleIndex) {
+fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleIndex) {
     // `--check --timings` already flipped this on; the env var lets any
     // startup-driven CLI mode (dump-package, etc.) opt in too.
     timings::enable_from_env();
@@ -294,7 +294,7 @@ fn cli_full_startup(root: &str) -> (file_store::FileStore, module_index::ModuleI
     // cache keys on, before the first build() (workspace indexing) fires.
     plugin::rhai_host::set_workspace_root(Some(&root_uri));
 
-    // Register workspace files INTO the module index (not just a FileStore)
+    // Register workspace files INTO the module index (not just a OpenDocs)
     // so their plugin bridges + package names participate in cross-file
     // lookups — the whole point of "act like the server just started".
     // Indexing without the index (bridge-less) is what forced callers to
@@ -304,7 +304,7 @@ fn cli_full_startup(root: &str) -> (file_store::FileStore, module_index::ModuleI
     // Wake the headless resolver: it blocks on this channel for the
     // @INC scan + SQLite warm.
     module_index.set_workspace_root(Some(root_uri.as_str()));
-    let ws = file_store::FileStore::new();
+    let ws = open_docs::OpenDocs::new();
     // Only the served language's tree is walked — the same choice the
     // server's `didOpen` latch makes.
     let served = language_driver::LanguageRegistry::served();

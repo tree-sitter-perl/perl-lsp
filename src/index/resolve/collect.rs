@@ -696,7 +696,7 @@ fn editable_copy_satisfies(
 /// surface. "Find references" on a project symbol must not scan CPAN —
 /// see the file-store ADR's RoleMask discipline.
 pub fn references_mask_for(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     target: &TargetRef,
 ) -> RoleMask {

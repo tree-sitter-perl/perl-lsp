@@ -14,7 +14,7 @@ pub(super) fn parse(source: &str) -> FileAnalysis {
 
 #[test]
 fn test_refs_to_finds_sub_across_workspace_files() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_a = PathBuf::from("/tmp/resolve_test_a.pm");
     let path_b = PathBuf::from("/tmp/resolve_test_b.pm");
@@ -65,7 +65,7 @@ fn test_refs_to_finds_sub_across_workspace_files() {
 /// out to the def under `refs_to`.
 #[test]
 fn test_refs_to_exporter_extensible_cross_file() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_a = PathBuf::from("/tmp/resolve_ext_a.pm");
     let path_b = PathBuf::from("/tmp/resolve_ext_b.pm");
@@ -106,7 +106,7 @@ fn test_refs_to_exporter_extensible_cross_file() {
 /// Exporter::Declare: `default_export name => sub {}` registers exports.
 #[test]
 fn test_refs_to_exporter_declare_cross_file() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_a = PathBuf::from("/tmp/resolve_decl_a.pm");
     let path_b = PathBuf::from("/tmp/resolve_decl_b.pm");
@@ -147,7 +147,7 @@ fn test_refs_to_exporter_declare_cross_file() {
 /// from Src — the call must fan out to Src's def, not stop at Importer.
 #[test]
 fn test_refs_to_importer_consumer_cross_file() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_a = PathBuf::from("/tmp/resolve_imp_src.pm");
     let path_b = PathBuf::from("/tmp/resolve_imp_consumer.pm");
@@ -188,7 +188,7 @@ fn test_refs_to_importer_consumer_cross_file() {
 /// must not register phantom exports that pollute cross-file refs.
 #[test]
 fn test_refs_to_export_not_registered_without_use() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_a = PathBuf::from("/tmp/resolve_noexport.pm");
     let fa_a = parse("package Plain;\nsub export {}\nexport('phantom');\n1;\n");
@@ -216,7 +216,7 @@ fn test_refs_to_export_not_registered_without_use() {
 /// Route target is `Users::create`. They only share a name.
 #[test]
 fn refs_to_helper_leaf_excludes_unrelated_route_with_same_method_name() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/helper_route_overlap.pm");
 
@@ -294,7 +294,7 @@ $app->routes->post('/users')->to(controller => 'Users', action => 'create');
 /// `Bar::run`. gr on Foo's run must not union with Bar's.
 #[test]
 fn refs_to_method_is_class_scoped_plain_packages() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/two_classes_same_method.pm");
 
@@ -400,7 +400,7 @@ $b->run;
 /// divergence — the edge is frozen once per build.
 #[test]
 fn refs_to_method_excludes_untyped_invocant_includes_self() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/nav_untyped_invocant.pm");
 
@@ -464,7 +464,7 @@ sub run {
 /// frozen edge. Guards against the unification dropping valid matches.
 #[test]
 fn refs_to_method_typed_same_file_invocant_resolves_fully() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/nav_typed_invocant.pm");
 
@@ -582,7 +582,7 @@ $x->frob;
 /// and Bler.
 #[test]
 fn refs_to_method_is_class_scoped_corinna() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/corinna_classes.pm");
 
@@ -852,7 +852,7 @@ $b->run;
     );
 
     // Move `fa` into the store for the refs_to walk.
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/lsp_paths_fixture.pm");
     idx.insert_workspace_for_test(path.clone(), fa);
@@ -990,7 +990,7 @@ hi();
         _ => Vec::new(),
     };
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/sub_import_fixture.pm");
     idx.insert_workspace_for_test(path.clone(), fa);
@@ -1118,7 +1118,7 @@ sub create { }
     // query time; an (empty) index hands the highlights projection the plugin
     // resolver, which finds the local `package Users` owning `create`.
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let highlights_at = |pt: tree_sitter::Point| {
         resolve(
             &store,
@@ -1195,7 +1195,7 @@ fn references_cross_file_method_respects_class_scope() {
     use crate::model::file_analysis::RenameKind;
     use tree_sitter::Parser;
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let parse_build = |source: &str| {
         let mut parser = Parser::new();
@@ -1336,7 +1336,7 @@ $u->create(name => 'alice');
 
 #[test]
 fn test_refs_to_empty_when_no_hits() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let fa = parse("package Only;\nsub bar { 1 }\n1;\n");
     idx.insert_workspace_for_test(PathBuf::from("/tmp/resolve_no_hits.pm"), fa);
@@ -1366,7 +1366,7 @@ fn test_refs_to_empty_when_no_hits() {
 /// refs_by_target) will close the cross-file consumer-access case.
 #[test]
 fn test_refs_to_finds_hash_key_def_and_access_same_file() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/resolve_hash_same.pm");
 
@@ -1405,7 +1405,7 @@ fn test_refs_to_finds_hash_key_def_and_access_same_file() {
 /// enrichment to run in the consumer's FileAnalysis.
 #[test]
 fn test_refs_to_finds_cross_file_hash_key_def() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_lib = PathBuf::from("/tmp/resolve_hash_cross_lib.pm");
 
@@ -1442,7 +1442,7 @@ fn test_refs_to_finds_cross_file_hash_key_def() {
 /// matching package's def does.
 #[test]
 fn test_refs_to_package_qualified_sub_owner_isolates_name_collisions() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_a = PathBuf::from("/tmp/resolve_pkg_a.pm");
     let path_b = PathBuf::from("/tmp/resolve_pkg_b.pm");
@@ -1491,7 +1491,7 @@ fn test_refs_to_package_qualified_sub_owner_isolates_name_collisions() {
 /// `resolved_package` qualifier pins package A.
 #[test]
 fn test_refs_to_qualified_call_resolves_to_def() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_a = PathBuf::from("/tmp/resolve_qual_a.pm");
     let path_b = PathBuf::from("/tmp/resolve_qual_b.pm");
@@ -1537,7 +1537,7 @@ fn test_refs_to_qualified_call_resolves_to_def() {
 /// `foo` in package C — `resolved_package` isolates the qualifier.
 #[test]
 fn test_refs_to_qualified_call_isolates_package() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_b = PathBuf::from("/tmp/resolve_qual_iso_b.pm");
 
@@ -1568,7 +1568,7 @@ fn test_refs_to_qualified_call_isolates_package() {
 
 #[test]
 fn test_refs_to_role_mask_excludes_workspace() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let fa = parse("package P;\nsub foo {}\n1;\n");
     idx.insert_workspace_for_test(PathBuf::from("/tmp/masked.pm"), fa);
@@ -1667,11 +1667,11 @@ $b->touch();
         b_type,
     );
 
-    // Build a FileStore over both files. `refs_to` reads
+    // Build a OpenDocs over both files. `refs_to` reads
     // `invocant_class` directly off the consumer's MethodCall ref —
     // that field was populated at consumer-build time when B's types
     // weren't yet known.
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     idx.insert_workspace_for_test(producer_path, parse(producer_src));
     idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa);
 
@@ -1734,7 +1734,7 @@ $b->touch();
     // The origin rides a real tier (here WORKSPACE), as every queried
     // document does — a tierless origin is admitted by no mask.
     let consumer_path = PathBuf::from("/tmp/highlights_xfile_consumer.pl");
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa.clone());
     let highlights = resolve(
         &store,
@@ -1809,7 +1809,7 @@ $x->ping();
         x_type,
     );
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     idx.insert_workspace_for_test(parent_path, parse(parent_src));
     idx.insert_workspace_for_test(child_path, parse(child_src));
     idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa);
@@ -1867,7 +1867,7 @@ sub touch  { 1 }
 1;
 "#;
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = ModuleIndex::new_for_test();
     let producer_path = PathBuf::from("/tmp/bench_b.pm");
     idx.register_workspace_module(producer_path.clone(), Arc::new(parse(producer_src)));
@@ -1984,7 +1984,7 @@ $x->makeFoo()->ping();
         x_type,
     );
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     idx.insert_workspace_for_test(producer_path, parse(producer_src));
     idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa);
 
@@ -2053,7 +2053,7 @@ $x->makeFoo()->ping();
     // The origin rides a real tier (here WORKSPACE), as every queried
     // document does — a tierless origin is admitted by no mask.
     let consumer_path = PathBuf::from("/tmp/highlights_chain_consumer.pl");
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa.clone());
     let highlights = resolve(
         &store,
@@ -2088,7 +2088,7 @@ $x->makeFoo()->ping();
 /// on for "go to references on a minion task".
 #[test]
 fn refs_to_handler_fans_out_across_files() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_reg = PathBuf::from("/tmp/resolve_minion_reg.pm");
     let path_call = PathBuf::from("/tmp/resolve_minion_call.pm");
@@ -2152,7 +2152,7 @@ fn refs_to_handler_finds_dispatch_in_unenriched_cross_file_subclass() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = ModuleIndex::new_for_test();
     idx.set_workspace_root(None);
 
@@ -2220,7 +2220,7 @@ sub fire {\n  my $self = shift;\n  my $minion = My::Minion->new;\n  $minion->enq
 /// same as a `@EXPORT_OK` sub. Models the export so the import resolves.
 #[test]
 fn refs_to_fans_runtime_exported_sub_to_consumer() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_def = PathBuf::from("/tmp/runtime_export_def.pm");
     let path_use = PathBuf::from("/tmp/runtime_export_use.pm");
@@ -2278,7 +2278,7 @@ fn refs_to_links_implicit_export_to_bare_use_consumer() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let def = PathBuf::from("/tmp/impl_export_def.pm");
     let consumer = PathBuf::from("/tmp/impl_export_use.pl");
 
@@ -2326,7 +2326,7 @@ fn refs_to_links_return_hash_key_cross_file() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let prod = PathBuf::from("/tmp/rk_cfg.pm");
     let cons = PathBuf::from("/tmp/rk_consumer.pl");
 
@@ -2381,7 +2381,7 @@ fn refs_to_links_return_hash_key_cross_file() {
 /// `refs_to`, the single path both backend and CLI now share.
 #[test]
 fn references_cross_file_sub_fans_out_and_stays_package_scoped() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let def = PathBuf::from("/tmp/xsub_def.pm");
     let caller1 = PathBuf::from("/tmp/xsub_c1.pm");
@@ -2456,7 +2456,7 @@ fn references_cross_file_method_matches_inheriting_invocant() {
     idx.register_workspace_module(role_path.clone(), Arc::new(parse(role_src)));
     idx.register_workspace_module(child_path.clone(), Arc::new(parse(child_src)));
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     idx.insert_workspace_for_test(role_path.clone(), parse(role_src));
     idx.insert_workspace_for_test(child_path.clone(), parse(child_src));
     idx.insert_workspace_for_test(decoy_path.clone(), parse(decoy_src));
@@ -2488,7 +2488,7 @@ fn references_cross_file_method_matches_inheriting_invocant() {
 /// @INC; a target with no editable declaration widens to VISIBLE.
 #[test]
 fn references_mask_scopes_to_editable_for_project_symbols() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let def = PathBuf::from("/tmp/mask_def.pm");
     idx.insert_workspace_for_test(

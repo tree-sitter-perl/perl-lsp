@@ -25,7 +25,7 @@ pub enum FileRole {
     /// Project file, not currently open.
     Workspace,
     /// @INC module. (Managed by ModuleIndex; this variant is reserved for
-    /// the phase 3/4 merge that folds deps into FileStore.)
+    /// the phase 3/4 merge that folds deps into OpenDocs.)
     Dependency,
     /// Pre-seeded built-in symbols (future).
     BuiltIn,
@@ -40,7 +40,7 @@ pub enum FileKey {
 }
 
 /// The unified store.
-pub struct FileStore {
+pub struct OpenDocs {
     /// Open files, keyed by URL. Each carries a full Document.
     open: DashMap<Url, Document>,
     /// The driver every opened file is analyzed by — the process's served
@@ -48,13 +48,13 @@ pub struct FileStore {
     driver: &'static dyn crate::build::language_driver::LanguageDriver,
 }
 
-impl Default for FileStore {
+impl Default for OpenDocs {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl FileStore {
+impl OpenDocs {
     /// A store for the process's served language.
     pub fn new() -> Self {
         Self::serving(crate::build::language_driver::LanguageRegistry::served())
@@ -63,7 +63,7 @@ impl FileStore {
     /// A store for `driver`'s language. Production stores serve the process
     /// language (`new`); tests reach a pack language through here.
     pub fn serving(driver: &'static dyn crate::build::language_driver::LanguageDriver) -> Self {
-        FileStore {
+        OpenDocs {
             open: DashMap::new(),
             driver,
         }
@@ -198,5 +198,5 @@ impl FileStore {
 }
 
 #[cfg(test)]
-#[path = "file_store_tests.rs"]
+#[path = "open_docs_tests.rs"]
 mod tests;

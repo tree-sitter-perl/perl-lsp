@@ -213,7 +213,7 @@ which is the non-obvious half (an unchanged header still moved every consumer's
 closure stamp, and skipping the refresh would make the next warm reject every
 consumer row). `is_consumer` stays the single include-closure rule.
 
-**`FileStore::enrich_open`** is the one open-doc writer and holds its
+**`OpenDocs::enrich_open`** is the one open-doc writer and holds its
 contract. It clones off the store lock, enriches, and swaps under a short
 `Arc::ptr_eq` guard, so a concurrent rebuild wins and this derivation is
 dropped. Idempotency is real: `enrich_imported_types_with_keys` truncates
@@ -417,7 +417,7 @@ eviction").
 
 What is genuinely missing is narrower, and worth having the real list:
 
-1. *(Closed: FileStore holds open documents only; the index is the one home
+1. *(Closed: OpenDocs holds open documents only; the index is the one home
    for project files, so unregister has no second map to pair.)*
 2. **`IndexCore.loader_config_shapes` has no removal.** Entries are keyed by
    contributor path string and retired *only* by that contributor

@@ -483,7 +483,7 @@ impl Backend {
     fn heal_open_docs(ctx: &PackHealCtx, want_enrichment: bool) {
         log::debug!("cold-window heal: index landed");
         if want_enrichment {
-            let pending = refresh_open_diagnostics(&ctx.files, &ctx.module_index, ctx.options);
+            let pending = refresh_open_diagnostics(&ctx.open_docs, &ctx.module_index, ctx.options);
             if pending.is_empty() {
                 return;
             }
@@ -495,7 +495,7 @@ impl Backend {
             });
         } else {
             let mut uris: Vec<Url> = Vec::new();
-            ctx.files.for_each_open(|uri, doc| {
+            ctx.open_docs.for_each_open(|uri, doc| {
                 // Only gather-dependent docs have a cold-open window to heal
                 // (a context-free analyze was already full quality).
                 if crate::build::language_driver::LanguageRegistry::caps(doc.language)
@@ -526,9 +526,9 @@ impl Backend {
     /// Bounded by `cold_wait_ms` (0 opts out) so it can never wedge, and on
     /// timeout the handler resolves degraded exactly as before.
     ///
-    /// GUARD DISCIPLINE: holds NO FileStore guard across the await — it touches
+    /// GUARD DISCIPLINE: holds NO OpenDocs guard across the await — it touches
     /// only the `ReadyGate`. Callers snapshot `analysis` fresh AFTER it, picking up any heal (see the hazard note on
-    /// `FileStore::for_each_open`).
+    /// `OpenDocs::for_each_open`).
     /// `WaitPolicy` → millisecond cap. `cold_wait_ms == 0` is the global
     /// "never block" opt-out and wins over any policy.
     fn wait_cap(&self, policy: WaitPolicy) -> u64 {
@@ -568,7 +568,7 @@ impl Backend {
     /// cap) resolves warm on the first pull exactly as before; a pathological
     /// file degrades after the cap and heals once the build lands + republishes.
     ///
-    /// GUARD DISCIPLINE: holds NO FileStore / DashMap guard across the await —
+    /// GUARD DISCIPLINE: holds NO OpenDocs / DashMap guard across the await —
     /// it snapshots the `ReadyGate` Arc out of the `opening` map and drops that
     /// guard before awaiting. Callers snapshot `analysis` fresh AFTER it.
     pub(super) async fn await_open_ready(&self, uri: &Url, policy: WaitPolicy) {
@@ -583,7 +583,7 @@ impl Backend {
         /// (`not_ready_or_null`). `cold_wait_ms == 0` still opts out of
         /// waiting entirely.
         const OPEN_BUILD_WAIT_MS: u64 = 5_000;
-        if self.files.get_open(uri).is_some() {
+        if self.open_docs.get_open(uri).is_some() {
             return; // already built
         }
         let Some(gate) = self.opening.get(uri).map(|n| Arc::clone(n.value())) else {
@@ -596,7 +596,7 @@ impl Backend {
         if matches!(policy, WaitPolicy::Interactive) {
             cap = cap.max(OPEN_BUILD_WAIT_MS);
         }
-        let waited = gate.armed_wait(|| self.files.get_open(uri).is_some());
+        let waited = gate.armed_wait(|| self.open_docs.get_open(uri).is_some());
         if let Some(waited) = waited {
             self.bounded_wait_with_progress(cap, waited, "Waiting for file analysis")
                 .await;

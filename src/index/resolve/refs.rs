@@ -132,7 +132,7 @@ pub(super) fn group_from_projections(
 /// deduped like `refs_to`, and every span covers a bare name token, so a
 /// rename caller can write one replacement text at every location.
 pub fn group_refs(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     origin: &FileKey,
     local_spans: &[Span],
@@ -201,7 +201,7 @@ pub(super) enum WalkScope<'a> {
 /// so the highlights image is the in-file slice of `references()` without
 /// paying the workspace walk per cursor move.
 pub(super) fn refs_to_in_file(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     target: &TargetRef,
     key: &FileKey,
@@ -227,7 +227,7 @@ pub fn is_valid_rename_name(new_name: &str) -> bool {
 /// accessor's decl token IS the group decl the bare edit covers.
 #[allow(clippy::too_many_arguments)]
 pub fn group_rename_edits(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     origin: &FileKey,
     local_spans: &[Span],
@@ -329,7 +329,7 @@ struct RetrievalMemo {
     /// heatmap: 693 files × 8,287 walks, 20.6 s of a 51 s gather).
     dep_files: dashmap::DashMap<(usize, u64), std::sync::Arc<DepFiles>>,
     /// `delegation_aliases`' (alias, delegate, def path) pairs, per index,
-    /// FileStore and dependency-tier admission: the scan reads every file's
+    /// OpenDocs and dependency-tier admission: the scan reads every file's
     /// macro defs and is the same for every walk of a frozen sweep (14.0 s of
     /// the same gather, all of it to find no pairs).
     alias_pairs: dashmap::DashMap<(usize, u64, usize, bool), std::sync::Arc<Vec<AliasPair>>>,
@@ -529,7 +529,7 @@ pub(super) fn matcher_view(
 /// - `files`   — open + workspace store
 /// - `module_index` — dep cache (consulted only if mask includes Dependency)
 pub fn refs_to(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     target: &TargetRef,
     mask: RoleMask,
@@ -543,7 +543,7 @@ pub fn refs_to(
 /// the scope enumerates (see `WalkScope` for the origin scope's two
 /// stated asymmetries).
 fn walk_refs(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     target: &TargetRef,
     mask: RoleMask,
@@ -1063,7 +1063,7 @@ pub(super) struct DelegationAlias {
 /// is gated on the mask so a Perl EDITABLE query never touches the dep cache.
 /// Sorted for deterministic output.
 pub(super) fn delegation_aliases(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     target: &TargetRef,
     mask: RoleMask,
@@ -1101,18 +1101,18 @@ pub(super) fn delegation_aliases(
 }
 
 /// Every macro delegation the walk can see, memoized while a sweep memo is
-/// open. The key carries the FileStore's identity, but nothing tracks its
+/// open. The key carries the OpenDocs's identity, but nothing tracks its
 /// contents: the sweep memo's premise is a world frozen for the run, which
 /// holds for the open docs and workspace files as much as for the index.
 fn alias_pairs(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     mask: RoleMask,
 ) -> std::sync::Arc<Vec<AliasPair>> {
     let dep = mask.contains(RoleMask::DEPENDENCY);
     let memo_key = module_index.map(|idx| {
         let (id, epoch) = index_identity(idx);
-        (id, epoch, files as *const FileStore as usize, dep)
+        (id, epoch, files as *const OpenDocs as usize, dep)
     });
     if let (Some(k), Ok(slot)) = (memo_key, RETRIEVAL_MEMO.read()) {
         if let Some(memo) = slot.as_ref() {
@@ -1128,7 +1128,7 @@ fn alias_pairs(
 }
 
 fn scan_alias_pairs(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     dep: bool,
 ) -> Vec<AliasPair> {
