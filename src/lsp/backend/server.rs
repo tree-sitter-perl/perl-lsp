@@ -294,10 +294,8 @@ impl LanguageServer for Backend {
         }
         let _ = self.client.register_capability(registrations).await;
 
-        // Workspace indexing is LAZY + per-language — the first `did_open` of a
-        // family triggers `ensure_workspace_indexed`, so a C++ session in a
-        // mixed tree never eagerly scans the 4000+ `.pm` files it can't use
-        // (that eager perl scan was the multi-minute first-open stall).
+        // Workspace indexing is LAZY — the first `did_open` triggers
+        // `ensure_workspace_indexed`.
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -355,9 +353,8 @@ impl LanguageServer for Backend {
         let mut needs_gather_refresh = false;
         if opened {
             if let Some(doc) = self.files.get_open(&uri) {
-                // Lazily index this file's language family (once) so a C++
-                // open doesn't wait on the perl tree.
-                self.ensure_workspace_indexed(&doc.language);
+                // Lazily index the workspace (once).
+                self.ensure_workspace_indexed();
                 // A gather-dependent file's first analyze was cached-only;
                 // warm the gather and re-analyze in the background so full
                 // cross-file macros land. The language declares whether a
@@ -574,14 +571,12 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         // Cold-open bounded waits: first the file's own initial build (may still
-        // be in flight — `did_open` runs it off the loop), then its family index
+        // be in flight — `did_open` runs it off the loop), then the workspace index
         // — so the query resolves warm instead of returning the one degraded
         // answer the user never re-triggers. Guards dropped before each await;
         // analysis snapshotted AFTER so any heal is picked up.
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
-        if let Some(language) = self.files.get_open(uri).map(|d| d.language) {
-            self.await_index_ready(language, WaitPolicy::Interactive).await;
-        }
+        self.await_index_ready(WaitPolicy::Interactive).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
         let (analysis, text, language) = match self.files.get_open(uri) {
@@ -664,11 +659,9 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         // Cold-open bounded waits, mirroring goto-def: the value's type may
-        // resolve through imports, so the family index matters here too.
+        // resolve through imports, so the workspace index matters here too.
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
-        if let Some(language) = self.files.get_open(uri).map(|d| d.language) {
-            self.await_index_ready(language, WaitPolicy::Interactive).await;
-        }
+        self.await_index_ready(WaitPolicy::Interactive).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
         let analysis = match self.files.get_open(uri) {
@@ -699,9 +692,7 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         self.await_open_ready(uri, WaitPolicy::Complete).await;
-        if let Some(language) = self.files.get_open(uri).map(|d| d.language) {
-            self.await_index_ready(language, WaitPolicy::Complete).await;
-        }
+        self.await_index_ready(WaitPolicy::Complete).await;
         let analysis = match self.files.get_open(uri) {
             Some(doc) => Arc::clone(&doc.analysis),
             None => return self.not_ready_or_null(uri),
@@ -780,9 +771,7 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         self.await_open_ready(uri, WaitPolicy::Complete).await;
-        if let Some(language) = self.files.get_open(uri).map(|d| d.language) {
-            self.await_index_ready(language, WaitPolicy::Complete).await;
-        }
+        self.await_index_ready(WaitPolicy::Complete).await;
         let analysis = match self.files.get_open(uri) {
             Some(doc) => Arc::clone(&doc.analysis),
             None => return self.not_ready_or_null(uri),
@@ -917,11 +906,9 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         // Cold-open bounded waits (see `await_open_ready` / `await_index_ready`):
-        // the file's own initial build, then an in-flight family index.
+        // the file's own initial build, then an in-flight workspace index.
         self.await_open_ready(uri, WaitPolicy::Complete).await;
-        if let Some(language) = self.files.get_open(uri).map(|d| d.language) {
-            self.await_index_ready(language, WaitPolicy::Complete).await;
-        }
+        self.await_index_ready(WaitPolicy::Complete).await;
         self.await_open_full(uri, WaitPolicy::Complete).await;
         // Snapshot the open doc (cheap `Arc` clone) and DROP the store guard
         // before `resolve()` — it re-locks the open shards via `for_each_open`,
@@ -953,13 +940,11 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         // Cold-open bounded waits (see `await_open_ready` / `await_index_ready`):
-        // the file's own initial build, then an in-flight family index so
+        // the file's own initial build, then an in-flight workspace index so
         // cross-file references resolve warm (the in-window `op_free` 1 → 118
         // heal) instead of returning def-only.
         self.await_open_ready(uri, WaitPolicy::Complete).await;
-        if let Some(language) = self.files.get_open(uri).map(|d| d.language) {
-            self.await_index_ready(language, WaitPolicy::Complete).await;
-        }
+        self.await_index_ready(WaitPolicy::Complete).await;
         self.await_open_full(uri, WaitPolicy::Complete).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
@@ -1097,9 +1082,7 @@ impl LanguageServer for Backend {
         self.await_open_ready(uri, WaitPolicy::Complete).await;
         // Cross-file rename edits are act-on-able: a cold-index rename that
         // silently missed files would corrupt the workspace. Wait Complete.
-        if let Some(language) = self.files.get_open(uri).map(|d| d.language) {
-            self.await_index_ready(language, WaitPolicy::Complete).await;
-        }
+        self.await_index_ready(WaitPolicy::Complete).await;
         self.await_open_full(uri, WaitPolicy::Complete).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
@@ -1131,12 +1114,10 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         // Cold-open bounded waits (see `await_open_ready` / `await_index_ready`):
-        // the file's own initial build, then an in-flight family index so hover
+        // the file's own initial build, then an in-flight workspace index so hover
         // resolves warm.
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
-        if let Some(language) = self.files.get_open(uri).map(|d| d.language) {
-            self.await_index_ready(language, WaitPolicy::Interactive).await;
-        }
+        self.await_index_ready(WaitPolicy::Interactive).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
         let (analysis, text, language) = match self.files.get_open(uri) {

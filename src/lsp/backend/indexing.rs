@@ -1,4 +1,4 @@
-//! Lazy per-family workspace indexing, the cold-open bounded waits
+//! Lazy workspace indexing, the cold-open bounded waits
 //! (`await_*`), and the shared work-done-progress spellings.
 
 use super::*;
@@ -227,15 +227,14 @@ impl Backend {
         self.rename_options.lock().unwrap().override_scope
     }
 
-    /// Index the opened file's language FAMILY's workspace, once, in the
-    /// background. `perl` → the `.pm/.pl/.t` scan; any pack language (C++/
-    /// Python/…) → the pack-language scan. Latched per family so a C++-only
-    /// session never touches the perl tree, and vice versa.
-    pub(super) fn ensure_workspace_indexed(&self, language: &str) {
+    /// Index the served language's workspace, once, in the background.
+    /// Perl → the `.pm/.pl/.t` scan; a pack language (C++/Python/…) → its
+    /// pack scan.
+    pub(super) fn ensure_workspace_indexed(&self) {
         use std::sync::atomic::Ordering;
-        let want_perl = language == "perl";
-        let latch = if want_perl { &self.perl_indexed } else { &self.pack_indexed };
-        if latch.swap(true, Ordering::Relaxed) {
+        let want_enrichment =
+            crate::build::language_driver::LanguageRegistry::served().caps().hub_enrichment;
+        if self.indexed.swap(true, Ordering::Relaxed) {
             return; // already indexed (or in flight)
         }
         let files = Arc::clone(&self.files);
@@ -256,14 +255,14 @@ impl Backend {
         // racing the scheduling defers into the invalidator's reconcile set
         // instead of hitting an unattached (no-op) invalidation. Perl uses the
         // direct re-index path and never touches the invalidator.
-        let pack_invalidator = (!want_perl).then(|| Arc::clone(&self.pack_invalidator));
+        let pack_invalidator = (!want_enrichment).then(|| Arc::clone(&self.pack_invalidator));
         if let Some(ref inv) = pack_invalidator {
             inv.begin_bulk_index();
         }
         tokio::task::spawn_blocking(move || {
             // Announces completion (or the no-root early-out) to bounded waiters
             // on Drop — every exit path of this closure, panic included.
-            let _done = IndexDoneGuard { ready: index_ready, want_perl };
+            let _done = IndexDoneGuard { ready: index_ready };
             // Every perl exit path below opens the gate BEFORE running the
             // heal sweep (`open_perl_gate_then_heal`): a `publish_diagnostics`
             // that read "index in flight" and deferred is guaranteed its doc
@@ -276,23 +275,20 @@ impl Backend {
                 // Pack keeps its early-out shape (no heal without a root);
                 // perl must still sweep so a publish deferred against the
                 // kickoff-to-early-out window converges.
-                if want_perl {
+                if want_enrichment {
                     Self::open_perl_gate_then_heal(&_done, &heal_ctx, true);
                 }
                 return;
             };
             let Some(root_path) = root_uri.strip_prefix("file://") else {
-                if want_perl {
+                if want_enrichment {
                     Self::open_perl_gate_then_heal(&_done, &heal_ctx, true);
                 }
                 return;
             };
             let root_path = PathBuf::from(root_path);
             let rt = tokio::runtime::Handle::current();
-            let token = NumberOrString::String(format!(
-                "perl-lsp/workspace-index-{}",
-                if want_perl { "perl" } else { "pack" }
-            ));
+            let token = NumberOrString::String("perl-lsp/workspace-index".into());
             if progress {
                 // tower-lsp holds the server→client request's oneshot SENDER in
                 // its pending map until the reply lands, and panics ("receiver
@@ -378,7 +374,7 @@ impl Backend {
             });
             let cb_ref: Option<&(dyn Fn(usize, usize) + Sync)> =
                 cb.as_ref().map(|c| c as &(dyn Fn(usize, usize) + Sync));
-            let count = if want_perl {
+            let count = if want_enrichment {
                 // Once the walk finishes, the persist writer may keep
                 // draining for minutes on a large tree — announce that phase
                 // instead of sitting at 100% looking hung.
@@ -442,7 +438,7 @@ impl Backend {
                     token,
                     value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(
                         WorkDoneProgressEnd {
-                            message: Some(if want_perl {
+                            message: Some(if want_enrichment {
                                 format!("Indexed {} Perl files", count)
                             } else {
                                 format!(
@@ -464,13 +460,12 @@ impl Backend {
             if let Some(inv) = pack_invalidator {
                 inv.finish_bulk_index(Some(root_uri.as_str()), &module_index);
             }
-            // Heal the cold-open degraded window: the index this file's family
-            // needs has now ATTACHED (the latch marked KICKOFF; this is the
-            // completion signal). Re-analyze + re-publish every open doc in the
-            // family so pull-verb answers baked in the cached-only open window
+            // Heal the cold-open degraded window: the index has now LANDED
+            // (the latch marked KICKOFF; this is the completion signal).
+            // Re-analyze + re-publish every open doc so pull-verb answers baked in the cached-only open window
             // (truncated cross-file closure, `None` gd/hover) self-heal without
             // the user re-triggering.
-            Self::open_perl_gate_then_heal(&_done, &heal_ctx, want_perl);
+            Self::open_perl_gate_then_heal(&_done, &heal_ctx, want_enrichment);
         });
     }
 
@@ -480,32 +475,24 @@ impl Backend {
     /// the raw open doc while the sweep's enrichment is still running — the
     /// same degraded window the deferral accepts). Pack keeps the guard's
     /// drop-time open: its degraded window is owned by `degraded_open`.
-    fn open_perl_gate_then_heal(done: &IndexDoneGuard, ctx: &PackHealCtx, want_perl: bool) {
-        if want_perl {
-            done.ready.perl.open();
+    fn open_perl_gate_then_heal(done: &IndexDoneGuard, ctx: &PackHealCtx, want_enrichment: bool) {
+        if want_enrichment {
+            done.ready.open();
         }
-        Self::heal_open_docs(ctx, want_perl);
+        Self::heal_open_docs(ctx, want_enrichment);
     }
 
-    /// Re-derive + re-publish every OPEN document in a language family after its
-    /// workspace index / macro gather lands — the pull-verb heal for the
+    /// Re-derive + re-publish every OPEN document after the workspace index /
+    /// macro gather lands — the pull-verb heal for the
     /// cold-open degraded window. Pack docs get a full OFF-lock re-analysis
     /// (their `did_open` gather was cached-only + the cross-file index is now
     /// warm); perl docs re-derive enrichment + diagnostics through
     /// `refresh_open_diagnostics` (URIs collected under the read iterator,
     /// each doc derived with no store guard held).
-    fn heal_open_docs(ctx: &PackHealCtx, want_perl: bool) {
-        log::debug!(
-            "cold-window heal: index landed for {} family",
-            if want_perl { "perl" } else { "pack" }
-        );
-        if want_perl {
-            let pending = refresh_open_diagnostics(
-                &ctx.files,
-                &ctx.module_index,
-                ctx.options,
-                OpenDocScope::PerlFamily,
-            );
+    fn heal_open_docs(ctx: &PackHealCtx, want_enrichment: bool) {
+        log::debug!("cold-window heal: index landed");
+        if want_enrichment {
+            let pending = refresh_open_diagnostics(&ctx.files, &ctx.module_index, ctx.options);
             if pending.is_empty() {
                 return;
             }
@@ -534,8 +521,7 @@ impl Backend {
         }
     }
 
-    /// Bounded wait for the opened file's language-family workspace/pack index
-    /// to finish, when — and ONLY when — it is actually in-flight: KICKED OFF
+    /// Bounded wait for the workspace index to finish, when — and ONLY when — it is actually in-flight: KICKED OFF
     /// (`ensure_workspace_indexed` flipped the latch at `did_open`) but not yet
     /// DONE. This closes the residual cold-open window for PULL verbs
     /// (goto-def / hover / references): unlike completion (`isIncomplete`) and
@@ -550,9 +536,7 @@ impl Backend {
     /// timeout the handler resolves degraded exactly as before.
     ///
     /// GUARD DISCIPLINE: holds NO FileStore guard across the await — it touches
-    /// only the family's `ReadyGate`. Callers peek `language` under
-    /// a `get_open` guard that DROPS before this await, and snapshot `analysis`
-    /// fresh AFTER it, picking up any heal (see the hazard note on
+    /// only the `ReadyGate`. Callers snapshot `analysis` fresh AFTER it, picking up any heal (see the hazard note on
     /// `FileStore::for_each_open`).
     /// `WaitPolicy` → millisecond cap. `cold_wait_ms == 0` is the global
     /// "never block" opt-out and wins over any policy.
@@ -569,13 +553,11 @@ impl Backend {
         }
     }
 
-    pub(super) async fn await_index_ready(&self, language: &str, policy: WaitPolicy) {
+    pub(super) async fn await_index_ready(&self, policy: WaitPolicy) {
         use std::sync::atomic::Ordering;
-        let want_perl = language == "perl";
-        let latch = if want_perl { &self.perl_indexed } else { &self.pack_indexed };
-        let gate = if want_perl { &self.index_ready.perl } else { &self.index_ready.pack };
+        let gate = &self.index_ready;
         // Only wait when an index is actually coming: kicked off but not done.
-        if !latch.load(Ordering::Relaxed) || gate.is_open() {
+        if !self.indexed.load(Ordering::Relaxed) || gate.is_open() {
             return;
         }
         let cap = self.wait_cap(policy);
