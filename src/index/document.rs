@@ -214,7 +214,7 @@ impl Document {
 }
 
 impl StableOutline {
-    fn from_analysis(analysis: &FileAnalysis) -> Self {
+    pub(crate) fn from_analysis(analysis: &FileAnalysis) -> Self {
         let mut outline = StableOutline::default();
         for sym in analysis.symbols() {
             match sym.kind {

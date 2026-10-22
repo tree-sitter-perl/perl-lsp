@@ -310,7 +310,7 @@ fn cli_full_startup(root: &str) -> (file_store::FileStore, module_index::ModuleI
     let served = language_driver::LanguageRegistry::served();
     let indexed = if served.caps().hub_enrichment {
         timings::phase("cli::index_workspace", || {
-            module_resolver::index_workspace_with_index(&root_path, &ws, Some(&module_index), None, None)
+            module_resolver::index_workspace_with_index(&root_path, &module_index, None, None)
         })
     } else {
         timings::phase("cli::index_pack", || {
@@ -374,16 +374,16 @@ fn cli_full_startup(root: &str) -> (file_store::FileStore, module_index::ModuleI
     }
 
     let mut needed = std::collections::HashSet::new();
-    for entry in ws.workspace_raw().iter() {
-        for imp in &entry.value().imports {
+    module_index.for_each_registered_file(&mut |cached| {
+        for imp in &cached.analysis.imports {
             needed.insert(imp.module_name.clone());
         }
-        for (_pkg, parents) in entry.value().package_parent_edges() {
+        for (_pkg, parents) in cached.analysis.package_parent_edges() {
             for p in parents {
                 needed.insert(p.clone());
             }
         }
-    }
+    });
 
     let mut parser = module_resolver::create_parser();
     let mut parse_memo: module_resolver::ParseMemo = std::collections::HashMap::new();

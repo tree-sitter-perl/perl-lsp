@@ -449,12 +449,13 @@ fn python_cross_file_function_refs_through_refs_to() {
         &fa_b,
     );
     let store = crate::index::file_store::FileStore::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let pa = std::path::PathBuf::from("/fake/py/a.py");
     let pb = std::path::PathBuf::from("/fake/py/b.py");
-    store.insert_workspace(pa.clone(), fa_a);
-    store.insert_workspace(pb.clone(), fa_b);
+    idx.insert_workspace_for_test(pa.clone(), fa_a);
+    idx.insert_workspace_for_test(pb.clone(), fa_b);
 
-    let locs = crate::index::resolve::refs_to(&store, None, &target, crate::index::resolve::RoleMask::EDITABLE);
+    let locs = crate::index::resolve::refs_to(&store, Some(&idx), &target, crate::index::resolve::RoleMask::EDITABLE);
     let by_file: Vec<(String, crate::model::file_analysis::AccessKind)> = locs
         .iter()
         .map(|l| {
@@ -572,13 +573,14 @@ fn python_workspace_rename_for_free() {
     let (fa_b, _) = python_fa(src_b);
 
     let store = crate::index::file_store::FileStore::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let pa = std::path::PathBuf::from("/fake/py/a.py");
     let pb = std::path::PathBuf::from("/fake/py/b.py");
-    store.insert_workspace(pa.clone(), fa_a);
-    store.insert_workspace(pb.clone(), fa_b);
+    idx.insert_workspace_for_test(pa.clone(), fa_a);
+    idx.insert_workspace_for_test(pb.clone(), fa_b);
 
     // Cursor on the CALL in b.py (line 2, inside "helper").
-    let fa_b_view = store.workspace_raw().get(&pb).unwrap().clone();
+    let fa_b_view = idx.workspace_file_for_test(&pb).unwrap();
     let point = tree_sitter::Point { row: 2, column: 6 };
     let resolved = crate::index::resolve::resolve_symbol(&fa_b_view, point, None);
     let target = match resolved {
@@ -587,7 +589,7 @@ fn python_workspace_rename_for_free() {
     };
     assert_eq!(target.name, "helper");
 
-    let locs = crate::index::resolve::refs_to(&store, None, &target, crate::index::resolve::RoleMask::EDITABLE);
+    let locs = crate::index::resolve::refs_to(&store, Some(&idx), &target, crate::index::resolve::RoleMask::EDITABLE);
     assert_eq!(locs.len(), 3, "decl + import spelling + call, got {locs:?}");
 
     // Apply the edits the way backend::rename does: replace each span
@@ -729,17 +731,17 @@ fn r_cross_file_refs_and_workspace_rename() {
     let store = crate::index::file_store::FileStore::new();
     let pm = std::path::PathBuf::from("/fake/r/analysis.R");
     let pu = std::path::PathBuf::from("/fake/r/util.R");
-    store.insert_workspace(pm.clone(), fa_main);
-    store.insert_workspace(pu.clone(), fa_util);
+    idx.insert_workspace_for_test(pm.clone(), fa_main);
+    idx.insert_workspace_for_test(pu.clone(), fa_util);
 
     let point = tree_sitter::Point { row: 2, column: 12 }; // on fetch_data call
-    let fa_view = store.workspace_raw().get(&pm).unwrap().clone();
+    let fa_view = idx.workspace_file_for_test(&pm).unwrap();
     let target = match crate::index::resolve::resolve_symbol(&fa_view, point, None) {
         Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
         other => panic!("expected target, got {other:?}"),
     };
     assert_eq!(target.name, "fetch_data");
-    let locs = crate::index::resolve::refs_to(&store, None, &target, crate::index::resolve::RoleMask::EDITABLE);
+    let locs = crate::index::resolve::refs_to(&store, Some(&idx), &target, crate::index::resolve::RoleMask::EDITABLE);
     let files: Vec<String> = locs
         .iter()
         .map(|l| match &l.key {
@@ -1323,17 +1325,17 @@ fn cpp_cross_file_include_resolution_and_rename() {
     let store = crate::index::file_store::FileStore::new();
     let pm = std::path::PathBuf::from("/fake/cpp/main.cpp");
     let ph = std::path::PathBuf::from("/fake/cpp/util.h");
-    store.insert_workspace(pm.clone(), main_skel.into_file_analysis());
-    store.insert_workspace(ph.clone(), cpp_skel(header).into_file_analysis());
+    idx.insert_workspace_for_test(pm.clone(), main_skel.into_file_analysis());
+    idx.insert_workspace_for_test(ph.clone(), cpp_skel(header).into_file_analysis());
 
-    let fa_view = store.workspace_raw().get(&pm).unwrap().clone();
+    let fa_view = idx.workspace_file_for_test(&pm).unwrap();
     let point = tree_sitter::Point { row: 3, column: 11 };
     let target = match crate::index::resolve::resolve_symbol(&fa_view, point, None) {
         Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
         other => panic!("expected target, got {other:?}"),
     };
     assert_eq!(target.name, "compute");
-    let locs = crate::index::resolve::refs_to(&store, None, &target, crate::index::resolve::RoleMask::EDITABLE);
+    let locs = crate::index::resolve::refs_to(&store, Some(&idx), &target, crate::index::resolve::RoleMask::EDITABLE);
     let files: Vec<String> = locs
         .iter()
         .map(|l| match &l.key {
@@ -1419,17 +1421,17 @@ fn cmake_cross_file_function_rename_and_subdirectory_resolution() {
     let store = crate::index::file_store::FileStore::new();
     let pr = std::path::PathBuf::from("/fake/cmake/CMakeLists.txt");
     let pu = std::path::PathBuf::from("/fake/cmake/util.cmake");
-    store.insert_workspace(pr.clone(), fa_root);
-    store.insert_workspace(pu.clone(), fa_util);
+    idx.insert_workspace_for_test(pr.clone(), fa_root);
+    idx.insert_workspace_for_test(pu.clone(), fa_util);
 
-    let fa_view = store.workspace_raw().get(&pr).unwrap().clone();
+    let fa_view = idx.workspace_file_for_test(&pr).unwrap();
     let point = tree_sitter::Point { row: 3, column: 4 };
     let target = match crate::index::resolve::resolve_symbol(&fa_view, point, None) {
         Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
         other => panic!("expected target, got {other:?}"),
     };
     assert_eq!(target.name, "register_widget");
-    let locs = crate::index::resolve::refs_to(&store, None, &target, crate::index::resolve::RoleMask::EDITABLE);
+    let locs = crate::index::resolve::refs_to(&store, Some(&idx), &target, crate::index::resolve::RoleMask::EDITABLE);
     let files: Vec<String> = locs
         .iter()
         .map(|l| match &l.key {

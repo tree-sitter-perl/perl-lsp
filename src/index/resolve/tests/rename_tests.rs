@@ -75,10 +75,10 @@ $d->ping;
     consumer_fa.enrich_imported_types_with_keys(Some(&idx));
 
     let store = FileStore::new();
-    store.insert_workspace(base_path.clone(), parse(base_src));
-    store.insert_workspace(child_path.clone(), parse(child_src));
-    store.insert_workspace(consumer_path.clone(), consumer_fa);
-    store.insert_workspace(decoy_path.clone(), parse(decoy_src));
+    idx.insert_workspace_for_test(base_path.clone(), parse(base_src));
+    idx.insert_workspace_for_test(child_path.clone(), parse(child_src));
+    idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa);
+    idx.insert_workspace_for_test(decoy_path.clone(), parse(decoy_src));
 
     // Targeting Base::ping (where rename cursor would sit at the `sub ping` declaration).
     let target = TargetRef {
@@ -155,7 +155,7 @@ $b->ping;
     let consumer_path = PathBuf::from("/tmp/rename_dep_consumer.pm");
 
     let store = FileStore::new();
-    store.insert_workspace(consumer_path.clone(), parse(consumer_src));
+    idx.insert_workspace_for_test(consumer_path.clone(), parse(consumer_src));
 
     let target = TargetRef {
         names: crate::model::conventions::PERL_SPELLINGS,
@@ -225,9 +225,9 @@ $g->hello;
     consumer_fa.enrich_imported_types_with_keys(Some(&idx));
 
     let store = FileStore::new();
-    store.insert_workspace(base_path.clone(), parse(base_src));
-    store.insert_workspace(child_path.clone(), parse(child_src));
-    store.insert_workspace(consumer_path.clone(), consumer_fa);
+    idx.insert_workspace_for_test(base_path.clone(), parse(base_src));
+    idx.insert_workspace_for_test(child_path.clone(), parse(child_src));
+    idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa);
 
     let target = TargetRef {
         names: crate::model::conventions::PERL_SPELLINGS,
@@ -325,9 +325,9 @@ fn rename_from_child_call_site_includes_inherited_base_declaration() {
     );
 
     let store = FileStore::new();
-    store.insert_workspace(base_path.clone(), parse(base_src));
-    store.insert_workspace(child_path.clone(), parse(child_src));
-    store.insert_workspace(script_path.clone(), script_fa);
+    idx.insert_workspace_for_test(base_path.clone(), parse(base_src));
+    idx.insert_workspace_for_test(child_path.clone(), parse(child_src));
+    idx.insert_workspace_for_test(script_path.clone(), script_fa);
 
     let locs = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
     let hit = |p: &PathBuf| locs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if x == p));

@@ -12,12 +12,10 @@ impl Backend {
     /// following didChange behind it — and a save is the most frequent trigger
     /// this path has.
     pub(super) fn spawn_reindex_saved_perl(&self, path: PathBuf) {
-        let files = Arc::clone(&self.files);
         let module_index = Arc::clone(&self.module_index);
         let ctx = self.diag_ctx();
         tokio::spawn(async move {
             let dirty = Self::reindex_perl_blocking(
-                files,
                 module_index,
                 vec![(path, FileChangeType::CHANGED)],
             )
@@ -36,7 +34,6 @@ impl Backend {
         perl_changes: Vec<(PathBuf, FileChangeType)>,
     ) {
         let dirty = Self::reindex_perl_blocking(
-            Arc::clone(&self.files),
             Arc::clone(&self.module_index),
             perl_changes,
         )
@@ -59,7 +56,6 @@ impl Backend {
     ///
     /// Over Arcs only, so the spawned caller can move it into a task.
     async fn reindex_perl_blocking(
-        files: Arc<crate::index::file_store::FileStore>,
         module_index: Arc<ModuleIndex>,
         perl_changes: Vec<(PathBuf, FileChangeType)>,
     ) -> std::collections::HashSet<PathBuf> {
@@ -109,8 +105,6 @@ impl Backend {
                 module_index.invalidate_derived_copies(&canon);
                 match typ {
                     FileChangeType::DELETED => {
-                        files.remove_workspace(&path);
-                        files.remove_workspace(&canon);
                         // Consumers of the departed file's packages, BEFORE
                         // the record (and its provided names) are removed.
                         dirty_all.extend(module_index.dirty_consumers(&canon));
@@ -125,7 +119,7 @@ impl Backend {
                     }
                     _ => {
                         // Re-index the file (created or changed). The fresh
-                        // copy registers WHOLE (refs + bag) in both stores:
+                        // copy registers WHOLE (refs + bag):
                         // its persisted generation was just invalidated, so
                         // the resident copy is the only source until the
                         // next bulk index re-persists.
@@ -134,7 +128,6 @@ impl Backend {
                             if let Some(tree) = parser.parse(&source, None) {
                                 let analysis = crate::build::builder::build(&tree, source.as_bytes());
                                 let arc = Arc::new(analysis);
-                                files.insert_workspace_arc(canon.clone(), arc.clone());
                                 module_index.record_workspace_projections(&canon, &arc);
                                 // register_workspace_resident routes through
                                 // record_and_dirty: the dirty set is bound to
@@ -237,7 +230,6 @@ impl Backend {
         if self.indexed.swap(true, Ordering::Relaxed) {
             return; // already indexed (or in flight)
         }
-        let files = Arc::clone(&self.files);
         let client = self.client.clone();
         let module_index = Arc::clone(&self.module_index);
         let root = self.module_index.workspace_root();
@@ -403,8 +395,7 @@ impl Backend {
                     walk_done.as_ref().map(|c| c as &(dyn Fn() + Sync));
                 crate::index::module_resolver::index_workspace_with_index(
                     &root_path,
-                    &files,
-                    Some(&module_index),
+                    &module_index,
                     cb_ref,
                     walk_done_ref,
                 )

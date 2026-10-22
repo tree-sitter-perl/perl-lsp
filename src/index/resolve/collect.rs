@@ -655,32 +655,20 @@ pub(super) fn symbol_defines_target(
     }
 }
 
-/// Does any WORKSPACE-tier copy satisfy `pred` — the FileStore's workspace
-/// entries and the index's own front-door registrations alike? Copies may be
+/// Does any WORKSPACE-tier index copy satisfy `pred`? Copies may be
 /// symbol-evicted (an empty vec is "on disk", not "declares nothing"): the
 /// resident scan covers whole copies, evicted ones are checked through the
 /// row-store candidates for `keys` (a couple of rehydrations, never a
 /// whole-tree decode).
 fn editable_copy_satisfies(
-    files: &FileStore,
     module_index: Option<&dyn CrossFileLookup>,
     keys: &[String],
     pred: &dyn Fn(&FileAnalysis) -> bool,
 ) -> bool {
-    if files
-        .workspace_raw()
-        .iter()
-        .any(|e| !e.value().symbols_are_evicted() && pred(e.value()))
-    {
-        return true;
-    }
     let Some(idx) = module_index else { return false };
     let mut found = false;
     idx.for_each_workspace_file(&mut |cached| {
-        if !found
-            && !cached.analysis.symbols_are_evicted()
-            && !files.workspace_raw().contains_key(&cached.path)
-        {
+        if !found && !cached.analysis.symbols_are_evicted() {
             found = pred(&cached.analysis);
         }
     });
@@ -688,18 +676,13 @@ fn editable_copy_satisfies(
         return true;
     }
     for path in idx.ref_candidate_paths(keys) {
-        let resident = files.workspace_raw().get(&path).map(|e| std::sync::Arc::clone(e.value()));
-        let Some(arc) = resident.or_else(|| {
-            (!idx.is_dependency_path(&path))
-                .then(|| idx.cached_by_path(&path).map(|cm| std::sync::Arc::clone(&cm.analysis)))
-                .flatten()
-        }) else {
+        if idx.is_dependency_path(&path) {
             continue;
-        };
-        if !arc.symbols_are_evicted() {
+        }
+        let Some(cm) = idx.cached_by_path(&path) else { continue };
+        if !cm.analysis.symbols_are_evicted() {
             continue; // the resident scan already judged it
         }
-        let cm = std::sync::Arc::new(crate::model::file_analysis::CachedModule::new(path, arc));
         if pred(&idx.whole_present(&cm)) {
             return true;
         }
@@ -725,7 +708,6 @@ pub fn references_mask_for(
     });
     if !found_in_editable {
         found_in_editable = editable_copy_satisfies(
-            files,
             module_index,
             &retrieval_keys(target, &[]),
             &|fa: &FileAnalysis| fa.symbols().iter().any(|s| symbol_defines_target(s, target, fa)),
@@ -738,7 +720,6 @@ pub fn references_mask_for(
     if !found_in_editable {
         if let TargetKind::Method { class } = &target.kind {
             found_in_editable = editable_copy_satisfies(
-                files,
                 module_index,
                 &[crate::model::file_analysis::name_match_key(class, &target.names)],
                 &|fa: &FileAnalysis| {

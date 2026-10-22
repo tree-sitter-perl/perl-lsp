@@ -686,12 +686,13 @@ sub retry {
     assert!(matches!(r.kind, RefKind::FunctionCall { .. }));
 
     let store = FileStore::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/qa_const.pm");
-    store.insert_workspace(path.clone(), fa);
+    idx.insert_workspace_for_test(path.clone(), fa);
 
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "MAX_RETRIES".to_string(),
@@ -806,11 +807,12 @@ sub opt_b { 'b' }
     assert_eq!(r.target_name, "opt_a");
 
     let store = FileStore::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/qa_export.pm");
-    store.insert_workspace(path.clone(), fa);
+    idx.insert_workspace_for_test(path.clone(), fa);
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "opt_a".to_string(),

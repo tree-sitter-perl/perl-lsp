@@ -442,11 +442,12 @@ fn sub_exporter_member_goto_def_and_references() {
     assert_eq!(r.target_name, "foo");
 
     let store = FileStore::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/qa_sub_exporter.pm");
-    store.insert_workspace(path.clone(), fa);
+    idx.insert_workspace_for_test(path.clone(), fa);
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
@@ -1093,11 +1094,12 @@ sub go {
         );
     }
     let store = FileStore::new();
-    store.insert_workspace(PathBuf::from("/tmp/qa_const_plain.pm"), fa);
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(PathBuf::from("/tmp/qa_const_plain.pm"), fa);
     for name in ["GAMMA", "DELTA"] {
         let results = refs_to(
             &store,
-            None,
+            Some(&idx),
             &TargetRef {
                 names: crate::model::conventions::PERL_SPELLINGS,
                 name: name.to_string(),
@@ -1208,13 +1210,14 @@ sub go {
 "#;
     let fa = build_fa(src);
     let store = FileStore::new();
-    store.insert_workspace(PathBuf::from("/tmp/qa_multi_const.pm"), fa);
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(PathBuf::from("/tmp/qa_multi_const.pm"), fa);
 
     // BETA: def + 1 usage = 2 hits. GAMMA: def + 1 usage = 2. ALPHA: def + 1.
     for name in ["ALPHA", "BETA", "GAMMA"] {
         let results = refs_to(
             &store,
-            None,
+            Some(&idx),
             &TargetRef {
                 names: crate::model::conventions::PERL_SPELLINGS,
                 name: name.to_string(),

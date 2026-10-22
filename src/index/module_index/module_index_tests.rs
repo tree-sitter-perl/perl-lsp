@@ -1,5 +1,31 @@
 use super::*;
 
+// Test-only registration helpers live here, not in a production part, so the
+// layering allowlist's whole-copy counts stay about production sites.
+impl ModuleIndex {
+    /// Register `fa` as a project file through its language's front door
+    /// (whole copy, every name feed).
+    pub(crate) fn insert_workspace_for_test(&self, path: PathBuf, fa: FileAnalysis) -> Arc<FileAnalysis> {
+        let arc = Arc::new(fa);
+        self.insert_workspace_arc_for_test(path, Arc::clone(&arc));
+        arc
+    }
+
+    pub(crate) fn insert_workspace_arc_for_test(&self, path: PathBuf, fa: Arc<FileAnalysis>) {
+        if crate::build::language_driver::LanguageRegistry::is_pack_language(&fa.language) {
+            self.register_symbols(path, fa);
+        } else {
+            self.register_workspace_module(path, fa);
+        }
+    }
+
+    /// The registered copy at `path`.
+    pub(crate) fn workspace_file_for_test(&self, path: &std::path::Path) -> Option<Arc<FileAnalysis>> {
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        self.all_files.get(&path).map(|e| Arc::clone(&e.value().analysis))
+    }
+}
+
 fn parse_source_to_cached(source: &str, module_name: &str) -> Arc<CachedModule> {
     use tree_sitter::Parser;
     let mut parser = Parser::new();

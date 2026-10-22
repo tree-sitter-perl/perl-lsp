@@ -1506,14 +1506,11 @@ impl LanguageServer for Backend {
             let mut covered: std::collections::HashSet<std::path::PathBuf> =
                 std::collections::HashSet::new();
 
-            cx.files().for_each_analysis(|key, analysis| {
-                let uri = match key {
-                    FileKey::Url(u) => u,
-                    FileKey::Path(p) => Url::from_file_path(&p).unwrap_or_else(|_| {
-                        Url::parse(&format!("file://{}", p.display()))
-                            .unwrap()
-                    }),
-                };
+            // Open docs first — the fresher text — then every index copy
+            // they don't shadow.
+            let mut open_paths: std::collections::HashSet<std::path::PathBuf> =
+                std::collections::HashSet::new();
+            let mut visit = |uri: Url, analysis: &crate::model::file_analysis::FileAnalysis| {
                 if !analysis.symbols_are_evicted() {
                     if let Ok(p) = uri.to_file_path() {
                         // Claim the canonical spelling too: rows are keyed
@@ -1541,24 +1538,21 @@ impl LanguageServer for Backend {
                         results.push(symbols::plugin_namespace_to_workspace_info(ns, uri.clone()));
                     }
                 }
+            };
+            cx.files().for_each_open(|url, doc| {
+                if let Ok(p) = url.to_file_path() {
+                    open_paths.insert(std::fs::canonicalize(&p).unwrap_or(p));
+                }
+                visit(url.clone(), &doc.analysis);
             });
-
-            // A pack language's files live in the index, not the FileStore.
-            cx.index().for_each_pack_registered_file(&mut |cached| {
-                let (path, analysis) = (cached.path.as_path(), &cached.analysis);
-                if !analysis.symbols_are_evicted() {
-                    covered.insert(path.to_path_buf());
+            cx.index().for_each_registered_file(&mut |cached| {
+                if open_paths.contains(&cached.path) {
+                    return;
                 }
-                let uri = Url::from_file_path(path).unwrap_or_else(|_| {
-                    Url::parse(&format!("file://{}", path.display())).unwrap()
+                let uri = Url::from_file_path(&cached.path).unwrap_or_else(|_| {
+                    Url::parse(&format!("file://{}", cached.path.display())).unwrap()
                 });
-                for sym in analysis.symbols() {
-                    if sym.name.to_lowercase().contains(&query) {
-                        if let Some(info) = symbols::symbol_to_workspace_info(sym, uri.clone()) {
-                            results.push(info);
-                        }
-                    }
-                }
+                visit(uri, &cached.analysis);
             });
 
             // Rows pass: symbol-evicted copies (the served language's

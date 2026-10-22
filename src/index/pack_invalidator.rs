@@ -41,7 +41,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tower_lsp::lsp_types::Url;
 
-use crate::index::file_store::{FileKey, FileStore};
+use crate::index::file_store::FileStore;
 use crate::index::module_cache;
 use crate::index::module_index::{CachedModule, ModuleIndex};
 use crate::model::file_analysis::FileAnalysis;
@@ -242,16 +242,14 @@ impl PackInvalidator {
     ) -> Vec<Url> {
         let canon_str = canon.to_string_lossy().into_owned();
         let mut out: Vec<Url> = Vec::new();
-        open_docs.for_each_analysis(|key, analysis| {
-            if let FileKey::Url(u) = key {
-                let is_self = !deleted
-                    && u.to_file_path()
-                        .ok()
-                        .map(|p| p.canonicalize().unwrap_or(p) == canon)
-                        .unwrap_or(false);
-                if is_self || (!skip_consumers && is_consumer(analysis, &canon_str)) {
-                    out.push(u);
-                }
+        open_docs.for_each_open(|u, doc| {
+            let is_self = !deleted
+                && u.to_file_path()
+                    .ok()
+                    .map(|p| p.canonicalize().unwrap_or(p) == canon)
+                    .unwrap_or(false);
+            if is_self || (!skip_consumers && is_consumer(&doc.analysis, &canon_str)) {
+                out.push(u.clone());
             }
         });
         out

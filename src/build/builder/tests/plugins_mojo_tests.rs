@@ -205,15 +205,16 @@ sub run {
 "#;
 
     let store = FileStore::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let producer_path = PathBuf::from("/tmp/plugin_producer.pm");
     let consumer_path = PathBuf::from("/tmp/plugin_consumer.pm");
 
-    store.insert_workspace(producer_path.clone(), build_fa(producer_src));
-    store.insert_workspace(consumer_path.clone(), build_fa(consumer_src));
+    idx.insert_workspace_for_test(producer_path.clone(), build_fa(producer_src));
+    idx.insert_workspace_for_test(consumer_path.clone(), build_fa(consumer_src));
 
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "ready".to_string(),

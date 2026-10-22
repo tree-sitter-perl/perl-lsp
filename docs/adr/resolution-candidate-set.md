@@ -171,7 +171,7 @@ The spike's axes live in CandidateSet construction:
   identity and completion), and `rename_edits` → `Result` REFUSES on
   alias-spelled sites (full-or-refuse) instead of silently skipping.
 - **file roles** — one rule for every language: an open document is OPEN,
-  a FileStore workspace entry or a front-door index registration
+  a front-door index registration
   (`CrossFileLookup::is_dependency_path` false) is WORKSPACE, the rest
   (@INC) is DEPENDENCY. Each index-held file is admitted by its own tier,
   so EDITABLE rename and VISIBLE references mean the same thing for a pack

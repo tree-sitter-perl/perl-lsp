@@ -360,8 +360,8 @@ $schema->resultset('Schema::Result::Users')->search({ name => 'X' });
     consumer_fa.enrich_imported_types_with_keys(Some(&idx));
 
     let store = FileStore::new();
-    store.insert_workspace(producer_path.clone(), parse(producer_src));
-    store.insert_workspace(consumer_path.clone(), consumer_fa);
+    idx.insert_workspace_for_test(producer_path.clone(), parse(producer_src));
+    idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa);
 
     let target = TargetRef {
         names: crate::model::conventions::PERL_SPELLINGS,
@@ -482,10 +482,11 @@ my $name = $schema->resultset('Schema::Result::Users')->find(1)->name;
     // References for the Row's `name` method must include the chained
     // call site — it resolves through the same frozen edge as goto-def.
     let store = FileStore::new();
-    store.insert_workspace(PathBuf::from("/tmp/nav_chained_return.pm"), fa);
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(PathBuf::from("/tmp/nav_chained_return.pm"), fa);
     let refs = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "name".to_string(),
@@ -803,8 +804,8 @@ sub action {
     consumer_fa.enrich_imported_types_with_keys(Some(&idx));
 
     let store = FileStore::new();
-    store.insert_workspace(producer_path.clone(), parse(producer_src));
-    store.insert_workspace(consumer_path.clone(), consumer_fa);
+    idx.insert_workspace_for_test(producer_path.clone(), parse(producer_src));
+    idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa);
 
     let target = TargetRef {
         names: crate::model::conventions::PERL_SPELLINGS,
@@ -874,8 +875,8 @@ sub action {
     consumer_fa.enrich_imported_types_with_keys(Some(&idx));
 
     let store = FileStore::new();
-    store.insert_workspace(producer_path.clone(), parse(producer_src));
-    store.insert_workspace(consumer_path.clone(), consumer_fa);
+    idx.insert_workspace_for_test(producer_path.clone(), parse(producer_src));
+    idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa);
 
     let target = TargetRef {
         names: crate::model::conventions::PERL_SPELLINGS,
