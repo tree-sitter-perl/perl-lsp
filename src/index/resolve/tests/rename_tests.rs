@@ -117,7 +117,7 @@ $d->ping;
 }
 
 /// Rename never edits dependency files. A `ping` method that also appears
-/// in a dep module (registered in ModuleIndex, not in the workspace store)
+/// in a dep module (an @INC provider in the module index)
 /// must not produce edits for that dep file — `RoleMask::EDITABLE` stops
 /// at OPEN + WORKSPACE, which is what `rename_via_refs_to` uses.
 #[test]
@@ -135,8 +135,15 @@ sub ping { "pong" }
 "#;
     let dep_path = PathBuf::from("/tmp/rename_dep_base.pm");
 
+    // An @INC provider: the name-keyed cache, not a front-door registration.
     let idx = ModuleIndex::new_for_test();
-    idx.register_workspace_module(dep_path.clone(), Arc::new(parse(dep_src)));
+    idx.insert_cache(
+        "Base",
+        Some(Arc::new(crate::model::file_analysis::CachedModule::new(
+            dep_path.clone(),
+            Arc::new(parse(dep_src)),
+        ))),
+    );
 
     // Consumer in the workspace calls ping on a Base invocant.
     let consumer_src = r#"

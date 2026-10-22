@@ -843,12 +843,9 @@ pub trait CrossFileLookup {
     }
     /// Is `path` in this lookup's read-only DEPENDENCY tier? Tier
     /// attribution for the masked backward walk: a dependency site is
-    /// visible to references but never rewritten by rename. The Perl hub's
-    /// whole cache is dependency BY CONSTRUCTION (workspace Perl files live
-    /// in the FileStore, so anything here came from `@INC`) — hence the
-    /// default. A pack language's index holds the workspace's own files too, so it
-    /// overrides with membership in its registered dependency-root set
-    /// (composer's vendor packages).
+    /// visible to references but never rewritten by rename; every other
+    /// file the lookup holds is WORKSPACE. The default (no front door, so
+    /// everything held came from elsewhere) is the conservative answer.
     fn is_dependency_path(&self, _path: &std::path::Path) -> bool {
         true
     }
@@ -900,6 +897,9 @@ pub trait CrossFileLookup {
             }
         });
     }
+    /// The WORKSPACE-tier subset of `for_each_cached_file`: exactly the
+    /// files `is_dependency_path` answers false for. Default: none.
+    fn for_each_workspace_file(&self, _f: &mut dyn FnMut(&std::sync::Arc<CachedModule>)) {}
     fn for_each_reexport_module(
         &self,
         start: Vec<String>,
@@ -1554,6 +1554,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     }
     fn for_each_cached_file(&self, f: &mut dyn FnMut(&std::sync::Arc<CachedModule>)) {
         self.inner.for_each_cached_file(f)
+    }
+    fn for_each_workspace_file(&self, f: &mut dyn FnMut(&std::sync::Arc<CachedModule>)) {
+        self.inner.for_each_workspace_file(f)
     }
     fn for_each_reexport_module(
         &self,

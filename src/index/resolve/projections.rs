@@ -78,18 +78,11 @@ impl<'a> CandidateSet<'a> {
     }
 
     /// The set-level visibility for a `Target` resolution: the override when
-    /// present; VISIBLE for pack routing (pack workspace files ride the
-    /// DEPENDENCY role); else `references_mask_for`'s editable-vs-visible
-    /// verdict.
+    /// present, else `references_mask_for`'s editable-vs-visible verdict.
     pub(super) fn target_visibility(&self, target: &TargetRef) -> RoleMask {
         *self.visibility.get_or_init(|| {
-            self.visibility_override.unwrap_or_else(|| {
-                if self.pack {
-                    RoleMask::VISIBLE
-                } else {
-                    references_mask_for(self.files, self.module_index, target)
-                }
-            })
+            self.visibility_override
+                .unwrap_or_else(|| references_mask_for(self.files, self.module_index, target))
         })
     }
 
@@ -168,7 +161,10 @@ impl<'a> CandidateSet<'a> {
                 if self.files.workspace_raw().contains_key(p) {
                     RoleMask::WORKSPACE
                 } else {
-                    RoleMask::DEPENDENCY
+                    match self.module_index {
+                        Some(idx) => super::refs::index_role(idx, p),
+                        None => RoleMask::DEPENDENCY,
+                    }
                 }
             }
         }
@@ -301,8 +297,7 @@ impl<'a> CandidateSet<'a> {
     /// paired to ITS replacement text (bare vs re-derived affixed accessor
     /// names for groups). Policy lives on the set/locations, not in handlers:
     /// non-rewritable sites (const-folded names) are references but never
-    /// edits, and the walk stops at editable space (for pack routing,
-    /// "editable" includes the per-language cache).
+    /// edits, and the walk stops at editable space.
     /// `Ok(empty)` = nothing renameable here; `Err` = a rename that would
     /// SILENTLY BREAK code — a pack set containing an alias-spelled site (a
     /// use through a delegating `#define`, `rewritable: false`) refuses: the
@@ -311,13 +306,10 @@ impl<'a> CandidateSet<'a> {
     /// non-rewritable sites (variable-folded dispatch) keep their
     /// long-standing skip.
     pub fn rename_edits(&self, new_name: &str) -> Result<Vec<(RefLocation, String)>, String> {
-        let editable = if self.pack {
-            RoleMask::VISIBLE
-        } else {
-            self.visibility_override
-                .map(|m| m & RoleMask::EDITABLE)
-                .unwrap_or(RoleMask::EDITABLE)
-        };
+        let editable = self
+            .visibility_override
+            .map(|m| m & RoleMask::EDITABLE)
+            .unwrap_or(RoleMask::EDITABLE);
         Ok(match self.resolution() {
             Some(ResolvedTarget::Target(t)) if t.supports_cross_file_rename() => {
                 let locations = refs_to(self.files, self.module_index, t, editable);

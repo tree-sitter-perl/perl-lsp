@@ -1712,11 +1712,15 @@ $b->touch();
     consumer_fa.enrich_imported_types_with_keys(Some(&idx));
 
     // Cursor on the first $b->touch() — column 4 lands on `t` of touch.
+    // The origin rides a real tier (here WORKSPACE), as every queried
+    // document does — a tierless origin is admitted by no mask.
+    let consumer_path = PathBuf::from("/tmp/highlights_xfile_consumer.pl");
     let store = FileStore::new();
+    store.insert_workspace(consumer_path.clone(), consumer_fa.clone());
     let highlights = resolve(
         &store,
         &consumer_fa,
-        FileKey::Path(PathBuf::from("/tmp/highlights_xfile_consumer.pl")),
+        FileKey::Path(consumer_path),
         tree_sitter::Point { row: 3, column: 4 },
         Some(&idx),
         OverrideScope::default(),
@@ -2027,11 +2031,15 @@ $x->makeFoo()->ping();
     consumer_fa.enrich_imported_types_with_keys(Some(&idx));
 
     // Cursor on the first `->ping()` — column 18 lands on `p` of ping.
+    // The origin rides a real tier (here WORKSPACE), as every queried
+    // document does — a tierless origin is admitted by no mask.
+    let consumer_path = PathBuf::from("/tmp/highlights_chain_consumer.pl");
     let store = FileStore::new();
+    store.insert_workspace(consumer_path.clone(), consumer_fa.clone());
     let highlights = resolve(
         &store,
         &consumer_fa,
-        FileKey::Path(PathBuf::from("/tmp/highlights_chain_consumer.pl")),
+        FileKey::Path(consumer_path),
         tree_sitter::Point { row: 3, column: 18 },
         Some(&idx),
         OverrideScope::default(),
