@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# C++ e2e: builds a --features all-langs release and drives cpp-lsp in headless
-# nvim (reuses the same lua harness as the Perl suites). Separate from
-# run.sh because it needs the cpp-feature binary.
+# Pack e2e: builds a --features cpp,python release and drives it as a C++
+# server and as a Python server (`--lang`, set by each suite's nvim config) in
+# headless nvim, reusing the same lua harness as the Perl suites. Separate
+# from run.sh because it needs the pack-feature binary.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -21,8 +22,8 @@ reap_servers() {
 }
 trap reap_servers EXIT
 
-echo "building --features all-langs release..."
-cargo build --release --features all-langs >/dev/null 2>&1
+echo "building --features cpp,python release..."
+cargo build --release --features cpp,python >/dev/null 2>&1
 
 bin="$PWD/target/release/perl-lsp"
 # Every suite names its binary explicitly. `dev_lsp.lua` falls back to this same

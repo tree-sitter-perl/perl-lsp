@@ -20,7 +20,7 @@ memo does not.
 `ResolutionSession::enter(index)` is an RAII guard, thread-local, opened
 once around a WALK — `CandidateSet::references()` (target minting resolves
 invocants too, so it belongs inside), `refs_to` for its other callers, and
-`FileStore::enrich_open`, because the open-doc heal runs the same cascade on
+`OpenDocs::enrich_open`, because the open-doc heal runs the same cascade on
 a background thread. Nested enters ride the open one. While it is open the
 `PackageSymbol` /
 `SlotType` cross-file hops answer from a memo of **candidate
