@@ -164,13 +164,11 @@ Facts to respect:
    allocation churn `scaling-limits.md` §5 measured as the heatmap's
    own residual (the 8-thread knee). Epic 15 makes each walk cheaper;
    this epic must not try to.
-3. **The heatmap runs `cli_full_startup` with `LanguageScope::All`**
-   (`grep -n 'LanguageScope::All' src/lsp/cli/heatmap.rs`) — correct,
-   because it sweeps the workspace, and CLAUDE.md's rule is that
-   under-indexing a sweeping verb is a quiet wrong answer. It is also
-   why it is expensive: the CLI's one-shot semantics are O(corpus) in
-   time and RAM, and `--heatmap` is named in the hitlist among the verbs
-   that bounds as workspace-scale tools.
+3. **The heatmap runs `cli_full_startup` over the served language's
+   whole workspace** — correct, because it sweeps the workspace. It is
+   also why it is expensive: the CLI's one-shot semantics are O(corpus)
+   in time and RAM, and `--heatmap` is named in the hitlist among the
+   verbs that bounds as workspace-scale tools.
 4. **Fan-in must stay the `references()` projection.** It is also the
    most expensive thing the heatmap does — references at 138k files
    takes 265–368 s (2026-08-17, Tier 1 #3, still OPEN). Phases A/B add

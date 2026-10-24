@@ -12,7 +12,7 @@ sub pick { my $pet = rand() ? Cat->new : Bird->new; return $pet->sound; }\n\
 sub cat { my $c = Cat->new; return $c->sound; }\n1;\n";
 
 struct Fixture {
-    store: FileStore,
+    store: OpenDocs,
     idx: ModuleIndex,
     cat: PathBuf,
     bird: PathBuf,
@@ -20,13 +20,13 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = ModuleIndex::new_for_test();
     let (cat, bird, zoo) =
         (PathBuf::from("/tmp/un_cat.pm"), PathBuf::from("/tmp/un_bird.pm"), PathBuf::from("/tmp/un_zoo.pm"));
     for (p, src) in [(&cat, CAT), (&bird, BIRD), (&zoo, ZOO)] {
         idx.register_workspace_module(p.clone(), Arc::new(parse(src)));
-        store.insert_workspace(p.clone(), parse(src));
+        idx.insert_workspace_for_test(p.clone(), parse(src));
     }
     Fixture { store, idx, cat, bird, zoo }
 }
@@ -50,7 +50,7 @@ use std::path::Path;
 
 /// The `sound` in `$pet->sound`.
 fn union_site(f: &Fixture) -> (Arc<FileAnalysis>, usize, usize) {
-    let fa = f.store.workspace_raw().get(&f.zoo).unwrap().value().clone();
+    let fa = f.idx.workspace_file_for_test(&f.zoo).unwrap();
     let line = ZOO.lines().nth(3).unwrap();
     (fa, 3, line.find("sound").unwrap())
 }
@@ -76,7 +76,7 @@ fn references_on_a_union_receiver_reach_every_arm() {
 #[test]
 fn an_arms_references_include_the_union_site() {
     let f = fixture();
-    let fa = f.store.workspace_raw().get(&f.cat).unwrap().value().clone();
+    let fa = f.idx.workspace_file_for_test(&f.cat).unwrap();
     let col = CAT.lines().nth(2).unwrap().find("sound").unwrap();
     let refs = at(&f, &fa, &f.cat, 2, col).references();
     assert!(in_file(&refs, &f.zoo, 3), "`$pet` may be a Cat: {refs:?}");

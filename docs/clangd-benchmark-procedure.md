@@ -6,8 +6,9 @@ reproduce every number, or push the same procedure to a bigger corpus.
 
 ## Prerequisites
 
-- Release binary with C++ support: `cargo build --release --features all-langs`
-  (or `--features cpp` if you only care about C/C++).
+- Release binary with C++ support: `cargo build --release --features cpp`.
+  A process serves one language: the CLI verbs below pick C++ from their
+  target file, and the live server needs `--lang cpp`.
 - `clangd` — check what's on the box first: `which clangd-N` for various N
   (Ubuntu ships versioned binaries, e.g. `clangd-18`, not a bare `clangd`
   symlink). `clangd --version` / `clangd-18 --version` to confirm.
@@ -103,7 +104,7 @@ the CLI and the live session share the exact `resolve()`/`references()`
 path, see `docs/clangd-comparison.md`'s Coverage section.
 
 ```bash
-python3 e2e/lsp_latency.py --bin ./target/release/perl-lsp \
+python3 e2e/lsp_latency.py --bin ./target/release/perl-lsp --arg=--lang --arg=cpp \
   --root <root> --file <relative/or/abs/path> \
   --line <1-based> --col <1-based> \
   --query definition --warm-repeat 2 \

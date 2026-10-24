@@ -15,10 +15,11 @@
 /// with headroom, which is the safe direction for a cap).
 pub const SOURCE_TO_ANALYSIS_EXPANSION: u64 = 65;
 
-/// Share of physical RAM a single derived cap may reach. Per POOL: the hub
-/// and each pack sub-index derive independently (no summed budget, by
-/// design), so on a mixed-language corpus the ceilings can sum past RAM —
-/// the ceiling bounds one runaway derivation, it is not a global budget.
+/// Share of physical RAM a single derived cap may reach. Per POOL: each
+/// derives independently (no summed budget, by design), and one process per
+/// language means a mixed-language corpus runs several processes whose
+/// ceilings can sum past RAM — the ceiling bounds one runaway derivation,
+/// it is not a global budget.
 const RAM_CEILING_SHARE: u64 = 2;
 
 /// Physical RAM in bytes. POSIX `sysconf` on unix (Linux and mac alike),

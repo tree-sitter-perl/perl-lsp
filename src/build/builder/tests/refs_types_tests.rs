@@ -994,6 +994,20 @@ fn test_return_type_undef_arm_before_explicit_return_still_undef() {
     );
 }
 
+#[test]
+fn test_return_type_undef_valued_arm_beside_an_untyped_arm_not_undef() {
+    // `return $self->_log(..)` is a value arm whose value is undef; the
+    // last arm calls something nothing types. Joining only the typed arms
+    // said `Undef`, and `return if !$m; $m->Foo` then warned that a live
+    // object's method call dies (Znuny's `_GetTransportModule`).
+    let fa = build_fa(
+        "package T;\nsub _log { return; }\nsub get {\n    my ($self, $y) = @_;\n    return if !$y;\n    \
+         if ($y > 1) { return $self->_log('bad'); }\n    return $Kernel::OM->Get($y);\n}\n",
+    );
+    assert_eq!(fa.sub_return_type_at_arity("_log", None), Some(InferredType::Undef));
+    assert_ne!(fa.sub_return_type_at_arity("get", None), Some(InferredType::Undef));
+}
+
 /// `package A` with a constructor, then `sub f` whose body is `body`.
 fn tail_return(body: &str) -> Option<InferredType> {
     let src = format!("package A;\nsub new {{ bless {{}}, shift }}\nsub f {{\n    my $self = shift;\n    {body}\n}}\n");

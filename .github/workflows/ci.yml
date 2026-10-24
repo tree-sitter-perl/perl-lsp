@@ -109,7 +109,7 @@ jobs:
           version: v0.11.0
 
       # Separate from `e2e-tests` because the suites need `--features
-      # all-langs`, which the script builds itself — there is no flag to add
+      # cpp,python`, which the script builds itself — there is no flag to add
       # here. Covers the C/C++ suites AND `python_members`, so this is the
       # pack lane generally, not a cpp one.
       - name: Run pack e2e tests

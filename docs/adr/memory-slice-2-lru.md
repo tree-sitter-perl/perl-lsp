@@ -109,14 +109,14 @@ dropped from the **resident pack-index copy** of each workspace/dependency file.
 The **disk blob keeps the full bag** (persisted before the strip), so
 rehydration is lossless.
 
-Open documents (`FileStore::open`) keep their full analysis **with** the bag —
+Open documents (`OpenDocs::open`) keep their full analysis **with** the bag —
 hover / completion / signature-help re-query it live. Only the pack
 `ModuleIndex` workspace copies are stripped. (A file can be in both: the small
 open set holds the fat copy, the index copy is thin.)
 
 ### The eviction seam
 
-In `module_resolver::index_pack_languages`, both feed paths converge on
+In `module_resolver::index_pack_language`, both feed paths converge on
 `pack_index.register_symbols(path, Arc<FileAnalysis>)`. Strip the bag on the
 resident copy immediately before that `Arc::new`, **after** the full blob is
 serialized to disk:
@@ -205,7 +205,7 @@ cache.
 - The pack `ModuleIndex` I/O runs on its dedicated `std::thread`; async handlers
   call `_cached` methods only. Rehydration is SQLite I/O, so it must **not** run
   inline in an async handler — route it through the module-index thread (or
-  `spawn_blocking`), never holding a `FileStore`/`DashMap` guard across the read
+  `spawn_blocking`), never holding an `OpenDocs`/`DashMap` guard across the read
   (`filestore-guard-discipline`: snapshot `Arc::clone`, drop the guard, then
   rehydrate).
 - `PackBagCache` is a `DashMap` + atomic recency stamps: the LRU touch/evict
@@ -230,7 +230,7 @@ lifecycle* (strip after persist; rehydrate on demand) and adds a `#[serde(skip)]
   across files; `Display` prints the table above.
 - `WitnessBag::heap_bytes_estimate()` (`witnesses.rs`) — `(vec, index)` bytes.
 - `PERL_LSP_HEAP_DUMP`-gated aggregate at the end of
-  `index_pack_languages`, walking `hub.for_each_pack_registered_file`.
+  `index_pack_language`, walking `index.for_each_pack_registered_file`.
 
 Methodology (honest bounds): flat `size_of<T>() × capacity` for every
 collection (so `Vec`/`HashMap` slack is counted) plus deep `String` capacities
