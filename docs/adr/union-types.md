@@ -101,9 +101,9 @@ Every per-arm query runs in an opaque frame, so a conclusion bake that
 crosses files under a union poisons to a decode instead of minting a
 first-answer `Link` for what is a join.
 
-The build-time chain walker (`invocant_type_at_node`) does not
-distribute: its answers back the frozen single-class dispatch edge, which
-a union never gets.
+The build-time chain walker (`invocant_type_at_node`) does not distribute
+yet (`TODO(union-chain-walker)`); the registry's projections above are
+the query-time answer.
 
 Python annotations mint unions: `A | B`, `Union[A, B]`, `Optional[A]`
 (`A | None`). PHP `A|B` docblocks land with the PHP pack.
