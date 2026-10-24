@@ -143,7 +143,7 @@ pub(super) fn walk_macro_defs(
             .map(|n| (n.start_position(), n.end_position()))
             .unwrap_or_default();
         if let (Some(n), Some(b)) = (oname, obody) {
-            emit(n, Macro { params: None, body: b, guards: guards.clone(), def_line }, name_span);
+            emit(n, Macro { params: None, body: b, guards: guards.clone(), def_line, variant_delegates: Vec::new() }, name_span);
         }
         // Bodyless `#define FLAG` — the canonical config knob (feature
         // toggles, include guards, `PERL_CORE`-style markers). It must enter
@@ -153,12 +153,12 @@ pub(super) fn walk_macro_defs(
         if let Some(n) = bname {
             emit(
                 n,
-                Macro { params: None, body: String::new(), guards: guards.clone(), def_line },
+                Macro { params: None, body: String::new(), guards: guards.clone(), def_line, variant_delegates: Vec::new() },
                 name_span,
             );
         }
         if let (Some(n), Some(p), Some(b)) = (fname, fparams, fbody) {
-            emit(n, Macro { params: Some(p), body: b, guards, def_line }, name_span);
+            emit(n, Macro { params: Some(p), body: b, guards, def_line, variant_delegates: Vec::new() }, name_span);
         }
     }
 }
@@ -208,11 +208,45 @@ pub fn looks_like_c_family(prefix: &str) -> bool {
 }
 
 pub fn collect_macros(tree: &Tree, src: &[u8]) -> BTreeMap<String, Macro> {
-    let mut out = BTreeMap::new();
-    walk_macro_defs(tree, src, |n, m, _span| {
+    let mut out: BTreeMap<String, Macro> = BTreeMap::new();
+    walk_macro_defs(tree, src, |n, mut m, _span| {
+        // Last definition wins the body; the shadowed one's delegate survives.
+        if let Some(prev) = out.remove(&n) {
+            m.absorb_variant(&prev);
+        }
         out.insert(n, m);
     });
     out
+}
+
+impl Macro {
+    /// This definition's direct-delegation callee. Function-like: a
+    /// whole-body single call `G(args)`. Object-like: a bare-identifier ALIAS
+    /// (`#define op_prune_chain_head Perl_op_prune_chain_head`, perl5's
+    /// non-threaded embed.h shape) — the same forwarding edge, spelled
+    /// without params.
+    pub fn delegate(&self) -> Option<String> {
+        match self.params {
+            Some(_) => delegation_target(&self.body),
+            None => bare_identifier(&self.body),
+        }
+    }
+
+    /// Every callee a use of this name may forward to, across all its
+    /// config variants.
+    pub fn all_delegates(&self) -> impl Iterator<Item = String> + '_ {
+        self.delegate().into_iter().chain(self.variant_delegates.iter().cloned())
+    }
+
+    /// Fold a shadowed same-named definition's delegates into this one.
+    pub fn absorb_variant(&mut self, other: &Macro) {
+        let own = self.delegate();
+        for d in other.all_delegates() {
+            if own.as_ref() != Some(&d) && !self.variant_delegates.contains(&d) {
+                self.variant_delegates.push(d);
+            }
+        }
+    }
 }
 
 /// The macro identity/navigation lane: every `#define` as a `MacroDef` carrying
@@ -229,14 +263,7 @@ pub fn collect_macro_defs(
     let src = source.as_bytes();
     let mut out = Vec::new();
     walk_macro_defs(&tree, src, |name, m, (start, end)| {
-        // Function-like: a whole-body single call `G(args)`. Object-like: a
-        // bare-identifier ALIAS (`#define op_prune_chain_head
-        // Perl_op_prune_chain_head`, perl5's non-threaded embed.h shape) —
-        // the same forwarding edge, spelled without params.
-        let delegate = match m.params {
-            Some(_) => delegation_target(&m.body),
-            None => bare_identifier(&m.body),
-        };
+        let delegate = m.delegate();
         out.push(MacroDef {
             name,
             params: m.params,

@@ -97,6 +97,13 @@ impl PreExpandedExternal {
     pub fn macro_names(&self) -> impl Iterator<Item = &str> {
         self.raw.keys().map(|k| k.as_str())
     }
+
+    /// Every callee a use of gathered macro `name` may forward to, across
+    /// its config variants in the whole closure — the delegation edges the
+    /// build mints onto this file's use sites (`macro_delegations`).
+    pub fn delegates_of(&self, name: &str) -> Vec<String> {
+        self.raw.get(name).map(|m| m.all_delegates().collect()).unwrap_or_default()
+    }
 }
 
 /// Every identifier token appearing in any macro body — the reference
@@ -245,7 +252,12 @@ pub(super) fn gather_included_macros(
             let Some(info) = info else { continue };
             headers.push((canon.clone(), file_stamp(canon)));
             for (k, v) in &info.macros {
-                macros.entry(k.clone()).or_insert_with(|| v.clone());
+                match macros.entry(k.clone()) {
+                    std::collections::btree_map::Entry::Vacant(e) => {
+                        e.insert(v.clone());
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut e) => e.get_mut().absorb_variant(v),
+                }
             }
             for inc in &info.includes {
                 if let Some(nx) = resolve_include(canon, inc) {
