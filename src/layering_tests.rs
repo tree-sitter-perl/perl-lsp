@@ -1421,9 +1421,8 @@ fn language_spellings_have_one_home() {
         ("build/query_extract/extract/defs.rs", 2, "the extractor mints `anonymous` and `inline`: the minting side"),
         ("build/query_extract/vocab.rs", 10, "the closed capture vocabulary: capture suffixes, and the attribute each def kind marks"),
         ("model/conventions.rs", 3, "Perl's own attribute spellings (`field_attribute_flag`): Perl's home"),
-        ("model/file_analysis/core_types.rs", 15, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`): the one table every language maps its spellings onto"),
-        ("model/file_analysis/completion.rs", 1, "a `DeclKind` rendered as completion detail text, not an attribute read"),
-        ("model/file_analysis/outline.rs", 2, "outline detail text for a union container and a param decl kind"),
+        ("model/file_analysis/core_types.rs", 16, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`): the one table every language maps its spellings onto; plus `DeclKind::label`, a decl kind rendered as outline/completion detail text"),
+        ("model/file_analysis/outline.rs", 1, "outline detail text for a union container"),
         ("model/witnesses/registry.rs", 1, "the `param` owner-keyed fallback key: a witness attachment name"),
         ("lsp/symbols/hover.rs", 1, "the hover LABEL for a macro-shaped Sub: display text (the fact itself is read as a flag)"),
     ];

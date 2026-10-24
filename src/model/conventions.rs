@@ -112,6 +112,36 @@ pub fn strip_variable_sigils(name: &str) -> &str {
     name.trim_start_matches(['$', '@', '%'])
 }
 
+/// A variable Perl itself defines (perlvar): punctuation (`$_`, `$@`, `@_`),
+/// digit (`$0`, `$1`), caret (`${^W}`) and the identifiers Perl forces into
+/// `main` (`%ENV`, `@ARGV`, `%SIG`, ...). Such a name never needs a
+/// declaration and never names user state, so an undeclared use of one is
+/// not an implicit global. `name` is sigil-led, as a variable ref spells it.
+pub fn is_special_variable(name: &str) -> bool {
+    let base = name.get(1..).unwrap_or("");
+    let base = base.strip_prefix('{').and_then(|b| b.strip_suffix('}')).unwrap_or(base);
+    match base.chars().next() {
+        None => true,
+        Some(c) if !(c.is_alphabetic() || c == '_') => true,
+        _ => matches!(
+            base,
+            "_" | "ENV" | "INC" | "ARGV" | "ARGVOUT" | "SIG" | "STDIN" | "STDOUT" | "STDERR"
+        ),
+    }
+}
+
+/// `use strict 'vars'` exempts these from declaration on top of the special
+/// variables: `$a`/`$b` are `sort`'s comparator globals.
+pub fn is_strict_vars_exempt(name: &str) -> bool {
+    is_special_variable(name) || matches!(name, "$a" | "$b")
+}
+
+/// The typeglob holding a variable's slot (`$x` → `*x`). Exporting the
+/// glob exports every sigil's variable of that name.
+pub fn glob_of_variable(name: &str) -> String {
+    format!("*{}", name.get(1..).unwrap_or(""))
+}
+
 /// Conventional constructor method name. Perl has no `new` keyword — this is
 /// pure convention, but it's the convention every framework and the inference
 /// rules ("`Class->new` returns `Class`") build on.

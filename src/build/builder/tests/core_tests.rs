@@ -1302,3 +1302,70 @@ fn stamp_pass_sharing_matches_lone_resolutions() {
             .unwrap();
     }
 }
+
+fn implicit_globals(fa: &FileAnalysis) -> Vec<(String, Option<String>, usize)> {
+    fa.symbols()
+        .iter()
+        .filter(|s| matches!(s.detail, SymbolDetail::Variable { decl_kind: DeclKind::Implicit, .. }))
+        .map(|s| (s.name.clone(), s.package.clone(), s.selection_span.start.row))
+        .collect()
+}
+
+/// #116: an undeclared variable is a package global. One symbol per
+/// `(package, name)`, anchored at the first use, with every use — bare and
+/// qualified — bound to it; special variables never mint one.
+#[test]
+fn undeclared_variable_mints_one_implicit_global_per_package() {
+    let src = "$a = 1;\n$a = 2;\n$abel = 3;\nprint \"$a $_ $0 $ENV{X} $main::abel\";\npackage Foo;\n$abel = 4;\n";
+    let fa = build_fa(src);
+    let mut globals = implicit_globals(&fa);
+    globals.sort();
+    assert_eq!(
+        globals,
+        vec![
+            ("$a".to_string(), Some("main".to_string()), 0),
+            ("$abel".to_string(), Some("Foo".to_string()), 5),
+            ("$abel".to_string(), Some("main".to_string()), 2),
+        ],
+    );
+    let main_abel = fa
+        .symbols()
+        .iter()
+        .find(|s| s.name == "$abel" && s.package.as_deref() == Some("main"))
+        .unwrap()
+        .id;
+    let bound_rows: Vec<usize> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.resolved_symbol() == Some(main_abel))
+        .map(|r| r.span.start.row)
+        .collect();
+    assert_eq!(bound_rows, vec![2, 3], "the bare use and `$main::abel`");
+    let a_uses = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "$a" && r.resolved_symbol().is_some())
+        .count();
+    assert_eq!(a_uses, 3);
+}
+
+/// A declared variable never mints a global, and `use vars` declares.
+#[test]
+fn declared_variables_mint_no_implicit_global() {
+    let src = "my $x = 1;\nour $y = 2;\nuse vars qw($v @w);\nfor my $i (1) { print $i }\nprint $x, $y, $v, @w;\n";
+    let fa = build_fa(src);
+    assert!(implicit_globals(&fa).is_empty(), "{:?}", implicit_globals(&fa));
+    let v = fa.symbols().iter().find(|s| s.name == "$v").expect("use vars declares $v");
+    assert!(matches!(v.detail, SymbolDetail::Variable { decl_kind: DeclKind::Our, .. }));
+    assert_eq!(v.selection_span.start, tree_sitter::Point::new(2, 12));
+}
+
+/// The outline shows an undeclared global (it used to come back empty).
+#[test]
+fn outline_lists_undeclared_global() {
+    let fa = build_fa("$a = 1;\n$a = 2;\nprint \"$a\";\n");
+    let outline = fa.document_symbols();
+    assert_eq!(outline.len(), 1);
+    assert_eq!(outline[0].name, "$a");
+    assert_eq!(outline[0].detail.as_deref(), Some("global"));
+}

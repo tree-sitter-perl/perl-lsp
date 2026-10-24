@@ -545,7 +545,7 @@ pub(super) fn symbol_defines_target(
     target: &TargetRef,
     analysis: &FileAnalysis,
 ) -> bool {
-    use crate::model::file_analysis::{DeclKind, HashKeyOwner, SymbolDetail};
+    use crate::model::file_analysis::{HashKeyOwner, SymbolDetail};
     if sym.name != target.name {
         return false;
     }
@@ -559,7 +559,7 @@ pub(super) fn symbol_defines_target(
         // sigil-bearing name is already matched by the `sym.name == target.name`
         // gate above; `collect_package_var` owns the (sigil-narrowed) span.
         TargetKind::PackageVar { package } => {
-            matches!(&sym.detail, SymbolDetail::Variable { decl_kind: DeclKind::Our, .. })
+            matches!(&sym.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global())
                 && sym.package.as_deref() == Some(package.as_str())
         }
         TargetKind::Sub { package } => {
@@ -749,7 +749,7 @@ pub(super) fn collect_package_var(
     name: &str,
     out: &mut Vec<RefLocation>,
 ) {
-    use crate::model::file_analysis::{DeclKind, RefKind, SymbolDetail};
+    use crate::model::file_analysis::{RefKind, SymbolDetail};
     // Rewrite only the trailing name token, anchored at the span *end* so the
     // sigil and any `Pkg::` qualifier survive — regardless of whether the ref
     // span is the whole `$Pkg::name` (container/element/slice reads span
@@ -763,12 +763,12 @@ pub(super) fn collect_package_var(
     };
     let is_our_decl = |id: crate::model::file_analysis::SymbolId| {
         let s = analysis.symbol(id);
-        matches!(&s.detail, SymbolDetail::Variable { decl_kind: DeclKind::Our, .. })
+        matches!(&s.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global())
             && s.package.as_deref() == Some(package)
             && s.name == name
     };
     for sym in analysis.symbols() {
-        if matches!(&sym.detail, SymbolDetail::Variable { decl_kind: DeclKind::Our, .. })
+        if matches!(&sym.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global())
             && sym.package.as_deref() == Some(package)
             && sym.name == name
         {

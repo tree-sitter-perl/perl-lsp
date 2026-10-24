@@ -76,6 +76,9 @@ impl<'a> Builder<'a> {
         if module_name == "Class::Tiny" {
             self.visit_class_tiny_use(node);
         }
+        if module_name == "vars" {
+            self.declare_use_vars(node);
+        }
         // Don't recurse — use statements don't contain interesting sub-nodes
     }
 
@@ -137,6 +140,28 @@ impl<'a> Builder<'a> {
                     is_dynamic: false,
                 },
             );
+        }
+    }
+
+    /// `use vars qw($x @y)` is the pre-`our` declaration form: each name is
+    /// a package global of the current package, declared at its word.
+    pub(super) fn declare_use_vars(&mut self, node: Node<'a>) {
+        let words = crate::cst::string_list(node, self.source, &mut |_| Vec::new());
+        for (name, span) in words {
+            let Some(sigil) = name.chars().next() else { continue };
+            if !crate::model::conventions::PERL_SPELLINGS.is_sigil(sigil)
+                || crate::model::conventions::split_qualified_var(&name, &crate::model::conventions::PERL_SPELLINGS).is_some()
+            {
+                continue;
+            }
+            self.add_symbol(
+                name.clone(),
+                SymKind::Variable,
+                node_to_span(node),
+                span,
+                SymbolDetail::Variable { sigil, decl_kind: DeclKind::Our },
+            );
+            self.add_ref(RefKind::Variable, span, name, AccessKind::Declaration);
         }
     }
 
@@ -362,8 +387,9 @@ impl<'a> Builder<'a> {
         // Emit FunctionCall refs for imported symbol names (for goto-def on import args).
         // These refs pin to the module being imported from — the qw list
         // IS the authoritative source. Synthetic uses skip this — there's
-        // no source span for the imported names to live on.
-        if module_name != "parent" && module_name != "base" {
+        // no source span for the imported names to live on. `use vars`
+        // names declarations, not imports (`declare_use_vars`).
+        if module_name != "parent" && module_name != "base" && module_name != "vars" {
             if !imports.is_empty() {
                 if let Some(node) = node {
                     // `:tag` / `-tag` group selectors name a `%EXPORT_TAGS`

@@ -8,7 +8,7 @@ use super::*;
 /// package. `None` for `my` / `state` / `field`, which are pure lexicals.
 pub(super) fn our_gate(sym: &Symbol) -> Option<&str> {
     match &sym.detail {
-        SymbolDetail::Variable { decl_kind: DeclKind::Our, .. } => sym.package.as_deref(),
+        SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global() => sym.package.as_deref(),
         _ => None,
     }
 }
@@ -22,6 +22,15 @@ pub(super) fn our_gate_admits(gate: Option<&str>, use_pkg: Option<&str>) -> bool
         Some(decl_pkg) => use_pkg.unwrap_or("main") == decl_pkg,
         None => true,
     }
+}
+
+/// A sigil and a plain identifier — the only spelling an implicit global is
+/// keyed by. `${name}` and computed names stay unbound.
+fn is_plain_variable_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|s| crate::model::conventions::PERL_SPELLINGS.is_sigil(s))
+        && chars.clone().next().is_some()
+        && chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
 impl<'a> Builder<'a> {
@@ -101,6 +110,92 @@ impl<'a> Builder<'a> {
                     }
                 }
                 current = self.scopes[scope_id.0 as usize].parent;
+            }
+        }
+
+        self.mint_implicit_globals();
+    }
+
+    /// A bare variable no declaration reaches is the package global Perl
+    /// creates on first mention. Mint one `DeclKind::Implicit` symbol per
+    /// `(package, name)` at its first use and bind every use to it — the
+    /// bare ones, then the qualified spellings (`$main::x`) of the same
+    /// global — so outline, references and rename see it like any `our`.
+    fn mint_implicit_globals(&mut self) {
+        let names = &crate::model::conventions::PERL_SPELLINGS;
+        let mut order: Vec<(String, String)> = Vec::new();
+        let mut uses: std::collections::HashMap<(String, String), Vec<usize>> =
+            std::collections::HashMap::new();
+        for idx in 0..self.refs.len() {
+            let r = &self.refs[idx];
+            if !matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess)
+                || r.binding.is_some()
+                || r.qualified_var_target(names).is_some()
+                || !is_plain_variable_name(&r.target_name)
+                || crate::model::conventions::is_special_variable(&r.target_name)
+            {
+                continue;
+            }
+            let pkg = self.package_at_pos(r.span.start).unwrap_or("main").to_string();
+            let key = (pkg, r.target_name.clone());
+            let bucket = uses.entry(key.clone()).or_default();
+            if bucket.is_empty() {
+                order.push(key);
+            }
+            bucket.push(idx);
+        }
+
+        let mut minted: std::collections::HashMap<(String, String), SymbolId> =
+            std::collections::HashMap::new();
+        for key in order {
+            let idxs = &uses[&key];
+            let first = idxs
+                .iter()
+                .copied()
+                .min_by_key(|&i| (self.refs[i].span.start, self.refs[i].span.end))
+                .expect("a bucket holds at least one use");
+            let span = self.refs[first].span;
+            let (pkg, name) = key.clone();
+            let sigil = name.chars().next().unwrap_or('$');
+            let id = SymbolId(self.next_symbol_id);
+            self.next_symbol_id += 1;
+            // File scope: a global is visible everywhere its package is.
+            self.var_decls.entry((ScopeId(0), name.clone())).or_default().push(id);
+            self.symbols.push(Symbol {
+                id,
+                name,
+                kind: SymKind::Variable,
+                span,
+                selection_span: span,
+                scope: ScopeId(0),
+                package: Some(pkg),
+                detail: SymbolDetail::Variable { sigil, decl_kind: DeclKind::Implicit },
+                namespace: Namespace::Language,
+                presentation: Default::default(),
+                attributes: Vec::new(),
+                flags: Default::default(),
+                declared_with: None,
+                deref_stack: Vec::new(),
+                arity: None,
+            });
+            for &i in idxs {
+                self.refs[i].bind_symbol(id);
+            }
+            minted.insert(key, id);
+        }
+
+        if minted.is_empty() {
+            return;
+        }
+        for r in self.refs.iter_mut() {
+            if !matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess) || r.binding.is_some() {
+                continue;
+            }
+            let Some((pkg, name)) = r.qualified_var_target(names).map(|(p, n)| (p.to_string(), n)) else {
+                continue;
+            };
+            if let Some(&id) = minted.get(&(pkg, name)) {
+                r.bind_symbol(id);
             }
         }
     }

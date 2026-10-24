@@ -327,14 +327,7 @@ impl FileAnalysis {
                         (sym.name.clone(), Some("union".to_string()), children)
                     } else {
                         let detail = match &sym.detail {
-                            SymbolDetail::Variable { decl_kind, .. } => match decl_kind {
-                                DeclKind::My => "my",
-                                DeclKind::Our => "our",
-                                DeclKind::State => "state",
-                                DeclKind::Field => "field",
-                                DeclKind::Param => "param",
-                                DeclKind::ForVar => "for",
-                            },
+                            SymbolDetail::Variable { decl_kind, .. } => decl_kind.label(),
                             _ => "my",
                         };
                         (sym.name.clone(), Some(detail.to_string()), Vec::new())
@@ -453,6 +446,9 @@ impl FileAnalysis {
                 SymKind::Variable | SymKind::Field => {
                     let is_self = crate::model::conventions::is_conventional_invocant_name(&sym.name);
                     let (sigil, is_readonly, is_param) = match &sym.detail {
+                        // Anchored on a use, not a declaration: the use's
+                        // own ref carries the token.
+                        SymbolDetail::Variable { decl_kind: DeclKind::Implicit, .. } => continue,
                         SymbolDetail::Variable { sigil, decl_kind } => {
                             let readonly = matches!(decl_kind, DeclKind::Field);
                             let is_param = matches!(decl_kind, DeclKind::Param | DeclKind::ForVar);

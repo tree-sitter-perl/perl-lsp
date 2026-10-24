@@ -969,3 +969,76 @@ fn diagnostic_options_deserialize_from_lsp_shape() {
     assert!(!opts.redundant_guard, "absent key defaults to false");
     assert!(!opts.unresolved_dispatch, "absent key defaults to false");
 }
+
+fn missing_declarations(diags: &[Diagnostic]) -> Vec<(u32, String)> {
+    diags
+        .iter()
+        .filter(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == codes::MISSING_DECLARATION))
+        .map(|d| (d.range.start.line, d.message.clone()))
+        .collect()
+}
+
+/// #116: an undeclared variable is what `use strict 'vars'` rejects — every
+/// use is flagged (WARNING); `$a`/`$b`, special variables and qualified
+/// spellings are not.
+#[test]
+fn missing_declaration_flags_each_undeclared_use() {
+    let source = "$a = 1;\n$abel = 3;\nprint \"$a $abel $_ $0 $ENV{X} @ARGV $main::abel\";\nmy @s = sort { $a <=> $b } @ARGV;\nmy $ok = 1; print $ok;\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::index::module_index::ModuleIndex::new_for_test();
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    let found = missing_declarations(&diags);
+    let lines: Vec<u32> = found.iter().map(|(l, _)| *l).collect();
+    assert_eq!(lines, vec![1, 2], "only the two bare `$abel` uses: {found:?}");
+    assert!(found[0].1.contains("'$abel'"), "{found:?}");
+    let d = diags
+        .iter()
+        .find(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == codes::MISSING_DECLARATION))
+        .unwrap();
+    assert_eq!(d.severity, Some(DiagnosticSeverity::WARNING));
+}
+
+/// A global used inside a sub before a file-level `my` of the same name is
+/// still the global: the lexical isn't in scope yet.
+#[test]
+fn missing_declaration_sees_lexical_declared_later() {
+    let source = "sub f { return $later }\nmy $later = 1;\nprint $later;\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::index::module_index::ModuleIndex::new_for_test();
+    let found = missing_declarations(&collect_diagnostics(&analysis, &module_index, Default::default()));
+    assert_eq!(found.iter().map(|(l, _)| *l).collect::<Vec<_>>(), vec![0], "{found:?}");
+}
+
+/// `our` and `use vars` declare; an Exporter `qw($x)` import or an exported
+/// glob declares too.
+#[test]
+fn missing_declaration_respects_declarations_and_imports() {
+    let source = "package P;\nour $o = 1;\nuse vars qw($v @w);\nuse vars ('%h');\nuse FakeVars qw($imported);\nuse FakeGlobs;\n$o++; $v++; push @w, 1; $h{k} = 1; print $imported, $globbed;\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::index::module_index::ModuleIndex::new_for_test();
+    for (name, src) in [
+        ("FakeVars", "package FakeVars;\nour @EXPORT_OK = qw($imported);\nour $imported;\n1;\n"),
+        ("FakeGlobs", "package FakeGlobs;\nour @EXPORT = qw(*globbed);\nour $globbed;\n1;\n"),
+    ] {
+        module_index.insert_cache(
+            name,
+            Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+                std::path::PathBuf::from(format!("/fake/{name}.pm")),
+                std::sync::Arc::new(parse_analysis(src)),
+            ))),
+        );
+    }
+    let found = missing_declarations(&collect_diagnostics(&analysis, &module_index, Default::default()));
+    assert!(found.is_empty(), "{found:?}");
+}
+
+/// A bare `use` whose producer isn't cached may export any variable: stay
+/// silent until it resolves rather than flag what it might declare.
+#[test]
+fn missing_declaration_silent_while_a_bare_import_is_unresolved() {
+    let source = "use NotCachedYet;\n$x = 1;\n";
+    let analysis = parse_analysis(source);
+    let module_index = crate::index::module_index::ModuleIndex::new_for_test();
+    let found = missing_declarations(&collect_diagnostics(&analysis, &module_index, Default::default()));
+    assert!(found.is_empty(), "{found:?}");
+}

@@ -1307,14 +1307,14 @@ impl FileAnalysis {
                     .map(|id| self.symbol(id))
                     .or_else(|| self.resolve_variable(&r.target_name, point));
                 if let Some(s) = sym {
-                    if let SymbolDetail::Variable { decl_kind: DeclKind::Our, .. } = s.detail {
+                    if matches!(s.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global()) {
                         return Some((s.package.clone()?, s.name.clone()));
                     }
                 }
             }
         }
         if let Some(s) = self.symbol_at(point) {
-            if let SymbolDetail::Variable { decl_kind: DeclKind::Our, .. } = s.detail {
+            if matches!(s.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global()) {
                 return Some((s.package.clone()?, s.name.clone()));
             }
         }

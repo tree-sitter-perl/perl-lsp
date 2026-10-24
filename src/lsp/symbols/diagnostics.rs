@@ -16,6 +16,7 @@ pub mod codes {
     pub const HELPER_NOT_LOADED: &str = "helper-not-loaded";
     pub const UNRESOLVED_DISPATCH: &str = "unresolved-dispatch";
     pub const UNKNOWN_HASH_KEY: &str = "unknown-hash-key";
+    pub const MISSING_DECLARATION: &str = "missing-declaration";
 }
 
 // ---- Diagnostics ----
@@ -315,6 +316,37 @@ pub fn collect_diagnostics(
     }
 
     drop(_g_fn);
+
+    // Undeclared variables — what `use strict 'vars'` rejects. Always on: a
+    // global nobody declared is the typo-shaped bug strict exists to catch.
+    // A name an import binds is declared by its exporter. A bare or `:tag`
+    // import whose producer isn't cached yet may bind any variable, so the
+    // file stays silent until it resolves (resolution re-publishes).
+    let surface_unknown = import_bindings.iter().any(|b| {
+        b.exported.is_none()
+            && !b.import.empty_import
+            && (b.import.imported_symbols.is_empty()
+                || b.import.imported_symbols.iter().any(|s| {
+                    s.local_name.starts_with(':') || s.local_name.starts_with('-')
+                }))
+    });
+    if !surface_unknown {
+        for r in analysis.undeclared_variable_uses() {
+            let glob = crate::model::conventions::glob_of_variable(&r.target_name);
+            let brought = |n: &str| matches!(resolve_name(n), Some((_, ImportResolution::Brought)));
+            if brought(&r.target_name) || brought(&glob) {
+                continue;
+            }
+            diagnostics.push(Diagnostic {
+                range: span_to_range(r.span),
+                severity: Some(DiagnosticSeverity::WARNING),
+                code: Some(NumberOrString::String(codes::MISSING_DECLARATION.into())),
+                source: Some("perl-lsp".into()),
+                message: format!("'{}' is not declared (add `my` or `our`)", r.target_name),
+                ..Default::default()
+            });
+        }
+    }
     // 5e: Unresolved method diagnostics for locally-defined classes.
     //
     // Core owns ONLY the true `UNIVERSAL::` surface — the methods every Perl
