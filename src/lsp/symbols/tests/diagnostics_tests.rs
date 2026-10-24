@@ -1042,3 +1042,14 @@ fn missing_declaration_silent_while_a_bare_import_is_unresolved() {
     let found = missing_declarations(&collect_diagnostics(&analysis, &module_index, Default::default()));
     assert!(found.is_empty(), "{found:?}");
 }
+
+/// `disableMissingDeclaration` turns the default-on lint off.
+#[test]
+fn missing_declaration_opt_out() {
+    let analysis = parse_analysis("$abel = 1;\n");
+    let module_index = crate::index::module_index::ModuleIndex::new_for_test();
+    assert_eq!(missing_declarations(&collect_diagnostics(&analysis, &module_index, Default::default())).len(), 1);
+    let opts: DiagnosticOptions =
+        serde_json::from_value(serde_json::json!({ "disableMissingDeclaration": true })).unwrap();
+    assert!(missing_declarations(&collect_diagnostics(&analysis, &module_index, opts)).is_empty());
+}

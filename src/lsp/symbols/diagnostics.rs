@@ -21,9 +21,10 @@ pub mod codes {
 
 // ---- Diagnostics ----
 
-/// Opt-in diagnostic toggles. Defaults are all-off for the QA/plugin-author
-/// channels (noise for end users); the always-on hints (`unresolved-function`
-/// / `unresolved-method`) ignore this.
+/// Diagnostic toggles. Defaults are all-off: the opt-in QA/plugin-author
+/// channels (noise for end users) and the opt-out of the default-on
+/// `missing-declaration`; the always-on hints (`unresolved-function` /
+/// `unresolved-method`) ignore this.
 ///
 /// **The struct is the schema.** `rename_all = "camelCase"` makes each field
 /// its own LSP key under `initializationOptions.diagnostics`, so `backend.rs`
@@ -74,6 +75,10 @@ pub struct DiagnosticOptions {
     /// guaranteed runtime die. Guard-narrowed reps only; objects are never a
     /// mismatch. Off by default.
     pub deref_shape: bool,
+    /// Turn OFF `missing-declaration` (an undeclared variable, what `use
+    /// strict 'vars'` rejects), which is on by default. Spelled as an
+    /// opt-out so every field keeps the all-off default.
+    pub disable_missing_declaration: bool,
 }
 
 impl DiagnosticOptions {
@@ -90,6 +95,7 @@ impl DiagnosticOptions {
             optional_deref: has("--optional-deref"),
             redundant_guard: has("--redundant-guard"),
             deref_shape: has("--deref-shape"),
+            disable_missing_declaration: has("--disable-missing-declaration"),
         }
     }
 }
@@ -317,8 +323,8 @@ pub fn collect_diagnostics(
 
     drop(_g_fn);
 
-    // Undeclared variables — what `use strict 'vars'` rejects. Always on: a
-    // global nobody declared is the typo-shaped bug strict exists to catch.
+    // Undeclared variables — what `use strict 'vars'` rejects. On by default:
+    // a global nobody declared is the typo-shaped bug strict exists to catch.
     // A name an import binds is declared by its exporter. A bare or `:tag`
     // import whose producer isn't cached yet may bind any variable, so the
     // file stays silent until it resolves (resolution re-publishes).
@@ -330,7 +336,7 @@ pub fn collect_diagnostics(
                     s.local_name.starts_with(':') || s.local_name.starts_with('-')
                 }))
     });
-    if !surface_unknown {
+    if !surface_unknown && !options.disable_missing_declaration {
         for r in analysis.undeclared_variable_uses() {
             let glob = crate::model::conventions::glob_of_variable(&r.target_name);
             let brought = |n: &str| matches!(resolve_name(n), Some((_, ImportResolution::Brought)));

@@ -27,12 +27,13 @@ crate / VS Code extension versions.
   `$x = 1` with no `my`/`our` now shows in the outline (detail `global`),
   and references, rename and highlight find every use, including
   `$main::x`. `use vars qw($x @y)` now declares like `our`.
-- **New always-on `missing-declaration` warning** on each use of a variable
+- **New default-on `missing-declaration` warning** on each use of a variable
   nothing declares, mirroring `use strict 'vars'`. `$a`/`$b`, Perl's
   special variables and qualified names are exempt; a variable an import
   brings in (`use FindBin qw($Bin)`, an exported `*glob`) counts as
   declared. A file with a bare `use` whose module isn't resolved yet stays
-  silent until it is. Known gap: `use English` builds its export list at
+  silent until it is. Opt out with `diagnostics.disableMissingDeclaration`
+  (CLI `--disable-missing-declaration`). Known gap: `use English` builds its export list at
   runtime, so `$ERRNO` and friends are still flagged.
 
 ## v0.8.0 — 2026-10-19

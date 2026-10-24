@@ -123,6 +123,29 @@ impl<'a> Builder<'a> {
     /// global — so outline, references and rename see it like any `our`.
     fn mint_implicit_globals(&mut self) {
         let names = &crate::model::conventions::PERL_SPELLINGS;
+        // `our` is lexically scoped: after `package main;` a bare `$v` still
+        // names an earlier `our $v` from `package Foo;`. Resolution gates
+        // `our` by package and leaves that use unbound; it is declared all
+        // the same, so it is no implicit global.
+        let mut ours: std::collections::HashMap<ScopeId, Vec<(&str, Point)>> =
+            std::collections::HashMap::new();
+        for sym in &self.symbols {
+            if matches!(sym.detail, SymbolDetail::Variable { decl_kind: DeclKind::Our, .. }) {
+                ours.entry(sym.scope).or_default().push((sym.name.as_str(), sym.span.start));
+            }
+        }
+        let our_visible = |r: &Ref| {
+            let mut current = Some(r.scope);
+            while let Some(scope_id) = current {
+                if ours.get(&scope_id).is_some_and(|v| {
+                    v.iter().any(|(n, at)| *n == r.target_name && *at <= r.span.start)
+                }) {
+                    return true;
+                }
+                current = self.scopes[scope_id.0 as usize].parent;
+            }
+            false
+        };
         let mut order: Vec<(String, String)> = Vec::new();
         let mut uses: std::collections::HashMap<(String, String), Vec<usize>> =
             std::collections::HashMap::new();
@@ -133,6 +156,7 @@ impl<'a> Builder<'a> {
                 || r.qualified_var_target(names).is_some()
                 || !is_plain_variable_name(&r.target_name)
                 || crate::model::conventions::is_special_variable(&r.target_name)
+                || our_visible(r)
             {
                 continue;
             }

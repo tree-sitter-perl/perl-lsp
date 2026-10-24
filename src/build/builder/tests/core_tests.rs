@@ -1369,3 +1369,11 @@ fn outline_lists_undeclared_global() {
     assert_eq!(outline[0].name, "$a");
     assert_eq!(outline[0].detail.as_deref(), Some("global"));
 }
+
+/// `our` is lexically scoped: a bare use after `package main;` still names
+/// the earlier `our $v` of `package Foo;`, so it is no implicit global.
+#[test]
+fn our_from_an_earlier_package_is_not_an_implicit_global() {
+    let fa = build_fa("package Foo;\nour $version = 1;\npackage main;\nprint $version;\n");
+    assert!(implicit_globals(&fa).is_empty(), "{:?}", implicit_globals(&fa));
+}
