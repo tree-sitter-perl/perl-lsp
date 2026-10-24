@@ -868,7 +868,7 @@ impl<'a> Builder<'a> {
         let source = return_expr.or(tail_expr);
         let Some(source) = source else { return vec![] };
         let list_node = if source.kind() == "return_expression" {
-            source.named_child(0)
+            crate::cst::nth_element(source, 0)
         } else {
             Some(source)
         };
@@ -981,8 +981,7 @@ impl<'a> Builder<'a> {
         pending_name: &mut Option<(String, Span)>,
         out: &mut Vec<(String, String, Span, Span)>,
     ) {
-        for i in 0..node.named_child_count() {
-            let Some(child) = node.named_child(i) else { continue };
+        for child in crate::cst::NodeExt::elements(&node) {
             match (crate::cst::literal_shape(child), child.kind()) {
                 (Some(LiteralShape::HashRef), _) => {
                     if let Some((remote, remote_span)) = pending_name.take() {

@@ -82,6 +82,34 @@ fn a_comment_in_a_hash_literal_is_not_a_key() {
     assert_eq!(names, ["host", "port"]);
 }
 
+// A comment before a `has`'s closing paren sits beside its options, not in
+// them, wherever it falls (#268).
+#[test]
+fn a_comment_before_a_has_options_close_paren_keeps_the_attribute() {
+    let fa = build_fa(
+        "package Foo;\nuse Moose;\n\
+         has trailing => (\n    is => 'ro',    # after the last value\n);\n\
+         has own_line => (\n    is => 'ro',\n    # on its own line\n);\n\
+         has no_comma => (\n    is => 'ro'    # no trailing comma\n);\n\
+         has typed => (\n    is => 'rw',  # first\n    isa => 'Int',\n    # last\n);\n\
+         has after => ( is => 'ro' );\n1;\n",
+    );
+    for name in ["trailing", "own_line", "no_comma", "typed", "after"] {
+        assert!(has_method(&fa, name), "{name}");
+    }
+    assert_eq!(fa.sub_return_type_at_arity("typed", Some(0)), Some(InferredType::Numeric));
+}
+
+// A comment between pairs is not an element: the pairs after it stay aligned.
+#[test]
+fn a_comment_between_hash_pairs_keeps_the_pairing() {
+    let fa = build_fa("package Foo;\nsub f { return {\n    host => 'h',  # note\n    port => 1,\n} }\n1;\n");
+    let t = fa.sub_return_type_at_arity("f", None);
+    let Some(InferredType::HashWithKeys { keys, .. }) = t else { panic!("{t:?}") };
+    let names: Vec<&str> = keys.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(names, ["host", "port"]);
+}
+
 // A string literal is one shape however it is quoted.
 #[test]
 fn as_alias_on_a_double_quoted_name() {
