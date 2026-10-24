@@ -1530,6 +1530,7 @@ impl<'a> Builder<'a> {
                     self.key_writes.push(crate::model::file_analysis::KeyWrite {
                         var_text,
                         key: crate::model::file_analysis::WriteKey::Unknown,
+                        path: Vec::new(),
                         scope: self
                             .scope_stack
                             .last()

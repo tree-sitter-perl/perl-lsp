@@ -615,6 +615,46 @@ $dyn->{$ENV{K}} = 1;
     );
 }
 
+/// Writes that are not a plain `$v->{k} = …` still land their key: `++`, a
+/// list-assignment target, a deref Perl autovivifies through, and a nested
+/// write, which extends the inner shape it lands in (an object's slot
+/// included, which no longer reads as just its literal).
+#[test]
+fn in_place_and_nested_writes_extend_shapes() {
+    let src = "\
+package T;
+sub a {
+    my $h = { a => { x => 1 } };
+    $h->{a}{y} = 'v';
+    push @{$h->{list}}, 1;
+    $h->{n}++;
+    ($h->{o}) = (1);
+    @{$h->{arr}} = ();
+    return $h;
+}
+sub b {
+    my $self = shift;
+    $self->{s} = { x => 1 };
+    $self->{s}{z} = 1;
+    return $self->{s};
+}
+";
+    let fa = build_fa(src);
+    let t = fa.inferred_type_via_bag("$h", Point::new(8, 0)).expect("$h typed");
+    let InferredType::HashWithKeys { keys, open: false } = &t else { panic!("shape: {:?}", t) };
+    let names: Vec<&str> = keys.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(names, ["a", "list", "n", "o", "arr"]);
+    let Some(InferredType::HashWithKeys { keys: inner, open: false }) = keys[0].1.as_deref() else {
+        panic!("inner shape: {:?}", keys[0].1)
+    };
+    assert_eq!(inner.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["x", "y"]);
+    assert_eq!(inner[1].1.as_deref(), Some(&InferredType::String));
+    let slot = fa
+        .sub_return_type_local("b")
+        .expect("slot typed");
+    assert!(slot.closed_keys_lacking("z").is_none(), "slot still closed without z: {:?}", slot);
+}
+
 /// The literal-hash spelling: `my %h = (k => v)` types through the
 /// same shape builder as the hashref literal, `$h{k}` projects off
 /// `%h` (the canonical container name), mutation extension applies,

@@ -81,12 +81,56 @@ impl<'a> Builder<'a> {
         None
     }
 
+    /// Whether `elem`, the outermost hop of an element chain, is written in
+    /// place by something other than a plain `elem = …` (which the
+    /// assignment visitor records with its RHS): `++`/`--`, a list
+    /// assignment target, or a container deref Perl autovivifies through
+    /// (`push @{$h->{k}}, …`, `@{$h->{k}} = …`).
+    pub(super) fn element_written_in_place(&self, elem: Node<'a>) -> bool {
+        if crate::cst::is_element_access_base(elem) {
+            return false;
+        }
+        if elem.parent().is_some_and(|p| matches!(p.kind(), "postinc_expression" | "preinc_expression")) {
+            return true;
+        }
+        if crate::cst::list_assignment_target_of(elem).is_some() {
+            return true;
+        }
+        let Some(container) = crate::cst::deref_container_of(elem) else { return false };
+        if let Some(p) = container.parent() {
+            if p.kind() == "assignment_expression" && p.child_by_field_name("left") == Some(container) {
+                return true;
+            }
+        }
+        if crate::cst::list_assignment_target_of(container).is_some() {
+            return true;
+        }
+        let call = match container.parent() {
+            Some(list) if crate::cst::is_list_literal(list) => {
+                if crate::cst::nth_element(list, 0) != Some(container) {
+                    return false;
+                }
+                list.parent()
+            }
+            other => other,
+        };
+        let Some(call) = call else { return false };
+        let name = match call.kind() {
+            "function_call_expression" | "ambiguous_function_call_expression" => {
+                call.child_by_field_name("function").and_then(|f| f.utf8_text(self.source).ok())
+            }
+            "func1op_call_expression" => call.child(0).and_then(|k| k.utf8_text(self.source).ok()),
+            _ => None,
+        };
+        name.is_some_and(crate::model::builtins::modifies_its_array_argument)
+    }
+
     /// Record a `$var->{key} = …` write for the mutation-extension
     /// pass. Walks subscript chains down to the scalar base: the FIRST
     /// hop's key is the one the write autovivifies onto the variable's
-    /// own shape (`$v->{a}{b} = …` adds `a`); only a direct single-hop
-    /// write types the key's value from the RHS. Plain `%foo` elements
-    /// (`$foo{k}`, no arrow) are a different variable — skipped.
+    /// own shape (`$v->{a}{b} = …` adds `a`), the hops below it ride
+    /// `path`, and the RHS types the key the path ends at. Plain `%foo`
+    /// elements (`$foo{k}`, no arrow) are a different variable — skipped.
     /// Record an escape as an open-switching `KeyWrite` (`key: None`)
     /// at the escape span — the modeled form of escape widening: once
     /// the reference is out of our sight, any key may have been
@@ -96,6 +140,7 @@ impl<'a> Builder<'a> {
         self.key_writes.push(crate::model::file_analysis::KeyWrite {
             var_text,
             key: crate::model::file_analysis::WriteKey::Unknown,
+            path: Vec::new(),
             scope: self
                 .scope_stack
                 .last()
@@ -109,14 +154,20 @@ impl<'a> Builder<'a> {
 
     pub(super) fn record_key_write(&mut self, left: Node<'a>, rhs: Option<Node<'a>>) {
         let mut innermost = left;
+        // The hops above the innermost, innermost-first.
+        let mut outer_hops: Vec<Node<'a>> = Vec::new();
         loop {
             let Some(c) = innermost.named_child(0) else { return };
             match c.kind() {
-                "hash_element_expression" | "array_element_expression" => innermost = c,
+                "hash_element_expression" | "array_element_expression" => {
+                    outer_hops.push(innermost);
+                    innermost = c;
+                }
                 "scalar" | "container_variable" => break,
                 _ => return,
             }
         }
+        outer_hops.reverse();
         // Direct `$v->[N] = …` — a Sequence slot write. Only the
         // direct, static-index, arrow-deref form is modeled (the pass
         // retypes the slot / appends at len); container `$arr[N]` and
@@ -147,6 +198,7 @@ impl<'a> Builder<'a> {
             self.key_writes.push(crate::model::file_analysis::KeyWrite {
                 var_text: t.to_string(),
                 key: crate::model::file_analysis::WriteKey::Index(idx),
+                path: Vec::new(),
                 scope: self
                     .scope_stack
                     .last()
@@ -188,20 +240,45 @@ impl<'a> Builder<'a> {
                 crate::model::file_analysis::WriteKey::Unknown,
                 crate::model::file_analysis::WriteKey::Hash,
             );
-        let direct = innermost == left;
+        // A hop below the first is a write into that key's value: a static
+        // key extends it, an index or dynamic key widens it. The path stops
+        // at the first non-hash hop, whose key is the last thing it knows.
+        let mut path = Vec::new();
+        for hop in &outer_hops {
+            let k = if hop.kind() == "hash_element_expression" {
+                hop.child_by_field_name("key")
+                    .and_then(|k| self.extract_key_text(k))
+                    .and_then(|(t, dynamic)| (!dynamic).then_some(t))
+                    .map_or(
+                        crate::model::file_analysis::WriteKey::Unknown,
+                        crate::model::file_analysis::WriteKey::Hash,
+                    )
+            } else {
+                crate::model::file_analysis::WriteKey::Unknown
+            };
+            let last = !matches!(k, crate::model::file_analysis::WriteKey::Hash(_));
+            path.push(k);
+            if last {
+                break;
+            }
+        }
+        // The RHS types the written key only when the path reaches it.
+        let typed = path.len() == outer_hops.len()
+            && path.last().map_or(true, |k| matches!(k, crate::model::file_analysis::WriteKey::Hash(_)));
         let span = key_node
             .map(node_to_span)
             .unwrap_or_else(|| node_to_span(innermost));
         self.key_writes.push(crate::model::file_analysis::KeyWrite {
             var_text: var_text.to_string(),
             key,
+            path,
             scope: self
                 .scope_stack
                 .last()
                 .copied()
                 .unwrap_or(crate::model::file_analysis::ScopeId(0)),
             span,
-            rhs_span: if direct { rhs.map(node_to_span) } else { None },
+            rhs_span: if typed { rhs.map(node_to_span) } else { None },
             conditional: crate::cst::is_conditionally_executed(left),
         });
     }

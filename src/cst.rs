@@ -367,6 +367,33 @@ pub(crate) fn refgen_operand(refgen: Node) -> Option<RefgenOperand> {
     })
 }
 
+/// The container deref around `elem`: `@{$h->{k}}` / `%{$h->{k}}` (a
+/// container whose varname is a block holding `elem`) and `$h->{k}->@*` /
+/// `$h->{k}->%*`. `None` when `elem` is not the whole deref operand.
+pub(crate) fn deref_container_of(elem: Node) -> Option<Node> {
+    let p = elem.parent()?;
+    if matches!(p.kind(), "array_deref_expression" | "hash_deref_expression") {
+        return Some(p);
+    }
+    if p.kind() != "expression_statement" {
+        return None;
+    }
+    let block = p.parent().filter(|b| b.kind() == "block")?;
+    let varname = block.parent().filter(|v| v.kind() == "varname")?;
+    varname.parent().filter(|c| matches!(c.kind(), "array" | "hash"))
+}
+
+/// The assignment whose target list holds `node` as an element:
+/// `($h->{k}, $x) = …`. A direct target (`$h->{k} = …`) is not in a list.
+pub(crate) fn list_assignment_target_of<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    let mut group = node.parent().filter(|g| is_list_literal(*g))?;
+    while let Some(up) = group.parent().filter(|g| is_list_literal(*g)) {
+        group = up;
+    }
+    let assign = group.parent().filter(|a| a.kind() == "assignment_expression")?;
+    (assign.child_by_field_name("left")? == group).then_some(assign)
+}
+
 /// `meth Class(ARGS)` / `meth Class ARGS` / `meth Class` — the spelling Perl
 /// may read as the indirect-object method call `Class->meth(ARGS)`. The
 /// grammar parses it as a call to `meth` whose argument is a call to (or a

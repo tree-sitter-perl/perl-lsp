@@ -129,6 +129,45 @@ pub fn query_variable_type(
 /// post-finalize the bag is append-only (removal would shift the
 /// sealed `base_witness_count`); duplicate pushes are idempotent under
 /// latest-wins and truncated away by the next enrichment cycle.
+/// `shape` after a write through `hops` (outermost key first): a static
+/// key at the end joins the shape, its value `vtype`; a key on the way
+/// extends that key's value; a dynamic or index key, or a write that may
+/// not have run (`widen`), opens the shape it lands on. `None` when the
+/// write says nothing new.
+fn extend_shape(
+    shape: &InferredType,
+    hops: &[&crate::model::file_analysis::WriteKey],
+    vtype: Option<&InferredType>,
+    widen: bool,
+) -> Option<InferredType> {
+    let InferredType::HashWithKeys { keys, open } = shape else { return None };
+    let opened = || (!*open).then(|| InferredType::HashWithKeys { keys: keys.clone(), open: true });
+    let (first, rest) = hops.split_first()?;
+    let crate::model::file_analysis::WriteKey::Hash(k) = first else { return opened() };
+    let mut keys = keys.clone();
+    // Copy-on-write: `to_mut` clones the key list only when the allocation
+    // is shared, so the pass pays per actual divergence, never per query.
+    let keys_mut = keys.to_mut();
+    match keys_mut.iter_mut().find(|(name, _)| name == k) {
+        Some(entry) if rest.is_empty() => {
+            if widen {
+                return opened();
+            }
+            if vtype.is_none() || entry.1.as_deref() == vtype {
+                return None;
+            }
+            entry.1 = vtype.cloned().map(Box::new);
+        }
+        Some(entry) => {
+            let inner = extend_shape(entry.1.as_deref()?, rest, vtype, widen)?;
+            entry.1 = Some(Box::new(inner));
+        }
+        None if widen => return opened(),
+        None => keys_mut.push((k.to_string(), if rest.is_empty() { vtype.cloned().map(Box::new) } else { None })),
+    }
+    Some(InferredType::HashWithKeys { keys, open: *open })
+}
+
 pub(crate) fn emit_mutation_extension_witnesses(
     bag: &mut WitnessBag,
     ctx: &BagContext,
@@ -181,38 +220,43 @@ pub(crate) fn emit_mutation_extension_witnesses(
                 ReducedValue::FactMap(_) | ReducedValue::None => None,
             }
         };
+        let widen = w.conditional || scope_crossed;
+        let hops: Vec<&crate::model::file_analysis::WriteKey> =
+            std::iter::once(&w.key).chain(&w.path).collect();
+        let vtype = w.rhs_span.and_then(rhs_type);
         let shape = match base {
-            InferredType::HashWithKeys { mut keys, open } => {
-                // An Index write on a hash-shaped var is contradictory
-                // evidence — widen like any unknowable write.
-                let widen = !matches!(w.key, crate::model::file_analysis::WriteKey::Hash(_))
-                    || w.conditional
-                    || scope_crossed;
-                if widen {
-                    if open {
-                        continue; // already open — nothing to add
-                    }
-                    InferredType::HashWithKeys { keys, open: true }
-                } else {
-                    let crate::model::file_analysis::WriteKey::Hash(ref k) = w.key else {
-                        unreachable!()
-                    };
-                    let vtype = w.rhs_span.and_then(rhs_type);
-                    // Copy-on-write: `to_mut` clones the key list only when
-                    // the allocation is shared — the extension path pays
-                    // O(S) per ACTUAL divergence, never per query.
-                    let keys_mut = keys.to_mut();
-                    match keys_mut.iter_mut().find(|(name, _)| name == k) {
-                        Some(entry) => {
-                            if vtype.is_none() || entry.1.as_deref() == vtype.as_ref() {
-                                continue; // no new information
-                            }
-                            entry.1 = vtype.map(Box::new);
-                        }
-                        None => keys_mut.push((k.to_string(), vtype.map(Box::new))),
-                    }
-                    InferredType::HashWithKeys { keys, open }
-                }
+            InferredType::HashWithKeys { .. } => {
+                let Some(shape) = extend_shape(&base, &hops, vtype.as_ref(), widen) else { continue };
+                shape
+            }
+            // A nested write through an object's slot (`$self->{s}{k} = …`)
+            // lands in the slot's value, which every method shares.
+            ref obj if !w.path.is_empty() && obj.class_name().is_some() => {
+                let crate::model::file_analysis::WriteKey::Hash(ref slot) = w.key else { continue };
+                let att = WitnessAttachment::SlotType {
+                    class: obj.class_name().unwrap_or_default().to_string(),
+                    key: slot.clone(),
+                };
+                let reg = ReducerRegistry::with_defaults();
+                let q = ReducerQuery {
+                    attachment: &att,
+                    point: None,
+                    framework: FrameworkFact::Plain,
+                    arity_hint: None,
+                    receiver: None,
+                    args: Vec::new(),
+                    context: Some(ctx),
+                };
+                let ReducedValue::Type(current) = reg.query(bag, &q) else { continue };
+                let hops: Vec<&crate::model::file_analysis::WriteKey> = w.path.iter().collect();
+                let Some(shape) = extend_shape(&current, &hops, vtype.as_ref(), widen) else { continue };
+                bag.push(Witness {
+                    attachment: att,
+                    source: WitnessSource::Builder("mutation_extension".into()),
+                    payload: WitnessPayload::InferredType(shape),
+                    span: Span { start: w.span.start, end: w.span.start },
+                });
+                continue;
             }
             // Sequence slot write: only the sound moves — retype an
             // in-bounds slot, append at exactly len. Everything else

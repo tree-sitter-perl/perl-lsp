@@ -368,6 +368,10 @@ pub struct CallBinding {
 pub struct KeyWrite {
     pub var_text: String,
     pub key: WriteKey,
+    /// The hops below `key` a nested write lands through, outward:
+    /// `$v->{a}{b}{c} = …` is `key: a`, `path: [b, c]`.
+    #[serde(default)]
+    pub path: Vec<WriteKey>,
     pub scope: ScopeId,
     /// Key-node span — temporal anchor and per-var ordering.
     pub span: Span,

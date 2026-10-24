@@ -562,7 +562,12 @@ impl<'a> Builder<'a> {
         // element node itself — `$self->{k} = ...` has this element as
         // the LHS of an assignment, so the grandparent check returns
         // Write. Needed for invocant mutations.
-        let element_access = self.determine_access(node);
+        let in_place = self.element_written_in_place(node);
+        let element_access =
+            if in_place { AccessKind::Write } else { self.determine_access(node) };
+        if in_place {
+            self.record_key_write(node, None);
+        }
 
         // READ drills get their Projected witness here, not only when
         // an enclosing assignment/invocant emitter happens to reach
