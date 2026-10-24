@@ -434,7 +434,7 @@ class Greeter:
 
 #[test]
 fn python_cross_file_function_refs_through_refs_to() {
-    // Two pack-built FileAnalyses in the production FileStore; the
+    // Two pack-built FileAnalyses in the production OpenDocs; the
     // production refs_to walks them — declaration in a.py, call in
     // b.py — with zero Perl and zero engine edits.
     let (fa_a, _) = python_fa("def helper(x):\n    return x\n");
@@ -445,21 +445,22 @@ fn python_cross_file_function_refs_through_refs_to() {
         crate::index::resolve::TargetKind::Sub { package: None },
         &fa_b,
     );
-    let store = crate::index::file_store::FileStore::new();
+    let store = crate::index::open_docs::OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let pa = std::path::PathBuf::from("/fake/py/a.py");
     let pb = std::path::PathBuf::from("/fake/py/b.py");
-    store.insert_workspace(pa.clone(), fa_a);
-    store.insert_workspace(pb.clone(), fa_b);
+    idx.insert_workspace_for_test(pa.clone(), fa_a);
+    idx.insert_workspace_for_test(pb.clone(), fa_b);
 
-    let locs = crate::index::resolve::refs_to(&store, None, &target, crate::index::resolve::RoleMask::EDITABLE);
+    let locs = crate::index::resolve::refs_to(&store, Some(&idx), &target, crate::index::resolve::RoleMask::EDITABLE);
     let by_file: Vec<(String, crate::model::file_analysis::AccessKind)> = locs
         .iter()
         .map(|l| {
             let f = match &l.key {
-                crate::index::file_store::FileKey::Path(p) => {
+                crate::index::open_docs::FileKey::Path(p) => {
                     p.file_name().unwrap().to_string_lossy().to_string()
                 }
-                crate::index::file_store::FileKey::Url(u) => u.to_string(),
+                crate::index::open_docs::FileKey::Url(u) => u.to_string(),
             };
             (f, l.access)
         })
@@ -568,14 +569,15 @@ fn python_workspace_rename_for_free() {
     let (fa_a, _) = python_fa(src_a);
     let (fa_b, _) = python_fa(src_b);
 
-    let store = crate::index::file_store::FileStore::new();
+    let store = crate::index::open_docs::OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let pa = std::path::PathBuf::from("/fake/py/a.py");
     let pb = std::path::PathBuf::from("/fake/py/b.py");
-    store.insert_workspace(pa.clone(), fa_a);
-    store.insert_workspace(pb.clone(), fa_b);
+    idx.insert_workspace_for_test(pa.clone(), fa_a);
+    idx.insert_workspace_for_test(pb.clone(), fa_b);
 
     // Cursor on the CALL in b.py (line 2, inside "helper").
-    let fa_b_view = store.workspace_raw().get(&pb).unwrap().clone();
+    let fa_b_view = idx.workspace_file_for_test(&pb).unwrap();
     let point = tree_sitter::Point { row: 2, column: 6 };
     let resolved = crate::index::resolve::resolve_symbol(&fa_b_view, point, None);
     let target = match resolved {
@@ -584,7 +586,7 @@ fn python_workspace_rename_for_free() {
     };
     assert_eq!(target.name, "helper");
 
-    let locs = crate::index::resolve::refs_to(&store, None, &target, crate::index::resolve::RoleMask::EDITABLE);
+    let locs = crate::index::resolve::refs_to(&store, Some(&idx), &target, crate::index::resolve::RoleMask::EDITABLE);
     assert_eq!(locs.len(), 3, "decl + import spelling + call, got {locs:?}");
 
     // Apply the edits the way backend::rename does: replace each span
@@ -592,7 +594,7 @@ fn python_workspace_rename_for_free() {
     let mut texts: std::collections::HashMap<std::path::PathBuf, String> =
         [(pa.clone(), src_a.to_string()), (pb.clone(), src_b.to_string())].into();
     for loc in &locs {
-        let crate::index::file_store::FileKey::Path(p) = &loc.key else { panic!() };
+        let crate::index::open_docs::FileKey::Path(p) = &loc.key else { panic!() };
         let text = texts.get_mut(p).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         let line = lines[loc.span.start.row];
@@ -723,24 +725,24 @@ fn r_cross_file_refs_and_workspace_rename() {
     );
 
     // rename across the two files via the production path
-    let store = crate::index::file_store::FileStore::new();
+    let store = crate::index::open_docs::OpenDocs::new();
     let pm = std::path::PathBuf::from("/fake/r/analysis.R");
     let pu = std::path::PathBuf::from("/fake/r/util.R");
-    store.insert_workspace(pm.clone(), fa_main);
-    store.insert_workspace(pu.clone(), fa_util);
+    idx.insert_workspace_for_test(pm.clone(), fa_main);
+    idx.insert_workspace_for_test(pu.clone(), fa_util);
 
     let point = tree_sitter::Point { row: 2, column: 12 }; // on fetch_data call
-    let fa_view = store.workspace_raw().get(&pm).unwrap().clone();
+    let fa_view = idx.workspace_file_for_test(&pm).unwrap();
     let target = match crate::index::resolve::resolve_symbol(&fa_view, point, None) {
         Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
         other => panic!("expected target, got {other:?}"),
     };
     assert_eq!(target.name, "fetch_data");
-    let locs = crate::index::resolve::refs_to(&store, None, &target, crate::index::resolve::RoleMask::EDITABLE);
+    let locs = crate::index::resolve::refs_to(&store, Some(&idx), &target, crate::index::resolve::RoleMask::EDITABLE);
     let files: Vec<String> = locs
         .iter()
         .map(|l| match &l.key {
-            crate::index::file_store::FileKey::Path(p) => {
+            crate::index::open_docs::FileKey::Path(p) => {
                 p.file_name().unwrap().to_string_lossy().to_string()
             }
             _ => unreachable!(),
@@ -1317,24 +1319,24 @@ fn cpp_cross_file_include_resolution_and_rename() {
 
     // cross-file rename: cursor on the call `compute` in main → def in
     // util.h + call in main, through the production resolve/refs path
-    let store = crate::index::file_store::FileStore::new();
+    let store = crate::index::open_docs::OpenDocs::new();
     let pm = std::path::PathBuf::from("/fake/cpp/main.cpp");
     let ph = std::path::PathBuf::from("/fake/cpp/util.h");
-    store.insert_workspace(pm.clone(), main_skel.into_file_analysis());
-    store.insert_workspace(ph.clone(), cpp_skel(header).into_file_analysis());
+    idx.insert_workspace_for_test(pm.clone(), main_skel.into_file_analysis());
+    idx.insert_workspace_for_test(ph.clone(), cpp_skel(header).into_file_analysis());
 
-    let fa_view = store.workspace_raw().get(&pm).unwrap().clone();
+    let fa_view = idx.workspace_file_for_test(&pm).unwrap();
     let point = tree_sitter::Point { row: 3, column: 11 };
     let target = match crate::index::resolve::resolve_symbol(&fa_view, point, None) {
         Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
         other => panic!("expected target, got {other:?}"),
     };
     assert_eq!(target.name, "compute");
-    let locs = crate::index::resolve::refs_to(&store, None, &target, crate::index::resolve::RoleMask::EDITABLE);
+    let locs = crate::index::resolve::refs_to(&store, Some(&idx), &target, crate::index::resolve::RoleMask::EDITABLE);
     let files: Vec<String> = locs
         .iter()
         .map(|l| match &l.key {
-            crate::index::file_store::FileKey::Path(p) => {
+            crate::index::open_docs::FileKey::Path(p) => {
                 p.file_name().unwrap().to_string_lossy().to_string()
             }
             _ => unreachable!(),
@@ -1378,7 +1380,7 @@ fn cpp_cross_file_enum_variant_goto_def() {
 
     let uri = tower_lsp::lsp_types::Url::from_file_path("/fake/cpp/use.c").unwrap();
     let pos = tower_lsp::lsp_types::Position { line: 1, character: 16 };
-    let store = crate::index::file_store::FileStore::new();
+    let store = crate::index::open_docs::OpenDocs::new();
     let resp = crate::lsp::symbols::find_definition(&store, &use_fa, pos, &uri, &idx)
         .expect("cross-file enum-variant goto-def resolves");
     let loc = match resp {
@@ -1413,24 +1415,24 @@ fn cmake_cross_file_function_rename_and_subdirectory_resolution() {
     );
 
     // workspace rename of the function, cursor on the call site
-    let store = crate::index::file_store::FileStore::new();
+    let store = crate::index::open_docs::OpenDocs::new();
     let pr = std::path::PathBuf::from("/fake/cmake/CMakeLists.txt");
     let pu = std::path::PathBuf::from("/fake/cmake/util.cmake");
-    store.insert_workspace(pr.clone(), fa_root);
-    store.insert_workspace(pu.clone(), fa_util);
+    idx.insert_workspace_for_test(pr.clone(), fa_root);
+    idx.insert_workspace_for_test(pu.clone(), fa_util);
 
-    let fa_view = store.workspace_raw().get(&pr).unwrap().clone();
+    let fa_view = idx.workspace_file_for_test(&pr).unwrap();
     let point = tree_sitter::Point { row: 3, column: 4 };
     let target = match crate::index::resolve::resolve_symbol(&fa_view, point, None) {
         Some(crate::index::resolve::ResolvedTarget::Target(t)) => t,
         other => panic!("expected target, got {other:?}"),
     };
     assert_eq!(target.name, "register_widget");
-    let locs = crate::index::resolve::refs_to(&store, None, &target, crate::index::resolve::RoleMask::EDITABLE);
+    let locs = crate::index::resolve::refs_to(&store, Some(&idx), &target, crate::index::resolve::RoleMask::EDITABLE);
     let files: Vec<String> = locs
         .iter()
         .map(|l| match &l.key {
-            crate::index::file_store::FileKey::Path(p) => {
+            crate::index::open_docs::FileKey::Path(p) => {
                 p.file_name().unwrap().to_string_lossy().to_string()
             }
             _ => unreachable!(),
@@ -2552,7 +2554,7 @@ void use_box() {
     let fa = cpp_fa(src);
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let uri = tower_lsp::lsp_types::Url::from_file_path("/fake/cpp/box.cpp").unwrap();
-    let store = crate::index::file_store::FileStore::new();
+    let store = crate::index::open_docs::OpenDocs::new();
     let gd = |line: u32, character: u32| {
         match crate::lsp::symbols::find_definition(
             &store,
@@ -3040,7 +3042,7 @@ void go() {
     let fa = cpp_fa(src);
     let gd = |line: u32, character: u32| {
         let uri = tower_lsp::lsp_types::Url::from_file_path("/fake/cpp/chain.cpp").unwrap();
-        let store = crate::index::file_store::FileStore::new();
+        let store = crate::index::open_docs::OpenDocs::new();
         let idx = crate::index::module_index::ModuleIndex::new_for_test();
         match crate::lsp::symbols::find_definition(
             &store,

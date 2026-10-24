@@ -212,22 +212,20 @@ class User extends Model implements Speaker, \\Countable, Sub\\Local {
 /// rewrites the declaration, the import's leaf and the parent's leaf.
 #[test]
 fn a_class_renames_across_files_through_its_identity() {
-    use crate::index::file_store::{FileKey, FileStore};
+    use crate::index::open_docs::{FileKey, OpenDocs};
     use crate::index::resolve::{resolve, OverrideScope};
     use std::path::PathBuf;
-    use std::sync::Arc;
     let src_model = "<?php\nnamespace Lib;\nclass Model {}\n";
     // `Other\Model` shares the leaf and must never be renamed with it.
     let src_user = "<?php\nnamespace App;\nuse Lib\\Model;\nclass User extends Model {}\nclass Twin extends Other\\Model {}\n";
     let (p_model, p_user) = (PathBuf::from("/fake/php/Lib/Model.php"), PathBuf::from("/fake/php/App/User.php"));
 
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
-    idx.register_symbols(p_model.clone(), Arc::new(php(src_model)));
-    let store = FileStore::new();
-    store.insert_workspace(p_model.clone(), php(src_model));
-    store.insert_workspace(p_user.clone(), php(src_user));
+    idx.insert_workspace_for_test(p_model.clone(), php(src_model));
+    idx.insert_workspace_for_test(p_user.clone(), php(src_user));
+    let store = OpenDocs::new();
 
-    let user = store.workspace_raw().get(&p_user).unwrap().clone();
+    let user = idx.workspace_file_for_test(&p_user).unwrap();
     let on_extends = tree_sitter::Point { row: 3, column: 21 };
     let cs = resolve(&store, &user, FileKey::Path(p_user.clone()), on_extends, Some(&idx), OverrideScope::default());
     let defs = cs.definitions();

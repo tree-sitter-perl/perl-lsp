@@ -157,16 +157,10 @@ impl<'a> CandidateSet<'a> {
     fn origin_role(&self) -> RoleMask {
         match &self.origin_key {
             FileKey::Url(_) => RoleMask::OPEN,
-            FileKey::Path(p) => {
-                if self.files.workspace_raw().contains_key(p) {
-                    RoleMask::WORKSPACE
-                } else {
-                    match self.module_index {
-                        Some(idx) => super::refs::index_role(idx, p),
-                        None => RoleMask::DEPENDENCY,
-                    }
-                }
-            }
+            FileKey::Path(p) => match self.module_index {
+                Some(idx) => super::refs::index_role(idx, p),
+                None => RoleMask::DEPENDENCY,
+            },
         }
     }
 

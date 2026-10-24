@@ -46,7 +46,7 @@ pub fn to_call_hierarchy_item(
 /// facts); this adapter serves plain-cursor consumers and tests.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn find_definition(
-    files: &crate::index::file_store::FileStore,
+    files: &crate::index::open_docs::OpenDocs,
     analysis: &FileAnalysis,
     pos: Position,
     uri: &Url,
@@ -55,7 +55,7 @@ pub fn find_definition(
     let cs = crate::index::resolve::resolve(
         files,
         analysis,
-        crate::index::file_store::FileKey::Url(uri.clone()),
+        crate::index::open_docs::FileKey::Url(uri.clone()),
         position_to_point(pos),
         Some(module_index),
         crate::index::resolve::OverrideScope::default(),
@@ -93,7 +93,7 @@ pub(super) fn config_variant_leaf_display(
     // Hover reads only the winning variant's BODY, never its location, so the
     // queried file's own key is immaterial — a placeholder keys its local
     // `macro_defs` without colliding with the real cross-file def paths.
-    let local = crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/__hover_local__"));
+    let local = crate::index::open_docs::FileKey::Path(std::path::PathBuf::from("/__hover_local__"));
     let ranked = crate::index::resolve::ranked_macro_variants(analysis, spelling, &local, module_index);
     // A single-variant (or non-) macro flows to its leaf already; only the
     // config-variant JOIN abstraction needs the display-side variant pick.

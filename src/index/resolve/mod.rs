@@ -1,4 +1,4 @@
-//! Unified query surface across FileStore + ModuleIndex.
+//! Unified query surface across OpenDocs + ModuleIndex.
 //!
 //! `resolve(cursor) → CandidateSet` is the one resolution entry point:
 //! identity (`resolve_symbol_scoped`'s Target/Group/Local verdict),
@@ -22,7 +22,7 @@ use crate::model::file_analysis::{
     AccessKind, CompletionCandidate, CrossFileLookup, FileAnalysis, HandlerOwner, MemberKind,
     RefKind, Span, SymKind,
 };
-use crate::index::file_store::{FileKey, FileStore};
+use crate::index::open_docs::{FileKey, OpenDocs};
 
 bitflags::bitflags! {
     /// Which file roles a query should search. Handlers pick the mask that
@@ -66,10 +66,10 @@ pub use collect::*;
 /// See `docs/adr/resolution-candidate-set.md`.
 ///
 /// Borrow discipline: the set only ever READS the stores (projections walk
-/// via `FileStore::for_each_open`), so an LSP handler may hold its open-doc
+/// via `OpenDocs::for_each_open`), so an LSP handler may hold its open-doc
 /// read guard for the set's whole lifetime.
 pub struct CandidateSet<'a> {
-    files: &'a FileStore,
+    files: &'a OpenDocs,
     origin: &'a FileAnalysis,
     origin_key: FileKey,
     point: tree_sitter::Point,
@@ -114,7 +114,7 @@ pub struct CandidateSet<'a> {
 /// CLI mirrors construct the set once and project; none of them re-derive
 /// identity, visibility, or per-site policy on their own.
 pub fn resolve<'a>(
-    files: &'a FileStore,
+    files: &'a OpenDocs,
     origin: &'a FileAnalysis,
     origin_key: FileKey,
     point: tree_sitter::Point,

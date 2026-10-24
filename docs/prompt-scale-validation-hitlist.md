@@ -109,7 +109,7 @@ lookups at 99.99% hit with zero capacity evictions. **Perl-only**, so
 
 **Storage and startup hold.** Warm ready is scale-free, post-ready RSS is
 flat, the bulk walk is near-linear, and per-file db cost *fell* at 39× the
-corpus. The FileStore / row-store / eviction architecture does exactly what
+corpus. The OpenDocs / row-store / eviction architecture does exactly what
 it was designed for. This is the tier that makes the target market possible.
 
 **Query paths break**, each for its own reason, and the CLI's one-shot
