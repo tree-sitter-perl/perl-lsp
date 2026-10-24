@@ -1547,3 +1547,16 @@ fn test_indirect_object_call_is_a_method_call_on_its_class() {
         .collect();
     assert_eq!(calls, vec![("new".into(), "Other::Pkg".into()), ("new".into(), "Other::Pkg".into())]);
 }
+
+#[test]
+fn test_method_on_the_invocant_param_keeps_the_callers_receiver() {
+    // `$class->new` / `$class->SUPER::new` inside an inherited constructor
+    // dispatch on whoever called it, so a subclass call site reads the
+    // subclass, through every level of the chain.
+    let fa = build_fa(
+        "package Base;\nsub new { my $class = shift; return bless {}, $class; }\nsub make { my $class = shift; return $class->new; }\npackage Server;\nour @ISA = ('Base');\nsub new {\n    my $self = shift;\n    return $self if ref $self;\n    my $class = $self;\n    $self = $class->SUPER::new(@_);\n    return $self;\n}\npackage Daemon;\nour @ISA = ('Server');\nsub new {\n    my $self = shift;\n    my $class = $self;\n    $self = $class->SUPER::new;\n    return $self;\n}\nmy $d = Daemon->new;\nmy $m = Daemon->make;\n1;\n",
+    );
+    let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(22, 0));
+    assert_eq!(at("$d"), Some(InferredType::ClassName("Daemon".into())));
+    assert_eq!(at("$m"), Some(InferredType::ClassName("Daemon".into())));
+}
