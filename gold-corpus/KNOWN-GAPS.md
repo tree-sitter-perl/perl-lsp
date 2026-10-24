@@ -152,23 +152,6 @@ assertion is "no diagnostic at this site."
 
 ---
 
-## 6. Big QA sweep (mined against the snapshot substrate)
-
-New gaps surfaced while mining gold from fresh CPAN modules. Each is pinned at
-xfail (expected-correct confirmed from source; tool genuinely wrong).
-
-### `diag-mojo-cookiejar-helper-fp` / `diag-mojo-daemon-callback-fp` — first-param-self over-reach in OO classes
-In an OO class, a plain helper (`sub _compare { my ($cookie,…)=@_ }`) or an
-anonymous callback (`on(request => sub { my $tx = shift; … })` ) has its first
-param typed as the enclosing class, so a method call on it (`$cookie->path`,
-`$tx->req`) fires a false `unresolved-method`. The `-strict` (non-OO module) case
-of this is now fixed; the in-OO-class helper/callback case is the harder residual —
-there's no clean static signal distinguishing a method from a helper in an OO
-class. **Subsystem:** first-param-self heuristic (`detect_first_param_type`).
-**Difficulty:** high (inherently ambiguous).
-
----
-
 ## Triage summary
 
 | gap | subsystem | difficulty |
@@ -177,10 +160,9 @@ class. **Subsystem:** first-param-self heuristic (`detect_first_param_type`).
 | completion-typetiny-imported-blessed | completion candidates | **low** |
 | diag-09 / diag-10 | typeglob-codegen synthesis | medium |
 | def-16-codegen-type-function | Type::Library synthesis | medium |
-| diag-mojo-cookiejar/daemon first-param-self | invocant heuristic in OO class | **high** (ambiguous) |
 
 Quickest wins: the signature-help invocant gate, imported-names in completion,
-the `bootstrap` loader recognition, and the `(shift, shift)` param extraction —
+and the `(shift, shift)` param extraction —
 all "the producer already has the signal, just consult it."
 
 ## C++ (multi-language tier)

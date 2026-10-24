@@ -1574,3 +1574,16 @@ fn test_subclass_sub_called_as_a_function_takes_no_invocant() {
     let s = fa.inferred_type_via_bag("$s", Point::new(13, 30));
     assert_eq!(s.as_ref().and_then(|t| t.class_name()), Some("R"), "{:?}", s);
 }
+
+#[test]
+fn test_ref_eq_current_package_narrows_to_the_enclosing_class() {
+    // Path::Tiny's `path`: a function whose early return hands back its
+    // argument once `ref($p) eq __PACKAGE__` has proven it an object.
+    let fa = build_fa(
+        "package P;\nsub path {\n    my $p = shift;\n    if (!@_ && ref($p) eq __PACKAGE__ && !$p->[1]) {\n        return $p;\n    }\n    return _make($p);\n}\nsub _make { my $s = shift; bless [$s], __PACKAGE__; }\nsub other { return path('x'); }\n1;\n",
+    );
+    let p = fa.inferred_type_via_bag("$p", Point::new(4, 15));
+    assert_eq!(p.as_ref().and_then(|t| t.class_name()), Some("P"), "{:?}", p);
+    let ret = fa.sub_return_type_at_arity("path", None);
+    assert_eq!(ret.as_ref().and_then(|t| t.class_name()), Some("P"), "{:?}", ret);
+}
