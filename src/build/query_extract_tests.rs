@@ -2207,6 +2207,22 @@ int d(struct crate* c) { return c->kind == 7; }
     assert_eq!(fa.field_domain("crate", "kind", None), None, "no cross-struct pooling");
 }
 
+#[test]
+fn cpp_domain_vote_never_answers_the_slot_value() {
+    // A slot with no usage sites has no domain, even with an index that
+    // reaches the slot's declared value: hover showed `argv: robj` (the
+    // value, minus its stars) as a "domain" for `robj **argv`.
+    let src = "\
+struct robj { int type; };
+struct client { struct robj **argv; };
+void f(struct client* c) { struct robj *o = c->argv[1]; }
+";
+    let fa = std::sync::Arc::new(cpp_skel(src).into_file_analysis());
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.register_symbols(std::path::PathBuf::from("/t/client.cpp"), fa.clone());
+    assert_eq!(fa.field_domain("client", "argv", Some(&idx)), None);
+}
+
 // ---- C++ template extraction hygiene (specializations, instantiations,
 // out-of-line members, aliases, concepts, unions) ----
 
@@ -2240,6 +2256,150 @@ fn cpp_member_read_is_a_field_access_and_a_member_call_is_a_method_call() {
         vec![(false, Some(1)), (false, Some(1))],
         "a called member is a call, with or without space before its arguments"
     );
+}
+
+/// Each call's `Invoke`: (callee, defined in this file, which arguments
+/// spread), in source order; `None` args when the call captured no list.
+fn call_invokes(fa: &crate::model::file_analysis::FileAnalysis) -> Vec<(String, bool, Option<Vec<bool>>)> {
+    use crate::model::witnesses::{CallArg, Callee, WitnessPayload};
+    fa.witnesses
+        .all()
+        .iter()
+        .filter_map(|w| match &w.payload {
+            WitnessPayload::Invoke { callee: Callee::Function { name, local, .. }, args, .. } => Some((
+                name.clone(),
+                local.is_some(),
+                args.as_ref().map(|a| a.iter().map(|a| matches!(a, CallArg::Spread(_))).collect()),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A call's value is an `Invoke` of its callee on its written arguments: a
+/// comment between two arguments is not one, a pack expansion spreads, and a
+/// callee this file doesn't define is left for the cross-file lookup.
+#[test]
+fn cpp_call_is_an_invoke_on_its_arguments() {
+    let fa = cpp_fa(
+        "int f(int a, int b);\n\
+         template <class... T> int g(T... args) { return f(1 /* one */, 2) + f(args...) + h(3); }\n",
+    );
+    assert_eq!(
+        call_invokes(&fa),
+        vec![
+            ("f".into(), true, Some(vec![false, false])),
+            ("f".into(), true, Some(vec![true])),
+            ("h".into(), false, Some(vec![false])),
+        ]
+    );
+}
+
+#[test]
+fn python_call_is_an_invoke_on_its_arguments() {
+    let (fa, _) = python_fa("def f(*a, **k):\n    return 1\n\nx = f(1, *rest, **kw)\ny = f(i for i in rest)\n");
+    assert_eq!(
+        call_invokes(&fa),
+        vec![("f".into(), true, Some(vec![false, true, true])), ("f".into(), true, None)],
+        "a starred argument spreads; a generator argument is no argument list"
+    );
+}
+
+/// A member call is an `Invoke` of the member on its receiver, and a member
+/// read projects the receiver's slot, so a chain types hop by hop through
+/// a flow edge with no intermediate variable.
+#[test]
+fn cpp_member_chains_type_through_their_receivers() {
+    use crate::model::file_analysis::InferredType;
+    let fa = cpp_fa(
+        "\
+struct Engine {
+    int spin() { return 7; }
+};
+struct Widget {
+    Engine get() { return Engine(); }
+    Engine motor;
+};
+template <typename T>
+struct Box { T item_; };
+int f(Widget w, Box<int> b) {
+    auto x = w.get().spin();
+    auto e = w.get();
+    auto m = w.motor;
+    auto n = w.motor.spin();
+    auto i = b.item_;
+    return x;
+}
+",
+    );
+    let at = tree_sitter::Point { row: 15, column: 4 };
+    let ty = |v: &str| fa.inferred_type_via_bag(v, at);
+    assert_eq!(ty("e"), Some(InferredType::ClassName("Engine".into())), "one call hop");
+    assert_eq!(ty("x"), Some(InferredType::Numeric), "two call hops");
+    assert_eq!(ty("m"), Some(InferredType::ClassName("Engine".into())), "a field read");
+    assert_eq!(ty("n"), Some(InferredType::Numeric), "a call on a field read");
+    assert_eq!(ty("i"), Some(InferredType::ClassName("int".into())), "a template-typed field substitutes");
+}
+
+/// A bare name in a member body is the class's member when one answers,
+/// inherited ones included, and the member hides a free function of the
+/// same name.
+#[test]
+fn cpp_bare_names_in_a_member_body_reach_inherited_members() {
+    use crate::model::file_analysis::InferredType;
+    let fa = cpp_fa(
+        "\
+struct Engine { int spin() { return 7; } };
+struct Base {
+    Engine motor;
+    Engine make() { return Engine(); }
+};
+int make();
+struct Car : Base {
+    int drive() {
+        auto m = motor;
+        auto e = make();
+        auto n = make().spin();
+        return n;
+    }
+};
+",
+    );
+    let at = tree_sitter::Point { row: 11, column: 8 };
+    let ty = |v: &str| fa.inferred_type_via_bag(v, at);
+    assert_eq!(ty("m"), Some(InferredType::ClassName("Engine".into())), "an inherited field");
+    assert_eq!(ty("e"), Some(InferredType::ClassName("Engine".into())), "the member hides `int make()`");
+    assert_eq!(ty("n"), Some(InferredType::Numeric), "a chain off an implicit call");
+}
+
+#[test]
+fn python_member_call_is_an_invoke_on_its_receiver() {
+    use crate::model::witnesses::{CallArg, Callee, ProjectionStep, WitnessPayload};
+    let (fa, _) = python_fa("w = make()\nx = w.get(1, *rest)\ny = w.size\n");
+    let calls: Vec<_> = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter_map(|w| match &w.payload {
+            WitnessPayload::Invoke { callee: Callee::Method { name, .. }, receiver, args } => Some((
+                name.clone(),
+                receiver.is_some(),
+                args.as_ref().map(|a| a.iter().map(|a| matches!(a, CallArg::Spread(_))).collect::<Vec<_>>()),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls, vec![("get".into(), true, Some(vec![false, true]))]);
+    let reads: Vec<_> = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter_map(|w| match &w.payload {
+            WitnessPayload::Projected { step: ProjectionStep::ValueHop { member }, .. } => Some(member.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reads, vec!["size".to_string()]);
 }
 
 /// C++ classes hold ONE member namespace: the nearest declaration of a
@@ -2901,4 +3061,31 @@ void go() {
     };
     assert_eq!(gd(11, 13), Some((1, 9)), "w.get().spin() resolves spin on Widget");
     assert_eq!(gd(12, 9), Some((1, 9)), "w.v_.spin() resolves through the field's type");
+}
+
+// A comment inside a C++ argument list is not an argument.
+#[test]
+fn cpp_call_arg_count_skips_comments() {
+    let skel = cpp_skel("void f(int, int);\nvoid g() { f(a, /* c */ b); }\n");
+    let call = skel.refs.iter().find(|r| r.name == "f").expect("f call ref");
+    assert_eq!(call.arg_count, Some(2));
+}
+
+// A comment ahead of a parenthesized C++ receiver is peeled with the parens.
+#[test]
+fn cpp_receiver_peel_skips_comments() {
+    let skel = cpp_skel("struct W { void spin(); };\nvoid g() { W w; (/* c */ w).spin(); }\n");
+    let call = skel.refs.iter().find(|r| r.name == "spin" && r.invocant.is_some()).expect("spin member ref");
+    assert_eq!(call.invocant.as_ref().unwrap().1, "w");
+}
+
+// A comment inside a Python argument list is not an argument.
+#[test]
+fn python_call_arg_count_skips_comments() {
+    let src = "o.f(a,  # c\n    b)\n";
+    let mut parser = python_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &python_pack()).unwrap();
+    let call = skel.refs.iter().find(|r| r.name == "f" && r.invocant.is_some()).expect("f member call ref");
+    assert_eq!(call.arg_count, Some(2));
 }
