@@ -1,10 +1,7 @@
-//! A CLI verb indexes only the language families its answer can consult.
-//!
-//! The asymmetry these tests guard: over-indexing is wasted work, but
-//! under-indexing is a WRONG answer and a quiet one — an unattached pack
-//! sub-index does not answer empty, `lookup_for` routes that language's
-//! queries to the Perl hub instead. So the C++ cases assert a real
-//! cross-file answer, not merely a non-empty one.
+//! A process serves one language: a file-target verb takes its file's
+//! language, a sweeping verb serves `--lang` (Perl without one), and startup
+//! indexes only that language. The C++ cases assert a real cross-file
+//! answer, not merely a non-empty one.
 
 use std::process::Command;
 
@@ -66,10 +63,8 @@ fn run(root: &std::path::Path, args: &[&str]) -> (String, String) {
 #[cfg(feature = "cpp")]
 #[test]
 fn a_cpp_query_still_resolves_cross_file_without_the_perl_tree() {
-    // THE trap. Scoping startup must not turn a correct C++ answer into a
-    // degraded one — and because an unattached pack index falls back to the
-    // Perl hub rather than answering nothing, "non-empty" is not enough:
-    // the answer has to name the header AND the body.
+    // Locking to the file's language must not degrade a C++ answer, so the
+    // answer has to name the header AND the body, not merely be non-empty.
     let dir = mixed_workspace("cpp");
     let consumer = dir.join("src/consumer.cc");
     let (stdout, stderr) = run(
@@ -114,21 +109,30 @@ fn a_perl_query_does_not_index_the_pack_family() {
 
 #[cfg(feature = "cpp")]
 #[test]
-fn a_whole_workspace_verb_still_sees_every_family() {
-    // `workspace/symbol` fans across the hub AND every pack sub-index, so
-    // its scope stays All — scoping the positional verbs must not quietly
-    // narrow the sweeping ones.
+fn a_whole_workspace_verb_serves_the_lang_it_was_given() {
+    // A sweep has no file to take a language from: it serves `--lang`, and
+    // sees only that language's files.
     let dir = mixed_workspace("ws");
     let (stdout, stderr) = run(
         &dir,
-        &["--workspace-symbol", dir.to_str().unwrap(), "a"],
+        &["--lang", "cpp", "--workspace-symbol", dir.to_str().unwrap(), "a"],
     );
     assert!(
         stdout.contains("Widget") || stdout.contains("compute_area"),
-        "workspace-symbol lost the pack family.\nstdout: {stdout}\nstderr: {stderr}"
+        "workspace-symbol --lang cpp lost the C++ files.\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
+        !stdout.contains("Syn::Alpha") && !stdout.contains("alpha_value"),
+        "workspace-symbol --lang cpp answered from Perl files.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let (stdout, stderr) = run(&dir, &["--workspace-symbol", dir.to_str().unwrap(), "a"]);
+    assert!(
         stdout.contains("Syn::Alpha") || stdout.contains("alpha_value"),
-        "workspace-symbol lost the Perl family.\nstdout: {stdout}\nstderr: {stderr}"
+        "workspace-symbol lost the Perl files.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains("Widget") && !stdout.contains("compute_area"),
+        "workspace-symbol without --lang answered from C++ files.\nstdout: {stdout}\nstderr: {stderr}"
     );
 }

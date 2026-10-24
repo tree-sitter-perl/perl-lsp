@@ -63,11 +63,12 @@ def now_ms():
     return time.monotonic() * 1000.0
 
 class Lsp:
-    def __init__(self, bin_path, root, stderr_path):
+    def __init__(self, bin_path, root, stderr_path, served_lang):
         self.root = os.path.abspath(root)
         self.stderr_f = open(stderr_path, "wb")
+        # One language per server process: a C/C++ scenario runs a cpp server.
         self.proc = subprocess.Popen(
-            [bin_path], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            [bin_path, "--lang", served_lang], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=self.stderr_f, cwd=self.root)
         self.next_id = 1
         self.pending = {}
@@ -266,7 +267,8 @@ def main():
 
     metrics = {"label": args.label, "root": root, "steps": [], "rss": []}
     t_spawn = now_ms()
-    lsp = Lsp(os.path.abspath(args.bin), root, args.out + f".{args.label}.stderr")
+    served_lang = "perl" if lang_of(scen["readiness"]["file"]) == "perl" else "cpp"
+    lsp = Lsp(os.path.abspath(args.bin), root, args.out + f".{args.label}.stderr", served_lang)
 
     _, init_ms = lsp.request("initialize", {
         "processId": os.getpid(),

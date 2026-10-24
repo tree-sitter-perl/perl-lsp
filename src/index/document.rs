@@ -19,10 +19,10 @@ pub struct Document {
     pub text: String,
     pub tree: Tree,
     /// `Arc` so a request handler can clone a cheap owned handle and DROP the
-    /// `FileStore` read guard before running `resolve()` — which re-locks the
+    /// `OpenDocs` read guard before running `resolve()` — which re-locks the
     /// open shards via `for_each_open`. Holding the guard across that reentrant
     /// read deadlocks against a concurrently queued writer (an edit's rebuild
-    /// or `FileStore::enrich_open`'s swap): parking_lot's writer-preference
+    /// or `OpenDocs::enrich_open`'s swap): parking_lot's writer-preference
     /// blocks the second read behind the queued writer, which waits on the
     /// first read.
     pub analysis: Arc<FileAnalysis>,
@@ -33,7 +33,7 @@ pub struct Document {
     /// consult the driver's declared `DriverCaps` through this id.
     pub language: &'static str,
     /// The freshness record's source: this doc's Surface, projected at BUILD
-    /// time from the pristine analysis — before `FileStore::enrich_open`
+    /// time from the pristine analysis — before `OpenDocs::enrich_open`
     /// swaps an enriched copy into `analysis`. `Surface::project`'s contract
     /// is the file's OWN facts; an enriched projection would fingerprint
     /// imported types and flip-flop verdicts against the workspace indexer's
@@ -115,7 +115,7 @@ impl Document {
         {
             return;
         }
-        let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+        let reg = crate::build::language_driver::LanguageRegistry::compiled();
         if let Some(driver) = reg.for_id(self.language) {
             let mut parser = driver.make_parser();
             if let Some(tree) = parser.parse(&new_text, None) {
@@ -148,7 +148,7 @@ impl Document {
             .synchronous_rebuild
         {
             self.update_text_only(new_text);
-            let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+            let reg = crate::build::language_driver::LanguageRegistry::compiled();
             if let Some(driver) = reg.for_id(self.language) {
                 self.analysis = Arc::new(driver.analyze_with_path(&self.text, self.path.as_deref()));
                 self.stable_outline.update(&self.analysis, &self.text);
@@ -214,7 +214,7 @@ impl Document {
 }
 
 impl StableOutline {
-    fn from_analysis(analysis: &FileAnalysis) -> Self {
+    pub(crate) fn from_analysis(analysis: &FileAnalysis) -> Self {
         let mut outline = StableOutline::default();
         for sym in analysis.symbols() {
             match sym.kind {

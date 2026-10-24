@@ -164,8 +164,19 @@ PERL5LIB=./my-libs/perl5 nvim lib/MyApp.pm
 
 ### C/C++ — beta (`--features cpp`)
 
-perl-lsp serves C/C++ from the same server, through the same query-driven
-extraction seam: goto-definition (reaching the out-of-line definition, not just
+Each perl-lsp process serves one language; C/C++ is a second server from the
+same binary, started with `--lang cpp`:
+
+```lua
+vim.lsp.config["cpp-lsp"] = {
+  cmd = { "perl-lsp", "--lang", "cpp" },
+  filetypes = { "c", "cpp" },
+  root_markers = { ".git", "compile_commands.json", "CMakeLists.txt" },
+}
+vim.lsp.enable("cpp-lsp")
+```
+
+It goes through the same query-driven extraction seam as Perl: goto-definition (reaching the out-of-line definition, not just
 the header prototype), cross-translation-unit references, inheritance-aware
 member completion, hover, outline, semantic tokens, `#include` navigation,
 template instantiation typing with partial-specialization selection, a
