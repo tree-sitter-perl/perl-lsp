@@ -204,7 +204,7 @@ pub fn detect_slot(
     language: &str,
     module_index: Option<&dyn CrossFileLookup>,
 ) -> DetectedSlot {
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let cursor = crate::build::cursor_sentinel::point_to_byte(source, point);
     let bare_identifier = || DetectedSlot {
         slot: Slot::Identifier { prefix: identifier_prefix(source, cursor).to_string() },

@@ -14,21 +14,22 @@ pub(super) fn parse(source: &str) -> FileAnalysis {
 
 #[test]
 fn test_refs_to_finds_sub_across_workspace_files() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_a = PathBuf::from("/tmp/resolve_test_a.pm");
     let path_b = PathBuf::from("/tmp/resolve_test_b.pm");
 
     // File A defines sub foo and exports it.
     let fa_a = parse("package A;\nour @EXPORT_OK = qw/foo/;\nsub foo { 42 }\n1;\n");
-    store.insert_workspace(path_a.clone(), fa_a);
+    idx.insert_workspace_for_test(path_a.clone(), fa_a);
 
     // File B imports foo from A and calls it.
     let fa_b = parse("package B;\nuse A qw/foo/;\nsub bar { foo(); }\n1;\n");
-    store.insert_workspace(path_b.clone(), fa_b);
+    idx.insert_workspace_for_test(path_b.clone(), fa_b);
 
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
@@ -64,21 +65,22 @@ fn test_refs_to_finds_sub_across_workspace_files() {
 /// out to the def under `refs_to`.
 #[test]
 fn test_refs_to_exporter_extensible_cross_file() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_a = PathBuf::from("/tmp/resolve_ext_a.pm");
     let path_b = PathBuf::from("/tmp/resolve_ext_b.pm");
 
     let fa_a = parse(
         "package Ext;\nuse Exporter::Extensible -exporter_setup => 1;\nexport(qw/foo/);\nsub foo { 42 }\nsub bar :Export {}\n1;\n",
     );
-    store.insert_workspace(path_a.clone(), fa_a);
+    idx.insert_workspace_for_test(path_a.clone(), fa_a);
 
     let fa_b = parse("package C;\nuse Ext qw/foo/;\nsub baz { foo(); }\n1;\n");
-    store.insert_workspace(path_b.clone(), fa_b);
+    idx.insert_workspace_for_test(path_b.clone(), fa_b);
 
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
@@ -104,21 +106,22 @@ fn test_refs_to_exporter_extensible_cross_file() {
 /// Exporter::Declare: `default_export name => sub {}` registers exports.
 #[test]
 fn test_refs_to_exporter_declare_cross_file() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_a = PathBuf::from("/tmp/resolve_decl_a.pm");
     let path_b = PathBuf::from("/tmp/resolve_decl_b.pm");
 
     let fa_a = parse(
         "package Decl;\nuse Exporter::Declare;\ndefault_export foo => sub { 42 };\nsub foo { 42 }\n1;\n",
     );
-    store.insert_workspace(path_a.clone(), fa_a);
+    idx.insert_workspace_for_test(path_a.clone(), fa_a);
 
     let fa_b = parse("package C;\nuse Decl qw/foo/;\nsub baz { foo(); }\n1;\n");
-    store.insert_workspace(path_b.clone(), fa_b);
+    idx.insert_workspace_for_test(path_b.clone(), fa_b);
 
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
@@ -144,21 +147,22 @@ fn test_refs_to_exporter_declare_cross_file() {
 /// from Src — the call must fan out to Src's def, not stop at Importer.
 #[test]
 fn test_refs_to_importer_consumer_cross_file() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_a = PathBuf::from("/tmp/resolve_imp_src.pm");
     let path_b = PathBuf::from("/tmp/resolve_imp_consumer.pm");
 
     let fa_a = parse("package Src::Mod;\nour @EXPORT_OK = qw/foo/;\nsub foo { 42 }\n1;\n");
-    store.insert_workspace(path_a.clone(), fa_a);
+    idx.insert_workspace_for_test(path_a.clone(), fa_a);
 
     let fa_b = parse(
         "package C;\nuse Importer 'Src::Mod' => qw/foo/;\nsub baz { foo(); }\n1;\n",
     );
-    store.insert_workspace(path_b.clone(), fa_b);
+    idx.insert_workspace_for_test(path_b.clone(), fa_b);
 
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
@@ -184,14 +188,15 @@ fn test_refs_to_importer_consumer_cross_file() {
 /// must not register phantom exports that pollute cross-file refs.
 #[test]
 fn test_refs_to_export_not_registered_without_use() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_a = PathBuf::from("/tmp/resolve_noexport.pm");
     let fa_a = parse("package Plain;\nsub export {}\nexport('phantom');\n1;\n");
-    store.insert_workspace(path_a.clone(), fa_a);
+    idx.insert_workspace_for_test(path_a.clone(), fa_a);
 
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "phantom".to_string(),
@@ -211,7 +216,8 @@ fn test_refs_to_export_not_registered_without_use() {
 /// Route target is `Users::create`. They only share a name.
 #[test]
 fn refs_to_helper_leaf_excludes_unrelated_route_with_same_method_name() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/helper_route_overlap.pm");
 
     let fa = parse(
@@ -223,13 +229,13 @@ $app->helper('users.create', sub ($c, $user) {});
 $app->routes->post('/users')->to(controller => 'Users', action => 'create');
 "#,
     );
-    store.insert_workspace(path.clone(), fa);
+    idx.insert_workspace_for_test(path.clone(), fa);
 
     // gr on the helper's `create` leaf (class = _Helper::users).
     // Must NOT include the route's `create` ref (targets Users).
     let helper_results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "create".to_string(),
@@ -258,7 +264,7 @@ $app->routes->post('/users')->to(controller => 'Users', action => 'create');
     // Must NOT include the helper's Method declaration.
     let route_results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "create".to_string(),
@@ -288,7 +294,8 @@ $app->routes->post('/users')->to(controller => 'Users', action => 'create');
 /// `Bar::run`. gr on Foo's run must not union with Bar's.
 #[test]
 fn refs_to_method_is_class_scoped_plain_packages() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/two_classes_same_method.pm");
 
     let fa = parse(
@@ -309,11 +316,11 @@ $b->run;
 1;
 "#,
     );
-    store.insert_workspace(path.clone(), fa);
+    idx.insert_workspace_for_test(path.clone(), fa);
 
     let foo_results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "run".to_string(),
@@ -350,7 +357,7 @@ $b->run;
 
     let bar_results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "run".to_string(),
@@ -393,7 +400,8 @@ $b->run;
 /// divergence — the edge is frozen once per build.
 #[test]
 fn refs_to_method_excludes_untyped_invocant_includes_self() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/nav_untyped_invocant.pm");
 
     let fa = parse(
@@ -409,11 +417,11 @@ sub run {
 1;
 "#,
     );
-    store.insert_workspace(path.clone(), fa);
+    idx.insert_workspace_for_test(path.clone(), fa);
 
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "frobnicate".to_string(),
@@ -456,7 +464,8 @@ sub run {
 /// frozen edge. Guards against the unification dropping valid matches.
 #[test]
 fn refs_to_method_typed_same_file_invocant_resolves_fully() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/nav_typed_invocant.pm");
 
     let fa = parse(
@@ -471,11 +480,11 @@ sub run {
 1;
 "#,
     );
-    store.insert_workspace(path.clone(), fa);
+    idx.insert_workspace_for_test(path.clone(), fa);
 
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "frobnicate".to_string(),
@@ -573,7 +582,8 @@ $x->frob;
 /// and Bler.
 #[test]
 fn refs_to_method_is_class_scoped_corinna() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/corinna_classes.pm");
 
     let fa = parse(
@@ -595,11 +605,11 @@ Bler->new->hi;
 1;
 "#,
     );
-    store.insert_workspace(path.clone(), fa);
+    idx.insert_workspace_for_test(path.clone(), fa);
 
     let sner_results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "hi".to_string(),
@@ -646,7 +656,7 @@ Bler->new->hi;
 
     let bler_results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "hi".to_string(),
@@ -842,11 +852,12 @@ $b->run;
     );
 
     // Move `fa` into the store for the refs_to walk.
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/lsp_paths_fixture.pm");
-    store.insert_workspace(path.clone(), fa);
+    idx.insert_workspace_for_test(path.clone(), fa);
 
-    let foo_refs = refs_to(&store, None, &target_from_f, RoleMask::EDITABLE);
+    let foo_refs = refs_to(&store, Some(&idx), &target_from_f, RoleMask::EDITABLE);
     let foo_lines: Vec<usize> = foo_refs.iter().map(|r| r.span.start.row).collect();
     assert!(
         foo_lines.contains(&2), // Foo::run decl
@@ -979,10 +990,11 @@ hi();
         _ => Vec::new(),
     };
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/sub_import_fixture.pm");
-    store.insert_workspace(path.clone(), fa);
-    let refs_result = refs_to(&store, None, &target, RoleMask::EDITABLE);
+    idx.insert_workspace_for_test(path.clone(), fa);
+    let refs_result = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
 
     // ---- Collect all findings ----
     let mut failures: Vec<String> = Vec::new();
@@ -1106,7 +1118,7 @@ sub create { }
     // query time; an (empty) index hands the highlights projection the plugin
     // resolver, which finds the local `package Users` owning `create`.
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let highlights_at = |pt: tree_sitter::Point| {
         resolve(
             &store,
@@ -1183,7 +1195,8 @@ fn references_cross_file_method_respects_class_scope() {
     use crate::model::file_analysis::RenameKind;
     use tree_sitter::Parser;
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let parse_build = |source: &str| {
         let mut parser = Parser::new();
         parser
@@ -1204,7 +1217,7 @@ my $r = app->routes;
 $r->post('/users')->to(controller => 'Users', action => 'create');
 "#;
     let f1 = parse_build(f1_src);
-    store.insert_workspace(PathBuf::from("/tmp/app.pm"), f1);
+    idx.insert_workspace_for_test(PathBuf::from("/tmp/app.pm"), f1);
 
     // File 2: Users controller with `sub create`.
     let f2_src = r#"
@@ -1218,7 +1231,7 @@ sub list { }
 1;
 "#;
     let f2 = parse_build(f2_src);
-    store.insert_workspace(PathBuf::from("/tmp/users.pm"), f2);
+    idx.insert_workspace_for_test(PathBuf::from("/tmp/users.pm"), f2);
 
     // File 3: another caller that creates Users and invokes create.
     let f3_src = r#"
@@ -1229,13 +1242,12 @@ $u->create(name => 'alice');
 1;
 "#;
     let f3 = parse_build(f3_src);
-    store.insert_workspace(PathBuf::from("/tmp/consumer.pm"), f3);
+    idx.insert_workspace_for_test(PathBuf::from("/tmp/consumer.pm"), f3);
 
     // The route controller `'Users'` is a plugin-bridged token; resolving
     // it to the `Users` class is a query-time job that needs the index
     // (the build-time freeze is intentionally skipped for bridged
     // invocants), so register `Users` and thread the index through.
-    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     idx.register_workspace_module(
         PathBuf::from("/tmp/users.pm"),
         std::sync::Arc::new(parse_build(f2_src)),
@@ -1324,13 +1336,14 @@ $u->create(name => 'alice');
 
 #[test]
 fn test_refs_to_empty_when_no_hits() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let fa = parse("package Only;\nsub bar { 1 }\n1;\n");
-    store.insert_workspace(PathBuf::from("/tmp/resolve_no_hits.pm"), fa);
+    idx.insert_workspace_for_test(PathBuf::from("/tmp/resolve_no_hits.pm"), fa);
 
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "nonexistent".to_string(),
@@ -1353,17 +1366,18 @@ fn test_refs_to_empty_when_no_hits() {
 /// refs_by_target) will close the cross-file consumer-access case.
 #[test]
 fn test_refs_to_finds_hash_key_def_and_access_same_file() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/resolve_hash_same.pm");
 
     let fa = parse(
             "package Lib;\nsub get_config { return { host => 1, port => 2 } }\nmy $cfg = get_config();\nmy $h = $cfg->{host};\n1;\n",
         );
-    store.insert_workspace(path.clone(), fa);
+    idx.insert_workspace_for_test(path.clone(), fa);
 
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "host".to_string(),
@@ -1391,15 +1405,16 @@ fn test_refs_to_finds_hash_key_def_and_access_same_file() {
 /// enrichment to run in the consumer's FileAnalysis.
 #[test]
 fn test_refs_to_finds_cross_file_hash_key_def() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_lib = PathBuf::from("/tmp/resolve_hash_cross_lib.pm");
 
     let fa_lib = parse("package Lib;\nsub get_config { return { host => 1, port => 2 } }\n1;\n");
-    store.insert_workspace(path_lib.clone(), fa_lib);
+    idx.insert_workspace_for_test(path_lib.clone(), fa_lib);
 
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "host".to_string(),
@@ -1427,21 +1442,22 @@ fn test_refs_to_finds_cross_file_hash_key_def() {
 /// matching package's def does.
 #[test]
 fn test_refs_to_package_qualified_sub_owner_isolates_name_collisions() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_a = PathBuf::from("/tmp/resolve_pkg_a.pm");
     let path_b = PathBuf::from("/tmp/resolve_pkg_b.pm");
 
     // Two different packages, same sub name, same key name.
     let fa_a = parse("package Alpha;\nsub get_config { return { host => 'alpha' } }\n1;\n");
-    store.insert_workspace(path_a.clone(), fa_a);
+    idx.insert_workspace_for_test(path_a.clone(), fa_a);
 
     let fa_b = parse("package Beta;\nsub get_config { return { host => 'beta' } }\n1;\n");
-    store.insert_workspace(path_b.clone(), fa_b);
+    idx.insert_workspace_for_test(path_b.clone(), fa_b);
 
     // Query for `host` in Alpha's get_config — must NOT match Beta's.
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "host".to_string(),
@@ -1475,20 +1491,21 @@ fn test_refs_to_package_qualified_sub_owner_isolates_name_collisions() {
 /// `resolved_package` qualifier pins package A.
 #[test]
 fn test_refs_to_qualified_call_resolves_to_def() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_a = PathBuf::from("/tmp/resolve_qual_a.pm");
     let path_b = PathBuf::from("/tmp/resolve_qual_b.pm");
 
     let fa_a = parse("package A;\nsub foo { 42 }\n1;\n");
-    store.insert_workspace(path_a.clone(), fa_a);
+    idx.insert_workspace_for_test(path_a.clone(), fa_a);
 
     // No import — the qualifier names the package directly.
     let fa_b = parse("package B;\nsub bar { A::foo(); A::foo() }\n1;\n");
-    store.insert_workspace(path_b.clone(), fa_b);
+    idx.insert_workspace_for_test(path_b.clone(), fa_b);
 
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
@@ -1520,15 +1537,16 @@ fn test_refs_to_qualified_call_resolves_to_def() {
 /// `foo` in package C — `resolved_package` isolates the qualifier.
 #[test]
 fn test_refs_to_qualified_call_isolates_package() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_b = PathBuf::from("/tmp/resolve_qual_iso_b.pm");
 
     let fa_b = parse("package B;\nsub bar { A::foo(); C::foo() }\n1;\n");
-    store.insert_workspace(path_b.clone(), fa_b);
+    idx.insert_workspace_for_test(path_b.clone(), fa_b);
 
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
@@ -1550,14 +1568,15 @@ fn test_refs_to_qualified_call_isolates_package() {
 
 #[test]
 fn test_refs_to_role_mask_excludes_workspace() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let fa = parse("package P;\nsub foo {}\n1;\n");
-    store.insert_workspace(PathBuf::from("/tmp/masked.pm"), fa);
+    idx.insert_workspace_for_test(PathBuf::from("/tmp/masked.pm"), fa);
 
     // OPEN-only mask should miss this workspace file.
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
@@ -1648,13 +1667,13 @@ $b->touch();
         b_type,
     );
 
-    // Build a FileStore over both files. `refs_to` reads
+    // Build a OpenDocs over both files. `refs_to` reads
     // `invocant_class` directly off the consumer's MethodCall ref —
     // that field was populated at consumer-build time when B's types
     // weren't yet known.
-    let store = FileStore::new();
-    store.insert_workspace(producer_path, parse(producer_src));
-    store.insert_workspace(consumer_path.clone(), consumer_fa);
+    let store = OpenDocs::new();
+    idx.insert_workspace_for_test(producer_path, parse(producer_src));
+    idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa);
 
     let target = TargetRef {
         names: crate::model::conventions::PERL_SPELLINGS,
@@ -1712,11 +1731,15 @@ $b->touch();
     consumer_fa.enrich_imported_types_with_keys(Some(&idx));
 
     // Cursor on the first $b->touch() — column 4 lands on `t` of touch.
-    let store = FileStore::new();
+    // The origin rides a real tier (here WORKSPACE), as every queried
+    // document does — a tierless origin is admitted by no mask.
+    let consumer_path = PathBuf::from("/tmp/highlights_xfile_consumer.pl");
+    let store = OpenDocs::new();
+    idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa.clone());
     let highlights = resolve(
         &store,
         &consumer_fa,
-        FileKey::Path(PathBuf::from("/tmp/highlights_xfile_consumer.pl")),
+        FileKey::Path(consumer_path),
         tree_sitter::Point { row: 3, column: 4 },
         Some(&idx),
         OverrideScope::default(),
@@ -1786,10 +1809,10 @@ $x->ping();
         x_type,
     );
 
-    let store = FileStore::new();
-    store.insert_workspace(parent_path, parse(parent_src));
-    store.insert_workspace(child_path, parse(child_src));
-    store.insert_workspace(consumer_path.clone(), consumer_fa);
+    let store = OpenDocs::new();
+    idx.insert_workspace_for_test(parent_path, parse(parent_src));
+    idx.insert_workspace_for_test(child_path, parse(child_src));
+    idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa);
 
     // Target the parent's `ping` — refs_to uses class-keyed Method
     // matching, so `$x->ping()` (whose nearest invocant class is C)
@@ -1844,11 +1867,11 @@ sub touch  { 1 }
 1;
 "#;
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = ModuleIndex::new_for_test();
     let producer_path = PathBuf::from("/tmp/bench_b.pm");
     idx.register_workspace_module(producer_path.clone(), Arc::new(parse(producer_src)));
-    store.insert_workspace(producer_path, parse(producer_src));
+    idx.insert_workspace_for_test(producer_path, parse(producer_src));
 
     // N consumer files, each with M method-call sites that mix:
     //  - $b->touch() (var invocant, cross-file enrichment)
@@ -1873,7 +1896,7 @@ sub touch  { 1 }
         let path = PathBuf::from(format!("/tmp/bench_consumer_{}.pm", f));
         let mut fa = parse(&src);
         fa.enrich_imported_types_with_keys(Some(&idx));
-        store.insert_workspace(path, fa);
+        idx.insert_workspace_for_test(path, fa);
     }
 
     let target = TargetRef {
@@ -1961,9 +1984,9 @@ $x->makeFoo()->ping();
         x_type,
     );
 
-    let store = FileStore::new();
-    store.insert_workspace(producer_path, parse(producer_src));
-    store.insert_workspace(consumer_path.clone(), consumer_fa);
+    let store = OpenDocs::new();
+    idx.insert_workspace_for_test(producer_path, parse(producer_src));
+    idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa);
 
     // refs_to(P::ping) — the consumer's `->ping()` is reachable
     // only by typing `$x->makeFoo()` (the chain hop's invocant)
@@ -2027,11 +2050,15 @@ $x->makeFoo()->ping();
     consumer_fa.enrich_imported_types_with_keys(Some(&idx));
 
     // Cursor on the first `->ping()` — column 18 lands on `p` of ping.
-    let store = FileStore::new();
+    // The origin rides a real tier (here WORKSPACE), as every queried
+    // document does — a tierless origin is admitted by no mask.
+    let consumer_path = PathBuf::from("/tmp/highlights_chain_consumer.pl");
+    let store = OpenDocs::new();
+    idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa.clone());
     let highlights = resolve(
         &store,
         &consumer_fa,
-        FileKey::Path(PathBuf::from("/tmp/highlights_chain_consumer.pl")),
+        FileKey::Path(consumer_path),
         tree_sitter::Point { row: 3, column: 18 },
         Some(&idx),
         OverrideScope::default(),
@@ -2061,7 +2088,8 @@ $x->makeFoo()->ping();
 /// on for "go to references on a minion task".
 #[test]
 fn refs_to_handler_fans_out_across_files() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_reg = PathBuf::from("/tmp/resolve_minion_reg.pm");
     let path_call = PathBuf::from("/tmp/resolve_minion_call.pm");
 
@@ -2070,18 +2098,18 @@ fn refs_to_handler_fans_out_across_files() {
         "package App::Tasks;\nuse Minion;\n\
 sub setup ($minion) {\n  $minion->add_task('send_email' => sub ($job, $to) { 1 });\n}\n1;\n",
     );
-    store.insert_workspace(path_reg.clone(), fa_reg);
+    idx.insert_workspace_for_test(path_reg.clone(), fa_reg);
 
     // Caller file: plain enqueue dispatch site → DispatchCall ref.
     let fa_call = parse(
         "package App::Caller;\nuse Minion;\n\
 sub fire ($minion) {\n  $minion->enqueue('send_email' => ['a@b']);\n}\n1;\n",
     );
-    store.insert_workspace(path_call.clone(), fa_call);
+    idx.insert_workspace_for_test(path_call.clone(), fa_call);
 
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "send_email".to_string(),
@@ -2124,7 +2152,7 @@ fn refs_to_handler_finds_dispatch_in_unenriched_cross_file_subclass() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = ModuleIndex::new_for_test();
     idx.set_workspace_root(None);
 
@@ -2139,10 +2167,10 @@ fn refs_to_handler_finds_dispatch_in_unenriched_cross_file_subclass() {
         "package App::Tasks;\nuse Minion;\n\
 sub setup ($minion) {\n  $minion->add_task('send_email' => sub ($job, $to) { 1 });\n}\n1;\n",
     );
-    store.insert_workspace(path_reg.clone(), fa_reg);
+    idx.insert_workspace_for_test(path_reg.clone(), fa_reg);
 
     // Caller: receiver is a cross-file Minion SUBCLASS, and the file does
-    // NOT `use Minion`. Built without enrichment (insert_workspace mirrors
+    // NOT `use Minion`. Built without enrichment (insert_workspace_for_test mirrors
     // the indexer). No materialized DispatchCall ref — must resolve lazily.
     let path_call = PathBuf::from("/tmp/rg_minion_call.pm");
     let fa_call = parse(
@@ -2156,7 +2184,7 @@ sub fire {\n  my $self = shift;\n  my $minion = My::Minion->new;\n  $minion->enq
             matches!(&r.kind, crate::model::file_analysis::RefKind::DispatchCall { .. })),
         "precondition: the caller must have NO materialized DispatchCall ref",
     );
-    store.insert_workspace(path_call.clone(), fa_call);
+    idx.insert_workspace_for_test(path_call.clone(), fa_call);
 
     let results = refs_to(
         &store,
@@ -2192,7 +2220,8 @@ sub fire {\n  my $self = shift;\n  my $minion = My::Minion->new;\n  $minion->enq
 /// same as a `@EXPORT_OK` sub. Models the export so the import resolves.
 #[test]
 fn refs_to_fans_runtime_exported_sub_to_consumer() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path_def = PathBuf::from("/tmp/runtime_export_def.pm");
     let path_use = PathBuf::from("/tmp/runtime_export_use.pm");
 
@@ -2202,7 +2231,7 @@ fn refs_to_fans_runtime_exported_sub_to_consumer() {
          use Sub::Exporter -setup => { exports => [qw/sweeten/] };\n\
          sub sweeten { 42 }\n1;\n",
     );
-    store.insert_workspace(path_def.clone(), fa_def);
+    idx.insert_workspace_for_test(path_def.clone(), fa_def);
 
     // Consumer imports and calls it.
     let fa_use = parse(
@@ -2210,11 +2239,11 @@ fn refs_to_fans_runtime_exported_sub_to_consumer() {
          use Sugar::Sub qw/sweeten/;\n\
          sub run { sweeten(); }\n1;\n",
     );
-    store.insert_workspace(path_use.clone(), fa_use);
+    idx.insert_workspace_for_test(path_use.clone(), fa_use);
 
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "sweeten".to_string(),
@@ -2249,7 +2278,7 @@ fn refs_to_links_implicit_export_to_bare_use_consumer() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let def = PathBuf::from("/tmp/impl_export_def.pm");
     let consumer = PathBuf::from("/tmp/impl_export_use.pl");
 
@@ -2263,8 +2292,8 @@ fn refs_to_links_implicit_export_to_bare_use_consumer() {
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(def.clone(), Arc::new(parse(def_src)));
 
-    store.insert_workspace(def.clone(), parse(def_src));
-    store.insert_workspace(consumer.clone(), parse(use_src));
+    idx.insert_workspace_for_test(def.clone(), parse(def_src));
+    idx.insert_workspace_for_test(consumer.clone(), parse(use_src));
 
     let target = TargetRef {
         names: crate::model::conventions::PERL_SPELLINGS,
@@ -2297,7 +2326,7 @@ fn refs_to_links_return_hash_key_cross_file() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let prod = PathBuf::from("/tmp/rk_cfg.pm");
     let cons = PathBuf::from("/tmp/rk_consumer.pl");
 
@@ -2309,10 +2338,10 @@ fn refs_to_links_return_hash_key_cross_file() {
 
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(prod.clone(), Arc::new(parse(prod_src)));
-    store.insert_workspace(prod.clone(), parse(prod_src));
+    idx.insert_workspace_for_test(prod.clone(), parse(prod_src));
     // Consumer stays UNENRICHED in the store (a workspace file), exercising the
     // deferred owner re-derivation rather than the eager enrichment fixup.
-    store.insert_workspace(cons.clone(), parse(cons_src));
+    idx.insert_workspace_for_test(cons.clone(), parse(cons_src));
 
     let target = TargetRef {
         names: crate::model::conventions::PERL_SPELLINGS,
@@ -2352,26 +2381,27 @@ fn refs_to_links_return_hash_key_cross_file() {
 /// `refs_to`, the single path both backend and CLI now share.
 #[test]
 fn references_cross_file_sub_fans_out_and_stays_package_scoped() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let def = PathBuf::from("/tmp/xsub_def.pm");
     let caller1 = PathBuf::from("/tmp/xsub_c1.pm");
     let caller2 = PathBuf::from("/tmp/xsub_c2.pm");
     let decoy = PathBuf::from("/tmp/xsub_decoy.pm");
 
-    store.insert_workspace(
+    idx.insert_workspace_for_test(
         def.clone(),
         parse("package TaskInfo;\nuse Exporter 'import';\nour @EXPORT_OK = qw/info_to_task/;\nsub info_to_task { 1 }\n1;\n"),
     );
-    store.insert_workspace(
+    idx.insert_workspace_for_test(
         caller1.clone(),
         parse("package TaskProxy;\nuse TaskInfo qw/info_to_task/;\nsub run { info_to_task(); }\n1;\n"),
     );
-    store.insert_workspace(
+    idx.insert_workspace_for_test(
         caller2.clone(),
         parse("use TaskInfo qw/info_to_task/;\ninfo_to_task();\n1;\n"),
     );
     // Decoy: a *different* package with a same-named sub, never imported.
-    store.insert_workspace(
+    idx.insert_workspace_for_test(
         decoy.clone(),
         parse("package Other;\nsub info_to_task { 99 }\nsub use_it { info_to_task(); }\n1;\n"),
     );
@@ -2382,7 +2412,7 @@ fn references_cross_file_sub_fans_out_and_stays_package_scoped() {
         kind: TargetKind::Sub { package: Some("TaskInfo".to_string()) },
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
     };
-    let refs = refs_to(&store, None, &target, RoleMask::EDITABLE);
+    let refs = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
     let hit = |p: &PathBuf| refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if x == p));
 
     assert!(hit(&def), "missed TaskInfo def. hits: {:?}", refs);
@@ -2426,10 +2456,10 @@ fn references_cross_file_method_matches_inheriting_invocant() {
     idx.register_workspace_module(role_path.clone(), Arc::new(parse(role_src)));
     idx.register_workspace_module(child_path.clone(), Arc::new(parse(child_src)));
 
-    let store = FileStore::new();
-    store.insert_workspace(role_path.clone(), parse(role_src));
-    store.insert_workspace(child_path.clone(), parse(child_src));
-    store.insert_workspace(decoy_path.clone(), parse(decoy_src));
+    let store = OpenDocs::new();
+    idx.insert_workspace_for_test(role_path.clone(), parse(role_src));
+    idx.insert_workspace_for_test(child_path.clone(), parse(child_src));
+    idx.insert_workspace_for_test(decoy_path.clone(), parse(decoy_src));
 
     let target = TargetRef {
         names: crate::model::conventions::PERL_SPELLINGS,
@@ -2458,9 +2488,10 @@ fn references_cross_file_method_matches_inheriting_invocant() {
 /// @INC; a target with no editable declaration widens to VISIBLE.
 #[test]
 fn references_mask_scopes_to_editable_for_project_symbols() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let def = PathBuf::from("/tmp/mask_def.pm");
-    store.insert_workspace(
+    idx.insert_workspace_for_test(
         def.clone(),
         parse("package Proj;\nsub thing { 1 }\n1;\n"),
     );
@@ -2473,7 +2504,7 @@ fn references_mask_scopes_to_editable_for_project_symbols() {
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
     };
     assert_eq!(
-        references_mask_for(&store, None, &in_ws).bits(),
+        references_mask_for(&store, Some(&idx), &in_ws).bits(),
         RoleMask::EDITABLE.bits(),
         "project-declared sub should scope to EDITABLE",
     );
@@ -2487,7 +2518,7 @@ fn references_mask_scopes_to_editable_for_project_symbols() {
         method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
     };
     assert_eq!(
-        references_mask_for(&store, None, &dep_only).bits(),
+        references_mask_for(&store, Some(&idx), &dep_only).bits(),
         RoleMask::VISIBLE.bits(),
         "symbol with no editable decl should widen to VISIBLE",
     );

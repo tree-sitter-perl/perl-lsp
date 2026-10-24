@@ -4,7 +4,8 @@
 designed is landed** (`src/build/language_driver.rs`; file-map entry in
 CLAUDE.md). C++/Python/R/CMake ship as pack languages behind opt-in
 Cargo features, each a `PackDriver` constructor plus a `.scm` skeleton
-and predicates — no new types per language. Per-language `ModuleIndex`
+and predicates — no new types per language. A process serves one of
+them (`--lang`, below). Per-language `ModuleIndex`
 instances and the `FileAnalysis.language` tag (cross-language ref
 pollution guard) are both landed. This brief now carries only what
 hasn't shipped.
@@ -35,7 +36,7 @@ consumer exists, tests for layering until then):
 
 **The core crate (`lsp-engine`).** the `src/` layer directories ARE
 the manifest: model (file_analysis, witnesses), the generic driver
-(query_extract + capture vocabulary), cross-file (file_store, resolve,
+(query_extract + capture vocabulary), cross-file (open_docs, resolve,
 module_index, module_cache), the rhai host, and the GENERIC half of
 the LSP adapter. The honest cost: `symbols.rs` must split — the verbs
 (documentSymbol/references/rename/workspace-symbol) are pure
@@ -53,10 +54,16 @@ predicates.rhai, pack.toml}`, installable like `.perl-lsp/` plugins.
 The grammar is the only hard part: compiled-in (crate dep) first;
 dynamically loaded (.so / wasm, the Helix/Zed model) later.
 
-**The binary: one multiplexing server.** The registry serves N
-languages from one process (LSP document selectors handle this).
-perl-lsp doesn't die — it becomes the Perl-configured distribution of
-that binary, name and install base intact.
+**The binary: one language per process.** A binary carries the
+languages it was compiled with; a process serves exactly one of them,
+locked at startup (`perl-lsp --lang cpp`; unlocked is Perl). An editor
+with C++ and CMake open runs two servers, each with its own document
+selector. Nothing is shared across languages inside a process: no
+second store, no route between indexes, no per-language rule that has
+to be looked up per file, because the process language IS the language.
+Per-language constants (lattice rules, name spellings) can be ambient
+process context. perl-lsp doesn't die — it is the Perl-configured
+distribution of that binary, name and install base intact.
 
 Open design round carried from the spikes: keying framework-plugin
 hooks on CAPTURE EVENTS the way rhai hooks key on CallContext today —

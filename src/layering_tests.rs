@@ -404,38 +404,6 @@ fn whole_copy_registration_sites_are_allowlisted() {
     assert!(violations.is_empty(), "whole-copy registration drift:\n{}", violations.join("\n"));
 }
 
-/// Verb-routing store selection has ONE speller: `ModuleIndex::lookup_for`.
-/// An LSP-layer call to `pack_index()` re-derives "which store serves this
-/// origin" per handler — the C1 disease: a verb that picks the store itself
-/// can pick it wrong (or forget), and the CandidateSet's construction-derived
-/// pack policy silently pairs with the wrong store. Whole-sub-index SWEEPS
-/// (`for_each_pack_index`) are a different question and stay allowed.
-#[test]
-fn pack_store_selection_stays_in_lookup_for() {
-    let mut violations = Vec::new();
-    for (path, layer, _stem) in source_files() {
-        if layer != Layer::Lsp {
-            continue;
-        }
-        let text = fs::read_to_string(&path).unwrap();
-        for (i, line) in text.lines().enumerate() {
-            let t = line.trim_start();
-            if t.starts_with("//") {
-                continue;
-            }
-            if t.contains(".pack_index(") {
-                violations.push(format!("{}:{}: {}", path.display(), i + 1, t));
-            }
-        }
-    }
-    assert!(
-        violations.is_empty(),
-        "LSP-layer store selection must route through ModuleIndex::lookup_for \
-         (the one speller), never pick a pack sub-index per handler:\n{}",
-        violations.join("\n")
-    );
-}
-
 /// `FileAnalysis::inferred_type` is raw-seed-state introspection for tests
 /// only. Its last production caller (the MCB early-out) is gone — the
 /// MCB→bag bridge publishes `Edge(PackageSymbol)` witnesses and lets the
@@ -579,8 +547,8 @@ fn slot_detection_dispatches_on_driver_caps_not_language_names() {
         .join("src/lsp/cursor_slot.rs");
     let text = fs::read_to_string(&path).unwrap();
     // Every id the registry can hand this file, whatever features are on.
-    let ids = crate::build::language_driver::LanguageRegistry::with_enabled()
-        .ids()
+    let ids = crate::build::language_driver::LanguageRegistry::compiled()
+        .languages()
         .into_iter()
         .collect::<Vec<_>>();
     let mut violations = Vec::new();
@@ -619,9 +587,8 @@ fn query_verbs_route_through_run_query() {
     let text = fs::read_to_string(&path).unwrap();
     let forbidden = [
         "index::resolve::resolve(", // set construction → QueryCx::set
-        "sym_row_search",           // relational rows → QueryCx::sym_rows
+        ".sym_search(",             // relational rows → QueryCx::sym_rows
         ".whole_present(",          // rehydration reader → QueryCx lanes
-        ".lookup_for(",             // routing binds inside the hop → QueryCx::routed
     ];
     let mut violations = Vec::new();
     for (i, line) in text.lines().enumerate() {
@@ -967,7 +934,7 @@ fn kind_comparisons_name_real_grammar_kinds() {
 /// because parking is only safe while holding no lock the writer needs.
 ///
 /// `run_persist_writer`'s committed and fallback lanes take `ModuleIndex`,
-/// `FileStore` and bag-cache guards. A producer that blocked on a full queue
+/// `OpenDocs` and bag-cache guards. A producer that blocked on a full queue
 /// while holding one of those could never be woken — the writer cannot drain
 /// to free a slot. Today every site hands over fully-owned values
 /// (`prepare_*_parts` tokens, encoded blobs) with no guard live, which is the
@@ -983,7 +950,7 @@ fn persist_queue_producers_are_allowlisted() {
     let allow: Vec<(&str, usize, &str)> = vec![(
         "module_resolver",
         4,
-        "index_perl's deferred + whole lanes (parts/blob owned; the FileStore write \
+        "index_perl's deferred + whole lanes (parts/blob owned; the OpenDocs write \
          happens AFTER the send) and index_pack's two (register_symbols completes \
          BEFORE the send)",
     )];
@@ -1714,7 +1681,7 @@ fn packs_with_grammars() -> Vec<(&'static str, crate::build::query_extract::Lang
         crate::build::packs::perl_pack(),
         (*perl_parser.language().expect("the perl grammar")).clone(),
     )];
-    let registry = LanguageRegistry::with_enabled();
+    let registry = LanguageRegistry::compiled();
     for id in registry.languages() {
         let Some(driver) = registry.for_id(id) else { continue };
         let Some(pack) = driver.lang_pack() else { continue };

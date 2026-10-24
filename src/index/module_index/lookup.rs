@@ -544,10 +544,16 @@ impl CrossFileLookup for ModuleIndex {
         .unwrap_or_default()
     }
 
+    fn is_dependency_path(&self, path: &std::path::Path) -> bool {
+        // `all_files` holds exactly what a workspace/pack front door
+        // registered; the @INC tier writes only the name-keyed cache.
+        !self.all_files.contains_key(path)
+    }
+
     fn cached_by_path(&self, path: &std::path::Path) -> Option<Arc<CachedModule>> {
-        // Pack sub-indexes: the per-path registry is O(1). The Perl hub's
-        // cache is name-keyed with unique paths — linear fallback (hub
-        // candidate sets are @INC-sized, not tree-sized).
+        // Registered files: the per-path registry is O(1). The @INC cache is
+        // name-keyed with unique paths — linear fallback (its candidate sets
+        // are @INC-sized, not tree-sized).
         if let Some(cm) = self.all_files.get(path) {
             return Some(cm.value().clone());
         }
@@ -747,6 +753,10 @@ impl CrossFileLookup for ModuleIndex {
             // candidate relation scoped by the asker's @INC.
             _ => self.get_cached(name).into_iter().collect(),
         }
+    }
+
+    fn for_each_workspace_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) {
+        self.for_each_registered_file(f)
     }
 
     fn for_each_cached_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) {

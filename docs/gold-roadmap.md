@@ -39,18 +39,16 @@ LANDED (additive, Perl path untouched, default suite 1062/0):
   pre-parse transform).
 - **Feature-gated distribution**: `cpp`/`python`/`r`/`cmake` features
   (optional grammar deps); default build links no pack grammar. A
-  `cpp-lsp` = `cargo build --features cpp`; `--features all-langs` serves
-  all five. `--languages` / `--lang-analyze <file>` prove it at the CLI
-  (a macro-heavy `.cpp` routes through the reparse seam and outlines).
-- **Async LSP backend routing.** `FileStore::open` routes `did_open` by
-  extension/content-sniff through `LanguageRegistry`; `did_change` and
-  watched-file events dispatch per-driver capability the same way, and
-  `ensure_workspace_indexed` latches per language family — `cpp-lsp` works
-  *in an editor*, not just the CLI.
-- **Per-language `ModuleIndex`** (keyspace isolation): `pack_indexes` keeps
-  a separate sub-index per language (own cache, own `modules-{lang}.db`),
-  and `lookup_for` routes a query to the right one by the queried file's
-  language — names never comingle across languages.
+  `cpp-lsp` = `cargo build --features cpp`, run as `perl-lsp --lang cpp`
+  (a process serves one language). `--languages` / `--lang-analyze <file>`
+  prove it at the CLI (a macro-heavy `.cpp` goes through the reparse seam
+  and outlines).
+- **Async LSP backend.** `OpenDocs::open` analyzes through the served
+  driver; `did_change` and watched-file events dispatch on its declared
+  capabilities — `cpp-lsp` works *in an editor*, not just the CLI.
+- **Per-language `ModuleIndex`** (keyspace isolation): a process serves one
+  language through one index (own cache, own `modules-{lang}.db`), so names
+  never comingle across languages.
 
 STILL DEFERRED (the risky part — needs e2e, do with review, NOT blind):
 - **`FileAnalysis.language` tag + the two cross-file filters** (refs_to /

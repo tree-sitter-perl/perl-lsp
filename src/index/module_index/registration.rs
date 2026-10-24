@@ -398,7 +398,11 @@ impl ModuleIndex {
         path: std::path::PathBuf,
         cm: Arc<CachedModule>,
     ) {
-        self.all_files.insert(path.clone(), cm.clone());
+        // Replace, never add: `all_files` is the front-door registry, and an
+        // @INC copy landing in it would read as a project file.
+        if let Some(mut slot) = self.all_files.get_mut(&path) {
+            *slot = cm.clone();
+        }
         // The path's `all_defs` candidates must track the same generation —
         // a stale candidate would serve the pre-materialization analysis to
         // every by-name candidate reader.
@@ -1219,7 +1223,7 @@ impl ModuleIndex {
     /// WHOLE analysis, then evict the requested axes, then store the
     /// stripped arc — so a feed can never read an already-emptied `symbols`
     /// (the ordering bug a caller-side strip invites). Returns the stored
-    /// arc for the caller's FileStore mirror. Synchronous-persistence
+    /// arc for the caller's OpenDocs mirror. Synchronous-persistence
     /// callers only (the warm path — the blob already exists on disk);
     /// the bulk fresh path splits the halves around the writer's COMMIT.
     /// `persisted` is the surface the COLD lane recorded for this file, when
@@ -1318,27 +1322,8 @@ impl ModuleIndex {
         self.register_workspace_resident(path, analysis);
     }
 
-    /// Register a pack-language file under each CLASS name it defines —
-    /// unlike Perl (one package per file), a C++ header / Python module
-    /// holds many classes, and cross-file lookup is class-keyed. Language-
-    /// GENERIC (keys on `SymKind::Class`), so every pack language gets
-    /// cross-file from one indexer + its own per-language ModuleIndex.
-    /// `get_cached("Box")` finds the file defining `Box`, and the same
-    /// PackageSymbol / member-completion machinery resolves across files.
-    /// Attach a per-language sub-index (`"cpp"`, `"python"`, …).
-    pub fn attach_pack_index(&self, lang: &str, idx: Arc<ModuleIndex>) {
-        // Share the hub's rehydration CELL (not its current contents — the
-        // cell, so a later `set_workspace_root` install stays visible): the
-        // sub-index can then serve a hub-owned path a sweep misroutes to it.
-        if let Ok(mut g) = idx.foreign_bag_cache.write() {
-            *g = Some(Arc::clone(&self.core.bag_cache));
-        }
-        self.pack_indexes.insert(lang.to_string(), idx);
-    }
-
-    /// Install this pack sub-index's Slice-2 bag-rehydration LRU before it is
-    /// `Arc`-wrapped and registered. Consuming builder so the field is set once
-    /// on the owned value (the index is shared immutably thereafter).
+    /// Install the Slice-2 bag-rehydration LRU on an owned index before it
+    /// is `Arc`-wrapped (tests).
     pub fn with_bag_cache(
         self,
         cache: Arc<crate::index::pack_bag_cache::PackBagCache>,
@@ -1347,8 +1332,9 @@ impl ModuleIndex {
         self
     }
 
-    /// Post-`Arc` variant for the hub, set alongside the workspace root.
-    /// LAST root wins — a re-rooted session must not keep rehydrating from
+    /// Post-`Arc` variant, set by whichever indexer owns the process
+    /// language's DB (the workspace root for Perl, the pack indexer for a
+    /// pack language). LAST root wins — a re-rooted session must not keep rehydrating from
     /// the first root's DB while the writers moved to the new one.
     pub fn set_bag_cache(&self, cache: Arc<crate::index::pack_bag_cache::PackBagCache>) {
         if let Ok(mut g) = self.core.bag_cache.write() {
@@ -1395,7 +1381,7 @@ impl ModuleIndex {
 
 
     /// Install the relational ref index's read-connection opener (once).
-    /// Callable post-`Arc` (interior `OnceLock`) because the hub is shared
+    /// Callable post-`Arc` (interior `OnceLock`) because the index is shared
     /// before the workspace root — and therefore the cache path — is known.
     pub fn set_ref_rows_opener(
         &self,
@@ -1409,9 +1395,7 @@ impl ModuleIndex {
     }
 
     /// Drop `path`'s rehydrated analysis from this index's LRU (a
-    /// changed/saved file's copy is stale). Pack sub-indexes AND the Perl
-    /// hub each carry one — the watcher and the bulk-index writers rely on
-    /// this taking effect on both.
+    /// changed/saved file's copy is stale).
     /// Record that a provider of each path moved. Returns the epoch used.
     ///
     /// The push half of the re-stamp gate. The epoch is minted before the
@@ -1642,16 +1626,6 @@ impl ModuleIndex {
                 Err(miss) => stage = format!("loader miss: {miss}"),
             }
         }
-        // Foreign route: sweeps mint `CachedModule`s from FileStore entries
-        // and ask whatever index the query routed to — this index's own
-        // loader can never serve a path a SIBLING tier persisted. One hop,
-        // sibling's CACHE directly (never its `rehydrate_or_resident` — no
-        // recursion): sub-index → the hub's cell; hub → the pack sibling
-        // that registered the path.
-        if let Some(fa) = self.rehydrate_foreign(&cached.path, want_bag) {
-            return fa;
-        }
-
         REHYDRATION_MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         log::error!(
             "rehydration miss for evicted copy {:?} ({stage}) — serving stripped \
@@ -1667,39 +1641,6 @@ impl ModuleIndex {
             );
         }
         cached.analysis.clone()
-    }
-
-    /// A whole copy of `path` from the SIBLING tier that owns it — the
-    /// cross-index half of `rehydrate_or_resident`. Exactly one hop, always
-    /// through the sibling's cache (never its miss path), so routing can't
-    /// recurse. `None` when no sibling owns the path — the caller's miss
-    /// handling then applies.
-    fn rehydrate_foreign(&self, path: &std::path::Path, want_bag: bool) -> Option<Arc<FileAnalysis>> {
-        let ask = |bc: &crate::index::pack_bag_cache::PackBagCache| {
-            if want_bag { bc.bag_for(path) } else { bc.rows_for(path) }
-        };
-        // Sub-index → the hub's cell (shared at `attach_pack_index`).
-        let hub_cell = self.foreign_bag_cache.read().ok().and_then(|g| g.clone());
-        if let Some(cell) = hub_cell {
-            let hub_cache = cell.read().ok().and_then(|g| g.clone());
-            if let Some(bc) = hub_cache {
-                if let Some(fa) = ask(&bc) {
-                    return Some(fa);
-                }
-            }
-        }
-        // Hub → the pack sibling that registered the path.
-        for entry in self.pack_indexes.iter() {
-            let sub = entry.value();
-            if sub.all_files.contains_key(path) {
-                if let Some(bc) = sub.bag_cache_ref() {
-                    if let Some(fa) = ask(&bc) {
-                        return Some(fa);
-                    }
-                }
-            }
-        }
-        None
     }
 
     /// Does `m` declare a `Class`/type named `name`? Rank source for the
@@ -1728,8 +1669,7 @@ impl ModuleIndex {
     }
 
     /// Rows-backed workspace/symbol scan over THIS index's store — the
-    /// enumeration surface for symbol-evicted copies. The hub serves Perl
-    /// rows; callers fan out to `pack_index` sub-indexes for pack rows.
+    /// enumeration surface for symbol-evicted copies.
     pub fn sym_search(&self, query: &str) -> Vec<crate::index::module_cache::SymRowHit> {
         self.with_rows_conn(|conn| crate::index::module_cache::sym_rows_matching(conn, query))
             .unwrap_or_default()
@@ -1760,36 +1700,6 @@ impl ModuleIndex {
                 crate::index::module_cache::paths_with_ref_rows(conn),
             )
         })
-    }
-
-    /// The sub-index for `lang`, if this distribution indexes it.
-    pub fn pack_index(&self, lang: &str) -> Option<Arc<ModuleIndex>> {
-        self.pack_indexes.get(lang).map(|e| e.value().clone())
-    }
-
-    /// The ONE speller of verb-routing store selection: which index serves
-    /// cross-file queries for a file of `language` — its pack sub-index when
-    /// attached, else this hub (Perl always; a pack language before its
-    /// index attaches). Handlers and CLI mirrors hold the returned value
-    /// and pass `as_lookup()` into `resolve()`; the pack POLICY is not
-    /// decided here — the CandidateSet derives it from the origin's stamped
-    /// `FileAnalysis.language`. A layering tripwire keeps `pack_index()`
-    /// itself out of the LSP layer so this stays the only spelling.
-    pub fn lookup_for(&self, language: &str) -> RoutedIndex<'_> {
-        match self.pack_index(language) {
-            Some(p) => RoutedIndex::Pack(p),
-            None => RoutedIndex::Hub(self),
-        }
-    }
-
-    /// Every attached pack-language sub-index, by language id. The CLI
-    /// diagnostics path sweeps these for Mode-B (member-op) diagnostics —
-    /// pack files live here, not in the Perl-only `FileStore` the whole-tree
-    /// pass iterates.
-    pub fn for_each_pack_index(&self, mut f: impl FnMut(&str, &Arc<ModuleIndex>)) {
-        for entry in self.pack_indexes.iter() {
-            f(entry.key(), entry.value());
-        }
     }
 
     /// Register a pack-language file's named top-level entities — classes
@@ -2057,25 +1967,16 @@ impl ModuleIndex {
         n
     }
 
+    /// Every front-door registration — the project's own files, the one
+    /// home they have.
     pub fn for_each_registered_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) {
         for entry in self.all_files.iter() {
             f(entry.value());
         }
     }
 
-    /// Iterate every pack-language (C/C++/…) registered file's analysis. Pack
-    /// symbols live in per-language sub-indexes, not the Perl FileStore
-    /// workspace map, so `workspace/symbol` must sweep them separately or a
-    /// C typedef/class/function never surfaces in a workspace search.
-    pub fn for_each_pack_registered_file(
-        &self,
-        f: &mut dyn FnMut(&std::path::Path, &FileAnalysis),
-    ) {
-        for entry in self.pack_indexes.iter() {
-            entry
-                .value()
-                .for_each_registered_file(&mut |cached| f(&cached.path, &cached.analysis));
-        }
+    pub fn registered_file_count(&self) -> usize {
+        self.all_files.len()
     }
 
     /// Rebuild the reverse index (`func → modules`) from the current cache.
