@@ -449,20 +449,28 @@ pub(super) fn pack_def_paths(
     if origin_defines {
         out.push(self_str.clone());
     }
+    let mut macro_out_of_sight = false;
     for c in idx.def_candidates(name) {
         let p = c.path.to_string_lossy().into_owned();
+        let connected = visible.contains(&p) || c.analysis.pack.include_closure.contains(&self_str);
         // A `#define` of the name anywhere joins unconditionally — config
         // variants of one conceptual macro live in disjoint headers (win32.h
         // vs the unix header) and the forward lane's never-prune rule keeps
         // them one identity. Non-macro values (globals, statics) stay
         // closure-strict: two unrelated `static int counter` TUs are two
         // targets.
-        if c.analysis.names_macro_def(name, None)
-            || visible.contains(&p)
-            || c.analysis.pack.include_closure.contains(&self_str)
-        {
+        if c.analysis.names_macro_def(name, None) {
+            macro_out_of_sight |= !connected;
+            out.push(p);
+        } else if connected {
             out.push(p);
         }
+    }
+    // Only out-of-closure defines joined: the origin's closure gate would
+    // then refuse the origin's OWN uses — the very sites the identity was
+    // minted from (highlights would see them, references not).
+    if macro_out_of_sight && !out.iter().any(|p| *p == self_str || visible.contains(p)) {
+        out.push(self_str);
     }
     out.sort();
     out.dedup();
@@ -649,13 +657,48 @@ pub(super) fn symbol_defines_target(
     }
 }
 
+/// Does any WORKSPACE-tier index copy satisfy `pred`? Copies may be
+/// symbol-evicted (an empty vec is "on disk", not "declares nothing"): the
+/// resident scan covers whole copies, evicted ones are checked through the
+/// row-store candidates for `keys` (a couple of rehydrations, never a
+/// whole-tree decode).
+fn editable_copy_satisfies(
+    module_index: Option<&dyn CrossFileLookup>,
+    keys: &[String],
+    pred: &dyn Fn(&FileAnalysis) -> bool,
+) -> bool {
+    let Some(idx) = module_index else { return false };
+    let mut found = false;
+    idx.for_each_workspace_file(&mut |cached| {
+        if !found && !cached.analysis.symbols_are_evicted() {
+            found = pred(&cached.analysis);
+        }
+    });
+    if found {
+        return true;
+    }
+    for path in idx.ref_candidate_paths(keys) {
+        if idx.is_dependency_path(&path) {
+            continue;
+        }
+        let Some(cm) = idx.cached_by_path(&path) else { continue };
+        if !cm.analysis.symbols_are_evicted() {
+            continue; // the resident scan already judged it
+        }
+        if pred(&idx.whole_present(&cm)) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Pick the role mask for a *references* query: scope to editable space
 /// (OPEN + WORKSPACE) when the target is declared in a file we can edit,
 /// else widen to VISIBLE so refs into a dependency-defined symbol still
 /// surface. "Find references" on a project symbol must not scan CPAN —
 /// see the file-store ADR's RoleMask discipline.
 pub fn references_mask_for(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     target: &TargetRef,
 ) -> RoleMask {
@@ -665,92 +708,28 @@ pub fn references_mask_for(
             found_in_editable = true;
         }
     });
-    // Workspace copies may be symbol-evicted (an empty vec here is "on
-    // disk", not "declares nothing") — the resident scan covers whole
-    // copies; evicted ones are checked via the row-store candidate filter
-    // below (a couple of rehydrations, never a whole-tree decode).
     if !found_in_editable {
-        for entry in files.workspace_raw().iter() {
-            if entry.value().symbols_are_evicted() {
-                continue;
-            }
-            if entry.value().symbols().iter().any(|s| symbol_defines_target(s, target, entry.value())) {
-                found_in_editable = true;
-                break;
-            }
-        }
-    }
-    if !found_in_editable {
-        if let Some(idx) = module_index {
-            let keys = retrieval_keys(target, &[]);
-            for path in idx.ref_candidate_paths(&keys) {
-                let Some(arc) = files
-                    .workspace_raw()
-                    .get(&path)
-                    .map(|e| std::sync::Arc::clone(e.value()))
-                else {
-                    continue;
-                };
-                if !arc.symbols_are_evicted() {
-                    continue; // the resident scan already judged it
-                }
-                let cm = std::sync::Arc::new(crate::model::file_analysis::CachedModule::new(
-                    path.clone(),
-                    arc,
-                ));
-                let whole = idx.whole_present(&cm);
-                if whole.symbols().iter().any(|s| symbol_defines_target(s, target, &whole)) {
-                    found_in_editable = true;
-                    break;
-                }
-            }
-        }
+        found_in_editable = editable_copy_satisfies(
+            module_index,
+            &retrieval_keys(target, &[]),
+            &|fa: &FileAnalysis| fa.symbols().iter().any(|s| symbol_defines_target(s, target, fa)),
+        );
     }
     // A class-keyed Method target whose decl we can't see in editable
     // space (cross-file synthesized accessor, parent in @INC) still wins
     // EDITABLE if the *class* is a workspace package — the callers we
-    // care about are project files. Fall back to the module index only
-    // when nothing project-side claims it.
+    // care about are project files.
     if !found_in_editable {
-        if let (TargetKind::Method { class }, Some(idx)) = (&target.kind, module_index) {
-            let declares_class = |fa: &FileAnalysis| {
-                fa.symbols().iter().any(|s| {
-                    matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == *class
-                })
-            };
-            let mut declared_in_workspace = false;
-            for entry in files.workspace_raw().iter() {
-                if !entry.value().symbols_are_evicted() && declares_class(entry.value()) {
-                    declared_in_workspace = true;
-                    break;
-                }
-            }
-            if !declared_in_workspace {
-                let keys = vec![crate::model::file_analysis::name_match_key(class, &target.names)];
-                for path in idx.ref_candidate_paths(&keys) {
-                    let Some(arc) = files
-                        .workspace_raw()
-                        .get(&path)
-                        .map(|e| std::sync::Arc::clone(e.value()))
-                    else {
-                        continue;
-                    };
-                    if !arc.symbols_are_evicted() {
-                        continue;
-                    }
-                    let cm = std::sync::Arc::new(crate::model::file_analysis::CachedModule::new(
-                        path.clone(),
-                        arc,
-                    ));
-                    if declares_class(&idx.whole_present(&cm)) {
-                        declared_in_workspace = true;
-                        break;
-                    }
-                }
-            }
-            if declared_in_workspace {
-                found_in_editable = true;
-            }
+        if let TargetKind::Method { class } = &target.kind {
+            found_in_editable = editable_copy_satisfies(
+                module_index,
+                &[crate::model::file_analysis::name_match_key(class, &target.names)],
+                &|fa: &FileAnalysis| {
+                    fa.symbols().iter().any(|s| {
+                        matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == *class
+                    })
+                },
+            );
         }
     }
     if found_in_editable {

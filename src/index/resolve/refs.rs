@@ -132,7 +132,7 @@ pub(super) fn group_from_projections(
 /// deduped like `refs_to`, and every span covers a bare name token, so a
 /// rename caller can write one replacement text at every location.
 pub fn group_refs(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     origin: &FileKey,
     local_spans: &[Span],
@@ -203,7 +203,7 @@ pub(super) enum WalkScope<'a> {
 /// so the highlights image is the in-file slice of `references()` without
 /// paying the workspace walk per cursor move.
 pub(super) fn refs_to_in_file(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     target: &TargetRef,
     key: &FileKey,
@@ -229,7 +229,7 @@ pub fn is_valid_rename_name(new_name: &str) -> bool {
 /// accessor's decl token IS the group decl the bare edit covers.
 #[allow(clippy::too_many_arguments)]
 pub fn group_rename_edits(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     origin: &FileKey,
     local_spans: &[Span],
@@ -371,7 +371,7 @@ struct RetrievalMemo {
     /// heatmap: 693 files × 8,287 walks, 20.6 s of a 51 s gather).
     dep_files: dashmap::DashMap<(usize, u64), std::sync::Arc<DepFiles>>,
     /// `delegation_aliases`' (alias, delegate, def path) pairs, per index,
-    /// FileStore and dependency-tier admission: the scan reads every file's
+    /// OpenDocs and dependency-tier admission: the scan reads every file's
     /// macro defs and is the same for every walk of a frozen sweep (14.0 s of
     /// the same gather, all of it to find no pairs).
     alias_pairs: dashmap::DashMap<(usize, u64, usize, bool), std::sync::Arc<Vec<AliasPair>>>,
@@ -571,7 +571,7 @@ pub(super) fn matcher_view(
 /// - `files`   — open + workspace store
 /// - `module_index` — dep cache (consulted only if mask includes Dependency)
 pub fn refs_to(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     target: &TargetRef,
     mask: RoleMask,
@@ -585,7 +585,7 @@ pub fn refs_to(
 /// the scope enumerates (see `WalkScope` for the origin scope's two
 /// stated asymmetries).
 fn walk_refs(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     target: &TargetRef,
     mask: RoleMask,
@@ -671,7 +671,7 @@ fn walk_refs(
     let mut rows_indexed: std::sync::Arc<std::collections::HashSet<PathBuf>> = Default::default();
     let mut candidate_set: std::collections::HashSet<PathBuf> = Default::default();
 
-    // Open files (canonical — workspace entries for open paths are skipped).
+    // Open docs (canonical — their index entries are skipped).
     let mut covered_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     if mask.contains(RoleMask::OPEN) {
         files.for_each_open(|url, doc| {
@@ -738,36 +738,14 @@ fn walk_refs(
                 if covered_paths.contains(path) {
                     continue;
                 }
-                // Tier attribution: a FileStore workspace entry rides the
-                // WORKSPACE role (Perl project files); everything else the
-                // rows name lives in a module-index tier (DEPENDENCY —
-                // @INC and the pack caches). The mask must admit the
-                // candidate's OWN tier, or an EDITABLE rename would walk
+                // Tier attribution: a front-door registration rides
+                // WORKSPACE, the rest (@INC) DEPENDENCY. The mask must admit
+                // the candidate's OWN tier, or an EDITABLE rename would walk
                 // read-only deps (and vice versa).
-                let ws_arc = files
-                    .workspace_raw()
-                    .get(path)
-                    .map(|e| std::sync::Arc::clone(e.value()));
-                let cached = match ws_arc {
-                    Some(arc) => {
-                        if !mask.contains(RoleMask::WORKSPACE) {
-                            continue;
-                        }
-                        std::sync::Arc::new(crate::model::file_analysis::CachedModule::new(
-                            path.clone(),
-                            arc,
-                        ))
-                    }
-                    None => {
-                        if !mask.contains(RoleMask::DEPENDENCY) {
-                            continue;
-                        }
-                        match idx.cached_by_path(path) {
-                            Some(cm) => cm,
-                            None => continue,
-                        }
-                    }
-                };
+                if !mask.contains(index_role(idx, path)) {
+                    continue;
+                }
+                let Some(cached) = idx.cached_by_path(path) else { continue };
                 covered_paths.insert(path.clone());
                 let key = FileKey::Path(cached.path.clone());
                 let file_str = canonical_file_str(&key);
@@ -785,55 +763,21 @@ fn walk_refs(
         }
     }
 
-    // Workspace files.
-    if mask.contains(RoleMask::WORKSPACE) {
-        let _t = crate::util::ghost_stats::ScopedNs::start("refs.sweep.workspace");
-        for entry in files.workspace_raw().iter() {
-            if covered_paths.contains(entry.key()) {
-                continue;
-            }
-            // Shredded AND not a candidate → holds no matching row; skip
-            // the whole-view rehydration. Candidates always fall through
-            // (the relational block may have failed to resolve them).
-            if rows_indexed.contains(entry.key()) && !candidate_set.contains(entry.key()) {
-                continue;
-            }
-            covered_paths.insert(entry.key().clone());
-            let key = FileKey::Path(entry.key().clone());
-            let file_str = canonical_file_str(&key);
-            if !gate(entry.value(), &file_str) {
-                continue;
-            }
-            // Same rows-axes routing as the sibling sweeps: a workspace
-            // copy with rows persisted is refs+symbols-STRIPPED, and the
-            // matcher reading it raw silently drops the file's matches.
-            let full = match module_index {
-                Some(idx) => {
-                    let cached = std::sync::Arc::new(
-                        crate::model::file_analysis::CachedModule::new(
-                            entry.key().clone(),
-                            std::sync::Arc::clone(entry.value()),
-                        ),
-                    );
-                    matcher_view(idx, &cached, target)
-                }
-                None => std::sync::Arc::clone(entry.value()),
-            };
-            collect_from_analysis(&key, &full, target, &aliases, module_index, &file_str, &memo, &mut out);
-        }
-    }
-
-    // Dependencies (read-only modules from @INC / the pack-language cache).
-    // Per-FILE sweep (`for_each_cached_file`): the name-keyed view both
-    // repeats files and HIDES a file that lost every name tie. Skip paths an
-    // open/workspace copy already covered — those are fresher.
-    if mask.contains(RoleMask::DEPENDENCY) {
+    // The index's files, each admitted by its OWN tier (`index_role`): the
+    // project's front-door registrations and the @INC dependencies. Per-FILE
+    // sweep (`for_each_cached_file`): the name-keyed view both repeats files
+    // and HIDES a file that lost every name tie. Skip paths an open doc
+    // already covered — it is fresher.
+    if mask.intersects(RoleMask::WORKSPACE | RoleMask::DEPENDENCY) {
         let _t = crate::util::ghost_stats::ScopedNs::start("refs.sweep.deps");
         if let Some(idx) = module_index {
             let mut visit = |cached: &std::sync::Arc<crate::model::file_analysis::CachedModule>| {
-                // Same row-narrowing skip as the workspace sweep: shredded
-                // but not a candidate ⇒ provably matchless; candidates
-                // always fall through.
+                if !mask.contains(index_role(idx, &cached.path)) {
+                    return;
+                }
+                // Shredded but not a candidate ⇒ provably matchless; skip the
+                // rehydration. Candidates always fall through (the relational
+                // block may have failed to resolve them).
                 if rows_indexed.contains(&cached.path) && !candidate_set.contains(&cached.path) {
                     return;
                 }
@@ -876,6 +820,16 @@ fn walk_refs(
     }
 
     sorted_deduped(out)
+}
+
+/// The tier an index-held file rides: WORKSPACE for a front-door
+/// registration, DEPENDENCY otherwise.
+pub(super) fn index_role(idx: &dyn CrossFileLookup, path: &std::path::Path) -> RoleMask {
+    if idx.is_dependency_path(path) {
+        RoleMask::DEPENDENCY
+    } else {
+        RoleMask::WORKSPACE
+    }
 }
 
 /// Stable output order + (path, span) dedup — the one spelling both walk
@@ -1154,7 +1108,7 @@ pub(super) struct DelegationAlias {
 /// is gated on the mask so a Perl EDITABLE query never touches the dep cache.
 /// Sorted for deterministic output.
 pub(super) fn delegation_aliases(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     target: &TargetRef,
     mask: RoleMask,
@@ -1192,18 +1146,18 @@ pub(super) fn delegation_aliases(
 }
 
 /// Every macro delegation the walk can see, memoized while a sweep memo is
-/// open. The key carries the FileStore's identity, but nothing tracks its
+/// open. The key carries the OpenDocs's identity, but nothing tracks its
 /// contents: the sweep memo's premise is a world frozen for the run, which
 /// holds for the open docs and workspace files as much as for the index.
 fn alias_pairs(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     mask: RoleMask,
 ) -> std::sync::Arc<Vec<AliasPair>> {
     let dep = mask.contains(RoleMask::DEPENDENCY);
     let memo_key = module_index.map(|idx| {
         let (id, epoch) = index_identity(idx);
-        (id, epoch, files as *const FileStore as usize, dep)
+        (id, epoch, files as *const OpenDocs as usize, dep)
     });
     if let (Some(k), Ok(slot)) = (memo_key, RETRIEVAL_MEMO.read()) {
         if let Some(memo) = slot.as_ref() {
@@ -1219,7 +1173,7 @@ fn alias_pairs(
 }
 
 fn scan_alias_pairs(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     dep: bool,
 ) -> Vec<AliasPair> {
@@ -1246,14 +1200,14 @@ fn scan_alias_pairs(
             .unwrap_or_else(|_| url.to_string());
         add(&doc.analysis, &path);
     });
-    for entry in files.workspace_raw().iter() {
-        add(entry.value(), &entry.key().to_string_lossy());
-    }
-    if dep {
-        if let Some(idx) = module_index {
-            idx.for_each_cached_file(&mut |cached| {
-                add(&cached.analysis, &cached.path.to_string_lossy());
-            });
+    if let Some(idx) = module_index {
+        let mut add_cached = |cached: &std::sync::Arc<crate::model::file_analysis::CachedModule>| {
+            add(&cached.analysis, &cached.path.to_string_lossy());
+        };
+        if dep {
+            idx.for_each_cached_file(&mut add_cached);
+        } else {
+            idx.for_each_workspace_file(&mut add_cached);
         }
     }
     pairs

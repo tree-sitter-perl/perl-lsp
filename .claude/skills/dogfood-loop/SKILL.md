@@ -15,9 +15,11 @@ gold fixture root. Proven over the C/C++ go-live (rounds 1–2 + tightening).
   locally (e.g. cpp used `~/personal/cpp-bench/`: abseil, fmt, folly, json,
   redis; Perl uses `gold-corpus/local/`). Real code finds what fixtures
   can't — the shapes nobody thought to write down.
-- **Binary**: `cargo build --release --features all-langs`, and verify the
-  binary actually has the language (`perl-lsp --parse <sample>` — a
-  default-features rebuild silently drops pack languages).
+- **Binary**: `cargo build --release --features <lang>`, and verify the
+  binary actually has the language (`perl-lsp --languages` — a
+  default-features rebuild silently drops pack languages). A process serves
+  one language: the editor config and any `--batch`/sweep verb pass
+  `--lang <lang>`; file-target verbs take it from the file.
 - **Gold fixture root** for the language (e.g. `gold-corpus/cpp-fixture/`)
   and its fixtures file under `gold-corpus/fixtures/`.
 
@@ -56,7 +58,7 @@ macro identity + namespace-blindness).
 ## Phase 3 — encode as RED xfail gold rows (before any fix)
 
 Every reducible finding becomes a gold row with `"status": "xfail"` via
-`gold-corpus/run.pl --emit --root <fixture-root> <cap> <file> <row> <col>`.
+`gold-corpus/run.pl --emit --root <fixture-root> --lang <lang> <cap> <file> <row> <col>`.
 This locks the repro. The harness then enforces the promotion: when a fix
 lands, the row XPASSes → flip it to `"status": "gold"` in the same commit.
 Non-reducible findings go to `docs/PARKED.md` (residual-bug tier) with the
@@ -143,7 +145,7 @@ Before merging each agent branch:
 3. Merge, then the **full net**: `cargo test --release` both feature sets;
    gold BOTH modes (default + `PERL_LSP_CPP_NO_FASTPATH=1`) cold — 
    `perl-lsp --clear-cache` between; `./e2e/run.sh` + per-language e2e.
-   All 0 FAIL / 0 XPASS / 0 CRASH. Rebuild `--features all-langs` LAST
+   All 0 FAIL / 0 XPASS / 0 CRASH. Rebuild `--features <lang>` LAST
    (a default-features test run leaves a langless binary on disk).
 4. Push. Delete the agent branch.
 

@@ -19,7 +19,7 @@
 ```
 perl-lsp-core/          — WASM-compatible analysis engine
   builder, file_analysis, witnesses, cursor_context,
-  pod, query_cache, cpanfile, file_store, resolve
+  pod, query_cache, cpanfile, open_docs, resolve
 
 perl-lsp/               — native LSP server (current binary)
   main, backend, module_resolver, module_cache, module_index

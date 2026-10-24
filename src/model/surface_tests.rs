@@ -263,7 +263,7 @@ fn freshness_dirty_closure_walks_imports_and_parent_chains() {
 #[test]
 fn cpp_values_are_on_the_surface_and_bodies_are_not() {
     let build_cpp = |src: &str| {
-        let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+        let reg = crate::build::language_driver::LanguageRegistry::compiled();
         let driver = reg
             .for_path(std::path::Path::new("/fake/surface_test.cpp"))
             .expect("cpp driver");
@@ -308,7 +308,7 @@ fn cpp_values_are_on_the_surface_and_bodies_are_not() {
 #[test]
 fn cpp_free_functions_are_on_the_surface() {
     let build_cpp = |src: &str| {
-        let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+        let reg = crate::build::language_driver::LanguageRegistry::compiled();
         let driver = reg
             .for_path(std::path::Path::new("/fake/surface_free.c"))
             .expect("c driver");

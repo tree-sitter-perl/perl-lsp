@@ -410,7 +410,7 @@ fn sub_exporter_member_refs_local_subs() {
 
 #[test]
 fn sub_exporter_member_goto_def_and_references() {
-    use crate::index::file_store::FileStore;
+    use crate::index::open_docs::OpenDocs;
     use crate::index::resolve::{refs_to, RoleMask, TargetKind, TargetRef};
     use std::path::PathBuf;
 
@@ -441,12 +441,13 @@ fn sub_exporter_member_goto_def_and_references() {
         .expect("ref_at the export member token");
     assert_eq!(r.target_name, "foo");
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/qa_sub_exporter.pm");
-    store.insert_workspace(path.clone(), fa);
+    idx.insert_workspace_for_test(path.clone(), fa);
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
@@ -1068,7 +1069,7 @@ fn use_constant_block_plain_comma_keys_register() {
 /// as fat-comma — the registration path is separator-agnostic end to end.
 #[test]
 fn use_constant_block_plain_comma_goto_def_and_references() {
-    use crate::index::file_store::FileStore;
+    use crate::index::open_docs::OpenDocs;
     use crate::index::resolve::{refs_to, RoleMask, TargetKind, TargetRef};
     use std::path::PathBuf;
 
@@ -1092,12 +1093,13 @@ sub go {
             fa.refs().iter().filter(|r| r.target_name == n).collect::<Vec<_>>(),
         );
     }
-    let store = FileStore::new();
-    store.insert_workspace(PathBuf::from("/tmp/qa_const_plain.pm"), fa);
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(PathBuf::from("/tmp/qa_const_plain.pm"), fa);
     for name in ["GAMMA", "DELTA"] {
         let results = refs_to(
             &store,
-            None,
+            Some(&idx),
             &TargetRef {
                 names: crate::model::conventions::PERL_SPELLINGS,
                 name: name.to_string(),
@@ -1192,7 +1194,7 @@ sub go {
 /// statements: every def is reachable and every usage lists.
 #[test]
 fn multiple_name_form_use_constants_goto_def_and_references() {
-    use crate::index::file_store::FileStore;
+    use crate::index::open_docs::OpenDocs;
     use crate::index::resolve::{refs_to, RoleMask, TargetKind, TargetRef};
     use std::path::PathBuf;
 
@@ -1207,14 +1209,15 @@ sub go {
 }
 "#;
     let fa = build_fa(src);
-    let store = FileStore::new();
-    store.insert_workspace(PathBuf::from("/tmp/qa_multi_const.pm"), fa);
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(PathBuf::from("/tmp/qa_multi_const.pm"), fa);
 
     // BETA: def + 1 usage = 2 hits. GAMMA: def + 1 usage = 2. ALPHA: def + 1.
     for name in ["ALPHA", "BETA", "GAMMA"] {
         let results = refs_to(
             &store,
-            None,
+            Some(&idx),
             &TargetRef {
                 names: crate::model::conventions::PERL_SPELLINGS,
                 name: name.to_string(),

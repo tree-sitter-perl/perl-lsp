@@ -1,5 +1,31 @@
 use super::*;
 
+// Test-only registration helpers live here, not in a production part, so the
+// layering allowlist's whole-copy counts stay about production sites.
+impl ModuleIndex {
+    /// Register `fa` as a project file through its language's front door
+    /// (whole copy, every name feed).
+    pub(crate) fn insert_workspace_for_test(&self, path: PathBuf, fa: FileAnalysis) -> Arc<FileAnalysis> {
+        let arc = Arc::new(fa);
+        self.insert_workspace_arc_for_test(path, Arc::clone(&arc));
+        arc
+    }
+
+    pub(crate) fn insert_workspace_arc_for_test(&self, path: PathBuf, fa: Arc<FileAnalysis>) {
+        if crate::build::language_driver::LanguageRegistry::is_pack_language(&fa.language) {
+            self.register_symbols(path, fa);
+        } else {
+            self.register_workspace_module(path, fa);
+        }
+    }
+
+    /// The registered copy at `path`.
+    pub(crate) fn workspace_file_for_test(&self, path: &std::path::Path) -> Option<Arc<FileAnalysis>> {
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        self.all_files.get(&path).map(|e| Arc::clone(&e.value().analysis))
+    }
+}
+
 fn parse_source_to_cached(source: &str, module_name: &str) -> Arc<CachedModule> {
     use tree_sitter::Parser;
     let mut parser = Parser::new();
@@ -464,7 +490,7 @@ fn test_children_index_survives_warm_rebuild_and_purge() {
 #[test]
 fn get_cached_scoped_prefers_reachable_same_name_class() {
     use std::collections::HashSet;
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
     let a = Arc::new(driver.analyze_with_path(
         "class Box { public: void a_only(); };\n",
@@ -501,7 +527,7 @@ fn get_cached_scoped_prefers_reachable_same_name_class() {
 #[test]
 fn visible_defs_with_prefix_gates_on_closure() {
     use std::collections::HashSet;
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
     let header = Arc::new(driver.analyze_with_path(
         "enum opcode { OP_NULL, OP_SCOPE };\nint op_name(int t);\n",
@@ -540,7 +566,7 @@ fn visible_defs_with_prefix_gates_on_closure() {
 #[test]
 fn unregister_file_removes_defs_and_repicks_winner() {
     use std::collections::HashSet;
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
     let a = Arc::new(driver.analyze_with_path(
         "class Box { public: void a_only(); };\n",
@@ -578,7 +604,7 @@ fn unregister_file_removes_defs_and_repicks_winner() {
 #[cfg(feature = "cpp")]
 #[test]
 fn edit_swap_drops_names_the_new_version_lost() {
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let driver = reg.for_id("cpp").expect("cpp driver");
     let v1 = Arc::new(driver.analyze_with_path(
         "class Box { public: int w; };\nint helper();\n",
@@ -1138,64 +1164,6 @@ fn rehydration_miss_is_counted_and_serves_resident() {
     assert!(
         crate::index::module_index::rehydration_miss_count() > before,
         "the miss must be counted — silent absence is the flake signature"
-    );
-}
-
-/// The foreign-route half of rehydration: a sweep minting `CachedModule`s
-/// from FileStore entries asks whatever index the query routed to — a cpp
-/// query's workspace sweep hands PERL paths to the cpp sub-index, whose own
-/// loader can never serve them (first caught live by the strict-residency
-/// tripwire: cross-TU cpp references silently dropped every Perl workspace
-/// file's matches). The sub-index must route a hub-owned path to the hub's
-/// rehydration cell instead of degrading to the stripped resident.
-#[test]
-fn foreign_path_rehydrates_through_the_owning_sibling() {
-    let hub = ModuleIndex::new_for_test();
-
-    // A whole analysis the "hub blob store" can serve, and its stripped twin
-    // the sweep would otherwise read empty.
-    let src = "package Ghost;\nsub boo { return 1 }\n1;\n";
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&ts_parser_perl::LANGUAGE.into())
-        .unwrap();
-    let tree = parser.parse(src, None).unwrap();
-    let whole = crate::build::builder::build(&tree, src.as_bytes());
-    let whole_arc = Arc::new(whole);
-    let mut stripped = (*whole_arc).clone();
-    stripped.evict_to(crate::model::file_analysis::Residency::Skeleton);
-    let path = PathBuf::from("/fake/hub/Ghost.pm");
-
-    // Install the hub's rehydration cell with a loader that serves the
-    // whole copy (stands in for the modules.db blob load).
-    let served = Arc::clone(&whole_arc);
-    hub.set_bag_cache(Arc::new(crate::index::pack_bag_cache::PackBagCache::new(
-        128 * 1024 * 1024,
-        move |p: &std::path::Path, _want_bag: bool| {
-            if p == std::path::Path::new("/fake/hub/Ghost.pm") {
-                Ok((*served).clone())
-            } else {
-                Err(crate::index::module_cache::RehydrateMiss::NoRow)
-            }
-        },
-    )));
-
-    // Attach a pack sub-index (its own bag cache can never serve the path).
-    let sub = Arc::new(ModuleIndex::new_for_test());
-    hub.attach_pack_index("cpp", Arc::clone(&sub));
-
-    // The misrouted ask: the sub-index handed a hub-owned stripped copy.
-    let cm = Arc::new(CachedModule::new(path, Arc::new(stripped)));
-    let before = crate::index::module_index::rehydration_miss_count();
-    let full = crate::model::file_analysis::CrossFileLookup::whole_present(sub.as_ref(), &cm);
-    assert!(
-        full.symbols().iter().any(|s| s.name == "boo"),
-        "foreign route must serve the owner's WHOLE copy, not the stripped resident"
-    );
-    assert_eq!(
-        crate::index::module_index::rehydration_miss_count(),
-        before,
-        "a foreign-routed answer is a hit, not a residency miss"
     );
 }
 

@@ -92,20 +92,6 @@ pub fn dedup_workspace_symbols(results: &mut Vec<SymbolInformation>) {
     });
 }
 
-/// The rows half of workspace/symbol: fan the query across the hub's Perl
-/// store and every pack sub-index's store. One spelling of the fan-out so
-/// the LSP handler and the CLI verb can never diverge.
-pub fn sym_row_search(
-    idx: &crate::index::module_index::ModuleIndex,
-    query: &str,
-) -> Vec<crate::index::module_cache::SymRowHit> {
-    let mut hits = idx.sym_search(query);
-    idx.for_each_pack_index(|_lang, pack| {
-        hits.extend(pack.sym_search(query));
-    });
-    hits
-}
-
 /// `symbol_to_workspace_info`'s row twin — identical kind gate and
 /// hidden/lexical suppressions, sourced from the baked row flags.
 // `SymbolInformation::deprecated` is a deprecated-but-required field.

@@ -40,7 +40,7 @@ pub struct CallEdge {
 /// an item's own file (LSP hierarchy requests hand back an item, not a
 /// cursor in an open document).
 pub fn analysis_for_key(
-    files: &FileStore,
+    files: &OpenDocs,
     module_index: Option<&dyn CrossFileLookup>,
     key: &FileKey,
 ) -> Option<Arc<FileAnalysis>> {
@@ -59,18 +59,10 @@ pub fn analysis_for_key(
         }
         FileKey::Path(p) => p.clone(),
     };
-    // Workspace copies are symbols-evicted after persist; the enclosing-
-    // caller lookup reads symbols, so an evicted copy must rehydrate through
-    // the index (`whole_present`) rather than answer absence-as-answer.
-    let resident = files.workspace_raw().get(&path).map(|e| Arc::clone(e.value()));
-    if let Some(a) = &resident {
-        if !a.symbols_are_evicted() {
-            return resident;
-        }
-    }
-    module_index
-        .and_then(|idx| idx.cached_by_path(&path).map(|cm| idx.whole_present(&cm)))
-        .or(resident)
+    // Index copies are symbols-evicted after persist; the enclosing-caller
+    // lookup reads symbols, so rehydrate (`whole_present`) rather than answer
+    // absence-as-answer.
+    module_index.and_then(|idx| idx.cached_by_path(&path).map(|cm| idx.whole_present(&cm)))
 }
 
 impl<'a> CandidateSet<'a> {
