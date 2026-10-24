@@ -242,6 +242,10 @@ impl<'a> Builder<'a> {
             self.queue_children(node);
             return;
         }
+        if let Some(io) = self.indirect_method_call(node) {
+            self.visit_indirect_method_call(node, io);
+            return;
+        }
         // Symbolic-code-deref call: `&{ EXPR }(...)`. The `function` field is
         // a `function` wrapping a `code_deref_expression`, NOT a sub name —
         // its text is `&{$z}`, not a callable identifier. Emitting a

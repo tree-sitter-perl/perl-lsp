@@ -274,6 +274,7 @@ impl<'a> Builder<'a> {
         // sub name; fall through to None when the variable isn't a known
         // compile-time constant.
         match node.kind() {
+            "ambiguous_function_call_expression" if self.indirect_method_call(node).is_some() => None,
             "function_call_expression" | "ambiguous_function_call_expression" => {
                 let name = crate::cst::extract_call_name(node, self.source)?;
                 if let Some(stripped) = name.strip_prefix('&') {

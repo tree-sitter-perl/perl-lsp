@@ -81,6 +81,81 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// `meth Class(ARGS)` when Perl reads it as `Class->meth(ARGS)`. Perl
+    /// decides while compiling the statement (toke.c `intuit_method`): a sub
+    /// named `Class` makes it a function call, a package named `Class` a
+    /// method call. A sub named `meth` defers to that package test, and a
+    /// bare `use` may have exported one, so only a package the file has
+    /// named by this point (declared, `use`d or `require`d) makes it a
+    /// method call here.
+    pub(super) fn indirect_method_call(&self, node: Node<'a>) -> Option<crate::cst::IndirectObjectCall<'a>> {
+        let io = crate::cst::indirect_object_call(node, self.source)?;
+        if self.is_indirect_object_filehandle_call(node) {
+            return None;
+        }
+        let at = node.start_position();
+        let method = io.method.utf8_text(self.source).ok()?;
+        let class = io.class.utf8_text(self.source).ok()?;
+        if crate::model::builtins::is_builtin(method)
+            || crate::model::builtins::is_builtin(class)
+            || self.sub_declared_before(class, at)
+        {
+            return None;
+        }
+        let names_package = self.imports.iter().any(|i| i.span.start < at && i.module_name == class)
+            || self.symbols.iter().any(|s| {
+                s.span.start < at && s.name == class && matches!(s.kind, SymKind::Package | SymKind::Class)
+            });
+        names_package.then_some(io)
+    }
+
+    /// An indirect-object call is a method call on its class: the same
+    /// `MethodCall` ref, receiver and arguments `Class->meth(ARGS)` mints, so
+    /// typing, navigation and diagnostics read one shape.
+    pub(super) fn visit_indirect_method_call(&mut self, node: Node<'a>, io: crate::cst::IndirectObjectCall<'a>) {
+        let (Ok(method), Ok(class)) = (io.method.utf8_text(self.source), io.class.utf8_text(self.source)) else {
+            return;
+        };
+        let (method, class) = (method.to_string(), class.to_string());
+        let class_span = node_to_span(io.class);
+        let args: Vec<Node<'a>> = match io.arguments {
+            Some(a) if crate::cst::is_list_literal(a) => crate::cst::NodeExt::elements(&a).collect(),
+            Some(a) => vec![a],
+            None => Vec::new(),
+        };
+        self.push_invocant_class(class_span, class.clone());
+        let operands = self.call_operands(&args);
+        let idx = self.refs.len();
+        self.add_ref(
+            RefKind::MethodCall {
+                invocant: crate::model::conventions::Invocant::assume_canonical(class.clone()),
+                invocant_span: Some(class_span),
+                method_name_span: node_to_span(io.method),
+                member_op: None,
+                named_by_string: false,
+            },
+            node_to_span(node),
+            method.clone(),
+            AccessKind::Read,
+        );
+        self.method_call_invocant.insert(idx, class.clone());
+        self.method_call_args.insert(idx, operands);
+        self.method_call_refs.entry(node.id()).or_default().push(idx);
+        self.add_ref(RefKind::PackageRef, class_span, class.clone(), AccessKind::Read);
+        if let Some(a) = io.arguments {
+            let declared_here = self
+                .symbols
+                .iter()
+                .any(|s| s.name == class && matches!(s.kind, SymKind::Package | SymKind::Class));
+            let owner = HashKeyOwner::Sub { package: Some(class), name: method };
+            self.emit_call_arg_key_accesses(
+                a,
+                if declared_here { Gate::Strict(owner) } else { Gate::StrictOrDefer(owner) },
+            );
+            self.queue_node(a);
+        }
+    }
+
     pub(super) fn visit_method_call(&mut self, node: Node<'a>) {
         use crate::cst::NodeExt;
         let call = crate::cst::MethodCall::cast(node)

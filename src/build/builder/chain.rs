@@ -339,6 +339,10 @@ impl<'a> Builder<'a> {
                 if self.is_shift_call(node) {
                     return self.arg_window_at(node)?.element_at(0).cloned();
                 }
+                // `new Foo(...)` is a method call; its value is the call's.
+                if self.indirect_method_call(node).is_some() {
+                    return self.bag_query_expr_span(node_to_span(node));
+                }
                 let func = node.child_by_field_name("function")?;
                 let name = func.utf8_text(self.source).ok()?;
                 // The cross-file arm below pairs this tail with an EXPLICITLY

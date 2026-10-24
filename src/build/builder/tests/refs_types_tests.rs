@@ -1524,3 +1524,26 @@ fn main_qualified_call_binds_in_a_package_less_file() {
         Some(InferredType::String),
     );
 }
+
+#[test]
+fn test_indirect_object_call_is_a_method_call_on_its_class() {
+    // Inside a class with its own `new`, `new Other::Pkg(...)` is still
+    // `Other::Pkg->new(...)`: Perl reads it as a method call once the file
+    // has named the package. A sub named like the class makes it a call.
+    let fa = build_fa(
+        "package Mine;\nuse Other::Pkg;\nsub new { bless {}, shift }\nsub Helper { 1 }\nsub go {\n    my $a = new Other::Pkg(1, 2);\n    my $b = new Other::Pkg;\n    my $c = new Helper(1);\n    return;\n}\n",
+    );
+    let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(8, 0));
+    assert_eq!(at("$a"), Some(InferredType::ClassName("Other::Pkg".into())));
+    assert_eq!(at("$b"), Some(InferredType::ClassName("Other::Pkg".into())));
+    assert_ne!(at("$c"), Some(InferredType::ClassName("Helper".into())), "{:?}", at("$c"));
+    let calls: Vec<_> = fa
+        .refs()
+        .iter()
+        .filter_map(|r| match &r.kind {
+            RefKind::MethodCall { invocant, .. } => Some((r.target_name.clone(), invocant.as_name()?.to_string())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls, vec![("new".into(), "Other::Pkg".into()), ("new".into(), "Other::Pkg".into())]);
+}

@@ -322,6 +322,19 @@ impl<'a> Builder<'a> {
             // variable to promote; the variable form is additionally
             // promoted via `visit_bless_call`'s TC. Honest-miss (fall
             // through) when the class isn't determinable.
+            // `new Foo(...)` read as `Foo->new(...)`: a constructor bakes
+            // like `Foo->new`; any other method is the call's `Invoke`.
+            "ambiguous_function_call_expression" if self.indirect_method_call(node).is_some() => {
+                let io = self.indirect_method_call(node)?;
+                let method = io.method.utf8_text(self.source).ok()?;
+                if crate::model::conventions::is_constructor_name(method) {
+                    let class = io.class.utf8_text(self.source).ok()?;
+                    return Some(WitnessPayload::InferredType(InferredType::ClassName(class.to_string())));
+                }
+                let &[idx] = self.method_call_refs.get(&node.id())?.as_slice() else { return None };
+                Some(WitnessPayload::Edge(WitnessAttachment::Expression(RefIdx(idx as u32))))
+            }
+
             "function_call_expression" | "ambiguous_function_call_expression"
                 if self.is_bless_call(node) =>
             {
@@ -508,33 +521,35 @@ impl<'a> Builder<'a> {
     /// to one class string reads as that class whatever the variable holds,
     /// so its class lands last.
     pub(super) fn emit_invocant_witness(&mut self, inv: Node<'a>) {
-        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let span = node_to_span(inv);
         let text = inv.utf8_text(self.source).unwrap_or("");
-        let push_class = |b: &mut Self, class: String| {
-            let w = Witness {
-                attachment: WitnessAttachment::Expr(span),
-                source: WitnessSource::Builder("invocant_class".into()),
-                payload: WitnessPayload::InferredType(InferredType::ClassName(class)),
-                span,
-            };
-            if !b.bag.for_attachment(&w.attachment).iter().any(|o| o.payload == w.payload && o.source == w.source) {
-                b.bag.push(w);
-            }
-        };
         match inv.kind() {
             "bareword" | "package" => {
-                push_class(self, text.to_string());
+                self.push_invocant_class(span, text.to_string());
                 self.emit_expr_witness(inv);
             }
             "scalar" => {
                 self.emit_expr_witness(inv);
                 let key = crate::cst::canonical_var_name(inv, self.source);
                 if let Some([class]) = self.resolve_constant_strings(key.as_deref().unwrap_or(text), inv).as_deref() {
-                    push_class(self, class.clone());
+                    self.push_invocant_class(span, class.clone());
                 }
             }
             _ => self.emit_expr_witness(inv),
+        }
+    }
+
+    /// The receiver at `span` is the class `class` itself.
+    pub(super) fn push_invocant_class(&mut self, span: Span, class: String) {
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let w = Witness {
+            attachment: WitnessAttachment::Expr(span),
+            source: WitnessSource::Builder("invocant_class".into()),
+            payload: WitnessPayload::InferredType(InferredType::ClassName(class)),
+            span,
+        };
+        if !self.bag.for_attachment(&w.attachment).iter().any(|o| o.payload == w.payload && o.source == w.source) {
+            self.bag.push(w);
         }
     }
 
@@ -905,6 +920,7 @@ impl<'a> Builder<'a> {
     fn imported_call_payload(&mut self, node: Node<'a>) -> Option<crate::model::witnesses::WitnessPayload> {
         if !matches!(node.kind(), "function_call_expression" | "ambiguous_function_call_expression")
             || self.is_bless_call(node)
+            || self.indirect_method_call(node).is_some()
         {
             return None;
         }

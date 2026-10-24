@@ -367,6 +367,48 @@ pub(crate) fn refgen_operand(refgen: Node) -> Option<RefgenOperand> {
     })
 }
 
+/// `meth Class(ARGS)` / `meth Class ARGS` / `meth Class` — the spelling Perl
+/// may read as the indirect-object method call `Class->meth(ARGS)`. The
+/// grammar parses it as a call to `meth` whose argument is a call to (or a
+/// bareword naming) `Class`. Shape only: whether Perl reads it as a method
+/// call depends on which names are subs and packages at that point, which
+/// the caller decides.
+#[derive(Clone, Copy)]
+pub(crate) struct IndirectObjectCall<'a> {
+    pub method: Node<'a>,
+    pub class: Node<'a>,
+    /// The call's arguments, when it has any.
+    pub arguments: Option<Node<'a>>,
+}
+
+pub(crate) fn indirect_object_call<'a>(node: Node<'a>, src: &[u8]) -> Option<IndirectObjectCall<'a>> {
+    use crate::model::conventions::{is_bareword_class_name, PERL_SPELLINGS};
+    if node.kind() != "ambiguous_function_call_expression" {
+        return None;
+    }
+    let method = node.child_by_field_name("function")?;
+    let inner = node.child_by_field_name("arguments")?;
+    let (class, arguments) = match inner.kind() {
+        "bareword" => (inner, None),
+        "function_call_expression" | "ambiguous_function_call_expression" => {
+            (inner.child_by_field_name("function")?, inner.child_by_field_name("arguments"))
+        }
+        _ => return None,
+    };
+    // The method token is one plain identifier; a `&name`, a deref or a
+    // qualified name is not.
+    let method_text = method.utf8_text(src).ok()?;
+    if !is_bareword_class_name(method_text, &PERL_SPELLINGS)
+        || crate::model::file_analysis::split_qualified(method_text, &PERL_SPELLINGS).0.is_some()
+    {
+        return None;
+    }
+    if !is_bareword_class_name(class.utf8_text(src).ok()?, &PERL_SPELLINGS) {
+        return None;
+    }
+    Some(IndirectObjectCall { method, class, arguments })
+}
+
 /// First named child of `node` (each group-peeled) whose kind satisfies
 /// `pred` — the "pull the single typed operand out of a call" primitive.
 /// The kind-filter callback keeps it reusable across callers.
