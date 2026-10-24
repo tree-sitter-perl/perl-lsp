@@ -107,8 +107,9 @@ pub enum EngineKey {
     Join(JoinKey),
     /// One caller file's part of a join.
     Contribution { join: JoinKey, file: PathBuf },
-    /// A callback parameter, asked of the files declaring its member's class.
-    CallbackProviders { package: String, name: String, param: u32, index: u32 },
+    /// An owner-keyed attachment (a callback parameter, a container slot's
+    /// members) asked of every file declaring its owner.
+    Providers(WitnessAttachment),
     /// One candidate file's answer to a cross-file query.
     Consult(ConsultKey),
 }
@@ -789,7 +790,7 @@ pub fn deeper_position_of_open_join(key: &JoinKey) -> bool {
         f.borrow().iter().any(|frame| {
             let open = match &frame.key {
                 EngineKey::Join(j) | EngineKey::Contribution { join: j, .. } => j,
-                EngineKey::CallbackProviders { .. } | EngineKey::Consult(_) => return false,
+                EngineKey::Providers(_) | EngineKey::Consult(_) => return false,
             };
             open.package == key.package
                 && open.name == key.name
@@ -811,7 +812,7 @@ pub fn innermost_kind(prefix: &'static str) -> String {
             EngineKey::Join(_) => "join",
             EngineKey::Contribution { .. } => "contribution",
             EngineKey::Consult(_) => "consult",
-            EngineKey::CallbackProviders { .. } => "callback",
+            EngineKey::Providers(_) => "providers",
         })
     });
     format!("{prefix}.{}", kind.unwrap_or("none"))

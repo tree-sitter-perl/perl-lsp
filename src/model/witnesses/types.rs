@@ -206,6 +206,17 @@ pub enum WitnessAttachment {
 }
 
 impl WitnessAttachment {
+    /// The owner whose declaring files answer this attachment, and the
+    /// provider site that names the scan, for the owner-keyed attachments
+    /// the engine scans once per sweep.
+    pub fn provider_owner(&self) -> Option<(&str, &'static str)> {
+        match self {
+            WitnessAttachment::CallbackIn { package, .. } => Some((package, "callback_in")),
+            WitnessAttachment::SlotElements { class, .. } => Some((class, "slot_elements")),
+            _ => None,
+        }
+    }
+
     /// The value arrives from call sites: whatever the joined callers pass,
     /// a caller the index doesn't hold (or a later edit) may pass more. A
     /// hash shape answered here is never closed.

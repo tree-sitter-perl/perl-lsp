@@ -1566,7 +1566,8 @@ impl ReducerRegistry {
         }
 
         if let WitnessAttachment::SlotElements { class, key } = q.attachment {
-            if let Some(v) = self.owner_keyed_fallback(bag, q, state, class, "slot_elements", None, &|p| {
+            let provider = EngineKey::Providers(q.attachment.clone());
+            if let Some(v) = self.owner_keyed_fallback(bag, q, state, class, "slot_elements", Some(&provider), &|p| {
                 WitnessAttachment::SlotElements { class: p, key: key.clone() }
             }) {
                 return v;
@@ -2139,12 +2140,7 @@ impl ReducerRegistry {
         let WitnessAttachment::CallbackIn { package, name, param, index } = q.attachment else {
             return None;
         };
-        let provider = EngineKey::CallbackProviders {
-            package: package.clone(),
-            name: name.clone(),
-            param: *param,
-            index: *index,
-        };
+        let provider = EngineKey::Providers(q.attachment.clone());
         self.owner_keyed_fallback(bag, q, state, package, "callback_in", Some(&provider), &|p| {
             WitnessAttachment::CallbackIn { package: p, name: name.clone(), param: *param, index: *index }
         })
@@ -3839,23 +3835,20 @@ pub(super) fn compute_engine_key(
         EngineKey::Join(join) => reg.param_in_join(idx, join),
         EngineKey::Contribution { join, file } => reg.param_contribution(idx, join, file),
         EngineKey::Consult(c) => EngineValue::Value(reg.consult(idx, c)),
-        EngineKey::CallbackProviders { package, name, param, index } => {
-            let att = WitnessAttachment::CallbackIn {
-                package: package.clone(),
-                name: name.clone(),
-                param: *param,
-                index: *index,
+        EngineKey::Providers(att) => {
+            let Some((owner, site)) = att.provider_owner() else {
+                return EngineValue::Value(ReducedValue::None);
             };
             EngineValue::Value(reg.owner_provider_scan(
                 idx,
                 None,
-                &att,
+                att,
                 FrameworkFact::Plain,
                 None,
                 Vec::new(),
                 &mut QueryState::new(),
-                package,
-                "callback_in",
+                owner,
+                site,
             ))
         }
     }
