@@ -483,6 +483,36 @@ impl FileAnalysis {
         Some(self.resolve_dbic_source_moniker(cn, None, module_index))
     }
 
+    /// Every class a `MethodCall` / `FieldAccess` ref may dispatch on: the
+    /// one `method_call_invocant_class` names, else one per arm of a union
+    /// receiver (an `Optional` around it peeled, as for one class). Empty
+    /// when nothing pins the receiver.
+    pub fn method_call_invocant_classes(
+        &self,
+        r: &Ref,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Vec<String> {
+        if let Some(class) = self.method_call_invocant_class(r, module_index) {
+            return vec![class];
+        }
+        let Some(mut t) = self.method_call_invocant_type(r, module_index) else {
+            return Vec::new();
+        };
+        while let InferredType::Optional(inner) = t {
+            t = *inner;
+        }
+        let mut out: Vec<String> = Vec::new();
+        for arm in t.arms() {
+            if let Some(class) = self.dispatch_class_of(arm, module_index) {
+                let class = self.resolve_dbic_source_moniker(class, None, module_index);
+                if !out.contains(&class) {
+                    out.push(class);
+                }
+            }
+        }
+        out
+    }
+
     /// Resolve a DBIC source moniker (`Artist`) to the FQ result class
     /// (`DBICTest::Schema::Artist`). DBIC's `$schema->resultset('Artist')`
     /// names a row by its registered SOURCE moniker — by convention the

@@ -362,6 +362,15 @@ pub fn resolve_symbol_scoped(
             }
         }
     }
+    // A member access on a union receiver names the member on every arm:
+    // one group whose members are each arm's target, so goto-def,
+    // references and rename all reach every class the receiver may be.
+    if let Some(r) = analysis.member_token_at(point) {
+        let classes = analysis.method_call_invocant_classes(r, module_index);
+        if classes.len() > 1 {
+            return Some(union_member_group(r, &classes, analysis, module_index, scope));
+        }
+    }
     Some(match analysis.rename_kind_at(point, module_index)? {
         RenameKind::Variable => ResolvedTarget::Local,
         RenameKind::HashKey(name) => match analysis.hash_key_owner_at(point) {
@@ -449,4 +458,42 @@ pub(super) fn class_member_bare_constant(
             })
         })
     })
+}
+
+/// The group a member access on a union receiver resolves to: per arm, the
+/// accessor group an attribute mints (its constructor keys and slots
+/// included), else the arm's member target.
+fn union_member_group(
+    r: &crate::model::file_analysis::Ref,
+    classes: &[String],
+    analysis: &FileAnalysis,
+    module_index: Option<&dyn CrossFileLookup>,
+    scope: OverrideScope,
+) -> ResolvedTarget {
+    let bare = r.unqualified_target_name(analysis.names()).to_string();
+    let (mut local, mut pinned, mut decls, mut members) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for class in classes {
+        let attr = module_index
+            .and_then(|idx| attr_group_via_ancestors(class, &bare, analysis, idx, true, false, scope));
+        match attr {
+            Some(ResolvedTarget::Group { local_spans, pinned_spans, decl_spans, members: m }) => {
+                local.extend(local_spans);
+                pinned.extend(pinned_spans);
+                decls.extend(decl_spans);
+                members.extend(m);
+            }
+            _ => members.push(GroupMember {
+                target: TargetRef::method(
+                    bare.clone(),
+                    class.clone(),
+                    MemberKind::of_ref(&r.kind),
+                    analysis,
+                    module_index,
+                    scope,
+                ),
+                rename: MemberRename::Bare,
+            }),
+        }
+    }
+    ResolvedTarget::Group { local_spans: local, pinned_spans: pinned, decl_spans: decls, members }
 }

@@ -916,111 +916,125 @@ impl<'a> CandidateSet<'a> {
                 let namespace = analysis.names().member_namespace;
                 // FQ `$o->Foo::Bar::m` dispatches the bare `m` on the named class.
                 let method = r.unqualified_target_name(analysis.names());
-                if let Some(cn) = analysis.method_call_invocant_class(r, Some(idx)) {
-                    // The invocant resolved (e.g. a plugin-bridged route token
-                    // → controller class) but the controller lives in THIS
-                    // file: jump to the local method symbol. The build-time
-                    // freeze normally serves same-file dispatch, but a bridged
-                    // invocant is never frozen (its class needs the index), so
-                    // re-resolve here.
-                    let resolution = analysis.resolve_member_in_ancestors(&cn, method, Some(idx), want);
-                    if let Some(MethodResolution::Local { sym_id, .. }) = resolution {
-                        if let Some(sym) = analysis.symbols().iter().find(|s| s.id == sym_id) {
-                            return vec![self.origin_decl(sym.selection_span)];
-                        }
-                    }
-                    if let Some(MethodResolution::CrossFile { ref class, ref def_module, .. }) =
-                        resolution
-                    {
-                        // One path for both: a real inherited method lives in
-                        // `class`'s own module; a plugin-bridged helper lives
-                        // in `def_module` (the bridging file). Same lookup
-                        // either way.
-                        let module = def_module.as_deref().unwrap_or(class);
-                        // The class's package may span files (Perl reopens
-                        // packages anywhere) — pick the candidate that
-                        // declares `method` under `class`, then a name-level
-                        // match (bridged/materialized copies attribute
-                        // synthesized methods loosely), smallest path among
-                        // several definers; the name-slot winner only as the
-                        // last resort (data-member reads below).
-                        let chosen = idx
-                            .candidate_defining_sub_in_package(module, class, method)
-                            .or_else(|| idx.get_cached(module));
-                        if let Some(cached) = chosen {
-                            // A cross-file DBIC accessor is a deferred emission
-                            // MATERIALIZED into the whole cached copy at index
-                            // completion (`materialize_gated_emissions`), so the
-                            // whole view carries it — no per-query enrichment.
-                            let whole = idx.whole_present(&cached);
-                            // A stored member of the class: a data field or
-                            // an enum constant, not a sub.
-                            let stored_member = || {
-                                whole.symbols().iter().find(|s| {
-                                    MemberKind::of_sym(s.kind) == MemberKind::Value
-                                        && s.name == method
-                                        && s.package.as_deref() == Some(class.as_str())
-                                        && whole.symbol_is_class_content(s)
-                                })
-                            };
-                            let stored_loc = |sym: &crate::model::file_analysis::Symbol| {
-                                Url::from_file_path(&cached.path).is_ok().then(|| RefLocation {
-                                    key: FileKey::Path(cached.path.clone()),
-                                    span: sym.selection_span,
-                                    access: AccessKind::Declaration,
-                                    rewritable: true,
-                                    label: None,
-                                })
-                            };
-                            // A value read lands on the stored member first.
-                            if want == MemberKind::Value {
-                                if let Some(loc) = stored_member().and_then(stored_loc) {
-                                    return vec![loc];
-                                }
+                // A union receiver dispatches on every arm: each arm's
+                // definition is offered.
+                let mut found: Vec<RefLocation> = Vec::new();
+                for cn in analysis.method_call_invocant_classes(r, Some(idx)) {
+                    let on_class = |cn: String| -> Vec<RefLocation> {
+                        // The invocant resolved (e.g. a plugin-bridged route token
+                        // → controller class) but the controller lives in THIS
+                        // file: jump to the local method symbol. The build-time
+                        // freeze normally serves same-file dispatch, but a bridged
+                        // invocant is never frozen (its class needs the index), so
+                        // re-resolve here.
+                        let resolution = analysis.resolve_member_in_ancestors(&cn, method, Some(idx), want);
+                        if let Some(MethodResolution::Local { sym_id, .. }) = resolution {
+                            if let Some(sym) = analysis.symbols().iter().find(|s| s.id == sym_id) {
+                                return vec![self.origin_decl(sym.selection_span)];
                             }
-                            let callable = want.admits_decl(SymKind::Sub, namespace)
-                                .then(|| whole.sub_info_view(method))
-                                .flatten();
-                            if let Some(sub_info) = callable {
-                                if Url::from_file_path(&cached.path).is_ok() {
-                                    // A pack member call lands on the class
-                                    // module's DECLARATION; hop to the
-                                    // out-of-line body (decl→def axis) like the
-                                    // free-function tail. The decl's own symbol
-                                    // span (not just `def_line`) is what the
-                                    // axis matches on. Perl subs keep the
-                                    // `def_line` jump (`prefer_member_defs` is a
-                                    // no-op off-pack anyway).
-                                    if self.pack {
-                                        if let Some(sym) = whole.symbols().iter().find(|s| {
-                                            s.name == method
-                                                && matches!(s.kind, SymKind::Sub | SymKind::Method)
-                                                && pkg_agrees(true, s.package.as_deref(), Some(class))
-                                        }) {
-                                            return self.prefer_member_defs(RefLocation {
-                                                key: FileKey::Path(cached.path.clone()),
-                                                span: sym.selection_span,
-                                                access: AccessKind::Declaration,
-                                                rewritable: true,
-                                                label: None,
-                                            });
-                                        }
+                        }
+                        if let Some(MethodResolution::CrossFile { ref class, ref def_module, .. }) =
+                            resolution
+                        {
+                            // One path for both: a real inherited method lives in
+                            // `class`'s own module; a plugin-bridged helper lives
+                            // in `def_module` (the bridging file). Same lookup
+                            // either way.
+                            let module = def_module.as_deref().unwrap_or(class);
+                            // The class's package may span files (Perl reopens
+                            // packages anywhere) — pick the candidate that
+                            // declares `method` under `class`, then a name-level
+                            // match (bridged/materialized copies attribute
+                            // synthesized methods loosely), smallest path among
+                            // several definers; the name-slot winner only as the
+                            // last resort (data-member reads below).
+                            let chosen = idx
+                                .candidate_defining_sub_in_package(module, class, method)
+                                .or_else(|| idx.get_cached(module));
+                            if let Some(cached) = chosen {
+                                // A cross-file DBIC accessor is a deferred emission
+                                // MATERIALIZED into the whole cached copy at index
+                                // completion (`materialize_gated_emissions`), so the
+                                // whole view carries it — no per-query enrichment.
+                                let whole = idx.whole_present(&cached);
+                                // A stored member of the class: a data field or
+                                // an enum constant, not a sub.
+                                let stored_member = || {
+                                    whole.symbols().iter().find(|s| {
+                                        MemberKind::of_sym(s.kind) == MemberKind::Value
+                                            && s.name == method
+                                            && s.package.as_deref() == Some(class.as_str())
+                                            && whole.symbol_is_class_content(s)
+                                    })
+                                };
+                                let stored_loc = |sym: &crate::model::file_analysis::Symbol| {
+                                    Url::from_file_path(&cached.path).is_ok().then(|| RefLocation {
+                                        key: FileKey::Path(cached.path.clone()),
+                                        span: sym.selection_span,
+                                        access: AccessKind::Declaration,
+                                        rewritable: true,
+                                        label: None,
+                                    })
+                                };
+                                // A value read lands on the stored member first.
+                                if want == MemberKind::Value {
+                                    if let Some(loc) = stored_member().and_then(stored_loc) {
+                                        return vec![loc];
                                     }
-                                    return vec![line_loc(
-                                        cached.path.clone(),
-                                        sub_info.def_line(),
-                                    )];
                                 }
-                            }
-                            // A call reaches a stored member where the
-                            // language keeps one member namespace.
-                            if want.admits_decl(SymKind::Field, namespace) {
-                                if let Some(loc) = stored_member().and_then(stored_loc) {
-                                    return vec![loc];
+                                let callable = want.admits_decl(SymKind::Sub, namespace)
+                                    .then(|| whole.sub_info_view(method))
+                                    .flatten();
+                                if let Some(sub_info) = callable {
+                                    if Url::from_file_path(&cached.path).is_ok() {
+                                        // A pack member call lands on the class
+                                        // module's DECLARATION; hop to the
+                                        // out-of-line body (decl→def axis) like the
+                                        // free-function tail. The decl's own symbol
+                                        // span (not just `def_line`) is what the
+                                        // axis matches on. Perl subs keep the
+                                        // `def_line` jump (`prefer_member_defs` is a
+                                        // no-op off-pack anyway).
+                                        if self.pack {
+                                            if let Some(sym) = whole.symbols().iter().find(|s| {
+                                                s.name == method
+                                                    && matches!(s.kind, SymKind::Sub | SymKind::Method)
+                                                    && pkg_agrees(true, s.package.as_deref(), Some(class))
+                                            }) {
+                                                return self.prefer_member_defs(RefLocation {
+                                                    key: FileKey::Path(cached.path.clone()),
+                                                    span: sym.selection_span,
+                                                    access: AccessKind::Declaration,
+                                                    rewritable: true,
+                                                    label: None,
+                                                });
+                                            }
+                                        }
+                                        return vec![line_loc(
+                                            cached.path.clone(),
+                                            sub_info.def_line(),
+                                        )];
+                                    }
+                                }
+                                // A call reaches a stored member where the
+                                // language keeps one member namespace.
+                                if want.admits_decl(SymKind::Field, namespace) {
+                                    if let Some(loc) = stored_member().and_then(stored_loc) {
+                                        return vec![loc];
+                                    }
                                 }
                             }
                         }
+                        Vec::new()
+                    };
+                    for loc in on_class(cn) {
+                        if !found.iter().any(|l| file_key_eq(&l.key, &loc.key) && l.span == loc.span) {
+                            found.push(loc);
+                        }
                     }
+                }
+                if !found.is_empty() {
+                    return found;
                 }
             }
         }

@@ -1166,7 +1166,9 @@ pub(super) fn collect_from_analysis(
                 }
                 let method = r.unqualified_target_name(analysis.names());
                 {
-                    let resolved_class = match r.method_target() {
+                    // A union receiver dispatches on every arm, so the
+                    // site references each arm's member.
+                    let resolved_classes: Vec<String> = match r.method_target() {
                         // The frozen edge can carry an UNRESOLVED DBIC source
                         // moniker (`Artist`) when it was stamped at build with
                         // no index (a closed call-site file — enrichment
@@ -1174,15 +1176,15 @@ pub(super) fn collect_from_analysis(
                         // class here, index in hand, so `$row->cds` sites match
                         // the same target goto-def reaches. No-op for a class
                         // that already resolves.
-                        Some(edge) => Some(analysis.resolve_dbic_source_moniker(
+                        Some(edge) => vec![analysis.resolve_dbic_source_moniker(
                             edge.invocant_class().to_string(),
                             None,
                             module_index,
-                        )),
-                        None => analysis.method_call_invocant_class(r, module_index),
+                        )],
+                        None => analysis.method_call_invocant_classes(r, module_index),
                     };
-                    match (resolved_class, scope) {
-                        (Some(cn), Some(pkg)) => {
+                    match scope {
+                        Some(pkg) => resolved_classes.into_iter().any(|cn| {
                             if target.scope == OverrideScope::Hierarchy {
                                 // The override family is precomputed; a call
                                 // matches iff its invocant is in it — so
@@ -1218,8 +1220,8 @@ pub(super) fn collect_from_analysis(
                                     .iter()
                                     .any(|c| c == pkg)
                             }
-                        }
-                        _ => false,
+                        }),
+                        None => false,
                     }
                 }
             }

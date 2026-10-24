@@ -763,6 +763,14 @@ impl InferredType {
         }
     }
 
+    /// Each value this may be: a union's arms, else this value alone.
+    pub fn arms(&self) -> &[InferredType] {
+        match self {
+            InferredType::Union(arms) => arms,
+            t => std::slice::from_ref(t),
+        }
+    }
+
     /// `f` over each value this may be (a union's arms, else this value),
     /// joined under `order`. An arm `f` answers nothing for adds no
     /// evidence, so a member only some arms carry answers from those arms.

@@ -105,6 +105,23 @@ The build-time chain walker (`invocant_type_at_node`) does not distribute
 yet (`TODO(union-chain-walker)`); the registry's projections above are
 the query-time answer.
 
+Navigation reads every arm too. `method_call_invocant_classes` is the
+dispatch projection over a union receiver (one class per object arm), and:
+
+- a member token on a union receiver resolves to one `Group` whose
+  members are each arm's target (an attribute's accessor group where the
+  arm declares one), so references and rename reach every arm;
+- goto-def offers each arm's definition;
+- the reference matcher counts a union site as a use of each arm's
+  member, so `Cat::sound`'s references include `$pet->sound` on
+  `Cat|Bird`;
+- completion offers the members every object arm has (`shared_members`).
+
+Renaming one arm's member from its own declaration renames the union
+sites too, leaving the other arms' declarations alone: those sites then
+call a name the other arms do not have. Renaming from the union site
+renames every arm.
+
 Python annotations mint unions: `A | B`, `Union[A, B]`, `Optional[A]`
 (`A | None`). PHP `A|B` docblocks land with the PHP pack.
 

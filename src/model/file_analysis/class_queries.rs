@@ -271,6 +271,29 @@ impl FileAnalysis {
         found
     }
 
+    /// The members a receiver of type `ty` offers, `members_of` completing
+    /// one class: for a union, those every object arm offers (the first
+    /// arm's candidate kept), so an accepted name dispatches whichever the
+    /// value is; an arm that is no object adds nothing. An `Optional` is
+    /// peeled, as for one class.
+    pub fn shared_members(
+        &self,
+        ty: &InferredType,
+        members_of: impl Fn(&str) -> Vec<CompletionCandidate>,
+    ) -> Vec<CompletionCandidate> {
+        let mut t = ty;
+        while let Some(inner) = t.optional_inner() {
+            t = inner;
+        }
+        let mut per_arm = t.arms().iter().filter_map(|a| a.class_name()).map(members_of);
+        let Some(mut out) = per_arm.next() else { return Vec::new() };
+        for other in per_arm {
+            let labels: HashSet<String> = other.into_iter().map(|c| c.label).collect();
+            out.retain(|c| labels.contains(&c.label));
+        }
+        out
+    }
+
     /// Complete methods for a known class name, walking the inheritance chain.
     pub fn complete_methods_for_class(
         &self,

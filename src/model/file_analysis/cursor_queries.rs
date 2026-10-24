@@ -1148,6 +1148,26 @@ impl FileAnalysis {
     /// falls through to symbol-at resolution; if that also has no
     /// class context (orphan Sub), returns `None` — the cursor isn't
     /// on something we can safely rename.
+    /// The member access whose member TOKEN the cursor is on. `ref_at` can
+    /// return a `MethodCall` for a cursor anywhere in the call (its span
+    /// covers the args), but only the member token names the member: a hash
+    /// key in the args (`$rs->search({ order_by => 1 })`) must not hijack
+    /// `search`. The token is the QUALIFIED one (`SUPER::|new`,
+    /// `Foo::Bar::|m`): the user sees it as one word, while the renamable
+    /// identifier stays the bare tail.
+    pub fn member_token_at(&self, point: Point) -> Option<&Ref> {
+        let r = self.ref_at(point)?;
+        let (RefKind::MethodCall { method_name_span: span, .. }
+        | RefKind::FieldAccess { member_name_span: span, .. }) = &r.kind
+        else {
+            return None;
+        };
+        let mut token = *span;
+        let qual = r.target_name.len().saturating_sub(r.unqualified_target_name(self.names()).len());
+        token.start.column = token.start.column.saturating_sub(qual);
+        contains_point(&token, point).then_some(r)
+    }
+
     pub fn rename_kind_at(&self, point: Point, module_index: Option<&dyn CrossFileLookup>) -> Option<RenameKind> {
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
@@ -1178,28 +1198,8 @@ impl FileAnalysis {
                         package,
                     });
                 }
-                RefKind::MethodCall { method_name_span, .. }
-                | RefKind::FieldAccess { member_name_span: method_name_span, .. } => {
-                    // `ref_at` can return a MethodCall ref for a cursor anywhere
-                    // in the call — its span covers the args. But only the
-                    // method-name token renames the method: a hash key in the
-                    // args (`$rs->search({ order_by => 1 })`) that didn't resolve
-                    // to a column must NOT hijack `search`. Gate on the name span
-                    // — widened to the QUALIFIED token: `method_name_span`
-                    // covers the bare tail only, so a cursor on the qualifier
-                    // segment (`SUPER::|new`, `Foo::Bar::|m`) minted no identity
-                    // — goto-def (span-generous) answered while references /
-                    // rename / highlights came back empty. The renamable
-                    // identifier stays the bare tail; only cursor ACCEPTANCE
-                    // covers the token the user sees as one word.
-                    let token_span = {
-                        let mut s = *method_name_span;
-                        let qual =
-                            r.target_name.len().saturating_sub(r.unqualified_target_name(self.names()).len());
-                        s.start.column = s.start.column.saturating_sub(qual);
-                        s
-                    };
-                    if contains_point(&token_span, point) {
+                RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => {
+                    if self.member_token_at(point).is_some() {
                         if let Some(class) = self.method_call_invocant_class(r, module_index) {
                             // FQ `$o->Foo::Bar::m` renames the bare `m` tail; the
                             // qualifier scopes the class (same as Function above).
