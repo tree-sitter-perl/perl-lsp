@@ -1227,9 +1227,14 @@ fn value_hop_chases_the_field_subject_and_method_hop_the_package_symbol() {
     push(
         &mut bag,
         var("$c"),
-        WitnessPayload::Projected {
-            base: var("$s"),
-            step: ProjectionStep::MethodHop { member: "v".into(), arity: 0 },
+        WitnessPayload::Invoke {
+            callee: crate::model::witnesses::Callee::Method {
+                name: "v".into(),
+                lookup: crate::model::witnesses::Lookup::Receiver,
+                constructs: false,
+            },
+            receiver: Some(var("$s")),
+            args: Some(Vec::new()),
         },
     );
     let reg = ReducerRegistry::with_defaults();

@@ -307,7 +307,7 @@ pub(super) fn bare_name(s: &str) -> &str {
 /// collect hash-key ownership delegation chains for post-pass resolution.
 pub(super) fn extract_delegated_call_name<'a>(return_node: Node<'a>, source: &'a [u8]) -> Option<String> {
     // The `return X` node has the expression as its first named child.
-    let expr = return_node.named_child(0)?;
+    let expr = crate::cst::nth_element(return_node, 0)?;
     let call_name = match expr.kind() {
         "function_call_expression" | "ambiguous_function_call_expression" => {
             expr.child_by_field_name("function")?.utf8_text(source).ok()?
