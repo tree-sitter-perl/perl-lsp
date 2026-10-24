@@ -32,7 +32,7 @@
 //! only from the entry points with no other lock held. Everything the worker
 //! touches (pack index maps, the module-cache connection, the reparse
 //! caches) nests strictly beneath it, and the open-document sweep over
-//! `FileStore` runs AFTER the guard drops, so `change_lock` never meets a
+//! `OpenDocs` runs AFTER the guard drops, so `change_lock` never meets a
 //! store shard guard.
 
 use std::path::{Path, PathBuf};
@@ -41,7 +41,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tower_lsp::lsp_types::Url;
 
-use crate::index::file_store::{FileKey, FileStore};
+use crate::index::open_docs::OpenDocs;
 use crate::index::module_cache;
 use crate::index::module_index::{CachedModule, ModuleIndex};
 use crate::model::file_analysis::FileAnalysis;
@@ -188,7 +188,7 @@ impl PackInvalidator {
         &self,
         root_uri: Option<&str>,
         index: &ModuleIndex,
-        open_docs: &FileStore,
+        open_docs: &OpenDocs,
         path: &Path,
         deleted: bool,
     ) -> InvalidationOutcome {
@@ -202,7 +202,7 @@ impl PackInvalidator {
         };
         // Open consumers re-analyze AFTER the eviction so their gather runs
         // cold against the new bytes. Off the serialization lock — the sweep
-        // only reads closures, and holding `change_lock` across FileStore
+        // only reads closures, and holding `change_lock` across OpenDocs
         // shard guards would mint a lock ordering for no protection.
         let refresh_open = self.open_docs_to_refresh(open_docs, &canon, deleted, skip_consumers);
         InvalidationOutcome { deferred: false, refresh_open }
@@ -235,23 +235,21 @@ impl PackInvalidator {
     /// one rule, surface-gated like the registered storm.
     fn open_docs_to_refresh(
         &self,
-        open_docs: &FileStore,
+        open_docs: &OpenDocs,
         canon: &Path,
         deleted: bool,
         skip_consumers: bool,
     ) -> Vec<Url> {
         let canon_str = canon.to_string_lossy().into_owned();
         let mut out: Vec<Url> = Vec::new();
-        open_docs.for_each_analysis(|key, analysis| {
-            if let FileKey::Url(u) = key {
-                let is_self = !deleted
-                    && u.to_file_path()
-                        .ok()
-                        .map(|p| p.canonicalize().unwrap_or(p) == canon)
-                        .unwrap_or(false);
-                if is_self || (!skip_consumers && is_consumer(analysis, &canon_str)) {
-                    out.push(u);
-                }
+        open_docs.for_each_open(|u, doc| {
+            let is_self = !deleted
+                && u.to_file_path()
+                    .ok()
+                    .map(|p| p.canonicalize().unwrap_or(p) == canon)
+                    .unwrap_or(false);
+            if is_self || (!skip_consumers && is_consumer(&doc.analysis, &canon_str)) {
+                out.push(u.clone());
             }
         });
         out

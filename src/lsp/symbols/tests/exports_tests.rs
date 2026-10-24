@@ -507,7 +507,7 @@ my $v = helper_fn(21);\n";
     };
 
     let uri = Url::parse("file:///consumer.pl").unwrap();
-    let resp = find_definition(&crate::index::file_store::FileStore::new(), &consumer, pos, &uri, &idx);
+    let resp = find_definition(&crate::index::open_docs::OpenDocs::new(), &consumer, pos, &uri, &idx);
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         other => panic!("expected a single-hop Scalar to the module sub, got {other:?}"),
@@ -549,7 +549,7 @@ Foo->bar();\n";
         character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32 + 1,
     };
     let uri = Url::parse("file:///test.pl").unwrap();
-    let resp = find_definition(&crate::index::file_store::FileStore::new(), &analysis, pos, &uri, &idx);
+    let resp = find_definition(&crate::index::open_docs::OpenDocs::new(), &analysis, pos, &uri, &idx);
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         other => panic!("expected goto-def on class invocant, got {other:?}"),
@@ -583,7 +583,7 @@ Foo->bar();\n";
         character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
     };
     let uri = Url::parse("file:///test.pl").unwrap();
-    let resp = find_definition(&crate::index::file_store::FileStore::new(), &analysis, pos, &uri, &idx);
+    let resp = find_definition(&crate::index::open_docs::OpenDocs::new(), &analysis, pos, &uri, &idx);
     let loc = match resp {
         Some(GotoDefinitionResponse::Scalar(loc)) => loc,
         other => panic!("expected goto-def on method token, got {other:?}"),
@@ -641,7 +641,7 @@ fn gd_resolves(source: &str, name: &str, idx: &crate::index::module_index::Modul
         character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
     };
     let uri = Url::parse("file:///consumer.pl").unwrap();
-    let loc = match find_definition(&crate::index::file_store::FileStore::new(), &analysis, pos, &uri, idx) {
+    let loc = match find_definition(&crate::index::open_docs::OpenDocs::new(), &analysis, pos, &uri, idx) {
         Some(GotoDefinitionResponse::Scalar(loc)) => Some(loc),
         Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => Some(v.remove(0)),
         _ => None,
@@ -853,7 +853,7 @@ fn gd_resolves_to(
         character: (byte - prefix.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32,
     };
     let uri = Url::parse("file:///consumer.pl").unwrap();
-    let loc = match find_definition(&crate::index::file_store::FileStore::new(), &analysis, pos, &uri, idx) {
+    let loc = match find_definition(&crate::index::open_docs::OpenDocs::new(), &analysis, pos, &uri, idx) {
         Some(GotoDefinitionResponse::Scalar(loc)) => Some(loc),
         Some(GotoDefinitionResponse::Array(mut v)) if !v.is_empty() => Some(v.remove(0)),
         _ => None,
@@ -1053,7 +1053,7 @@ class Point {
     let uri = Url::parse("file:///tmp/sym_defer_consumer.pl").unwrap();
     // Cursor on `x` (row 1, col 19).
     let resp = find_definition(
-        &crate::index::file_store::FileStore::new(),
+        &crate::index::open_docs::OpenDocs::new(),
         &analysis,
         Position { line: 1, character: 19 },
         &uri,

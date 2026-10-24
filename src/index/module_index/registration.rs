@@ -398,7 +398,11 @@ impl ModuleIndex {
         path: std::path::PathBuf,
         cm: Arc<CachedModule>,
     ) {
-        self.all_files.insert(path.clone(), cm.clone());
+        // Replace, never add: `all_files` is the front-door registry, and an
+        // @INC copy landing in it would read as a project file.
+        if let Some(mut slot) = self.all_files.get_mut(&path) {
+            *slot = cm.clone();
+        }
         // The path's `all_defs` candidates must track the same generation —
         // a stale candidate would serve the pre-materialization analysis to
         // every by-name candidate reader.
@@ -1219,7 +1223,7 @@ impl ModuleIndex {
     /// WHOLE analysis, then evict the requested axes, then store the
     /// stripped arc — so a feed can never read an already-emptied `symbols`
     /// (the ordering bug a caller-side strip invites). Returns the stored
-    /// arc for the caller's FileStore mirror. Synchronous-persistence
+    /// arc for the caller's OpenDocs mirror. Synchronous-persistence
     /// callers only (the warm path — the blob already exists on disk);
     /// the bulk fresh path splits the halves around the writer's COMMIT.
     /// `persisted` is the surface the COLD lane recorded for this file, when
@@ -1963,24 +1967,16 @@ impl ModuleIndex {
         n
     }
 
+    /// Every front-door registration — the project's own files, the one
+    /// home they have.
     pub fn for_each_registered_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) {
         for entry in self.all_files.iter() {
             f(entry.value());
         }
     }
 
-    /// Every registered pack-language file. A pack language's files live
-    /// only here; Perl's workspace residents are in the FileStore too, which
-    /// whole-tree sweeps already walk.
-    pub fn for_each_pack_registered_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) {
-        for entry in self.all_files.iter() {
-            let cm = entry.value();
-            if !crate::build::language_driver::LanguageRegistry::caps(&cm.analysis.language)
-                .hub_enrichment
-            {
-                f(cm);
-            }
-        }
+    pub fn registered_file_count(&self) -> usize {
+        self.all_files.len()
     }
 
     /// Rebuild the reverse index (`func → modules`) from the current cache.

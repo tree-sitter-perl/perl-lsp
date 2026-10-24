@@ -934,7 +934,7 @@ fn kind_comparisons_name_real_grammar_kinds() {
 /// because parking is only safe while holding no lock the writer needs.
 ///
 /// `run_persist_writer`'s committed and fallback lanes take `ModuleIndex`,
-/// `FileStore` and bag-cache guards. A producer that blocked on a full queue
+/// `OpenDocs` and bag-cache guards. A producer that blocked on a full queue
 /// while holding one of those could never be woken — the writer cannot drain
 /// to free a slot. Today every site hands over fully-owned values
 /// (`prepare_*_parts` tokens, encoded blobs) with no guard live, which is the
@@ -950,7 +950,7 @@ fn persist_queue_producers_are_allowlisted() {
     let allow: Vec<(&str, usize, &str)> = vec![(
         "module_resolver",
         4,
-        "index_perl's deferred + whole lanes (parts/blob owned; the FileStore write \
+        "index_perl's deferred + whole lanes (parts/blob owned; the OpenDocs write \
          happens AFTER the send) and index_pack's two (register_symbols completes \
          BEFORE the send)",
     )];

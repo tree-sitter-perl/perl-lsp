@@ -1,23 +1,13 @@
-//! Unified file store: one home for every `FileAnalysis` the LSP has.
+//! The open documents: the files the editor holds, each a full `Document`
+//! (tree + text + stable outline + analysis) because cursor-time queries need
+//! the tree, and because they are what diagnostics publish to.
 //!
-//! Three roles live in one store:
-//! - `Open`    — files the user is editing. Carry a full `Document` (tree + text +
-//!               stable outline + analysis) because queries routinely need the tree
-//!               for cursor-context-sensitive operations.
-//! - `Workspace` — every `.pm`/`.pl`/`.t` in the project root. Stored as
-//!               `Arc<FileAnalysis>` only; the tree is re-parsed on demand.
-//! - `Dependency` — (owned by `ModuleIndex`, viewed here via secondary index)
-//!               `@INC` modules. Not duplicated into this store — calls go
-//!               through `ModuleIndex` as of phase 3. A future merge moves them
-//!               under this same roof.
-//!
-//! A single path is never represented twice. Opening a workspace file promotes
-//! it to `Open` (workspace entry removed); closing demotes it back.
-//!
-//! Queries that span files (rename, workspace/symbol, cross-file refs) iterate
-//! this store uniformly via `for_each_analysis` — no per-role handler code.
+//! Every other file — the project's own and its dependencies — lives in the
+//! `ModuleIndex`, the one per-path registry. An open document SHADOWS its
+//! index copy (it is the fresher text); walks claim open paths first and
+//! skip the index entry for them.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -35,7 +25,7 @@ pub enum FileRole {
     /// Project file, not currently open.
     Workspace,
     /// @INC module. (Managed by ModuleIndex; this variant is reserved for
-    /// the phase 3/4 merge that folds deps into FileStore.)
+    /// the phase 3/4 merge that folds deps into OpenDocs.)
     Dependency,
     /// Pre-seeded built-in symbols (future).
     BuiltIn,
@@ -50,26 +40,21 @@ pub enum FileKey {
 }
 
 /// The unified store.
-pub struct FileStore {
+pub struct OpenDocs {
     /// Open files, keyed by URL. Each carries a full Document.
     open: DashMap<Url, Document>,
-    /// Workspace files, keyed by canonical path. Stored as Arc for cheap clones.
-    workspace: DashMap<PathBuf, Arc<FileAnalysis>>,
-    /// URL → canonical path, for open files. Lets us demote cleanly and
-    /// prevents duplicate workspace entries for open files.
-    url_to_path: DashMap<Url, PathBuf>,
     /// The driver every opened file is analyzed by — the process's served
     /// language, fixed for the store's life.
     driver: &'static dyn crate::build::language_driver::LanguageDriver,
 }
 
-impl Default for FileStore {
+impl Default for OpenDocs {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl FileStore {
+impl OpenDocs {
     /// A store for the process's served language.
     pub fn new() -> Self {
         Self::serving(crate::build::language_driver::LanguageRegistry::served())
@@ -78,18 +63,15 @@ impl FileStore {
     /// A store for `driver`'s language. Production stores serve the process
     /// language (`new`); tests reach a pack language through here.
     pub fn serving(driver: &'static dyn crate::build::language_driver::LanguageDriver) -> Self {
-        FileStore {
+        OpenDocs {
             open: DashMap::new(),
-            workspace: DashMap::new(),
-            url_to_path: DashMap::new(),
             driver,
         }
     }
 
     // ---- Open-file mutation ----
 
-    /// Open a file from text. Parses and builds analysis. If a workspace entry
-    /// exists for the same path, it's replaced by the Open entry.
+    /// Open a file from text. Parses and builds analysis.
     pub fn open(&self, url: Url, text: String) -> bool {
         // A hub-enriched language keeps the native constructor —
         // `Document::new` is the reference pipeline the hub's freshness/
@@ -114,36 +96,26 @@ impl FileStore {
                 None => return false,
             }
         };
-        if let Some(path) = path {
-            self.workspace.remove(&path);
-            self.url_to_path.insert(url.clone(), path);
-        }
         self.open.insert(url, doc);
         true
     }
 
-    /// Close an open file. If a path is known, demote to workspace (keeping
-    /// the latest analysis snapshot).
+    /// Install an already-built Document — the CLI stages its query file
+    /// this way, with the analysis it built and enriched itself.
+    pub fn insert_open(&self, url: Url, doc: Document) {
+        self.open.insert(url, doc);
+    }
+
+    /// Close an open file. Its index copy (the on-disk text) answers from
+    /// here on — an unsaved buffer's edits close with it.
     pub fn close(&self, url: &Url) {
-        let doc = match self.open.remove(url) {
-            Some((_, doc)) => doc,
-            None => return,
-        };
-        if let Some((_, path)) = self.url_to_path.remove(url) {
-            // Snapshot analysis into workspace under the CANONICAL spelling —
-            // the bulk indexer keys canonically, and a URI spelled through a
-            // symlinked root would otherwise coexist with the canonical entry
-            // as two store keys for one file (double hits, double edits).
-            let canon = std::fs::canonicalize(&path).unwrap_or(path.clone());
-            self.workspace.remove(&path);
-            self.workspace.insert(canon, doc.analysis);
-        }
+        self.open.remove(url);
     }
 
     /// Immutable access to an open Document.
     ///
     /// The returned `Ref` pins its DashMap shard: holding it across ANY
-    /// store mutation (`open`/`close`/`insert_workspace`) deadlocks when
+    /// store mutation (`open`/`close`) deadlocks when
     /// the other key lands on the same shard — a seed-dependent hang, not
     /// a deterministic failure. Snapshot what you need and drop the guard.
     pub fn get_open(&self, url: &Url) -> Option<dashmap::mapref::one::Ref<'_, Url, Document>> {
@@ -198,51 +170,6 @@ impl FileStore {
         Some(enriched)
     }
 
-    // ---- Workspace population ----
-
-    /// Insert or replace a workspace entry, unless the same path is currently
-    /// open (in which case the open entry is canonical).
-    pub fn insert_workspace(&self, path: PathBuf, analysis: FileAnalysis) {
-        self.insert_workspace_arc(path, Arc::new(analysis));
-    }
-
-    /// Pre-Arc'd variant — lets callers share the same analysis with
-    /// other systems (e.g. registering the same module into
-    /// ModuleIndex under its primary package name) without cloning
-    /// the FileAnalysis twice at workspace-index startup.
-    pub fn insert_workspace_arc(&self, path: PathBuf, analysis: Arc<FileAnalysis>) {
-        // Compare canonically: the indexer passes canonical paths while
-        // url_to_path holds URI spellings — under a symlinked root a raw
-        // equality check never matches and an OPEN file gets a stale
-        // workspace twin.
-        let canon = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-        let shadowed = self.url_to_path.iter().any(|e| {
-            e.value() == &path
-                || std::fs::canonicalize(e.value())
-                    .map(|c| c == canon)
-                    .unwrap_or(false)
-        });
-        if !shadowed {
-            self.workspace.insert(path, analysis);
-        }
-    }
-
-    /// Remove a workspace entry (e.g. file deletion via watcher).
-    pub fn remove_workspace(&self, path: &Path) {
-        self.workspace.remove(path);
-    }
-
-    /// Direct access to the workspace DashMap (for parallel indexing via Rayon
-    /// and CLI tools that pre-populate then iterate). Values are `Arc<FileAnalysis>`.
-    pub fn workspace_raw(&self) -> &DashMap<PathBuf, Arc<FileAnalysis>> {
-        &self.workspace
-    }
-
-    /// Count of workspace entries.
-    pub fn workspace_len(&self) -> usize {
-        self.workspace.len()
-    }
-
     // ---- Iteration ----
 
     /// Read-only iteration over open Documents. Query paths (`refs_to`,
@@ -262,45 +189,14 @@ impl FileStore {
         }
     }
 
-    /// Call `f` for every file-path backed analysis in the store — open files
-    /// first (canonical), then workspace files (skipping paths already covered
-    /// by an open entry). Borrowed, not cloned.
-    pub fn for_each_analysis<F: FnMut(FileKey, &FileAnalysis)>(&self, mut f: F) {
-        let mut covered_paths = std::collections::HashSet::new();
-
-        for entry in self.open.iter() {
-            let url = entry.key().clone();
-            if let Ok(path) = url.to_file_path() {
-                // Claim the canonical spelling too (indexer keys canonically).
-                if let Ok(canon) = std::fs::canonicalize(&path) {
-                    covered_paths.insert(canon);
-                }
-                covered_paths.insert(path);
-            }
-            f(FileKey::Url(url), &entry.value().analysis);
-        }
-
-        for entry in self.workspace.iter() {
-            if covered_paths.contains(entry.key()) {
-                continue;
-            }
-            f(FileKey::Path(entry.key().clone()), entry.value());
-        }
-    }
-
     /// Count of open files.
     #[cfg(test)]
     pub fn open_count(&self) -> usize {
         self.open.len()
     }
 
-    /// Count of workspace files.
-    #[cfg(test)]
-    pub fn workspace_count(&self) -> usize {
-        self.workspace.len()
-    }
 }
 
 #[cfg(test)]
-#[path = "file_store_tests.rs"]
+#[path = "open_docs_tests.rs"]
 mod tests;

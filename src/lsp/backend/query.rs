@@ -34,7 +34,7 @@ impl Backend {
         T: Send + 'static,
     {
         let cx = QueryCx {
-            files: Arc::clone(&self.files),
+            open_docs: Arc::clone(&self.open_docs),
             module_index: Arc::clone(&self.module_index),
         };
         tokio::task::spawn_blocking(move || f(&cx))
@@ -46,13 +46,13 @@ impl Backend {
 /// What a blocking query closure reaches the stores through. Only
 /// `run_query` constructs one.
 pub(super) struct QueryCx {
-    files: Arc<FileStore>,
+    open_docs: Arc<OpenDocs>,
     module_index: Arc<ModuleIndex>,
 }
 
 impl QueryCx {
-    pub(super) fn files(&self) -> &FileStore {
-        &self.files
+    pub(super) fn open_docs(&self) -> &OpenDocs {
+        &self.open_docs
     }
 
     pub(super) fn index(&self) -> &ModuleIndex {
@@ -75,7 +75,7 @@ impl QueryCx {
         scope: crate::index::resolve::OverrideScope,
     ) -> crate::index::resolve::CandidateSet<'a> {
         crate::index::resolve::resolve(
-            &self.files,
+            &self.open_docs,
             analysis,
             FileKey::Url(uri.clone()),
             point,
@@ -94,7 +94,7 @@ impl QueryCx {
         point: tree_sitter::Point,
         scope: crate::index::resolve::OverrideScope,
     ) -> crate::index::resolve::CandidateSet<'a> {
-        crate::index::resolve::resolve(&self.files, analysis, key, point, Some(lookup), scope)
+        crate::index::resolve::resolve(&self.open_docs, analysis, key, point, Some(lookup), scope)
     }
 
     /// The analysis + key a hierarchy ITEM re-anchors at.
@@ -107,13 +107,13 @@ impl QueryCx {
         &self,
         uri: &Url,
     ) -> Option<(Arc<crate::model::file_analysis::FileAnalysis>, FileKey)> {
-        if let Some(doc) = self.files.get_open(uri) {
+        if let Some(doc) = self.open_docs.get_open(uri) {
             return Some((Arc::clone(&doc.analysis), FileKey::Url(uri.clone())));
         }
         let path = uri.to_file_path().ok()?;
         let key = FileKey::Path(path);
         let analysis =
-            crate::index::resolve::analysis_for_key(&self.files, Some(&*self.module_index), &key)?;
+            crate::index::resolve::analysis_for_key(&self.open_docs, Some(&*self.module_index), &key)?;
         Some((analysis, key))
     }
 

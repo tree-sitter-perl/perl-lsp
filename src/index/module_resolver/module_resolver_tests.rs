@@ -182,9 +182,9 @@ fn workspace_index_progress_is_throttled_monotone_and_completes() {
         }
     };
 
-    let files = crate::index::file_store::FileStore::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let indexed =
-        index_workspace_with_index(&dir, &files, None, Some(&cb as &(dyn Fn(usize, usize) + Sync)), None);
+        index_workspace_with_index(&dir, &idx, Some(&cb as &(dyn Fn(usize, usize) + Sync)), None);
     std::fs::remove_dir_all(&dir).ok();
 
     assert_eq!(indexed, n_files, "all files indexed");
@@ -633,8 +633,7 @@ fn a_bulk_index_marks_the_consumers_of_what_changed() {
     .unwrap();
 
     let idx = crate::index::module_index::ModuleIndex::new_for_cli();
-    let files = crate::index::file_store::FileStore::new();
-    index_workspace_with_index(&dir, &files, Some(&idx), None, None);
+    index_workspace_with_index(&dir, &idx, None, None);
 
     let canon_cons = std::fs::canonicalize(&consumer).unwrap();
     let before = idx.flush_epoch();
@@ -645,7 +644,7 @@ fn a_bulk_index_marks_the_consumers_of_what_changed() {
         "package BulkProv;\nsub build { return bless {}, 'Widget::Two' }\n1;\n",
     )
     .unwrap();
-    index_workspace_with_index(&dir, &files, Some(&idx), None, None);
+    index_workspace_with_index(&dir, &idx, None, None);
 
     let after = idx.flush_epoch();
     assert!(

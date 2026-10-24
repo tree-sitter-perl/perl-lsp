@@ -308,7 +308,7 @@ impl LanguageServer for Backend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
-        // Build the document OFF the message loop. `FileStore::open` runs the
+        // Build the document OFF the message loop. `OpenDocs::open` runs the
         // whole pack pipeline (macro transform + extraction) synchronously — for
         // a 16k-line macro-heavy C file that is ~1.3 s even cached-only, and
         // running it here would head-of-line block every request the client
@@ -322,12 +322,12 @@ impl LanguageServer for Backend {
         // blocking closure so it applies exactly to this build's thread.
         let gate = Arc::new(ReadyGate::default());
         self.opening.insert(uri.clone(), Arc::clone(&gate));
-        let files = Arc::clone(&self.files);
+        let open_docs = Arc::clone(&self.open_docs);
         let uri_build = uri.clone();
         let build_started = std::time::Instant::now();
         let opened = tokio::task::spawn_blocking(move || {
             crate::build::cpp_reparse::set_gather_cached_only(true);
-            let opened = files.open(uri_build, text);
+            let opened = open_docs.open(uri_build, text);
             crate::build::cpp_reparse::set_gather_cached_only(false);
             opened
         })
@@ -352,7 +352,7 @@ impl LanguageServer for Backend {
         }
         let mut needs_gather_refresh = false;
         if opened {
-            if let Some(doc) = self.files.get_open(&uri) {
+            if let Some(doc) = self.open_docs.get_open(&uri) {
                 // Lazily index the workspace (once).
                 self.ensure_workspace_indexed();
                 // A gather-dependent file's first analyze was cached-only;
@@ -383,7 +383,7 @@ impl LanguageServer for Backend {
         // future inside one task, so awaiting it here head-of-line blocked
         // every other verb (the post-cold-index availability hole).
         if opened {
-            if let (Ok(path), Some(doc)) = (uri.to_file_path(), self.files.get_open(&uri)) {
+            if let (Ok(path), Some(doc)) = (uri.to_file_path(), self.open_docs.get_open(&uri)) {
                 // Hub-integrated languages record @INC residency here; pack
                 // freshness is the invalidator's disk-side gate.
                 if crate::build::language_driver::LanguageRegistry::caps(doc.language)
@@ -429,7 +429,7 @@ impl LanguageServer for Backend {
             // first change's heal coalesces into THIS gather instead of
             // spawning a redundant second one.
             let heal_ctx = self.pack_heal_ctx();
-            let language = self.files.get_open(&uri).map(|d| d.language);
+            let language = self.open_docs.get_open(&uri).map(|d| d.language);
             if let Some(language) = language {
                 heal_ctx.begin_progress(&uri, language).await;
             }
@@ -442,7 +442,7 @@ impl LanguageServer for Backend {
         let Some(change) = params.content_changes.into_iter().next() else {
             return;
         };
-        let language = match self.files.get_open(&uri) {
+        let language = match self.open_docs.get_open(&uri) {
             Some(doc) => doc.language,
             None => return,
         };
@@ -451,7 +451,7 @@ impl LanguageServer for Backend {
         // position features stay live, and DEBOUNCE the analysis so a burst
         // of keystrokes pays one rebuild after typing settles, not one each.
         if crate::build::language_driver::LanguageRegistry::caps(language).synchronous_rebuild {
-            if let Some(mut doc) = self.files.get_open_mut(&uri) {
+            if let Some(mut doc) = self.open_docs.get_open_mut(&uri) {
                 doc.update(change.text);
                 for imp in &doc.analysis.imports {
                     self.module_index.request_resolve(&imp.module_name);
@@ -469,7 +469,7 @@ impl LanguageServer for Backend {
             self.schedule_diag_refresh(uri);
             return;
         }
-        if let Some(mut doc) = self.files.get_open_mut(&uri) {
+        if let Some(mut doc) = self.open_docs.get_open_mut(&uri) {
             doc.update_text_only(change.text);
         }
         self.spawn_debounced_rebuild(uri);
@@ -480,7 +480,7 @@ impl LanguageServer for Backend {
         // A save of an invalidator-owned language forwards to the
         // invalidation seam below; hub languages take the direct path.
         let pack_path = self
-            .files
+            .open_docs
             .get_open(&uri)
             .filter(|doc| {
                 crate::build::language_driver::LanguageRegistry::caps(doc.language)
@@ -488,7 +488,7 @@ impl LanguageServer for Backend {
             })
             .and_then(|_| uri.to_file_path().ok());
         if let Some(text) = params.text {
-            if let Some(mut doc) = self.files.get_open_mut(&uri) {
+            if let Some(mut doc) = self.open_docs.get_open_mut(&uri) {
                 doc.update(text);
             }
             self.schedule_diag_refresh(uri.clone());
@@ -520,7 +520,7 @@ impl LanguageServer for Backend {
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
-        self.files.close(&uri);
+        self.open_docs.close(&uri);
         // Wake any degraded-window waiter — the doc is gone, there is
         // nothing to wait for.
         if let Some((_, g)) = self.degraded_open.remove(&uri) {
@@ -556,7 +556,7 @@ impl LanguageServer for Backend {
     ) -> Result<Option<DocumentSymbolResponse>> {
         let uri = &params.text_document.uri;
         self.await_open_ready(uri, WaitPolicy::Complete).await;
-        let doc = match self.files.get_open(uri) {
+        let doc = match self.open_docs.get_open(uri) {
             Some(doc) => doc,
             None => return self.not_ready_or_null(uri),
         };
@@ -579,7 +579,7 @@ impl LanguageServer for Backend {
         self.await_index_ready(WaitPolicy::Interactive).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
-        let (analysis, text, language) = match self.files.get_open(uri) {
+        let (analysis, text, language) = match self.open_docs.get_open(uri) {
             Some(doc) => (Arc::clone(&doc.analysis), doc.text.clone(), doc.language),
             None => return self.not_ready_or_null(uri),
         };
@@ -664,7 +664,7 @@ impl LanguageServer for Backend {
         self.await_index_ready(WaitPolicy::Interactive).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
-        let analysis = match self.files.get_open(uri) {
+        let analysis = match self.open_docs.get_open(uri) {
             Some(doc) => Arc::clone(&doc.analysis),
             None => return self.not_ready_or_null(uri),
         };
@@ -693,7 +693,7 @@ impl LanguageServer for Backend {
         let pos = params.text_document_position_params.position;
         self.await_open_ready(uri, WaitPolicy::Complete).await;
         self.await_index_ready(WaitPolicy::Complete).await;
-        let analysis = match self.files.get_open(uri) {
+        let analysis = match self.open_docs.get_open(uri) {
             Some(doc) => Arc::clone(&doc.analysis),
             None => return self.not_ready_or_null(uri),
         };
@@ -772,7 +772,7 @@ impl LanguageServer for Backend {
         let pos = params.text_document_position_params.position;
         self.await_open_ready(uri, WaitPolicy::Complete).await;
         self.await_index_ready(WaitPolicy::Complete).await;
-        let analysis = match self.files.get_open(uri) {
+        let analysis = match self.open_docs.get_open(uri) {
             Some(doc) => Arc::clone(&doc.analysis),
             None => return self.not_ready_or_null(uri),
         };
@@ -864,7 +864,7 @@ impl LanguageServer for Backend {
         // no resolution kicks — one text scan over the stored buffer plus
         // registered-only map lookups. An unknown module yields no link and
         // appears once registration lands.
-        let text = match self.files.get_open(uri) {
+        let text = match self.open_docs.get_open(uri) {
             Some(doc) => doc.text.clone(),
             None => return self.not_ready_or_null(uri),
         };
@@ -914,7 +914,7 @@ impl LanguageServer for Backend {
         // before `resolve()` — it re-locks the open shards via `for_each_open`,
         // and holding the guard across that reentrant read deadlocks against a
         // concurrently queued writer. See `Document::analysis`.
-        let analysis = match self.files.get_open(uri) {
+        let analysis = match self.open_docs.get_open(uri) {
             Some(doc) => Arc::clone(&doc.analysis),
             None => return self.not_ready_or_null(uri),
         };
@@ -948,7 +948,7 @@ impl LanguageServer for Backend {
         self.await_open_full(uri, WaitPolicy::Complete).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
-        let (analysis, language) = match self.files.get_open(uri) {
+        let (analysis, language) = match self.open_docs.get_open(uri) {
             Some(doc) => (Arc::clone(&doc.analysis), doc.language),
             None => return self.not_ready_or_null(uri),
         };
@@ -1035,7 +1035,7 @@ impl LanguageServer for Backend {
         self.await_open_ready(&params.text_document.uri, WaitPolicy::Interactive).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
-        let analysis = match self.files.get_open(&params.text_document.uri) {
+        let analysis = match self.open_docs.get_open(&params.text_document.uri) {
             Some(doc) => Arc::clone(&doc.analysis),
             None => return self.not_ready_or_null(&params.text_document.uri),
         };
@@ -1086,7 +1086,7 @@ impl LanguageServer for Backend {
         self.await_open_full(uri, WaitPolicy::Complete).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
-        let analysis = match self.files.get_open(uri) {
+        let analysis = match self.open_docs.get_open(uri) {
             Some(doc) => Arc::clone(&doc.analysis),
             None => return self.not_ready_or_null(uri),
         };
@@ -1119,7 +1119,7 @@ impl LanguageServer for Backend {
         self.await_index_ready(WaitPolicy::Interactive).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
-        let (analysis, text, language) = match self.files.get_open(uri) {
+        let (analysis, text, language) = match self.open_docs.get_open(uri) {
             Some(doc) => (Arc::clone(&doc.analysis), doc.text.clone(), doc.language),
             None => return self.not_ready_or_null(uri),
         };
@@ -1190,7 +1190,7 @@ impl LanguageServer for Backend {
         // which re-locks the open shards via `for_each_open`); see
         // `Document::analysis`. `tree` clones O(1) (tree-sitter refcount).
         let (analysis, text, tree, language, path, package_lines) =
-            match self.files.get_open(uri) {
+            match self.open_docs.get_open(uri) {
                 Some(doc) => (
                     Arc::clone(&doc.analysis),
                     doc.text.clone(),
@@ -1210,7 +1210,7 @@ impl LanguageServer for Backend {
             let (items, is_incomplete) = self
                 .run_query(move |cx| {
                     pack_completion(
-                        cx.files(),
+                        cx.open_docs(),
                         &analysis,
                         &text,
                         &tree,
@@ -1240,7 +1240,7 @@ impl LanguageServer for Backend {
         let (items, capped) = self
             .run_query(move |cx| {
                 symbols::completion_items(
-                    cx.files(),
+                    cx.open_docs(),
                     &key,
                     &analysis,
                     &tree,
@@ -1303,7 +1303,7 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
-        let doc = match self.files.get_open(uri) {
+        let doc = match self.open_docs.get_open(uri) {
             Some(doc) => doc,
             None => return self.not_ready_or_null(uri),
         };
@@ -1322,7 +1322,7 @@ impl LanguageServer for Backend {
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
         // Snapshot + drop the store guard before `resolve()` (reentrant
         // `for_each_open`); see `Document::analysis`.
-        let analysis = match self.files.get_open(uri) {
+        let analysis = match self.open_docs.get_open(uri) {
             Some(doc) => Arc::clone(&doc.analysis),
             None => return self.not_ready_or_null(uri),
         };
@@ -1350,7 +1350,7 @@ impl LanguageServer for Backend {
     ) -> Result<Option<Vec<SelectionRange>>> {
         let uri = &params.text_document.uri;
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
-        let doc = match self.files.get_open(uri) {
+        let doc = match self.open_docs.get_open(uri) {
             Some(doc) => doc,
             None => return self.not_ready_or_null(uri),
         };
@@ -1371,7 +1371,7 @@ impl LanguageServer for Backend {
     ) -> Result<Option<Vec<FoldingRange>>> {
         let uri = &params.text_document.uri;
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
-        let doc = match self.files.get_open(uri) {
+        let doc = match self.open_docs.get_open(uri) {
             Some(doc) => doc,
             None => return self.not_ready_or_null(uri),
         };
@@ -1391,7 +1391,7 @@ impl LanguageServer for Backend {
         // Copy the source out and release the DashMap guard before awaiting
         // perltidy: holding a shard read lock across the await deadlocks any
         // concurrent didChange (which needs the write lock) on the same file.
-        let source = match self.files.get_open(uri) {
+        let source = match self.open_docs.get_open(uri) {
             Some(doc) => doc.text.clone(),
             None => return self.not_ready_or_null(uri),
         };
@@ -1446,7 +1446,7 @@ impl LanguageServer for Backend {
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
         let uri = &params.text_document.uri;
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
-        let doc = match self.files.get_open(uri) {
+        let doc = match self.open_docs.get_open(uri) {
             Some(doc) => doc,
             None => return self.not_ready_or_null(uri),
         };
@@ -1464,7 +1464,7 @@ impl LanguageServer for Backend {
     ) -> Result<Option<SemanticTokensResult>> {
         let uri = &params.text_document.uri;
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
-        let doc = match self.files.get_open(uri) {
+        let doc = match self.open_docs.get_open(uri) {
             Some(doc) => doc,
             None => return self.not_ready_or_null(uri),
         };
@@ -1478,7 +1478,7 @@ impl LanguageServer for Backend {
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         let uri = &params.text_document.uri;
         self.await_open_ready(uri, WaitPolicy::Interactive).await;
-        let doc = match self.files.get_open(uri) {
+        let doc = match self.open_docs.get_open(uri) {
             Some(doc) => doc,
             None => return self.not_ready_or_null(uri),
         };
@@ -1506,14 +1506,11 @@ impl LanguageServer for Backend {
             let mut covered: std::collections::HashSet<std::path::PathBuf> =
                 std::collections::HashSet::new();
 
-            cx.files().for_each_analysis(|key, analysis| {
-                let uri = match key {
-                    FileKey::Url(u) => u,
-                    FileKey::Path(p) => Url::from_file_path(&p).unwrap_or_else(|_| {
-                        Url::parse(&format!("file://{}", p.display()))
-                            .unwrap()
-                    }),
-                };
+            // Open docs first — the fresher text — then every index copy
+            // they don't shadow.
+            let mut open_paths: std::collections::HashSet<std::path::PathBuf> =
+                std::collections::HashSet::new();
+            let mut visit = |uri: Url, analysis: &crate::model::file_analysis::FileAnalysis| {
                 if !analysis.symbols_are_evicted() {
                     if let Ok(p) = uri.to_file_path() {
                         // Claim the canonical spelling too: rows are keyed
@@ -1541,24 +1538,21 @@ impl LanguageServer for Backend {
                         results.push(symbols::plugin_namespace_to_workspace_info(ns, uri.clone()));
                     }
                 }
+            };
+            cx.open_docs().for_each_open(|url, doc| {
+                if let Ok(p) = url.to_file_path() {
+                    open_paths.insert(std::fs::canonicalize(&p).unwrap_or(p));
+                }
+                visit(url.clone(), &doc.analysis);
             });
-
-            // A pack language's files live in the index, not the FileStore.
-            cx.index().for_each_pack_registered_file(&mut |cached| {
-                let (path, analysis) = (cached.path.as_path(), &cached.analysis);
-                if !analysis.symbols_are_evicted() {
-                    covered.insert(path.to_path_buf());
+            cx.index().for_each_registered_file(&mut |cached| {
+                if open_paths.contains(&cached.path) {
+                    return;
                 }
-                let uri = Url::from_file_path(path).unwrap_or_else(|_| {
-                    Url::parse(&format!("file://{}", path.display())).unwrap()
+                let uri = Url::from_file_path(&cached.path).unwrap_or_else(|_| {
+                    Url::parse(&format!("file://{}", cached.path.display())).unwrap()
                 });
-                for sym in analysis.symbols() {
-                    if sym.name.to_lowercase().contains(&query) {
-                        if let Some(info) = symbols::symbol_to_workspace_info(sym, uri.clone()) {
-                            results.push(info);
-                        }
-                    }
-                }
+                visit(uri, &cached.analysis);
             });
 
             // Rows pass: symbol-evicted copies (the served language's
@@ -1609,7 +1603,7 @@ impl LanguageServer for Backend {
         // Copy the source out and release the DashMap guard before awaiting
         // perltidy — see `formatting` for why holding it across the await
         // deadlocks concurrent didChange on the same file.
-        let source = match self.files.get_open(uri) {
+        let source = match self.open_docs.get_open(uri) {
             Some(doc) => doc.text.clone(),
             None => return self.not_ready_or_null(uri),
         };
