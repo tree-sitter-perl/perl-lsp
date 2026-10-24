@@ -2750,6 +2750,24 @@ fn a_dynamic_member_of_a_slot_reads_what_was_written_under_any_key() {
     assert_eq!(class_at(&bus, &idx, "$h", 3, 60).as_deref(), Some("Greeter"));
 }
 
+/// A sub that hands back its argument answers each call with what that
+/// call passed, across files and through `$_[N]` alike.
+#[test]
+fn a_call_reads_its_own_arguments_back_out_of_the_callee() {
+    let util = parse_source_to_cached(
+        "package Util;\nsub id { my ($x) = @_; return $x }\nsub first { return $_[0] }\n1;\n",
+        "Util",
+    );
+    let app = parse_source_to_cached(
+        "package App;\nsub run {\n    my $u = Util::id(bless({}, 'User'));\n    my $g = Util::id(bless({}, 'Greeter'));\n    my $f = Util::first(bless({}, 'Greeter'));\n}\n1;\n",
+        "App",
+    );
+    let idx = index_of(&[&util, &app]);
+    assert_eq!(class_at(&app, &idx, "$u", 5, 0).as_deref(), Some("User"));
+    assert_eq!(class_at(&app, &idx, "$g", 5, 0).as_deref(), Some("Greeter"));
+    assert_eq!(class_at(&app, &idx, "$f", 5, 0).as_deref(), Some("Greeter"));
+}
+
 /// The sweep probe store answers a repeated probe without re-running it,
 /// re-runs after a shape bump, and never keeps "file never shredded".
 #[test]

@@ -453,6 +453,21 @@ pub(super) struct QueryState {
     /// site is the innermost one — it has to know whether ANY ancestor is
     /// opaque, not whether its immediate parent is.
     opaque_frames: u32,
+    /// The calls the chase is inside, innermost last: a parameter of the
+    /// callee reads the argument its own call site passes before it reads
+    /// the join over every caller.
+    call_frames: Vec<CallFrame>,
+}
+
+/// One call the chase descended through: the callee's name and what that
+/// call site passes.
+struct CallFrame {
+    name: String,
+    /// Whether the call dispatched as a method: its `@_` then heads with
+    /// the receiver, so positions only line up with a method's view.
+    method: bool,
+    receiver: Option<InferredType>,
+    args: Vec<InferredType>,
 }
 
 impl QueryState {
@@ -465,7 +480,34 @@ impl QueryState {
             residual: Vec::new(),
             poisoned: false,
             opaque_frames: 0,
+            call_frames: Vec::new(),
         }
+    }
+
+    /// Run `f` inside the call `frame`. Answers computed in it depend on
+    /// what the call passes, so they get a memo of their own and count as
+    /// cut: no store outside this query keeps them.
+    fn in_call_frame<T>(&mut self, frame: CallFrame, f: impl FnOnce(&mut Self) -> T) -> T {
+        self.call_frames.push(frame);
+        let outer = std::mem::take(&mut self.memo);
+        let out = f(self);
+        self.memo = outer;
+        self.call_frames.pop();
+        out
+    }
+
+    /// The argument the innermost call passes at `@_` position `index`, when
+    /// that call is to `name` and the argument is typed.
+    fn frame_argument(&mut self, name: &str, method: bool, index: u32) -> Option<InferredType> {
+        let frame = self.call_frames.last().filter(|f| f.name == name && f.method == method)?;
+        let t = match (method, index) {
+            (true, 0) => frame.receiver.clone(),
+            (true, i) => frame.args.get(i as usize - 1).cloned(),
+            (false, i) => frame.args.get(i as usize).cloned(),
+        }
+        .filter(InferredType::is_known)?;
+        self.cuts += 1;
+        Some(t)
     }
 
     /// Record where the chase would have consulted the index.
@@ -1565,12 +1607,18 @@ impl ReducerRegistry {
     fn param_in_fallback(
         &self,
         q: &ReducerQuery,
-        _state: &mut QueryState,
+        state: &mut QueryState,
         package: &str,
         name: &str,
         method: bool,
         want: JoinWant,
     ) -> Option<ReducedValue> {
+        if let JoinWant::At(index) = want {
+            if let Some(t) = state.frame_argument(name, method, index) {
+                crate::util::ghost_stats::count("param_in.from_call_site");
+                return Some(ReducedValue::Type(t));
+            }
+        }
         let ctx = q.context?;
         let Some(idx) = ctx.module_index else {
             super::note_bake_exit("param_in", true);
@@ -1722,7 +1770,27 @@ impl ReducerRegistry {
             args: c.args.clone(),
             context: Some(&ctx),
         };
-        (*self.query_rec(&full.witnesses, &q, &mut QueryState::new())).clone()
+        // The asking call's arguments ride the key, so the callee's own
+        // parameters read them here exactly as a local call's frame would.
+        let callee = match &c.attachment {
+            WitnessAttachment::PackageSymbol { name, .. } => Some(name.clone()),
+            WitnessAttachment::Symbol(sid) => {
+                full.symbols().get(sid.0 as usize).map(|s| s.name.clone())
+            }
+            _ => None,
+        };
+        let mut state = QueryState::new();
+        match callee {
+            Some(name) => {
+                let method = c.receiver.is_some();
+                let frame =
+                    CallFrame { name, method, receiver: c.receiver.clone(), args: c.args.clone() };
+                state.in_call_frame(frame, |state| {
+                    (*self.query_rec(&full.witnesses, &q, state)).clone()
+                })
+            }
+            None => (*self.query_rec(&full.witnesses, &q, &mut state)).clone(),
+        }
     }
 
     /// One caller file's part of a join: the argument `join.want` names at
@@ -3223,7 +3291,7 @@ impl ReducerRegistry {
         receiver: Option<&WitnessAttachment>,
         args: Option<&[CallArg]>,
     ) -> Option<InferredType> {
-        let mut recv = receiver.and_then(|r| self.operand_type(bag, q, state, r));
+        let recv = receiver.and_then(|r| self.operand_type(bag, q, state, r));
         // Positional argument types up to the first spread; an operand that
         // types nothing holds its position as `Unknown`.
         // TODO(prototypes): a callee prototype like `(\@)` takes an aggregate
@@ -3243,6 +3311,35 @@ impl ReducerRegistry {
             }
         }
         let exact = args.is_some() && !spread;
+        let name = match callee {
+            Callee::Function { name, .. } => Some((name.clone(), false)),
+            Callee::Method { name, .. } => Some((name.clone(), true)),
+            Callee::Value(_) => None,
+        };
+        match name {
+            Some((name, method)) => {
+                let frame =
+                    CallFrame { name, method, receiver: recv.clone(), args: arg_types.clone() };
+                state.in_call_frame(frame, |state| {
+                    self.invoke_with(bag, q, state, callee, recv, arg_types, exact)
+                })
+            }
+            None => self.invoke_with(bag, q, state, callee, recv, arg_types, exact),
+        }
+    }
+
+    /// `invoke` once the receiver and arguments are typed.
+    #[allow(clippy::too_many_arguments)]
+    fn invoke_with(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        callee: &Callee,
+        mut recv: Option<InferredType>,
+        mut arg_types: Vec<InferredType>,
+        exact: bool,
+    ) -> Option<InferredType> {
         // A bare call in a body that elides the receiver: the class's member
         // (its own or inherited, in any file) hides every free function of
         // the name, with the class itself as the receiver.

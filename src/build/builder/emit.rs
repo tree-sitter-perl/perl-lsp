@@ -626,7 +626,13 @@ impl<'a> Builder<'a> {
         if a.kind() != "array" || a.utf8_text(self.source).ok()? != "@_" {
             return None;
         }
-        let point = a.start_position();
+        let (package, name, from, method) = self.sub_arg_position(a.start_position())?;
+        Some(crate::model::witnesses::CallArg::Forward { package, name, from, method })
+    }
+
+    /// The named sub whose `@_` is in view at `point`, and how many of its
+    /// heads the straight-line `shift`s before `point` consumed.
+    fn sub_arg_position(&self, point: Point) -> Option<(String, String, u32, bool)> {
         let mut scope = Some(self.scope_at_point(point));
         let sub = loop {
             let s = &self.scopes[scope?.0 as usize];
@@ -640,7 +646,21 @@ impl<'a> Builder<'a> {
             Some(shifts) => shifts.iter().rev().find(|(at, _)| *at <= point).map_or(Some(0), |(_, n)| *n)?,
             None => 0,
         };
-        Some(crate::model::witnesses::CallArg::Forward { package, name, from, method })
+        Some((package, name, from, method))
+    }
+
+    /// `$_[N]` in a named sub: what its callers pass at that position. Rides
+    /// after the window projection, so it answers only where callers do.
+    fn arg_element_param(&self, node: Node<'a>) -> Option<crate::model::witnesses::WitnessPayload> {
+        let container = node.child_by_field_name("array")?;
+        if crate::cst::canonical_container_name(container, self.source)? != "@_" {
+            return None;
+        }
+        let idx: u32 = node.child_by_field_name("index")?.utf8_text(self.source).ok()?.parse().ok()?;
+        let (package, name, from, method) = self.sub_arg_position(node.start_position())?;
+        Some(crate::model::witnesses::WitnessPayload::Edge(
+            crate::model::witnesses::WitnessAttachment::ParamIn { package, name, index: from + idx, method },
+        ))
     }
 
     /// A `shift` whose array is `@_` — bare, or spelled `shift @_`.
@@ -885,6 +905,16 @@ impl<'a> Builder<'a> {
                 payload,
                 span,
             });
+            if node.kind() == "array_element_expression" {
+                if let Some(param) = self.arg_element_param(node) {
+                    self.bag.push(Witness {
+                        attachment: WitnessAttachment::Expr(span),
+                        source: WitnessSource::Builder("expression".into()),
+                        payload: param,
+                        span,
+                    });
+                }
+            }
             // `$_[0]` is the call's receiver wherever a call site supplies
             // one (`sub me { $_[0] }` types `$o->me->me` to `$o`'s class);
             // `ReturnExprReducer` claims it ahead of the window projection
