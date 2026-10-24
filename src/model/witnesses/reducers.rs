@@ -633,6 +633,13 @@ impl WitnessReducer for SymbolReturnArmFold {
         if arms.is_empty() && has_undef_arm && value_arms == 0 {
             return ReducedValue::Type(InferredType::Undef);
         }
+        // The same reading guards a typed arm that is itself undef
+        // (`return $self->_log(..)` where `_log` returns nothing): with a
+        // value arm left untyped, the sub may still return a value, and an
+        // `Undef` answer would claim every caller's deref dies.
+        if arms.len() < value_arms && arms.iter().all(|t| t.is_undef()) {
+            return ReducedValue::None;
+        }
         match crate::model::file_analysis::join_return_arms(&arms, has_undef_arm, &*class_order(_q)) {
             Some(t) => ReducedValue::Type(t),
             None => ReducedValue::None,
