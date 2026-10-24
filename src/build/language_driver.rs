@@ -998,8 +998,7 @@ fn remap_spans(
         refs,
         imports: _,
         import_sites,
-        // names, no spans
-        use_aliases: _,
+        use_rows,
         scope_count: _,
         scopes,
         witnesses,
@@ -1102,6 +1101,10 @@ fn remap_spans(
     // `#include` path tokens — goto-def on the token is span-keyed.
     for (_, span) in import_sites.iter_mut() {
         *span = rspan(*span);
+    }
+    // `use` row name tokens — a class token inside one names the row.
+    for row in use_rows.iter_mut() {
+        row.span = rspan(row.span);
     }
     // Witness spans (the type tier). A length-changing splice (`PBF op_type` →
     // `unsigned op_type`) shifts every span AFTER it, so a declared-type

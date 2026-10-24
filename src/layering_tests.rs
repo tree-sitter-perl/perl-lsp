@@ -1537,11 +1537,10 @@ fn rendered_strings_are_not_reparsed() {
     let seen = count_lines(&files, &|l| fns.iter().any(|f| l.contains(f)));
     let allow: &[(&str, usize, &str)] = &[
         ("model/conventions.rs", 3, "source text: a name split on its language's declared separator, class-token segments, and Perl method tokens"),
-        ("model/file_analysis/class_queries.rs", 1, "`use` rows as written, split on the pack's declared separator"),
         ("model/file_analysis/enrichment.rs", 1, "Perl package leaf vs a load name — both source-spelled"),
         ("model/file_analysis/invocants.rs", 2, "Perl `::` on source-spelled class and sub names"),
         ("model/file_analysis/types.rs", 1, "canonical_template_spelling — a C++ instance as written in source"),
-        ("model/file_analysis/use_map.rs", 3, "resolving WRITTEN spellings"),
+        ("model/file_analysis/use_map.rs", 2, "a WRITTEN spelling's leaf and its qualifier's head segment"),
         ("lsp/cli/positions.rs", 1, "a `file:line:col` CLI argument: what the user typed, not what we rendered"),
         ("lsp/cursor_context.rs", 1, "Perl source text at the cursor, split on Perl's own separator"),
         ("lsp/symbols/links.rs", 2, "POD link text and a module path as the source wrote them"),
