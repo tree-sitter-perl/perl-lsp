@@ -303,14 +303,6 @@ pub(super) fn is_exit_expression(node: Node, source: &[u8]) -> bool {
     }
 }
 
-/// First named child of `node` with the given `kind` (the `elsif` / `else`
-/// arm hanging off a `conditional_statement` or `elsif`).
-fn child_of_kind<'a>(node: Node<'a>, kind: &str) -> Option<Node<'a>> {
-    (0..node.named_child_count())
-        .filter_map(|i| node.named_child(i))
-        .find(|c| c.kind() == kind)
-}
-
 /// A subject's identity for dedup across arms (its source spelling).
 fn subject_key(subject: &NarrowSubject) -> String {
     match subject {
@@ -343,38 +335,10 @@ impl<'a> Builder<'a> {
     /// arm is pure cumulative negation; an `elsif` arm combines its own
     /// guard with the priors' negation.
     pub(super) fn narrow_block_guard(&mut self, cond_stmt: Node<'a>) {
-        let Some(condition) = cond_stmt.child_by_field_name("condition") else { return };
-        let Some(block) = cond_stmt.child_by_field_name("block") else { return };
-        // The truth value the first condition must take for its block to run
-        // (`if` → true, `unless` → false). `elsif` arms are always positive.
-        let Some(first_enter) = self.block_guard_polarity(cond_stmt, condition) else { return };
-
-        // Walk the chain: `(condition?, block, enter_polarity)` per arm.
-        // The `else`/`elsif` nest inside the trailing `elsif`, so descend.
-        let mut arms: Vec<(Option<Node<'a>>, Node<'a>, bool)> =
-            vec![(Some(condition), block, first_enter)];
-        let mut tail = cond_stmt;
-        loop {
-            let Some(next) =
-                child_of_kind(tail, "elsif").or_else(|| child_of_kind(tail, "else"))
-            else {
-                break;
-            };
-            if next.kind() == "elsif" {
-                let (Some(c), Some(b)) =
-                    (next.child_by_field_name("condition"), next.child_by_field_name("block"))
-                else {
-                    break;
-                };
-                arms.push((Some(c), b, true));
-                tail = next;
-            } else {
-                if let Some(b) = next.child_by_field_name("block") {
-                    arms.push((None, b, true));
-                }
-                break;
-            }
-        }
+        let arms: Vec<(Option<Node<'a>>, Node<'a>, bool)> = crate::cst::conditional_arms(cond_stmt)
+            .into_iter()
+            .map(|arm| (arm.cond, arm.block, arm.enter))
+            .collect();
 
         for k in 0..arms.len() {
             let (own_cond, blk, enter) = arms[k];
@@ -434,19 +398,6 @@ impl<'a> Builder<'a> {
                 span,
                 before_point: before,
             });
-        }
-    }
-
-    /// `if` → body holds where the guard is TRUE; `unless` → where FALSE.
-    /// `None` for any other leading keyword (`elsif` / `while` / `until`).
-    fn block_guard_polarity(&self, cond_stmt: Node<'a>, condition: Node<'a>) -> Option<bool> {
-        let between =
-            std::str::from_utf8(&self.source[cond_stmt.start_byte()..condition.start_byte()])
-                .ok()?;
-        match between.split_whitespace().next()? {
-            "if" => Some(true),
-            "unless" => Some(false),
-            _ => None,
         }
     }
 
