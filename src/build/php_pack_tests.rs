@@ -211,6 +211,31 @@ class User extends Model implements Speaker, \\Countable, Sub\\Local {
     assert_eq!(refs, want);
 }
 
+/// A `use function` / `use const` row names no class, whether its keyword
+/// sits on the statement (flat, or a whole group) or on one clause of a
+/// group: it is neither a use-map row nor a class reference.
+#[test]
+fn function_and_const_imports_are_neither_rows_nor_class_references() {
+    use crate::model::file_analysis::RefKind;
+    let fa = php("<?php
+namespace App;
+use function Lib\\helper;
+use const Lib\\LIMIT;
+use function Lib\\Fns\\{wrap, unwrap};
+use const Lib\\Limits\\{MAX};
+use Lib\\Mixed\\{function f, const C, Klass};
+");
+    let rows: Vec<String> = fa.pack.use_rows.iter().map(|r| r.name.identity("\\")).collect();
+    assert_eq!(rows, ["Lib\\Mixed\\Klass"]);
+    let refs: Vec<&str> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::PackageRef))
+        .map(|r| r.target_name.as_str())
+        .collect();
+    assert_eq!(refs, ["Klass"]);
+}
+
 /// A class's uses in another file are found by the identity they name:
 /// goto-def from a parent clause lands on the declaration, and rename
 /// rewrites the declaration, the import's leaf and the parent's leaf.

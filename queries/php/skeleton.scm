@@ -28,42 +28,50 @@
 ; ---- parents ----
 ; `extends`, `implements` and a trait `use` are all parents for member
 ; lookup. The whole written spelling is the capture: it resolves through
-; the file's use-map to the parent's identity.
+; the file's use-map to the parent's identity. The same name is a class
+; reference — goto-def, references and rename reach it — and a qualified
+; spelling references by the whole spelling while rewriting only its leaf.
 (class_declaration
   name: (name) @def.class.name
-  (base_clause [(name) (qualified_name)] @parent))
+  (base_clause
+    [(name) @parent @ref.type
+     (qualified_name (name) @ref.type) @parent @ref.spelled]))
 (class_declaration
   name: (name) @def.class.name
-  (class_interface_clause [(name) (qualified_name)] @parent))
+  (class_interface_clause
+    [(name) @parent @ref.type
+     (qualified_name (name) @ref.type) @parent @ref.spelled]))
 (interface_declaration
   name: (name) @def.class.name
-  (base_clause [(name) (qualified_name)] @parent))
+  (base_clause
+    [(name) @parent @ref.type
+     (qualified_name (name) @ref.type) @parent @ref.spelled]))
 (class_declaration
   name: (name) @def.class.name
-  body: (declaration_list (use_declaration [(name) (qualified_name)] @parent)))
+  body: (declaration_list
+    (use_declaration
+      [(name) @parent @ref.type
+       (qualified_name (name) @ref.type) @parent @ref.spelled])))
 (trait_declaration
   name: (name) @def.class.name
-  body: (declaration_list (use_declaration [(name) (qualified_name)] @parent)))
-
-; A parent's name is a class reference: goto-def, references and rename
-; reach it. A qualified spelling references by the whole spelling and
-; rewrites only its leaf.
-(base_clause (name) @ref.type)
-(base_clause (qualified_name (name) @ref.type) @ref.spelled)
-(class_interface_clause (name) @ref.type)
-(class_interface_clause (qualified_name (name) @ref.type) @ref.spelled)
-(use_declaration (name) @ref.type)
-(use_declaration (qualified_name (name) @ref.type) @ref.spelled)
+  body: (declaration_list
+    (use_declaration
+      [(name) @parent @ref.type
+       (qualified_name (name) @ref.type) @parent @ref.spelled])))
 
 ; ---- the use-map ----
 ; A row binds a class unless its keyword says it binds a function or a
 ; constant; those rows name no class, so they never enter the map. The
 ; keyword is an anonymous token, so the row's own text excludes it. The
 ; `.` anchor pins the name to the clause's first child, so the alias node
-; never matches as a second name.
+; never matches as a second name. An imported class's leaf references the
+; class the row names, so a rename of the class rewrites the `use` line
+; too; the ref is the leaf alone, since the row it sits in already names
+; the class in full (`spelled_identity`).
 ((namespace_use_declaration
   (namespace_use_clause
-    . [(name) (qualified_name)] @import.name
+    . [(name) @import.name @ref.type
+       (qualified_name (name) @ref.type) @import.name]
     alias: (name)? @import.alias) @_clause)
  (#not-match? @_clause "^(function|const)\\s"))
 ; `use A\B\{C, D as E}`: each clause hangs off the shared prefix. A group
@@ -72,22 +80,7 @@
   (namespace_name) @import.prefix
   body: (namespace_use_group
     (namespace_use_clause
-      . (name) @import.name
+      . (name) @import.name @ref.type
       alias: (name)? @import.alias) @_clause)) @_group
  (#not-match? @_group "^use\\s+(function|const)\\s")
- (#not-match? @_clause "^(function|const)\\s"))
-
-; An imported class's leaf references the class the row names, so a
-; rename of the class rewrites the `use` line too.
-((namespace_use_declaration
-  (namespace_use_clause . (qualified_name (name) @ref.type)) @_clause)
- (#not-match? @_clause "^(function|const)\\s"))
-((namespace_use_declaration
-  (namespace_use_clause . (name) @ref.type) @_clause) @_decl
- (#not-match? @_decl "^use\\s+(function|const)\\s")
- (#not-match? @_clause "^(function|const)\\s"))
-((namespace_use_declaration
-  body: (namespace_use_group
-    (namespace_use_clause . (name) @ref.type) @_clause)) @_decl
- (#not-match? @_decl "^use\\s+(function|const)\\s")
  (#not-match? @_clause "^(function|const)\\s"))
