@@ -136,6 +136,12 @@ pub fn is_strict_vars_exempt(name: &str) -> bool {
     is_special_variable(name) || matches!(name, "$a" | "$b")
 }
 
+/// A name spelled as a variable or a glob (`$x`, `@x`, `*x`) rather than a
+/// sub — an import list carries both.
+pub fn is_variable_or_glob_spelling(name: &str) -> bool {
+    name.starts_with('*') || name.chars().next().is_some_and(|c| PERL_SPELLINGS.is_sigil(c))
+}
+
 /// The typeglob holding a variable's slot (`$x` → `*x`). Exporting the
 /// glob exports every sigil's variable of that name.
 pub fn glob_of_variable(name: &str) -> String {

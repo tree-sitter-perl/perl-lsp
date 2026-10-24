@@ -1053,3 +1053,26 @@ fn missing_declaration_opt_out() {
         serde_json::from_value(serde_json::json!({ "disableMissingDeclaration": true })).unwrap();
     assert!(missing_declarations(&collect_diagnostics(&analysis, &module_index, opts)).is_empty());
 }
+
+/// `use English` picks `@EXPORT` at runtime; the bundled `english` plugin
+/// states the glob list, so its variables count as declared — minus the
+/// match variables under `-no_match_vars`.
+#[test]
+fn missing_declaration_knows_use_english() {
+    let module_index = crate::index::module_index::ModuleIndex::new_for_test();
+    module_index.insert_cache(
+        "English",
+        Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+            std::path::PathBuf::from("/fake/English.pm"),
+            std::sync::Arc::new(parse_analysis("package English;\nsub import {}\n1;\n")),
+        ))),
+    );
+    let bare = parse_analysis("use English;\nprint $ERRNO, $EVAL_ERROR, @ARG, $MATCH, @LAST_MATCH_START;\n");
+    let found = missing_declarations(&collect_diagnostics(&bare, &module_index, Default::default()));
+    assert!(found.is_empty(), "{found:?}");
+
+    let no_match = parse_analysis("use English qw(-no_match_vars);\nprint $ERRNO, $MATCH;\n");
+    let found = missing_declarations(&collect_diagnostics(&no_match, &module_index, Default::default()));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].1.contains("'$MATCH'"), "{found:?}");
+}
