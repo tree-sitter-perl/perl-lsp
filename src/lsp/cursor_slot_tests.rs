@@ -148,7 +148,7 @@ fn detect_slot_cpp_qualified_path_is_module_path() {
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_cpp::LANGUAGE.into()).unwrap();
     let tree = parser.parse(src, None).unwrap();
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     let analysis = reg.for_id("cpp").unwrap().analyze_with_path(src, None);
 
     use crate::lsp::cursor_slot::DetectorArm;

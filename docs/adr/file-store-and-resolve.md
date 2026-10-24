@@ -1,6 +1,6 @@
-# ADR: One file store, role-tagged. One resolve(). One refs_to().
+# ADR: Role-tagged file homes. One resolve(). One refs_to().
 
-The LSP has one role-tagged store, not three parallel ones
+The LSP has role-tagged file homes behind one walk, not three parallel stores
 (`Backend.documents`, `Backend.workspace_index`, `ModuleIndex.cache`) with
 per-query tier walks that each independently pick which subset to consult.
 Parallel stores make every query a place where a tier can be forgotten — the
@@ -23,21 +23,22 @@ imports all survive the module boundary.
 When you need data from another file: get the file's `FileAnalysis` and
 read the field. No "summary type" detour.
 
-### Single store, role-tagged: `FileStore`
+### Two homes, role-tagged: `OpenDocs` and the index
 
 ```rust
 pub enum FileRole { Open, Workspace, Dependency, BuiltIn }
 ```
 
-`src/index/file_store.rs` holds every parsed file, in two role-keyed maps:
-`open: DashMap<Url, Document>` and `workspace: DashMap<PathBuf, Arc<FileAnalysis>>`.
-Role is implicit in which map holds the path — `FileRole` names the tags but
-isn't itself stored on an entry. A workspace file that becomes open is
-promoted by removing it from `workspace` and inserting it into `open` (and
-demoted the same way on close); readers hold Arcs and see consistent
-snapshots either way.
+`src/index/open_docs.rs` (`OpenDocs`) holds the open documents,
+`DashMap<Url, Document>`, each with its tree because cursor-time queries need
+it and because diagnostics publish to them. Every other file lives in the
+`ModuleIndex`: the project's own in `all_files` (the per-path front-door
+registry, WORKSPACE), `@INC` modules in the name-keyed cache (DEPENDENCY).
+Role is implicit in which home holds the path. An open document SHADOWS its
+index copy: walks claim open paths first and skip the index entry, and
+closing a document leaves the index copy (the on-disk text) answering.
 
-Rule: **don't add a fourth store**. New file sources (REPL buffers, virtual
+Rule: **don't add a third home**. New file sources (REPL buffers, virtual
 docs, whatever) become a new `FileRole`, not a new map.
 
 ### Role mask: explicit at every call site
@@ -63,7 +64,7 @@ have to write the mask down.
 ### Single `refs_to`, single resolution entry point
 
 `src/index/resolve/` is the only place tier-walking lives. LSP handlers do not
-iterate `FileStore` directly. Adding a new cross-file query = picking a
+iterate `OpenDocs` or the index directly. Adding a new cross-file query = picking a
 mask and calling `refs_to`.
 
 The walk: a mask-gated sweep over open/workspace/dependency files, each file
@@ -94,7 +95,7 @@ wrapper for tests probing identity directly.
 Workspace files aren't enriched at index time — only on-demand when a query
 needs cross-file types. The `SymbolTable` / `RefTable` enrichment baselines
 and `base_witness_count` mark the post-build seal so re-enrichment truncates
-back to baseline before re-deriving. `FileStore::enrich_open` re-derives on
+back to baseline before re-deriving. `OpenDocs::enrich_open` re-derives on
 every call — clone off the lock, re-run `enrich_imported_types_with_keys`,
 swap in behind an `Arc::ptr_eq` guard that only protects against clobbering
 a concurrent rebuild — idempotency comes from the baseline truncation, not

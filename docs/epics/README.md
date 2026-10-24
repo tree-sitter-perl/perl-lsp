@@ -151,7 +151,7 @@ residuals, or (d) explicitly out of scope. Nothing is unaccounted for.
 | Doc / item | Disposition |
 |---|---|
 | `prompt-scale-validation-hitlist.md` Tier 1 #3 (`references` at scale) | **Epic 15** Phase A — RETURNS at 138k but 265–368 s; slow, honest, bounded, not yet fast |
-| `prompt-scale-validation-hitlist.md` Tier 1 #5 residual + #6 | **Epic 15** Phase B — CLI one-shot is O(corpus); `LanguageScope` root-caused but unconfirmed at 138k |
+| `prompt-scale-validation-hitlist.md` Tier 1 #5 residual + #6 | **Epic 15** Phase B — CLI one-shot is O(corpus); pack share gone (one language per process) but unconfirmed at 138k |
 | `prompt-scale-validation-hitlist.md` §Validation ("OWED" rows) | **Epic 15** Phase D — cold cpan5k with every fix in, the differential sweep, the `PackBagCache` re-soak |
 | `prompt-scale-validation-hitlist.md` Tier 2/3 open rows (`query_rec` 512-depth, `cursor_slot.rs:205`, index-family merge) | **Epic 15** Phase C, or explicitly declined there |
 | `scaling-limits.md` §1 (FHEM `package main` monoculture) | **Epic 1** owns the mechanism (the 534-member candidate set IS the package-identity relation) and **Epic 15** owns the sweep-level dedup |
