@@ -48,28 +48,32 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     }
 }
 
-/// An imported name's row: the name in full (a group clause joins its
-/// prefix), spanning the name token. An aliased import also records what
-/// the alias stands for, as the parts the producer has in hand.
+/// An imported name's row, spanning the name token. Under a use-map it is
+/// a `UseRow` of the parts as written — the group clause's prefix and the
+/// name's own qualifier are its namespace, the name's last segment its
+/// leaf, the alias what it is bound under — so nothing downstream splits a
+/// joined name back apart. Elsewhere the name as written is the row.
 fn name_row(st: &mut ExtractState, e: &Event) {
     let names = &st.pack.names;
-    let prefix = st.imports.prefix_by_match.get(&e.match_id);
-    let (raw, parts) = match (names.sep(), prefix) {
-        (Some(sep), Some(prefix)) => {
-            let ns = prefix.trim_start_matches(sep);
-            (crate::model::conventions::join_qualified(ns, &e.text, sep), (ns, e.text.as_str()))
-        }
-        _ => {
-            let written = names.sep().map_or(e.text.as_str(), |sep| e.text.trim_start_matches(sep));
-            let (ns, leaf) = crate::model::conventions::split_qualified(written, names);
-            (e.text.clone(), (ns.unwrap_or(""), leaf))
-        }
+    let Some(sep) = names.use_map_sep() else {
+        st.out.import_sites.push((e.text.clone(), e.span()));
+        st.out.imports.push(e.text.clone());
+        return;
     };
-    if let Some(alias) = st.imports.alias_by_match.get(&e.match_id) {
-        st.out.use_aliases.push((alias.clone(), parts.0.to_string(), parts.1.to_string()));
-    }
-    st.out.import_sites.push((raw.clone(), e.span()));
-    st.out.imports.push(raw);
+    let (qualifier, leaf) =
+        crate::model::conventions::split_qualified(e.text.trim_start_matches(sep), names);
+    let prefix = st.imports.prefix_by_match.get(&e.match_id).map(|p| p.trim_start_matches(sep));
+    let namespace = match (prefix, qualifier) {
+        (Some(p), Some(q)) => crate::model::conventions::join_qualified(p, q, sep),
+        (p, q) => p.or(q).unwrap_or("").to_string(),
+    };
+    let row = crate::model::file_analysis::UseRow {
+        span: e.span(),
+        name: crate::model::file_analysis::QualifiedName { namespace, leaf: leaf.to_string() },
+        alias: st.imports.alias_by_match.get(&e.match_id).cloned(),
+    };
+    st.out.imports.push(row.name.identity(sep));
+    st.out.use_rows.push(row);
 }
 
 /// Import-call arguments → imports, the module as written.

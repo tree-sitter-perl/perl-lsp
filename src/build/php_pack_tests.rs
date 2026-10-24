@@ -116,19 +116,23 @@ use function App\\Helpers\\format;
 use function App\\Helpers\\{wrap};
 use const App\\Limits\\MAX;
 ");
-    let rows: Vec<&str> = fa.pack.include_directives.iter().map(|(_, raw)| raw.as_str()).collect();
+    let rows: Vec<(&str, &str, Option<&str>)> = fa
+        .pack
+        .use_rows
+        .iter()
+        .map(|r| (r.name.namespace.as_str(), r.name.leaf.as_str(), r.alias.as_deref()))
+        .collect();
     assert_eq!(
         rows,
         [
-            "Illuminate\\Support\\Collection",
-            "\\Vendor\\Pkg\\Speaker",
-            "App\\Contracts\\Listener",
-            "App\\Contracts\\Logger",
+            ("Illuminate\\Support", "Collection", None),
+            ("Vendor\\Pkg", "Speaker", Some("Talks")),
+            ("App\\Contracts", "Listener", None),
+            ("App\\Contracts", "Logger", Some("Log")),
         ]
     );
-    let aliases: Vec<(&str, &str, &str)> =
-        fa.pack.use_aliases.iter().map(|(a, ns, leaf)| (a.as_str(), ns.as_str(), leaf.as_str())).collect();
-    assert_eq!(aliases, [("Talks", "Vendor\\Pkg", "Speaker"), ("Log", "App\\Contracts", "Logger")]);
+    // a use-map language's rows are not import paths
+    assert!(fa.pack.include_directives.is_empty());
 
     // The model reads the same map the extractor resolved parents through.
     assert_eq!(fa.class_spelling_identity("Collection"), "Illuminate\\Support\\Collection");
