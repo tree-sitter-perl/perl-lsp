@@ -100,6 +100,9 @@ pub fn collect_diagnostics(
     options: DiagnosticOptions,
 ) -> Vec<Diagnostic> {
     crate::util::ghost_stats::count("collect_diagnostics");
+    // One publish asks the same cross-file questions from many refs; the
+    // session memo answers the repeats.
+    let _session = crate::model::witnesses::ResolutionSession::enter(Some(module_index));
     let mut diagnostics = Vec::new();
 
     // Plugin-emitted diagnostics (pattern lints) — already decided at
