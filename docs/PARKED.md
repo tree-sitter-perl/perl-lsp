@@ -376,7 +376,7 @@ marked otherwise; the drain re-derived each rationale against current code.
     its own doc on gather completion, so BOTH completion signals now fire a
     heal. Guard discipline held: pack URIs are snapshotted under a read guard
     that drops before any re-analyze; the perl branch re-derives enrichment
-    through `FileStore::enrich_open` (clone off the store lock, short swap)
+    through `OpenDocs::enrich_open` (clone off the store lock, short swap)
     and publishes after. Verified: `heal_open_docs` logs
     `cold-window heal: index landed for pack family` on op.c open, refs heal
     1→118 (`e2e/cold-window-heal-repro.sh` phase 1).
@@ -396,7 +396,7 @@ marked otherwise; the drain re-derived each rationale against current code.
   `AtomicBool` + `tokio::sync::Notify` fired by an `IndexDoneGuard` on EVERY exit
   of the indexing task (no-root / panic included), so a waiter is never stranded.
   **Guard discipline held:** the wait touches ONLY the family's atomic + Notify
-  — NO FileStore guard is held across the await (the handler peeks `language`
+  — NO OpenDocs guard is held across the await (the handler peeks `language`
   under a `get_open` that drops before the await, and snapshots `analysis` fresh
   after). Cap is `initializationOptions.coldWaitMs` (default 400ms, 0 opts out) —
   bounded, so it can never wedge; on timeout the handler degrades exactly as

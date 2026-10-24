@@ -104,7 +104,7 @@ weakens it.
 
 `enrich_imported_types_with_keys` begins by truncating symbols/refs/witnesses
 back to their sealed baselines so repeat enrichment is idempotent. On a fresh
-copy that truncate is a no-op; it earns its keep for `FileStore::enrich_open`,
+copy that truncate is a no-op; it earns its keep for `OpenDocs::enrich_open`,
 which re-enriches an already-enriched open document in place. It is procedural
 rather than structural, and a delta representation would make it structural —
 but it is not a cost worth chasing on its own: it is a length assignment.

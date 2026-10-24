@@ -81,8 +81,7 @@ impl PackBagCache {
         Self::new_labeled(cap_bytes, "pack-bag", loader)
     }
 
-    /// `new` with a report label naming the owning tier (hub vs per-lang
-    /// sub-index) so the ghost-stats output attributes traffic correctly.
+    /// `new` with a report label naming the owning language's store so the ghost-stats output attributes traffic correctly.
     pub fn new_labeled(
         cap_bytes: usize,
         label: &str,

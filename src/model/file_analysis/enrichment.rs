@@ -230,7 +230,7 @@ impl FileAnalysis {
 
 /// What a verb's consumers actually READ out of enrichment.
 ///
-/// `LanguageScope`'s shape, applied one tier down: the verb declares what it
+/// The verb declares what it
 /// needs and the machinery obeys, never asking which verb it serves. Soundness
 /// is by construction rather than by freshness — a product no consumer reads
 /// need not be produced, and that argument does not decay the way a cache's
