@@ -1597,30 +1597,19 @@ fn pack_fields_name_no_grammar_shapes() {
     const CURSOR: &str = "moves when the cursor reads the document: which nodes are \
          members, calls, bare variables, strings and comparisons is answered by the patterns \
          that capture them";
-    const DECLARATORS: &str = "moves when cpp declarators come from the document: \
-         one capture per declarator level";
-    const MEMBER_OPS: &str = "moves with cpp/python receivers and member operators: \
-         the operator written is a capture suffix";
-    const RECEIVERS: &str = "moves with cpp/python receivers: a receiver is a flag \
-         the document mints";
     let allow: &[(&str, &str, usize, &str)] = &[
         ("cmake", "trigger_chars", 2, TRIGGERS),
         ("cpp", "call_kinds", 1, CURSOR),
         ("cpp", "domain_compare_kinds", 1, CURSOR),
         ("cpp", "domain_compare_ops", 2, CURSOR),
         ("cpp", "member_kinds", 1, CURSOR),
-        ("cpp", "nested_peel.annot_kinds", 1, DECLARATORS),
-        ("cpp", "nested_peel.leaf_to_def", 2, DECLARATORS),
-        ("cpp", "nested_peel.wrappers", 2, DECLARATORS),
-        ("cpp", "op_map", 2, MEMBER_OPS),
-        ("cpp", "receiver_names", 1, RECEIVERS),
-        ("cpp", "recv_peel.wrappers", 2, CURSOR),
+        ("cpp", "recv_peel", 2, CURSOR),
         ("cpp", "simple_var_kinds", 1, CURSOR),
         ("cpp", "skip_kinds", 4, CURSOR),
         ("cpp", "trigger_chars", 3, TRIGGERS),
         ("python", "call_kinds", 1, CURSOR),
         ("python", "member_kinds", 1, CURSOR),
-        ("python", "recv_peel.wrappers", 1, CURSOR),
+        ("python", "recv_peel", 1, CURSOR),
         ("python", "simple_var_kinds", 1, CURSOR),
         ("python", "skip_kinds", 4, CURSOR),
         ("python", "trigger_chars", 1, TRIGGERS),
@@ -1640,6 +1629,46 @@ fn pack_fields_name_no_grammar_shapes() {
 /// are ratcheted by count instead. `trigger_chars` is not here: the LSP
 /// protocol's trigger characters are the client's vocabulary, not the
 /// language's.
+/// A comment or POD is a grammar extra and a named child, so a raw
+/// `named_child(i)` / `named_child_count()` read of a list, argument list
+/// or block counts it as an element (#268). Positional reads go through
+/// `NodeExt::elements` and `cst::nth_element`; the raw sites left are inside
+/// nodes that cannot hold an extra, or kind-gated. Shrink-only.
+#[test]
+fn positional_reads_skip_grammar_extras() {
+    let files = layer_files(&[Layer::Build, Layer::Cst, Layer::Lsp]);
+    let seen = count_lines(&files, &|l| {
+        l.contains(".named_child(") || l.contains(".named_child_count(") || l.contains(".named_children(")
+    });
+    let allow: &[(&str, usize, &str)] = &[
+        ("build/builder/arity.rs", 9, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/chain.rs", 4, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/emit.rs", 13, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/extract.rs", 7, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/fold.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/frameworks.rs", 5, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/narrowing.rs", 4, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/pipeline.rs", 3, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/plugin_emit.rs", 2, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/visit_bless.rs", 3, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/visit_calls.rs", 45, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/visit_decl.rs", 19, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/visit_method.rs", 4, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/visit_use.rs", 17, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/cpp_reparse/defs.rs", 7, "C++ reparse spike: legacy"),
+        ("build/cpp_reparse/synthetic.rs", 2, "C++ reparse spike: legacy"),
+        ("build/cpp_reparse/validate.rs", 2, "C++ reparse spike: legacy"),
+        ("build/cursor_sentinel.rs", 11, "pack member-access probes over the sentinel reparse: legacy"),
+        ("build/pod.rs", 21, "the POD grammar: legacy"),
+        ("build/query_extract/extract/members.rs", 1, "receiver peel, filtering `is_extra()` itself"),
+        ("cst.rs", 26, "the typed view: `elements()` itself, and reads inside nodes that hold no extra"),
+        ("lsp/cursor_context.rs", 8, "the Perl cursor detector (rule #6): legacy"),
+        ("lsp/symbols/signature.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),
+    ];
+    let drift = allowlist_drift("positional reads (NodeExt::elements)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 #[test]
 fn pack_string_tables_are_ratcheted() {
     let seen = pack_string_sites(&|value, kinds, fields| {
@@ -1650,8 +1679,6 @@ fn pack_string_tables_are_ratcheted() {
     let allow: &[(&str, &str, usize, &str)] = &[
         ("cpp", "entrypoint_symbols", 1, "moves when the heatmap's entry guard reads a \
           minted fact: an entry point is a fact the document mints, not a name list"),
-        ("python", "receiver_names", 2, "moves with cpp/python receivers: a receiver is \
-          a flag the document mints"),
     ];
     let drift = pack_allowlist_drift("rule #15 (vocabulary tables on the pack)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
@@ -1734,7 +1761,7 @@ fn pack_facts_fields_are_ratcheted() {
     let body = &text[start..];
     let end = body.find("\n}\n").expect("struct end");
     let fields = body[..end].lines().filter(|l| l.starts_with("    pub ")).count();
-    const RATCHET: usize = 22;
+    const RATCHET: usize = 21;
     assert!(
         fields <= RATCHET,
         "PackFacts grew to {fields} fields (ratchet {RATCHET}). A per-language constant goes on \

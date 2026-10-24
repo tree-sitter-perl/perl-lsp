@@ -235,14 +235,20 @@ impl ModuleIndex {
         {
             return true;
         }
-        let rows = self.with_rows_conn(|conn| {
-            crate::index::module_cache::sym_name_row_exists(
-                conn,
-                &cached.path.to_string_lossy(),
-                cached.analysis().names(),
-                name,
-            )
-        });
+        let rows = self.memo_row_probe(
+            &cached.path,
+            super::registration::RowProbe::SymName(name.to_string()),
+            || {
+                self.with_rows_conn(|conn| {
+                    crate::index::module_cache::sym_name_row_exists(
+                        conn,
+                        &cached.path.to_string_lossy(),
+                        cached.analysis().names(),
+                        name,
+                    )
+                })
+            },
+        );
         member_prefilter_may_declare(
             !cached.analysis().plugin.gated_emissions.is_empty(),
             rows,
@@ -733,15 +739,24 @@ impl CrossFileLookup for ModuleIndex {
         {
             return true;
         }
-        let rows = self.with_rows_conn(|conn| {
-            crate::index::module_cache::sym_member_row_exists(
-                conn,
-                &cached.path.to_string_lossy(),
-                cached.analysis().names(),
-                name,
-                class,
-            )
-        });
+        let rows = self.memo_row_probe(
+            &cached.path,
+            super::registration::RowProbe::Member {
+                name: name.to_string(),
+                class: class.to_string(),
+            },
+            || {
+                self.with_rows_conn(|conn| {
+                    crate::index::module_cache::sym_member_row_exists(
+                        conn,
+                        &cached.path.to_string_lossy(),
+                        cached.analysis().names(),
+                        name,
+                        class,
+                    )
+                })
+            },
+        );
         member_prefilter_may_declare(
             !cached.analysis().plugin.gated_emissions.is_empty(),
             rows,
@@ -801,12 +816,22 @@ impl CrossFileLookup for ModuleIndex {
         // Raw name only: the probes own the spelling policy (raw + match
         // key — `rows::probe_spelling`). `None` (file never shredded)
         // dominates `Some(false)` — fail open.
-        let rows = self.with_rows_conn(|conn| {
-            if attributed {
-                crate::index::module_cache::sym_member_row_exists(conn, &path, names, name, class)
-            } else {
-                crate::index::module_cache::name_row_exists(conn, &path, names, name)
+        let probe = if attributed {
+            super::registration::RowProbe::Member {
+                name: name.to_string(),
+                class: class.to_string(),
             }
+        } else {
+            super::registration::RowProbe::Name(name.to_string())
+        };
+        let rows = self.memo_row_probe(&cached.path, probe, || {
+            self.with_rows_conn(|conn| {
+                if attributed {
+                    crate::index::module_cache::sym_member_row_exists(conn, &path, names, name, class)
+                } else {
+                    crate::index::module_cache::name_row_exists(conn, &path, names, name)
+                }
+            })
         });
         member_prefilter_may_declare(
             !cached.analysis().plugin.gated_emissions.is_empty(),
@@ -1197,6 +1222,35 @@ impl ModuleIndex {
         }
     }
 
+    /// `run` (one rows probe on `path`), answered from the sweep-wide probe
+    /// store when a batch sweep opened one (`SweepProbeGuard`). Same
+    /// three-valued result as the probe itself.
+    pub(super) fn memo_row_probe(
+        &self,
+        path: &std::path::Path,
+        probe: super::registration::RowProbe,
+        run: impl FnOnce() -> Option<Option<bool>>,
+    ) -> Option<Option<bool>> {
+        // Stamp read BEFORE the probe: rows read under it are keyed under
+        // it, so a bump that lands mid-probe orphans the entry.
+        let stamp = self.core.shape_bumps.load(std::sync::atomic::Ordering::Relaxed);
+        let Some((memo, cap)) =
+            super::registration::sweep_probes_for(self.core.core_id, stamp)
+        else {
+            return run();
+        };
+        let key = (stamp, path.to_path_buf(), probe);
+        if let Some(hit) = memo.get(&key) {
+            crate::util::ghost_stats::count("sweepprobe.hit");
+            return Some(Some(hit));
+        }
+        crate::util::ghost_stats::count("sweepprobe.miss");
+        let rows = run();
+        if let Some(Some(verdict)) = rows {
+            memo.insert(key, verdict, cap);
+        }
+        rows
+    }
 }
 
 /// The member pre-filter's verdict, separated from the store and the copy so

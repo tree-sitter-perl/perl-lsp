@@ -308,7 +308,12 @@ impl<'a> Builder<'a> {
                     ),
                     source: crate::model::witnesses::WitnessSource::Builder("function_call".into()),
                     payload: crate::model::witnesses::WitnessPayload::Invoke {
-                        callee: crate::model::witnesses::Callee::Sub { package, name: leaf },
+                        callee: crate::model::witnesses::Callee::Function {
+                            name: leaf,
+                            local: None,
+                            member_of: None,
+                            package,
+                        },
                         receiver: None,
                         args: Some(ops),
                     },
@@ -547,14 +552,14 @@ impl<'a> Builder<'a> {
         if node.kind() != "array" {
             return None;
         }
-        let block = crate::cst::varname_child(node)?.named_child(0).filter(|b| b.kind() == "block")?;
+        let block = crate::cst::varname_child(node).and_then(|v| crate::cst::nth_element(v, 0)).filter(|b| b.kind() == "block")?;
         let stmt = crate::cst::NodeExt::named(&block).next()?;
-        let inner = if stmt.kind() == "expression_statement" { stmt.named_child(0)? } else { stmt };
+        let inner = if stmt.kind() == "expression_statement" { crate::cst::nth_element(stmt, 0)? } else { stmt };
         if inner.kind() != "hash_element_expression" || inner.child_by_field_name("hash").is_some() {
             return None;
         }
         let (key, dynamic) = self.extract_key_text(inner.child_by_field_name("key")?)?;
-        (!dynamic).then_some((inner.named_child(0)?, key))
+        (!dynamic).then_some((crate::cst::nth_element(inner, 0)?, key))
     }
 
     /// `push @{ $obj->{key} }, VALUES`: each value is an element of `key`'s
@@ -696,7 +701,7 @@ impl<'a> Builder<'a> {
     /// `push @EXPORT, @{"${m}::EXPORT"}` arg list: first arg an `@EXPORT`/
     /// `@EXPORT_OK` array, a later arg a symbolic deref of `${m}...::EXPORT[_OK]`.
     pub(super) fn push_args_reexport_export(&self, args: Node<'a>, loop_var_bare: &str) -> bool {
-        let first = args.named_child(0);
+        let first = crate::cst::nth_element(args, 0);
         let target_is_export = first
             .and_then(|f| if f.kind() == "array" { f.named_child(0) } else { None })
             .filter(|v| v.kind() == "varname")
@@ -706,14 +711,9 @@ impl<'a> Builder<'a> {
         if !target_is_export {
             return false;
         }
-        for i in 1..args.named_child_count() {
-            if let Some(arg) = args.named_child(i) {
-                if self.is_symbolic_export_deref(arg, loop_var_bare) {
-                    return true;
-                }
-            }
-        }
-        false
+        crate::cst::NodeExt::elements(&args)
+            .skip(1)
+            .any(|arg| self.is_symbolic_export_deref(arg, loop_var_bare))
     }
 
     /// True if `node` is `@{"${var}::EXPORT"}` / `@{"${var}::EXPORT_OK"}` — a
@@ -1254,7 +1254,7 @@ impl<'a> Builder<'a> {
     pub(super) fn detect_export_pair_call(&mut self, node: Node<'a>) {
         let Some(args) = node.child_by_field_name("arguments") else { return };
         // First named child is the export name (bareword or string).
-        let Some(first) = args.named_child(0) else { return };
+        let Some(first) = crate::cst::nth_element(args, 0) else { return };
         let names: Vec<String> = self.extract_node_string(first).into_iter().collect();
         self.record_runtime_exports(Self::keep_sub_export_names(names));
     }
@@ -1649,8 +1649,7 @@ impl<'a> Builder<'a> {
                 self.try_fold_interpolated_string(expr)
             }
             (Some(LiteralShape::Str), _) => self.extract_string_content(expr).into_iter().collect(),
-            (Some(LiteralShape::List), _) => expr
-                .named_child(0)
+            (Some(LiteralShape::List), _) => crate::cst::nth_element(expr, 0)
                 .map(|c| self.enumerate_string_values(c))
                 .unwrap_or_default(),
             (None, "binary_expression") => self.try_fold_string_concat(expr),
@@ -1667,8 +1666,7 @@ impl<'a> Builder<'a> {
     pub(super) fn try_fold_string_concat(&self, node: Node<'a>) -> Vec<String> {
         // Cartesian product across operands so a loop-var operand expands.
         let mut acc: Vec<String> = vec![String::new()];
-        for i in 0..node.named_child_count() {
-            let Some(child) = node.named_child(i) else { return vec![] };
+        for child in crate::cst::NodeExt::elements(&node) {
             let pieces: Vec<String> = match child.kind() {
                 "string_literal" => self.extract_string_content(child).into_iter().collect(),
                 "interpolated_string_literal" => self.try_fold_interpolated_string(child),

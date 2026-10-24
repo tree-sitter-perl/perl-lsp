@@ -1164,9 +1164,8 @@ impl UseMapPins {
 }
 
 /// How an origin's language scopes cross-file visibility — the routing
-/// fact `for_origin` consumes. Derived by the registry from the pack's
-/// own linkage declaration (`include_path_tokens`), never a
-/// language-name branch here or at a call site.
+/// fact `for_origin` consumes. Chosen at the call site from the registry,
+/// never a language-name branch here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackVisibility {
     /// Not a pack: the host's search-path derivation (`use lib` ∪ @INC).

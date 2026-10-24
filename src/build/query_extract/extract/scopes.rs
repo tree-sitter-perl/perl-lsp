@@ -29,19 +29,21 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         // instantiations, requires-expressions) — the kind
         // `scope_within_sub_body` reads to shield params/locals from the
         // outline and the class-content lane. Pack subs carry no name on
-        // the scope (the Symbol holds identity).
+        // the scope (the Symbol holds identity); the callable it is the body
+        // of is joined as its `owner` at assembly.
         Capture::Scope(scope_cap) => {
             let id = ScopeId(st.out.scopes.len() as u32);
             st.out.scopes.push(Scope {
                 id,
                 parent: Some(st.cur_scope),
                 kind: match scope_cap {
-                    ScopeCap::Sub => ScopeKind::Sub { name: String::new() },
+                    ScopeCap::Sub | ScopeCap::SubImplicitReceiver => ScopeKind::Sub { name: String::new() },
                     ScopeCap::Block => ScopeKind::Block,
                 },
                 span: e.span(),
                 package: st.package.clone(),
                 owner: None,
+                implicit_receiver: scope_cap == ScopeCap::SubImplicitReceiver,
             });
             st.scope_stack.push((e.end_byte, id));
             st.out.scope_count += 1;
@@ -77,7 +79,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         Capture::Parent => {
             // `@parent` (a base class) pairs with the `@def.class.name`
             // in the same match — record the inheritance edge.
-            if let Some(child) = st.defs.name_of(e.match_id, DefKind::Class) {
+            if let Some(child) = st.defs.name_of(e.match_id, DefCap::Class) {
                 // Shaped like the child's def name (cpp canonicalizes a
                 // template-spelled base) so the edge joins the identity
                 // the target class was filed under.

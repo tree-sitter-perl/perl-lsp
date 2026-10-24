@@ -89,9 +89,8 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
             // The returned expression's own general-rule witness (literal
             // / var-read / member / call — whichever matched this same
             // node) already carries its type; this just records the site
-            // (scope + span) so `emit_return_fuel` (language_driver.rs,
-            // phase 7) can chain the enclosing function's `Symbol` onto it
-            // when undeclared.
+            // (scope + span) so `into_file_analysis` can chain the enclosing
+            // function's `Symbol` onto it when undeclared.
             out.return_sites.push((cur_scope, e.span()));
         }
         Capture::Flow(FlowCap::Target) => {
@@ -158,22 +157,54 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
             ));
         }
         Capture::Expr(ExprCap::Call) => {
-            // A call's VALUE is the callee's own resolution — deferred to
-            // `into_file_analysis`, where the symbol table is known: a
-            // `Class` callee is a functional cast / constructor, a callable
-            // flows its return, an unresolvable name types nothing. Record
-            // (span, callee) and mark the span as a value-producing site so
-            // an enclosing `auto x = f(..)` flow edge targets it; the type
-            // witness is minted later once the callee resolves (no name-case
-            // guess). `docs/adr/macro-handling.md`.
-            let callee = events
-                .iter()
-                .find(|x| x.match_id == e.match_id && x.cap == Capture::Ref(RefKind::Call))
-                .map(|x| x.text.clone());
-            if let Some(callee) = callee {
+            // A call's VALUE is an `Invoke` of its callee, minted in
+            // `into_file_analysis`, where the symbol table resolves a free
+            // callee (`docs/adr/calls-are-invokes.md`). Record the site and
+            // mark its span as value-producing so an enclosing `auto x =
+            // f(..)` flow edge targets it. A member call (`recv.m(..)`)
+            // carries its receiver, the `@member.recv` of the same match.
+            let in_match = |cap: Capture| events.iter().find(|x| x.match_id == e.match_id && x.cap == cap);
+            let callee = in_match(Capture::Ref(RefCap::Call))
+                .map(|x| (x.text.clone(), None))
+                .or_else(|| {
+                    let name = in_match(Capture::Ref(RefCap::MemberCall))?;
+                    let recv = in_match(Capture::Member(MemberCap::Recv))?;
+                    Some(((pack.shape_name)(&name.text), Some(recv.span())))
+                });
+            if let Some((callee, receiver)) = callee {
                 let span = e.span();
                 f.lit_spans.push((e.start_byte, e.end_byte, span));
-                out.call_sites.push((span, callee));
+                let args = st.members.call_args(e.match_id);
+                out.call_sites.push(crate::build::query_extract::CallSite {
+                    span,
+                    callee,
+                    receiver,
+                    scope: cur_scope,
+                    args,
+                });
+            }
+        }
+        Capture::Expr(ExprCap::Member) => {
+            // A member read's value is the receiver's slot of that name:
+            // a `ValueHop` dispatched on the receiver's type at query time,
+            // so a chain (`a.b.c`) hops through each receiver's own `Expr`.
+            let in_match = |cap: Capture| events.iter().find(|x| x.match_id == e.match_id && x.cap == cap);
+            if let (Some(name), Some(recv)) =
+                (in_match(Capture::Ref(RefCap::MemberValue)), in_match(Capture::Member(MemberCap::Recv)))
+            {
+                let span = e.span();
+                f.lit_spans.push((e.start_byte, e.end_byte, span));
+                out.witnesses.push(skeleton_witness(
+                    WitnessAttachment::Expr(span),
+                    "skeleton-member",
+                    WitnessPayload::Projected {
+                        base: WitnessAttachment::Expr(recv.span()),
+                        step: crate::model::witnesses::ProjectionStep::ValueHop {
+                            member: (pack.shape_name)(&name.text),
+                        },
+                    },
+                    span,
+                ));
             }
         }
         // The assignment node anchors its pattern; its target and source
@@ -236,7 +267,7 @@ pub(super) fn finish(st: &mut ExtractState, events: &[Event]) {
     let field_scope_span: HashMap<(String, ScopeId), Span> = out
         .symbols
         .iter()
-        .filter(|s| s.kind == DefKind::Field)
+        .filter(|s| s.kind == DefCap::Field)
         .filter_map(|s| out.scopes.get(s.scope.0 as usize).map(|sc| ((s.name.clone(), s.scope), sc.span)))
         .collect();
     for mid in flow_mids {
@@ -254,7 +285,11 @@ pub(super) fn finish(st: &mut ExtractState, events: &[Event]) {
             // primitives stay leaves; `None` (auto/void) defers to the flow
             // edge as before. `TypeName` chases the typedef or falls back to
             // the same `ClassName`, so a plain struct/class is unchanged.
-            let payload = match (st.pack.annot_type)(annot) {
+            let annot_type = (st.pack.annot_type)(annot);
+            if let (Some(t), true) = (&annot_type, field_scope_span.contains_key(&(name.clone(), *scope))) {
+                out.field_types.push((name.clone(), *scope, t.clone()));
+            }
+            let payload = match annot_type {
                 Some(InferredType::ClassName(cn)) => Some(WitnessPayload::Edge(WitnessAttachment::TypeName(cn))),
                 Some(t) => Some(WitnessPayload::InferredType(t)),
                 None => None,

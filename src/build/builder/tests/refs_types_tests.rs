@@ -1012,6 +1012,83 @@ fn test_return_type_undef_arm_before_explicit_return_still_undef() {
     );
 }
 
+/// `package A` with a constructor, then `sub f` whose body is `body`.
+fn tail_return(body: &str) -> Option<InferredType> {
+    let src = format!("package A;\nsub new {{ bless {{}}, shift }}\nsub f {{\n    my $self = shift;\n    {body}\n}}\n");
+    build_fa(&src).sub_return_type_at_arity("f", None)
+}
+
+#[test]
+fn test_return_type_trailing_if_is_cond_and_block() {
+    // perl compiles `if (C) {B}` to `C && B` (op.c `newCONDOP`): the sub
+    // yields B's tail, or the falsy C. The tail must not fall back to the
+    // statement before it (`my $self = shift`, the invocant).
+    let a = || InferredType::ClassName("A".into());
+    let opt_a = || Some(InferredType::Optional(Box::new(a())));
+    assert_eq!(tail_return("if ($self->{x}) { A->new }"), opt_a());
+    assert_eq!(tail_return("if ($self->{x}) { A->new } elsif ($self->{y}) { A->new }"), opt_a());
+    assert_eq!(tail_return("if ($self->{x}) {} else { A->new }"), opt_a());
+}
+
+#[test]
+fn test_return_type_trailing_if_else_is_its_branches() {
+    // `if (C) {B} else {E}` is `C ? B : E`: no condition arm, and nested
+    // chains contribute their own branch tails.
+    let a = Some(InferredType::ClassName("A".into()));
+    assert_eq!(tail_return("if ($self->{x}) { A->new } else { A->new }"), a);
+    assert_eq!(
+        tail_return("if ($self->{x}) { if ($self->{y}) { A->new } else { A->new } } else { A->new }"),
+        a,
+    );
+    assert_eq!(tail_return("if ($self->{x}) { A->new } else { return; }"), Some(InferredType::Optional(Box::new(InferredType::ClassName("A".into())))));
+}
+
+#[test]
+fn test_return_type_trailing_unless_yields_its_condition() {
+    // `unless (C) {B}` is `C || B`: falling past it yields C's own (true)
+    // value, not undef.
+    assert_eq!(
+        tail_return("my $o = A->new;\n    unless ($o) { A->new }"),
+        Some(InferredType::ClassName("A".into())),
+    );
+}
+
+#[test]
+fn test_return_type_trailing_loop_is_undef() {
+    // perlsub: a trailing loop's value is unspecified.
+    for tail in ["for my $k (1, 2) { A->new }", "while ($self->{x}) { A->new }"] {
+        assert_eq!(tail_return(tail), Some(InferredType::Undef), "{tail}");
+    }
+}
+
+#[test]
+fn test_return_type_trailing_bare_block_is_its_tail() {
+    assert_eq!(tail_return("{ A->new }"), Some(InferredType::ClassName("A".into())));
+}
+
+#[test]
+fn test_anon_sub_return_reads_the_same_tail_arms() {
+    // A coderef's return is the anon sub's own return arms — a trailing
+    // `if` is `C && B`, and a trailing comment is not the tail.
+    let fa = build_fa(
+        "package A;\nsub new { bless {}, shift }\nmy $cb = sub {\n    if ($_[0]) { A->new }\n    # done\n};\nmy $r = $cb->(1);\nprint $r;\n",
+    );
+    assert_eq!(
+        fa.inferred_type_via_bag("$r", Point::new(7, 6)),
+        Some(InferredType::Optional(Box::new(InferredType::ClassName("A".into())))),
+    );
+}
+
+#[test]
+fn test_return_type_tail_skips_trailing_comment() {
+    // A comment after the last statement is not the tail.
+    let fa = build_fa("package A;\nsub new { bless {}, shift }\nsub make {\n    A->new;\n    # done\n}");
+    assert_eq!(
+        fa.sub_return_type_at_arity("make", None),
+        Some(InferredType::ClassName("A".into())),
+    );
+}
+
 #[test]
 fn test_return_type_empty_list_return_optional() {
     // `return ()` beside a typed arm lifts to Optional<T>, same as bare

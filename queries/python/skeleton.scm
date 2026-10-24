@@ -28,6 +28,11 @@
 (parameters
   (identifier) @def.var.name @def.var)
 
+; a method's leading `self` / `cls` is its receiver: the object, not a member
+; of the class it is declared in.
+((parameters . (identifier) @param.receiver)
+  (#match? @param.receiver "^(self|cls)$"))
+
 (import_statement
   name: (dotted_name) @import.name) @import
 (import_from_statement
@@ -56,10 +61,31 @@
 (for_statement
   left: (identifier) @flow.rebind)
 
+; ---- calls: a call's value is an Invoke of its callee on its arguments. The
+; argument list rides the callee's match, and a starred argument spreads. A
+; generator argument (`f(x for x in xs)`) is one value, not a list. ----
 (call
-  function: (identifier) @ref.call) @expr.call
+  function: (identifier) @ref.call
+  arguments: [(argument_list ((_) @arity.arg ","?)*) @arity.args (generator_expression)]) @expr.call
+(argument_list [(list_splat) (dictionary_splat)] @arity.spread)
 (call
   function: (attribute attribute: (identifier) @ref.method))
+
+; ---- member access (`recv.attr`, and `recv.m(...)`): the receiver subtree is
+; the invocant, typed at query time through expr_type_at_span — the same
+; MethodCall ref core resolves for Perl `$obj->m`. The document states the
+; kind: an attribute that is a call's callee is a member call, any other is a
+; value read. The read's value is the receiver's slot (@expr.member); the
+; call's is an Invoke of the member on the receiver (@expr.call). ----
+((attribute
+  object: (_) @member.recv
+  attribute: (identifier) @ref.member.value) @expr.member
+ (#not-has-parent? @expr.member call))
+(call
+  function: (attribute
+    object: (_) @member.recv
+    attribute: (identifier) @ref.member.call)
+  arguments: [(argument_list ((_) @arity.arg ","?)*) @arity.args (generator_expression)]) @expr.call
 (identifier) @expr.read.var
 
 (string) @expr.lit.string

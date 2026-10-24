@@ -1279,6 +1279,10 @@ fn for_each_tree_diagnostic(
     // are the n² a package-main corpus produces. Shared across the rayon
     // workers; stamp-cleared on any index shape change.
     let _answers = module_index::SweepAnswerGuard::open();
+    // The sweep-wide row-probe store: the member and consult prefilters ask
+    // the same (file, name, class) probes from every file, and each one
+    // takes SQLite's process-global mutexes (#195).
+    let _probes = module_index::SweepProbeGuard::open();
     // The sweep-wide shared PROVIDER cache: each provider decodes once per
     // sweep and is resident once, replacing up to worker-count OVERLAPPING
     // per-file memos (measured: 13,456 rehydrates for ~500 distinct

@@ -138,6 +138,7 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
             span: node_to_span(tree.root_node()),
             package: Some("main".to_string()),
             owner: None,
+            implicit_receiver: false,
         }],
         plugin: crate::model::file_analysis::PluginFacts {
             diagnostics: vec![PluginDiagnostic {
@@ -296,8 +297,7 @@ fn build_once(
         imports: Vec::new(),
         return_infos: Vec::new(),
         pending_array_pushes: Vec::new(),
-        last_expr_span: std::collections::HashMap::new(),
-        last_stmt_exit: std::collections::HashMap::new(),
+        sub_tail: std::collections::HashMap::new(),
         slot_write_rhs_span: std::collections::HashMap::new(),
         call_bindings: Vec::new(),
         method_call_bindings: Vec::new(),
@@ -323,8 +323,6 @@ fn build_once(
         type_provenance: std::collections::HashMap::new(),
         bag: crate::model::witnesses::WitnessBag::new(),
         unresolved_expr_nodes: Vec::new(),
-        symbol_table_final: false,
-        pending_call_operands: std::collections::HashMap::new(),
         package_framework: std::collections::HashMap::new(),
         blessing_packages: std::collections::HashSet::new(),
         scope_stack: Vec::new(),
@@ -567,10 +565,10 @@ fn build_once(
     // `function_call_expression` / `bareword` / `scoped_identifier` did
     // a `self.symbols.iter().find` against a partial symbol table.
     // Forward-defined callees (Perl's `sub a { b() } sub b {…}` pattern,
-    // canonically Carp's `longmess` → `longmess_heavy`) silently
-    // produced no witness. The walk queued each missing lookup; resolve
-    // them now against the final symbol table and push the
-    // `Expr(span) → Edge(Symbol(sid))` witness the walk would have.
+    // canonically Carp's `longmess` → `longmess_heavy`) produced no
+    // witness. The walk queued each missing lookup; resolve them now
+    // against the final symbol table, and leave what is still unresolved
+    // to the cross-file lookup (`Callee::Function { local: None }`).
     bphase!("resolve_fwd_expr_witnesses", b.resolve_forward_expr_witnesses());
 
     // Worklist driver: one fixed-point loop over chain typing +
@@ -934,27 +932,19 @@ impl<'a> Builder<'a> {
         // FALLTHROUGH tail: Perl yields the last statement's value when
         // control reaches the end. That is an arm like any other, so it is
         // emitted as one here rather than through a second mechanism.
-        let mut tail_arms: Vec<(SymbolId, Span, TailExit)> = Vec::new();
+        let mut tail_arms: Vec<(SymbolId, TailArm)> = Vec::new();
         for scope in &self.scopes {
             if !matches!(scope.kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. }) {
                 continue;
             }
-            // A `return` tail means control cannot fall off the end: no tail
-            // arm, and the return already contributed its own.
-            let exit = self.last_stmt_exit.get(&scope.id).copied().unwrap_or(TailExit::Value);
-            if exit == TailExit::Return {
-                continue;
-            }
-            let Some(span) = self.last_expr_span.get(&scope.id).copied() else { continue };
+            let Some(arms) = self.sub_tail.get(&scope.id) else { continue };
             let Some(sym_id) = self.find_sub_symbol_for_scope(scope.id) else { continue };
-            tail_arms.push((sym_id, span, exit));
+            tail_arms.extend(arms.iter().map(|&arm| (sym_id, arm)));
         }
-        for (sym_id, span, exit) in tail_arms {
-            match exit {
-                TailExit::Undef(spelling) => {
-                    self.push_return_undef_arm(sym_id, span, spelling)
-                }
-                _ => self.push_return_value_arm(sym_id, span),
+        for (sym_id, arm) in tail_arms {
+            match arm {
+                TailArm::Undef(span, spelling) => self.push_return_undef_arm(sym_id, span, spelling),
+                TailArm::Value(span) => self.push_return_value_arm(sym_id, span),
             }
         }
     }

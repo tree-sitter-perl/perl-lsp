@@ -89,6 +89,7 @@ pub(super) fn import_candidates(
                     .whole_present(cached)
                     .sub_info_view(name)
                     .and_then(|s| s.return_type(None))
+                    .filter(crate::model::file_analysis::InferredType::is_known)
                     .map(|rt| format!("→ {} ", format_inferred_type(&rt)))
                     .unwrap_or_default();
 
@@ -192,7 +193,7 @@ pub(super) fn completion_detail_for_import(
     use crate::model::file_analysis::format_inferred_type;
     if let Some(whole) = whole {
         if let Some(sub_info) = whole.sub_info_view(name) {
-            if let Some(rt) = sub_info.return_type(None) {
+            if let Some(rt) = sub_info.return_type(None).filter(crate::model::file_analysis::InferredType::is_known) {
                 return format!("→ {} ({})", format_inferred_type(&rt), module_name);
             }
         }

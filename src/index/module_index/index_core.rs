@@ -108,6 +108,34 @@ pub(crate) struct IndexCore {
     /// The world digest and every held file's source stamp, rebuilt when the
     /// counters that move with either do.
     pub(crate) world_digest: Mutex<Option<Arc<WorldDigest>>>,
+    /// Process-unique identity, for sweep stores that key per index: an
+    /// `Arc` address can be reused by a later core and inherit its entries.
+    pub(crate) core_id: u64,
+    /// The flush clock, and the per-file marks compared against it.
+    ///
+    /// The re-stamp gate's whole mechanism: a flush bumps `flush_epoch` once,
+    /// then records that epoch for every consumer it enqueued
+    /// (`provider_diff_gen`). A file whose own `stamped_at` is at or past its
+    /// mark has had no provider move since it last stamped, so its re-stamp is
+    /// re-deriving what it already froze.
+    ///
+    /// Sessional on purpose: `FileAnalysis::stamped_at` is `#[serde(skip)]`,
+    /// so both halves die with the process and a fresh one fails open. A
+    /// persisted mark table paired with sessional stamps would be sound; a
+    /// persisted STAMP paired with sessional marks would silently skip a
+    /// re-stamp that was owed, so neither half may outlive the other.
+    ///
+    /// **A dedicated clock, and not the conclusion store's generation** — the
+    /// obvious-looking consolidation, ruled out on purpose. A comparison clock
+    /// must share its lifetime with the operands it orders, and these operands
+    /// are sessional. A persistent clock over sessional operands fails the
+    /// mirror of the half-persistence case above: a restart resets stamps and
+    /// marks while the store generation carries on, so any path that ever
+    /// seeded `stamped_at` from a persisted value would compare a new-session
+    /// stamp against an old-session clock. This counter cannot express that
+    /// bug. If the marks are ever persisted, all three move together.
+    pub(crate) flush_epoch: std::sync::atomic::AtomicU64,
+    pub(crate) provider_diff_gen: DashMap<std::path::PathBuf, u64>,
     /// The witness seams' fallback-on-miss enriched retries only pay off
     /// when the process lives long enough to amortize the overlay (each
     /// miss is a whole-analysis deep copy + enrich). Off by default; the
@@ -184,6 +212,12 @@ impl IndexCore {
             world_digest: Mutex::new(None),
             world_bumps: std::sync::atomic::AtomicU64::new(0),
             caller_slices: CallerSliceCache::default(),
+            core_id: {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            },
+            flush_epoch: std::sync::atomic::AtomicU64::new(0),
+            provider_diff_gen: DashMap::new(),
             long_lived: std::sync::atomic::AtomicBool::new(false),
             bag_cache: Arc::new(std::sync::RwLock::new(None)),
             conclusion_cache: Arc::new(std::sync::RwLock::new(None)),

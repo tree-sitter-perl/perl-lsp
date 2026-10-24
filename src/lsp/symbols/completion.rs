@@ -480,7 +480,12 @@ fn completion_items_native(
 
     candidates.extend::<Vec<CompletionCandidate>>(match slot {
         Slot::Member { ref receiver, .. } => {
-            if let Some(ref ty) = receiver.receiver_type {
+            // In-scope lexical methods ride every `->` completion with their
+            // mandatory `&` prefix — they're excluded from the class-keyed
+            // walks below, so this is their one entry (empty for pack
+            // languages, which mint no lexical subs).
+            let mut member_cands = analysis.complete_lexical_methods_at(point);
+            member_cands.extend(if let Some(ref ty) = receiver.receiver_type {
                 // `class_name_lenient` peels `Optional<Foo>` to `Foo` so an
                 // unguarded optional receiver still offers its methods — the
                 // same lenient receiver projection goto/hover/refs now use.
@@ -493,7 +498,8 @@ fn completion_items_native(
             } else {
                 let invocant_text = receiver.receiver_text.as_deref().unwrap_or("");
                 analysis.complete_methods(invocant_text, point, Some(module_index))
-            }
+            });
+            member_cands
         }
         Slot::Key { ref owner } => {
             // Keys already written in the enclosing hash literal —
@@ -556,7 +562,7 @@ fn completion_items_native(
             } else {
                 cs.complete_qualified_path(module_index, prefix)
             };
-            let mut items: Vec<CompletionItem> =
+            let items: Vec<CompletionItem> =
                 candidates.into_iter().map(candidate_to_completion_item).collect();
             // The candidate sources already narrowed by the qualifier
             // prefix, so the cap's own prefix pass has nothing to add.
@@ -803,7 +809,7 @@ pub(super) fn format_imported_signature(name: &str, sub_info: &SubInfo<'_>) -> S
         .collect::<Vec<_>>()
         .join(", ");
     let mut sig = format!("sub {}({})", name, params_str);
-    if let Some(rt) = sub_info.return_type(None) {
+    if let Some(rt) = sub_info.return_type(None).filter(InferredType::is_known) {
         sig.push_str(&format!(" → {}", format_inferred_type(&rt)));
     }
     sig

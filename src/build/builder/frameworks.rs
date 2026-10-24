@@ -2,7 +2,7 @@
 //! DBIC components, Sub::Exporter config, and isa-constraint mapping.
 
 use super::*;
-use crate::cst::LiteralShape;
+use crate::cst::{LiteralShape, NodeExt};
 
 impl<'a> Builder<'a> {
     /// Synthesize accessor methods from `has` calls in Moo/Moose/Mojo::Base classes.
@@ -236,7 +236,7 @@ impl<'a> Builder<'a> {
 
         // The arguments node might be a list_expression or a single node
         let args_children: Vec<Node> = if crate::cst::is_list_literal(args) {
-            (0..args.child_count()).filter_map(|i| args.child(i)).collect()
+            crate::cst::children_without_trivia(args)
         } else {
             // Single argument (e.g., has 'name')
             vec![args]
@@ -666,9 +666,7 @@ impl<'a> Builder<'a> {
             return None;
         }
         let args_children: Vec<Node<'a>> = if crate::cst::is_list_literal(args_node) {
-            (0..args_node.child_count())
-                .filter_map(|i| args_node.child(i))
-                .collect()
+            crate::cst::children_without_trivia(args_node)
         } else {
             vec![args_node]
         };
@@ -690,7 +688,11 @@ impl<'a> Builder<'a> {
     /// `has 'n', k => v` (flat siblings). Owned Vec so the caller can run
     /// `&self` classifiers over each pair without a borrow tangle.
     pub(super) fn has_option_pair_nodes(&self, rest: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a>)> {
-        let named: Vec<Node<'a>> = rest.iter().copied().filter(|n| n.is_named()).collect();
+        let named: Vec<Node<'a>> = rest
+            .iter()
+            .copied()
+            .filter(|n| n.is_named() && !crate::cst::is_trivia(*n))
+            .collect();
         if let [only] = named.as_slice() {
             if crate::cst::is_list_literal(*only) {
                 return crate::cst::pair_nodes(*only);
@@ -1038,9 +1040,7 @@ impl<'a> Builder<'a> {
     /// pairs by keeping the key and skipping the value, and bare `qw()` /
     /// string / bareword entries as standalone names.
     pub(super) fn collect_sub_exporter_list_members(&self, list: Node<'a>, out: &mut Vec<(String, Span)>) {
-        let children: Vec<Node<'a>> = (0..list.child_count())
-            .filter_map(|i| list.child(i))
-            .collect();
+        let children = crate::cst::children_without_trivia(list);
         let mut i = 0;
         while i < children.len() {
             let c = children[i];
@@ -1137,8 +1137,7 @@ impl<'a> Builder<'a> {
                 // The config hashref is the first positional; fold it the same
                 // as the `-setup` use form so exports + groups + member refs
                 // ride one path.
-                let config = args
-                    .named_child(0)
+                let config = crate::cst::nth_element(args, 0)
                     .filter(|c| c.kind() == "anonymous_hash_expression")
                     .unwrap_or(args);
                 self.fold_sub_exporter_config(config);
@@ -1149,7 +1148,7 @@ impl<'a> Builder<'a> {
                 // `add_type(Foo => ...)` / `add_type('Foo')` also seen.
                 if let Some(name_node) = self.value_node_after_key(args, "name") {
                     self.record_runtime_exports(self.extract_string_names(name_node));
-                } else if let Some(first) = args.named_child(0) {
+                } else if let Some(first) = crate::cst::nth_element(args, 0) {
                     // `add_type Foo, ...` — first positional is the name.
                     if matches!(first.kind(), "string_literal" | "interpolated_string_literal" | "bareword" | "autoquoted_bareword") {
                         self.record_runtime_exports(self.extract_string_names(first));
@@ -1182,14 +1181,9 @@ pub(super) fn walk_constraint_params<'a>(
 fn constraint_param_nodes<'a>(call_node: Node<'a>) -> Vec<Node<'a>> {
     let mut out = Vec::new();
     let Some(args) = call_node.child_by_field_name("arguments") else { return out };
-    for i in 0..args.named_child_count() {
-        let Some(child) = args.named_child(i) else { continue };
+    for child in args.elements() {
         if child.kind() == "anonymous_array_expression" {
-            for j in 0..child.named_child_count() {
-                if let Some(el) = child.named_child(j) {
-                    out.push(el);
-                }
-            }
+            out.extend(child.elements());
         } else {
             out.push(child);
         }

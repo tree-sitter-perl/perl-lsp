@@ -13,8 +13,11 @@
 ; capture the string CONTENT for quoted paths so the cache key is the
 ; clean relative path ("util.h", not "\"util.h\""); system <...>
 ; headers have no content node, so keep the whole token. ----
-(preproc_include path: (string_literal (string_content) @import.name))
-(preproc_include path: (system_lib_string) @import.name)
+; `#include` splices a PATH and binds no name, so the capture says so; the
+; path-shaped lanes (goto-def on a header, "who includes this") are on for a
+; language whose document mints it.
+(preproc_include path: (string_literal (string_content) @import.path))
+(preproc_include path: (system_lib_string) @import.path)
 
 ; ---- #define macros become SYMBOLS (completion / goto-def / outline).
 ; For a macro-heavy API (perl5: Newx/SvPV; embedded HALs) the macros ARE
@@ -359,6 +362,27 @@
 ; The `qualifier` walk, rooted at each `@qualifier`: a templated owner to the
 ; base name it files under.
 (template_type name: (_) @link.base) @link.from.qualifier
+; The `deref` walk, rooted at each `@nested.target`: a pointer or reference
+; declarator links to its operand, and the marks say what each level is. A
+; level contributes a pointer or reference step, a cv-qualifier among its
+; children rides onto that step, and the leaf's suffix names the def it mints,
+; so a pointer member outlines as a field and a pointer local as a local
+; (`Box** a`, `char* const& b`, at any depth).
+(pointer_declarator declarator: (_) @link.inner) @link.from.deref
+(reference_declarator . (_) @link.inner) @link.from.deref
+(pointer_declarator) @deref.pointer
+(reference_declarator) @deref.ref
+(pointer_declarator (type_qualifier) @deref.annot)
+(pointer_declarator declarator: (identifier) @deref.leaf.local)
+(pointer_declarator declarator: (field_identifier) @deref.leaf.field)
+(reference_declarator . (identifier) @deref.leaf.local)
+(reference_declarator . (field_identifier) @deref.leaf.field)
+; Grouping parens and a function pointer's function declarator add no step:
+; `int (*read)(char *)` peels to one pointer level over the field `read`.
+(function_declarator declarator: (_) @link.inner) @link.from.deref
+(parenthesized_declarator . (_) @link.inner) @link.from.deref
+(function_declarator) @deref.pass
+(parenthesized_declarator) @deref.pass
 (function_definition
   declarator: (pointer_declarator
     declarator: (function_declarator
@@ -386,8 +410,10 @@
 ; `@scope.sub` (not plain `@scope`): a function's params/locals are
 ; sub-body content — `scope_within_sub_body` shields them from the outline
 ; and keeps them out of the class-content lane a sticky class package
-; would otherwise drag them into.
-(function_definition) @scope.sub
+; would otherwise drag them into. `.implicit_receiver`: a body elides the
+; member receiver for reads AND sibling calls (`return inner_;`, `grow()`),
+; since C++ name lookup finds the member before any free function.
+(function_definition) @scope.sub.implicit_receiver
 
 ; ---- top-level / namespaced function prototypes (the bulk of any
 ; header file) — a `declaration`, not a `function_definition`. A
@@ -505,9 +531,9 @@
 ; (`T& operator[](...) { ... }`, `T* operator->() { ... }`): the return
 ; wrapper nests the function_declarator, exactly like the field-decl operator
 ; forms above. Without these the inline body's method symbol is never minted,
-; so the implicit-`this` sibling-pin's enclosing-class lookup (which joins a
-; body scope to its owning method SYMBOL) dead-ends and a bare sibling call
-; inside the operator body resolves nowhere.
+; so the implicit receiver's enclosing class (the body scope's owning method
+; SYMBOL) is missing and a bare sibling call inside the operator body
+; resolves nowhere.
 (function_definition
   type: (_) @rettype
   declarator: (reference_declarator
@@ -625,11 +651,19 @@
   type: (_) @type.annot
   declarator: (field_identifier) @flow.target)
 ; pointer / reference data members of any depth (`Box* inner;`, `Node** next;`).
-; The leaf is a field_identifier, so core mints a @def.var (a class member),
-; not a @def.local — `peel_nested`'s leaf→def-capture map handles that.
+; The leaf is a field_identifier, so the `deref` walk's leaf mark mints a
+; @def.field (a class member), not a @def.local.
 (field_declaration
   type: (_) @type.annot
   declarator: [(pointer_declarator) (reference_declarator)] @nested.target)
+; a function-POINTER data member (`int (*read)(char *);`): a stored slot
+; whose value is called. The parenthesized declarator is what tells it from
+; a method prototype (`int read();`). `ops->read(buf)` reaches the slot
+; because a class keeps one member namespace.
+(field_declaration
+  type: (_) @type.annot
+  declarator: (function_declarator
+    declarator: (parenthesized_declarator)) @nested.target)
 
 ; ---- C goto labels: `done:` is a nav target, `goto done;` jumps to it.
 ; The def is an unpackaged Variable symbol (outline-hidden, like a local);
@@ -637,33 +671,53 @@
 (labeled_statement label: (statement_identifier) @def.label)
 (goto_statement label: (statement_identifier) @ref.label)
 
-; ---- calls ----
-(call_expression function: (identifier) @ref.call) @expr.call
+; ---- calls. Each call pattern captures its argument list (@arity.args) and
+; each argument in it (@arity.arg) in the same match, so the call's Invoke
+; carries its arguments and the callee ref its written arg count — overload
+; arity ranking fuel (structural counts only; "which overload fits" is
+; downstream interpretation, `ParamArity::fit`). A def's parameter list is
+; joined to the def by span containment. ----
+(call_expression
+  function: (identifier) @ref.call
+  arguments: (argument_list ((_) @arity.arg ","?)*) @arity.args) @expr.call
 
 ; qualified calls (`fmt::format_to(...)`, `detail::vformat_to(...)`,
 ; `Widget::create(...)`): the whole path is captured; extraction narrows the
 ; ref span to the bare name token and carries the qualifier as
 ; `resolved_package` — the namespace-participation half of gr identity.
-(call_expression function: (qualified_identifier) @ref.qcall) @expr.call
+(call_expression
+  function: (qualified_identifier) @ref.qcall
+  arguments: (argument_list ((_) @arity.arg ","?)*) @arity.args) @expr.call
 
-; ---- overload arity ranking fuel (structural counts only; "which overload
-; fits" is downstream interpretation, `ParamArity::fit`). An arg list is
-; joined to its callee ref by adjacency (`ref.end == arglist.start`); a
-; def's parameter list is joined to the def by span containment. ----
-(argument_list) @arity.args
 (function_declarator parameters: (parameter_list) @arity.sig)
+; a pack expansion (`f(args...)`) passes any number of values.
+(argument_list (parameter_pack_expansion) @arity.spread)
 
-; ---- member access (`recv.field` / `recv->field`, AND `recv.method(...)`):
-; the field is the "method", the receiver subtree the invocant. Mints the same
-; MethodCall ref core resolves for Perl `$obj->m` — goto-def / hover /
-; references / rename all flow from it. @member.recv carries the receiver
-; (span+text) for query-time typing via expr_type_at_span. The trailing `()`
-; of a method call doesn't change the reference, so calls + plain field access
-; share one pattern.
-(field_expression
+; ---- member access (`recv.field` / `recv->field`): the receiver subtree is
+; the invocant, carried (span+text) for query-time typing via
+; expr_type_at_span. A read mints FieldAccess; a called member
+; (`recv.f(...)`) mints the same MethodCall ref core resolves for Perl
+; `$obj->m`, so goto-def / hover / references / rename flow from it. A
+; call_expression's only children are its callee and its argument_list, so a
+; field_expression whose parent is a call is the callee. The read's value is
+; the receiver's slot (@expr.member); the call's is an Invoke of the member
+; on the receiver (@expr.call).
+((field_expression
   argument: (_) @member.recv
   operator: _ @member.op
-  field: (field_identifier) @ref.member)
+  field: (field_identifier) @ref.member.value) @expr.member
+ (#not-has-parent? @expr.member call_expression))
+(call_expression
+  function: (field_expression
+    argument: (_) @member.recv
+    operator: _ @member.op
+    field: (field_identifier) @ref.member.call)
+  arguments: (argument_list ((_) @arity.arg ","?)*) @arity.args) @expr.call
+
+; which operator a member access wrote, so op-DX can name the other one. A
+; token no pattern names here claims no operator.
+(field_expression operator: "->" @member.op.arrow)
+(field_expression operator: "." @member.op.dot)
 
 ; ---- domain typing (int-used-as-enum): a struct-field SLOT compared or
 ; assigned against ANY value. `o->op_type == OP_CONST` / `o->op_type =
@@ -730,7 +784,7 @@
 
 ; pointer / reference locals of ANY depth, bare and initialized — `T* p;`,
 ; `T** pp;`, `T& r = x;`, `if (Derived* d = dynamic_cast<...>(b))`. The
-; @nested.target chain is unravelled by core (see params). The init form also
+; @nested.target chain is unravelled by the `deref` walk (see params). The init form also
 ; carries @flow.source so the initializer's type flows to the leaf.
 (declaration
   (storage_class_specifier)? @sym.attr
@@ -749,7 +803,7 @@
   type: (_) @type.annot
   declarator: (identifier) @flow.target @def.local)
 ; pointer / reference parameters of ANY depth — `Handle* h`, `OP** op_p`,
-; `char**** x`, `Box*& rp`. One @nested.target capture; core (`peel_nested`)
+; `char**** x`, `Box*& rp`. One @nested.target capture; the `deref` walk
 ; unravels the declarator chain to the leaf identifier + the deref stack
 ; (arbitrary depth, cv-qualifiers per level), emitting the leaf as a synthetic
 ; @flow.target/@def.local. The plain-value form above has no chain.
@@ -794,6 +848,16 @@
 ; inflowing type yet) so the narrowing cutoff ends a region at the loop.
 (for_range_loop
   declarator: (identifier) @flow.rebind)
+
+; the std container / optional / smart-pointer resets put a moved-from object
+; back into a known state, so the receiver rebinds at the call: a use after
+; `x.clear()` is NOT a use-after-move. An ordinary `x.use()` is not here, so
+; the canonical bug still flags.
+(call_expression
+  function: (field_expression
+    argument: (identifier) @flow.rebind
+    field: (field_identifier) @_m)
+  (#match? @_m "^(clear|reset|assign|emplace|swap)$"))
 
 ; a plain `x = rhs` reassignment rebinds x with the rhs value — mints a Whole
 ; FlowEdge (like a declaration's init) so the moved-from region AND the

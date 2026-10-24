@@ -294,10 +294,6 @@ impl FileAnalysis {
         self.refs.rebuild_indices(&self.pack.names);
     }
 
-    pub fn refs_mut(&mut self) -> &mut [Ref] {
-        self.refs.as_mut_slice()
-    }
-
     /// All refs that resolve to this symbol — O(1) lookup via the index.
     /// Callers typically combine this with a kind filter.
     pub fn refs_to_symbol(&self, sym_id: SymbolId) -> &[usize] {

@@ -2687,3 +2687,46 @@ fn pushed_slot_elements_type_the_loop_over_the_slot() {
         .inferred_type_via_bag_ctx("$m", tree_sitter::Point { row: 4, column: 2 }, Some(&idx));
     assert_eq!(t.and_then(|t| t.class_name().map(str::to_string)).as_deref(), Some("User"));
 }
+
+/// The sweep probe store answers a repeated probe without re-running it,
+/// re-runs after a shape bump, and never keeps "file never shredded".
+#[test]
+fn sweep_probe_memo_is_stamp_keyed_and_keeps_only_proven_verdicts() {
+    use super::registration::RowProbe;
+    let idx = ModuleIndex::new_for_test();
+    let path = std::path::Path::new("/sweep-probe-memo/A.pm");
+    let member = || RowProbe::Member { name: "m".into(), class: "A".into() };
+    let runs = std::cell::Cell::new(0);
+    let probe = |idx: &ModuleIndex, p: RowProbe, v: Option<Option<bool>>| {
+        idx.memo_row_probe(path, p, || {
+            runs.set(runs.get() + 1);
+            v
+        })
+    };
+
+    // Closed: every probe runs.
+    probe(&idx, member(), Some(Some(false)));
+    probe(&idx, member(), Some(Some(false)));
+    assert_eq!(runs.get(), 2);
+
+    let _g = SweepProbeGuard::open();
+    runs.set(0);
+    assert_eq!(probe(&idx, member(), Some(Some(false))), Some(Some(false)));
+    assert_eq!(probe(&idx, member(), Some(Some(true))), Some(Some(false)), "served from the memo");
+    assert_eq!(runs.get(), 1);
+
+    // A different probe kind on the same file is its own entry.
+    probe(&idx, RowProbe::Name("m".into()), Some(Some(true)));
+    assert_eq!(runs.get(), 2);
+
+    // A shape bump voids the remembered verdict.
+    idx.core.note_shape_change();
+    assert_eq!(probe(&idx, member(), Some(Some(true))), Some(Some(true)));
+    assert_eq!(runs.get(), 3);
+
+    // Unknowns fail open every time — never remembered.
+    let sym = || RowProbe::SymName("never".into());
+    assert_eq!(probe(&idx, sym(), Some(None)), Some(None));
+    assert_eq!(probe(&idx, sym(), None), None);
+    assert_eq!(runs.get(), 5);
+}

@@ -232,23 +232,21 @@ struct DeferredNamedSubParamType {
     plugin_id: String,
 }
 
-/// What the last body-top-level statement of a sub does with control.
+/// One way a sub leaves by falling off its end.
 ///
-/// Perl yields the last statement's value when control reaches the end, so
-/// that statement is a way OUT of the sub — an arm, exactly like an explicit
-/// `return`. This says which kind, using the same classification the return
-/// side uses, so "is this way out undef" has one answer and not two.
+/// Perl yields the value of the body's last statement, so that statement is
+/// a way OUT of the sub — an arm, exactly like an explicit `return`. A
+/// compound tail fans out into several (each `if` branch's own tail), and a
+/// tail that is itself a `return` contributes none here: it minted its arm
+/// as a `return`. Undef-ness uses the return side's classification, so "is
+/// this way out undef" has one answer and not two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TailExit {
-    /// The statement is a `return`, so control cannot fall off the end.
-    /// It already contributed its own arm; there is no tail arm.
-    Return,
-    /// The tail evaluates to undef — an undef arm. Carries WHICH spelling,
-    /// because `undef` and `()` diverge in list context
-    /// (`crate::model::witnesses::tags::UndefArm`).
-    Undef(crate::model::witnesses::tags::UndefArm),
-    /// The tail yields a value — a value arm, whether or not it types.
-    Value,
+pub(super) enum TailArm {
+    /// The arm yields the value at this span, whether or not it types.
+    Value(Span),
+    /// The arm yields undef. Carries WHICH spelling, because `undef` and
+    /// `()` diverge in list context (`crate::model::witnesses::tags::UndefArm`).
+    Undef(Span, crate::model::witnesses::tags::UndefArm),
 }
 
 struct Builder<'a> {
@@ -282,15 +280,10 @@ struct Builder<'a> {
     /// types. Clear-and-emit on `source_tag = "array_push"`. Tuple
     /// shape only; cross-scope and conditional branches not handled.
     pending_array_pushes: Vec<(ScopeId, String, Vec<Span>)>,
-    /// For each Sub/Method scope, the body span of the last
-    /// top-level expression statement. Used as the implicit-return
-    /// query key — `seed_return_types_from_bag` reads `Expr(span)` via
-    /// `bag_query_expr_span` for scopes without an explicit `return`.
-    /// Types ride the bag; this map only carries the structural
-    /// pointer to the source span.
-    last_expr_span: std::collections::HashMap<ScopeId, Span>,
-    /// How the sub's last body-top-level statement exits — see [`TailExit`].
-    last_stmt_exit: std::collections::HashMap<ScopeId, TailExit>,
+    /// For each Sub/Method scope, its fallthrough arms (see [`TailArm`]).
+    /// The tail-arm pass mints them on the sub's return arms; types ride the
+    /// bag, this only points at source spans.
+    sub_tail: std::collections::HashMap<ScopeId, Vec<TailArm>>,
     /// For each `$obj->{k} = <rhs>` hash-key WRITE, maps the key node's
     /// span (the span the matching `HashKeyAccess` Write ref carries) to
     /// the RHS expression's span. `populate_witness_bag`'s mutation loop
@@ -422,13 +415,6 @@ struct Builder<'a> {
     /// paths produce byte-identical witnesses (same span, same
     /// `expression` source tag).
     unresolved_expr_nodes: Vec<Node<'a>>,
-    /// Set once the walk is done and the symbol table is final: from here a
-    /// call to a name this file does not declare is a cross-file question
-    /// (`Callee::Sub`), not a forward reference.
-    symbol_table_final: bool,
-    /// Walk-time operands of calls to names the symbol table did not hold
-    /// yet, keyed by call node, for the post-walk retry to mint the call with.
-    pending_call_operands: std::collections::HashMap<usize, Vec<crate::model::witnesses::CallArg>>,
     /// Per-package framework fact, computed from `framework_modes` once
     /// the walk finishes. Available before `resolve_return_types` so
     /// the bag-aware return-arm fold can ask the framework-aware

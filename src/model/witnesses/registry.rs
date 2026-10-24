@@ -1803,7 +1803,7 @@ impl ReducerRegistry {
                 WitnessPayload::Invoke { callee: Callee::Method { name: n, .. }, receiver, args } if method && n == name => {
                     Some((receiver.clone(), args.clone()))
                 }
-                WitnessPayload::Invoke { callee: Callee::Sub { package: p, name: n }, args, .. }
+                WitnessPayload::Invoke { callee: Callee::Function { package: p, name: n, .. }, args, .. }
                     if !method && n == name && p.as_deref().map_or(true, |p| p == package) =>
                 {
                     Some((None, args.clone()))
@@ -3072,41 +3072,21 @@ impl ReducerRegistry {
                                     })
                                 })
                             }
-                            ProjectionStep::MethodHop { member, arity: _ }
-                            | ProjectionStep::ValueHop { member } => {
-                                // The step's kind picks the attachment: a call
-                                // dispatches `PackageSymbol{class, member}` at
-                                // the call's own arity, a value read chases
-                                // `Field{class, member}` — the slot's own
-                                // subject — so a same-named callable's return
-                                // can never answer a read, nor a field a call.
-                                // The base type IS the dynamic receiver, so a
-                                // fluent `Receiver` return substitutes it
-                                // (`$q->where()->get()`).
-                                let (att_of, arity): (fn(String, String) -> WitnessAttachment, Option<u32>) =
-                                    match step {
-                                        ProjectionStep::MethodHop { arity, .. } => (
-                                            |class, name| WitnessAttachment::PackageSymbol {
-                                                package: class,
-                                                name,
-                                            },
-                                            Some(*arity),
-                                        ),
-                                        _ => (
-                                            |class, name| WitnessAttachment::Field {
-                                                owner: class,
-                                                name,
-                                            },
-                                            None,
-                                        ),
-                                    };
+                            ProjectionStep::ValueHop { member } => {
+                                // A value read chases `Field{class, member}`,
+                                // the slot's own subject, so a same-named
+                                // callable's return never answers it (a call
+                                // is an `Invoke`). The base type IS the
+                                // receiver, so a slot typed by the class's
+                                // template parameters substitutes the base's
+                                // arguments.
                                 t.class_name().map(str::to_string).and_then(|class| {
-                                    let att = att_of(class, member.clone());
+                                    let att = WitnessAttachment::Field { owner: class, name: member.clone() };
                                     let sub_q = ReducerQuery {
                                         attachment: &att,
                                         point: q.point,
                                         framework: q.framework,
-                                        arity_hint: arity,
+                                        arity_hint: None,
                                         receiver: Some(t.clone()),
                                         args: q.args.clone(),
                                         context: q.context,
@@ -3263,6 +3243,28 @@ impl ReducerRegistry {
             }
         }
         let exact = args.is_some() && !spread;
+        // A bare call in a body that elides the receiver: the class's member
+        // (its own or inherited, in any file) hides every free function of
+        // the name, with the class itself as the receiver.
+        if let Callee::Function { name, member_of: Some(class), .. } = callee {
+            let att = WitnessAttachment::PackageSymbol { package: class.clone(), name: name.clone() };
+            let sub_q = ReducerQuery {
+                attachment: &att,
+                point: q.point,
+                framework: q.framework,
+                arity_hint: exact.then_some(arg_types.len() as u32),
+                receiver: Some(InferredType::ClassName(class.clone())),
+                args: arg_types.clone(),
+                context: q.context,
+            };
+            let member = state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
+                ReducedValue::Type(t) => Some(t.clone()),
+                ReducedValue::FactMap(_) | ReducedValue::None => None,
+            });
+            if member.is_some() {
+                return member;
+            }
+        }
         let lookups: Vec<WitnessAttachment> = match callee {
             Callee::Method { name, lookup, .. } => {
                 let classes: Vec<String> = match lookup {
@@ -3292,6 +3294,21 @@ impl ReducerRegistry {
                     .map(|package| WitnessAttachment::PackageSymbol { package, name: name.clone() })
                     .collect()
             }
+            Callee::Function { name, local: None, package: Some(package), .. } => {
+                vec![WitnessAttachment::PackageSymbol { package: package.clone(), name: name.clone() }]
+            }
+            Callee::Function { name, local: None, package: None, .. } => {
+                let Some(ctx) = q.context.filter(|c| c.module_index.is_some()) else {
+                    // The definition is in another file, and no conclusion
+                    // key names a free function, so a bake can't link it.
+                    super::note_bake_exit("free_function", false);
+                    state.note_exit(None);
+                    return None;
+                };
+                let arity = exact.then_some(arg_types.len() as u32);
+                return self.free_function_cross_file(ctx, name, arity, recv, &arg_types, state);
+            }
+            Callee::Function { local: Some(sid), .. } => vec![WitnessAttachment::Symbol(*sid)],
             Callee::Value(att) => {
                 let target = self.operand_type(bag, q, state, att)?.callable_return_edge()?.clone();
                 // Invoking a method through a coderef passes its invocant as
@@ -3303,13 +3320,6 @@ impl ReducerRegistry {
                 }
                 vec![target]
             }
-            Callee::Sub { package, name } => vec![match package {
-                Some(package) => WitnessAttachment::PackageSymbol {
-                    package: package.clone(),
-                    name: name.clone(),
-                },
-                None => WitnessAttachment::ImportedSub { name: name.clone() },
-            }],
         };
         let arity = exact.then_some(arg_types.len() as u32);
         // SUPER walks the writer's parents in MRO order: the first that
@@ -3335,6 +3345,125 @@ impl ReducerRegistry {
                 .then(|| recv?.class_name().map(|c| InferredType::ClassName(c.to_string())))
                 .flatten()
         })
+    }
+
+    /// The free function `name` as the files `ctx` can see it: a module
+    /// exporting it, then a pack's linkage-visible definitions. One ladder
+    /// for both entries — `query_sub_return_type`'s cross-file half and an
+    /// unresolved `Callee::Function` — and the chase shares `state`, so a
+    /// call that crosses back into a file already on the path stops at the
+    /// cycle guard instead of recursing through a fresh query.
+    pub(super) fn free_function_cross_file(
+        &self,
+        ctx: &BagContext,
+        name: &str,
+        arity_hint: Option<u32>,
+        receiver: Option<InferredType>,
+        args: &[InferredType],
+        state: &mut QueryState,
+    ) -> Option<InferredType> {
+        use crate::model::file_analysis::{FileAnalysis, SymKind};
+        use std::sync::Arc;
+        let idx = ctx.module_index?;
+        if !super::session::budget_available(idx) {
+            return None;
+        }
+        let is_callable = |s: &crate::model::file_analysis::Symbol| {
+            s.name == name && matches!(s.kind, SymKind::Sub | SymKind::Method)
+        };
+        // The callable's answer in its own file, under the caller's arity,
+        // receiver and arguments. The copy is pinned: the memo keys on its
+        // bag's address for the rest of this query.
+        let ask = |full: &Arc<FileAnalysis>, origin: &std::path::Path, sym: SymbolId, state: &mut QueryState| {
+            state.pins.push(Arc::clone(full));
+            let cached_ctx = BagContext {
+                scopes: &full.scopes,
+                package_framework: &full.packages,
+                module_index: Some(idx),
+                package_parents: &full.packages,
+                app_surface_consumers: &full.plugin.app_surface_consumers,
+                origin: Some(origin),
+            };
+            let att = WitnessAttachment::Symbol(sym);
+            let q = ReducerQuery {
+                attachment: &att,
+                point: None,
+                framework: FrameworkFact::Plain,
+                arity_hint,
+                receiver: receiver.clone(),
+                args: args.to_vec(),
+                context: Some(&cached_ctx),
+            };
+            match &*self.query_rec(&full.witnesses, &q, state) {
+                ReducedValue::Type(t) => Some(t.clone()),
+                ReducedValue::FactMap(_) | ReducedValue::None => None,
+            }
+        };
+        // A module exporting it: the `ImportedSub` key, so the exporter walk
+        // and its per-candidate memo are the ones a bare call's bake reads.
+        {
+            let att = WitnessAttachment::ImportedSub { name: name.to_string() };
+            let q = ReducerQuery {
+                attachment: &att,
+                point: None,
+                framework: FrameworkFact::Plain,
+                arity_hint,
+                receiver: receiver.clone(),
+                args: args.to_vec(),
+                context: Some(ctx),
+            };
+            let empty = WitnessBag::default();
+            match &*self.query_rec(&empty, &q, state) {
+                ReducedValue::Type(t) => return Some(t.clone()),
+                ReducedValue::FactMap(_) | ReducedValue::None => {}
+            }
+        }
+        // A pack callee defined in an INCLUDED file carries no export edge (C
+        // free functions never populate `@EXPORT`). It crosses the boundary
+        // by the include-closure visibility goto-def uses (`pack_def_paths`):
+        // a candidate is reachable iff the querying file sees its path or the
+        // candidate includes the querying file — never a bare name match, so
+        // a same-named function in an unrelated TU can't contaminate. A Flat
+        // scope (a name-keyed pack) has no closure to gate by: every
+        // candidate is reachable by rule. Disagreeing candidates are a
+        // genuine ambiguity and answer nothing; a prototype and its
+        // definition agree. Transparent hosts (no rule known) skip the arm.
+        let scope = idx.visibility_scope().map(|(p, v)| (p.to_string_lossy().into_owned(), v));
+        if scope.is_none() && !idx.flat_scope() {
+            return None;
+        }
+        let mut answer: Option<InferredType> = None;
+        for cached in idx.def_candidates(name).read() {
+            let p = cached.path.to_string_lossy();
+            // Reachability reads pinned fields (path + include_closure), so
+            // gate BEFORE rehydrating: an unreachable candidate never pays a
+            // bag decode.
+            let reachable = match &scope {
+                Some((self_str, visible)) => {
+                    visible.contains(p.as_ref())
+                        || idx.facts_present(&cached).pack.include_closure.contains(self_str)
+                }
+                None => true,
+            };
+            if !reachable {
+                continue;
+            }
+            let full = idx.bag_present(&cached);
+            let Some(sym) = full
+                .symbols()
+                .iter()
+                .find(|s| is_callable(s) && full.is_linkage_visible(s))
+                .map(|s| s.id)
+            else {
+                continue;
+            };
+            match (ask(&full, &cached.path, sym, state), &answer) {
+                (Some(t), Some(existing)) if *existing != t => return None,
+                (Some(t), None) => answer = Some(t),
+                _ => {}
+            }
+        }
+        answer
     }
 
     /// Scope-chain variable lookup with an explicit visited set.

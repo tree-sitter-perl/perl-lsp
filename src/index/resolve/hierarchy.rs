@@ -99,6 +99,16 @@ impl<'a> CandidateSet<'a> {
                     self.origin
                         .inferred_type_via_bag_ctx(&r.target_name, self.point, self.idx())
                 }
+                // A value read: the receiver's type, then the stored
+                // member's value on it; the bare span's own witnesses when
+                // the receiver does not type.
+                RefKind::FieldAccess { invocant_span, .. } => invocant_span
+                    .and_then(|inv| self.origin.expr_type_at_span(inv, self.idx()))
+                    .and_then(|t| {
+                        let member = r.unqualified_target_name(self.origin.names());
+                        self.origin.field_value_type(&t, member, self.idx())
+                    })
+                    .or_else(|| self.origin.expr_type_at_span(r.span, self.idx())),
                 _ => self.origin.expr_type_at_span(r.span, self.idx()),
             };
         }

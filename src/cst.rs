@@ -37,6 +37,9 @@ pub(crate) trait NodeExt<'a>: Sized {
     fn span(&self) -> Span;
     /// Named children, by index (no `TreeCursor` borrow gymnastics).
     fn named(&self) -> NamedChildren<'a>;
+    /// Named children minus trivia ([`is_trivia`]): what a positional read
+    /// ("the first argument", "the last statement", "the k-th pair") means.
+    fn elements(&self) -> Elements<'a>;
 }
 
 impl<'a> NodeExt<'a> for Node<'a> {
@@ -51,6 +54,9 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
     fn named(&self) -> NamedChildren<'a> {
         NamedChildren { node: *self, idx: 0 }
+    }
+    fn elements(&self) -> Elements<'a> {
+        Elements(self.named())
     }
 }
 
@@ -108,6 +114,16 @@ impl<'a> Iterator for NamedChildren<'a> {
             }
         }
         None
+    }
+}
+
+/// [`NodeExt::elements`].
+pub(crate) struct Elements<'a>(NamedChildren<'a>);
+
+impl<'a> Iterator for Elements<'a> {
+    type Item = Node<'a>;
+    fn next(&mut self) -> Option<Node<'a>> {
+        self.0.by_ref().find(|c| !is_trivia(*c))
     }
 }
 
@@ -268,7 +284,7 @@ pub(crate) fn call_args<'a>(call_node: Node<'a>) -> Vec<Node<'a>> {
         return Vec::new();
     };
     if is_list_literal(args) {
-        args.named().collect()
+        args.elements().collect()
     } else {
         vec![args]
     }
@@ -283,7 +299,7 @@ pub(crate) fn topic_list<'a>(node: Node<'a>) -> Option<Node<'a>> {
     loop {
         match parent.kind() {
             "postfix_for_expression" => {
-                let list = parent.named_child(1)?;
+                let list = nth_element(parent, 1)?;
                 return (list.id() != child.id()).then_some(list);
             }
             "for_statement" => {
@@ -328,14 +344,14 @@ pub(crate) fn enclosing_call_of_arg<'a>(arg: Node<'a>) -> Option<Node<'a>> {
 /// `key, a, b`; the grouped-value spelling is the ref `[a, b]`). So we descend
 /// nested groups wherever they appear, yielding the flat sibling sequence a
 /// single linear scan can pair over. Ref literals (`[...]`, `{...}`) are NOT
-/// groups and stay whole.
+/// groups and stay whole. Comments and POD are skipped ([`is_trivia`]).
 pub(crate) fn flatten_list<'a>(list: Node<'a>, out: &mut Vec<Node<'a>>) {
     let count = list.child_count();
     for i in 0..count {
         let Some(child) = list.child(i) else { continue };
         if is_list_literal(child) {
             flatten_list(child, out);
-        } else {
+        } else if !is_trivia(child) {
             out.push(child);
         }
     }
@@ -361,7 +377,7 @@ pub(crate) fn list_elements<'a>(list: Node<'a>) -> Vec<Node<'a>> {
 /// Loops, so nested `(($x))` collapse.
 pub(crate) fn peel_groups(mut node: Node) -> Node {
     while is_list_literal(node) {
-        let mut named = node.named();
+        let mut named = node.elements();
         match (named.next(), named.next()) {
             (Some(inner), None) => node = inner,
             _ => break, // empty, or a real multi-element list
@@ -391,13 +407,13 @@ pub(crate) fn pair_nodes_in<'a>(children: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a
     while i < count {
         let k_node = children[i];
         i += 1;
-        if !k_node.is_named() {
+        if !is_list_element(k_node) {
             continue;
         }
         // Skip the comma / fat comma to the next named node (the value).
         let val = loop {
             match children.get(i) {
-                Some(c) if c.is_named() => break Some(*c),
+                Some(c) if is_list_element(*c) => break Some(*c),
                 Some(_) => i += 1,
                 None => break None,
             }
@@ -407,6 +423,36 @@ pub(crate) fn pair_nodes_in<'a>(children: &[Node<'a>]) -> Vec<(Node<'a>, Node<'a
         out.push((k_node, val));
     }
     out
+}
+
+/// A node the grammar declares an extra (Perl: comment, POD, heredoc body):
+/// it can sit between any two tokens, so it is never an element of the list,
+/// argument or block around it. Counting one shifts every later position.
+pub(crate) fn is_trivia(node: Node) -> bool {
+    node.is_extra()
+}
+
+/// The `n`-th element of `node` ([`NodeExt::elements`]).
+pub(crate) fn nth_element(node: Node, n: usize) -> Option<Node> {
+    node.elements().nth(n)
+}
+
+/// The last element of `node` ([`NodeExt::elements`]).
+pub(crate) fn last_element(node: Node) -> Option<Node> {
+    node.elements().last()
+}
+
+/// Every child of `node`, punctuation included, minus trivia: the token
+/// stream a separator-aware scan walks.
+pub(crate) fn children_without_trivia(node: Node) -> Vec<Node> {
+    (0..node.child_count())
+        .filter_map(|i| node.child(i))
+        .filter(|c| !is_trivia(*c))
+        .collect()
+}
+
+fn is_list_element(node: Node) -> bool {
+    node.is_named() && !is_trivia(node)
 }
 
 /// The list a `{…}` / `[…]` literal holds, in either spelling: `{ a => 1 }`
@@ -662,6 +708,42 @@ pub(crate) fn string_content_span(node: Node) -> Span {
     node_to_span(node)
 }
 
+/// One arm of an `if`/`unless` statement chain.
+#[derive(Clone, Copy)]
+pub(crate) struct CondArm<'a> {
+    /// `None` for the trailing `else`.
+    pub cond: Option<Node<'a>>,
+    pub block: Node<'a>,
+    /// The truth value `cond` must take for `block` to run: `false` only
+    /// for the leading arm of an `unless`. An `else` arm carries `true`.
+    pub enter: bool,
+}
+
+/// A `conditional_statement`'s arms in order: the leading `if`/`unless`,
+/// each `elsif`, then the `else`. The `elsif`/`else` nodes nest inside one
+/// another, so the chain is the walk down them.
+pub(crate) fn conditional_arms(stmt: Node<'_>) -> Vec<CondArm<'_>> {
+    let mut arms = Vec::new();
+    let (Some(cond), Some(block)) =
+        (stmt.child_by_field_name("condition"), stmt.child_by_field_name("block"))
+    else {
+        return arms;
+    };
+    let enter = stmt.child(0).is_none_or(|k| k.kind() != "unless");
+    arms.push(CondArm { cond: Some(cond), block, enter });
+    let mut tail = stmt;
+    while let Some(next) = tail.elements().find(|c| matches!(c.kind(), "elsif" | "else")) {
+        let Some(block) = next.child_by_field_name("block") else { break };
+        let cond = next.child_by_field_name("condition");
+        arms.push(CondArm { cond, block, enter: true });
+        if cond.is_none() {
+            break;
+        }
+        tail = next;
+    }
+    arms
+}
+
 /// The template node a `map` callback contributes. `map EXPR, LIST` is
 /// the callback itself; `map { ... } LIST` (the block form — at least
 /// as idiomatic) yields the block's tail expression, since Perl
@@ -677,10 +759,7 @@ fn map_callback_template<'a>(cb: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
     if cb.kind() != "block" {
         return Some(cb);
     }
-    let stmts: Vec<Node> = cb
-        .named()
-        .filter(|c| !matches!(c.kind(), "comment" | "pod"))
-        .collect();
+    let stmts: Vec<Node> = cb.elements().collect();
     if stmts.is_empty() || !stmts.iter().all(|s| s.kind() == "expression_statement") {
         return None;
     }
@@ -850,7 +929,7 @@ pub(crate) fn string_list_with_residue(
                 // Separators and parens are anonymous; anything NAMED we
                 // didn't fold is a real list item we couldn't read.
                 _ => {
-                    if child.is_named() && !matches!(child.kind(), "comment" | "pod") {
+                    if is_list_element(child) {
                         residue = true;
                     }
                 }
