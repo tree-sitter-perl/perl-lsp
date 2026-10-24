@@ -169,7 +169,14 @@ impl<'a> Builder<'a> {
                 let key_node = node.child_by_field_name("key")?;
                 let (key, is_dynamic) = self.extract_key_text(key_node)?;
                 if is_dynamic {
-                    return None;
+                    // A member of a container slot under a run-time key is
+                    // any of the slot's members.
+                    let (base, slot) = self.dynamic_member_of_slot(node)?;
+                    self.emit_expr_witness(base);
+                    return Some(WitnessPayload::Projected {
+                        base: WitnessAttachment::Expr(node_to_span(base)),
+                        step: crate::model::witnesses::ProjectionStep::SlotElements { key: slot },
+                    });
                 }
                 // Container form `$h{k}` (grammar field `hash:`) — the
                 // subject is `%h`, not scalar `$h`; project off the
@@ -206,6 +213,18 @@ impl<'a> Builder<'a> {
             }
             "anonymous_array_expression" => {
                 Some(WitnessPayload::InferredType(self.array_literal_type(node)))
+            }
+            // `grep`/`sort` hand on elements of their list; `@{ $r }` is
+            // the list its reference holds.
+            "sort_expression" | "map_grep_expression" => {
+                let list = crate::cst::element_preserving_list(node)?;
+                self.emit_expr_witness(list);
+                Some(WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(list))))
+            }
+            "array" if crate::cst::array_deref_operand(node).is_some() => {
+                let operand = crate::cst::array_deref_operand(node)?;
+                self.emit_expr_witness(operand);
+                Some(WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(operand))))
             }
             // A paren list in value position (`return ($a, $b)`) is a
             // positional tuple — the list-assignment binder projects

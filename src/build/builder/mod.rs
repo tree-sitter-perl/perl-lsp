@@ -663,6 +663,12 @@ struct Builder<'a> {
     /// with their `@_` positions: what a `$cb->(…)` in the body needs to
     /// say which parameter it calls (`CallbackIn`).
     callback_params: std::collections::HashMap<ScopeId, (String, String, Vec<(String, u32)>)>,
+    /// A callback parameter written into an instance slot
+    /// (`$self->{on_done} = $cb`): slot key span → the sub and parameter.
+    slot_callback_stores: std::collections::HashMap<Span, (String, String, u32)>,
+    /// Code read out of an instance slot and called (`$self->{k}->(ARGS)`):
+    /// the slot key's span and each argument's span, in order.
+    slot_callback_calls: Vec<(Span, Vec<Span>)>,
 
     /// Each named sub scope → its package, name and whether it unpacks an
     /// invocant: what a `@_` forwarded from its body hands on (`CallArg::Forward`).

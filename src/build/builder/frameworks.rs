@@ -147,6 +147,36 @@ impl<'a> Builder<'a> {
         });
     }
 
+    /// An attribute with no `isa`: its getter answers the slot
+    /// (`SlotType{class, name}`), and the class's instances hold the
+    /// constructor's named arguments (`InstanceShape{class}` →
+    /// `ParamPairs{class::new}`), so a slot no write types reads its key
+    /// off what the callers of `new` pass.
+    /// TODO(moo-init): `init_arg`, `default`, `builder` and a hashref
+    /// constructor argument (`new({...})`) don't feed the slot yet.
+    fn push_untyped_attribute_slot(&mut self, getter_id: SymbolId, name: &str, has: Node<'a>) {
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let Some(class) = self.current_package.clone() else { return };
+        let span = node_to_span(has);
+        self.bag.push(Witness {
+            attachment: WitnessAttachment::Symbol(getter_id),
+            source: WitnessSource::Builder("framework_accessor".into()),
+            payload: WitnessPayload::Edge(WitnessAttachment::SlotType { class: class.clone(), key: name.to_string() }),
+            span,
+        });
+        let shape = WitnessAttachment::InstanceShape { class: class.clone() };
+        let args = WitnessAttachment::ParamPairs { package: class, name: "new".into(), from: 1, method: true };
+        if self.bag.for_attachment(&shape).iter().any(|w| w.payload == WitnessPayload::Edge(args.clone())) {
+            return;
+        }
+        self.bag.push(Witness {
+            attachment: shape,
+            source: WitnessSource::Builder("instance_shape".into()),
+            payload: WitnessPayload::Edge(args),
+            span,
+        });
+    }
+
     /// Record a framework-synthesized accessor's per-Symbol answer
     /// in the bag and stamp its provenance. `return_expr` is the
     /// arity-gated return for THIS specific symbol (a getter sym
@@ -376,6 +406,11 @@ impl<'a> Builder<'a> {
                         framework,
                         format!("{} `has '{}'` getter (isa)", framework, name),
                     );
+                    // No `isa`: the getter returns whatever the slot holds,
+                    // which the constructor's named argument fills.
+                    if return_type.is_none() {
+                        self.push_untyped_attribute_slot(getter_id, name, node);
+                    }
                     // Setter for rw — same isa type at arity ≥ 1
                     // (Moo/Moose writers return the new value, not
                     // the invocant).

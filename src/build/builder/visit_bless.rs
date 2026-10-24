@@ -80,6 +80,22 @@ impl<'a> Builder<'a> {
             .filter(|e| e.kind() == "hash")
             .filter_map(|e| Some((crate::cst::canonical_var_name(e, self.source)?, node_to_span(e))))
             .collect();
+        // A literal key's value is that slot's first write
+        // (`bless { members => $m }`). Pairs stop at the first spread: past
+        // it, which element is a key is unknown.
+        for (k, v) in crate::cst::pair_nodes(obj) {
+            if crate::cst::is_flattening(k) {
+                break;
+            }
+            let Some(key) = self.extract_node_string(k) else { continue };
+            self.emit_expr_witness(v);
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::SlotType { class: class.to_string(), key },
+                source: WitnessSource::Builder("slot_type".into()),
+                payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(v))),
+                span: node_to_span(v),
+            });
+        }
         // Edged at the spread's own read, so the variable answers as of
         // the bless, not as of its scope's start.
         for (name, span) in spreads {

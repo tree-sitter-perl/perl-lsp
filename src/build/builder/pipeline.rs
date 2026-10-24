@@ -380,6 +380,8 @@ fn build_once(
         anon_sub_symbol_by_span: std::collections::HashMap::new(),
         modifier_invocant_pos: None,
         callback_params: std::collections::HashMap::new(),
+        slot_callback_stores: std::collections::HashMap::new(),
+        slot_callback_calls: Vec::new(),
         forwarding_subs: std::collections::HashMap::new(),
         arg_shifts: std::collections::HashMap::new(),
         expr_type_depth: 0,
@@ -871,21 +873,66 @@ impl<'a> Builder<'a> {
         // SlotType seed.
         let mut mutations: Vec<(HashKeyOwner, String, Span)> = Vec::new();
         let mut slot_writes: Vec<(String, String, Span, Span)> = Vec::new();
+        let owner_of = |r: &crate::model::file_analysis::Ref, var_text: &str| match r.hash_key_owner() {
+            Some(o @ (HashKeyOwner::Class(_) | HashKeyOwner::Sub { .. })) => Some(o.clone()),
+            _ => {
+                if var_text == "$self" {
+                    let scope = &self.scopes[r.scope.0 as usize];
+                    scope.package.clone().map(HashKeyOwner::Class)
+                } else {
+                    None
+                }
+            }
+        };
+        // A callback stored into a slot and one called out of it, met on
+        // the slot's (class, key): each call's arguments are what the
+        // storing sub passes the code its caller handed it.
+        // TODO(slot-callback-cross-file): a store and a call in different
+        // files don't meet.
+        let mut stored_callbacks: std::collections::HashMap<(String, String), Vec<(String, String, u32)>> = std::collections::HashMap::new();
+        let mut slot_calls: std::collections::HashMap<Span, (String, String)> = std::collections::HashMap::new();
+        if !self.slot_callback_calls.is_empty() {
+            let call_keys: std::collections::HashSet<Span> =
+                self.slot_callback_calls.iter().map(|(k, _)| *k).collect();
+            for r in &self.refs {
+                let RefKind::HashKeyAccess { var_text } = &r.kind else { continue };
+                let Some(HashKeyOwner::Class(class)) = owner_of(r, var_text) else { continue };
+                match r.access {
+                    AccessKind::Write => {
+                        if let Some(cb) = self.slot_callback_stores.get(&r.span) {
+                            stored_callbacks.entry((class, r.target_name.clone())).or_default().push(cb.clone());
+                        }
+                    }
+                    _ if call_keys.contains(&r.span) => {
+                        slot_calls.insert(r.span, (class, r.target_name.clone()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for (key_span, args) in &self.slot_callback_calls {
+            let Some(slot) = slot_calls.get(key_span) else { continue };
+            for (package, name, param) in stored_callbacks.get(slot).into_iter().flatten() {
+                for (index, arg) in args.iter().enumerate() {
+                    self.bag.push(Witness {
+                        attachment: WitnessAttachment::CallbackIn {
+                            package: package.clone(),
+                            name: name.clone(),
+                            param: *param,
+                            index: index as u32,
+                        },
+                        source: WitnessSource::Builder("callback_in".into()),
+                        payload: WitnessPayload::Edge(WitnessAttachment::Expr(*arg)),
+                        span: *arg,
+                    });
+                }
+            }
+        }
         for r in &self.refs {
             if let (RefKind::HashKeyAccess { var_text }, AccessKind::Write) =
                 (&r.kind, r.access)
             {
-                let resolved_owner = match r.hash_key_owner() {
-                    Some(o @ (HashKeyOwner::Class(_) | HashKeyOwner::Sub { .. })) => Some(o.clone()),
-                    _ => {
-                        if var_text == "$self" {
-                            let scope = &self.scopes[r.scope.0 as usize];
-                            scope.package.clone().map(HashKeyOwner::Class)
-                        } else {
-                            None
-                        }
-                    }
-                };
+                let resolved_owner = owner_of(r, var_text);
                 if let Some(o) = resolved_owner {
                     if let HashKeyOwner::Class(class) = &o {
                         if let Some(rhs_span) = self.slot_write_rhs_span.get(&r.span) {
@@ -921,6 +968,29 @@ impl<'a> Builder<'a> {
                 attachment: WitnessAttachment::SlotType { class, key },
                 source: WitnessSource::Builder("slot_type".into()),
                 payload: WitnessPayload::Edge(WitnessAttachment::Expr(rhs_span)),
+                span,
+            });
+        }
+        // An array slot holds the elements of whatever list is stored in
+        // it, as well as what is pushed: one edge per slot this file types,
+        // at its first write.
+        let mut slots: Vec<(String, String, Span)> = Vec::new();
+        let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+        for w in self.bag.all() {
+            if let WitnessAttachment::SlotType { class, key } = &w.attachment {
+                if seen.insert((class.clone(), key.clone())) {
+                    slots.push((class.clone(), key.clone(), w.span));
+                }
+            }
+        }
+        for (class, key, span) in slots {
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::SlotElements { class: class.clone(), key: key.clone() },
+                source: WitnessSource::Builder("slot_elements".into()),
+                payload: WitnessPayload::Projected {
+                    base: WitnessAttachment::SlotType { class, key },
+                    step: crate::model::witnesses::ProjectionStep::Element,
+                },
                 span,
             });
         }

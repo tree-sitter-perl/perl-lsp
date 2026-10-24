@@ -1484,10 +1484,18 @@ impl<'a> Builder<'a> {
         // already published the RHS's `Expr(rhs_span)`; a compound write
         // stores the assignment's own value instead.
         let stored = if op == Some(crate::cst::AssignOp::Plain) { right } else { node };
+        if op == Some(crate::cst::AssignOp::Plain) {
+            self.push_dynamic_slot_member(left, right);
+        }
         if left.kind() == "hash_element_expression" {
             if let Some(key_node) = left.child_by_field_name("key") {
                 self.slot_write_rhs_span
                     .insert(node_to_span(key_node), node_to_span(stored));
+                if stored.kind() == "scalar" {
+                    if let Some(cb) = stored.utf8_text(self.source).ok().and_then(|v| self.callback_param_named(v)) {
+                        self.slot_callback_stores.insert(node_to_span(key_node), cb);
+                    }
+                }
             }
         }
         if matches!(

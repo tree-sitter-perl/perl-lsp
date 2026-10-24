@@ -2688,6 +2688,68 @@ fn pushed_slot_elements_type_the_loop_over_the_slot() {
     assert_eq!(t.and_then(|t| t.class_name().map(str::to_string)).as_deref(), Some("User"));
 }
 
+/// The class of `var` in `fa`'s file at `(row, column)`, read through `idx`.
+fn class_at(fa: &CachedModule, idx: &ModuleIndex, var: &str, row: usize, column: usize) -> Option<String> {
+    fa.analysis()
+        .inferred_type_via_bag_ctx(var, tree_sitter::Point { row, column }, Some(idx))
+        .and_then(|t| t.class_name().map(str::to_string))
+}
+
+/// A Moo attribute with no `isa` holds what its constructor's callers pass.
+#[test]
+fn an_untyped_moo_attribute_reads_the_constructor_argument() {
+    let store = parse_source_to_cached(
+        "package Store;\nuse Moo;\nhas db => (is => 'ro');\nsub fetch { my ($self) = @_; my $db = $self->db; return $db }\n1;\n",
+        "Store",
+    );
+    let app = parse_source_to_cached("package App;\nsub run { Store->new(db => bless({}, 'DB'))->fetch }\n1;\n", "App");
+    let idx = index_of(&[&store, &app]);
+    assert_eq!(class_at(&store, &idx, "$db", 3, 60).as_deref(), Some("DB"));
+}
+
+/// A callback stored into a slot and called out of it later: the sub
+/// literal's parameter is what that later call passes.
+#[test]
+fn a_callback_stored_in_a_slot_types_its_parameters_from_the_later_call() {
+    let bus = parse_source_to_cached(
+        "package Bus;\nsub new { bless {}, shift }\nsub when_done { my ($self, $cb) = @_; $self->{on_done} = $cb; return $self }\nsub finish { my ($self, $r) = @_; $self->{on_done}->($r) }\n1;\n",
+        "Bus",
+    );
+    let app = parse_source_to_cached(
+        "package App;\nsub run { my $b = Bus->new; $b->when_done(sub { my ($res) = @_;\n $res });\n $b->finish(bless({}, 'User')) }\n1;\n",
+        "App",
+    );
+    let idx = index_of(&[&bus, &app]);
+    assert_eq!(class_at(&app, &idx, "$res", 2, 1).as_deref(), Some("User"));
+}
+
+/// A slot set from a blessed literal's key holds that value, and walking it
+/// (directly, through a copy, or through `grep`) yields its elements.
+#[test]
+fn a_slot_from_the_blessed_literal_types_its_walks() {
+    let team = parse_source_to_cached(
+        "package Team;\nsub new { my ($class, $m) = @_; return bless { members => $m }, $class }\nsub f { my ($self) = @_; my @g = grep { $_ } @{ $self->{members} }; my $first = $g[0];\n for my $x (@{ $self->{members} }) {\n $x }\n return $first }\n1;\n",
+        "Team",
+    );
+    let app = parse_source_to_cached("package App;\nsub run { Team->new([ bless({}, 'User') ]) }\n1;\n", "App");
+    let idx = index_of(&[&team, &app]);
+    assert_eq!(class_at(&team, &idx, "$x", 4, 1).as_deref(), Some("User"), "the loop over the slot");
+    assert_eq!(class_at(&team, &idx, "$first", 3, 1).as_deref(), Some("User"), "an element of a grep over it");
+}
+
+/// Members written into a container slot under a run-time key are what a
+/// read under any run-time key yields.
+#[test]
+fn a_dynamic_member_of_a_slot_reads_what_was_written_under_any_key() {
+    let bus = parse_source_to_cached(
+        "package Bus;\nsub new { bless { h => {} }, shift }\nsub register { my ($self, $n, $h) = @_; $self->{h}{$n} = $h; return $self }\nsub fire { my ($self, $n) = @_; my $h = $self->{h}{$n}; return $h }\n1;\n",
+        "Bus",
+    );
+    let app = parse_source_to_cached("package App;\nsub run { Bus->new->register(x => bless({}, 'Greeter')) }\n1;\n", "App");
+    let idx = index_of(&[&bus, &app]);
+    assert_eq!(class_at(&bus, &idx, "$h", 3, 60).as_deref(), Some("Greeter"));
+}
+
 /// The sweep probe store answers a repeated probe without re-running it,
 /// re-runs after a shape bump, and never keeps "file never shredded".
 #[test]

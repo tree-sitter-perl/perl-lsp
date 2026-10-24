@@ -308,14 +308,49 @@ pub(crate) fn topic_list<'a>(node: Node<'a>) -> Option<Node<'a>> {
                     .then(|| parent.child_by_field_name("list"))
                     .flatten();
             }
-            "map_grep_expression"
-            | "anonymous_subroutine_expression"
+            // `map`/`grep` set `$_` to each element of their list while
+            // the callback runs.
+            "map_grep_expression" => {
+                let in_callback = parent.child_by_field_name("callback").map(|b| b.id()) == Some(child.id());
+                return in_callback.then(|| parent.child_by_field_name("list")).flatten();
+            }
+            "anonymous_subroutine_expression"
             | "subroutine_declaration_statement"
             | "method_declaration_statement" => return None,
             _ => {}
         }
         child = parent;
         parent = parent.parent()?;
+    }
+}
+
+/// The list whose elements an expression yields, a subset of them in
+/// some order: `grep … LIST` and `sort … LIST`. `None` for `map`, whose
+/// elements are what its callback yields.
+pub(crate) fn element_preserving_list<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    match node.kind() {
+        "sort_expression" => node.child_by_field_name("list"),
+        "map_grep_expression" if node.child(0).map(|k| k.kind()) == Some("grep") => {
+            node.child_by_field_name("list")
+        }
+        _ => None,
+    }
+}
+
+/// The reference an array deref reads through: `$x` in `@$x`, `EXPR` in
+/// `@{ EXPR }`. `None` for a named array.
+pub(crate) fn array_deref_operand<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    if node.kind() != "array" {
+        return None;
+    }
+    // A deref's `varname` wraps the operand; a named array's holds only text.
+    let inner = nth_element(varname_child(node)?, 0)?;
+    match inner.kind() {
+        "block" => {
+            let tail = last_element(inner)?;
+            if tail.kind() == "expression_statement" { nth_element(tail, 0) } else { Some(tail) }
+        }
+        _ => Some(inner),
     }
 }
 

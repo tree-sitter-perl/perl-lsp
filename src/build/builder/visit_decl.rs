@@ -1340,15 +1340,27 @@ impl<'a> Builder<'a> {
     /// is what that sub passes the code its caller handed it.
     fn emit_callback_in(&mut self, node: Node<'a>) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        let Some(operand) = crate::cst::nth_element(node, 0).filter(|o| o.kind() == "scalar") else { return };
-        let Ok(var) = operand.utf8_text(self.source) else { return };
-        let Some((package, name, param)) = self.scope_stack.iter().rev().find_map(|s| {
-            let (package, name, params) = self.callback_params.get(s)?;
-            let (_, param) = params.iter().find(|(n, _)| n == var)?;
-            Some((package.clone(), name.clone(), *param))
-        }) else {
+        let Some(operand) = crate::cst::nth_element(node, 0) else { return };
+        if operand.kind() == "hash_element_expression" {
+            // Code read out of a slot: which callback it is is known once
+            // the slot's owner is (`populate_witness_bag`).
+            let Some(key) = operand.child_by_field_name("key") else { return };
+            let mut spans = Vec::new();
+            for arg in self.flat_call_args(self.extract_call_args(node)) {
+                if crate::cst::is_flattening(arg) {
+                    break;
+                }
+                self.emit_expr_witness(arg);
+                spans.push(node_to_span(arg));
+            }
+            self.slot_callback_calls.push((node_to_span(key), spans));
             return;
-        };
+        }
+        if operand.kind() != "scalar" {
+            return;
+        }
+        let Ok(var) = operand.utf8_text(self.source) else { return };
+        let Some((package, name, param)) = self.callback_param_named(var) else { return };
         let args = self.flat_call_args(self.extract_call_args(node));
         for (index, arg) in args.into_iter().enumerate() {
             if crate::cst::is_flattening(arg) {
@@ -1367,6 +1379,16 @@ impl<'a> Builder<'a> {
                 span: node_to_span(arg),
             });
         }
+    }
+
+    /// The enclosing named sub's scalar parameter spelled `var`: the sub's
+    /// package, name and the parameter's `@_` position.
+    pub(super) fn callback_param_named(&self, var: &str) -> Option<(String, String, u32)> {
+        self.scope_stack.iter().rev().find_map(|s| {
+            let (package, name, params) = self.callback_params.get(s)?;
+            let (_, param) = params.iter().find(|(n, _)| n == var)?;
+            Some((package.clone(), name.clone(), *param))
+        })
     }
 
     /// A sub literal passed as an argument: each of its parameters is what the

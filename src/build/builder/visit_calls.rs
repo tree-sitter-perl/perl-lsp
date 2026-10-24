@@ -562,6 +562,39 @@ impl<'a> Builder<'a> {
         (!dynamic).then_some((crate::cst::nth_element(inner, 0)?, key))
     }
 
+    /// `BASE->{key}{$k}`: a member of the container slot `key` holds, read
+    /// or written under a key known only at run time, as (BASE, key).
+    pub(super) fn dynamic_member_of_slot(&self, node: Node<'a>) -> Option<(Node<'a>, String)> {
+        if node.kind() != "hash_element_expression" || node.child_by_field_name("hash").is_some() {
+            return None;
+        }
+        let (_, dynamic) = self.extract_key_text(node.child_by_field_name("key")?)?;
+        if !dynamic {
+            return None;
+        }
+        let slot = crate::cst::nth_element(node, 0).filter(|s| s.kind() == "hash_element_expression")?;
+        if slot.child_by_field_name("hash").is_some() {
+            return None;
+        }
+        let (key, dynamic) = self.extract_key_text(slot.child_by_field_name("key")?)?;
+        (!dynamic).then_some((crate::cst::nth_element(slot, 0)?, key))
+    }
+
+    /// `BASE->{key}{$k} = VALUE`: the value is a member of `key`'s container
+    /// on every instance of BASE's class (`SlotElements`).
+    pub(super) fn push_dynamic_slot_member(&mut self, target: Node<'a>, value: Node<'a>) {
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let Some((base, key)) = self.dynamic_member_of_slot(target) else { return };
+        let Some(class) = self.resolve_invocant_class_tree(base) else { return };
+        self.emit_expr_witness(value);
+        self.bag.push(Witness {
+            attachment: WitnessAttachment::SlotElements { class, key },
+            source: WitnessSource::Builder("slot_elements".into()),
+            payload: WitnessPayload::Edge(WitnessAttachment::Expr(node_to_span(value))),
+            span: node_to_span(value),
+        });
+    }
+
     /// `push @{ $obj->{key} }, VALUES`: each value is an element of `key`'s
     /// array on every instance of `$obj`'s class (`SlotElements`).
     fn push_slot_elements(&mut self, target: Node<'a>, values: &[Node<'a>]) {
