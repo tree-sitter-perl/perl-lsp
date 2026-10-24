@@ -33,8 +33,10 @@ crate / VS Code extension versions.
   brings in (`use FindBin qw($Bin)`, an exported `*glob`) counts as
   declared. A file with a bare `use` whose module isn't resolved yet stays
   silent until it is. Opt out with `diagnostics.disableMissingDeclaration`
-  (CLI `--disable-missing-declaration`). Known gap: `use English` builds its export list at
-  runtime, so `$ERRNO` and friends are still flagged.
+  (CLI `--disable-missing-declaration`).
+- **`use English` variables are declared.** English builds its export list
+  at runtime; a bundled `english` plugin states it, so `$ERRNO` and friends
+  count as declared (match variables only without `-no_match_vars`).
 
 ## v0.8.0 — 2026-10-19
 
