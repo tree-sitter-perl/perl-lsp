@@ -823,6 +823,7 @@ impl ReducerRegistry {
         r.register(Box::new(SlotTypeFold));
         r.register(Box::new(InstanceShapeFold));
         r.register(Box::new(SlotElementsFold));
+        r.register(Box::new(ParamWritesFold));
         // BranchArmFold claims the dedicated `BranchArm(_)` shape — no
         // overlap with the Variable/Expr folds below, so order here is
         // not load-bearing.
@@ -1570,6 +1571,32 @@ impl ReducerRegistry {
             if let Some(v) = self.owner_keyed_fallback(bag, q, state, class, "slot_elements", Some(&provider), &|p| {
                 WitnessAttachment::SlotElements { class: p, key: key.clone() }
             }) {
+                return v;
+            }
+        }
+
+        if let WitnessAttachment::ParamWrites {
+            package,
+            name,
+            index,
+            method,
+        } = q.attachment
+        {
+            let provider = EngineKey::Providers(q.attachment.clone());
+            if let Some(v) = self.owner_keyed_fallback(
+                bag,
+                q,
+                state,
+                package,
+                "param_writes",
+                Some(&provider),
+                &|p| WitnessAttachment::ParamWrites {
+                    package: p,
+                    name: name.clone(),
+                    index: *index,
+                    method: *method,
+                },
+            ) {
                 return v;
             }
         }
@@ -3164,6 +3191,42 @@ impl ReducerRegistry {
                                     })
                                 })
                             }
+                            ProjectionStep::AsKey { key } => Some(InferredType::HashWithKeys {
+                                keys: crate::model::file_analysis::SharedKeys::new(vec![(
+                                    key.clone(),
+                                    Some(Box::new(t.clone())),
+                                )]),
+                                open: false,
+                            }),
+                            ProjectionStep::WrittenBy {
+                                package,
+                                name,
+                                index,
+                                method,
+                            } => {
+                                let att = WitnessAttachment::ParamWrites {
+                                    package: package.clone(),
+                                    name: name.clone(),
+                                    index: *index,
+                                    method: *method,
+                                };
+                                let sub_q = ReducerQuery {
+                                    attachment: &att,
+                                    point: None,
+                                    framework: q.framework,
+                                    arity_hint: None,
+                                    receiver: None,
+                                    args: Vec::new(),
+                                    context: q.context,
+                                };
+                                let written = state.in_opaque_frame(|state| {
+                                    match &*self.query_rec(bag, &sub_q, state) {
+                                        ReducedValue::Type(t) => Some(t.clone()),
+                                        ReducedValue::FactMap(_) | ReducedValue::None => None,
+                                    }
+                                });
+                                written.and_then(|w| merge_written_keys(&t, &w))
+                            }
                         };
                         if let Some(t) = projected {
                             out.push(Witness {
@@ -3852,4 +3915,36 @@ pub(super) fn compute_engine_key(
             ))
         }
     }
+}
+
+/// `base` with the keys a callee wrote through it merged in: a written key
+/// takes the callee's value type, an unwritten one keeps the caller's. Only
+/// a hash shape takes keys; anything else is left as it was.
+fn merge_written_keys(base: &InferredType, written: &InferredType) -> Option<InferredType> {
+    let (
+        InferredType::HashWithKeys { keys, open },
+        InferredType::HashWithKeys {
+            keys: wkeys,
+            open: wopen,
+        },
+    ) = (base, written)
+    else {
+        return None;
+    };
+    let mut keys = keys.clone();
+    let merged = keys.to_mut();
+    for (k, v) in wkeys.iter() {
+        match merged.iter_mut().find(|(name, _)| name == k) {
+            Some(entry) => {
+                if v.is_some() {
+                    entry.1 = v.clone();
+                }
+            }
+            None => merged.push((k.clone(), v.clone())),
+        }
+    }
+    Some(InferredType::HashWithKeys {
+        keys,
+        open: *open || *wopen,
+    })
 }

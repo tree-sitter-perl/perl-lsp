@@ -203,6 +203,12 @@ pub enum WitnessAttachment {
     /// reads its own parameters off it. Kept at the END for bincode
     /// variant-index stability (bump `EXTRACT_VERSION`).
     CallbackIn { package: String, name: String, param: u32, index: u32 },
+    /// The keys `package::name` writes through the hash reference it takes
+    /// at `@_` position `index`: one single-key shape per write, merged. A
+    /// caller's variable passed there holds its own shape plus these after
+    /// the call. Kept at the END for bincode variant-index stability (bump
+    /// `EXTRACT_VERSION`).
+    ParamWrites { package: String, name: String, index: u32, method: bool },
 }
 
 impl WitnessAttachment {
@@ -213,6 +219,7 @@ impl WitnessAttachment {
         match self {
             WitnessAttachment::CallbackIn { package, .. } => Some((package, "callback_in")),
             WitnessAttachment::SlotElements { class, .. } => Some((class, "slot_elements")),
+            WitnessAttachment::ParamWrites { package, .. } => Some((package, "param_writes")),
             _ => None,
         }
     }
@@ -583,6 +590,14 @@ pub enum ProjectionStep {
     /// chases `CallbackIn{class, member, param, index}`. Kept at the END for
     /// bincode variant-index stability (bump `EXTRACT_VERSION`).
     CallbackOf { member: String, param: u32, index: u32 },
+    /// The base wrapped as the value of `key` in a closed one-key hash: a
+    /// key write as the shape it adds. Kept at the END for bincode
+    /// variant-index stability (bump `EXTRACT_VERSION`).
+    AsKey { key: String },
+    /// The base hash shape with the keys `package::name` writes through its
+    /// parameter `index` merged in (`ParamWrites`). Kept at the END for
+    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
+    WrittenBy { package: String, name: String, index: u32, method: bool },
 }
 
 /// A sub's return type as a **deferred computation**, not a value:

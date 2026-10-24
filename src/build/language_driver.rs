@@ -1134,7 +1134,8 @@ fn remap_spans(
         | WitnessAttachment::ParamPairs { .. }
         | WitnessAttachment::InstanceShape { .. }
         | WitnessAttachment::SlotElements { .. }
-        | WitnessAttachment::CallbackIn { .. } => {}
+        | WitnessAttachment::CallbackIn { .. }
+        | WitnessAttachment::ParamWrites { .. } => {}
     };
     for w in witnesses.iter_mut() {
         remap_att(&mut w.attachment);

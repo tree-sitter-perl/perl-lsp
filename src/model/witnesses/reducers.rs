@@ -347,11 +347,17 @@ impl WitnessReducer for FrameworkAwareTypeFold {
                     // standing answer subsumes the newcomer — structure
                     // dominates rep (`HashWithKeys` is not downgraded by a
                     // deref's re-derived `HashRef`), mirroring class-over-rep.
+                    // "Latest" is the SOURCE position: re-emittable passes
+                    // (mutation extension) re-push every fold round, so bag
+                    // order is not doc order.
                     other => {
                         let subsumed = plain_type
                             .as_ref()
                             .is_some_and(|have| have.subsumes_narrowing(other));
-                        if prio > plain_type_priority || (prio == plain_type_priority && !subsumed) {
+                        let earlier = plain_type_at.is_some_and(|at| w.span.start < at);
+                        if prio > plain_type_priority
+                            || (prio == plain_type_priority && !subsumed && !earlier)
+                        {
                             plain_type = Some(other.clone());
                             plain_type_priority = prio;
                             plain_type_at = Some(w.span.start);
@@ -752,6 +758,59 @@ impl WitnessReducer for SlotElementsFold {
             Some(t) => ReducedValue::Type(t),
             None => ReducedValue::None,
         }
+    }
+}
+
+/// `ParamWrites{..}`: every key written through the parameter, in one
+/// hash shape. A key written more than once holds the join of its values.
+pub struct ParamWritesFold;
+
+impl WitnessReducer for ParamWritesFold {
+    fn name(&self) -> &str {
+        "param_writes"
+    }
+
+    fn claims(&self, w: &Witness) -> bool {
+        matches!(w.attachment, WitnessAttachment::ParamWrites { .. })
+            && matches!(w.payload, WitnessPayload::InferredType(_))
+    }
+
+    fn reduce(&self, ws: &[&Witness], q: &ReducerQuery) -> ReducedValue {
+        let mut keys: Vec<(String, Vec<InferredType>)> = Vec::new();
+        let mut open = false;
+        for w in ws {
+            let WitnessPayload::InferredType(InferredType::HashWithKeys { keys: wk, open: wo }) =
+                &w.payload
+            else {
+                continue;
+            };
+            open |= *wo;
+            for (k, v) in wk.iter() {
+                let slot = match keys.iter().position(|(name, _)| name == k) {
+                    Some(i) => i,
+                    None => {
+                        keys.push((k.clone(), Vec::new()));
+                        keys.len() - 1
+                    }
+                };
+                if let Some(v) = v {
+                    keys[slot].1.push((**v).clone());
+                }
+            }
+        }
+        if keys.is_empty() && !open {
+            return ReducedValue::None;
+        }
+        let keys = keys
+            .into_iter()
+            .map(|(k, vs)| {
+                (
+                    k,
+                    crate::model::file_analysis::join_all(&vs, class_order(q)).map(Box::new),
+                )
+            })
+            .collect();
+        ReducedValue::Type(InferredType::HashWithKeys { keys, open })
     }
 }
 

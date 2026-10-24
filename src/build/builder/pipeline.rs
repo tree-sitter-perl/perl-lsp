@@ -820,6 +820,67 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// A write through a named sub's scalar parameter (`$cfg->{k} = V`) is
+    /// an effect its callers see on the hash they passed: one single-key
+    /// shape per write on `ParamWrites`. A dynamic key or an escape opens
+    /// the shape instead.
+    // TODO(effect-shadowing): the parameter is matched by name in the sub's
+    // scope chain, so an inner `my $cfg` shadowing it is taken for it.
+    fn emit_param_write_effects(&mut self) {
+        use crate::model::file_analysis::WriteKey;
+        use crate::model::witnesses::{
+            ProjectionStep, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
+        };
+        let mut pushes = Vec::new();
+        for w in &self.key_writes {
+            let mut scope = Some(w.scope);
+            let sub = loop {
+                let Some(sid) = scope else { break None };
+                let s = &self.scopes[sid.0 as usize];
+                match s.kind {
+                    ScopeKind::Sub { .. } | ScopeKind::Method { .. } => break Some(s.id),
+                    _ => scope = s.parent,
+                }
+            };
+            let Some(sub) = sub else { continue };
+            let Some((package, name, params)) = self.callback_params.get(&sub) else {
+                continue;
+            };
+            let Some(&(_, index)) = params.iter().find(|(n, _)| *n == w.var_text) else {
+                continue;
+            };
+            let method = self.forwarding_subs.get(&sub).is_some_and(|(_, _, m)| *m);
+            let attachment = WitnessAttachment::ParamWrites {
+                package: package.clone(),
+                name: name.clone(),
+                index,
+                method,
+            };
+            let payload = match (&w.key, w.rhs_span) {
+                (WriteKey::Hash(k), Some(rhs)) => WitnessPayload::Projected {
+                    base: WitnessAttachment::Expr(rhs),
+                    step: ProjectionStep::AsKey { key: k.clone() },
+                },
+                (WriteKey::Hash(_) | WriteKey::Index(_), _) => continue,
+                (WriteKey::Unknown, _) => {
+                    WitnessPayload::InferredType(InferredType::HashWithKeys {
+                        keys: crate::model::file_analysis::SharedKeys::new(Vec::new()),
+                        open: true,
+                    })
+                }
+            };
+            pushes.push(Witness {
+                attachment,
+                source: WitnessSource::Builder("param_writes".into()),
+                payload,
+                span: w.rhs_span.unwrap_or(w.span),
+            });
+        }
+        for w in pushes {
+            self.bag.push(w);
+        }
+    }
+
     /// Post-walk pass: ref-derived facts that don't need walk-time
     /// visibility — `HashRefAccess` observations from `$v->{k}` refs
     /// and invocant-mutation facts on hash-key writes. Variable
@@ -836,6 +897,7 @@ impl<'a> Builder<'a> {
             TypeObservation, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
         };
         self.seed_arg_windows();
+        self.emit_param_write_effects();
 
         // Rep observations from `$v->{k}` access. Method-call return
         // edges on `Expression(refidx)` are emitted later — by the

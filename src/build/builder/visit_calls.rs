@@ -256,6 +256,7 @@ impl<'a> Builder<'a> {
             self.queue_children(node);
             return;
         }
+        self.emit_arg_write_edges(node);
         if let Some(func_node) = node.child_by_field_name("function") {
             if let Ok(raw) = func_node.utf8_text(self.source) {
                 // `goto &Foo::bar` / `&Foo::bar()` — the leading `&` is the
@@ -578,6 +579,80 @@ impl<'a> Builder<'a> {
         }
         let (key, dynamic) = self.extract_key_text(slot.child_by_field_name("key")?)?;
         (!dynamic).then_some((crate::cst::nth_element(slot, 0)?, key))
+    }
+
+    /// A bare scalar passed to a sub holds, after the call, its own shape
+    /// plus the keys the sub writes through that parameter (`ParamWrites`).
+    // TODO(effect-methods): method calls carry the effect too, once the
+    // receiver's class is known at the call; only function calls do today.
+    // TODO(effect-imports): a bare call to an imported sub keys the effect to
+    // the current package, so it answers nothing.
+    fn emit_arg_write_edges(&mut self, node: Node<'a>) {
+        use crate::model::witnesses::{
+            ProjectionStep, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
+        };
+        let Some(called) = self.forward_callee_name(node) else {
+            return;
+        };
+        if crate::model::builtins::is_builtin(&called) {
+            return;
+        }
+        let (qualifier, leaf) = crate::model::conventions::split_qualified(
+            &called,
+            &crate::model::conventions::PERL_SPELLINGS,
+        );
+        let Some(package) = qualifier
+            .map(str::to_string)
+            .or_else(|| self.current_package.clone())
+        else {
+            return;
+        };
+        let leaf = leaf.to_string();
+        let at = node.end_position();
+        let end = Span { start: at, end: at };
+        let args = self.flat_call_args(self.extract_call_args(node));
+        for (index, arg) in args.into_iter().enumerate() {
+            if crate::cst::is_flattening(arg) {
+                break;
+            }
+            if arg.kind() != "scalar" {
+                continue;
+            }
+            let Ok(var) = arg.utf8_text(self.source) else {
+                continue;
+            };
+            let var = var.to_string();
+            let Some(scope) =
+                crate::model::file_analysis::scope_chain_of(&self.scopes, self.current_scope())
+                    .into_iter()
+                    .find(|&sid| {
+                        !self
+                            .bag
+                            .for_attachment(&WitnessAttachment::Variable {
+                                name: var.clone(),
+                                scope: sid,
+                            })
+                            .is_empty()
+                    })
+            else {
+                continue;
+            };
+            self.emit_expr_witness(arg);
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::Variable { name: var, scope },
+                source: WitnessSource::Builder("arg_writes".into()),
+                payload: WitnessPayload::Projected {
+                    base: WitnessAttachment::Expr(node_to_span(arg)),
+                    step: ProjectionStep::WrittenBy {
+                        package: package.clone(),
+                        name: leaf.clone(),
+                        index: index as u32,
+                        method: false,
+                    },
+                },
+                span: end,
+            });
+        }
     }
 
     /// `BASE->{key}{$k} = VALUE`: the value is a member of `key`'s container

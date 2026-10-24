@@ -2768,6 +2768,25 @@ fn a_call_reads_its_own_arguments_back_out_of_the_callee() {
     assert_eq!(class_at(&app, &idx, "$f", 5, 0).as_deref(), Some("Greeter"));
 }
 
+/// Keys a sub writes through the hash reference it is passed are on the
+/// caller's hash after the call.
+#[test]
+fn a_hash_passed_to_a_sub_holds_the_keys_the_sub_writes() {
+    let util = parse_source_to_cached(
+        "package Util;\nsub add_defaults { my ($cfg) = @_; $cfg->{greeter} = bless({}, 'Greeter'); return }\n1;\n",
+        "Util",
+    );
+    let app = parse_source_to_cached(
+        "package App;\nsub run {\n    my $cfg = { name => 'x' };\n    Util::add_defaults($cfg);\n    my $gg = $cfg->{greeter};\n    return $gg;\n}\n1;\n",
+        "App",
+    );
+    let idx = index_of(&[&util, &app]);
+    assert_eq!(
+        class_at(&app, &idx, "$gg", 5, 4).as_deref(),
+        Some("Greeter")
+    );
+}
+
 /// The sweep probe store answers a repeated probe without re-running it,
 /// re-runs after a shape bump, and never keeps "file never shredded".
 #[test]
