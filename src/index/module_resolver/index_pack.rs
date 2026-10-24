@@ -509,7 +509,7 @@ pub fn index_pack_language(
     {
         let mut agg = crate::model::file_analysis::HeapBreakdown::default();
         let mut hj = crate::model::file_analysis::HeapJson::new();
-        index.for_each_pack_registered_file(&mut |cached| {
+        index.for_each_registered_file(&mut |cached| {
             agg.add(&cached.analysis.heap_estimate());
             hj.push(&cached.path, &cached.analysis);
         });

@@ -143,7 +143,7 @@ Deliberately NOT on the set (the seam's edge, kept honest):
   Completion has no resolved target for `references_mask_for` to judge, so
   its default visibility is the full VISIBLE universe; the construction
   override narrows it like every other projection.
-- Projections only READ the stores (`FileStore::for_each_open`), so an LSP
+- Projections only READ the stores (`OpenDocs::for_each_open`), so an LSP
   handler may hold its open-doc guard across a projection — the old
   `drop(doc)`-before-walking discipline (a deadlock trap) is gone.
 - Each projection reproduces the exact composition of the verb it serves.
@@ -171,7 +171,7 @@ The spike's axes live in CandidateSet construction:
   identity and completion), and `rename_edits` → `Result` REFUSES on
   alias-spelled sites (full-or-refuse) instead of silently skipping.
 - **file roles** — one rule for every language: an open document is OPEN,
-  a FileStore workspace entry or a front-door index registration
+  a front-door index registration
   (`CrossFileLookup::is_dependency_path` false) is WORKSPACE, the rest
   (@INC) is DEPENDENCY. Each index-held file is admitted by its own tier,
   so EDITABLE rename and VISIBLE references mean the same thing for a pack

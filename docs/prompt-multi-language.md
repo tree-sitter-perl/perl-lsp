@@ -36,7 +36,7 @@ consumer exists, tests for layering until then):
 
 **The core crate (`lsp-engine`).** the `src/` layer directories ARE
 the manifest: model (file_analysis, witnesses), the generic driver
-(query_extract + capture vocabulary), cross-file (file_store, resolve,
+(query_extract + capture vocabulary), cross-file (open_docs, resolve,
 module_index, module_cache), the rhai host, and the GENERIC half of
 the LSP adapter. The honest cost: `symbols.rs` must split — the verbs
 (documentSymbol/references/rename/workspace-symbol) are pure

@@ -80,7 +80,7 @@ impl PackHealCtx {
     /// (no clobber); the loop's `finish` decides whether to re-run.
     async fn run_gather_once(&self, uri: &Url) {
         let Some((text, path, language)) = self
-            .files
+            .open_docs
             .get_open(uri)
             .filter(|d| {
                 // Only a gather-dependent language has anything to re-gather.
@@ -109,7 +109,7 @@ impl PackHealCtx {
         // loop re-runs against the latest text — the gather cache stays warm
         // for unchanged included files, so the re-run is cheap).
         if self
-            .files
+            .open_docs
             .get_open(uri)
             .map(|d| d.text != snapshot)
             .unwrap_or(true)
@@ -124,11 +124,11 @@ impl PackHealCtx {
                 self.module_index.request_resolve(parent);
             }
         }
-        if let Some(mut doc) = self.files.get_open_mut(uri) {
+        if let Some(mut doc) = self.open_docs.get_open_mut(uri) {
             doc.apply_rebuilt(analysis);
         }
         let diags = self
-            .files
+            .open_docs
             .get_open(uri)
             .map(|doc| symbols::pack_diagnostics(&doc.analysis, self.options));
         if let Some(diags) = diags {
@@ -143,7 +143,7 @@ impl Backend {
     /// Build the shared context a background pack-gather heal runs with.
     pub(super) fn pack_heal_ctx(&self) -> PackHealCtx {
         PackHealCtx {
-            files: Arc::clone(&self.files),
+            open_docs: Arc::clone(&self.open_docs),
             module_index: Arc::clone(&self.module_index),
             client: self.client.clone(),
             options: self.diagnostic_options(),
@@ -155,7 +155,7 @@ impl Backend {
     }
 
     pub fn new(client: Client) -> Self {
-        let files: Arc<FileStore> = Arc::new(FileStore::new());
+        let open_docs: Arc<OpenDocs> = Arc::new(OpenDocs::new());
 
         // We need Arc<ModuleIndex> so the refresh callback can access it.
         // Two-phase init: create ModuleIndex whose refresh callback references
@@ -167,7 +167,7 @@ impl Backend {
 
         let on_refresh = make_on_refresh(
             client.clone(),
-            Arc::clone(&files),
+            Arc::clone(&open_docs),
             Arc::clone(&module_index_holder),
             Arc::clone(&diag_options),
         );
@@ -178,7 +178,7 @@ impl Backend {
         Backend {
             module_index,
             client,
-            files,
+            open_docs,
             change_debounce: Arc::new(dashmap::DashMap::new()),
             diag_debounce: Arc::new(dashmap::DashMap::new()),
             indexed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -209,7 +209,7 @@ impl Backend {
                 .value(),
         );
         let debounce = Arc::clone(&gate.debounce);
-        let files = Arc::clone(&self.files);
+        let open_docs = Arc::clone(&self.open_docs);
         let module_index = Arc::clone(&self.module_index);
         let client = self.client.clone();
         let options = self.diagnostic_options();
@@ -229,7 +229,7 @@ impl Backend {
             }
             // Snapshot the latest text off the lock; build on a blocking
             // thread so the ~0.7s analysis never stalls completion/hover.
-            let Some((text, path, language)) = files
+            let Some((text, path, language)) = open_docs
                 .get_open(&uri)
                 .map(|d| (d.text.clone(), d.path.clone(), d.language))
             else {
@@ -267,10 +267,10 @@ impl Backend {
                     module_index.request_resolve(parent);
                 }
             }
-            if let Some(mut doc) = files.get_open_mut(&uri) {
+            if let Some(mut doc) = open_docs.get_open_mut(&uri) {
                 doc.apply_rebuilt(analysis);
             }
-            let diags = files
+            let diags = open_docs
                 .get_open(&uri)
                 .map(|doc| symbols::pack_diagnostics(&doc.analysis, options));
             if let Some(diags) = diags {
@@ -302,14 +302,14 @@ impl Backend {
     /// of double-gathering the same cone. Which analyses are stale, the
     /// serialization, and the H9 disciplines are all `PackInvalidator`'s.
     pub(super) fn schedule_pack_invalidate(&self, path: PathBuf, deleted: bool) {
-        let files = Arc::clone(&self.files);
+        let open_docs = Arc::clone(&self.open_docs);
         let module_index = Arc::clone(&self.module_index);
         let invalidator = Arc::clone(&self.pack_invalidator);
         let root = self.module_index.workspace_root();
         let heal_ctx = self.pack_heal_ctx();
         tokio::spawn(async move {
             let outcome = tokio::task::spawn_blocking(move || {
-                invalidator.file_changed(root.as_deref(), &module_index, &files, &path, deleted)
+                invalidator.file_changed(root.as_deref(), &module_index, &open_docs, &path, deleted)
             })
             .await;
             let Ok(outcome) = outcome else { return };
@@ -328,7 +328,7 @@ impl Backend {
     /// with — Arcs only, safe to move into a spawned task.
     pub(super) fn diag_ctx(&self) -> DiagCtx {
         DiagCtx {
-            files: Arc::clone(&self.files),
+            open_docs: Arc::clone(&self.open_docs),
             module_index: Arc::clone(&self.module_index),
             client: self.client.clone(),
             options: self.diagnostic_options(),
@@ -395,7 +395,7 @@ impl Backend {
 /// `PackHealCtx`). Holds Arcs/handles only.
 #[derive(Clone)]
 pub(super) struct DiagCtx {
-    files: Arc<FileStore>,
+    open_docs: Arc<OpenDocs>,
     module_index: Arc<ModuleIndex>,
     client: Client,
     options: symbols::DiagnosticOptions,
@@ -418,7 +418,7 @@ impl DiagCtx {
         uri: &Url,
     ) -> Option<crate::index::module_index::SurfaceDirty> {
         let surface = {
-            let doc = self.files.get_open(uri)?;
+            let doc = self.open_docs.get_open(uri)?;
             if !crate::build::language_driver::LanguageRegistry::caps(doc.language)
                 .hub_enrichment
             {
@@ -446,7 +446,7 @@ impl DiagCtx {
             return;
         }
         let mut to_refresh: Vec<Url> = Vec::new();
-        self.files.for_each_open(|u, _doc| {
+        self.open_docs.for_each_open(|u, _doc| {
             if let Ok(p) = u.to_file_path() {
                 let c = std::fs::canonicalize(&p).unwrap_or(p);
                 if dirty.contains(&c) {
@@ -460,7 +460,7 @@ impl DiagCtx {
     }
 
     /// Publish `uri`'s diagnostics — a pure read over the derived enriched
-    /// analysis. The one enrichment writer is `FileStore::enrich_open`
+    /// analysis. The one enrichment writer is `OpenDocs::enrich_open`
     /// (clone-and-enrich off the store lock, ptr-guarded swap); this path
     /// reads the artifact it returns, never mutates a stored analysis.
     /// The derivation (enrichment + collection) runs on the BLOCKING pool:
@@ -468,7 +468,7 @@ impl DiagCtx {
     /// future that runs it inline stalls tower-lsp's single serve task.
     pub(super) async fn publish(&self, uri: &Url) {
         crate::util::ghost_stats::count("publish_diagnostics");
-        let language = self.files.get_open(uri).map(|d| d.language);
+        let language = self.open_docs.get_open(uri).map(|d| d.language);
         let diagnostics = match language {
             Some(l) if crate::build::language_driver::LanguageRegistry::caps(l).hub_enrichment => {
                 // Deferred while the Perl workspace index is landing: an
@@ -489,12 +489,12 @@ impl DiagCtx {
                     crate::util::ghost_stats::count("publish_diagnostics.deferred");
                     return;
                 }
-                let files = Arc::clone(&self.files);
+                let open_docs = Arc::clone(&self.open_docs);
                 let idx = Arc::clone(&self.module_index);
                 let options = self.options;
                 let uri = uri.clone();
                 tokio::task::spawn_blocking(move || {
-                    match files.enrich_open(&uri, &*idx) {
+                    match open_docs.enrich_open(&uri, &*idx) {
                         Some(analysis) => {
                             symbols::collect_diagnostics(&analysis, &idx, options)
                         }
@@ -509,7 +509,7 @@ impl DiagCtx {
             // (gated by `DiagnosticOptions.use_after_move`) — a cheap
             // per-file read, no blocking hop needed.
             Some(_) => self
-                .files
+                .open_docs
                 .get_open(uri)
                 .map(|doc| symbols::pack_diagnostics(&doc.analysis, self.options))
                 .unwrap_or_default(),
@@ -538,7 +538,7 @@ impl DiagCtx {
 /// instead of replaying every one.
 fn make_on_refresh(
     client: Client,
-    files: Arc<FileStore>,
+    open_docs: Arc<OpenDocs>,
     holder: Arc<std::sync::OnceLock<Arc<ModuleIndex>>>,
     diag_options: Arc<std::sync::Mutex<symbols::DiagnosticOptions>>,
 ) -> impl Fn() + Send + Sync + 'static {
@@ -547,7 +547,7 @@ fn make_on_refresh(
     let handle = tokio::runtime::Handle::current();
     move || {
         let client = client.clone();
-        let files = Arc::clone(&files);
+        let open_docs = Arc::clone(&open_docs);
         let holder = Arc::clone(&holder);
         let diag_options = Arc::clone(&diag_options);
         let run = Arc::clone(&run);
@@ -573,10 +573,10 @@ fn make_on_refresh(
             // must never pin a reactor worker.
             let options = *diag_options.lock().unwrap();
             let pending = {
-                let files = Arc::clone(&files);
+                let open_docs = Arc::clone(&open_docs);
                 let module_index = Arc::clone(module_index);
                 tokio::task::spawn_blocking(move || {
-                    refresh_open_diagnostics(&files, &module_index, options)
+                    refresh_open_diagnostics(&open_docs, &module_index, options)
                 })
                 .await
                 .unwrap_or_default()
@@ -589,12 +589,12 @@ fn make_on_refresh(
 }
 
 /// Re-derive diagnostics for open docs: hub-enriched docs re-enrich through
-/// `FileStore::enrich_open` (the one enrichment writer) and are read from
+/// `OpenDocs::enrich_open` (the one enrichment writer) and are read from
 /// the returned artifact; the rest are read as-is. URIs are collected
 /// under the read iterator first, then each doc is derived with no store
 /// guard held — safe to run from any task, publish after.
 pub(super) fn refresh_open_diagnostics(
-    files: &FileStore,
+    open_docs: &OpenDocs,
     module_index: &ModuleIndex,
     options: symbols::DiagnosticOptions,
 ) -> Vec<(Url, Vec<Diagnostic>)> {
@@ -603,18 +603,18 @@ pub(super) fn refresh_open_diagnostics(
     let hub = |language: &str| {
         crate::build::language_driver::LanguageRegistry::caps(language).hub_enrichment
     };
-    files.for_each_open(|uri, doc| {
+    open_docs.for_each_open(|uri, doc| {
         docs.push((uri.clone(), doc.language));
     });
     let mut pending: Vec<(Url, Vec<Diagnostic>)> = Vec::new();
     for (uri, language) in docs {
         let diagnostics = if hub(language) {
-            match files.enrich_open(&uri, module_index) {
+            match open_docs.enrich_open(&uri, module_index) {
                 Some(analysis) => symbols::collect_diagnostics(&analysis, module_index, options),
                 None => continue, // closed mid-iteration
             }
         } else {
-            match files.get_open(&uri) {
+            match open_docs.get_open(&uri) {
                 Some(doc) => symbols::pack_diagnostics(&doc.analysis, options),
                 None => continue,
             }

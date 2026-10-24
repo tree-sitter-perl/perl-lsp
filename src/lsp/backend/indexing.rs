@@ -12,12 +12,10 @@ impl Backend {
     /// following didChange behind it — and a save is the most frequent trigger
     /// this path has.
     pub(super) fn spawn_reindex_saved_perl(&self, path: PathBuf) {
-        let files = Arc::clone(&self.files);
         let module_index = Arc::clone(&self.module_index);
         let ctx = self.diag_ctx();
         tokio::spawn(async move {
             let dirty = Self::reindex_perl_blocking(
-                files,
                 module_index,
                 vec![(path, FileChangeType::CHANGED)],
             )
@@ -36,7 +34,6 @@ impl Backend {
         perl_changes: Vec<(PathBuf, FileChangeType)>,
     ) {
         let dirty = Self::reindex_perl_blocking(
-            Arc::clone(&self.files),
             Arc::clone(&self.module_index),
             perl_changes,
         )
@@ -59,7 +56,6 @@ impl Backend {
     ///
     /// Over Arcs only, so the spawned caller can move it into a task.
     async fn reindex_perl_blocking(
-        files: Arc<crate::index::file_store::FileStore>,
         module_index: Arc<ModuleIndex>,
         perl_changes: Vec<(PathBuf, FileChangeType)>,
     ) -> std::collections::HashSet<PathBuf> {
@@ -109,8 +105,6 @@ impl Backend {
                 module_index.invalidate_derived_copies(&canon);
                 match typ {
                     FileChangeType::DELETED => {
-                        files.remove_workspace(&path);
-                        files.remove_workspace(&canon);
                         // Consumers of the departed file's packages, BEFORE
                         // the record (and its provided names) are removed.
                         dirty_all.extend(module_index.dirty_consumers(&canon));
@@ -125,7 +119,7 @@ impl Backend {
                     }
                     _ => {
                         // Re-index the file (created or changed). The fresh
-                        // copy registers WHOLE (refs + bag) in both stores:
+                        // copy registers WHOLE (refs + bag):
                         // its persisted generation was just invalidated, so
                         // the resident copy is the only source until the
                         // next bulk index re-persists.
@@ -134,7 +128,6 @@ impl Backend {
                             if let Some(tree) = parser.parse(&source, None) {
                                 let analysis = crate::build::builder::build(&tree, source.as_bytes());
                                 let arc = Arc::new(analysis);
-                                files.insert_workspace_arc(canon.clone(), arc.clone());
                                 module_index.record_workspace_projections(&canon, &arc);
                                 // register_workspace_resident routes through
                                 // record_and_dirty: the dirty set is bound to
@@ -232,12 +225,11 @@ impl Backend {
     /// pack scan.
     pub(super) fn ensure_workspace_indexed(&self) {
         use std::sync::atomic::Ordering;
-        let want_perl =
+        let want_enrichment =
             crate::build::language_driver::LanguageRegistry::served().caps().hub_enrichment;
         if self.indexed.swap(true, Ordering::Relaxed) {
             return; // already indexed (or in flight)
         }
-        let files = Arc::clone(&self.files);
         let client = self.client.clone();
         let module_index = Arc::clone(&self.module_index);
         let root = self.module_index.workspace_root();
@@ -255,7 +247,7 @@ impl Backend {
         // racing the scheduling defers into the invalidator's reconcile set
         // instead of hitting an unattached (no-op) invalidation. Perl uses the
         // direct re-index path and never touches the invalidator.
-        let pack_invalidator = (!want_perl).then(|| Arc::clone(&self.pack_invalidator));
+        let pack_invalidator = (!want_enrichment).then(|| Arc::clone(&self.pack_invalidator));
         if let Some(ref inv) = pack_invalidator {
             inv.begin_bulk_index();
         }
@@ -275,13 +267,13 @@ impl Backend {
                 // Pack keeps its early-out shape (no heal without a root);
                 // perl must still sweep so a publish deferred against the
                 // kickoff-to-early-out window converges.
-                if want_perl {
+                if want_enrichment {
                     Self::open_perl_gate_then_heal(&_done, &heal_ctx, true);
                 }
                 return;
             };
             let Some(root_path) = root_uri.strip_prefix("file://") else {
-                if want_perl {
+                if want_enrichment {
                     Self::open_perl_gate_then_heal(&_done, &heal_ctx, true);
                 }
                 return;
@@ -374,7 +366,7 @@ impl Backend {
             });
             let cb_ref: Option<&(dyn Fn(usize, usize) + Sync)> =
                 cb.as_ref().map(|c| c as &(dyn Fn(usize, usize) + Sync));
-            let count = if want_perl {
+            let count = if want_enrichment {
                 // Once the walk finishes, the persist writer may keep
                 // draining for minutes on a large tree — announce that phase
                 // instead of sitting at 100% looking hung.
@@ -403,8 +395,7 @@ impl Backend {
                     walk_done.as_ref().map(|c| c as &(dyn Fn() + Sync));
                 crate::index::module_resolver::index_workspace_with_index(
                     &root_path,
-                    &files,
-                    Some(&module_index),
+                    &module_index,
                     cb_ref,
                     walk_done_ref,
                 )
@@ -438,7 +429,7 @@ impl Backend {
                     token,
                     value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(
                         WorkDoneProgressEnd {
-                            message: Some(if want_perl {
+                            message: Some(if want_enrichment {
                                 format!("Indexed {} Perl files", count)
                             } else {
                                 format!(
@@ -465,7 +456,7 @@ impl Backend {
             // Re-analyze + re-publish every open doc so pull-verb answers baked in the cached-only open window
             // (truncated cross-file closure, `None` gd/hover) self-heal without
             // the user re-triggering.
-            Self::open_perl_gate_then_heal(&_done, &heal_ctx, want_perl);
+            Self::open_perl_gate_then_heal(&_done, &heal_ctx, want_enrichment);
         });
     }
 
@@ -475,11 +466,11 @@ impl Backend {
     /// the raw open doc while the sweep's enrichment is still running — the
     /// same degraded window the deferral accepts). Pack keeps the guard's
     /// drop-time open: its degraded window is owned by `degraded_open`.
-    fn open_perl_gate_then_heal(done: &IndexDoneGuard, ctx: &PackHealCtx, want_perl: bool) {
-        if want_perl {
+    fn open_perl_gate_then_heal(done: &IndexDoneGuard, ctx: &PackHealCtx, want_enrichment: bool) {
+        if want_enrichment {
             done.ready.open();
         }
-        Self::heal_open_docs(ctx, want_perl);
+        Self::heal_open_docs(ctx, want_enrichment);
     }
 
     /// Re-derive + re-publish every OPEN document after the workspace index /
@@ -489,10 +480,10 @@ impl Backend {
     /// warm); perl docs re-derive enrichment + diagnostics through
     /// `refresh_open_diagnostics` (URIs collected under the read iterator,
     /// each doc derived with no store guard held).
-    fn heal_open_docs(ctx: &PackHealCtx, want_perl: bool) {
+    fn heal_open_docs(ctx: &PackHealCtx, want_enrichment: bool) {
         log::debug!("cold-window heal: index landed");
-        if want_perl {
-            let pending = refresh_open_diagnostics(&ctx.files, &ctx.module_index, ctx.options);
+        if want_enrichment {
+            let pending = refresh_open_diagnostics(&ctx.open_docs, &ctx.module_index, ctx.options);
             if pending.is_empty() {
                 return;
             }
@@ -504,7 +495,7 @@ impl Backend {
             });
         } else {
             let mut uris: Vec<Url> = Vec::new();
-            ctx.files.for_each_open(|uri, doc| {
+            ctx.open_docs.for_each_open(|uri, doc| {
                 // Only gather-dependent docs have a cold-open window to heal
                 // (a context-free analyze was already full quality).
                 if crate::build::language_driver::LanguageRegistry::caps(doc.language)
@@ -535,9 +526,9 @@ impl Backend {
     /// Bounded by `cold_wait_ms` (0 opts out) so it can never wedge, and on
     /// timeout the handler resolves degraded exactly as before.
     ///
-    /// GUARD DISCIPLINE: holds NO FileStore guard across the await — it touches
+    /// GUARD DISCIPLINE: holds NO OpenDocs guard across the await — it touches
     /// only the `ReadyGate`. Callers snapshot `analysis` fresh AFTER it, picking up any heal (see the hazard note on
-    /// `FileStore::for_each_open`).
+    /// `OpenDocs::for_each_open`).
     /// `WaitPolicy` → millisecond cap. `cold_wait_ms == 0` is the global
     /// "never block" opt-out and wins over any policy.
     fn wait_cap(&self, policy: WaitPolicy) -> u64 {
@@ -577,7 +568,7 @@ impl Backend {
     /// cap) resolves warm on the first pull exactly as before; a pathological
     /// file degrades after the cap and heals once the build lands + republishes.
     ///
-    /// GUARD DISCIPLINE: holds NO FileStore / DashMap guard across the await —
+    /// GUARD DISCIPLINE: holds NO OpenDocs / DashMap guard across the await —
     /// it snapshots the `ReadyGate` Arc out of the `opening` map and drops that
     /// guard before awaiting. Callers snapshot `analysis` fresh AFTER it.
     pub(super) async fn await_open_ready(&self, uri: &Url, policy: WaitPolicy) {
@@ -592,7 +583,7 @@ impl Backend {
         /// (`not_ready_or_null`). `cold_wait_ms == 0` still opts out of
         /// waiting entirely.
         const OPEN_BUILD_WAIT_MS: u64 = 5_000;
-        if self.files.get_open(uri).is_some() {
+        if self.open_docs.get_open(uri).is_some() {
             return; // already built
         }
         let Some(gate) = self.opening.get(uri).map(|n| Arc::clone(n.value())) else {
@@ -605,7 +596,7 @@ impl Backend {
         if matches!(policy, WaitPolicy::Interactive) {
             cap = cap.max(OPEN_BUILD_WAIT_MS);
         }
-        let waited = gate.armed_wait(|| self.files.get_open(uri).is_some());
+        let waited = gate.armed_wait(|| self.open_docs.get_open(uri).is_some());
         if let Some(waited) = waited {
             self.bounded_wait_with_progress(cap, waited, "Waiting for file analysis")
                 .await;

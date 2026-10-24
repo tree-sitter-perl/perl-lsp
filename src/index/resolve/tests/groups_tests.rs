@@ -94,7 +94,8 @@ sub describe { my ($self) = @_; return $self->{size} }
 /// from the consumer's key, the field must surface back.
 #[test]
 fn test_field_group_unions_across_files() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let point_path = PathBuf::from("/tmp/fieldgroup_point.pm");
     let user_path = PathBuf::from("/tmp/fieldgroup_user.pl");
 
@@ -113,10 +114,10 @@ my $val = $p->x;
 ";
     let point_fa = parse(point_src);
     let user_fa = parse(user_src);
-    store.insert_workspace(point_path.clone(), point_fa);
-    store.insert_workspace(user_path.clone(), user_fa);
+    idx.insert_workspace_for_test(point_path.clone(), point_fa);
+    idx.insert_workspace_for_test(user_path.clone(), user_fa);
 
-    let origin_fa = store.workspace_raw().get(&point_path).unwrap().value().clone();
+    let origin_fa = idx.workspace_file_for_test(&point_path).unwrap();
     // Cursor on `$x` in the field decl (row 2, col 11 = bare name).
     let resolved = resolve_symbol(&origin_fa, tree_sitter::Point { row: 2, column: 11 }, None)
         .expect("field decl resolves");
@@ -129,7 +130,7 @@ my $val = $p->x;
 
     let locs = group_refs(
         &store,
-        None,
+        Some(&idx),
         &FileKey::Path(point_path.clone()),
         &local_spans,
         &pinned_spans,
@@ -216,19 +217,20 @@ class Point {
 /// replacement texts via group_rename_edits.
 #[test]
 fn test_group_rename_rederives_mapped_members_cross_file() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let class_path = PathBuf::from("/tmp/grp_map_widget.pm");
     let user_path = PathBuf::from("/tmp/grp_map_user.pl");
-    store.insert_workspace(
+    idx.insert_workspace_for_test(
         class_path.clone(),
         parse("package Widget;\nuse Moo;\nhas size => (is => 'ro', predicate => 1);\n1;\n"),
     );
-    store.insert_workspace(
+    idx.insert_workspace_for_test(
         user_path.clone(),
         parse("use Widget;\nmy $w = Widget->new(size => 3);\nprint $w->size if $w->has_size;\n"),
     );
 
-    let class_fa = store.workspace_raw().get(&class_path).unwrap().value().clone();
+    let class_fa = idx.workspace_file_for_test(&class_path).unwrap();
     // Cursor on the attr decl token `size` (row 2, col 4).
     let resolved = resolve_symbol(&class_fa, tree_sitter::Point { row: 2, column: 4 }, None)
         .expect("attr decl resolves");
@@ -237,7 +239,7 @@ fn test_group_rename_rederives_mapped_members_cross_file() {
     };
     let edits = group_rename_edits(
         &store,
-        None,
+        Some(&idx),
         &FileKey::Path(class_path.clone()),
         &local_spans,
         &pinned_spans,
@@ -269,13 +271,14 @@ fn test_group_rename_rederives_mapped_members_cross_file() {
 /// covered by `test_group_rename_rederives_mapped_members_cross_file`.
 #[test]
 fn moo_explicit_string_accessor_renames_its_defining_string() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/moo_str_widget.pm");
     let src = "package Widget;\nuse Moo;\n\
         has size => (is => 'rw', predicate => 'has_size', clearer => 'clear_size');\n\
         sub area { my $self = shift; return $self->size if $self->has_size; }\n1;\n";
-    store.insert_workspace(path.clone(), parse(src));
-    let fa = store.workspace_raw().get(&path).unwrap().value().clone();
+    idx.insert_workspace_for_test(path.clone(), parse(src));
+    let fa = idx.workspace_file_for_test(&path).unwrap();
     // Cursor on the `has size` attr token (row 2, col 4).
     let resolved = resolve_symbol(&fa, tree_sitter::Point { row: 2, column: 4 }, None)
         .expect("attr decl resolves");
@@ -283,7 +286,7 @@ fn moo_explicit_string_accessor_renames_its_defining_string() {
         panic!("expected Group, got {:?}", resolved);
     };
     let edits = group_rename_edits(
-        &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "dim",
+        &store, Some(&idx), &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "dim",
         RoleMask::EDITABLE,
     );
     let lines: Vec<&str> = src.lines().collect();
@@ -318,7 +321,7 @@ fn package_var_our_renames_cross_file() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let lib = PathBuf::from("/tmp/pv_cfg.pm");
     let app = PathBuf::from("/tmp/pv_app.pl");
     let lib_src = "package Cfg;\nour $debug = 0;\nsub on { $debug = 1 }\n1;\n";
@@ -326,10 +329,10 @@ fn package_var_our_renames_cross_file() {
 
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(lib.clone(), Arc::new(parse(lib_src)));
-    store.insert_workspace(lib.clone(), parse(lib_src));
-    store.insert_workspace(app.clone(), parse(app_src));
+    idx.insert_workspace_for_test(lib.clone(), parse(lib_src));
+    idx.insert_workspace_for_test(app.clone(), parse(app_src));
 
-    let lib_fa = store.workspace_raw().get(&lib).unwrap().value().clone();
+    let lib_fa = idx.workspace_file_for_test(&lib).unwrap();
 
     // Cursor on the `our $debug` decl resolves to a cross-file PackageVar.
     let col = lib_src.lines().nth(1).unwrap().find("debug").unwrap();
@@ -381,7 +384,7 @@ fn package_var_array_hash_globals_rename_name_tail_only() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let lib = PathBuf::from("/tmp/pvc_pkg.pm");
     let app = PathBuf::from("/tmp/pvc_user.pl");
     let lib_src = "package Pkg;\nour @items = (1, 2, 3);\nour %map = (a => 1);\n1;\n";
@@ -389,9 +392,9 @@ fn package_var_array_hash_globals_rename_name_tail_only() {
 
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(lib.clone(), Arc::new(parse(lib_src)));
-    store.insert_workspace(lib.clone(), parse(lib_src));
-    store.insert_workspace(app.clone(), parse(app_src));
-    let lib_fa = store.workspace_raw().get(&lib).unwrap().value().clone();
+    idx.insert_workspace_for_test(lib.clone(), parse(lib_src));
+    idx.insert_workspace_for_test(app.clone(), parse(app_src));
+    let lib_fa = idx.workspace_file_for_test(&lib).unwrap();
 
     // Cursor on `our @items`.
     let col = lib_src.lines().nth(1).unwrap().find("items").unwrap();
@@ -442,21 +445,22 @@ fn package_var_main_global_is_file_local_group() {
 /// file-local until entrypoint analysis can prove two files are one program.
 #[test]
 fn package_var_main_global_does_not_cross_scripts() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let a = PathBuf::from("/tmp/pvm_a.pl");
     let b = PathBuf::from("/tmp/pvm_b.pl");
     let a_src = "our $config = 1;\nprint $config;\n";
-    store.insert_workspace(a.clone(), parse(a_src));
-    store.insert_workspace(b.clone(), parse("our $config = 2;\nprint $config;\n"));
+    idx.insert_workspace_for_test(a.clone(), parse(a_src));
+    idx.insert_workspace_for_test(b.clone(), parse("our $config = 2;\nprint $config;\n"));
 
-    let a_fa = store.workspace_raw().get(&a).unwrap().value().clone();
+    let a_fa = idx.workspace_file_for_test(&a).unwrap();
     let ResolvedTarget::Group { local_spans, pinned_spans, members, .. } =
         resolve_symbol(&a_fa, tree_sitter::Point { row: 0, column: 5 }, None).unwrap()
     else {
         panic!("main global should be a file-local Group")
     };
     let edits = group_rename_edits(
-        &store, None, &FileKey::Path(a.clone()), &local_spans, &pinned_spans, &members, "settings",
+        &store, Some(&idx), &FileKey::Path(a.clone()), &local_spans, &pinned_spans, &members, "settings",
         RoleMask::EDITABLE,
     );
     assert!(
@@ -475,7 +479,7 @@ fn override_scope_hierarchy_unions_dispatch_is_precise() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let base = PathBuf::from("/tmp/os_base.pm");
     let child = PathBuf::from("/tmp/os_child.pm");
     let base_src = "package Base;\nsub new { bless {}, shift }\nsub shared { 1 }\n1;\n";
@@ -485,10 +489,10 @@ fn override_scope_hierarchy_unions_dispatch_is_precise() {
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(base.clone(), Arc::new(parse(base_src)));
     idx.register_workspace_module(child.clone(), Arc::new(parse(child_src)));
-    store.insert_workspace(base.clone(), parse(base_src));
-    store.insert_workspace(child.clone(), parse(child_src));
+    idx.insert_workspace_for_test(base.clone(), parse(base_src));
+    idx.insert_workspace_for_test(child.clone(), parse(child_src));
 
-    let base_fa = store.workspace_raw().get(&base).unwrap().value().clone();
+    let base_fa = idx.workspace_file_for_test(&base).unwrap();
 
     // Hierarchy (default): Base::shared's family includes the Child override,
     // so a rename reaches Child's file.
@@ -529,7 +533,7 @@ fn test_renaming_import_remote_joins_source_alias_stays_local() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let exp = PathBuf::from("/tmp/rni_exp.pm");
     let cons = PathBuf::from("/tmp/rni_cons.pm");
     let exp_src = "package Exp;\nuse Exporter 'import';\nour @EXPORT_OK = ('beta');\nsub beta { 1 }\n1;\n";
@@ -537,8 +541,8 @@ fn test_renaming_import_remote_joins_source_alias_stays_local() {
 
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(exp.clone(), Arc::new(parse(exp_src)));
-    store.insert_workspace(exp.clone(), parse(exp_src));
-    store.insert_workspace(cons.clone(), parse(cons_src));
+    idx.insert_workspace_for_test(exp.clone(), parse(exp_src));
+    idx.insert_workspace_for_test(cons.clone(), parse(cons_src));
 
     let hit = |refs: &[RefLocation], p: &PathBuf| {
         refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if x == p))
@@ -595,13 +599,14 @@ fn arg_key_does_not_hijack_enclosing_method() {
 /// `Class`-owned columns, not verb params — so renaming the column reaches them.
 #[test]
 fn dbic_column_rename_reaches_single_arg_call_keys() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/dbic_argkey.pm");
     let src = "package U;\nuse base 'DBIx::Class::Core';\n\
         __PACKAGE__->add_columns(qw/id name/);\n\
         sub go { my $self = shift; $self->update({ name => 1 }); return $self->find({ name => 2 }); }\n1;\n";
-    store.insert_workspace(path.clone(), parse(src));
-    let fa = store.workspace_raw().get(&path).unwrap().value().clone();
+    idx.insert_workspace_for_test(path.clone(), parse(src));
+    let fa = idx.workspace_file_for_test(&path).unwrap();
     let col = src.lines().nth(2).unwrap().find("name").unwrap();
     let ResolvedTarget::Group { local_spans, pinned_spans, members, .. } =
         resolve_symbol(&fa, tree_sitter::Point { row: 2, column: col }, None).expect("column resolves")
@@ -609,7 +614,7 @@ fn dbic_column_rename_reaches_single_arg_call_keys() {
         panic!("expected a column attr Group")
     };
     let edits = group_rename_edits(
-        &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "RENAMED",
+        &store, Some(&idx), &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "RENAMED",
         RoleMask::EDITABLE,
     );
     let rows: std::collections::BTreeSet<usize> = edits.iter().map(|(l, _)| l.span.start.row).collect();
@@ -627,13 +632,14 @@ fn dbic_column_rename_reaches_single_arg_call_keys() {
 /// never walked, so renaming a column joins `\%cond` keys but never an attr.
 #[test]
 fn dbic_column_rename_multiarg_search_excludes_attrs_hash() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/dbic_multiarg.pm");
     let src = "package U;\nuse base 'DBIx::Class::Core';\n\
         __PACKAGE__->add_columns(qw/id name/);\n\
         sub go { my $self = shift; $self->search({ name => 1 }, { order_by => 'id' }); }\n1;\n";
-    store.insert_workspace(path.clone(), parse(src));
-    let fa = store.workspace_raw().get(&path).unwrap().value().clone();
+    idx.insert_workspace_for_test(path.clone(), parse(src));
+    let fa = idx.workspace_file_for_test(&path).unwrap();
     let col = src.lines().nth(2).unwrap().find("name").unwrap();
     let ResolvedTarget::Group { local_spans, pinned_spans, members, .. } =
         resolve_symbol(&fa, tree_sitter::Point { row: 2, column: col }, None).expect("column resolves")
@@ -641,7 +647,7 @@ fn dbic_column_rename_multiarg_search_excludes_attrs_hash() {
         panic!("expected a column attr Group")
     };
     let edits = group_rename_edits(
-        &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
+        &store, Some(&idx), &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
     );
     let lines: Vec<&str> = src.lines().collect();
@@ -663,13 +669,14 @@ fn dbic_column_rename_multiarg_search_excludes_attrs_hash() {
 /// which only comes from the schema) and is deliberately not typed.
 #[test]
 fn dbic_column_rename_reaches_fluent_resultset_chain() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/dbic_fluent.pm");
     let src = "package User;\nuse base 'DBIx::Class::Core';\n\
         __PACKAGE__->add_columns(qw/id name/);\n\
         sub go { my ($self, $schema) = @_; my $rs = $schema->resultset('User'); my $f = $rs->search({ name => 1 }); my $u = $rs->find({ name => 2 }); return $u->name; }\n1;\n";
-    store.insert_workspace(path.clone(), parse(src));
-    let fa = store.workspace_raw().get(&path).unwrap().value().clone();
+    idx.insert_workspace_for_test(path.clone(), parse(src));
+    let fa = idx.workspace_file_for_test(&path).unwrap();
     let col = src.lines().nth(2).unwrap().find("name").unwrap();
     let ResolvedTarget::Group { local_spans, pinned_spans, members, .. } =
         resolve_symbol(&fa, tree_sitter::Point { row: 2, column: col }, None).expect("column resolves")
@@ -677,7 +684,7 @@ fn dbic_column_rename_reaches_fluent_resultset_chain() {
         panic!("expected a column attr Group")
     };
     let edits = group_rename_edits(
-        &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "RENAMED",
+        &store, Some(&idx), &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "RENAMED",
         RoleMask::EDITABLE,
     );
     let lines: Vec<&str> = src.lines().collect();
@@ -699,7 +706,8 @@ fn dbic_column_rename_reaches_fluent_resultset_chain() {
 /// to the column group — it's not a column reference at all.
 #[test]
 fn dbic_column_rename_excludes_row_hashref_deref() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/dbic_deref.pm");
     let src = "package User;\n\
 use base 'DBIx::Class::Core';\n\
@@ -711,8 +719,8 @@ sub go {\n\
     my $bad = $row->{name};\n\
     return $row->name;\n\
 }\n1;\n";
-    store.insert_workspace(path.clone(), parse(src));
-    let fa = store.workspace_raw().get(&path).unwrap().value().clone();
+    idx.insert_workspace_for_test(path.clone(), parse(src));
+    let fa = idx.workspace_file_for_test(&path).unwrap();
     let col = src.lines().nth(2).unwrap().find("name").unwrap();
     let ResolvedTarget::Group { local_spans, pinned_spans, members, .. } =
         resolve_symbol(&fa, tree_sitter::Point { row: 2, column: col }, None).expect("column resolves")
@@ -720,7 +728,7 @@ sub go {\n\
         panic!("expected a column attr Group")
     };
     let edits = group_rename_edits(
-        &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
+        &store, Some(&idx), &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
     );
     let rows: std::collections::BTreeSet<usize> = edits.iter().map(|(l, _)| l.span.start.row).collect();
@@ -747,16 +755,16 @@ sub go {\n\
 fn moo_attr_group_includes_cross_file_constructor_key() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let lib = PathBuf::from("/tmp/moo_ctor_widget.pm");
     let app = PathBuf::from("/tmp/moo_ctor_app.pl");
     let lib_src = "package Widget;\nuse Moo;\nhas name => (is => 'rw');\nsub greet { my $self = shift; $self->name }\n1;\n";
     let app_src = "use Widget;\nmy $w = Widget->new(name => 'bob');\nprint $w->name;\n";
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(lib.clone(), Arc::new(parse(lib_src)));
-    store.insert_workspace(lib.clone(), parse(lib_src));
-    store.insert_workspace(app.clone(), parse(app_src));
-    let lib_fa = store.workspace_raw().get(&lib).unwrap().value().clone();
+    idx.insert_workspace_for_test(lib.clone(), parse(lib_src));
+    idx.insert_workspace_for_test(app.clone(), parse(app_src));
+    let lib_fa = idx.workspace_file_for_test(&lib).unwrap();
     let col = lib_src.lines().nth(2).unwrap().find("name").unwrap();
     let ResolvedTarget::Group { local_spans, pinned_spans, members, .. } =
         resolve_symbol(&lib_fa, tree_sitter::Point { row: 2, column: col }, Some(&idx)).expect("attr resolves")
@@ -798,7 +806,7 @@ fn non_embedding_mapped_accessor_renames_itself_not_the_attr() {
 fn inherited_attr_rename_reaches_subclass_constructor_key() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let animal = PathBuf::from("/tmp/inh_animal.pm");
     let dog = PathBuf::from("/tmp/inh_dog.pm");
     let app = PathBuf::from("/tmp/inh_run.pl");
@@ -808,10 +816,10 @@ fn inherited_attr_rename_reaches_subclass_constructor_key() {
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(animal.clone(), Arc::new(parse(animal_src)));
     idx.register_workspace_module(dog.clone(), Arc::new(parse(dog_src)));
-    store.insert_workspace(animal.clone(), parse(animal_src));
-    store.insert_workspace(dog.clone(), parse(dog_src));
-    store.insert_workspace(app.clone(), parse(app_src));
-    let animal_fa = store.workspace_raw().get(&animal).unwrap().value().clone();
+    idx.insert_workspace_for_test(animal.clone(), parse(animal_src));
+    idx.insert_workspace_for_test(dog.clone(), parse(dog_src));
+    idx.insert_workspace_for_test(app.clone(), parse(app_src));
+    let animal_fa = idx.workspace_file_for_test(&animal).unwrap();
     let col = animal_src.lines().nth(2).unwrap().find("name").unwrap();
     let ResolvedTarget::Group { local_spans, pinned_spans, members, .. } =
         resolve_symbol(&animal_fa, tree_sitter::Point { row: 2, column: col }, Some(&idx)).expect("attr resolves")
@@ -836,7 +844,7 @@ fn inherited_attr_rename_reaches_subclass_constructor_key() {
 fn corinna_field_subclass_does_not_bleed_to_ancestor() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let base = PathBuf::from("/tmp/cor_base.pm");
     let deriv = PathBuf::from("/tmp/cor_deriv.pm");
     let base_src = "use v5.38;\nclass CBase { field $size :param :reader; method show { return $size; } }\n";
@@ -844,9 +852,9 @@ fn corinna_field_subclass_does_not_bleed_to_ancestor() {
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(base.clone(), Arc::new(parse(base_src)));
     idx.register_workspace_module(deriv.clone(), Arc::new(parse(deriv_src)));
-    store.insert_workspace(base.clone(), parse(base_src));
-    store.insert_workspace(deriv.clone(), parse(deriv_src));
-    let deriv_fa = store.workspace_raw().get(&deriv).unwrap().value().clone();
+    idx.insert_workspace_for_test(base.clone(), parse(base_src));
+    idx.insert_workspace_for_test(deriv.clone(), parse(deriv_src));
+    let deriv_fa = idx.workspace_file_for_test(&deriv).unwrap();
     let col = deriv_src.lines().nth(1).unwrap().find("size").unwrap();
     let resolved = resolve_symbol(&deriv_fa, tree_sitter::Point { row: 1, column: col }, Some(&idx))
         .expect("field resolves");
@@ -871,7 +879,7 @@ fn corinna_field_subclass_does_not_bleed_to_ancestor() {
 fn overridden_attr_renames_whole_family_symmetrically() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let animal = PathBuf::from("/tmp/ov_animal.pm");
     let dog = PathBuf::from("/tmp/ov_dog.pm");
     let animal_src = "package Animal;\nuse Moo;\nhas name => (is => 'rw');\n1;\n";
@@ -879,11 +887,11 @@ fn overridden_attr_renames_whole_family_symmetrically() {
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(animal.clone(), Arc::new(parse(animal_src)));
     idx.register_workspace_module(dog.clone(), Arc::new(parse(dog_src)));
-    store.insert_workspace(animal.clone(), parse(animal_src));
-    store.insert_workspace(dog.clone(), parse(dog_src));
+    idx.insert_workspace_for_test(animal.clone(), parse(animal_src));
+    idx.insert_workspace_for_test(dog.clone(), parse(dog_src));
 
     let edits_from = |path: &PathBuf, src: &str, row: usize| {
-        let fa = store.workspace_raw().get(path).unwrap().value().clone();
+        let fa = idx.workspace_file_for_test(path).unwrap();
         let col = src.lines().nth(row).unwrap().find("name").unwrap();
         let r = resolve_symbol(&fa, tree_sitter::Point { row, column: col }, Some(&idx)).unwrap();
         let ResolvedTarget::Group { local_spans, pinned_spans, members, .. } = r else {
@@ -918,13 +926,14 @@ fn overridden_attr_renames_whole_family_symmetrically() {
 /// the top-level children would see only `a`. (`cst::pair_nodes` flattens it.)
 #[test]
 fn dbic_multi_key_hashref_links_all_columns() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/dbic_multikey.pm");
     let src = "package U;\nuse base 'DBIx::Class::Core';\n\
         __PACKAGE__->add_columns(qw/alpha beta gamma/);\n\
         sub go { my $self = shift; $self->search({ alpha => 1, beta => 2, gamma => 3 }); }\n1;\n";
-    store.insert_workspace(path.clone(), parse(src));
-    let fa = store.workspace_raw().get(&path).unwrap().value().clone();
+    idx.insert_workspace_for_test(path.clone(), parse(src));
+    let fa = idx.workspace_file_for_test(&path).unwrap();
     // Rename the MIDDLE column `beta` — it must reach the search arg key (row 3).
     let col = src.lines().nth(2).unwrap().find("beta").unwrap();
     let ResolvedTarget::Group { local_spans, pinned_spans, members, .. } =
@@ -933,7 +942,7 @@ fn dbic_multi_key_hashref_links_all_columns() {
         panic!("expected a column attr Group")
     };
     let edits = group_rename_edits(
-        &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
+        &store, Some(&idx), &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
     );
     assert!(
@@ -948,16 +957,17 @@ fn dbic_multi_key_hashref_links_all_columns() {
 /// it. Same rewritable split as folded handlers, now for callables.
 #[test]
 fn folded_method_dispatch_site_is_non_rewritable() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/folded_dispatch.pm");
     let src = "package D;\nsub poke { my $self = shift; return 1; }\n\
         sub run { my $self = shift; my $m = 'poke'; return $self->$m(); }\n1;\n";
-    store.insert_workspace(path.clone(), parse(src));
-    let fa = store.workspace_raw().get(&path).unwrap().value().clone();
+    idx.insert_workspace_for_test(path.clone(), parse(src));
+    let fa = idx.workspace_file_for_test(&path).unwrap();
     let resolved = resolve_symbol(&fa, tree_sitter::Point { row: 1, column: 4 }, None)
         .expect("sub poke resolves");
     let ResolvedTarget::Target(t) = resolved else { panic!("expected a Target, got {resolved:?}") };
-    let refs = refs_to(&store, None, &t, RoleMask::EDITABLE);
+    let refs = refs_to(&store, Some(&idx), &t, RoleMask::EDITABLE);
     // The `$self->$m()` site (row 2) is present but frozen; the decl is rewritable.
     let lines: Vec<&str> = src.lines().collect();
     let folded = refs.iter().find(|r| {
@@ -978,16 +988,17 @@ fn folded_method_dispatch_site_is_non_rewritable() {
 /// dispatch's only spelling of the name).
 #[test]
 fn folded_method_dispatch_rewrites_source_literal() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/folded_source.pm");
     let src = "package D;\nsub poke { my $self = shift; return 1; }\n\
         sub run { my $self = shift; my $m = 'poke'; return $self->$m(); }\n1;\n";
-    store.insert_workspace(path.clone(), parse(src));
-    let fa = store.workspace_raw().get(&path).unwrap().value().clone();
+    idx.insert_workspace_for_test(path.clone(), parse(src));
+    let fa = idx.workspace_file_for_test(&path).unwrap();
     let resolved = resolve_symbol(&fa, tree_sitter::Point { row: 1, column: 4 }, None)
         .expect("sub poke resolves");
     let ResolvedTarget::Target(t) = resolved else { panic!("expected a Target, got {resolved:?}") };
-    let refs = refs_to(&store, None, &t, RoleMask::EDITABLE);
+    let refs = refs_to(&store, Some(&idx), &t, RoleMask::EDITABLE);
     let lines: Vec<&str> = src.lines().collect();
     let span_text = |r: &RefLocation| &lines[r.span.start.row][r.span.start.column..r.span.end.column];
     // The source literal `'poke'` (row 2) must be a rewritable edit covering
@@ -1013,14 +1024,15 @@ fn folded_method_dispatch_rewrites_source_literal() {
 /// touch that custom method's `{ col => … }` arg key.
 #[test]
 fn dbic_custom_sub_shadowing_verb_is_not_column_keyed() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/dbic_shadow.pm");
     let src = "package Tag;\nuse base 'DBIx::Class::Core';\n\
         __PACKAGE__->add_columns(qw/id name/);\n\
         sub create { my ($self, $args) = @_; return $args->{name}; }\n\
         sub go { my $self = shift; $self->create({ name => 'x' }); }\n1;\n";
-    store.insert_workspace(path.clone(), parse(src));
-    let fa = store.workspace_raw().get(&path).unwrap().value().clone();
+    idx.insert_workspace_for_test(path.clone(), parse(src));
+    let fa = idx.workspace_file_for_test(&path).unwrap();
     let col = src.lines().nth(2).unwrap().find("name").unwrap();
     let ResolvedTarget::Group { local_spans, pinned_spans, members, .. } =
         resolve_symbol(&fa, tree_sitter::Point { row: 2, column: col }, None).expect("column resolves")
@@ -1028,7 +1040,7 @@ fn dbic_custom_sub_shadowing_verb_is_not_column_keyed() {
         panic!("expected a column attr Group")
     };
     let edits = group_rename_edits(
-        &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
+        &store, Some(&idx), &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
     );
     assert!(
@@ -1042,13 +1054,14 @@ fn dbic_custom_sub_shadowing_verb_is_not_column_keyed() {
 /// trailing `\%attrs` hash must never be walked as if it were the conditions.
 #[test]
 fn dbic_scalar_cond_does_not_column_key_attrs_hash() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/dbic_scalarcond.pm");
     let src = "package Row;\nuse base 'DBIx::Class::Core';\n\
         __PACKAGE__->add_columns(qw/id name/);\n\
         sub go { my ($self, $cond) = @_; $self->search($cond, { name => 'attrs' }); }\n1;\n";
-    store.insert_workspace(path.clone(), parse(src));
-    let fa = store.workspace_raw().get(&path).unwrap().value().clone();
+    idx.insert_workspace_for_test(path.clone(), parse(src));
+    let fa = idx.workspace_file_for_test(&path).unwrap();
     let col = src.lines().nth(2).unwrap().find("name").unwrap();
     let ResolvedTarget::Group { local_spans, pinned_spans, members, .. } =
         resolve_symbol(&fa, tree_sitter::Point { row: 2, column: col }, None).expect("column resolves")
@@ -1056,7 +1069,7 @@ fn dbic_scalar_cond_does_not_column_key_attrs_hash() {
         panic!("expected a column attr Group")
     };
     let edits = group_rename_edits(
-        &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
+        &store, Some(&idx), &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
     );
     assert!(
@@ -1073,16 +1086,16 @@ fn dbic_scalar_cond_does_not_column_key_attrs_hash() {
 fn dbic_column_rename_reaches_cross_file_consumer_arg_key() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let lib = PathBuf::from("/tmp/dbic_user.pm");
     let app = PathBuf::from("/tmp/dbic_app.pl");
     let lib_src = "package User;\nuse base 'DBIx::Class::Core';\n__PACKAGE__->add_columns(qw/id name/);\n1;\n";
     let app_src = "use User;\nmy $rs = User->search({ name => 'x' });\n";
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(lib.clone(), Arc::new(parse(lib_src)));
-    store.insert_workspace(lib.clone(), parse(lib_src));
-    store.insert_workspace(app.clone(), parse(app_src));
-    let lib_fa = store.workspace_raw().get(&lib).unwrap().value().clone();
+    idx.insert_workspace_for_test(lib.clone(), parse(lib_src));
+    idx.insert_workspace_for_test(app.clone(), parse(app_src));
+    let lib_fa = idx.workspace_file_for_test(&lib).unwrap();
     let col = lib_src.lines().nth(2).unwrap().find("name").unwrap();
     let ResolvedTarget::Group { local_spans, pinned_spans, members, .. } =
         resolve_symbol(&lib_fa, tree_sitter::Point { row: 2, column: col }, Some(&idx)).expect("column resolves")
@@ -1110,7 +1123,7 @@ fn dbic_column_rename_reaches_cross_file_consumer_arg_key() {
 fn dbic_column_rename_owner_gated_excludes_framework_and_siblings() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let base = PathBuf::from("/tmp/owngate_base.pm");
     let widget = PathBuf::from("/tmp/owngate_widget.pm");
     let gadget = PathBuf::from("/tmp/owngate_gadget.pm");
@@ -1130,11 +1143,11 @@ fn dbic_column_rename_owner_gated_excludes_framework_and_siblings() {
     idx.register_workspace_module(base.clone(), Arc::new(parse(base_src)));
     idx.register_workspace_module(widget.clone(), Arc::new(parse(widget_src)));
     idx.register_workspace_module(gadget.clone(), Arc::new(parse(gadget_src)));
-    store.insert_workspace(base.clone(), parse(base_src));
-    store.insert_workspace(widget.clone(), parse(widget_src));
-    store.insert_workspace(gadget.clone(), parse(gadget_src));
+    idx.insert_workspace_for_test(base.clone(), parse(base_src));
+    idx.insert_workspace_for_test(widget.clone(), parse(widget_src));
+    idx.insert_workspace_for_test(gadget.clone(), parse(gadget_src));
 
-    let widget_fa = store.workspace_raw().get(&widget).unwrap().value().clone();
+    let widget_fa = idx.workspace_file_for_test(&widget).unwrap();
     let col = widget_src.lines().nth(2).unwrap().find("id").unwrap();
     let ResolvedTarget::Group { local_spans, pinned_spans, members, .. } =
         resolve_symbol(&widget_fa, tree_sitter::Point { row: 2, column: col }, Some(&idx))
@@ -1180,7 +1193,8 @@ fn dbic_column_rename_owner_gated_excludes_framework_and_siblings() {
 /// distinction.
 #[test]
 fn test_event_handler_refs_mark_folded_site_non_rewritable() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/ev_handler.pm");
     let src = "package App;\n\
          use parent 'Mojo::EventEmitter';\n\
@@ -1193,7 +1207,7 @@ fn test_event_handler_refs_mark_folded_site_non_rewritable() {
          $self->on(EVT, sub { 1 });\n\
          $self->emit('connect');\n\
          }\n1;\n";
-    store.insert_workspace(path.clone(), parse(src));
+    idx.insert_workspace_for_test(path.clone(), parse(src));
 
     let target = TargetRef {
         names: crate::model::conventions::PERL_SPELLINGS,
@@ -1206,7 +1220,7 @@ fn test_event_handler_refs_mark_folded_site_non_rewritable() {
     };
     assert!(target.supports_cross_file_rename(), "Handler renames cross-file now");
 
-    let refs = refs_to(&store, None, &target, RoleMask::EDITABLE);
+    let refs = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
     let lines: Vec<&str> = src.lines().collect();
     let mut rewritable = 0;
     let mut frozen = std::collections::BTreeSet::new();
@@ -1284,11 +1298,9 @@ fn test_consumer_mapped_accessor_and_slot_resolve_to_attr_group_cross_file() {
 
     let idx = ModuleIndex::new_for_test();
     idx.register_workspace_module(class_path.clone(), Arc::new(parse(class_src)));
-    let store = FileStore::new();
-    store.insert_workspace(class_path.clone(), parse(class_src));
-    store.insert_workspace(user_path.clone(), parse(user_src));
+    idx.insert_workspace_for_test(user_path.clone(), parse(user_src));
 
-    let consumer = store.workspace_raw().get(&user_path).unwrap().value().clone();
+    let consumer = idx.workspace_file_for_test(&user_path).unwrap();
 
     // Both spellings must mint the remote group (pinned to the class file) and
     // carry the accessor / ctor-key members, so a rename fans out across both.
@@ -1316,20 +1328,21 @@ fn test_consumer_mapped_accessor_and_slot_resolve_to_attr_group_cross_file() {
 /// `(size => 1)` arg keys in unrelated classes stay out.
 #[test]
 fn test_internal_slot_pokes_join_group_cross_file() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let class_path = PathBuf::from("/tmp/grp_slot_widget.pm");
     let sub_path = PathBuf::from("/tmp/grp_slot_subclass.pm");
-    store.insert_workspace(
+    idx.insert_workspace_for_test(
         class_path.clone(),
         parse("package Widget;\nuse Moo;\nhas size => (is => 'rw');\n1;\n"),
     );
     // Subclass pokes the parent's slot directly — classic promiscuous Perl.
-    store.insert_workspace(
+    idx.insert_workspace_for_test(
         sub_path.clone(),
         parse("package Gadget;\nuse Moo;\nextends 'Widget';\nsub poke { my ($self) = @_; return $self->{size}; }\n1;\n"),
     );
 
-    let class_fa = store.workspace_raw().get(&class_path).unwrap().value().clone();
+    let class_fa = idx.workspace_file_for_test(&class_path).unwrap();
     let resolved = resolve_symbol(&class_fa, tree_sitter::Point { row: 2, column: 4 }, None)
         .expect("attr decl resolves");
     let ResolvedTarget::Group { local_spans, pinned_spans, members, .. } = resolved else {
@@ -1342,7 +1355,7 @@ fn test_internal_slot_pokes_join_group_cross_file() {
     );
     let edits = group_rename_edits(
         &store,
-        None,
+        Some(&idx),
         &FileKey::Path(class_path.clone()),
         &local_spans,
         &pinned_spans,
@@ -1368,15 +1381,16 @@ fn test_internal_slot_pokes_join_group_cross_file() {
 /// `found_by`. This pins the symmetry.
 #[test]
 fn rename_from_bless_key_reaches_self_slot_accesses() {
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let path = PathBuf::from("/tmp/bless_slot.pm");
     let src = "package Calc;\n\
          sub new { my ($class) = @_; return bless { history => [] }, $class; }\n\
          sub add { my ($self) = @_; push @{$self->{history}}, 1; }\n\
          sub log { my ($self) = @_; return $self->{history}; }\n1;\n";
-    store.insert_workspace(path.clone(), parse(src));
+    idx.insert_workspace_for_test(path.clone(), parse(src));
 
-    let fa = store.workspace_raw().get(&path).unwrap().value().clone();
+    let fa = idx.workspace_file_for_test(&path).unwrap();
     // Cursor on the bless key `history` (row 1, inside `bless { history`).
     let key_col = src.lines().nth(1).unwrap().find("history").unwrap();
     let resolved = resolve_symbol(&fa, tree_sitter::Point { row: 1, column: key_col }, None)
@@ -1390,7 +1404,7 @@ fn rename_from_bless_key_reaches_self_slot_accesses() {
         members,
     );
     let edits = group_rename_edits(
-        &store, None, &FileKey::Path(path.clone()),
+        &store, Some(&idx), &FileKey::Path(path.clone()),
         &local_spans, &pinned_spans, &members, "log",
         RoleMask::EDITABLE,
     );
@@ -1518,7 +1532,7 @@ fn refs_to_package_verb_reaches_cross_file_call_sites() {
     use crate::index::module_index::ModuleIndex;
     use std::sync::Arc;
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
     let idx = ModuleIndex::new_for_test();
 
     let comp_path = PathBuf::from("/tmp/h9/Comp.pm");
@@ -1533,7 +1547,7 @@ fn refs_to_package_verb_reaches_cross_file_call_sites() {
     let b_src = "package ClassB;\nuse base 'Comp';\n__PACKAGE__->my_rel( beta => 'ClassB::Beta' );\n1;\n";
 
     for (path, src) in [(&comp_path, comp_src), (&a_path, a_src), (&b_path, b_src)] {
-        store.insert_workspace(path.clone(), parse(src));
+        idx.insert_workspace_for_test(path.clone(), parse(src));
         idx.register_workspace_module(path.clone(), Arc::new(parse(src)));
     }
 
@@ -1653,7 +1667,7 @@ mod pack_symmetry {
         idx.register_symbols(PathBuf::from("/fake/vis/use2.c"), Arc::new(user_bare));
         idx.register_symbols(PathBuf::from("/fake/vis/other.c"), Arc::new(stranger));
 
-        let store = FileStore::new();
+        let store = OpenDocs::new();
         let origin = idx.get_cached("f").expect("use.c registered by its fn name");
         assert!(origin.path.ends_with("use.c"));
         let cs = resolve(
@@ -1742,7 +1756,7 @@ mod pack_symmetry {
         // Same-file: static forward decl at row 0, bodied def at row 2.
         let src = "static int helper(int n);\nint use_it(int n) { return helper(n); }\nstatic int helper(int n) { return n * 2; }\n";
         let fa = cpp(src);
-        let store = FileStore::new();
+        let store = OpenDocs::new();
         let cs = resolve(
             &store,
             &fa,
@@ -1823,7 +1837,7 @@ mod pack_symmetry {
         idx.register_symbols(PathBuf::from("/fake/mt/memtable.h"), Arc::new(header));
         idx.register_symbols(PathBuf::from("/fake/mt/memtable.cc"), Arc::new(def_tu));
         idx.register_symbols(PathBuf::from("/fake/mt/writer.cc"), Arc::new(caller));
-        let store = FileStore::new();
+        let store = OpenDocs::new();
 
         // (1) Explicitly-qualified cross-file call: `MemTable::Add(3)`.
         let origin = idx
@@ -1907,7 +1921,7 @@ mod pack_symmetry {
         idx.register_symbols(PathBuf::from("/fake/inc/frag.c"), Arc::new(frag));
         idx.register_symbols(PathBuf::from("/fake/inc/noise.c"), Arc::new(noise));
 
-        let store = FileStore::new();
+        let store = OpenDocs::new();
         let origin = idx
             .get_cached_scoped("compute_thing", &["/fake/inc/lib.c".to_string()].iter().cloned().collect())
             .expect("def TU registered");
@@ -1963,7 +1977,7 @@ mod pack_symmetry {
         idx.register_symbols(header_path.clone(), Arc::new(header));
         idx.register_symbols(dir.join("use.c"), Arc::new(user));
 
-        let store = FileStore::new();
+        let store = OpenDocs::new();
         let origin = idx.get_cached("f").expect("use.c registered by its fn name");
         let cs = resolve(
             &store,
@@ -2003,7 +2017,8 @@ mod pack_symmetry {
 
     #[test]
     fn enum_constant_def_reaches_bare_reads_across_files() {
-        let store = FileStore::new();
+        let store = OpenDocs::new();
+        let idx = crate::index::module_index::ModuleIndex::new_for_test();
         let decl = cpp("enum opcode { OP_NULL, OP_SCOPE };\n");
         // Resolve at the OP_SCOPE def token (row 0, col 24).
         let target = match resolve_symbol(&decl, tree_sitter::Point::new(0, 24), None) {
@@ -2011,12 +2026,12 @@ mod pack_symmetry {
             other => panic!("enum-constant def resolves to a Method target: {other:?}"),
         };
         assert_eq!(target.kind, TargetKind::Method { class: "opcode".to_string() });
-        store.insert_workspace(PathBuf::from("/tmp/sym_opcodes.h"), decl);
-        store.insert_workspace(
+        idx.insert_workspace_for_test(PathBuf::from("/tmp/sym_opcodes.h"), decl);
+        idx.insert_workspace_for_test(
             PathBuf::from("/tmp/sym_use.c"),
             cpp("int is_scope(int t) {\n    return t == OP_SCOPE;\n}\n"),
         );
-        let results = refs_to(&store, None, &target, RoleMask::EDITABLE);
+        let results = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
         assert!(
             results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p.ends_with("sym_use.c"))
                 && r.span.start == tree_sitter::Point::new(1, 16)),
@@ -2047,21 +2062,25 @@ mod pack_symmetry {
     /// made pack rename refuse with a bogus "delegating macro" reason).
     #[test]
     fn enum_constant_rename_emits_full_edit_set() {
-        let store = FileStore::new();
+        let store = OpenDocs::new();
+        let idx = crate::index::module_index::ModuleIndex::new_for_test();
         let decl = cpp("enum opcode { OP_NULL, OP_SCOPE };\n");
         let hpath = PathBuf::from("/tmp/ren_opcodes.h");
-        store.insert_workspace(hpath.clone(), decl);
-        store.insert_workspace(
-            PathBuf::from("/tmp/ren_use.c"),
-            cpp("int is_scope(int t) {\n    return t == OP_SCOPE;\n}\n"),
+        idx.insert_workspace_for_test(hpath.clone(), decl);
+        // The use TU includes the header, or the include-closure visibility
+        // axis keeps it out of the image.
+        let mut user = cpp("int is_scope(int t) {\n    return t == OP_SCOPE;\n}\n");
+        user.pack.include_closure = crate::model::file_analysis::path_intern::ClosureList::from_iter(
+            std::iter::once("/tmp/ren_opcodes.h"),
         );
-        let origin = store.workspace_raw().get(&hpath).unwrap().value().clone();
+        idx.insert_workspace_for_test(PathBuf::from("/tmp/ren_use.c"), user);
+        let origin = idx.workspace_file_for_test(&hpath).unwrap();
         let cs = resolve(
             &store,
             &origin,
             FileKey::Path(hpath),
             tree_sitter::Point::new(0, 24),
-            None,
+            Some(&idx),
             OverrideScope::default(),
         );
         let edits = cs
@@ -2079,7 +2098,8 @@ mod pack_symmetry {
 
     #[test]
     fn object_like_macro_def_reaches_value_and_type_uses() {
-        let store = FileStore::new();
+        let store = OpenDocs::new();
+        let idx = crate::index::module_index::ModuleIndex::new_for_test();
         let fa = cpp("#define MAX 100\n#define BITS unsigned\nint a = MAX;\nBITS b;\n");
         let target = match resolve_symbol(&fa, tree_sitter::Point::new(0, 9), None) {
             Some(ResolvedTarget::Target(t)) => t,
@@ -2091,8 +2111,8 @@ mod pack_symmetry {
             Some(ResolvedTarget::Target(t)) => t,
             other => panic!("type-alias `#define`: {other:?}"),
         };
-        store.insert_workspace(PathBuf::from("/tmp/sym_macro.c"), fa);
-        let results = refs_to(&store, None, &target, RoleMask::EDITABLE);
+        idx.insert_workspace_for_test(PathBuf::from("/tmp/sym_macro.c"), fa);
+        let results = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
         assert!(
             results.iter().any(|r| r.span.start == tree_sitter::Point::new(2, 8)),
             "the value use (expanded or left) is reached: {results:?}"
@@ -2101,7 +2121,7 @@ mod pack_symmetry {
             results.iter().any(|r| r.access == AccessKind::Declaration),
             "the `#define` decl is included: {results:?}"
         );
-        let type_results = refs_to(&store, None, &type_target, RoleMask::EDITABLE);
+        let type_results = refs_to(&store, Some(&idx), &type_target, RoleMask::EDITABLE);
         assert!(
             type_results.iter().any(|r| r.span.start.row == 3),
             "the type-position use of a type-alias macro is reached: {type_results:?}"
@@ -2113,14 +2133,15 @@ mod pack_symmetry {
         // gd sees through `#define WRAP(x) real(x)` forward; gr on `real`
         // must traverse the edge BACKWARD: WRAP's call sites are references
         // to `real` — listed, but never rewritable (the token spells WRAP).
-        let store = FileStore::new();
+        let store = OpenDocs::new();
+        let idx = crate::index::module_index::ModuleIndex::new_for_test();
         let fa = cpp("int real(int x);\n#define WRAP(x) real(x)\nvoid f() { WRAP(1); }\n");
         let target = match resolve_symbol(&fa, tree_sitter::Point::new(0, 5), None) {
             Some(ResolvedTarget::Target(t)) => t,
             other => panic!("free function target: {other:?}"),
         };
-        store.insert_workspace(PathBuf::from("/tmp/sym_deleg.c"), fa);
-        let results = refs_to(&store, None, &target, RoleMask::EDITABLE);
+        idx.insert_workspace_for_test(PathBuf::from("/tmp/sym_deleg.c"), fa);
+        let results = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
         let wrap_call = results
             .iter()
             .find(|r| r.span.start == tree_sitter::Point::new(2, 11))
@@ -2130,19 +2151,20 @@ mod pack_symmetry {
 
     #[test]
     fn file_scope_global_def_reaches_bare_reads() {
-        let store = FileStore::new();
+        let store = OpenDocs::new();
+        let idx = crate::index::module_index::ModuleIndex::new_for_test();
         let a = cpp("int global_counter;\n");
         let target = match resolve_symbol(&a, tree_sitter::Point::new(0, 6), None) {
             Some(ResolvedTarget::Target(t)) => t,
             other => panic!("a file-scope global is a FileScopeValue target: {other:?}"),
         };
         assert_eq!(target.kind, TargetKind::FileScopeValue);
-        store.insert_workspace(PathBuf::from("/tmp/sym_glob.h"), a);
-        store.insert_workspace(
+        idx.insert_workspace_for_test(PathBuf::from("/tmp/sym_glob.h"), a);
+        idx.insert_workspace_for_test(
             PathBuf::from("/tmp/sym_glob_use.c"),
             cpp("int f() { return global_counter; }\n"),
         );
-        let results = refs_to(&store, None, &target, RoleMask::EDITABLE);
+        let results = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
         assert!(
             results.iter().any(|r| matches!(&r.key, FileKey::Path(p) if p.ends_with("sym_glob_use.c"))),
             "cross-file bare read matches by name: {results:?}"

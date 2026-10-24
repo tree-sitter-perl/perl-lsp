@@ -7,7 +7,7 @@ use tower_lsp::lsp_types::{notification, request};
 use tower_lsp::{Client, LanguageServer};
 
 use crate::lsp::cursor_slot::identifier_prefix;
-use crate::index::file_store::{FileKey, FileStore};
+use crate::index::open_docs::{FileKey, OpenDocs};
 use crate::index::module_index::ModuleIndex;
 use crate::lsp::symbols;
 
@@ -60,7 +60,7 @@ impl Drop for IndexDoneGuard {
 
 pub struct Backend {
     client: Client,
-    files: Arc<FileStore>,
+    open_docs: Arc<OpenDocs>,
     module_index: Arc<ModuleIndex>,
     /// Per-document rebuild debounce (`DebouncedLatest`): each `did_change`
     /// fires it, and only the fire that survives the settle window rebuilds —
@@ -109,7 +109,7 @@ pub struct Backend {
     /// this opens on COMPLETION — the index has landed and `heal_open_docs`
     /// ran. A pull verb arriving in between (latch set, gate closed) arms it
     /// and waits bounded. Touched only via the gate's atomics + `Notify` —
-    /// never behind a FileStore guard — so the wait is deadlock-safe by
+    /// never behind a OpenDocs guard — so the wait is deadlock-safe by
     /// construction.
     index_ready: Arc<ReadyGate>,
     /// Bounded-wait cap (ms) for the cold-open pull-verb heal; 0 disables it.
@@ -226,7 +226,7 @@ impl GatherRegistry {
 /// own handles and never touches `Backend`. Holds Arcs/counters only.
 #[derive(Clone)]
 struct PackHealCtx {
-    files: Arc<FileStore>,
+    open_docs: Arc<OpenDocs>,
     module_index: Arc<ModuleIndex>,
     client: Client,
     options: symbols::DiagnosticOptions,
