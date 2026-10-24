@@ -75,7 +75,7 @@ impl FileAnalysis {
                     doc_mentions: _doc_mentions, // a file-local lint fact
                     type_display: _type_display,     // LangPack-wide display vocabulary, same reasoning
                     specializes: _specializes,       // family edges; the file re-registers on its own rebuild even when Unchanged
-                    use_aliases: _use_aliases,             // this file's OWN spelling table; a consumer never sees an alias
+                    use_rows: _use_rows,                   // this file's OWN spelling table: what its spellings mean, never what another file sees
                     qualified_spellings: _qualified_spellings, // same: how THIS file spells classes
                     names: _names,                   // language-wide convention, identical across the language's files
                     template_params: _template_params, // instantiation substitution reads the provider live

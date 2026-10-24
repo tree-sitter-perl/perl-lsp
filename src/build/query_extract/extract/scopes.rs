@@ -119,14 +119,12 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
 /// unimported leaf is the namespace's own.
 pub(super) fn resolve_parents(st: &mut ExtractState) {
     let Some(sep) = st.pack.names.use_map_sep() else { return };
-    let rows: Vec<(Span, String)> = st.out.import_sites.iter().map(|(raw, span)| (*span, raw.clone())).collect();
     for (i, ns) in std::mem::take(&mut st.scopes.written_parents) {
         let map = crate::model::file_analysis::UseMap {
-            rows: &rows,
-            aliases: &st.out.use_aliases,
+            rows: &st.out.use_rows,
             own_namespace: ns.as_deref(),
             sep,
         };
-        st.out.parents[i].1 = map.resolve(&st.out.parents[i].1);
+        st.out.parents[i].1 = map.resolve(&st.out.parents[i].1).identity(sep);
     }
 }

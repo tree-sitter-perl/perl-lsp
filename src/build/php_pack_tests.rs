@@ -116,19 +116,23 @@ use function App\\Helpers\\format;
 use function App\\Helpers\\{wrap};
 use const App\\Limits\\MAX;
 ");
-    let rows: Vec<&str> = fa.pack.include_directives.iter().map(|(_, raw)| raw.as_str()).collect();
+    let rows: Vec<(&str, &str, Option<&str>)> = fa
+        .pack
+        .use_rows
+        .iter()
+        .map(|r| (r.name.namespace.as_str(), r.name.leaf.as_str(), r.alias.as_deref()))
+        .collect();
     assert_eq!(
         rows,
         [
-            "Illuminate\\Support\\Collection",
-            "\\Vendor\\Pkg\\Speaker",
-            "App\\Contracts\\Listener",
-            "App\\Contracts\\Logger",
+            ("Illuminate\\Support", "Collection", None),
+            ("Vendor\\Pkg", "Speaker", Some("Talks")),
+            ("App\\Contracts", "Listener", None),
+            ("App\\Contracts", "Logger", Some("Log")),
         ]
     );
-    let aliases: Vec<(&str, &str, &str)> =
-        fa.pack.use_aliases.iter().map(|(a, ns, leaf)| (a.as_str(), ns.as_str(), leaf.as_str())).collect();
-    assert_eq!(aliases, [("Talks", "Vendor\\Pkg", "Speaker"), ("Log", "App\\Contracts", "Logger")]);
+    // a use-map language's rows are not import paths
+    assert!(fa.pack.include_directives.is_empty());
 
     // The model reads the same map the extractor resolved parents through.
     assert_eq!(fa.class_spelling_identity("Collection"), "Illuminate\\Support\\Collection");
@@ -205,6 +209,31 @@ class User extends Model implements Speaker, \\Countable, Sub\\Local {
     .map(|(n, t, i)| (n.to_string(), *t, i.to_string()))
     .collect();
     assert_eq!(refs, want);
+}
+
+/// A `use function` / `use const` row names no class, whether its keyword
+/// sits on the statement (flat, or a whole group) or on one clause of a
+/// group: it is neither a use-map row nor a class reference.
+#[test]
+fn function_and_const_imports_are_neither_rows_nor_class_references() {
+    use crate::model::file_analysis::RefKind;
+    let fa = php("<?php
+namespace App;
+use function Lib\\helper;
+use const Lib\\LIMIT;
+use function Lib\\Fns\\{wrap, unwrap};
+use const Lib\\Limits\\{MAX};
+use Lib\\Mixed\\{function f, const C, Klass};
+");
+    let rows: Vec<String> = fa.pack.use_rows.iter().map(|r| r.name.identity("\\")).collect();
+    assert_eq!(rows, ["Lib\\Mixed\\Klass"]);
+    let refs: Vec<&str> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::PackageRef))
+        .map(|r| r.target_name.as_str())
+        .collect();
+    assert_eq!(refs, ["Klass"]);
 }
 
 /// A class's uses in another file are found by the identity they name:

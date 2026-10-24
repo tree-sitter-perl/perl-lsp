@@ -45,14 +45,19 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    filed under one key whatever container it is written in, and its
    symbol's `package` is that namespace. A written spelling resolves
    through the pure `UseMap::resolve` ladder
-   (`model/file_analysis/use_map.rs`) over the file's import rows and
-   aliases (`@import.name`, `@import.prefix`, `@import.alias`) at the
-   namespace it was written in, once every row is in: absolute spelling
-   → itself; head segment → its alias, else its `use` row (an aliased row
-   binds the alias, never its leaf), else the file's own namespace; the
-   rest hangs off that. Parent clauses resolve this way
-   (`scopes::resolve_parents`); every other class spelling the extractor
-   mints goes through the same ladder — an annotation type through
+   (`model/file_analysis/use_map.rs`) over the file's `use` rows
+   (`PackFacts::use_rows`) at the namespace it was written in, once every
+   row is in: absolute spelling → itself; head segment → its alias, else
+   its `use` row (an aliased row binds the alias, never its leaf), else
+   the file's own namespace; the rest hangs off that. A row is minted as
+   the parts the extractor read (`@import.prefix` and the name's qualifier
+   as its namespace, the name's last segment as its leaf, `@import.alias`)
+   and the ladder answers parts too (`QualifiedName`), so the only strings
+   it splits are written spellings; the joined FQN is formed only where a
+   string key is needed (`QualifiedName::identity`). Parent clauses
+   resolve this way (`scopes::resolve_parents`); every other class
+   spelling the extractor mints goes through the same ladder — an
+   annotation type through
    `InferredType::map_class_names`, so a qualified element inside
    `array<int, \App\User>` resolves like a bare one — with template
    parameter names and the current-class tokens exempt. The query side's
