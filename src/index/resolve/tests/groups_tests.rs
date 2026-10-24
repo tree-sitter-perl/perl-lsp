@@ -2171,6 +2171,142 @@ mod pack_symmetry {
     }
 
     #[test]
+    fn delegation_follows_only_macros_defined_at_the_use() {
+        // `A → B` arrives with the first include, `B → F` with the second.
+        // Above the second include `A(1)` reaches only `B`, and `B(0)` is not
+        // a macro use at all; below it `A(2)` reaches `F` too.
+        let dir = std::env::temp_dir().join("perl_lsp_delegation_position");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("inc_a.h"), "#define A(x) B(x)\n").unwrap();
+        let b_src = "int F(int x);\n#define B(x) F(x)\n";
+        std::fs::write(dir.join("inc_b.h"), b_src).unwrap();
+        let use_src =
+            "#include \"inc_a.h\"\nvoid f() { B(0); A(1); }\n#include \"inc_b.h\"\nvoid g() { A(2); }\n";
+        let use_path = dir.join("use.c");
+        std::fs::write(&use_path, use_src).unwrap();
+        let fa = crate::build::language_driver::LanguageRegistry::with_enabled()
+            .for_id("cpp")
+            .unwrap()
+            .analyze_with_path(use_src, Some(&use_path));
+        let at = |name: &str, row: usize, col: usize| {
+            fa.refs()
+                .iter()
+                .position(|r| r.target_name == name && r.span.start == tree_sitter::Point::new(row, col))
+                .unwrap_or_else(|| panic!("{name} use minted at {row}:{col}: {:?}", fa.refs()))
+        };
+        let (b0, a1, a2) = (at("B", 1, 11), at("A", 1, 17), at("A", 3, 11));
+        assert!(fa.is_premature_macro_use(b0), "B above its include is not a macro use");
+        assert!(fa.ref_delegates(b0).is_empty());
+        assert_eq!(fa.ref_delegates(a1), ["B".to_string()]);
+        assert_eq!(fa.ref_delegates(a2), ["B".to_string(), "F".to_string()]);
+
+        let header = cpp(b_src);
+        let target = match resolve_symbol(&header, tree_sitter::Point::new(0, 4), None) {
+            Some(ResolvedTarget::Target(t)) => t,
+            other => panic!("F target: {other:?}"),
+        };
+        let store = FileStore::new();
+        store.insert_workspace(use_path, fa);
+        let results = refs_to(&store, None, &target, RoleMask::EDITABLE);
+        assert!(
+            results.iter().any(|r| r.span.start == tree_sitter::Point::new(3, 11)),
+            "A(2) below the include reaches F: {results:?}"
+        );
+        assert!(
+            !results.iter().any(|r| r.span.start == tree_sitter::Point::new(1, 17)),
+            "A(1) above the include does not: {results:?}"
+        );
+    }
+
+    #[test]
+    fn a_late_headers_variant_counts_only_below_its_include() {
+        // perl5's universal.c: `HvNAME_HEK` is defined early by hv.h and again,
+        // delegating to `HvNAME_get`, by vxs.inc included at the bottom. The
+        // table keeps one body per name, but the delegating variant counts
+        // only below vxs.inc's own include line.
+        let dir = std::env::temp_dir().join("perl_lsp_delegation_variant_position");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("early.h"), "#define NAME_OF(h) ((h)->name)\n").unwrap();
+        std::fs::write(dir.join("late.h"), "int name_get(int h);\n#define NAME_OF(h) name_get(h)\n").unwrap();
+        let use_src = "#include \"early.h\"\nint a = NAME_OF(1);\n#include \"late.h\"\nint b = NAME_OF(2);\n";
+        let use_path = dir.join("use.c");
+        std::fs::write(&use_path, use_src).unwrap();
+        let fa = crate::build::language_driver::LanguageRegistry::with_enabled()
+            .for_id("cpp")
+            .unwrap()
+            .analyze_with_path(use_src, Some(&use_path));
+        let at = |row: usize| {
+            fa.refs()
+                .iter()
+                .position(|r| r.target_name == "NAME_OF" && r.span.start == tree_sitter::Point::new(row, 8))
+                .unwrap_or_else(|| panic!("NAME_OF use minted on row {row}: {:?}", fa.refs()))
+        };
+        assert!(fa.ref_delegates(at(1)).is_empty(), "above late.h only the early body counts");
+        assert_eq!(fa.ref_delegates(at(3)), ["name_get".to_string()]);
+    }
+
+    #[test]
+    fn goto_def_above_a_define_lands_on_the_plain_name() {
+        // re2's shape: a call above `#define Simplify DontCallSimplify` is the
+        // function, not the macro, so gd's macro lane stands aside for it;
+        // below the `#define` the same spelling is the macro.
+        let src = "int Simplify(int x) { return x; }\nint f() { return Simplify(1); }\n#define Simplify DontCallSimplify\nint g() { return Simplify(2); }\n";
+        let fa = cpp(src);
+        let idx = crate::index::module_index::ModuleIndex::new_for_test();
+        let store = FileStore::new();
+        let gd = |row: usize| {
+            resolve(
+                &store,
+                &fa,
+                FileKey::Path(PathBuf::from("/tmp/gd_position.c")),
+                tree_sitter::Point::new(row, 17),
+                Some(&idx),
+                OverrideScope::default(),
+            )
+            .with_source(src)
+            .definitions()
+        };
+        let above = gd(1);
+        assert!(
+            above.iter().any(|d| d.span.start.row == 0),
+            "the call above the #define reaches the function: {above:?}"
+        );
+        assert!(
+            !above.iter().any(|d| d.span.start.row == 2),
+            "and not the #define: {above:?}"
+        );
+        let below = gd(3);
+        assert!(
+            below.iter().any(|d| d.span.start.row == 2),
+            "the use below the #define reaches it: {below:?}"
+        );
+    }
+
+    #[test]
+    fn goto_def_above_a_function_like_define_never_lands_on_it() {
+        // No real function shares the name, so every gd lane would otherwise
+        // find the macro by name; above its `#define` none may.
+        let src = "int a = W(1);\n#define W(x) F(x)\nint b = W(2);\n";
+        let fa = cpp(src);
+        let idx = crate::index::module_index::ModuleIndex::new_for_test();
+        let store = FileStore::new();
+        let gd = |row: usize| {
+            resolve(
+                &store,
+                &fa,
+                FileKey::Path(PathBuf::from("/tmp/gd_position_fn.c")),
+                tree_sitter::Point::new(row, 8),
+                Some(&idx),
+                OverrideScope::default(),
+            )
+            .with_source(src)
+            .definitions()
+        };
+        assert!(!gd(0).iter().any(|d| d.span.start.row == 1), "above: {:?}", gd(0));
+        assert!(gd(2).iter().any(|d| d.span.start.row == 1), "below: {:?}", gd(2));
+    }
+
+    #[test]
     fn file_scope_global_def_reaches_bare_reads() {
         let store = FileStore::new();
         let a = cpp("int global_counter;\n");

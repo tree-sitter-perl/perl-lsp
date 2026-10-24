@@ -123,13 +123,35 @@ unsigned short`). Abstraction for inference, concrete leaf for the human.
   The backward half is minted at the use: the build resolves each used
   macro name's transitive delegate chain through the file's own `#define`s
   and its gathered include closure (every config variant counts —
-  `Macro::variant_delegates`) and stores it on the `RefTable`
-  (`delegations`). The use is indexed and row-shredded under each
+  `Macro::variant_delegates`) and stores it per use site on the `RefTable`
+  (`MacroUses`). The use is indexed and row-shredded under each
   delegate's key, so references on `Perl_SvREFCNT_inc` find `SvREFCNT_inc(x)`
   through the ordinary key bucket, with no query-time macro scan and no
   query-time visibility check — the file's own preprocessor view already
   decided it. Freshness rides the Surface: macro bodies are on it, so a
   header edit that changes a delegate re-analyzes its includers.
+
+### Position: a macro is defined from its `#define`, or its `#include`
+
+The preprocessor reads top to bottom, so a name is a macro only below the
+line that defines it: its own `#define`, or for a gathered macro the
+`#include` line whose closure first defines it (`Macro::via_include`, an
+ordinal into the file's include lines; an include guard makes later
+includes of the same header no-ops, so the first one wins). The table
+keeps one body per name, but each config variant's delegate carries its
+own header's ordinal and counts only below that header's include. Three
+consumers read this:
+
+- **Expansion** leaves a use above that line unexpanded (re2's
+  `Regexp::Simplify` above `#define Simplify DontCallSimplify`).
+- **Delegation** follows a chain link only where that link is defined, so
+  `A → B → F` stops at `B` above the include that defines `B`. A use inside
+  a `#define` body is expanded where its macro is used, so it sees every
+  macro the file defines.
+- **Goto-def and references** treat a use above the line as the plain name
+  it spells (`MacroUses::premature`): the macro lane stands aside.
+
+`#undef` is not modeled: a macro, once defined, stays defined.
 
 ### Resolution visibility = the include-closure lie (generalizes beyond macros)
 

@@ -331,7 +331,7 @@ fn macro_heap_bytes(m: &Macro) -> usize {
     m.body.capacity()
         + m.params.as_ref().map_or(0, |p| p.iter().map(|s| s.capacity() + 24).sum())
         + m.guards.iter().map(|s| s.capacity() + 24).sum::<usize>()
-        + m.variant_delegates.iter().map(|s| s.capacity() + 24).sum::<usize>()
+        + m.variant_delegates.iter().map(|(s, _)| s.capacity() + 32).sum::<usize>()
         + 72
 }
 
@@ -375,9 +375,8 @@ pub(super) fn include_set_hash(src: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     for line in src.lines() {
-        let t = line.trim_start();
-        if t.starts_with('#') && t[1..].trim_start().starts_with("include") {
-            t.hash(&mut h);
+        if is_include_line(line) {
+            line.trim_start().hash(&mut h);
         }
     }
     h.finish()
@@ -385,7 +384,7 @@ pub(super) fn include_set_hash(src: &str) -> u64 {
 
 /// Bump when the persisted macro-table format or the gather's semantics
 /// change in a way that invalidates on-disk blobs.
-const MACRO_CACHE_VERSION: i64 = 5;
+const MACRO_CACHE_VERSION: i64 = 6;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PersistedMacros {
