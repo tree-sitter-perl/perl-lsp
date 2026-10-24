@@ -340,6 +340,33 @@ pub(crate) fn peel_groups(mut node: Node) -> Node {
     node
 }
 
+/// What a `refgen_expression` (`\X`) takes a reference to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefgenOperand {
+    /// `\&name`, `\&$v`, `\&{..}`.
+    Code,
+    Hash,
+    Array,
+    /// `\$x`, `\(...)`, `\"str"`: nothing the lattice models.
+    Other,
+}
+
+/// `\my @z` names the declared variable, not the declaration.
+pub(crate) fn refgen_operand(refgen: Node) -> Option<RefgenOperand> {
+    let operand = refgen.elements().next()?;
+    let operand = if operand.kind() == "variable_declaration" {
+        operand.child_by_field_name("variable")?
+    } else {
+        operand
+    };
+    Some(match operand.kind() {
+        "function" => RefgenOperand::Code,
+        "hash" => RefgenOperand::Hash,
+        "array" => RefgenOperand::Array,
+        _ => RefgenOperand::Other,
+    })
+}
+
 /// First named child of `node` (each group-peeled) whose kind satisfies
 /// `pred` — the "pull the single typed operand out of a call" primitive.
 /// The kind-filter callback keeps it reusable across callers.

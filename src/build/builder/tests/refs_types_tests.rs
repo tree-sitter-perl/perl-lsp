@@ -458,6 +458,21 @@ fn test_extract_coderef_literal() {
 }
 
 #[test]
+fn test_refgen_types_by_what_it_references() {
+    // Only `\&name` is code: `\%h` and `\@a` are container refs, and a
+    // scalar ref is nothing the lattice models.
+    let fa = build_fa(
+        "my %h; my @a; my $s;\nmy $hr = \\%h;\nmy $ar = \\@a;\nmy $sr = \\$s;\nmy $cr = \\&foo;\nmy $dr = \\my @z;\nsub foo { 1 }\n",
+    );
+    let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(6, 0));
+    assert_eq!(at("$hr"), Some(InferredType::HashRef));
+    assert_eq!(at("$ar"), Some(InferredType::ArrayRef));
+    assert_eq!(at("$sr"), None);
+    assert!(matches!(at("$cr"), Some(InferredType::CodeRef { return_edge: Some(_) })), "{:?}", at("$cr"));
+    assert_eq!(at("$dr"), Some(InferredType::ArrayRef));
+}
+
+#[test]
 fn test_extract_regexp_literal() {
     let fa = build_fa("my $re = qr/pattern/;");
     let ty = fa.inferred_type_via_bag("$re", Point::new(0, 21));

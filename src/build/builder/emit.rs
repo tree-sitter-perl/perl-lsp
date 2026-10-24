@@ -202,7 +202,18 @@ impl<'a> Builder<'a> {
                 }
             }
             "quoted_regexp" => Some(WitnessPayload::InferredType(InferredType::Regexp)),
-            "anonymous_subroutine_expression" | "refgen_expression" => {
+            // `\%h` / `\@a` take a container's reference; only `\&name` is
+            // code. A `\$x` or `\(...)` is a scalar ref nothing models.
+            "refgen_expression" => match crate::cst::refgen_operand(node) {
+                Some(crate::cst::RefgenOperand::Code) => {
+                    let return_edge = self.coderef_return_edge_for(node);
+                    Some(WitnessPayload::InferredType(InferredType::CodeRef { return_edge }))
+                }
+                Some(crate::cst::RefgenOperand::Hash) => Some(WitnessPayload::InferredType(InferredType::HashRef)),
+                Some(crate::cst::RefgenOperand::Array) => Some(WitnessPayload::InferredType(InferredType::ArrayRef)),
+                _ => None,
+            },
+            "anonymous_subroutine_expression" => {
                 // Pre-create the (anon) Symbol so
                 // `coderef_return_edge_for`'s anon-sub arm resolves
                 // to `Symbol(sym_id)` instead of falling back to
@@ -213,10 +224,8 @@ impl<'a> Builder<'a> {
                 // the bound variable carries the stale Expr-span
                 // edge and `ReturnExprReducer` never sees the call
                 // site through Symbol-attached witnesses.
-                if node.kind() == "anonymous_subroutine_expression" {
-                    let params = self.extract_params(node);
-                    self.ensure_anon_sub_symbol(node, &params);
-                }
+                let params = self.extract_params(node);
+                self.ensure_anon_sub_symbol(node, &params);
                 let return_edge = self.coderef_return_edge_for(node);
                 Some(WitnessPayload::InferredType(InferredType::CodeRef { return_edge }))
             }
