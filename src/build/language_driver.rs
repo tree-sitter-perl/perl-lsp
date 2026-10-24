@@ -1196,10 +1196,11 @@ struct MacroLane {
 /// `#define B(x) F(x)` gives `A → [B, F]`), or that the name is no macro
 /// there. A definition counts from its own `#define` line, or for a gathered
 /// one from the `#include` line bringing its header in, until the next
-/// `#undef` of the name; a chain follows a
+/// unconditional `#undef` of the name, the file's own or a header's
+/// (`definition_spans`); a chain follows a
 /// link only while that link's macro is defined at the use, which is when
 /// the preprocessor would rescan it. Every config variant of a name
-/// contributes, each from its own line (`Macro::variant_delegates`).
+/// contributes, each over its own lines (`Macro::spans`).
 #[cfg(feature = "pack-langs")]
 fn macro_uses(
     fa: &FileAnalysis,
@@ -1212,8 +1213,7 @@ fn macro_uses(
     let include_rows: Vec<usize> =
         crate::build::cpp_reparse::include_lines(source).into_iter().map(|(_, row)| row).collect();
     // Every definition of a name this file sees: the rows it counts over
-    // and its delegate. A gathered name is defined from its include line
-    // even when no variant delegates.
+    // and its delegate.
     let mut own: HashMap<&str, Vec<(usize, Option<String>)>> = HashMap::new();
     for m in &fa.pack.macro_defs {
         own.entry(m.name.as_str()).or_default().push((m.selection_span.start.row, m.delegate.clone()));
@@ -1226,19 +1226,15 @@ fn macro_uses(
     let mut defs_of = |name: &str| -> Vec<MacroSpan> {
         defs.entry(name.to_string())
             .or_insert_with(|| {
-                let mut v = own.get(name).cloned().unwrap_or_default();
-                if let Some(row) = external.activation_line(name, &include_rows) {
-                    v.push((row, None));
-                }
-                v.extend(external.delegates_of(name, &include_rows).into_iter().map(|(d, row)| (row, Some(d))));
-                let undefs = undef_rows.get(name).map_or(&[][..], |u| &u[..]);
-                v.into_iter()
-                    .map(|(from, delegate)| MacroSpan {
-                        from,
-                        until: crate::build::cpp_reparse::definition_end(from, undefs),
-                        delegate,
-                    })
-                    .collect()
+                crate::build::cpp_reparse::definition_spans(
+                    own.get(name).cloned().unwrap_or_default(),
+                    external.gathered_spans(name, &include_rows).unwrap_or_default(),
+                    undef_rows.get(name).map_or(&[][..], |u| &u[..]),
+                    &external.undefined_lines(name, &include_rows),
+                )
+                .into_iter()
+                .map(|(from, until, delegate)| MacroSpan { from, until, delegate })
+                .collect()
             })
             .clone()
     };
@@ -1257,7 +1253,8 @@ fn macro_uses(
         }
         let name = r.unqualified_target_name(names);
         let own_defs = defs_of(name);
-        if own_defs.is_empty() {
+        // A name the closure defines and undefines again is no macro here.
+        if own_defs.is_empty() && !external.defines(name) {
             continue;
         }
         // `None`: anywhere, for a use inside a `#define` body.

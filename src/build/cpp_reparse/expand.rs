@@ -273,21 +273,27 @@ fn compute_splices_inner(
     // macro name before its own `#define` (re2 `Simplify` →
     // `DontCallSimplify`) must keep the real name.
     // The same holds for a gathered macro: it is defined from the `#include`
-    // line that brings it in, so a use above that line keeps its name.
+    // line that brings it in, until one that undefines it.
     let local_lines = local_macro_lines(tree, src);
     let include_starts: Vec<usize> = include_lines(src).into_iter().map(|(b, _)| b).collect();
+    // `None`: the name is no macro this file or its closure defines.
+    let spans: std::cell::RefCell<HashMap<String, Option<Vec<(usize, Option<usize>, ())>>>> = Default::default();
     let defined_at = |word: &str, at: usize| -> Option<bool> {
-        let (defs, undefs) = local_lines.get(word).map_or((&[][..], &[][..]), |(d, u)| (&d[..], &u[..]));
-        let gathered = external.activation_line(word, &include_starts);
-        if defs.is_empty() && gathered.is_none() {
-            return None;
+        let mut spans = spans.borrow_mut();
+        if !spans.contains_key(word) {
+            let (defs, undefs) = local_lines.get(word).map_or((&[][..], &[][..]), |(d, u)| (&d[..], &u[..]));
+            let gathered = external.gathered_spans(word, &include_starts);
+            let of = (!defs.is_empty() || gathered.is_some()).then(|| {
+                definition_spans(
+                    defs.iter().map(|&from| (from, ())),
+                    gathered.into_iter().flatten().map(|(from, until, _)| (from, until, ())),
+                    undefs,
+                    &external.undefined_lines(word, &include_starts),
+                )
+            });
+            spans.insert(word.to_string(), of);
         }
-        Some(
-            defs.iter()
-                .copied()
-                .chain(gathered)
-                .any(|from| definition_counts_at(from, definition_end(from, undefs), at)),
-        )
+        spans[word].as_ref().map(|of| of.iter().any(|&(from, until, ())| definition_counts_at(from, until, at)))
     };
     let excludes = exclusion_spans(tree, expand_region_bodies);
     // The HARD exclusions (strings/comments/directives) a context-free-safe

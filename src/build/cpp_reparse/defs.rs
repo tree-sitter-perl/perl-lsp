@@ -60,7 +60,8 @@ pub(super) const INCLUDE_QUERY: &str = r#"
 (preproc_include path: (system_lib_string) @s)
 "#;
 
-/// `#undef NAME` — the directive line ends the name's macro definition.
+/// `#undef NAME` — the directive line ends the name's macro definition
+/// (`walk_macro_undefs` keeps only the unconditional ones).
 pub(super) const UNDEF_QUERY: &str = r#"
 (preproc_call
   directive: (preproc_directive) @d (#match? @d "^#[ \t]*undef$")
@@ -151,7 +152,7 @@ pub(super) fn walk_macro_defs(
             .map(|n| (n.start_position(), n.end_position()))
             .unwrap_or_default();
         if let (Some(n), Some(b)) = (oname, obody) {
-            emit(n, Macro { params: None, body: b, guards: guards.clone(), def_line, variant_delegates: Vec::new(), via_include: None }, name_span);
+            emit(n, Macro { params: None, body: b, guards: guards.clone(), def_line, spans: Vec::new(), undefined_at: Vec::new() }, name_span);
         }
         // Bodyless `#define FLAG` — the canonical config knob (feature
         // toggles, include guards, `PERL_CORE`-style markers). It must enter
@@ -161,12 +162,12 @@ pub(super) fn walk_macro_defs(
         if let Some(n) = bname {
             emit(
                 n,
-                Macro { params: None, body: String::new(), guards: guards.clone(), def_line, variant_delegates: Vec::new(), via_include: None },
+                Macro { params: None, body: String::new(), guards: guards.clone(), def_line, spans: Vec::new(), undefined_at: Vec::new() },
                 name_span,
             );
         }
         if let (Some(n), Some(p), Some(b)) = (fname, fparams, fbody) {
-            emit(n, Macro { params: Some(p), body: b, guards, def_line, variant_delegates: Vec::new(), via_include: None }, name_span);
+            emit(n, Macro { params: Some(p), body: b, guards, def_line, spans: Vec::new(), undefined_at: Vec::new() }, name_span);
         }
     }
 }
@@ -217,11 +218,8 @@ pub fn looks_like_c_family(prefix: &str) -> bool {
 
 pub fn collect_macros(tree: &Tree, src: &[u8]) -> BTreeMap<String, Macro> {
     let mut out: BTreeMap<String, Macro> = BTreeMap::new();
-    walk_macro_defs(tree, src, |n, mut m, _span| {
-        // Last definition wins the body; the shadowed one's delegate survives.
-        if let Some(prev) = out.remove(&n) {
-            m.absorb_variant(&prev);
-        }
+    // Last definition wins the body.
+    walk_macro_defs(tree, src, |n, m, _span| {
         out.insert(n, m);
     });
     out
@@ -239,22 +237,6 @@ impl Macro {
             None => bare_identifier(&self.body),
         }
     }
-
-    /// Every callee a use of this name may forward to, across all its
-    /// config variants.
-    pub fn all_delegates(&self) -> impl Iterator<Item = String> + '_ {
-        self.delegate().into_iter().chain(self.variant_delegates.iter().map(|(d, _)| d.clone()))
-    }
-
-    /// Fold a shadowed same-named definition's delegates into this one.
-    pub fn absorb_variant(&mut self, other: &Macro) {
-        let own = self.delegate();
-        for d in other.all_delegates() {
-            if own.as_ref() != Some(&d) && !self.variant_delegates.iter().any(|(v, _)| *v == d) {
-                self.variant_delegates.push((d, None));
-            }
-        }
-    }
 }
 
 /// The macro identity/navigation lane: every `#define` as a `MacroDef` carrying
@@ -262,6 +244,7 @@ impl Macro {
 /// the callee it forwards to. Consumed by goto-def (`#define`-preference,
 /// reachability-ranked multi-location, see-through). Parses `source` fresh so
 /// def spans are in ORIGINAL coordinates (the expansion tree splices usages).
+#[cfg(test)]
 pub fn collect_macro_defs(
     parser: &mut tree_sitter::Parser,
     source: &str,
@@ -298,7 +281,10 @@ pub fn collect_macro_directives(parser: &mut tree_sitter::Parser, source: &str) 
     out
 }
 
-/// Call `emit(name, directive node)` per `#undef NAME`.
+/// Call `emit(name, directive node)` per `#undef NAME` outside any config
+/// conditional (an include guard is none). Every arm of a conditional is
+/// read as live, so an `#undef` under `#if` ends the definition only on
+/// some configs; the others still have the macro, and they keep it.
 pub(super) fn walk_macro_undefs(tree: &Tree, src: &[u8], mut emit: impl FnMut(String, tree_sitter::Node)) {
     let query = cached_query(&UNDEF_Q, &tree.language(), UNDEF_QUERY);
     let names: Vec<&str> = query.capture_names().to_vec();
@@ -311,8 +297,8 @@ pub(super) fn walk_macro_undefs(tree: &Tree, src: &[u8], mut emit: impl FnMut(St
             }
             let Ok(t) = c.node.utf8_text(src) else { continue };
             let name = t.trim();
-            if !name.is_empty() && name.bytes().all(is_ident_byte) {
-                let directive = c.node.parent().unwrap_or(c.node);
+            let directive = c.node.parent().unwrap_or(c.node);
+            if !name.is_empty() && name.bytes().all(is_ident_byte) && guard_trail(directive, src).is_empty() {
                 emit(name.to_string(), directive);
             }
         }
@@ -321,8 +307,7 @@ pub(super) fn walk_macro_undefs(tree: &Tree, src: &[u8], mut emit: impl FnMut(St
 
 /// The line a definition counting from `from` stops counting at: the first
 /// `#undef` of the name at or below it. Lines are any one unit (byte
-/// offsets, rows); an `#undef` on a gathered macro's line 0 (visible from
-/// the top) ends it.
+/// offsets, rows).
 pub fn definition_end(from: usize, undef_lines: &[usize]) -> Option<usize> {
     undef_lines.iter().copied().filter(|&u| u >= from).min()
 }
@@ -330,6 +315,34 @@ pub fn definition_end(from: usize, undef_lines: &[usize]) -> Option<usize> {
 /// Whether a definition over `[from, end)` counts at `at`.
 pub fn definition_counts_at(from: usize, end: Option<usize>, at: usize) -> bool {
     from <= at && end.is_none_or(|end| at < end)
+}
+
+/// Every stretch over which a name is a macro in one file, as
+/// `(from, until, payload)`: its own `#define`s (`own`, from their lines)
+/// end at the file's own next `#undef` or at an include whose header
+/// undefines it (`gathered_undefs`); a gathered definition (`gathered`,
+/// already bounded by the closure's own order) ends at the file's next
+/// `#undef` too. Lines are any one unit, the same for every argument.
+pub fn definition_spans<T>(
+    own: impl IntoIterator<Item = (usize, T)>,
+    gathered: impl IntoIterator<Item = (usize, Option<usize>, T)>,
+    own_undefs: &[usize],
+    gathered_undefs: &[usize],
+) -> Vec<(usize, Option<usize>, T)> {
+    let earlier = |a: Option<usize>, b: Option<usize>| match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    let mut out: Vec<(usize, Option<usize>, T)> = own
+        .into_iter()
+        .map(|(from, t)| (from, earlier(definition_end(from, own_undefs), definition_end(from, gathered_undefs)), t))
+        .collect();
+    out.extend(
+        gathered
+            .into_iter()
+            .map(|(from, until, t)| (from, earlier(until, definition_end(from, own_undefs)), t)),
+    );
+    out
 }
 
 /// A direct-delegation body — a single call `G(args)` whose whole point is to

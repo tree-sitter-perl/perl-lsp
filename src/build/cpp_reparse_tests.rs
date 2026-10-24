@@ -122,8 +122,9 @@ fn two_tier_matches_single_tier_expansion() {
                 body: body.to_string(),
                 guards: Vec::new(),
                 def_line: 0,
-                variant_delegates: Vec::new(),
-                via_include: None,
+                // Defined from the top: the sources below include nothing.
+                spans: vec![GatheredSpan { from: 0, until: None, delegate: None }],
+                undefined_at: Vec::new(),
             },
         );
     };
@@ -883,8 +884,9 @@ fn macro_table(defs: &[(&str, Option<&[&str]>, &str)]) -> PreExpandedExternal {
                 body: body.to_string(),
                 guards: Vec::new(),
                 def_line: 0,
-                variant_delegates: Vec::new(),
-                via_include: None,
+                // Defined from the top: the sources below include nothing.
+                spans: vec![GatheredSpan { from: 0, until: None, delegate: None }],
+                undefined_at: Vec::new(),
             },
         );
     }
@@ -994,7 +996,7 @@ Regexp* Foo() { return Simplify(); }\n";
 #[test]
 fn gathered_macro_does_not_expand_uses_before_its_include() {
     // A gathered macro is defined from the `#include` line bringing it in
-    // (`via_include` = that line's ordinal), so a use above it keeps its name.
+    // (its span's ordinal), so a use above it keeps its name.
     let mut p = cpp_parser();
     let mut ext = std::collections::BTreeMap::new();
     ext.insert(
@@ -1004,8 +1006,8 @@ fn gathered_macro_does_not_expand_uses_before_its_include() {
             body: "real_name".to_string(),
             guards: Vec::new(),
             def_line: 0,
-            variant_delegates: Vec::new(),
-            via_include: Some(1),
+            spans: vec![GatheredSpan { from: 1, until: None, delegate: Some("real_name".to_string()) }],
+            undefined_at: Vec::new(),
         },
     );
     let external = PreExpandedExternal::from_raw(std::sync::Arc::new(ext));
@@ -1014,6 +1016,35 @@ fn gathered_macro_does_not_expand_uses_before_its_include() {
     let (rewritten, _map) = preprocess_with(&tree, src, &external);
     assert!(rewritten.contains("int x = ALIAS;"), "use above the include keeps its name: {rewritten}");
     assert!(rewritten.contains("int y = real_name;"), "use below the include expands: {rewritten}");
+}
+
+#[test]
+fn gathered_macro_does_not_expand_uses_after_a_header_undefines_it() {
+    let mut p = cpp_parser();
+    let mut ext = std::collections::BTreeMap::new();
+    ext.insert(
+        "ALIAS".to_string(),
+        Macro {
+            params: None,
+            body: "real_name".to_string(),
+            guards: Vec::new(),
+            def_line: 0,
+            spans: vec![GatheredSpan { from: 0, until: Some(1), delegate: Some("real_name".to_string()) }],
+            undefined_at: vec![1],
+        },
+    );
+    let external = PreExpandedExternal::from_raw(std::sync::Arc::new(ext));
+    let src = "#include \"a.h\"\nint x = ALIAS;\n#include \"b.h\"\nint y = ALIAS;\n";
+    let tree = parse(&mut p, src);
+    let (rewritten, _map) = preprocess_with(&tree, src, &external);
+    assert!(rewritten.contains("int x = real_name;"), "use between the includes expands: {rewritten}");
+    assert!(rewritten.contains("int y = ALIAS;"), "use below the undefining include keeps its name: {rewritten}");
+}
+
+#[test]
+fn a_header_undef_ends_a_define_written_above_its_include() {
+    let spans = definition_spans([(0, ())], Vec::new(), &[], &[5]);
+    assert_eq!(spans, vec![(0, Some(5), ())]);
 }
 
 #[test]
