@@ -70,28 +70,29 @@ pub struct RefTable {
 /// Perl_Inc(x)` reaches `[B, Perl_Inc]`), so the use is indexed and
 /// row-shredded under each delegate's key: the backward half of goto-def's
 /// see-through. A chain only follows macros defined at the use's position.
-/// A use before its macro's `#define` (or before the `#include` that
-/// brings it in) is not a macro use at all, and is listed as `premature`.
+/// A use where its macro is not defined (above the `#define` or the
+/// `#include` bringing it in, or below an `#undef`) is not a macro use at
+/// all, and is listed as `inactive`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MacroUses {
     /// Distinct delegate chains, each sorted.
     chains: Vec<Box<[String]>>,
     /// `(ref index, chain index)`, sorted by ref index.
     delegated: Vec<(u32, u32)>,
-    /// Ref indices spelling a macro name before the macro is defined, sorted.
-    premature: Vec<u32>,
+    /// Ref indices spelling a macro name where the macro is not defined, sorted.
+    inactive: Vec<u32>,
 }
 
 impl MacroUses {
-    /// `delegated` and `premature` must be sorted by ref index.
-    pub fn from_parts(chains: Vec<Box<[String]>>, delegated: Vec<(u32, u32)>, premature: Vec<u32>) -> Self {
+    /// `delegated` and `inactive` must be sorted by ref index.
+    pub fn from_parts(chains: Vec<Box<[String]>>, delegated: Vec<(u32, u32)>, inactive: Vec<u32>) -> Self {
         debug_assert!(delegated.windows(2).all(|w| w[0].0 < w[1].0));
-        debug_assert!(premature.windows(2).all(|w| w[0] < w[1]));
-        MacroUses { chains, delegated, premature }
+        debug_assert!(inactive.windows(2).all(|w| w[0] < w[1]));
+        MacroUses { chains, delegated, inactive }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.delegated.is_empty() && self.premature.is_empty()
+        self.delegated.is_empty() && self.inactive.is_empty()
     }
 
     fn delegates_of(&self, i: usize) -> &[String] {
@@ -109,7 +110,7 @@ impl MacroUses {
             .sum::<usize>()
             + self.chains.capacity() * std::mem::size_of::<Box<[String]>>()
             + self.delegated.capacity() * std::mem::size_of::<(u32, u32)>()
-            + self.premature.capacity() * std::mem::size_of::<u32>()
+            + self.inactive.capacity() * std::mem::size_of::<u32>()
     }
 }
 
@@ -227,14 +228,14 @@ impl RefTable {
         self.macro_uses.delegates_of(i)
     }
 
-    /// Refs spelling a macro name before that macro is defined.
-    pub fn premature_macro_uses(&self) -> impl Iterator<Item = usize> + '_ {
-        self.macro_uses.premature.iter().map(|&i| i as usize)
+    /// Refs spelling a macro name where that macro is not defined.
+    pub fn inactive_macro_uses(&self) -> impl Iterator<Item = usize> + '_ {
+        self.macro_uses.inactive.iter().map(|&i| i as usize)
     }
 
-    /// Whether ref `i` spells a macro name before that macro is defined.
-    pub fn is_premature_macro_use(&self, i: usize) -> bool {
-        u32::try_from(i).is_ok_and(|i| self.macro_uses.premature.binary_search(&i).is_ok())
+    /// Whether ref `i` spells a macro name where that macro is not defined.
+    pub fn is_inactive_macro_use(&self, i: usize) -> bool {
+        u32::try_from(i).is_ok_and(|i| self.macro_uses.inactive.binary_search(&i).is_ok())
     }
 
     /// Bucket ref `i` under its own match key and every delegate's.
@@ -437,16 +438,17 @@ impl FileAnalysis {
         self.refs.delegates_at(ri)
     }
 
-    /// Whether ref `ri` spells a macro name before that macro is defined
-    /// (its `#define`, or the `#include` that brings it in, comes later).
-    pub fn is_premature_macro_use(&self, ri: usize) -> bool {
-        self.refs.is_premature_macro_use(ri)
+    /// Whether ref `ri` spells a macro name where that macro is not defined
+    /// (above its `#define` or the `#include` bringing it in, or below an
+    /// `#undef`).
+    pub fn is_inactive_macro_use(&self, ri: usize) -> bool {
+        self.refs.is_inactive_macro_use(ri)
     }
 
-    /// Whether the `name` token at `point` precedes that macro's definition,
-    /// so it is not a macro use (goto-def's macro lane stands aside).
+    /// Whether the `name` token at `point` is where that macro is not
+    /// defined, so it is not a macro use (goto-def's macro lane stands aside).
     pub fn macro_inactive_at(&self, name: &str, point: Point) -> bool {
-        self.refs.premature_macro_uses().any(|i| {
+        self.refs.inactive_macro_uses().any(|i| {
             let r = &self.refs.as_slice()[i];
             r.span.start <= point && point <= r.span.end && r.unqualified_target_name(&self.pack.names) == name
         })
