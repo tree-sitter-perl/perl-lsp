@@ -85,10 +85,28 @@ cost a cross-file ancestry read on every join.
 ## Consumers
 
 A union is not a class: `class_name()` is `None`, as for `Optional`, so
-every dispatch lane is unchanged by this ADR. Rendering spells `A|B`.
-Dispatch over the arms (goto-def / references across every arm,
-completion over the arms' shared members), PHP `A|B` docblocks, and the
-`--dump-package` widening trace are the next layer.
+no single-class dispatch lane reads one. Rendering spells `A|B`.
+
+A consumer of a union's VALUE reads each arm and joins what the arms
+answer (`InferredType::join_over_arms`): a call on a union receiver
+dispatches on every arm with that arm as the receiver its method sees
+(the `Invoke`), a drill (`->{k}`, `->[i]`, element, key, slot) projects
+every arm, and so do the query-time member reads (`member_value_type`,
+`field_value_type`). An arm that answers nothing adds no evidence, the
+same as any other `None`: `$pet->purr` on `Cat|Bird` is Cat's `purr`, the
+Bird there a runtime error rather than a type. An `Optional` receiver
+stays strict, as before; only a union distributes.
+
+Every per-arm query runs in an opaque frame, so a conclusion bake that
+crosses files under a union poisons to a decode instead of minting a
+first-answer `Link` for what is a join.
+
+The build-time chain walker (`invocant_type_at_node`) does not
+distribute: its answers back the frozen single-class dispatch edge, which
+a union never gets.
+
+Python annotations mint unions: `A | B`, `Union[A, B]`, `Optional[A]`
+(`A | None`). PHP `A|B` docblocks land with the PHP pack.
 
 Latest-wins reducers (`ExprReturn`, `SubReturnReducer`) are not joins:
 two witnesses on one attachment keep the latest, union or not.

@@ -254,6 +254,16 @@ pub fn class_isa_prefix(
 }
 
 impl FileAnalysis {
+    /// The order a query-time join over this file's values reads: its
+    /// packages' parents, the index's graph, its language's rules.
+    pub fn type_order<'a>(&'a self, module_index: Option<&'a dyn CrossFileLookup>) -> IsaOrder<'a> {
+        IsaOrder {
+            local: &self.packages,
+            module_index,
+            rules: crate::model::conventions::lattice_for(&self.language),
+        }
+    }
+
     /// Single-source-of-truth DFS ancestor walk for every per-class
     /// lookup on this file: walks `class_name` and every ancestor
     /// (local `PackageFacts::parents` ∪ cross-file `parents_cached`),

@@ -325,6 +325,11 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
         arg_count: Option<usize>,
     ) -> Option<InferredType> {
+        if let InferredType::Union(_) = receiver {
+            return receiver.join_over_arms(&self.type_order(module_index), |arm| {
+                self.member_value_type(arm, member, module_index, arg_count)
+            });
+        }
         // The whole ladder, most-specific first: a member the winning spec
         // doesn't define falls through to the next rung (ultimately the
         // primary) — same never-pruned order goto-def presents.
@@ -352,6 +357,11 @@ impl FileAnalysis {
         member: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
+        if let InferredType::Union(_) = receiver {
+            return receiver.join_over_arms(&self.type_order(module_index), |arm| {
+                self.field_value_type(arm, member, module_index)
+            });
+        }
         for (class, recv) in self.dispatch_ladder_of(receiver, module_index) {
             let Some(raw) = self.field_type_on_class(&class, member, module_index) else {
                 continue;

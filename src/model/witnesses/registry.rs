@@ -2376,128 +2376,138 @@ impl ReducerRegistry {
                             }
                         }
                     });
-                    if let Some(t) = base_t {
-                        let projected = match step {
-                            ProjectionStep::HashKey(k) => {
-                                t.key_value_type(k).flatten().cloned().or_else(|| {
-                                    // Class-typed base: the structural
-                                    // literal can't answer, but a typed
-                                    // slot WRITE can — `SlotType{class,
-                                    // key}`, local or (via the arm in
-                                    // query_rec_body) cross-file and up
-                                    // the ancestry. The read drills
-                                    // through the registry, never a
-                                    // baked value.
-                                    let class = t.class_name()?.to_string();
-                                    let att = WitnessAttachment::SlotType {
-                                        class,
-                                        key: k.clone(),
-                                    };
-                                    let sub_q = ReducerQuery {
-                                        attachment: &att,
-                                        point: q.point,
-                                        framework: q.framework,
-                                        arity_hint: None,
-                                        receiver: q.receiver.clone(),
-                                        args: q.args.clone(),
-                                        context: q.context,
-                                    };
-                                    state.in_opaque_frame(|state| {
-                                        match &*self.query_rec(bag, &sub_q, state) {
-                                            ReducedValue::Type(t) => Some(t.clone()),
-                                            ReducedValue::FactMap(_)
-                                            | ReducedValue::None => None,
-                                        }
+                    if let Some(base_ty) = base_t {
+                        let project = |t: &InferredType, state: &mut QueryState| -> Option<InferredType> {
+                            match step {
+                                ProjectionStep::HashKey(k) => {
+                                    t.key_value_type(k).flatten().cloned().or_else(|| {
+                                        // Class-typed base: the structural
+                                        // literal can't answer, but a typed
+                                        // slot WRITE can — `SlotType{class,
+                                        // key}`, local or (via the arm in
+                                        // query_rec_body) cross-file and up
+                                        // the ancestry. The read drills
+                                        // through the registry, never a
+                                        // baked value.
+                                        let class = t.class_name()?.to_string();
+                                        let att = WitnessAttachment::SlotType {
+                                            class,
+                                            key: k.clone(),
+                                        };
+                                        let sub_q = ReducerQuery {
+                                            attachment: &att,
+                                            point: q.point,
+                                            framework: q.framework,
+                                            arity_hint: None,
+                                            receiver: q.receiver.clone(),
+                                            args: q.args.clone(),
+                                            context: q.context,
+                                        };
+                                        state.in_opaque_frame(|state| {
+                                            match &*self.query_rec(bag, &sub_q, state) {
+                                                ReducedValue::Type(t) => Some(t.clone()),
+                                                ReducedValue::FactMap(_)
+                                                | ReducedValue::None => None,
+                                            }
+                                        })
                                     })
-                                })
-                            }
-                            ProjectionStep::ArrayIndex(i) => t.element_at(*i).cloned(),
-                            ProjectionStep::Element => match &t {
-                                crate::model::file_analysis::InferredType::Sequence(elems) => {
-                                    let mut it = elems.iter();
-                                    it.next().filter(|first| it.all(|e| e == *first)).cloned()
                                 }
-                                // A parametric container's TRAILING argument is
-                                // its element by the same positional convention
-                                // `ParamOf` projects (`array<K, V>` → V,
-                                // `vector<T>` → T) — no base-name branch.
-                                crate::model::file_analysis::InferredType::Parametric(
-                                    crate::model::file_analysis::ParametricType::Instance {
-                                        args, ..
-                                    },
-                                ) => args.last().cloned(),
-                                _ => None,
-                            },
-                            ProjectionStep::Key => match &t {
-                                // A sequence's keys ARE its positions.
-                                crate::model::file_analysis::InferredType::Sequence(_) => {
-                                    Some(crate::model::file_analysis::InferredType::Numeric)
+                                ProjectionStep::ArrayIndex(i) => t.element_at(*i).cloned(),
+                                ProjectionStep::Element => match t {
+                                    crate::model::file_analysis::InferredType::Sequence(elems) => {
+                                        let mut it = elems.iter();
+                                        it.next().filter(|first| it.all(|e| e == *first)).cloned()
+                                    }
+                                    // A parametric container's TRAILING argument is
+                                    // its element by the same positional convention
+                                    // `ParamOf` projects (`array<K, V>` → V,
+                                    // `vector<T>` → T) — no base-name branch.
+                                    crate::model::file_analysis::InferredType::Parametric(
+                                        crate::model::file_analysis::ParametricType::Instance {
+                                            args, ..
+                                        },
+                                    ) => args.last().cloned(),
+                                    _ => None,
+                                },
+                                ProjectionStep::Key => match t {
+                                    // A sequence's keys ARE its positions.
+                                    crate::model::file_analysis::InferredType::Sequence(_) => {
+                                        Some(crate::model::file_analysis::InferredType::Numeric)
+                                    }
+                                    // A two-argument instance keys by its first
+                                    // argument (`array<string, V>` → string).
+                                    crate::model::file_analysis::InferredType::Parametric(
+                                        crate::model::file_analysis::ParametricType::Instance {
+                                            args, ..
+                                        },
+                                    ) if args.len() == 2 => args.first().cloned(),
+                                    _ => None,
+                                },
+                                ProjectionStep::ParamOf { member, index } => {
+                                    // The dispatch class picks the callee; the
+                                    // callee's bag says whether the position
+                                    // aliases (`Param` fallback below).
+                                    t.class_name().map(str::to_string).and_then(|class| {
+                                        let att = WitnessAttachment::Param {
+                                            package: class,
+                                            name: member.clone(),
+                                            index: *index,
+                                        };
+                                        let sub_q = ReducerQuery {
+                                            attachment: &att,
+                                            point: q.point,
+                                            framework: q.framework,
+                                            arity_hint: None,
+                                            receiver: Some(t.clone()),
+                                            args: q.args.clone(),
+                                            context: q.context,
+                                        };
+                                        state.in_opaque_frame(|state| {
+                                            match &*self.query_rec(bag, &sub_q, state) {
+                                                ReducedValue::Type(t) => Some(t.clone()),
+                                                ReducedValue::FactMap(_)
+                                                | ReducedValue::None => None,
+                                            }
+                                        })
+                                    })
                                 }
-                                // A two-argument instance keys by its first
-                                // argument (`array<string, V>` → string).
-                                crate::model::file_analysis::InferredType::Parametric(
-                                    crate::model::file_analysis::ParametricType::Instance {
-                                        args, ..
-                                    },
-                                ) if args.len() == 2 => args.first().cloned(),
-                                _ => None,
-                            },
-                            ProjectionStep::ParamOf { member, index } => {
-                                // The dispatch class picks the callee; the
-                                // callee's bag says whether the position
-                                // aliases (`Param` fallback below).
-                                t.class_name().map(str::to_string).and_then(|class| {
-                                    let att = WitnessAttachment::Param {
-                                        package: class,
-                                        name: member.clone(),
-                                        index: *index,
-                                    };
-                                    let sub_q = ReducerQuery {
-                                        attachment: &att,
-                                        point: q.point,
-                                        framework: q.framework,
-                                        arity_hint: None,
-                                        receiver: Some(t.clone()),
-                                        args: q.args.clone(),
-                                        context: q.context,
-                                    };
-                                    state.in_opaque_frame(|state| {
-                                        match &*self.query_rec(bag, &sub_q, state) {
-                                            ReducedValue::Type(t) => Some(t.clone()),
-                                            ReducedValue::FactMap(_)
-                                            | ReducedValue::None => None,
-                                        }
+                                ProjectionStep::ValueHop { member } => {
+                                    // A value read chases `Field{class, member}`,
+                                    // the slot's own subject, so a same-named
+                                    // callable's return never answers it (a call
+                                    // is an `Invoke`). The base type IS the
+                                    // receiver, so a slot typed by the class's
+                                    // template parameters substitutes the base's
+                                    // arguments.
+                                    t.class_name().map(str::to_string).and_then(|class| {
+                                        let att = WitnessAttachment::Field { owner: class, name: member.clone() };
+                                        let sub_q = ReducerQuery {
+                                            attachment: &att,
+                                            point: q.point,
+                                            framework: q.framework,
+                                            arity_hint: None,
+                                            receiver: Some(t.clone()),
+                                            args: q.args.clone(),
+                                            context: q.context,
+                                        };
+                                        state.in_opaque_frame(|state| {
+                                            match &*self.query_rec(bag, &sub_q, state) {
+                                                ReducedValue::Type(t) => Some(t.clone()),
+                                                ReducedValue::FactMap(_)
+                                                | ReducedValue::None => None,
+                                            }
+                                        })
                                     })
-                                })
+                                }
                             }
-                            ProjectionStep::ValueHop { member } => {
-                                // A value read chases `Field{class, member}`,
-                                // the slot's own subject, so a same-named
-                                // callable's return never answers it (a call
-                                // is an `Invoke`). The base type IS the
-                                // receiver, so a slot typed by the class's
-                                // template parameters substitutes the base's
-                                // arguments.
-                                t.class_name().map(str::to_string).and_then(|class| {
-                                    let att = WitnessAttachment::Field { owner: class, name: member.clone() };
-                                    let sub_q = ReducerQuery {
-                                        attachment: &att,
-                                        point: q.point,
-                                        framework: q.framework,
-                                        arity_hint: None,
-                                        receiver: Some(t.clone()),
-                                        args: q.args.clone(),
-                                        context: q.context,
-                                    };
-                                    state.in_opaque_frame(|state| {
-                                        match &*self.query_rec(bag, &sub_q, state) {
-                                            ReducedValue::Type(t) => Some(t.clone()),
-                                            ReducedValue::FactMap(_)
-                                            | ReducedValue::None => None,
-                                        }
-                                    })
-                                })
+                        };
+                        // A union base projects arm by arm (the order only for a
+                        // union: this arm is hot, and `class_order` allocates).
+                        let projected = match &base_ty {
+                            InferredType::Union(_) => {
+                                base_ty.join_over_arms(&*class_order(q), |t| project(t, state))
                             }
+                            t => project(t, state),
                         };
                         if let Some(t) = projected {
                             out.push(Witness {
@@ -2621,7 +2631,7 @@ impl ReducerRegistry {
         receiver: Option<&WitnessAttachment>,
         args: Option<&[CallArg]>,
     ) -> Option<InferredType> {
-        let mut recv = receiver.and_then(|r| self.operand_type(bag, q, state, r));
+        let recv = receiver.and_then(|r| self.operand_type(bag, q, state, r));
         // Positional argument types up to the first spread; an operand that
         // types nothing holds its position as `Unknown`.
         // TODO(prototypes): a callee prototype like `(\@)` takes an aggregate
@@ -2663,6 +2673,30 @@ impl ReducerRegistry {
                 return member;
             }
         }
+        // A union receiver dispatches on each arm it may be, with that arm
+        // as the receiver its method sees.
+        match (callee, recv) {
+            (Callee::Method { lookup: Lookup::Receiver, .. }, Some(t @ InferredType::Union(_))) => t
+                .join_over_arms(&*class_order(q), |arm| {
+                    self.dispatch_invoke(bag, q, state, callee, Some(arm.clone()), arg_types.clone(), exact)
+                }),
+            (_, recv) => self.dispatch_invoke(bag, q, state, callee, recv, arg_types, exact),
+        }
+    }
+
+    /// An `Invoke` on one materialized receiver: pick the lookup attachment
+    /// and query it with the receiver and argument types substituted.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_invoke(
+        &self,
+        bag: &WitnessBag,
+        q: &ReducerQuery,
+        state: &mut QueryState,
+        callee: &Callee,
+        mut recv: Option<InferredType>,
+        mut arg_types: Vec<InferredType>,
+        exact: bool,
+    ) -> Option<InferredType> {
         let lookups: Vec<WitnessAttachment> = match callee {
             Callee::Method { name, lookup, .. } => {
                 let classes: Vec<String> = match lookup {

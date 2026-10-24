@@ -763,6 +763,23 @@ impl InferredType {
         }
     }
 
+    /// `f` over each value this may be (a union's arms, else this value),
+    /// joined under `order`. An arm `f` answers nothing for adds no
+    /// evidence, so a member only some arms carry answers from those arms.
+    pub fn join_over_arms(
+        &self,
+        order: &dyn TypeOrder,
+        mut f: impl FnMut(&InferredType) -> Option<InferredType>,
+    ) -> Option<InferredType> {
+        match self {
+            InferredType::Union(arms) => {
+                let answers: Vec<InferredType> = arms.iter().filter_map(&mut f).collect();
+                join_all(&answers, order)
+            }
+            t => f(t),
+        }
+    }
+
     /// The wrapped type of an `Optional<T>`, else `None`. The `defined` /
     /// `blessed` guards strip an optional to its inner via this.
     pub fn optional_inner(&self) -> Option<&InferredType> {

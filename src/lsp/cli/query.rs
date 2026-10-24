@@ -1764,11 +1764,7 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
                     _ => None,
                 })
                 .collect();
-            let order = file_analysis::IsaOrder {
-                local: &analysis.packages,
-                module_index: Some(&module_index),
-                rules: crate::model::conventions::lattice_for(&analysis.language),
-            };
+            let order = analysis.type_order(Some(&module_index));
             let fmt = |ms: &[file_analysis::InferredType]| {
                 ms.iter().map(file_analysis::format_inferred_type).collect::<Vec<_>>()
             };

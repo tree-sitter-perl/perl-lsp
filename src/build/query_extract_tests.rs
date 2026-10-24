@@ -1448,6 +1448,47 @@ fn cmake_cross_file_function_rename_and_subdirectory_resolution() {
 
 
 #[test]
+fn python_union_annotations_are_unions() {
+    use crate::model::file_analysis::{format_inferred_type, InferredType};
+    let at = python_pack().annot_type;
+    let spelled = |t: &str| at(t).map(|t| format_inferred_type(&t));
+    for (src, want) in [
+        ("Cat | Bird", "Bird|Cat"),
+        ("Union[Cat, Bird]", "Bird|Cat"),
+        ("typing.Union[Cat, Bird]", "Bird|Cat"),
+        ("Cat | None", "Maybe<Cat>"),
+        ("Optional[Cat]", "Maybe<Cat>"),
+        ("Optional[Cat | Bird]", "Maybe<Bird|Cat>"),
+        ("int | float", "Numeric"),
+    ] {
+        assert_eq!(spelled(src).as_deref(), Some(want), "{src}");
+    }
+    // An arm nothing reads types the whole spelling as nothing.
+    assert_eq!(at("Cat | 3"), None);
+    assert_eq!(at("None"), Some(InferredType::Undef));
+}
+
+#[test]
+fn python_a_union_annotation_types_the_variable() {
+    let src = "\
+class Cat:
+    def sound(self):
+        return 'meow'
+class Bird:
+    def sound(self):
+        return 'tweet'
+pet: Cat | Bird = adopt()
+y = 1
+";
+    let mut parser = python_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let skel = extract(&tree, src.as_bytes(), &python_pack()).unwrap();
+    let fa = skel.into_file_analysis();
+    let t = fa.inferred_type_via_bag("pet", tree_sitter::Point { row: 7, column: 0 });
+    assert_eq!(t.map(|t| crate::model::file_analysis::format_inferred_type(&t)).as_deref(), Some("Bird|Cat"));
+}
+
+#[test]
 fn python_isinstance_narrows_within_the_guard() {
     // `if isinstance(x, Foo): ...` refines x to Foo INSIDE the block and
     // nowhere else — guard narrowing via scoped witness.
