@@ -293,6 +293,8 @@ fn build_once(
         refs: Vec::new(),
         deferred_var_types: Vec::new(),
         deferred_named_sub_param_types: Vec::new(),
+        convention_invocant_subs: Vec::new(),
+        plain_called_subs: std::collections::HashSet::new(),
         fold_ranges: Vec::new(),
         imports: Vec::new(),
         return_infos: Vec::new(),
@@ -496,6 +498,7 @@ fn build_once(
     // every sub scope + its params now exist, including forward-declared
     // ones.
     b.flush_deferred_named_sub_param_types();
+    b.settle_convention_invocants();
 
     // Post-pass 1: resolve variable refs -> Symbol bindings
     bphase!("resolve_variable_refs", b.resolve_variable_refs());
@@ -794,17 +797,24 @@ impl<'a> Builder<'a> {
                 && w.span.start == self.scopes[scope.0 as usize].span.start => Some(*scope),
             _ => None,
         }).collect();
+        let method_names = self.method_call_names();
+        let mut heads = Vec::new();
         for i in 0..self.scopes.len() {
             let scope = &self.scopes[i];
-            let (is_method, anon) = match &scope.kind {
-                ScopeKind::Method { .. } => (true, false),
-                ScopeKind::Sub { name } => (false, name == "(anon)"),
+            let (is_method, named) = match &scope.kind {
+                ScopeKind::Method { .. } => (true, None),
+                ScopeKind::Sub { name } if name == "(anon)" => (false, None),
+                ScopeKind::Sub { name } => (false, Some(name.as_str())),
                 _ => continue,
             };
             let (Some(pkg), false) = (scope.package.clone(), seeded.contains(&scope.id)) else { continue };
-            let (id, span) = (scope.id, scope.span);
             let class_pkg = facts.get(&pkg).is_some_and(PackageFacts::is_class);
-            let head = (is_method || (class_pkg && !anon)).then(|| InferredType::FirstParam { package: pkg });
+            // A named sub of a class package is a method unless the file
+            // only ever calls it as a plain function.
+            let convention = named.is_some_and(|n| !self.called_only_as_function(&pkg, n, &method_names));
+            heads.push((scope.id, scope.span, (is_method || (class_pkg && convention)).then(|| InferredType::FirstParam { package: pkg })));
+        }
+        for (id, span, head) in heads {
             self.push_type_constraint(TypeConstraint {
                 variable: "@_".into(),
                 scope: id,

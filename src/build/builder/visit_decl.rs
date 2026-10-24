@@ -667,14 +667,20 @@ impl<'a> Builder<'a> {
         //     user can call it `$c`/`$ctx`/whatever.
         // Framework-specific invocant markers (`as_invocant_params` from
         // a plugin) stack on top via EmittedParam → ParamInfo.
+        // The subclass convention alone is settled post-walk
+        // (`settle_convention_invocants`): a sub the file calls as a plain
+        // function takes no invocant, and its callers may come later.
+        let mut convention_only = false;
         if let Some(first) = params.first_mut() {
             let name_says_invocant =
                 crate::model::conventions::is_conventional_invocant_name(&first.name);
             let pkg_is_subclass = self.current_package
                 .as_ref()
                 .map_or(false, |p| self.package_parents.contains_key(p));
-            if is_method || name_says_invocant || pkg_is_subclass {
+            if is_method || name_says_invocant {
                 first.is_invocant = true;
+            } else if pkg_is_subclass && first.name.starts_with('$') {
+                convention_only = true;
             }
         }
 
@@ -743,6 +749,14 @@ impl<'a> Builder<'a> {
 
         // Detect first-param-is-self pattern
         self.detect_first_param_type(&params, node);
+        if let (true, Some(package)) = (convention_only, self.current_package.clone()) {
+            self.convention_invocant_subs.push(ConventionInvocant {
+                sub_id,
+                scope: self.current_scope(),
+                span: node_to_span(node),
+                package,
+            });
+        }
 
         // Role-contract param typing: a plugin `param_types()` rule may type
         // a named param (e.g. `$app` in a `GenericCo::Upgrade::OneTime` doer's
@@ -1310,33 +1324,81 @@ impl<'a> Builder<'a> {
             .iter()
             .find(|p| p.is_invocant && p.name.starts_with('$'));
         let invocant = match invocant {
-            Some(p) => p,
+            Some(p) => p.clone(),
             None => return,
         };
 
         if let Some(pkg) = self.current_package.clone() {
             let (scope, span) = (self.current_scope(), node_to_span(node));
-            let head = InferredType::FirstParam { package: pkg };
-            // Anchored at the invocant's binding token: the declaration's
-            // own write marker retires only what lies strictly before it.
-            let at = invocant
-                .binding_site
-                .map(|p| Span { start: p, end: p })
-                .unwrap_or(span);
-            self.push_type_constraint(TypeConstraint {
-                variable: invocant.name.clone(),
-                scope,
-                constraint_span: at,
-                inferred_type: head.clone(),
-            });
-            // `@_`'s argument window for this scope, headed by the same
-            // invocant (`seed_arg_windows` covers the scopes without one).
-            self.push_type_constraint(TypeConstraint {
-                variable: "@_".into(),
-                scope,
-                constraint_span: span,
-                inferred_type: InferredType::Sequence(vec![head]),
-            });
+            self.push_invocant_type(&invocant, pkg, scope, span);
+        }
+    }
+
+    /// Type `invocant` (and the head of `@_`'s window) as the class the sub
+    /// at `span` is called on.
+    pub(super) fn push_invocant_type(&mut self, invocant: &ParamInfo, pkg: String, scope: ScopeId, span: Span) {
+        let head = InferredType::FirstParam { package: pkg };
+        // Anchored at the invocant's binding token: the declaration's
+        // own write marker retires only what lies strictly before it.
+        let at = invocant
+            .binding_site
+            .map(|p| Span { start: p, end: p })
+            .unwrap_or(span);
+        self.push_type_constraint(TypeConstraint {
+            variable: invocant.name.clone(),
+            scope,
+            constraint_span: at,
+            inferred_type: head.clone(),
+        });
+        // `@_`'s argument window for this scope, headed by the same
+        // invocant (`seed_arg_windows` covers the scopes without one).
+        self.push_type_constraint(TypeConstraint {
+            variable: "@_".into(),
+            scope,
+            constraint_span: span,
+            inferred_type: InferredType::Sequence(vec![head]),
+        });
+    }
+
+    /// Whether the file calls `pkg`'s sub `name` as a plain function and
+    /// never as a method, which is what decides that its first argument is
+    /// not an invocant when only the package convention says it is.
+    pub(super) fn called_only_as_function(&self, pkg: &str, name: &str, method_names: &std::collections::HashSet<&str>) -> bool {
+        self.plain_called_subs.contains(&(pkg.to_string(), name.to_string())) && !method_names.contains(name)
+    }
+
+    /// The names this file calls as methods.
+    pub(super) fn method_call_names(&self) -> std::collections::HashSet<&str> {
+        self.refs
+            .iter()
+            .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }))
+            .map(|r| crate::model::conventions::MethodToken::parse(&r.target_name).name())
+            .collect()
+    }
+
+    /// Post-walk: a subclass's sub whose first parameter only the package
+    /// convention calls the invocant is a method unless the file calls it
+    /// as a plain function, which takes every call site into account.
+    pub(super) fn settle_convention_invocants(&mut self) {
+        let pending = std::mem::take(&mut self.convention_invocant_subs);
+        let mut settled = Vec::new();
+        {
+            let method_names = self.method_call_names();
+            for c in pending {
+                let name = &self.symbols[c.sub_id.0 as usize].name;
+                if !self.called_only_as_function(&c.package, name, &method_names) {
+                    settled.push(c);
+                }
+            }
+        }
+        for c in settled {
+            let SymbolDetail::Sub { params, .. } = &mut self.symbols[c.sub_id.0 as usize].detail else {
+                continue;
+            };
+            let Some(first) = params.first_mut() else { continue };
+            first.is_invocant = true;
+            let invocant = first.clone();
+            self.push_invocant_type(&invocant, c.package, c.scope, c.span);
         }
     }
 

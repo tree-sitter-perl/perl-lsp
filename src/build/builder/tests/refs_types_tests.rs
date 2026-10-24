@@ -1560,3 +1560,17 @@ fn test_method_on_the_invocant_param_keeps_the_callers_receiver() {
     assert_eq!(at("$d"), Some(InferredType::ClassName("Daemon".into())));
     assert_eq!(at("$m"), Some(InferredType::ClassName("Daemon".into())));
 }
+
+#[test]
+fn test_subclass_sub_called_as_a_function_takes_no_invocant() {
+    // In a subclass every sub's first parameter is its invocant by
+    // convention, unless the file calls the sub as a plain function, and
+    // the call may come before or after the sub.
+    let fa = build_fa(
+        "package Base;\nsub new { bless {}, shift }\npackage R;\nuse base qw(Base);\nsub hook {\n    my ($self, $args) = @_;\n    _check($args);\n    return $self->_helper;\n}\nsub _check {\n    my ($flag) = @_;\n    return $flag;\n}\nsub _helper { my ($s) = @_; return $s; }\nsub _later { my ($t) = @_; return $t; }\n_later(1);\n1;\n",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$flag", Point::new(11, 4)), None);
+    assert_eq!(fa.inferred_type_via_bag("$t", Point::new(14, 30)), None);
+    let s = fa.inferred_type_via_bag("$s", Point::new(13, 30));
+    assert_eq!(s.as_ref().and_then(|t| t.class_name()), Some("R"), "{:?}", s);
+}

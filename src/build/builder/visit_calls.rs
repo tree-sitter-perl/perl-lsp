@@ -273,6 +273,9 @@ impl<'a> Builder<'a> {
                     .filter(|n| n.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ':'))
                     .unwrap_or(raw);
                 let resolved_package = self.resolve_call_package(name);
+                if let Some(pkg) = resolved_package.clone().or_else(|| self.current_package.clone()) {
+                    self.plain_called_subs.insert((pkg, bare_name(name).to_string()));
+                }
                 // Narrowest span (rule #7): for a qualified call
                 // (`Foo::Bar::baz()`) the renamable/highlightable token is
                 // the bare tail, not the whole `::` path — so rename rewrites
