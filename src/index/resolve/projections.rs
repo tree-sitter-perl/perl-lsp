@@ -125,7 +125,8 @@ impl<'a> CandidateSet<'a> {
                     span,
                     access,
                     rewritable: true,
-                    label: None
+                    label: None,
+                    also_on: Vec::new(),
                 })
                 .collect(),
         }
@@ -218,6 +219,7 @@ impl<'a> CandidateSet<'a> {
                                 access: AccessKind::Read,
                                 rewritable: true,
                                 label: None,
+                                also_on: Vec::new(),
                             },
                             true,
                         )
@@ -267,6 +269,7 @@ impl<'a> CandidateSet<'a> {
                             access,
                             rewritable: true,
                             label: None,
+                            also_on: Vec::new(),
                         },
                         true,
                     )
@@ -310,6 +313,9 @@ impl<'a> CandidateSet<'a> {
     /// leave the delegation chain pointing at the old name. Perl's
     /// non-rewritable sites (variable-folded dispatch) keep their
     /// long-standing skip.
+    /// A Perl rename keeps offering its box where a union site would refuse:
+    /// the refusal's message, which names the site to rename from, is
+    /// carried by the rename itself.
     pub fn rename_edits(&self, new_name: &str) -> Result<Vec<(RefLocation, String)>, String> {
         let editable = if self.pack {
             RoleMask::VISIBLE
@@ -328,6 +334,9 @@ impl<'a> CandidateSet<'a> {
                          emitting a partial edit",
                         t.name
                     ));
+                }
+                if let Some(loc) = locations.iter().find(|l| !l.also_on.is_empty()) {
+                    return Err(shared_site_refusal(&t.name, loc));
                 }
                 locations
                     .into_iter()
@@ -348,7 +357,7 @@ impl<'a> CandidateSet<'a> {
                     members,
                     bare_new,
                     editable,
-                )
+                )?
             }
             // Lexical variables, unowned hash keys, non-cross-file targets:
             // the origin file's rename machinery owns the edit set.
@@ -364,7 +373,8 @@ impl<'a> CandidateSet<'a> {
                             span,
                             access: AccessKind::Read,
                             rewritable: true,
-                            label: None
+                            label: None,
+                            also_on: Vec::new(),
                         },
                         text,
                     )
@@ -413,7 +423,8 @@ impl<'a> CandidateSet<'a> {
                                 span,
                                 access: AccessKind::Read,
                                 rewritable: false,
-                                label: None
+                                label: None,
+                                also_on: Vec::new(),
                             });
                         }
                     });

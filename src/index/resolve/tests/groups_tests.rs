@@ -244,7 +244,8 @@ fn test_group_rename_rederives_mapped_members_cross_file() {
         &members,
         "extent",
         RoleMask::EDITABLE,
-    );
+    )
+    .expect("no union sites");
     let user_edits: Vec<_> = edits
         .iter()
         .filter(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &user_path))
@@ -285,7 +286,8 @@ fn moo_explicit_string_accessor_renames_its_defining_string() {
     let edits = group_rename_edits(
         &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "dim",
         RoleMask::EDITABLE,
-    );
+    )
+    .expect("no union sites");
     let lines: Vec<&str> = src.lines().collect();
     let materialized: Vec<(String, String)> = edits
         .iter()
@@ -458,7 +460,8 @@ fn package_var_main_global_does_not_cross_scripts() {
     let edits = group_rename_edits(
         &store, None, &FileKey::Path(a.clone()), &local_spans, &pinned_spans, &members, "settings",
         RoleMask::EDITABLE,
-    );
+    )
+    .expect("no union sites");
     assert!(
         edits.iter().all(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &a)),
         "rename must stay in a.pl, never touch b.pl: {edits:?}",
@@ -611,7 +614,8 @@ fn dbic_column_rename_reaches_single_arg_call_keys() {
     let edits = group_rename_edits(
         &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "RENAMED",
         RoleMask::EDITABLE,
-    );
+    )
+    .expect("no union sites");
     let rows: std::collections::BTreeSet<usize> = edits.iter().map(|(l, _)| l.span.start.row).collect();
     // Column def (row 2) + the `update` and `find` arg keys (both row 3).
     assert!(rows.contains(&2), "column def renames: {rows:?}");
@@ -643,7 +647,8 @@ fn dbic_column_rename_multiarg_search_excludes_attrs_hash() {
     let edits = group_rename_edits(
         &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
-    );
+    )
+    .expect("no union sites");
     let lines: Vec<&str> = src.lines().collect();
     for (l, _) in &edits {
         let s = &lines[l.span.start.row][l.span.start.column..l.span.end.column];
@@ -679,7 +684,8 @@ fn dbic_column_rename_reaches_fluent_resultset_chain() {
     let edits = group_rename_edits(
         &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "RENAMED",
         RoleMask::EDITABLE,
-    );
+    )
+    .expect("no union sites");
     let lines: Vec<&str> = src.lines().collect();
     for (l, _) in &edits {
         let s = &lines[l.span.start.row][l.span.start.column..l.span.end.column];
@@ -722,7 +728,8 @@ sub go {\n\
     let edits = group_rename_edits(
         &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
-    );
+    )
+    .expect("no union sites");
     let rows: std::collections::BTreeSet<usize> = edits.iter().map(|(l, _)| l.span.start.row).collect();
     // def (2), find-condition arg (6), accessor (8) — NOT the `$row->{name}`
     // deref (7): a column isn't a hash slot.
@@ -766,7 +773,8 @@ fn moo_attr_group_includes_cross_file_constructor_key() {
     let edits = group_rename_edits(
         &store, Some(&idx), &FileKey::Path(lib.clone()), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
-    );
+    )
+    .expect("no union sites");
     // app.pl row 1 is the `Widget->new(name => …)` ctor key.
     assert!(
         edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &app) && l.span.start.row == 1),
@@ -821,7 +829,8 @@ fn inherited_attr_rename_reaches_subclass_constructor_key() {
     let edits = group_rename_edits(
         &store, Some(&idx), &FileKey::Path(animal.clone()), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
-    );
+    )
+    .expect("no union sites");
     assert!(
         edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &app) && l.span.start.row == 1),
         "base attr rename must reach the subclass `Dog->new(name => …)` ctor key: {edits:?}",
@@ -856,7 +865,8 @@ fn corinna_field_subclass_does_not_bleed_to_ancestor() {
     let edits = group_rename_edits(
         &store, Some(&idx), &FileKey::Path(deriv.clone()), &local_spans, &pinned_spans, &members, "vol",
         RoleMask::EDITABLE,
-    );
+    )
+    .expect("no union sites");
     assert!(
         edits.iter().all(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &deriv)),
         "Corinna field rename must stay in the subclass, never touch the ancestor: {edits:?}",
@@ -893,6 +903,7 @@ fn overridden_attr_renames_whole_family_symmetrically() {
             &store, Some(&idx), &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
             RoleMask::EDITABLE,
         )
+        .expect("no union sites")
         .iter()
         .map(|(l, _)| match &l.key {
             FileKey::Path(p) => format!("{}:{}", p.file_name().unwrap().to_string_lossy(), l.span.start.row),
@@ -935,7 +946,8 @@ fn dbic_multi_key_hashref_links_all_columns() {
     let edits = group_rename_edits(
         &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
-    );
+    )
+    .expect("no union sites");
     assert!(
         edits.iter().any(|(l, _)| l.span.start.row == 3),
         "the 2nd-key `beta` search arg must link to the column: {edits:?}",
@@ -1030,7 +1042,8 @@ fn dbic_custom_sub_shadowing_verb_is_not_column_keyed() {
     let edits = group_rename_edits(
         &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
-    );
+    )
+    .expect("no union sites");
     assert!(
         edits.iter().all(|(l, _)| l.span.start.row != 4),
         "custom `sub create`'s arg key (row 4) must NOT be column-keyed: {edits:?}",
@@ -1058,7 +1071,8 @@ fn dbic_scalar_cond_does_not_column_key_attrs_hash() {
     let edits = group_rename_edits(
         &store, None, &FileKey::Path(path.clone()), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
-    );
+    )
+    .expect("no union sites");
     assert!(
         edits.iter().all(|(l, _)| l.span.start.row != 3),
         "the `\\%attrs` hash key (row 3) must NOT be walked when cond is a scalar: {edits:?}",
@@ -1092,7 +1106,8 @@ fn dbic_column_rename_reaches_cross_file_consumer_arg_key() {
     let edits = group_rename_edits(
         &store, Some(&idx), &FileKey::Path(lib.clone()), &local_spans, &pinned_spans, &members, "X",
         RoleMask::EDITABLE,
-    );
+    )
+    .expect("no union sites");
     assert!(
         edits.iter().any(|(l, _)| matches!(&l.key, FileKey::Path(p) if p == &app)),
         "column rename reaches the cross-file `User->search({{ name }})` arg key: {edits:?}",
@@ -1145,7 +1160,8 @@ fn dbic_column_rename_owner_gated_excludes_framework_and_siblings() {
     let edits = group_rename_edits(
         &store, Some(&idx), &FileKey::Path(widget.clone()), &local_spans, &pinned_spans,
         &members, "renamed", RoleMask::EDITABLE,
-    );
+    )
+    .expect("no union sites");
     let touched: std::collections::BTreeSet<&PathBuf> = edits
         .iter()
         .filter_map(|(l, _)| match &l.key { FileKey::Path(p) => Some(p), _ => None })
@@ -1349,7 +1365,8 @@ fn test_internal_slot_pokes_join_group_cross_file() {
         &members,
         "extent",
         RoleMask::EDITABLE,
-    );
+    )
+    .expect("no union sites");
     assert!(
         edits.iter().any(|(l, t)| {
             matches!(&l.key, FileKey::Path(p) if p == &sub_path) && t == "extent"
@@ -1393,7 +1410,8 @@ fn rename_from_bless_key_reaches_self_slot_accesses() {
         &store, None, &FileKey::Path(path.clone()),
         &local_spans, &pinned_spans, &members, "log",
         RoleMask::EDITABLE,
-    );
+    )
+    .expect("no union sites");
     // bless key (1) + two $self->{history} accesses (rows 2, 3) = 3 spellings.
     assert_eq!(
         edits.len(), 3,

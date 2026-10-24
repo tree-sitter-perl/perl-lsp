@@ -228,7 +228,8 @@ pub(super) fn dispatch_handler_locations(
                             span: sym.selection_span,
                             access: AccessKind::Declaration,
                             rewritable: true,
-                            label: None
+                            label: None,
+                            also_on: Vec::new(),
                         });
                     }
                 }

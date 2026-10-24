@@ -147,7 +147,8 @@ pub fn group_refs(
             span: *span,
             access: AccessKind::Read,
             rewritable: true,
-            label: None
+            label: None,
+            also_on: Vec::new(),
         })
         .collect();
     out.extend(pinned_spans.iter().map(|(path, span)| RefLocation {
@@ -155,7 +156,8 @@ pub fn group_refs(
         span: *span,
         access: AccessKind::Read,
         rewritable: true,
-        label: None
+        label: None,
+        also_on: Vec::new(),
     }));
     for m in members {
         let mask = mask_override
@@ -235,12 +237,12 @@ pub fn group_rename_edits(
     members: &[GroupMember],
     bare_new: &str,
     mask: RoleMask,
-) -> Vec<(RefLocation, String)> {
+) -> Result<Vec<(RefLocation, String)>, String> {
     let mut out: Vec<(RefLocation, String)> = local_spans
         .iter()
         .map(|span| {
             (
-                RefLocation { key: origin.clone(), span: *span, access: AccessKind::Read, rewritable: true, label: None},
+                RefLocation { key: origin.clone(), span: *span, access: AccessKind::Read, rewritable: true, label: None, also_on: Vec::new() },
                 bare_new.to_string(),
             )
         })
@@ -252,7 +254,8 @@ pub fn group_rename_edits(
                 span: *span,
                 access: AccessKind::Read,
                 rewritable: true,
-                label: None
+                label: None,
+                also_on: Vec::new(),
             },
             bare_new.to_string(),
         )
@@ -274,9 +277,48 @@ pub fn group_rename_edits(
             out.push((loc, text.clone()));
         }
     }
+    // A union site appears in the image of each member it dispatches to; it
+    // is safe only when every class it names is one of them, so what no
+    // member's image covers is what its `also_on` lists share.
+    let mut uncovered: std::collections::HashMap<(PathBuf, Span), Vec<String>> =
+        std::collections::HashMap::new();
+    for (loc, _) in &out {
+        let at = (key_for_sort(&loc.key), loc.span);
+        match uncovered.get_mut(&at) {
+            Some(left) => left.retain(|c| loc.also_on.contains(c)),
+            None => {
+                uncovered.insert(at, loc.also_on.clone());
+            }
+        }
+    }
+    if let Some((loc, _)) = out
+        .iter()
+        .find(|(loc, _)| uncovered.get(&(key_for_sort(&loc.key), loc.span)).is_some_and(|c| !c.is_empty()))
+    {
+        let mut loc = loc.clone();
+        loc.also_on = uncovered.remove(&(key_for_sort(&loc.key), loc.span)).unwrap_or_default();
+        let name = members.first().map_or(bare_new, |m| m.target.name.as_str());
+        return Err(shared_site_refusal(name, &loc));
+    }
     let mut seen = std::collections::HashSet::new();
     out.retain(|(loc, _)| seen.insert((key_for_sort(&loc.key), loc.span)));
-    out
+    Ok(out)
+}
+
+/// Why a rename refuses a union site: renaming one class's member there would
+/// break the call for the classes it also names.
+pub(crate) fn shared_site_refusal(name: &str, loc: &RefLocation) -> String {
+    let at = match &loc.key {
+        FileKey::Path(p) => p.display().to_string(),
+        FileKey::Url(u) => u.to_string(),
+    };
+    format!(
+        "`{}` at {}:{} may also be {}'s; rename from there to rename them together",
+        name,
+        at,
+        loc.span.start.row + 1,
+        loc.also_on.join(" or "),
+    )
 }
 
 /// Per-process override for the relational retrieval switch — the parity
@@ -907,6 +949,7 @@ pub fn implementations_of(
                                 access: AccessKind::Declaration,
                                 rewritable: false,
                                 label: None,
+                                also_on: Vec::new(),
                             });
                         }
                     }
@@ -1011,7 +1054,8 @@ pub fn implementations_of(
                         span: s.selection_span,
                         access: AccessKind::Declaration,
                         rewritable: true,
-                        label: None
+                        label: None,
+                        also_on: Vec::new(),
                     });
                 }
             }
@@ -1070,7 +1114,8 @@ pub(super) fn specialization_family(
                         span: s.selection_span,
                         access: AccessKind::Declaration,
                         rewritable: false,
-                        label: None
+                        label: None,
+                        also_on: Vec::new(),
                     });
                 }
             }

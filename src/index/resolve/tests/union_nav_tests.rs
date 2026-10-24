@@ -110,3 +110,49 @@ fn completion_on_a_union_offers_the_members_every_arm_has() {
     assert!(labels.iter().any(|l| l == "sound"), "{labels:?}");
     assert!(!labels.iter().any(|l| l == "purr" || l == "fly"), "{labels:?}");
 }
+
+#[test]
+fn rename_from_one_arm_refuses_the_union_site() {
+    // Renaming Cat's `sound` alone would leave `$pet->sound` calling a
+    // method Cat no longer has whenever `$pet` is a Cat.
+    let f = fixture();
+    let fa = f.store.workspace_raw().get(&f.cat).unwrap().value().clone();
+    let col = CAT.lines().nth(2).unwrap().find("sound").unwrap();
+    let err = at(&f, &fa, &f.cat, 2, col).rename_edits("noise").expect_err("refuses");
+    assert!(err.contains("Bird") && err.contains("un_zoo.pm:4"), "{err}");
+}
+
+#[test]
+fn rename_from_the_union_site_refuses_an_arm_it_does_not_cover() {
+    // A second union site names Fish too: renaming Cat's and Bird's `sound`
+    // together would still break it for a Fish.
+    let store = FileStore::new();
+    let idx = ModuleIndex::new_for_test();
+    let fish = "package Fish;\nsub new { bless {}, shift }\nsub sound { 'blub' }\n1;\n";
+    let tank = "package Tank;\nuse Cat;\nuse Fish;\n\
+                sub pick { my $pet = rand() ? Cat->new : Fish->new; return $pet->sound; }\n1;\n";
+    let files = [
+        ("/tmp/un2_cat.pm", CAT),
+        ("/tmp/un2_bird.pm", BIRD),
+        ("/tmp/un2_fish.pm", fish),
+        ("/tmp/un2_zoo.pm", ZOO),
+        ("/tmp/un2_tank.pm", tank),
+    ];
+    for (p, src) in files {
+        idx.register_workspace_module(PathBuf::from(p), Arc::new(parse(src)));
+        store.insert_workspace(PathBuf::from(p), parse(src));
+    }
+    let zoo = PathBuf::from("/tmp/un2_zoo.pm");
+    let fa = store.workspace_raw().get(&zoo).unwrap().value().clone();
+    let col = ZOO.lines().nth(3).unwrap().find("sound").unwrap();
+    let cs = resolve(
+        &store,
+        &fa,
+        FileKey::Path(zoo.clone()),
+        tree_sitter::Point { row: 3, column: col },
+        Some(&idx),
+        OverrideScope::default(),
+    );
+    let err = cs.rename_edits("noise").expect_err("refuses");
+    assert!(err.contains("Fish") && err.contains("un2_tank.pm:4"), "{err}");
+}

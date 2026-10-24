@@ -386,6 +386,11 @@ pub struct RefLocation {
     /// `Location` has no label slot so the editor adapter drops it (ordering
     /// conveys rank); the CLI renders it and the gold harness asserts on it.
     pub label: Option<String>,
+    /// The other classes this site's member access dispatches to, outside
+    /// the target — a union receiver (`$pet->sound`, `$pet` a Cat or a Bird)
+    /// found from Cat's `sound` names Bird here. Empty for every other site.
+    /// Rename refuses a site whose classes it would not all rename.
+    pub also_on: Vec<String>,
 }
 
 impl RefLocation {

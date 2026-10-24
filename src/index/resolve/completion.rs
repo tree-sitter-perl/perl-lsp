@@ -31,7 +31,8 @@ impl<'a> CandidateSet<'a> {
                 span: sym.selection_span,
                 access: AccessKind::Declaration,
                 rewritable: true,
-                label: None
+                label: None,
+                also_on: Vec::new(),
             })
         })
     }

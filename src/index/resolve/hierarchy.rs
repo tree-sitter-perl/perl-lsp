@@ -155,6 +155,7 @@ impl<'a> CandidateSet<'a> {
                         access: AccessKind::Declaration,
                         rewritable: true,
                         label: None,
+                        also_on: Vec::new(),
                     });
                 }
             }
@@ -173,6 +174,7 @@ impl<'a> CandidateSet<'a> {
                         access: AccessKind::Declaration,
                         rewritable: false,
                         label: None,
+                        also_on: Vec::new(),
                     });
                 }
             }
@@ -326,6 +328,7 @@ impl<'a> CandidateSet<'a> {
                         access: AccessKind::Declaration,
                         rewritable: false,
                         label: None,
+                        also_on: Vec::new(),
                     },
                 });
             }
@@ -385,6 +388,7 @@ impl<'a> CandidateSet<'a> {
                                 access: AccessKind::Declaration,
                                 rewritable: false,
                                 label: None,
+                                also_on: Vec::new(),
                             },
                         },
                         sites: vec![loc.span],

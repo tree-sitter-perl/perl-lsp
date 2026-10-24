@@ -32,6 +32,7 @@ impl<'a> CandidateSet<'a> {
                 access: AccessKind::Declaration,
                 rewritable: true,
                 label: None,
+                also_on: Vec::new(),
             })
         };
         // Class-keyed cached module — the fast path when `class` names a
@@ -92,6 +93,7 @@ impl<'a> CandidateSet<'a> {
             access: AccessKind::Declaration,
             rewritable: true,
             label: None,
+            also_on: Vec::new(),
         })
     }
 
@@ -174,6 +176,7 @@ impl<'a> CandidateSet<'a> {
                 access: AccessKind::Declaration,
                 rewritable: true,
                 label: None,
+                also_on: Vec::new(),
             });
         };
         // The decl's own file first (a static's forward decl and body).
@@ -249,6 +252,7 @@ impl<'a> CandidateSet<'a> {
                                     access: AccessKind::Declaration,
                                     rewritable: true,
                                     label: None,
+                                    also_on: Vec::new(),
                                 },
                             ));
                         }
@@ -379,6 +383,7 @@ impl<'a> CandidateSet<'a> {
                     access: AccessKind::Declaration,
                     rewritable: true,
                     label: None,
+                    also_on: Vec::new(),
                 },
             ));
         };
@@ -461,7 +466,8 @@ impl<'a> CandidateSet<'a> {
             span,
             access: AccessKind::Declaration,
             rewritable: true,
-            label: None
+            label: None,
+            also_on: Vec::new(),
         }
     }
 
@@ -526,6 +532,7 @@ impl<'a> CandidateSet<'a> {
                                 access: AccessKind::Declaration,
                                 rewritable: true,
                                 label: r.label(),
+                                also_on: Vec::new(),
                             })
                             .collect();
                         // See-through: a direct-delegation wrapper
@@ -673,7 +680,8 @@ impl<'a> CandidateSet<'a> {
                 span: Span { start: p, end: p },
                 access: AccessKind::Declaration,
                 rewritable: true,
-                label: None
+                label: None,
+                also_on: Vec::new(),
             }
         };
 
@@ -712,7 +720,8 @@ impl<'a> CandidateSet<'a> {
                                 span: def.selection_span,
                                 access: AccessKind::Declaration,
                                 rewritable: true,
-                                label: None
+                                label: None,
+                                also_on: Vec::new(),
                             }];
                         }
                     }
@@ -857,6 +866,7 @@ impl<'a> CandidateSet<'a> {
                             access: AccessKind::Declaration,
                             rewritable: true,
                             label: None,
+                            also_on: Vec::new(),
                         };
                         if let Some(s) = whole.symbols().iter().find(|s| {
                             s.name == r.target_name
@@ -974,6 +984,7 @@ impl<'a> CandidateSet<'a> {
                                         access: AccessKind::Declaration,
                                         rewritable: true,
                                         label: None,
+                                        also_on: Vec::new(),
                                     })
                                 };
                                 // A value read lands on the stored member first.
@@ -1007,6 +1018,7 @@ impl<'a> CandidateSet<'a> {
                                                     access: AccessKind::Declaration,
                                                     rewritable: true,
                                                     label: None,
+                                                    also_on: Vec::new(),
                                                 });
                                             }
                                         }
@@ -1071,6 +1083,7 @@ impl<'a> CandidateSet<'a> {
                                     access: AccessKind::Declaration,
                                     rewritable: true,
                                     label: None,
+                                    also_on: Vec::new(),
                                 },
                                 &whole,
                             );
@@ -1098,6 +1111,7 @@ impl<'a> CandidateSet<'a> {
                     access: AccessKind::Declaration,
                     rewritable: true,
                     label: None,
+                    also_on: Vec::new(),
                 })
                 .collect();
             if !out.is_empty() {

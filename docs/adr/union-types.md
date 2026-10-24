@@ -117,10 +117,17 @@ dispatch projection over a union receiver (one class per object arm), and:
   `Cat|Bird`;
 - completion offers the members every object arm has (`shared_members`).
 
-Renaming one arm's member from its own declaration renames the union
-sites too, leaving the other arms' declarations alone: those sites then
-call a name the other arms do not have. Renaming from the union site
-renames every arm.
+- the unresolved-method diagnostic checks each object arm on its own:
+  `$pet->purr` warns "'purr' is not defined in Bird, which $pet may be".
+
+Rename refuses a union site whose classes it would not all rename. The
+matcher records, on each union site it matches, the classes the site
+names outside the target (`RefLocation::also_on`). Renaming `Cat::sound`
+from its declaration finds `$pet->sound` naming Bird too, so it refuses
+and names the site to rename from. Renaming from that site renames every
+arm; a group rename refuses only a site that no member's image covers
+(a second site on `Cat|Fish` while renaming `Cat|Bird`). prepareRename
+still offers the box, so the refusal's message reaches the user.
 
 Python annotations mint unions: `A | B`, `Union[A, B]`, `Optional[A]`
 (`A | None`). PHP `A|B` docblocks land with the PHP pack.
