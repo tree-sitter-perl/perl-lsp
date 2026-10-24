@@ -39,22 +39,9 @@ the row and written up in the last section here.
 
 ## 2. Dynamic-install recognition (diagnostics false-positives)
 
-These three are unresolved-X diagnostics fired on subs/methods that *do* exist
+These two are unresolved-X diagnostics fired on subs/methods that *do* exist
 but are installed by a mechanism we don't yet treat as a definition. The
 assertion is "no diagnostic at this site."
-
-### `diag-08` — XS `bootstrap` flagged unresolved-function
-- **Cursor:** `Net/SSLeay.pm:1023:1` · **Expect.none:** a diagnostic at `SSLeay.pm:1023`.
-- **Construct:** `bootstrap Net::SSLeay $VERSION;` — the XS loader. `bootstrap` is
-  a builtin-ish loader call; the subs it installs are XS (no Perl body).
-- **Root cause:** `bootstrap` isn't in our resolved set, so the call flags
-  unresolved-function. (Separately, real XS-installed subs have no Perl def — the
-  reference NOT-a-bug case.) The narrow fix here is recognizing `bootstrap` itself.
-- **Fix sketch:** treat `bootstrap`/`XSLoader::load`/`DynaLoader` as
-  defining/loader builtins (suppress unresolved on the loader call, and optionally
-  mark the package as XS-backed so its missing-body subs aren't flagged).
-- **Difficulty:** low (the loader call); the broader "this package is XS, don't
-  flag its absent bodies" is medium.
 
 ### `diag-09` / `diag-10` — Log4perl typeglob-codegen accessors flagged unresolved-method
 - **Cursors:** `Log/Log4perl/Logger.pm:879` (`is_warn`), `:883` (`warn`).
@@ -188,7 +175,6 @@ class. **Subsystem:** first-param-self heuristic (`detect_first_param_type`).
 |---|---|---|
 | sig-uri-check-path-function-noinvocant | signature-help invocant | **low** |
 | completion-typetiny-imported-blessed | completion candidates | **low** |
-| diag-08 (loader call) | XS loader recognition | **low** |
 | diag-09 / diag-10 | typeglob-codegen synthesis | medium |
 | def-16-codegen-type-function | Type::Library synthesis | medium |
 | diag-mojo-cookiejar/daemon first-param-self | invocant heuristic in OO class | **high** (ambiguous) |
