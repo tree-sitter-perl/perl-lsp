@@ -1607,3 +1607,23 @@ fn test_indirect_object_call_reads_subs_of_the_current_package() {
         .collect();
     assert_eq!(calls, vec![(8, "Widget".into()), (24, "Gadget".into())]);
 }
+
+#[test]
+fn test_indirect_object_constructor_keys_bind_like_arrow_calls() {
+    // `new Widget(name => 'x')` binds its constructor keys exactly as
+    // `Widget->new(name => 'x')` does: one post-walk pass owns both.
+    let fa = build_fa(
+        "package Widget;\nuse Moo;\nhas name => (is => 'ro');\npackage main;\nmy $a = new Widget(name => 'x');\nmy $b = Widget->new(name => 'y');\n",
+    );
+    let owners: Vec<_> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "name")
+        .filter_map(|r| match &r.kind {
+            RefKind::HashKeyAccess { .. } => Some((r.span.start.row, r.hash_key_owner().cloned())),
+            _ => None,
+        })
+        .collect();
+    let want = Some(HashKeyOwner::Sub { package: Some("Widget".into()), name: "new".into() });
+    assert_eq!(owners, vec![(4, want.clone()), (5, want)]);
+}

@@ -618,6 +618,13 @@ struct Builder<'a> {
     /// **Build-only**.
     method_call_refs: std::collections::HashMap<usize, Vec<usize>>,
 
+    /// Indirect-object calls (`new Foo(ARGS)`): `(call, class, args)`. The
+    /// chain-typing index finds a call's receiver and arguments by
+    /// `method_call_expression` node, and only the walk knows a
+    /// function-call node is one of these, so the walk hands them over.
+    /// **Build-only**.
+    indirect_method_calls: Vec<(Node<'a>, Node<'a>, Option<Node<'a>>)>,
+
     /// MethodCall ref indices for which we've published an
     /// `InferredType::Parametric` witness on `Expression(refidx)`
     /// — `recv->resultset('Foo')` and search-family threading
