@@ -16,6 +16,9 @@ pub struct SkelSymbol {
     /// Sticky `@context.package` value in force at the def site.
     pub package: Option<String>,
     pub scope: crate::model::file_analysis::ScopeId,
+    /// The declaration as written around its name token (`@def.<kind>.spelled`:
+    /// php's `$x` around the member name `x`), listed in place of the name.
+    pub spelled: Option<String>,
     /// Declared return type (`@rettype`), for methods/functions — drives
     /// method-return resolution + chaining through PackageSymbol.
     pub return_type: Option<InferredType>,
@@ -524,7 +527,7 @@ impl SkeletonAnalysis {
                     deprecation: None,
                     doc: None,
                     display: None,
-                    label: None,
+                    label: s.spelled.clone(),
                 },
                 attributes: {
                     let mut a = s.attributes.clone();

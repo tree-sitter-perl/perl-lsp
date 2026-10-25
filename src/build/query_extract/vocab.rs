@@ -154,6 +154,9 @@ spelled! {
         /// The assignment node (pattern anchor).
         Assign = "assign",
         Target = "target",
+        /// A member of the enclosing class as the target: its value lands
+        /// at the class body, where the member's readers look.
+        TargetMember = "target.member",
         Source = "source",
         /// A rebind with no inflowing value (loop variables).
         Rebind = "rebind",
@@ -295,11 +298,14 @@ spelled! {
     }
 }
 
-/// Whether a `@def.<kind>` capture is the def node or its name token.
+/// Whether a `@def.<kind>` capture is the def node, its name token, or
+/// the whole written spelling around a name token that is only part of it
+/// (php's `$x` around `x`): the label the declaration is listed by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DefPart {
     Node,
     Name,
+    Spelled,
 }
 
 /// One capture of a pack query document.
@@ -387,6 +393,7 @@ impl Capture {
         Some(match segs.as_slice() {
             ["def", k] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Node },
             ["def", k, "name"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Name },
+            ["def", k, "spelled"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Spelled },
             ["ref", "spelled"] => C::RefSpelled,
             ["ref", rest @ ..] => C::Ref(RefCap::parse(&rest.join("."))?),
             ["scope"] => C::Scope(ScopeCap::Block),
@@ -399,7 +406,7 @@ impl Capture {
             ["alias", k] => C::Alias(AliasPart::parse(k)?),
             ["macro", "alias", k] => C::MacroAlias(AliasPart::parse(k)?),
             ["tmpl", k] => C::Tmpl(TmplCap::parse(k)?),
-            ["flow", k] => C::Flow(FlowCap::parse(k)?),
+            ["flow", rest @ ..] => C::Flow(FlowCap::parse(&rest.join("."))?),
             ["expr", "call"] => C::Expr(ExprCap::Call),
             ["expr", "lit", k] => C::Expr(ExprCap::Lit(LitKind::parse(k)?)),
             ["expr", "read", "var"] => C::Expr(ExprCap::ReadVar),
@@ -452,6 +459,7 @@ impl fmt::Display for Capture {
         match *self {
             C::Def { kind, part: DefPart::Node } => write!(f, "def.{kind}"),
             C::Def { kind, part: DefPart::Name } => write!(f, "def.{kind}.name"),
+            C::Def { kind, part: DefPart::Spelled } => write!(f, "def.{kind}.spelled"),
             C::Ref(k) => write!(f, "ref.{k}"),
             C::RefSpelled => f.write_str("ref.spelled"),
             C::Scope(k) => family(f, "scope", k.spelling()),

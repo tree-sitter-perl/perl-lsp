@@ -55,6 +55,25 @@ registry partitions on, and no per-pack strictness flag.
   admits a declaration (`admits_decl`) and a use (`admits_ref`) under the
   SCANNED file's member namespace. Outgoing calls skip value reads.
 
+## A member is declared at its class body
+
+A data member's symbol and its value witness belong to the class body
+scope, wherever the declaration is written. Most languages write it there;
+php's constructor promotion (`__construct(private Clock $made)`) writes it
+in a callable's parameter list, which sits inside the callable's own scope.
+So a `@def.field` is filed at the innermost scope that is not a callable's
+body, and the document names the member as the target of its declared type
+with `@flow.target.member`, which lands the `Variable` at that same scope.
+The `Field{owner, name}` edge then reaches it class-wide, the outline lists
+it under the class rather than under the constructor, and no consumer
+reasons about where the token sat.
+
+A member's name is the name its accesses use. A php property is declared
+`$x` and read `$obj->x`, so the symbol is `x`, its selection span is the
+bare name token (what rename rewrites), and the written `$x` rides
+`@def.field.spelled` onto `Presentation::label`, the spelling the outline
+lists it by. No pack declares a sigil for the model to put back.
+
 ## A language decides how its classes hold members
 
 Whether a call can reach a stored member is a fact about the language,

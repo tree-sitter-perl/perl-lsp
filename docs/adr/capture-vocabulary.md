@@ -64,6 +64,15 @@ Ancestry is read by one descent from the walked root
 too and would repeat the walk per hop. Only patterns that carry a
 structural predicate pay it.
 
+## Decision: a def's name token and its written spelling are two captures
+
+A def has three parts a document may capture: the node (`@def.<kind>`), its
+name token (`@def.<kind>.name`), and, when the name token is only part of
+what is written, the whole written spelling (`@def.<kind>.spelled`, php's
+`$x` around `x`), which is the label a listing shows. It is the def-side
+twin of `@ref.spelled`: the token keys and is rewritten, the spelling is
+read.
+
 ## Decision: a kind's meaning lives on the kind
 
 What a kind means is a method on its enum, matched exhaustively:

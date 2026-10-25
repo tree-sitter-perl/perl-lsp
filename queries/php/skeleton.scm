@@ -38,13 +38,48 @@
 (function_definition) @scope.sub
 (method_declaration) @scope.sub
 
+; ---- properties ----
+; A property is a data member of its class, named without the `$` it is
+; declared with: `$obj->x` reads the member `x`. The `$x` it is written as
+; is the spelling it is listed by. A declared type is the member's value.
+; `readonly` is display vocabulary, no flag.
+(property_declaration
+  (readonly_modifier)? @sym.attr
+  type: (_)? @type.annot
+  (property_element
+    name: (variable_name (name) @def.field.name @flow.target.member) @def.field.spelled) @def.field)
+; A constructor parameter with a visibility or `readonly` is also a
+; property of the class (PHP 8 promotion); the member belongs to the class
+; body, not to the constructor whose parameter list declares it.
+(property_promotion_parameter
+  readonly: (readonly_modifier)? @sym.attr
+  type: (_)? @type.annot
+  name: [
+    (variable_name (name) @def.field.name @flow.target.member) @def.field.spelled
+    (by_ref (variable_name (name) @def.field.name @flow.target.member) @def.field.spelled)
+  ]) @def.field
+
 ; ---- what a declaration is, stated on its name ----
 ; Modifiers come in any order, so each fact is a pattern of its own.
 (method_declaration
   (visibility_modifier) @_visibility
   name: (name) @mark.non_public
   (#any-of? @_visibility "private" "protected"))
+(property_declaration
+  (visibility_modifier) @_visibility
+  (property_element name: (variable_name (name) @mark.non_public))
+  (#any-of? @_visibility "private" "protected"))
+(property_promotion_parameter
+  visibility: (visibility_modifier) @_visibility
+  name: [
+    (variable_name (name) @mark.non_public)
+    (by_ref (variable_name (name) @mark.non_public))
+  ]
+  (#any-of? @_visibility "private" "protected"))
 (method_declaration (static_modifier) name: (name) @mark.static)
+(property_declaration
+  (static_modifier)
+  (property_element name: (variable_name (name) @mark.static)))
 (method_declaration (abstract_modifier) name: (name) @mark.abstract)
 ; A method declared without a body (an interface's, an abstract one) is
 ; a contract the composing class must provide.

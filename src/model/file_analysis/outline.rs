@@ -341,7 +341,8 @@ impl FileAnalysis {
                     }
                 }
                 SymKind::Field => {
-                    (sym.name.clone(), Some("field".to_string()), Vec::new())
+                    let identifier = sym.presentation.label.clone().unwrap_or_else(|| sym.name.clone());
+                    (identifier, Some("field".to_string()), Vec::new())
                 }
                 SymKind::Enumerator => {
                     (sym.name.clone(), Some("enumerator".to_string()), Vec::new())

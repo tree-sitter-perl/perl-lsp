@@ -1,7 +1,7 @@
 //! PHP's pack.
 
 use crate::build::query_extract::*;
-use crate::model::file_analysis::{ClassSpelling, NameSpellings};
+use crate::model::file_analysis::{ClassSpelling, InferredType, NameSpellings};
 
 pub fn php_pack() -> LangPack {
     LangPack {
@@ -17,7 +17,7 @@ pub fn php_pack() -> LangPack {
         },
         shape_name: |raw| raw.to_string(),
         default_name: |_| None,
-        annot_type: |_| None,
+        annot_type: declared_type,
         // Where a namespace lives is composer's autoload map, not a rule
         // over the name.
         module_paths: |_| Vec::new(),
@@ -32,5 +32,25 @@ pub fn php_pack() -> LangPack {
         call_kinds: &[],
         domain_compare_kinds: &[],
         domain_compare_ops: &[],
+    }
+}
+
+/// A declared type as written (`int`, `?Foo`, `\App\User`). A union has
+/// no single type in the lattice, and `self` / `parent` name a class by
+/// where they are written rather than by spelling, so each reads as no
+/// declared type; a class spelling resolves through the use-map at its
+/// site.
+fn declared_type(text: &str) -> Option<InferredType> {
+    let t = text.trim().trim_start_matches('?');
+    if t.contains(['|', '&', '(']) {
+        return None;
+    }
+    match t.to_ascii_lowercase().as_str() {
+        "int" | "float" => Some(InferredType::Numeric),
+        "string" => Some(InferredType::String),
+        "bool" | "true" | "false" => Some(InferredType::Bool),
+        "array" | "iterable" | "callable" | "object" | "mixed" | "null" | "void" | "never" | "self"
+        | "parent" => None,
+        _ => Some(InferredType::ClassName(t.to_string())),
     }
 }

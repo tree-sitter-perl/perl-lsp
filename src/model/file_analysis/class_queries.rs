@@ -345,9 +345,9 @@ impl FileAnalysis {
                 && self.symbol_in_class(sym.id, cls)
                 // A Field is class content BY KIND — extraction only mints it
                 // for real data members, and constructor promotion (php
-                // `__construct(public string $name)`) legitimately places one
-                // inside a sub body and a param region, so the locals gates
-                // below apply to Variables only.
+                // `__construct(public string $name)`) legitimately declares
+                // one inside a parameter list, so the locals gates below
+                // apply to Variables only.
                 && (matches!(sym.kind, SymKind::Field)
                     || (!self
                         .pack

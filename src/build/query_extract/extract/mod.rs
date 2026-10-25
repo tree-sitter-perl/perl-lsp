@@ -166,6 +166,17 @@ impl ExtractState<'_> {
             .or(self.file_namespace.as_deref())
     }
 
+    /// The scope a class member declared at the current event belongs to:
+    /// the innermost scope that is not a callable's body.
+    fn member_scope(&self) -> ScopeId {
+        self.scope_stack
+            .iter()
+            .rev()
+            .map(|&(_, id)| id)
+            .find(|id| !matches!(self.out.scopes[id.0 as usize].kind, ScopeKind::Sub { .. }))
+            .unwrap_or(self.cur_scope)
+    }
+
     /// The identity a class named `leaf` and declared at the current event
     /// is filed under. Under a use-map it is the leaf joined to the
     /// namespace in force, whatever container the class is written in, so

@@ -11,6 +11,9 @@ pub(super) struct State {
     nested_stacks: HashMap<usize, Vec<crate::model::file_analysis::DerefStep>>,
     /// A def's name token, joined to its def event by match.
     names_by_match: HashMap<(usize, DefCap), (String, Point, Point)>,
+    /// `@def.<kind>.spelled`: the declaration as written around its name
+    /// token, joined to the def by match.
+    spelled_by_match: HashMap<(usize, DefCap), String>,
     /// `@qualifier` (a `Class::` on an out-of-line def) and `@rettype` (a
     /// method's declared return type) — pre-collected like names because the
     /// `@def` event fires before these inner captures.
@@ -113,6 +116,9 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
         Capture::Def { kind, part: DefPart::Name } => {
             d.names_by_match.insert((e.match_id, kind), (e.text.clone(), e.start, e.end));
         }
+        Capture::Def { kind, part: DefPart::Spelled } => {
+            d.spelled_by_match.insert((e.match_id, kind), e.text.clone());
+        }
         Capture::Qualifier => {
             d.qualifier_by_match.insert(e.match_id, e.text.clone());
         }
@@ -189,7 +195,10 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         name_start,
         name_end,
         package: pkg,
-        scope: st.cur_scope,
+        // A data member belongs to its class body even where it is written
+        // inside a callable (php's constructor-promoted property).
+        scope: if kind == DefCap::Field { st.member_scope() } else { st.cur_scope },
+        spelled: d.spelled_by_match.get(&(e.match_id, kind)).cloned(),
         return_type: d.rettype_by_match.get(&e.match_id).and_then(|t| (pack.annot_type)(t)),
         deref_stack: d.nested_stacks.get(&e.match_id).cloned().unwrap_or_default(),
         attributes: {

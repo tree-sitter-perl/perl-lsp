@@ -992,6 +992,7 @@ fn sksym(src: &str, kind: DefCap, name: &str, occ: usize, package: Option<&str>)
         name_end: Point { row: ns.row, column: ns.column + name.len() },
         package: package.map(str::to_string),
         scope: crate::model::file_analysis::ScopeId(0),
+        spelled: None,
         return_type: None,
         deref_stack: Vec::new(),
         attributes: Vec::new(),
