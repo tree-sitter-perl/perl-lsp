@@ -216,6 +216,16 @@ struct DeferredVarType {
     plugin_id: String,
 }
 
+/// A named sub of a package that may be a class, whose first parameter is
+/// its invocant if it is a method rather than a plain helper; decided by
+/// `mark_method_invocants`.
+struct MethodOrHelperSub {
+    sub_id: SymbolId,
+    scope: ScopeId,
+    span: Span,
+    package: String,
+}
+
 /// Plugin-emitted `NamedSubParamType` request, resolved at end-of-build.
 /// Keyed by sub name + positional index rather than a span: a `\&name`
 /// registration arg carries no callback body span, and the named sub may
@@ -267,6 +277,10 @@ struct Builder<'a> {
     /// resolved by sub name + index at end-of-build alongside
     /// `deferred_var_types`.
     deferred_named_sub_param_types: Vec<DeferredNamedSubParamType>,
+    method_or_helper_subs: Vec<MethodOrHelperSub>,
+    /// `(package, name)` of each sub the file calls as a plain function
+    /// (`name(...)`; a `\&name` reference is not a call).
+    plain_called_subs: std::collections::HashSet<(String, String)>,
     fold_ranges: Vec<FoldRange>,
     imports: Vec<Import>,
     /// Return values collected during the walk (explicit `return` + implicit last expr).
@@ -604,6 +618,13 @@ struct Builder<'a> {
     /// of a dynamic `$o->$m`), so an assignment binds to its call's refs.
     /// **Build-only**.
     method_call_refs: std::collections::HashMap<usize, Vec<usize>>,
+
+    /// Indirect-object calls (`new Foo(ARGS)`): `(call, class, args)`. The
+    /// chain-typing index finds a call's receiver and arguments by
+    /// `method_call_expression` node, and only the walk knows a
+    /// function-call node is one of these, so the walk hands them over.
+    /// **Build-only**.
+    indirect_method_calls: Vec<(Node<'a>, Node<'a>, Option<Node<'a>>)>,
 
     /// MethodCall ref indices for which we've published an
     /// `InferredType::Parametric` witness on `Expression(refidx)`
