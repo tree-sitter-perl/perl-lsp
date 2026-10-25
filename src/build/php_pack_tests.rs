@@ -699,3 +699,32 @@ namespace B {
     assert_eq!(fa.namespace_at(in_m), Some("A"));
     assert_eq!(fa.namespace_at(tree_sitter::Point::new(7, 20)), Some("B"));
 }
+
+/// A fully-qualified class spelling (`\Lib\Model`) names its identity:
+/// goto-def lands on the declaration, never the declaring file's top, and
+/// the spelling widens nothing.
+#[cfg(feature = "php")]
+#[test]
+fn a_fully_qualified_class_spelling_lands_on_its_declaration() {
+    let sub = ("/fake/php/App/Sub.php", "<?php\nnamespace App;\nclass Sub extends \\Lib\\Model {}\n");
+    let idx = php_indexed(&[PHP_STRANGER, PHP_LIB, sub]);
+    let (defs, hover) = php_landing(&idx, sub.0, tree_sitter::Point::new(2, 24));
+    assert_eq!(defs, [("Lib/Model.php".to_string(), 2, None)]);
+    assert_eq!(hover.as_deref(), Some("Lib/Model.php"));
+    assert!(php_widening(&idx, sub.0).is_empty());
+}
+
+/// A relative qualified parent (`Sub\Model` in `namespace App`) names
+/// `App\Sub\Model`: goto-def lands on that declaration, never on the
+/// file tops of the same-leaf classes.
+#[cfg(feature = "php")]
+#[test]
+fn a_relative_qualified_parent_lands_on_its_resolved_class() {
+    let model = ("/fake/php/App/Sub/Model.php", "<?php\nnamespace App\\Sub;\nclass Model { function name() {} }\n");
+    let user = ("/fake/php/App/User.php", "<?php\nnamespace App;\nclass User extends Sub\\Model {}\n");
+    let idx = php_indexed(&[PHP_STRANGER, PHP_LIB, model, user]);
+    let (defs, hover) = php_landing(&idx, user.0, tree_sitter::Point::new(2, 23));
+    assert_eq!(defs, [("App/Sub/Model.php".to_string(), 2, None)]);
+    assert_eq!(hover.as_deref(), Some("App/Sub/Model.php"));
+    assert!(php_widening(&idx, user.0).is_empty());
+}
