@@ -566,3 +566,35 @@ fn a_dotted_spelling_reaches_a_nested_class_across_modules() {
     assert_eq!(edits, [("models.py".to_string(), 1, 10), ("views.py".to_string(), 2, 14)]);
     assert!(widening_codes(&idx, &views).is_empty());
 }
+
+/// A rename from a Python class's own name token, or from a local, writes
+/// each site's whole token: a pack's names carry no sigil for the edit to
+/// step past (`php_pack_tests::a_cpp_local_renames_whole`).
+#[cfg(feature = "python")]
+#[test]
+fn a_python_rename_writes_whole_tokens() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let src = "class Foo:\n    pass\n\ndef helper(n):\n    total = n\n    return total\n";
+    let (t, idx) = indexed("wholetokens", &[("app/__init__.py", ""), ("app/mod.py", src)]);
+    let path = t.0.join("app/mod.py");
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let store = OpenDocs::new();
+    let edits_from = |row: usize, column: usize| {
+        let cs = resolve(&store, &fa, FileKey::Path(path.clone()), Point { row, column }, Some(&idx), OverrideScope::default());
+        let mut e: Vec<(usize, usize, usize)> = cs
+            .rename_edits("Renamed")
+            .unwrap()
+            .into_iter()
+            .map(|(l, text)| {
+                assert_eq!(text, "Renamed");
+                (l.span.start.row, l.span.start.column, l.span.end.column)
+            })
+            .collect();
+        e.sort();
+        e
+    };
+    assert_eq!(edits_from(0, 7), [(0, 6, 9)], "the class's own name token");
+    assert_eq!(edits_from(4, 5), [(4, 4, 9), (5, 11, 16)], "a local, from its binding");
+    assert_eq!(edits_from(5, 12), [(4, 4, 9), (5, 11, 16)], "a local, from a read");
+}
