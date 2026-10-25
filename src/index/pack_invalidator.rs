@@ -196,6 +196,7 @@ impl PackInvalidator {
         if self.coord.note_change(&canon, deleted) {
             return InvalidationOutcome::deferred();
         }
+        let manifest = index.is_dependency_input(&canon);
         let skip_consumers = {
             let _g = self.change_lock.lock().unwrap_or_else(|e| e.into_inner());
             self.pack_file_changed(root_uri, index, &canon, deleted)
@@ -204,7 +205,14 @@ impl PackInvalidator {
         // cold against the new bytes. Off the serialization lock — the sweep
         // only reads closures, and holding `change_lock` across OpenDocs
         // shard guards would mint a lock ordering for no protection.
-        let refresh_open = self.open_docs_to_refresh(open_docs, &canon, deleted, skip_consumers);
+        let refresh_open = if manifest {
+            // A new dependency map can move any open file's answers.
+            let mut all = Vec::new();
+            open_docs.for_each_open(|u, _| all.push(u.clone()));
+            all
+        } else {
+            self.open_docs_to_refresh(open_docs, &canon, deleted, skip_consumers)
+        };
         InvalidationOutcome { deferred: false, refresh_open }
     }
 
@@ -315,6 +323,19 @@ impl PackInvalidator {
         let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let canon_str = canon.to_string_lossy().into_owned();
         let pack = index;
+        // The dependency tier's own events: a manifest moves the map (a new
+        // generation re-lands what the project names), and a file under a
+        // tier root is never a workspace file — the next generation, not a
+        // registration, is what refreshes it.
+        if index.is_dependency_input(&canon) {
+            if crate::index::module_resolver::refresh_dependency_map_again(index) {
+                crate::index::module_resolver::acquire_dependencies(index, index.dependency_demand());
+            }
+            return true;
+        }
+        if index.dependency_roots().iter().any(|r| canon.starts_with(r)) {
+            return true;
+        }
 
         // The source generation this invalidation registers under (H9-1): the
         // changed file's mtime, captured at call time. Every result (the changed
@@ -410,6 +431,12 @@ impl PackInvalidator {
                 }
             })
             .collect();
+        // What the changed file now names that nothing declares is the
+        // dependency tier's to place, before its registration is queried.
+        let demand: Vec<String> = changed_fa
+            .as_deref()
+            .map(crate::index::module_index::dependency_demand_of)
+            .unwrap_or_default();
         if let Some(fa) = changed_fa {
             results.push((canon.clone(), fa));
         }
@@ -498,6 +525,7 @@ impl PackInvalidator {
                 }
             }
         }
+        crate::index::module_resolver::acquire_dependencies(pack, demand);
         skip_consumers
     }
 

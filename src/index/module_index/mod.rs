@@ -180,6 +180,9 @@ pub(crate) use index_core::IndexCore;
 #[cfg(test)]
 pub(crate) use index_core::strip_import_copy_one;
 
+mod dependency_tier;
+pub(crate) use dependency_tier::DependencyState;
+pub use dependency_tier::dependency_demand_of;
 mod lookup;
 mod queries;
 mod registration;

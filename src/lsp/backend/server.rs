@@ -262,16 +262,16 @@ impl LanguageServer for Backend {
 
         // Register file watchers for workspace indexing — the served
         // language's extensions, so out-of-editor changes reach the
-        // re-index / invalidation path too.
-        let watchers: Vec<FileSystemWatcher> =
-            crate::build::language_driver::LanguageRegistry::served()
-                .extensions()
-                .iter()
-                .map(|ext| FileSystemWatcher {
-                    glob_pattern: GlobPattern::String(format!("**/*.{ext}")),
-                    kind: None,
-                })
-                .collect();
+        // re-index / invalidation path too, and its dependency manifests,
+        // so a package install moves the dependency map.
+        let served = crate::build::language_driver::LanguageRegistry::served();
+        let watchers: Vec<FileSystemWatcher> = served
+            .extensions()
+            .iter()
+            .map(|ext| format!("**/*.{ext}"))
+            .chain(served.dependency_manifests().iter().map(|name| format!("**/{name}")))
+            .map(|glob| FileSystemWatcher { glob_pattern: GlobPattern::String(glob), kind: None })
+            .collect();
         let mut registrations = vec![Registration {
             id: "perl-file-watcher".to_string(),
             method: "workspace/didChangeWatchedFiles".to_string(),

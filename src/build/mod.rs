@@ -4,6 +4,9 @@
 
 pub mod builder;
 pub mod cpanfile;
+// Composer's autoload data: the php dependency tier's map
+#[cfg(feature = "php")]
+pub mod composer;
 // config-variant macro model: guard trail + reachability + join
 pub mod cpp_macro_model;
 // Compiled unconditionally (symbols.rs consumes the macro-model surface in

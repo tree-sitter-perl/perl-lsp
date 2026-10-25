@@ -66,6 +66,8 @@ fn spawn_loop(name: &str, core: Arc<IndexCore>, server: Option<ServerSession>) {
 
 pub use crate::build::builder::create_parser;
 
+mod dependency;
+pub use dependency::*;
 mod inc;
 pub use inc::*;
 mod index_pack;
@@ -81,3 +83,6 @@ use thread::*;
 #[cfg(test)]
 #[path = "module_resolver_tests.rs"]
 mod tests;
+#[cfg(all(test, feature = "php"))]
+#[path = "dependency_tests.rs"]
+mod dependency_tests;

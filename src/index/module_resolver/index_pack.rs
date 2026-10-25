@@ -39,6 +39,19 @@ pub fn index_pack_language(
     crate::build::cpp_reparse::set_macro_persist_dir(module_cache::cache_dir_for_workspace(cache_key));
 
     let lang = driver.id();
+    // The dependency map first: its roots are the tier's, so the walk
+    // leaves them out whether or not the project ignores them.
+    refresh_dependency_map(index, driver, root);
+    // Spelled under the walk's own root so the filter is a prefix test,
+    // not a canonicalize per entry; a root outside the walk needs none.
+    let skip_roots: Vec<PathBuf> = {
+        let canon_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        index
+            .dependency_roots()
+            .iter()
+            .filter_map(|r| r.strip_prefix(&canon_root).ok().map(|rel| root.join(rel)))
+            .collect()
+    };
     let paths: Vec<PathBuf> = {
         let mut tb = TypesBuilder::new();
         for ext in driver.extensions() {
@@ -48,6 +61,7 @@ pub fn index_pack_language(
         match tb.build() {
             Ok(types) if !driver.extensions().is_empty() => WalkBuilder::new(root)
                 .types(types)
+                .filter_entry(move |e| !skip_roots.iter().any(|r| e.path().starts_with(r)))
                 .build()
                 .filter_map(|e| e.ok())
                 .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
@@ -497,6 +511,14 @@ pub fn index_pack_language(
             );
         }
     }
+    // The project's own files are registered: what they name that none of
+    // them declares is the dependency tier's to place. The map is re-read
+    // first if a manifest moved during the walk — an event then was
+    // deferred to this index, and this is where the index reads it.
+    crate::util::timings::phase("index.dependencies", || {
+        refresh_dependency_map(index, driver, root);
+        acquire_dependencies(index, index.dependency_demand())
+    });
     if std::env::var_os("PERL_LSP_MEM_REPORT").is_some() {
         eprintln!("[mem-report] {}", crate::build::cpp_reparse::cache_size_report());
     }

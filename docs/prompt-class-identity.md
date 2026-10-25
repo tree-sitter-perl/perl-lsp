@@ -131,6 +131,22 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    an instance (C++'s functional cast `Foo(x)`); the reference half reads
    it only through a use-map, so C++, whose spellings are identities, keeps
    its calls calls.
+8. **A dependency map makes the identity indexed, as DEPENDENCY.** A
+   driver may declare where its projects keep what the workspace walk does
+   not own (`LanguageDriver::dependency_locator`; php: `build::composer`,
+   Composer's `composer.json` + `installed.json`, never PHP itself). The
+   walk skips the map's roots (`vendor/`) whatever `.gitignore` says, and
+   after it the indexer asks the map for every identity the project's
+   files import or extend that nothing declares
+   (`module_resolver::acquire_dependencies`, then each landed file's
+   parents, transitively). A landed file enters the @INC tier's relation
+   (`IndexCore::insert_resolved`: `all_defs` + the name slot, never
+   `all_files`), so the exact lane of `use_map_candidates` answers and the
+   leaf lane never runs for it; it is dependency by construction
+   (`is_dependency_path`), so rename never rewrites it and no workspace
+   sweep counts it. The map is per generation: an input manifest's stamp
+   moving (a watcher event, or the indexer's own re-read) retires
+   everything the old map landed and re-asks under the new one.
 
 **A class body can be a namespace.** A document that captures a class's
 body as `@section.class` (Python's) makes it a section of the lane,

@@ -332,7 +332,8 @@ fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleInd
         );
     }
 
-    // @INC is the Perl hub's dependency tier; a pack process has none.
+    // @INC is the Perl hub's dependency tier; a pack process's was read
+    // by its indexer, from the driver's dependency map.
     if !served.caps().hub_enrichment {
         return (ws, module_index);
     }

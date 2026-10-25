@@ -137,6 +137,10 @@ pub(crate) struct IndexCore {
     /// cache; absent on an index with no store, which simply keeps decoding.
     pub(crate) conclusion_cache:
         Arc<std::sync::RwLock<Option<Arc<crate::index::conclusion_cache::ConclusionCache>>>>,
+    /// The pack dependency tier's map and what it landed
+    /// (`dependency_tier`). `None` until a pack index reads a map; Perl's
+    /// dependency tier is `@INC`, resolved by the thread above.
+    pub(crate) dependencies: Mutex<Option<super::dependency_tier::DependencyState>>,
 }
 
 impl IndexCore {
@@ -175,6 +179,7 @@ impl IndexCore {
             long_lived: std::sync::atomic::AtomicBool::new(false),
             bag_cache: std::sync::RwLock::new(None),
             conclusion_cache: Arc::new(std::sync::RwLock::new(None)),
+            dependencies: Mutex::new(None),
         }
     }
 

@@ -135,6 +135,33 @@ pub trait LanguageDriver: Send + Sync {
     fn analysis_input_fingerprint(&self) -> u64 {
         0
     }
+    /// Where this project keeps the dependencies the workspace walk does
+    /// not own (php: Composer's `vendor/`), and which of their files
+    /// declares a name. `None` = the walk is the whole story.
+    fn dependency_locator(&self, _root: &Path) -> Option<std::sync::Arc<dyn DependencyLocator>> {
+        None
+    }
+    /// File names whose change can move `dependency_locator`'s answer —
+    /// the watcher subscribes to them; the locator's own `inputs` decide
+    /// which changes count.
+    fn dependency_manifests(&self) -> &[&'static str] {
+        &[]
+    }
+}
+
+/// The dependency tier's map for one project: a name nothing in the
+/// workspace declares → the files that may declare it. The index asks it
+/// on demand and parses only what it lands; the locator only probes the
+/// filesystem. Implemented per language (php: `build::composer`).
+pub trait DependencyLocator: Send + Sync {
+    /// Files that may declare `identity`, most-preferred first.
+    fn locate(&self, identity: &str) -> Vec<std::path::PathBuf>;
+    /// Files the project loads whatever it names (Composer's `files`).
+    fn always_loaded(&self) -> &[std::path::PathBuf];
+    /// Directories whose files belong to this tier, never to the walk.
+    fn roots(&self) -> &[std::path::PathBuf];
+    /// The manifests this map was read from: a change to any is a new map.
+    fn inputs(&self) -> &[std::path::PathBuf];
 }
 
 /// Perl — the reference driver. Wraps the production builder; behaviour
@@ -279,6 +306,18 @@ pub struct PackDriver {
     /// The module a file is, for a language that names modules by path
     /// (python). Reads the filesystem, so it runs in the gather phase.
     file_module: Option<fn(&Path) -> Option<crate::build::query_extract::FileModule>>,
+    /// The project's dependency map (php: Composer). `None` = the workspace
+    /// walk is the whole story.
+    dependencies: Option<PackDependencies>,
+}
+
+/// A pack's dependency map: how to build it for a root, and the manifest
+/// file names the watcher must report.
+#[cfg(feature = "pack-langs")]
+#[derive(Clone, Copy)]
+struct PackDependencies {
+    locator: fn(&Path) -> std::sync::Arc<dyn DependencyLocator>,
+    manifests: &'static [&'static str],
 }
 
 /// Pre-parse external state gathered in phase 1 (`gather_pack_context`) and
@@ -382,6 +421,12 @@ impl LanguageDriver for PackDriver {
     }
     fn analysis_input_fingerprint(&self) -> u64 {
         self.input_fingerprint.map(|f| f()).unwrap_or(0)
+    }
+    fn dependency_locator(&self, root: &Path) -> Option<std::sync::Arc<dyn DependencyLocator>> {
+        self.dependencies.map(|d| (d.locator)(root))
+    }
+    fn dependency_manifests(&self) -> &[&'static str] {
+        self.dependencies.map(|d| d.manifests).unwrap_or(&[])
     }
 }
 
@@ -639,6 +684,7 @@ fn cpp_driver() -> PackDriver {
         input_fingerprint: Some(crate::build::cpp_reparse::toolchain_fingerprint),
         access_regions: Some(crate::build::cpp_reparse::access_regions),
         file_module: None,
+        dependencies: None,
     }
 }
 
@@ -663,6 +709,7 @@ fn python_driver() -> PackDriver {
         input_fingerprint: None,
         access_regions: None,
         file_module: Some(crate::build::packs::python_file_module),
+        dependencies: None,
     }
 }
 
@@ -690,6 +737,10 @@ fn php_driver() -> PackDriver {
         input_fingerprint: None,
         access_regions: None,
         file_module: None,
+        dependencies: Some(PackDependencies {
+            locator: crate::build::composer::locator,
+            manifests: &["composer.json", "installed.json"],
+        }),
     }
 }
 
@@ -714,6 +765,7 @@ fn r_driver() -> PackDriver {
         input_fingerprint: None,
         access_regions: None,
         file_module: None,
+        dependencies: None,
     }
 }
 
@@ -739,6 +791,7 @@ fn cmake_driver() -> PackDriver {
         input_fingerprint: None,
         access_regions: None,
         file_module: None,
+        dependencies: None,
     }
 }
 

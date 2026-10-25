@@ -303,6 +303,19 @@ fn whole_copy_registration_sites_are_allowlisted() {
                 ),
             ],
         ),
+        (
+            "insert_resolved",
+            vec![
+                ("module_resolver", 1, "the @INC resolve — strips once persisted"),
+                (
+                    "module_index",
+                    2,
+                    "insert_cache_providers (CLI @INC seeding, one-shot) and the pack \
+                     dependency tier's landing — whole because nothing persisted it, bounded \
+                     by the demand closure (the project's imports + parents, then ancestors)",
+                ),
+            ],
+        ),
         // register_workspace_module: TEST-ONLY today (fixtures build whole
         // copies directly). Its first production caller lands here.
         ("register_workspace_module", vec![]),
