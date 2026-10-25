@@ -1587,3 +1587,23 @@ fn test_ref_eq_current_package_narrows_to_the_enclosing_class() {
     let ret = fa.sub_return_type_at_arity("path", None);
     assert_eq!(ret.as_ref().and_then(|t| t.class_name()), Some("P"), "{:?}", ret);
 }
+
+#[test]
+fn test_indirect_object_call_reads_subs_of_the_current_package() {
+    // Perl looks the class name up as a sub in the package in force at the
+    // call: `sub Widget` in another package of the file leaves `new Widget`
+    // a method call, while one in this package, or a sub imported into it
+    // by name, makes it a function call.
+    let fa = build_fa(
+        "package Widget;\nsub new { bless {}, shift }\npackage Other;\nsub Widget { 1 }\npackage Gadget;\nsub new { bless {}, shift }\npackage Mine;\nsub go {\n    my $a = new Widget(1);\n    return;\n}\npackage Other;\nsub go {\n    my $b = new Widget(1);\n    return;\n}\npackage Third;\nuse Some::Lib qw(Gadget);\nsub go {\n    my $c = new Gadget(1);\n    return;\n}\npackage Fourth;\nsub go {\n    my $d = new Gadget(1);\n    return;\n}\n",
+    );
+    let calls: Vec<_> = fa
+        .refs()
+        .iter()
+        .filter_map(|r| match &r.kind {
+            RefKind::MethodCall { invocant, .. } => Some((r.span.start.row, invocant.as_name()?.to_string())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls, vec![(8, "Widget".into()), (24, "Gadget".into())]);
+}
