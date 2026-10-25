@@ -8,6 +8,13 @@
 use super::*;
 use crate::cst::LiteralShape;
 
+/// One target of a list-assignment LHS.
+pub(super) enum ListSlot<'a> {
+    Var(String, crate::model::file_analysis::Extraction),
+    /// A written element and its position, `None` past a slurpy target.
+    Element(Node<'a>, Option<usize>),
+}
+
 impl<'a> Builder<'a> {
     pub(super) fn get_decl_keyword(&self, var_decl: Node<'a>) -> Option<String> {
         for i in 0..var_decl.child_count() {
@@ -153,30 +160,23 @@ impl<'a> Builder<'a> {
         });
     }
 
-    /// An element written in place, with the value it receives when it is a
-    /// slot of a plain list assignment: a literal-list RHS gives the slot its
-    /// own element, any other RHS its element N, the same binding a
-    /// variable slot gets (`docs/adr/destructuring.md`).
+    /// An element written in place. A list-assignment target's write is the
+    /// list binder's (`mint_flow_edges_via_query`), which gives it its slot's
+    /// value the way it does a variable target's.
     pub(super) fn record_in_place_write(&mut self, elem: Node<'a>) {
-        let slot = crate::cst::list_assignment_slot(elem).filter(|(assign, _)| {
-            crate::cst::assign_op(*assign) == Some(crate::cst::AssignOp::Plain)
-        });
-        let Some((assign, n)) = slot else {
-            self.record_key_write(elem, None, None);
-            return;
-        };
-        let Some(rhs) = assign.child_by_field_name("right") else {
-            self.record_key_write(elem, None, None);
-            return;
-        };
-        match self.list_element_nodes(rhs) {
-            Some(nodes) => self.record_key_write(elem, nodes.get(n).copied(), None),
-            None => self.record_key_write(elem, Some(rhs), Some(n as i32)),
+        if crate::cst::list_assignment_target_of(elem).is_none() {
+            self.record_key_write(elem, None, None, self.current_scope());
         }
     }
 
-    pub(super) fn record_key_write(&mut self, left: Node<'a>, rhs: Option<Node<'a>>, rhs_slot: Option<i32>) {
-        use crate::model::file_analysis::{KeyWrite, ScopeId, WriteKey};
+    pub(super) fn record_key_write(
+        &mut self,
+        left: Node<'a>,
+        rhs: Option<Node<'a>>,
+        rhs_slot: Option<i32>,
+        scope: crate::model::file_analysis::ScopeId,
+    ) {
+        use crate::model::file_analysis::{KeyWrite, WriteKey};
         let mut innermost = left;
         // The hops above the innermost, innermost-first.
         let mut outer_hops: Vec<Node<'a>> = Vec::new();
@@ -234,7 +234,7 @@ impl<'a> Builder<'a> {
             var_text,
             key,
             path,
-            scope: self.scope_stack.last().copied().unwrap_or(ScopeId(0)),
+            scope,
             span,
             rhs_span: if typed { rhs.map(node_to_span) } else { None },
             rhs_slot,
@@ -434,6 +434,22 @@ impl<'a> Builder<'a> {
         &self,
         lhs: Node<'a>,
     ) -> Option<Vec<(String, crate::model::file_analysis::Extraction)>> {
+        let out: Vec<_> = self
+            .lhs_list_slots(lhs)?
+            .into_iter()
+            .filter_map(|slot| match slot {
+                ListSlot::Var(name, extraction) => Some((name, extraction)),
+                ListSlot::Element(..) => None,
+            })
+            .collect();
+        (!out.is_empty()).then_some(out)
+    }
+
+    /// Every target slot of a list-assignment LHS, in order: variables and
+    /// written elements (`($x, $h->{k}) = …`). An element after a slurpy
+    /// target has no slot (`None`) — the slurpy took the rest. `undef` and
+    /// other placeholders take a position and yield nothing.
+    pub(super) fn lhs_list_slots(&self, lhs: Node<'a>) -> Option<Vec<ListSlot<'a>>> {
         use crate::model::file_analysis::Extraction;
         // `my ($a, $b)` (variable_declaration) OR a bare `($a, $b) = …`
         // reassignment (a grouping container LHS — no `my`).
@@ -451,25 +467,29 @@ impl<'a> Builder<'a> {
             _ => return None,
         };
         let mut out = Vec::new();
-        let mut pos = 0usize;
-        for child in elems {
-            let extraction = match child.kind() {
-                "scalar" => Extraction::Positional(pos),
-                "array" | "hash" => Extraction::Slurpy(pos),
-                // `my (undef, $x) = @_` — the placeholder takes a slot.
-                // `my (undef, $x) = @_` and `($h->{k}, $x) = …`: the
-                // placeholder or element target takes a slot too.
-                _ => {
-                    pos += 1;
-                    continue;
+        let mut slurped = false;
+        for (pos, child) in elems.into_iter().enumerate() {
+            match child.kind() {
+                "scalar" | "array" | "hash" => {
+                    let slurpy = child.kind() != "scalar";
+                    let extraction =
+                        if slurpy { Extraction::Slurpy(pos) } else { Extraction::Positional(pos) };
+                    if let Ok(t) = child.utf8_text(self.source) {
+                        out.push(ListSlot::Var(t.to_string(), extraction));
+                    }
+                    slurped |= slurpy;
                 }
-            };
-            if let Ok(t) = child.utf8_text(self.source) {
-                out.push((t.to_string(), extraction));
+                "hash_element_expression" | "array_element_expression" => {
+                    out.push(ListSlot::Element(child, (!slurped).then_some(pos)));
+                }
+                "variable_declaration" => {
+                    let inner = child.child_by_field_name("variable");
+                    slurped |= inner.is_some_and(|v| matches!(v.kind(), "array" | "hash"));
+                }
+                _ => {}
             }
-            pos += 1;
         }
-        (!out.is_empty()).then_some(out)
+        Some(out)
     }
 
     /// The per-element NODES of a literal-list RHS (`(10, "str")` → [10,
