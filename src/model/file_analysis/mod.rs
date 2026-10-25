@@ -71,12 +71,13 @@ pub struct FileAnalysis {
     pub call_bindings: Vec<CallBinding>,
     pub method_call_bindings: Vec<MethodCallBinding>,
 
-    /// Flat list of `package`/`class` declarations and the byte ranges
-    /// they govern. Replaces `Scope::package` walks for `package_at`.
-    /// `#[serde(default)]` so older cache blobs deserialize as empty
-    /// (`package_at` falls back to the legacy scope walk in that case).
+    /// The namespace lane: which namespace is in force over each range of
+    /// the file (`namespace_at`) — Perl's packages, PHP's namespace
+    /// sections, a Python module's file. In Perl the namespace is also the
+    /// class its code belongs to; whether `package_at` reads it is the
+    /// language's `NameSpellings::enclosing_class`.
     #[serde(default)]
-    pub package_ranges: Vec<PackageRange>,
+    pub namespace_ranges: Vec<NamespaceRange>,
 
     /// Everything a pack driver recorded that Perl has no analog for —
     /// macros, the include graph, template parameters, move tracking.
@@ -596,7 +597,7 @@ pub struct FileAnalysisParts {
     pub reexport_modules: Vec<String>,
     pub lib_roots: Vec<String>,
     pub type_provenance: HashMap<SymbolId, TypeProvenance>,
-    pub package_ranges: Vec<PackageRange>,
+    pub namespace_ranges: Vec<NamespaceRange>,
     pub witnesses: crate::model::witnesses::WitnessBag,
     pub provisional_dispatches: Vec<ProvisionalDispatch>,
     pub guard_sites: Vec<GuardSite>,

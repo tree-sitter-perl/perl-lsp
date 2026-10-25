@@ -339,6 +339,13 @@ pub enum Capture {
     RefSpelled,
     Scope(ScopeCap),
     Context(ContextKind),
+    /// A class body the language makes a namespace (`@section.class`,
+    /// Python's class scope), paired with the match's `@context.class`: the
+    /// class's identity is in force over it for code written directly in
+    /// it. A name the class does not declare resolves past it, and a
+    /// callable inside sees past it altogether
+    /// (`SectionKind::ClassBody`).
+    ClassSection,
     /// A base class, paired with the match's `@def.class.name`.
     Parent,
     Import(ImportCap),
@@ -423,6 +430,7 @@ impl Capture {
             ["scope", "sub", "implicit_receiver"] => C::Scope(ScopeCap::SubImplicitReceiver),
             ["scope", k] if !k.is_empty() => C::Scope(ScopeCap::parse(k)?),
             ["context", k] => C::Context(ContextKind::parse(k)?),
+            ["section", "class"] => C::ClassSection,
             ["parent"] => C::Parent,
             ["import"] => C::Import(ImportCap::Statement),
             ["import", k] if !k.is_empty() => C::Import(ImportCap::parse(k)?),
@@ -490,6 +498,7 @@ impl fmt::Display for Capture {
             C::RefSpelled => f.write_str("ref.spelled"),
             C::Scope(k) => family(f, "scope", k.spelling()),
             C::Context(k) => write!(f, "context.{k}"),
+            C::ClassSection => f.write_str("section.class"),
             C::Parent => f.write_str("parent"),
             C::Import(k) => family(f, "import", k.spelling()),
             C::Alias(k) => write!(f, "alias.{k}"),
