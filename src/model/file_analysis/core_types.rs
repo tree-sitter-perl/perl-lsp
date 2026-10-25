@@ -289,14 +289,15 @@ pub enum ImportReach {
     FromImport,
 }
 
-/// What a separator leading an imported module path means.
+/// What a relative import's level (the separators an `@import.relative`
+/// capture holds) climbs from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ImportPrefix {
-    /// Absolute: PHP's `use \A\B` is `A\B`.
+    /// Nothing: every module path is absolute (PHP's `use \A\B` is `A\B`).
     #[default]
     Absolute,
-    /// Relative to the file's own package, one level up per separator past
-    /// the first: Python's `from .x import C` / `from .. import y`.
+    /// The file's own package, one level up per separator past the first:
+    /// Python's `from .x import C` / `from .. import y`.
     PackageRelative,
 }
 
