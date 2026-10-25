@@ -16,6 +16,8 @@ pub(super) struct State {
     spelled_by_match: HashMap<(usize, DefCap), String>,
     /// Matches whose defs share one name token as one declaration (`@def.pair`).
     paired_matches: std::collections::HashSet<usize>,
+    /// Matches whose defs declare in the scope around them (`@def.hoist`).
+    hoisted_matches: std::collections::HashSet<usize>,
     /// `@qualifier` (a `Class::` on an out-of-line def) and `@rettype` (a
     /// method's declared return type) — pre-collected like names because the
     /// `@def` event fires before these inner captures.
@@ -128,6 +130,9 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
         Capture::DefPair => {
             d.paired_matches.insert(e.match_id);
         }
+        Capture::DefHoist => {
+            d.hoisted_matches.insert(e.match_id);
+        }
         Capture::Def { kind, part: DefPart::Spelled } => {
             d.spelled_by_match.insert((e.match_id, kind), e.text.clone());
         }
@@ -227,7 +232,13 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         package: pkg,
         // A data member belongs to its class body even where it is written
         // inside a callable (php's constructor-promoted property).
-        scope: if kind == DefCap::Field { st.member_scope() } else { st.cur_scope },
+        scope: if kind == DefCap::Field {
+            st.member_scope()
+        } else if d.hoisted_matches.contains(&e.match_id) {
+            st.out.scopes[st.cur_scope.0 as usize].parent.unwrap_or(st.cur_scope)
+        } else {
+            st.cur_scope
+        },
         spelled: d.spelled_by_match.get(&(e.match_id, kind)).cloned(),
         pair: d.paired_matches.contains(&e.match_id).then_some(e.match_id),
         return_type,
@@ -258,6 +269,56 @@ pub(super) fn resolve_returns(st: &mut ExtractState) {
             st.out.symbols[i].return_type = Some(written_type_at(&st.out, &st.pack.names, t, site));
         }
     }
+}
+
+/// Variables declared by being written (`@def.assigned`). In source order,
+/// a write declares its name only when nothing the write can see declares
+/// it already — a parameter, an earlier write, the variable around a
+/// closure that captures it; the declaration is the callable's (or, outside
+/// any callable, the file's), so every use in the body reaches it whatever
+/// the order. Every other write is a `var_writes` row of that declaration.
+pub(super) fn unify_assigned(st: &mut ExtractState) {
+    use crate::model::file_analysis::ScopeKind;
+    let out = &mut st.out;
+    if !out.symbols.iter().any(|s| s.kind == DefCap::Assigned) {
+        return;
+    }
+    let owning = |mut s: ScopeId| loop {
+        let sc = &out.scopes[s.0 as usize];
+        match (&sc.kind, sc.parent) {
+            (ScopeKind::Sub { .. }, _) | (_, None) => return s,
+            (_, Some(p)) => s = p,
+        }
+    };
+    // Every other Variable def declares where it is written, from its token on.
+    let mut declared: HashMap<(ScopeId, String), Point> = HashMap::new();
+    for s in out.symbols.iter().filter(|s| s.kind != DefCap::Assigned && s.kind.sym_kind() == crate::model::file_analysis::SymKind::Variable) {
+        let at = declared.entry((s.scope, s.name.clone())).or_insert(s.name_start);
+        *at = (*at).min(s.name_start);
+    }
+    let mut order: Vec<usize> = (0..out.symbols.len()).filter(|&i| out.symbols[i].kind == DefCap::Assigned).collect();
+    order.sort_by_key(|&i| out.symbols[i].name_start);
+    let mut accepted: std::collections::HashSet<(ScopeId, String)> = Default::default();
+    let mut keep = vec![true; out.symbols.len()];
+    for i in order {
+        let s = &out.symbols[i];
+        let seen = super::variable_lookup_chain(&out.scopes, &out.closed_scopes, &out.captures, s.scope, &s.name)
+            .into_iter()
+            .any(|sc| {
+                accepted.contains(&(sc, s.name.clone()))
+                    || declared.get(&(sc, s.name.clone())).is_some_and(|&at| at <= s.name_start)
+            });
+        if seen {
+            keep[i] = false;
+            out.var_writes.push((s.name.clone(), s.scope, Span { start: s.name_start, end: s.name_end }));
+        } else {
+            let home = owning(s.scope);
+            accepted.insert((home, s.name.clone()));
+            out.symbols[i].scope = home;
+        }
+    }
+    let mut it = keep.iter();
+    out.symbols.retain(|_| *it.next().unwrap());
 }
 
 /// Template params joined to their owner class — the owner shaped like a

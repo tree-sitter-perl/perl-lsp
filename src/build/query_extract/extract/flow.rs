@@ -9,13 +9,20 @@ use std::collections::HashMap;
 
 #[derive(Default)]
 pub(super) struct State {
-    /// flow.assign joins: match_id → (target name+scope, source span)
-    flow_targets: HashMap<usize, (String, ScopeId, Point)>,
+    /// flow.assign joins: match_id → (target name, scope, the write's
+    /// site, the target token's start)
+    flow_targets: HashMap<usize, (String, ScopeId, Point, Point)>,
     flow_sources: HashMap<usize, Span>,
+    /// match_id → the source with the pack's transparent wrappers peeled
+    /// off (`(5)` → `5`): the node whose value the source is.
+    source_inner: HashMap<usize, Span>,
     /// Rebind shapes with no inflowing value (loop vars: `for x in …`,
     /// `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
     /// cutoff sees them, exactly like Perl's `foreach` var.
-    pub(super) flow_rebinds: Vec<(String, ScopeId, Point)>,
+    pub(super) flow_rebinds: Vec<(String, ScopeId, Point, Point)>,
+    /// `@flow.write`: where each match's write lands, the end of its
+    /// assignment node.
+    write_at: HashMap<usize, Point>,
     /// `@type.annot` — a declaration's type text, joined per match.
     annots: HashMap<usize, String>,
     /// `@expr.read.var.name` — a read's name token, joined to its node.
@@ -36,6 +43,21 @@ pub(super) struct State {
     domain_value_by_match: HashMap<usize, String>,
 }
 
+/// `@flow.source`: record the value node under the source's transparent
+/// wrappers (`recv_peel`), where the node is live.
+pub(super) fn flatten_source(
+    f: &mut State,
+    node: tree_sitter::Node<'_>,
+    pack: &LangPack,
+    source: &[u8],
+    match_id: usize,
+    events: &mut Vec<Event>,
+) {
+    let inner = super::members::peel_receiver(node, pack.recv_peel);
+    f.source_inner.insert(match_id, Span { start: inner.start_position(), end: inner.end_position() });
+    events.push(Event::at(node, Capture::Flow(FlowCap::Source), node.utf8_text(source).unwrap_or("").to_string(), match_id));
+}
+
 pub(super) fn collect(st: &mut ExtractState, e: &Event) {
     match e.cap {
         Capture::TypeAnnot => {
@@ -44,12 +66,30 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
         Capture::Expr(ExprCap::ReadVarName) => {
             st.flow.read_names.insert(e.match_id, (e.text.clone(), e.span()));
         }
+        Capture::Flow(FlowCap::Write) => {
+            st.flow.write_at.insert(e.match_id, e.end);
+        }
         Capture::Domain(DomainCap::Value) => {
             let v = if is_identifier_text(&e.text) { e.text.clone() } else { String::new() };
             st.flow.domain_value_by_match.insert(e.match_id, v);
         }
         _ => {}
     }
+}
+
+/// Where a target event's write lands. A `@flow.write` match writes at its
+/// assignment's end, after every read the assignment makes, and resets the
+/// variable there (`docs/adr/flow-narrowing.md`); any other target is
+/// bound at its own token.
+fn written_at(f: &State, out: &mut SkeletonAnalysis, name: String, scope: ScopeId, e: &Event) -> Point {
+    let Some(&at) = f.write_at.get(&e.match_id) else { return e.start };
+    out.witnesses.push(Witness {
+        attachment: WitnessAttachment::Variable { name, scope },
+        source: WitnessSource::Builder(crate::model::witnesses::RESET_SOURCE.into()),
+        payload: WitnessPayload::Reset,
+        span: Span { start: at, end: at },
+    });
+    at
 }
 
 fn skeleton_witness(attachment: WitnessAttachment, source: &str, payload: WitnessPayload, span: Span) -> Witness {
@@ -107,7 +147,8 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
         }
         Capture::Flow(target @ (FlowCap::Target | FlowCap::TargetMember)) => {
             let scope = if target == FlowCap::TargetMember { member_scope } else { cur_scope };
-            f.flow_targets.insert(e.match_id, ((pack.shape_name)(&e.text), scope, e.start));
+            let at = written_at(f, out, (pack.shape_name)(&e.text), scope, e);
+            f.flow_targets.insert(e.match_id, ((pack.shape_name)(&e.text), scope, at, e.start));
             // Record the declared-type text keyed by (var, DECLARING scope)
             // for the token-less optional-engagement narrowing. cur_scope is
             // only known here (scopes mint during this walk); the type-annot
@@ -117,7 +158,8 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
             }
         }
         Capture::Flow(FlowCap::Rebind) => {
-            f.flow_rebinds.push(((pack.shape_name)(&e.text), cur_scope, e.start));
+            let at = written_at(f, out, (pack.shape_name)(&e.text), cur_scope, e);
+            f.flow_rebinds.push(((pack.shape_name)(&e.text), cur_scope, at, e.start));
         }
         Capture::Flow(FlowCap::Source) => {
             f.flow_sources.insert(e.match_id, e.span());
@@ -234,7 +276,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
         }
         // The assignment node anchors its pattern; its target and source
         // carry the meaning.
-        Capture::Flow(FlowCap::Assign) => {}
+        Capture::Flow(FlowCap::Assign | FlowCap::Write) => {}
         _ => {}
     }
 }
@@ -270,7 +312,7 @@ pub(super) fn emit_keyed_shapes(st: &mut ExtractState) {
 
 /// Join flow captures into value-flow edges, then lower the edges to
 /// Variable witnesses.
-pub(super) fn finish(st: &mut ExtractState, events: &[Event]) {
+pub(super) fn finish(st: &mut ExtractState) {
     let f = &mut st.flow;
     let out = &mut st.out;
     // Match-id order (deterministic) — two captures targeting the same
@@ -295,8 +337,13 @@ pub(super) fn finish(st: &mut ExtractState, events: &[Event]) {
         .filter(|s| s.kind == DefCap::Field)
         .filter_map(|s| out.scopes.get(s.scope.0 as usize).map(|sc| ((s.name.clone(), s.scope), sc.span)))
         .collect();
+    // A write of a name some earlier def declares replaces its value.
+    let reassigned: std::collections::HashSet<(&str, Point)> =
+        out.var_writes.iter().map(|(n, _, sp)| (n.as_str(), sp.start)).collect();
+    let reassigns = |name: &str, token: &Point| reassigned.contains(&(name, *token));
+    let mut edges = Vec::new();
     for mid in flow_mids {
-        let (name, scope, at) = &f.flow_targets[mid];
+        let (name, scope, at, token) = &f.flow_targets[mid];
         let var = WitnessAttachment::Variable { name: name.clone(), scope: *scope };
         // Class-wide extent for a data member; the sequential decl point for a
         // local (see `field_scope_span`).
@@ -330,42 +377,41 @@ pub(super) fn finish(st: &mut ExtractState, events: &[Event]) {
             }
         }
         if let Some(src_span) = f.flow_sources.get(mid) {
-            // Narrow onto the outermost literal the rhs wraps, when the
-            // rhs node itself carries no witness (paren wrappers).
-            let src_bytes = byte_range_of(events, *mid, Capture::Flow(FlowCap::Source));
-            let target_span = f
-                .lit_spans
-                .iter()
-                .filter(|&&(s, en, _)| src_bytes.is_some_and(|(ss, se)| s >= ss && en <= se))
-                .max_by_key(|&&(s, en, _)| en - s)
-                .map(|&(_, _, sp)| sp)
-                .filter(|sp| sp != src_span)
-                .unwrap_or(*src_span);
+            // A source that states no value of its own takes the value its
+            // transparent wrappers hold (`(5)`). A value merely inside it —
+            // an argument, an operand, a subscripted call — is not its
+            // value, so the edge stays on the source.
+            let valued = |sp: &Span| f.lit_spans.iter().any(|(_, _, l)| l == sp);
+            let target_span = match f.source_inner.get(mid) {
+                Some(inner) if !valued(src_span) && valued(inner) => *inner,
+                _ => *src_span,
+            };
             // Mint a value-flow edge (cpp init is `Whole`); the witness is its
             // lowering, so type inference sees the same `Variable → Edge(Expr)`
             // it always did — now with the source span kept for provenance.
-            out.flow_edges.push(crate::model::file_analysis::FlowEdge {
+            edges.push(crate::model::file_analysis::FlowEdge {
                 target_name: name.clone(),
                 target_scope: *scope,
                 target_at: *at,
                 source: target_span,
                 extraction: crate::model::file_analysis::Extraction::Whole,
-                reassigns: false,
+                reassigns: reassigns(name, token),
             });
         }
     }
     // Bind-shape rebinds (loop vars): no inflowing value, recorded for the
     // narrowing cutoff (`Rebind` lowers to nothing — provenance only).
-    for (name, scope, at) in std::mem::take(&mut f.flow_rebinds) {
-        out.flow_edges.push(crate::model::file_analysis::FlowEdge {
+    for (name, scope, at, token) in std::mem::take(&mut f.flow_rebinds) {
+        edges.push(crate::model::file_analysis::FlowEdge {
+            reassigns: reassigns(&name, &token),
             target_name: name,
             target_scope: scope,
             target_at: at,
             source: Span { start: at, end: at },
             extraction: crate::model::file_analysis::Extraction::Rebind,
-            reassigns: false,
         });
     }
+    out.flow_edges.extend(edges);
     // Lower the value-flow edges to type-tier witnesses (the bag is canonical
     // for types; the edges are the provenance tier above it).
     for fe in &out.flow_edges {

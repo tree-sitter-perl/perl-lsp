@@ -96,6 +96,33 @@ method is written in rather than a class by its spelling (php's `self`,
 `static`). It is a pattern of its own, joined to the def's `@rettype` by
 span.
 
+## Decision: a function-scoped variable is declared by its first write
+
+A language whose variables belong to their function rather than a block
+(php) has no declaration syntax: `$x = …` declares `$x` when nothing the
+write can see declares it already, and is a write of that declaration
+otherwise. The document says so per pattern: `@def.assigned` marks such a
+write. After dedup, `defs::unify_assigned` walks those defs in source
+order; the first one per name whose lookup finds nothing is the
+declaration, re-anchored to the callable around it (or the file), and is
+visible from the top of that body, so a read above it in a loop reaches
+it. Every other one becomes a `var_writes` row, minted as a `Variable` ref
+with `AccessKind::Write`. Reads, writes and the unification look a name up
+along one chain, `variable_lookup_chain`.
+
+`@scope.sub.closed` is a callable body that sees no variable of the code
+around it (php's functions, methods and closures; an arrow function is a
+plain `@scope.sub` and sees the enclosing function's).
+`@closure.capture` is a name such a body takes from around it (`use
+($x)`): the chain continues past the closed body for that name alone.
+`@def.hoist` files the match's def in the scope around the one it is
+written in, so `use (&$x)` declares `$x` in the enclosing function when it
+does not exist yet.
+
+`@access.write` sits on a token an assignment writes through a
+reference that is not a variable's (php's `$o->p = v`): the ref at that
+token is a write.
+
 ## Decision: a kind's meaning lives on the kind
 
 What a kind means is a method on its enum, matched exhaustively:

@@ -211,3 +211,14 @@ fn calling_a_local_class_constructs_it() {
         fa.complete_methods_for_class("app.shapes.Widget", None).into_iter().map(|c| c.label).collect();
     assert!(members.iter().any(|m| m == "grow"), "{members:?}");
 }
+
+/// A value inside an assignment's right-hand side is not the variable's:
+/// `w = Widget()[0]` is an element, not a `Widget`. A transparent wrapper
+/// still holds its operand's value.
+#[test]
+fn a_value_inside_the_right_hand_side_is_not_the_variables() {
+    let src = "class Widget:\n    pass\n\nw = Widget()[0]\np = (Widget())\n";
+    let fa = py_in(src, None);
+    assert_eq!(fa.inferred_type_via_bag("w", Point::new(5, 0)), None);
+    assert_eq!(fa.inferred_type_via_bag("p", Point::new(5, 0)), Some(InferredType::ClassName("Widget".to_string())));
+}

@@ -63,7 +63,9 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 id,
                 parent: Some(st.cur_scope),
                 kind: match scope_cap {
-                    ScopeCap::Sub | ScopeCap::SubImplicitReceiver => ScopeKind::Sub { name: String::new() },
+                    ScopeCap::Sub | ScopeCap::SubImplicitReceiver | ScopeCap::SubClosed => {
+                        ScopeKind::Sub { name: String::new() }
+                    }
                     ScopeCap::Block => ScopeKind::Block,
                 },
                 span: e.span(),
@@ -71,6 +73,9 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 owner: None,
                 implicit_receiver: scope_cap == ScopeCap::SubImplicitReceiver,
             });
+            if scope_cap == ScopeCap::SubClosed {
+                st.out.closed_scopes.insert(id);
+            }
             st.scope_stack.push((e.end_byte, id));
             st.out.scope_count += 1;
             // a context deferred to THIS scope (C++ namespace) →
@@ -120,6 +125,9 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 }
                 st.context_stack.push((st.scope_stack.len(), kind, value));
             }
+        }
+        Capture::ClosureCapture => {
+            st.out.captures.insert((st.cur_scope, (pack.shape_name)(&e.text)));
         }
         Capture::Parent => {
             // `@parent` (a base class) pairs with the `@def.class.name`

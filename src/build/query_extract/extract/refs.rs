@@ -10,8 +10,12 @@ pub(super) struct State {
 }
 
 pub(super) fn collect(st: &mut ExtractState, e: &Event) {
-    if e.cap == Capture::RefSpelled {
-        st.refs.spelled_by_match.insert(e.match_id, e.text.clone());
+    match e.cap {
+        Capture::RefSpelled => {
+            st.refs.spelled_by_match.insert(e.match_id, e.text.clone());
+        }
+        Capture::AccessWrite => st.out.write_sites.push(e.span()),
+        _ => {}
     }
 }
 

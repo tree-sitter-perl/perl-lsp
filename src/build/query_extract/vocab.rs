@@ -44,6 +44,11 @@ spelled! {
         Var = "var",
         /// A parameter or block local.
         Local = "local",
+        /// A variable declared by being written (php's `$x = …`): the first
+        /// such def of a name in its callable is the declaration, unless
+        /// something the callable sees already declares the name; every
+        /// other one is a write of that declaration.
+        Assigned = "assigned",
         /// A struct/class data member.
         Field = "field",
         Constant = "constant",
@@ -105,6 +110,10 @@ spelled! {
         Sub = "sub",
         /// A sub body whose bare names may elide the member receiver.
         SubImplicitReceiver = "sub.implicit_receiver",
+        /// A sub body that sees no variable of the scopes around it but the
+        /// ones it captures (`@closure.capture`): php's functions, methods
+        /// and closures.
+        SubClosed = "sub.closed",
     }
 }
 
@@ -153,6 +162,10 @@ spelled! {
     pub enum FlowCap {
         /// The assignment node (pattern anchor).
         Assign = "assign",
+        /// The assignment node of a write that replaces its target's value:
+        /// every target of the match is written at the node's end, where
+        /// everything believed about it before dies.
+        Write = "write",
         Target = "target",
         /// A member of the enclosing class as the target: its value lands
         /// at the class body, where the member's readers look.
@@ -332,12 +345,21 @@ pub enum Capture {
     /// promoted constructor parameter: the property and the local). They
     /// are one declaration, linked each way as `Symbol::declared_with`.
     DefPair,
+    /// The match's def declares in the scope around the one it is written
+    /// in (php's `use (&$x)` creates `$x` in the function around the
+    /// closure).
+    DefHoist,
     Ref(RefCap),
+    /// The token is written, not read: the reference it carries is a write.
+    AccessWrite,
     /// The whole written spelling of the match's reference when its token
     /// is only the leaf (`Base\Model` around `Model`): the reference
     /// resolves by the spelling and rewrites only the leaf.
     RefSpelled,
     Scope(ScopeCap),
+    /// A variable a closure takes from the scope around it (php's
+    /// `use ($x)`): the closure sees that name through its closed boundary.
+    ClosureCapture,
     Context(ContextKind),
     /// A base class, paired with the match's `@def.class.name`.
     Parent,
@@ -418,6 +440,7 @@ impl Capture {
         let segs: Vec<&str> = name.split('.').collect();
         Some(match segs.as_slice() {
             ["def", "pair"] => C::DefPair,
+            ["def", "hoist"] => C::DefHoist,
             ["def", k] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Node },
             ["def", k, "name"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Name },
             ["def", k, "spelled"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Spelled },
@@ -425,6 +448,9 @@ impl Capture {
             ["ref", rest @ ..] => C::Ref(RefCap::parse(&rest.join("."))?),
             ["scope"] => C::Scope(ScopeCap::Block),
             ["scope", "sub", "implicit_receiver"] => C::Scope(ScopeCap::SubImplicitReceiver),
+            ["scope", "sub", "closed"] => C::Scope(ScopeCap::SubClosed),
+            ["closure", "capture"] => C::ClosureCapture,
+            ["access", "write"] => C::AccessWrite,
             ["scope", k] if !k.is_empty() => C::Scope(ScopeCap::parse(k)?),
             ["context", k] => C::Context(ContextKind::parse(k)?),
             ["parent"] => C::Parent,
@@ -491,6 +517,9 @@ impl fmt::Display for Capture {
             C::Def { kind, part: DefPart::Name } => write!(f, "def.{kind}.name"),
             C::Def { kind, part: DefPart::Spelled } => write!(f, "def.{kind}.spelled"),
             C::DefPair => f.write_str("def.pair"),
+            C::DefHoist => f.write_str("def.hoist"),
+            C::AccessWrite => f.write_str("access.write"),
+            C::ClosureCapture => f.write_str("closure.capture"),
             C::Ref(k) => write!(f, "ref.{k}"),
             C::RefSpelled => f.write_str("ref.spelled"),
             C::Scope(k) => family(f, "scope", k.spelling()),
@@ -608,7 +637,9 @@ impl DefCap {
             DefCap::Method | DefCap::Reexport => SymKind::Method,
             DefCap::Field => SymKind::Field,
             DefCap::Enumerator => SymKind::Enumerator,
-            DefCap::Var | DefCap::Local | DefCap::Label | DefCap::UnionField => SymKind::Variable,
+            DefCap::Var | DefCap::Local | DefCap::Assigned | DefCap::Label | DefCap::UnionField => {
+                SymKind::Variable
+            }
         }
     }
 

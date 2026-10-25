@@ -1020,6 +1020,11 @@ fn remap_spans(
         witnesses,
         parents: _,
         var_reads,
+        var_writes,
+        // scope-keyed — no spans to fix.
+        closed_scopes: _,
+        captures: _,
+        write_sites,
         label_refs,
         flow_edges,
         moved_from,
@@ -1095,7 +1100,10 @@ fn remap_spans(
             *sp = rspan(*sp);
         }
     }
-    for (_, _, span) in var_reads.iter_mut() {
+    for (_, _, span) in var_reads.iter_mut().chain(var_writes.iter_mut()) {
+        *span = rspan(*span);
+    }
+    for span in write_sites.iter_mut() {
         *span = rspan(*span);
     }
     // Call-site spans feed the call-value edge (`into_file_analysis`, after

@@ -139,6 +139,19 @@ pub struct SkeletonAnalysis {
     /// to the nearest visible Variable declaration by lexical scope walk →
     /// local goto-def + hover. Resolution runs in `into_file_analysis`.
     pub var_reads: Vec<(String, crate::model::file_analysis::ScopeId, crate::model::file_analysis::Span)>,
+    /// Writes of a variable a def the write can see already declares (a
+    /// `@def.assigned` that is not its name's first): (name, scope, name
+    /// token span). Each resolves like a read and is minted as a write.
+    pub var_writes: Vec<(String, crate::model::file_analysis::ScopeId, crate::model::file_analysis::Span)>,
+    /// Callable bodies that see no variable of the scopes around them but
+    /// the ones they capture (`@scope.sub.closed`).
+    pub closed_scopes: std::collections::HashSet<crate::model::file_analysis::ScopeId>,
+    /// (closure body, name) for each `@closure.capture`: the name the body
+    /// sees through its closed boundary.
+    pub captures: std::collections::HashSet<(crate::model::file_analysis::ScopeId, String)>,
+    /// Tokens the document says are written (`@access.write`): the
+    /// reference at each is a write.
+    pub write_sites: Vec<crate::model::file_analysis::Span>,
     /// `goto LABEL` refs (`@ref.label`): (name, scope, span). Resolve to the
     /// `LABEL:` def (a Variable symbol from `@def.label`) function-wide —
     /// scope-chain walk WITHOUT the declared-before constraint (a forward
@@ -209,6 +222,28 @@ pub struct SkeletonAnalysis {
     /// Callable parameter arities keyed by parameter_list span (`@arity.sig`).
     /// Associated to def symbols by span containment in `into_file_analysis`.
     pub param_sigs: Vec<(crate::model::file_analysis::Span, crate::model::file_analysis::ParamArity)>,
+}
+
+/// The scopes a use of the variable `name` in `from` looks it up in,
+/// innermost first. The chain ends at a closed body (`@scope.sub.closed`)
+/// unless that body captures the name (`@closure.capture`).
+pub fn variable_lookup_chain(
+    scopes: &[crate::model::file_analysis::Scope],
+    closed: &std::collections::HashSet<crate::model::file_analysis::ScopeId>,
+    captures: &std::collections::HashSet<(crate::model::file_analysis::ScopeId, String)>,
+    from: crate::model::file_analysis::ScopeId,
+    name: &str,
+) -> Vec<crate::model::file_analysis::ScopeId> {
+    let mut chain = Vec::new();
+    let mut cur = Some(from);
+    while let Some(sc) = cur {
+        chain.push(sc);
+        if closed.contains(&sc) && !captures.contains(&(sc, name.to_string())) {
+            break;
+        }
+        cur = scopes.get(sc.0 as usize).and_then(|s| s.parent);
+    }
+    chain
 }
 
 /// What a function-like macro's return resolves to (`SkeletonAnalysis::
@@ -1011,16 +1046,19 @@ impl SkeletonAnalysis {
         // goto-def + hover. Declarations are already Variable symbols
         // (`@def.local`/`@def.var`); fields are excluded naturally (their
         // class scope isn't on a local read's scope chain).
+        // A variable a write declares is its callable's from the top of
+        // the body, so a read above its first write (a loop's) reaches it.
         let mut defs_by_name: std::collections::HashMap<
             String,
-            Vec<(crate::model::file_analysis::ScopeId, Span, SymbolId)>,
+            Vec<(crate::model::file_analysis::ScopeId, Span, SymbolId, bool)>,
         > = std::collections::HashMap::new();
         for s in &symbols {
             if matches!(s.kind, SymKind::Variable) {
+                let scope_wide = self.symbols[s.id.0 as usize].kind == DefCap::Assigned;
                 defs_by_name
                     .entry(s.name.clone())
                     .or_default()
-                    .push((s.scope, s.selection_span, s.id));
+                    .push((s.scope, s.selection_span, s.id, scope_wide));
             }
         }
         let scope_parent: std::collections::HashMap<
@@ -1035,28 +1073,54 @@ impl SkeletonAnalysis {
         // resolves the same way a bare call does). rule #7: the token gets a
         // ref whether or not the def is local.
         let mut unresolved_reads: Vec<(String, crate::model::file_analysis::ScopeId, Span)> = Vec::new();
-        for (name, read_scope, read_span) in &self.var_reads {
-            let rp = (read_span.start.row, read_span.start.column);
-            let resolved = defs_by_name.get(name).and_then(|cands| {
-                let mut cur = Some(*read_scope);
-                while let Some(sc) = cur {
-                    // nearest decl of this name in THIS scope level, declared at
-                    // or before the read (latest-wins for redeclaration).
-                    let mut best: Option<((usize, usize), SymbolId)> = None;
-                    for (dscope, dspan, did) in cands {
-                        let dp = (dspan.start.row, dspan.start.column);
-                        if *dscope == sc && dp <= rp && best.is_none_or(|(bp, _)| dp > bp) {
-                            best = Some((dp, *did));
-                        }
+        let resolve_var = |name: &String, scope: crate::model::file_analysis::ScopeId, span: &Span| {
+            let rp = (span.start.row, span.start.column);
+            let cands = defs_by_name.get(name)?;
+            for sc in variable_lookup_chain(&self.scopes, &self.closed_scopes, &self.captures, scope, name) {
+                // nearest decl of this name in THIS scope level, declared at
+                // or before the use (latest-wins for redeclaration).
+                let mut best: Option<((usize, usize), SymbolId)> = None;
+                for (dscope, dspan, did, scope_wide) in cands {
+                    let dp = (dspan.start.row, dspan.start.column);
+                    if *dscope == sc && (dp <= rp || *scope_wide) && best.is_none_or(|(bp, _)| dp > bp) {
+                        best = Some((dp, *did));
                     }
-                    if let Some((_, did)) = best {
-                        return Some(did);
-                    }
-                    cur = scope_parent.get(&sc).copied().flatten();
                 }
-                None
+                if let Some((_, did)) = best {
+                    return Some(did);
+                }
+            }
+            None
+        };
+        // A token an assignment writes is that write, not a read of it.
+        let written: std::collections::HashSet<(Point, Point)> = self
+            .var_writes
+            .iter()
+            .map(|(_, _, sp)| (sp.start, sp.end))
+            .chain(
+                self.symbols
+                    .iter()
+                    .filter(|s| s.kind == DefCap::Assigned)
+                    .map(|s| (s.name_start, s.name_end)),
+            )
+            .collect();
+        for (name, write_scope, write_span) in &self.var_writes {
+            local_refs.push(crate::model::file_analysis::Ref {
+                kind: crate::model::file_analysis::RefKind::Variable,
+                span: *write_span,
+                scope: *write_scope,
+                target_name: name.clone(),
+                access: crate::model::file_analysis::AccessKind::Write,
+                binding: resolve_var(name, *write_scope, write_span).map(crate::model::file_analysis::RefBinding::Symbol),
+                folded_from: None,
+                arg_count: None,
             });
-            match resolved {
+        }
+        for (name, read_scope, read_span) in &self.var_reads {
+            if written.contains(&(read_span.start, read_span.end)) {
+                continue;
+            }
+            match resolve_var(name, *read_scope, read_span) {
                 Some(did) => local_refs.push(crate::model::file_analysis::Ref {
                     kind: crate::model::file_analysis::RefKind::Variable,
                     span: *read_span,
@@ -1078,7 +1142,7 @@ impl SkeletonAnalysis {
             let mut cur = Some(*ref_scope);
             let mut resolved: Option<SymbolId> = None;
             while let Some(sc) = cur {
-                if let Some((_, _, did)) = cands.iter().find(|(dscope, _, _)| *dscope == sc) {
+                if let Some((_, _, did, _)) = cands.iter().find(|(dscope, ..)| *dscope == sc) {
                     resolved = Some(*did);
                     break;
                 }
@@ -1112,6 +1176,8 @@ impl SkeletonAnalysis {
                 )
             })
             .collect();
+        let write_sites: std::collections::HashSet<(Point, Point)> =
+            self.write_sites.iter().map(|sp| (sp.start, sp.end)).collect();
         let mut refs: Vec<crate::model::file_analysis::Ref> = self
             .refs
             .iter()
@@ -1194,12 +1260,16 @@ impl SkeletonAnalysis {
                     | RefCap::Var
                     | RefCap::Key => return None,
                 };
+                let access = match write_sites.contains(&(r.start, r.end)) {
+                    true => crate::model::file_analysis::AccessKind::Write,
+                    false => crate::model::file_analysis::AccessKind::Read,
+                };
                 Some(crate::model::file_analysis::Ref {
                     kind,
                     span,
                     scope: r.scope,
                     target_name: r.name.clone(),
-                    access: crate::model::file_analysis::AccessKind::Read,
+                    access,
                     binding,
                     folded_from: None,
                     arg_count: r.arg_count,

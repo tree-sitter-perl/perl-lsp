@@ -69,9 +69,10 @@ enum Family {
 fn family(cap: Capture) -> Family {
     use Capture as C;
     match cap {
-        C::Scope(_) | C::Context(_) | C::Parent => Family::Scopes,
+        C::Scope(_) | C::ClosureCapture | C::Context(_) | C::Parent => Family::Scopes,
         C::Def { .. }
         | C::DefPair
+        | C::DefHoist
         | C::Qualifier
         | C::OolDef
         | C::NestedTarget
@@ -85,7 +86,7 @@ fn family(cap: Capture) -> Family {
         | C::Tmpl(_)
         | C::ParamReceiver
         | C::Mark(_) => Family::Defs,
-        C::Ref(_) | C::RefSpelled => Family::Refs,
+        C::Ref(_) | C::RefSpelled | C::AccessWrite => Family::Refs,
         C::Member(_) | C::MemberOp(_) | C::Arity(_) => Family::Members,
         C::Flow(_)
         | C::Expr(_)
@@ -342,6 +343,7 @@ pub fn extract_in(
             Capture::Member(MemberCap::Recv) => {
                 members::flatten_recv(&mut st.members, node, pack, source, match_id, &mut events)
             }
+            Capture::Flow(FlowCap::Source) => flow::flatten_source(&mut st.flow, node, pack, source, match_id, &mut events),
             Capture::Arity(ArityCap::Args) => members::open_args(&mut st.members, match_id),
             Capture::Arity(ArityCap::Arg) => members::record_arg(&mut st.members, node, match_id),
             Capture::Arity(ArityCap::Sig) => members::count_params(&mut st.members, node),
@@ -414,10 +416,12 @@ pub fn extract_in(
     // A return type likewise.
     defs::resolve_returns(&mut st);
     defs::dedup(&mut st);
+    // Reads the deduped defs; the flow lane reads the writes it finds.
+    defs::unify_assigned(&mut st);
     commands::finish(&mut st);
     defs::emit_type_aliases(&mut st);
     // Reads the symbol table after dedup and the command defs.
-    flow::finish(&mut st, &events);
+    flow::finish(&mut st);
     // The narrowing cutoff reads the flow edges.
     narrowing::finish(&mut st);
     members::finish(&mut st);

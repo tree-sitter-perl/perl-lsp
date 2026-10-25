@@ -154,7 +154,7 @@ pub(super) fn finish(st: &mut ExtractState) {
 /// Drop transparent receiver wrappers (`(*p)` → `p`) through each one's
 /// first named child; the node itself when it is not a wrapper, or when a
 /// wrapper has no named child.
-fn peel_receiver<'a>(node: tree_sitter::Node<'a>, wrappers: &[&str]) -> tree_sitter::Node<'a> {
+pub(super) fn peel_receiver<'a>(node: tree_sitter::Node<'a>, wrappers: &[&str]) -> tree_sitter::Node<'a> {
     let mut inner = node;
     for _ in 0..32 {
         if !wrappers.contains(&inner.kind()) {
