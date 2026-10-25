@@ -368,11 +368,19 @@ pub struct CallBinding {
 pub struct KeyWrite {
     pub var_text: String,
     pub key: WriteKey,
+    /// The hops below `key` a nested write lands through, outward:
+    /// `$v->{a}{b}{c} = …` is `key: a`, `path: [b, c]`.
+    #[serde(default)]
+    pub path: Vec<WriteKey>,
     pub scope: ScopeId,
     /// Key-node span — temporal anchor and per-var ordering.
     pub span: Span,
     /// RHS expression span — types the extended key's value.
     pub rhs_span: Option<Span>,
+    /// A list-assignment slot (`($v->{k}, $x) = f()`): the value is element
+    /// N of the RHS, not the RHS itself.
+    #[serde(default)]
+    pub rhs_slot: Option<i32>,
     /// Syntactically conditional within its sub (if/postfix/ternary/
     /// loop/short-circuit). Scope-crossing writes (nested block or
     /// closure relative to the decl scope) are detected in the pass.
