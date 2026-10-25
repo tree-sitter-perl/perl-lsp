@@ -1,18 +1,21 @@
 //! PHP's pack.
 
 use crate::build::query_extract::*;
-use crate::model::file_analysis::{ClassSpelling, InferredType, NameSpellings};
+use crate::model::file_analysis::{ClassCall, ClassSpelling, InferredType, NameSpellings};
 
 pub fn php_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/php/skeleton.scm"),
         // `\` qualifies, `$` leads every variable, and a written class
         // spelling names the class the file's `use` rows and namespace say
-        // it does (`Collection` after `use A\B\Collection;`).
+        // it does (`Collection` after `use A\B\Collection;`). `Foo()` calls
+        // a function even where a class `Foo` is in scope: construction is
+        // `new Foo`.
         names: NameSpellings {
             namespace_sep: Some(std::borrow::Cow::Borrowed("\\")),
             sigils: std::borrow::Cow::Borrowed(&['$']),
             class_spelling: ClassSpelling::UseMap,
+            class_call: ClassCall::FunctionCall,
             ..NameSpellings::NONE
         },
         shape_name: |raw| raw.to_string(),

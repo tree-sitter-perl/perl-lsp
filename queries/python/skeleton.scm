@@ -2,10 +2,14 @@
 ; engine. ~40 lines for outline + lexical typing through the
 ; production witness bag.
 
-; A class is filed under its module's namespace; its body's members file
-; under the class's identity.
+; A class is filed under the namespace in force where it is written — its
+; module's, or the class body it sits directly in (`pkg.mod.Outer.Inner`);
+; its body's members file under the class's identity. The body is a
+; namespace of its own for the code written directly in it: a name the
+; class declares resolves there first, and a method sees past it.
 (class_definition
-  name: (identifier) @def.class.name @context.class) @def.class @scope
+  name: (identifier) @def.class.name @context.class
+  body: (block) @section.class) @def.class @scope
 
 ; inheritance: `class Dog(Animal):` → Dog parent Animal (one @parent per
 ; base; member completion + method resolution walk the ancestors). The

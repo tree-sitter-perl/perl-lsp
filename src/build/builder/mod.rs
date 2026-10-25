@@ -431,17 +431,14 @@ struct Builder<'a> {
     next_scope_id: u32,
     next_symbol_id: u32,
 
-    /// Flat record of `package`/`class` declarations and the byte
-    /// ranges they govern. Independent of the lexical scope tree —
-    /// `package Foo;` is not a lexical boundary in Perl. For
-    /// statement-form declarations the end is initially seeded with
-    /// the file end and gets trimmed when a same-level successor
-    /// appears.
-    package_ranges: Vec<crate::model::file_analysis::PackageRange>,
-    /// Index in `package_ranges` of the currently-open statement-form
-    /// declaration (the one a successor `package X;` / `class X;`
-    /// would supplant), if any.
-    open_statement_package: Option<usize>,
+    /// The namespace lane (`FileAnalysis::namespace_ranges`) as the walk
+    /// writes it.
+    namespace_ranges: Vec<crate::model::file_analysis::NamespaceRange>,
+    /// The statement-form `package X;` / `class X;` sections still running.
+    open_sections: crate::model::file_analysis::OpenSections,
+    /// The end of each `{ … }` block enclosing the walk: the regions a
+    /// statement-form package is bounded by.
+    package_regions: Vec<Point>,
 
     /// Framework plugin registry. Shared Arc so multiple builders in one
     /// process avoid re-compiling the same Rhai scripts.

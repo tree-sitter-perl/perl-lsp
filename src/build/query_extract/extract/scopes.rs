@@ -2,7 +2,7 @@
 //! container context, and the inheritance edges declared with a class.
 
 use super::*;
-use crate::model::file_analysis::{PackageKind, PackageRange};
+use crate::model::file_analysis::{OpenSections, SectionKind};
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -15,30 +15,35 @@ pub(super) struct State {
     scope_start_by_match: HashMap<usize, usize>,
     pending_context: HashMap<usize, (ContextKind, String)>,
     /// Parent edges whose parent is still the written spelling: its index
-    /// in `out.parents`, the namespace in force where it was written, and
-    /// where. Resolved through the use-map once every import row is in.
-    written_parents: Vec<(usize, Option<String>, Point)>,
-    /// Statement-form namespace sections still running, by the depth they
-    /// were declared at: the next one at that depth ends them.
-    open_sections: Vec<(usize, usize)>,
+    /// in `out.parents` and where it was written. Resolved through the
+    /// use-map once every import row and class is in.
+    written_parents: Vec<(usize, Point)>,
+    /// The identity each match's `@context.class` minted, for the
+    /// `@section.class` body the same match names.
+    class_by_match: HashMap<usize, String>,
+    /// Statement-form namespace sections still running, by the scope
+    /// depth they were declared at.
+    open_sections: OpenSections,
 }
 
-/// Record a namespace section under a use-map: a braced one is its body,
-/// a statement-form one runs to the end of the enclosing scope until the
-/// next one at its depth cuts it short.
-fn open_section(st: &mut ExtractState, namespace: &str, span: Span, kind: PackageKind) {
+/// Record a namespace section under a use-map: a braced one (and a class
+/// body or a callable in one) is its body, a statement-form one runs to the
+/// end of the enclosing scope until the next one at its depth cuts it
+/// short.
+fn open_section(st: &mut ExtractState, namespace: &str, span: Span, kind: SectionKind) {
     if st.pack.names.use_map_sep().is_none() {
         return;
     }
-    let depth = st.scope_stack.len();
-    if kind == PackageKind::Statement {
-        while st.scopes.open_sections.last().is_some_and(|&(d, _)| d >= depth) {
-            let (_, i) = st.scopes.open_sections.pop().unwrap();
-            st.out.namespace_sections[i].span.end = span.start;
+    let lane = &mut st.out.namespace_ranges;
+    match kind {
+        SectionKind::Statement => {
+            let depth = st.scope_stack.len();
+            st.scopes.open_sections.open_statement(lane, namespace.to_string(), span.start, span.end, depth);
         }
-        st.scopes.open_sections.push((depth, st.out.namespace_sections.len()));
+        SectionKind::Block | SectionKind::ClassBody | SectionKind::Callable => {
+            OpenSections::push_section(lane, namespace.to_string(), span, kind)
+        }
     }
-    st.out.namespace_sections.push(PackageRange { package: namespace.to_string(), span, kind });
 }
 
 pub(super) fn collect(st: &mut ExtractState, e: &Event) {
@@ -78,6 +83,18 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             }
             st.scope_stack.push((e.end_byte, id));
             st.out.scope_count += 1;
+            // A callable written in a class body sees past the class: the
+            // namespace around it is in force over the callable.
+            if scope_cap != ScopeCap::Block {
+                let lane = &st.out.namespace_ranges;
+                let in_class_body = crate::model::file_analysis::namespace_range_at(lane, e.start)
+                    .is_some_and(|r| r.kind == SectionKind::ClassBody);
+                if in_class_body {
+                    let around = crate::model::file_analysis::namespace_range_around(lane, e.start)
+                        .map_or(String::new(), |r| r.namespace.clone());
+                    open_section(st, &around, e.span(), SectionKind::Callable);
+                }
+            }
             // a context deferred to THIS scope (C++ namespace) →
             // register at the body depth so it pops with the block.
             if let Some((kind, text)) = st.scopes.pending_context.remove(&e.match_id) {
@@ -85,7 +102,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                     st.context_stack.pop();
                 }
                 if kind == ContextKind::Namespace {
-                    open_section(st, &text, e.span(), PackageKind::Block);
+                    open_section(st, &text, e.span(), SectionKind::Block);
                 }
                 st.context_stack.push((st.scope_stack.len(), kind, text));
             }
@@ -99,7 +116,10 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             let text = (pack.shape_name)(st.defs.anchored_name(e.match_id).unwrap_or(&e.text));
             // A class body's members file under the class's identity.
             let identity = (kind == ContextKind::Class && pack.names.use_map_sep().is_some())
-                .then(|| st.class_identity(&text));
+                .then(|| st.class_identity(&text, e.start));
+            if let Some(identity) = &identity {
+                st.scopes.class_by_match.insert(e.match_id, identity.clone());
+            }
             // If this match's `@scope` starts AFTER this context, the
             // context belongs to that (not-yet-pushed) body — defer it
             // so it registers at the body depth and pops with the block.
@@ -115,7 +135,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                     .unwrap_or_else(|| st.defs.anchored_name(e.match_id).unwrap_or(&e.text).to_string());
                 if kind == ContextKind::Namespace {
                     let end = st.out.scopes[st.cur_scope.0 as usize].span.end;
-                    open_section(st, &value, Span { start: e.span().start, end }, PackageKind::Statement);
+                    open_section(st, &value, Span { start: e.span().start, end }, SectionKind::Statement);
                 }
                 // A scope opened by this same match is the container the
                 // context names (php's class node), so a point anywhere in
@@ -131,19 +151,23 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         Capture::ClosureCapture => {
             st.out.captures.insert((st.cur_scope, (pack.shape_name)(&e.text)));
         }
+        Capture::ClassSection => {
+            if let Some(class) = st.scopes.class_by_match.get(&e.match_id).cloned() {
+                open_section(st, &class, e.span(), SectionKind::ClassBody);
+            }
+        }
         Capture::Parent => {
             // `@parent` (a base class) pairs with the `@def.class.name`
             // in the same match — record the inheritance edge.
-            if let Some(child) = st.defs.name_of(e.match_id, DefCap::Class) {
+            if let Some((child, at)) = st.defs.name_of(e.match_id, DefCap::Class) {
                 // Shaped like the child's def name (cpp canonicalizes a
                 // template-spelled base) so the edge joins the identity
                 // the target class was filed under. The parent pattern is a
                 // match of its own, so the child's identity is minted here
                 // the way the def handler mints it.
-                let edge = (st.class_identity(child), (pack.shape_name)(&e.text));
+                let edge = (st.class_identity(child, at), (pack.shape_name)(&e.text));
                 if pack.names.use_map_sep().is_some() {
-                    let ns = st.namespace().map(str::to_string);
-                    st.scopes.written_parents.push((st.out.parents.len(), ns, e.span().start));
+                    st.scopes.written_parents.push((st.out.parents.len(), e.span().start));
                 }
                 st.out.parents.push(edge);
             }
@@ -153,18 +177,20 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
 }
 
 /// Resolve each written parent spelling to the identity it names, through
-/// the file's use-map at the namespace it was written in: `extends Model`
-/// after `use Illuminate\Database\Eloquent\Model;` is that class, an
-/// unimported leaf is the namespace's own.
+/// the file's use-map where it was written: `extends Model` after `use
+/// Illuminate\Database\Eloquent\Model;` is that class, an unimported leaf
+/// is the namespace's own, a sibling the enclosing class body declares is
+/// that nested class. Runs after every class is minted.
 pub(super) fn resolve_parents(st: &mut ExtractState) {
-    let Some(sep) = st.pack.names.use_map_sep() else { return };
-    for (i, ns, site) in std::mem::take(&mut st.scopes.written_parents) {
-        let map = crate::model::file_analysis::UseMap {
-            rows: &st.out.use_rows,
-            own_namespace: ns.as_deref(),
-            sep,
-            site: Some(site),
-        };
-        st.out.parents[i].1 = map.resolve(&st.out.parents[i].1).identity(sep);
+    let out = &st.out;
+    let resolved: Vec<(usize, String)> = std::mem::take(&mut st.scopes.written_parents)
+        .into_iter()
+        .filter_map(|(i, site)| {
+            let map = crate::model::file_analysis::UseMap::at(&out.use_rows, &out.namespace_ranges, &st.pack.names, site, &out.symbols)?;
+            Some((i, map.resolve(&out.parents[i].1).identity(map.sep)))
+        })
+        .collect();
+    for (i, parent) in resolved {
+        st.out.parents[i].1 = parent;
     }
 }

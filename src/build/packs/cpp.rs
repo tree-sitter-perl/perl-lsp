@@ -1,14 +1,19 @@
 //! C/C++'s pack.
 
 use crate::build::query_extract::*;
-use crate::model::file_analysis::{InferredType, MemberNamespace, NameSpellings};
+use crate::model::file_analysis::{ClassCall, InferredType, MemberNamespace, NameSpellings};
 
 pub fn cpp_pack() -> LangPack {
     LangPack {
         query_source: include_str!("../../../queries/cpp/skeleton.scm"),
         // One member namespace: the nearest declaration of a name wins,
-        // whether it is a data member or a member function.
-        names: NameSpellings { member_namespace: MemberNamespace::Shared, ..NameSpellings::with_separator("::") },
+        // whether it is a data member or a member function. Calling a class
+        // constructs it (a functional cast, `Foo(x)`).
+        names: NameSpellings {
+            member_namespace: MemberNamespace::Shared,
+            class_call: ClassCall::Constructs,
+            ..NameSpellings::with_separator("::")
+        },
         // Template spellings get ONE canonical whitespace form so a
         // specialization's identity (`formatter<int, char>`) matches
         // however the source wrapped it. Identity for every non-template

@@ -2,7 +2,7 @@
 
 use crate::build::query_extract::*;
 use crate::model::file_analysis::{
-    ClassSpelling, ImportPrefix, ImportReach, ImportRule, InferredType, MemberNamespace, NameSpellings,
+    ClassCall, ClassSpelling, ImportPrefix, ImportReach, ImportRule, InferredType, MemberNamespace, NameSpellings,
 };
 use std::path::Path;
 
@@ -13,13 +13,15 @@ pub fn python_pack() -> LangPack {
         // and its own module say it does (`User` after `from pkg.models
         // import User`). An import is a statement that runs, so it binds
         // from where it is written; a leading `.` climbs from the file's
-        // package. One member namespace: the nearest declaration of a name
-        // wins, whether it is a data member or a member function.
+        // package. Calling a class constructs it. One member namespace: the
+        // nearest declaration of a name wins, whether it is a data member
+        // or a member function.
         names: NameSpellings {
             namespace_sep: Some(std::borrow::Cow::Borrowed(".")),
             class_spelling: ClassSpelling::UseMap,
             member_namespace: MemberNamespace::Shared,
             imports: ImportRule { reach: ImportReach::FromImport, prefix: ImportPrefix::PackageRelative },
+            class_call: ClassCall::Constructs,
             ..NameSpellings::NONE
         },
         shape_name: |raw| raw.to_string(),

@@ -17,7 +17,7 @@
 //! Rows and answers are (namespace, leaf) parts: the only strings split
 //! here are written spellings, never an identity this code joined.
 
-use super::{contains_point, NameSpellings, PackageRange, Span};
+use super::{contains_point, namespace_range_around, namespace_range_at, NameSpellings, NamespaceRange, SectionKind, Span};
 use crate::model::conventions::join_qualified as join;
 use serde::{Deserialize, Serialize};
 use tree_sitter::Point;
@@ -63,11 +63,31 @@ impl UseRow {
     }
 }
 
-/// The namespace section in force at `site`: the innermost
-/// (latest-starting) one containing it, `None` outside every section (the
-/// global namespace).
-pub fn section_at(sections: &[PackageRange], site: Point) -> Option<&PackageRange> {
-    sections.iter().filter(|s| contains_point(&s.span, site)).max_by_key(|s| s.span.start)
+/// The classes a file declares, asked by identity — what the class-body
+/// step of a resolution reads.
+pub trait DeclaredClasses {
+    fn declares_class(&self, identity: &str) -> bool;
+}
+
+impl DeclaredClasses for Vec<super::Symbol> {
+    fn declares_class(&self, identity: &str) -> bool {
+        self.iter().any(|s| matches!(s.kind, super::SymKind::Package | super::SymKind::Class) && s.name == identity)
+    }
+}
+
+/// The class body a site is written directly in (`SectionKind::ClassBody`)
+/// and the file's classes: a bare head the class declares names its nested
+/// class before anything else binds it.
+#[derive(Clone, Copy)]
+pub struct ClassBodyStep<'a> {
+    pub class: &'a str,
+    pub classes: &'a dyn DeclaredClasses,
+}
+
+impl std::fmt::Debug for ClassBodyStep<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ClassBodyStep").field(&self.class).finish()
+    }
 }
 
 /// One file's name-resolution context for class spellings, as seen from
@@ -76,7 +96,9 @@ pub fn section_at(sections: &[PackageRange], site: Point) -> Option<&PackageRang
 pub struct UseMap<'a> {
     /// The file's `use` rows (`PackFacts::use_rows`).
     pub rows: &'a [UseRow],
-    /// The namespace in force at the site.
+    /// The class body the site is written directly in, consulted first.
+    pub class_body: Option<ClassBodyStep<'a>>,
+    /// The namespace in force at the site, past any class body.
     pub own_namespace: Option<&'a str>,
     /// The namespace separator the spellings use (`PackFacts::names`).
     pub sep: &'a str,
@@ -88,13 +110,27 @@ pub struct UseMap<'a> {
 
 impl<'a> UseMap<'a> {
     /// The map a spelling written at `site` resolves through: the rows
-    /// that reach it, the section in force there. `None` for a language
-    /// whose spellings are identities as written.
-    pub fn at(rows: &'a [UseRow], sections: &'a [PackageRange], names: &'a NameSpellings, site: Point) -> Option<Self> {
+    /// that reach it, the section in force there — a class body the site is
+    /// written directly in, then the section around it. `None` for a
+    /// language whose spellings are identities as written.
+    pub fn at(
+        rows: &'a [UseRow],
+        sections: &'a [NamespaceRange],
+        names: &'a NameSpellings,
+        site: Point,
+        classes: &'a dyn DeclaredClasses,
+    ) -> Option<Self> {
+        let sep = names.use_map_sep()?;
+        let class_body = namespace_range_at(sections, site)
+            .filter(|s| s.kind == SectionKind::ClassBody)
+            .map(|s| ClassBodyStep { class: s.namespace.as_str(), classes });
         Some(UseMap {
             rows,
-            own_namespace: section_at(sections, site).map(|s| s.package.as_str()),
-            sep: names.use_map_sep()?,
+            class_body,
+            own_namespace: namespace_range_around(sections, site)
+                .map(|s| s.namespace.as_str())
+                .filter(|ns| !ns.is_empty()),
+            sep,
             site: Some(site),
         })
     }
@@ -134,11 +170,19 @@ impl<'a> UseMap<'a> {
         QualifiedName { namespace, leaf: leaf.to_string() }
     }
 
-    /// The class a single bare segment names: an alias first, then an
-    /// unaliased row's leaf — a row bound under an alias binds the alias,
-    /// never its leaf (`use A\Event as ScriptEvent` leaves `Event` to the
-    /// file's own namespace) — then the file's own namespace.
+    /// The class a single bare segment names: a class the enclosing class
+    /// body declares first (`Inner` in `class Outer:`'s body is
+    /// `Outer.Inner`), then an alias, then an unaliased row's leaf — a row
+    /// bound under an alias binds the alias, never its leaf (`use A\Event
+    /// as ScriptEvent` leaves `Event` to the file's own namespace) — then
+    /// the file's own namespace.
     fn bind(&self, head: &str) -> QualifiedName {
+        if let Some(body) = self.class_body {
+            let nested = QualifiedName::new(body.class, head);
+            if body.classes.declares_class(&nested.identity(self.sep)) {
+                return nested;
+            }
+        }
         let rows = || self.rows.iter().filter(|r| self.site.is_none_or(|p| r.binds_at(p)));
         rows()
             .find(|r| r.alias.as_deref() == Some(head))

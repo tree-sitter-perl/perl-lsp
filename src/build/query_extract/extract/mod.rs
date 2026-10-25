@@ -69,7 +69,7 @@ enum Family {
 fn family(cap: Capture) -> Family {
     use Capture as C;
     match cap {
-        C::Scope(_) | C::ClosureCapture | C::Context(_) | C::Parent => Family::Scopes,
+        C::Scope(_) | C::ClosureCapture | C::Context(_) | C::ClassSection | C::Parent => Family::Scopes,
         C::Def { .. }
         | C::DefPair
         | C::DefHoist
@@ -130,10 +130,9 @@ struct ExtractState<'p> {
     commands: commands::State,
     imports: imports::State,
     /// The module the file IS, when its language names it by path and the
-    /// driver had one, and that module's dotted name: the namespace every
-    /// declaration without a namespace context of its own joins.
+    /// driver had one: its dotted name is the section every declaration
+    /// without a namespace of its own joins.
     file_module: Option<&'p FileModule>,
-    file_namespace: Option<String>,
     /// The constructor's name, as the document spells it.
     constructor: Option<&'static str>,
 }
@@ -161,15 +160,14 @@ impl FileModule {
 }
 
 impl ExtractState<'_> {
-    /// The innermost namespace context in force at the current event, else
-    /// the file's own module.
-    fn namespace(&self) -> Option<&str> {
-        self.context_stack
-            .iter()
-            .rev()
-            .find(|(_, kind, _)| *kind == ContextKind::Namespace)
-            .map(|(.., ns)| ns.as_str())
-            .or(self.file_namespace.as_deref())
+    /// The namespace a declaration at `at` joins: the section of the lane
+    /// in force there, as written so far. Every section that holds `at` is
+    /// in by then — a section opens at or before the code it covers, and
+    /// a statement form is cut short only where its successor starts.
+    fn namespace_at(&self, at: Point) -> Option<&str> {
+        crate::model::file_analysis::namespace_range_at(&self.out.namespace_ranges, at)
+            .map(|r| r.namespace.as_str())
+            .filter(|ns| !ns.is_empty())
     }
 
     /// The scope a class member declared at the current event belongs to:
@@ -183,16 +181,15 @@ impl ExtractState<'_> {
             .unwrap_or(self.cur_scope)
     }
 
-    /// The identity a class named `leaf` and declared at the current event
-    /// is filed under. Under a use-map it is the leaf joined to the
-    /// namespace in force, whatever container the class is written in, so
-    /// every spelling of the class resolves to the key it is filed under.
-    /// Otherwise the spelling is the identity.
-    fn class_identity(&self, leaf: &str) -> String {
+    /// The identity a class named `leaf` and declared at `at` is filed
+    /// under. Under a use-map it is the leaf joined to the namespace in
+    /// force there — a namespace section, or the class body it is written
+    /// directly in (`Outer.Inner`) — so every spelling of the class
+    /// resolves to the key it is filed under. Otherwise the spelling is
+    /// the identity.
+    fn class_identity(&self, leaf: &str, at: Point) -> String {
         match self.pack.names.use_map_sep() {
-            Some(sep) => {
-                crate::model::conventions::join_qualified(self.namespace().unwrap_or(""), leaf, sep)
-            }
+            Some(sep) => crate::model::conventions::join_qualified(self.namespace_at(at).unwrap_or(""), leaf, sep),
             None => leaf.to_string(),
         }
     }
@@ -200,10 +197,10 @@ impl ExtractState<'_> {
 
 /// A written type as the identities it names at `site`: under a use-map
 /// every class spelling it carries resolves through the rows that reach
-/// the site and the namespace in force there. Runs once every row and
-/// section is in.
+/// the site and the namespace in force there. Runs once every row,
+/// section and class is in.
 fn written_type_at(out: &SkeletonAnalysis, names: &crate::model::file_analysis::NameSpellings, t: InferredType, site: Point) -> InferredType {
-    match crate::model::file_analysis::UseMap::at(&out.use_rows, &out.namespace_sections, names, site) {
+    match crate::model::file_analysis::UseMap::at(&out.use_rows, &out.namespace_ranges, names, site, &out.symbols) {
         Some(map) => t.map_class_names(&mut |c| map.resolve(c).identity(map.sep)),
         None => t,
     }
@@ -317,18 +314,16 @@ pub fn extract_in(
         commands: Default::default(),
         imports: Default::default(),
         file_module,
-        file_namespace: None,
         constructor: compiled.constructor,
     };
     // A module named by its path is one section, the whole file.
     if let (Some(m), Some(sep)) = (file_module, pack.names.use_map_sep()) {
         let ns = m.segments.iter().fold(String::new(), |ns, seg| crate::model::conventions::join_qualified(&ns, seg, sep));
-        st.out.namespace_sections.push(crate::model::file_analysis::PackageRange {
-            package: ns.clone(),
+        st.out.namespace_ranges.push(crate::model::file_analysis::NamespaceRange {
+            namespace: ns,
             span: st.out.scopes[0].span,
-            kind: crate::model::file_analysis::PackageKind::Statement,
+            kind: crate::model::file_analysis::SectionKind::Statement,
         });
-        st.file_namespace = Some(ns);
     }
 
     // ---- flatten matches into ordered events ----
