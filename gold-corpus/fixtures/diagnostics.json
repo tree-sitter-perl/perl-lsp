@@ -33,8 +33,8 @@
           "\"file\":\"SSLeay.pm\",\"line\":\"1023\""
         ]
       },
-      "status": "xfail",
-      "note": "XS-bootstrapped sub at SSLeay.pm:1023 is flagged unresolved-function ('bootstrap'); should be suppressed."
+      "status": "gold",
+      "note": "`bootstrap Net::SSLeay $VERSION` is an indirect-object method call (Net::SSLeay->bootstrap, inherited from DynaLoader), not an unresolved function."
     },
     {
       "id": "diag-09",
@@ -122,8 +122,8 @@
           "\"file\":\"CookieJar.pm\",\"line\":\"169\""
         ]
       },
-      "status": "xfail",
-      "note": "GAP: sub _compare { my ($cookie,...)=@_ } is a plain helper in an OO class; $cookie is a Mojo::Cookie, but first-param-self types it as the jar -> false unresolved-method on path/name/domain. The OO-class first-param-self over-reach (vs the -strict case) is unfixed. XPASSes only on a cache whose ref-rows migration silently failed (bag-evicted sweep copies drop the invocant type, hiding the FP) — a healthy store still shows the diagnostic."
+      "status": "gold",
+      "note": "sub _compare { my ($cookie,...)=@_ } is called as a plain function (_compare($_, ...) at line 32), so $cookie takes no invocant type and the jar-typed unresolved-method FP on path/name/domain is gone."
     },
     {
       "id": "diag-mojo-daemon-callback-fp",
