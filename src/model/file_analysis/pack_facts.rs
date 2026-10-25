@@ -122,8 +122,8 @@ pub struct PackFacts {
     /// Raw domain-typing sites: each `slot`-field access that interacts
     /// with a `value` token (`slot == V`, `slot = V`) at `slot_span`. The
     /// value's enum is resolved cross-file at query time (an enumerator
-    /// carries its `enum`), then the sites fold onto the language-generic
-    /// `Field{owner, name}` subject via `DomainCoherenceFold`. Stored raw
+    /// carries its `enum`), then the sites are tallied per owner across
+    /// files (the engine's `DomainVote`). Stored raw
     /// (not pre-resolved) because both the slot owner AND the value's enum
     /// are cross-file for the perl5 `op_type`/`opcode` case — resolution
     /// belongs where the module index is in hand.

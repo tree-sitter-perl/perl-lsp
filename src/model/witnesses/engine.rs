@@ -112,6 +112,24 @@ pub enum EngineKey {
     Providers(WitnessAttachment),
     /// One candidate file's answer to a cross-file query.
     Consult(ConsultKey),
+    /// The enums a storage slot is compared against, tallied over every
+    /// file that mentions the slot's name.
+    DomainVote { owner: String, field: String },
+    /// One file's part of a `DomainVote`.
+    DomainSites { owner: String, field: String, file: PathBuf },
+}
+
+/// Site counts per enum (`None`: a site whose value is no enumerator),
+/// sorted by enum so equal tallies hash alike.
+pub type DomainTally = Vec<(Option<String>, u32)>;
+
+/// `a` and `b` added up.
+pub fn add_tallies(a: &DomainTally, b: &DomainTally) -> DomainTally {
+    let mut m: std::collections::BTreeMap<Option<String>, u32> = a.iter().cloned().collect();
+    for (k, n) in b {
+        *m.entry(k.clone()).or_default() += n;
+    }
+    m.into_iter().collect()
 }
 
 /// What a chase asks of one candidate file: the query, point-free (a
@@ -136,6 +154,8 @@ pub enum EngineValue {
     /// A caller file whose own call sites disagree: the join it feeds has
     /// no answer, whatever the other files say.
     Disagree,
+    /// A domain vote's site counts (`DomainVote`, `DomainSites`).
+    Tally(DomainTally),
 }
 
 impl EngineValue {
@@ -145,7 +165,7 @@ impl EngineValue {
     pub fn reduced(self) -> ReducedValue {
         match self {
             EngineValue::Value(v) => v,
-            EngineValue::Disagree => ReducedValue::None,
+            EngineValue::Disagree | EngineValue::Tally(_) => ReducedValue::None,
         }
     }
 
@@ -157,6 +177,7 @@ impl EngineValue {
             EngineValue::Value(ReducedValue::None) => Some(PersistedValue::Nothing),
             EngineValue::Value(ReducedValue::FactMap(_)) => None,
             EngineValue::Disagree => Some(PersistedValue::Disagree),
+            EngineValue::Tally(t) => Some(PersistedValue::Tally(t.clone())),
         }
     }
 }
@@ -166,6 +187,7 @@ enum PersistedValue {
     Nothing,
     Type(InferredType),
     Disagree,
+    Tally(DomainTally),
 }
 
 impl PersistedValue {
@@ -174,6 +196,7 @@ impl PersistedValue {
             PersistedValue::Nothing => EngineValue::NOTHING,
             PersistedValue::Type(t) => EngineValue::Value(ReducedValue::Type(t)),
             PersistedValue::Disagree => EngineValue::Disagree,
+            PersistedValue::Tally(t) => EngineValue::Tally(t),
         }
     }
 }
@@ -297,6 +320,7 @@ fn entry_bytes(key: &EngineKey, e: &Entry) -> usize {
             // A fact map is the size of its debug rendering, near enough.
             EngineValue::Value(ReducedValue::FactMap(m)) => format!("{m:?}").len(),
             EngineValue::Value(ReducedValue::None) | EngineValue::Disagree => 0,
+            EngineValue::Tally(t) => bincode::serialized_size(t).unwrap_or(0) as usize,
         }
         + e.deps
             .iter()
@@ -790,7 +814,10 @@ pub fn deeper_position_of_open_join(key: &JoinKey) -> bool {
         f.borrow().iter().any(|frame| {
             let open = match &frame.key {
                 EngineKey::Join(j) | EngineKey::Contribution { join: j, .. } => j,
-                EngineKey::Providers(_) | EngineKey::Consult(_) => return false,
+                EngineKey::Providers(_)
+                | EngineKey::Consult(_)
+                | EngineKey::DomainVote { .. }
+                | EngineKey::DomainSites { .. } => return false,
             };
             open.package == key.package
                 && open.name == key.name
@@ -813,6 +840,8 @@ pub fn innermost_kind(prefix: &'static str) -> String {
             EngineKey::Contribution { .. } => "contribution",
             EngineKey::Consult(_) => "consult",
             EngineKey::Providers(_) => "providers",
+            EngineKey::DomainVote { .. } => "domain_vote",
+            EngineKey::DomainSites { .. } => "domain_sites",
         })
     });
     format!("{prefix}.{}", kind.unwrap_or("none"))

@@ -2134,8 +2134,7 @@ struct S {
 
 // ---- Domain typing (int-used-as-enum): a storage slot's DOMAIN recovered
 // from usage. `op_type` is stored `uint16_t` but always compared against
-// `enum opcode` values — the sites fold onto the language-generic
-// `Field{owner, name}` subject via `DomainCoherenceFold`. ----
+// `enum opcode` values — the sites are tallied per declaring owner. ----
 
 #[test]
 fn cpp_domain_typing_field_folds_to_enum() {
@@ -2221,6 +2220,30 @@ void f(struct client* c) { struct robj *o = c->argv[1]; }
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     idx.register_symbols(std::path::PathBuf::from("/t/client.cpp"), fa.clone());
     assert_eq!(fa.field_domain("client", "argv", Some(&idx)), None);
+}
+
+/// The vote counts every file's sites: one site per file is no majority
+/// alone, but two files comparing the slot against the same enum are.
+#[test]
+fn cpp_domain_vote_tallies_sites_across_files() {
+    let header = "\
+enum opcode { OP_NULL, OP_CONST, OP_SCOPE };
+struct op { int op_type; };
+";
+    let a = "void a(struct op* o) { if (o->op_type == OP_CONST) { } }\n";
+    let b = "void b(struct op* o) { if (o->op_type == OP_SCOPE) { } }\n";
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let mut fas = Vec::new();
+    for (path, src) in [("/t/op.h", header), ("/t/a.c", a), ("/t/b.c", b)] {
+        let fa = std::sync::Arc::new(cpp_skel(src).into_file_analysis());
+        idx.register_symbols(std::path::PathBuf::from(path), fa.clone());
+        fas.push(fa);
+    }
+    let a_fa = &fas[1];
+    assert_eq!(a_fa.field_domain_for_owner("op", "op_type", None), None, "one site is no vote");
+    let dom = a_fa.field_domain_for_owner("op", "op_type", Some(&idx)).expect("two files vote");
+    assert_eq!(dom.domain, "opcode");
+    assert!(dom.confidence > 0.99, "coherent: {}", dom.confidence);
 }
 
 // ---- C++ template extraction hygiene (specializations, instantiations,

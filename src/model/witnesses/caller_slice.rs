@@ -237,7 +237,6 @@ fn payload_targets(w: &Witness, out: &mut Vec<WitnessAttachment>) {
         | WitnessPayload::Fact { .. }
         | WitnessPayload::Derivation
         | WitnessPayload::Custom { .. }
-        | WitnessPayload::DomainCompare { .. }
         | WitnessPayload::Reset
         | WitnessPayload::BrandOverlay { .. } => {}
     }

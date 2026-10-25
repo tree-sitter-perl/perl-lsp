@@ -123,15 +123,11 @@ pub enum WitnessAttachment {
     /// the bag's local subjects (`Variable{name,scope}`, `Expr{span}`):
     /// every access to the slot, in any scope, folds onto the SAME `Field`
     /// subject — the IDENTITY is project-wide (the `field_subject` ancestor
-    /// walk converges subtypes on the declaring owner), while the domain
-    /// fold GATHERS per querying file (`FileAnalysis::field_domain_for_owner`
-    /// reads that file's own `domain_sites`; owner-gated per site).
-    /// `DomainCompare` witnesses on this attachment carry the enum a use
-    /// compares/assigns the slot against (or `None` counter-evidence);
-    /// `DomainCoherenceFold` folds them into the slot's DOMAIN type
-    /// (`op_type: uint16_t` storage → `opcode` domain). The domain is a
-    /// defeasible refinement for human surfaces; it never changes the
-    /// storage type that flows. The slot's VALUE rides the same
+    /// walk converges subtypes on the declaring owner). The slot's DOMAIN
+    /// (`op_type: uint16_t` storage → `opcode` domain) is not on this
+    /// attachment: it is the engine's `DomainVote`, tallied over every file
+    /// (`FileAnalysis::field_domain_for_owner`), a defeasible refinement for
+    /// human surfaces that never changes the storage type that flows. The slot's VALUE rides the same
     /// attachment as an `Edge(Variable{decl})` the pack extractor pushes
     /// per field declaration: `ProjectionStep::ValueHop` chases it, and
     /// the registry's `Field` fallback walks the owner's candidate files
@@ -330,7 +326,6 @@ impl WitnessPayload {
             | WitnessPayload::Fact { .. }
             | WitnessPayload::Derivation
             | WitnessPayload::Custom { .. }
-            | WitnessPayload::DomainCompare { .. }
             | WitnessPayload::Reset
             | WitnessPayload::BrandOverlay { .. } => {}
         }
@@ -443,19 +438,6 @@ pub enum WitnessPayload {
         base: WitnessAttachment,
         step: ProjectionStep,
     },
-    /// **Domain evidence** for a `Field` slot: a single use-site where the
-    /// slot interacts with a value operand (a comparison `slot == E`, an
-    /// assignment `slot = E`, a `switch(slot){case E}`, a typed-arg
-    /// position). `Some(enum)` when the operand resolves to an enumerator
-    /// (its enum, resolved cross-file before the witness is pushed);
-    /// `None` when it does not — an integer literal, arithmetic, a call —
-    /// which is COUNTER-evidence: the site still counts in the coherence
-    /// vote's denominator, so a slot that is dominantly a plain integer
-    /// with a minority enum idiom refuses a domain instead of reporting
-    /// 100% confidence. `DomainCoherenceFold` folds every site:
-    /// mostly-agree → that domain, truly-mixed → none. Kept at the END for
-    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
-    DomainCompare { enum_type: Option<String> },
     /// Positional tuple of EDGES: "the value at my attachment is a
     /// `Sequence` whose slot i is whatever resolves at `elems[i]`". The
     /// pack spelling of a key-less array literal (`return [$queue,

@@ -837,13 +837,7 @@ impl ReducerRegistry {
         // so order isn't load-bearing — grouped with the other class-keyed
         // fallbacks. The `ClassName(name)` terminal lives in query_rec_body.
         r.register(Box::new(TypeNameReducer));
-        // The two `Field{..}` reducers claim disjoint PAYLOADS on one
-        // attachment: FieldValueReducer the slot's materialized value edge
-        // (what a `ValueHop` reads), DomainCoherenceFold the `DomainCompare`
-        // vote. Value first is load-bearing — the domain is a human-surface
-        // refinement and must never be the type that flows.
         r.register(Box::new(FieldValueReducer));
-        r.register(Box::new(DomainCoherenceFold));
         // `Param{..}` is a disjoint attachment shape; order isn't load-bearing.
         r.register(Box::new(ParamBindingReducer));
         // Last — fallback for "this Symbol's stored return type".
@@ -1730,7 +1724,7 @@ impl ReducerRegistry {
             }
             let t = match part {
                 EngineValue::Value(ReducedValue::Type(t)) => t,
-                EngineValue::Value(ReducedValue::FactMap(_) | ReducedValue::None) => continue,
+                EngineValue::Value(ReducedValue::FactMap(_) | ReducedValue::None) | EngineValue::Tally(_) => continue,
                 EngineValue::Disagree => return EngineValue::Disagree,
             };
             joined = match joined {
@@ -3898,6 +3892,27 @@ pub(super) fn compute_engine_key(
         EngineKey::Join(join) => reg.param_in_join(idx, join),
         EngineKey::Contribution { join, file } => reg.param_contribution(idx, join, file),
         EngineKey::Consult(c) => EngineValue::Value(reg.consult(idx, c)),
+        EngineKey::DomainVote { owner, field } => {
+            let key = crate::model::conventions::name_match_key(field, &crate::model::conventions::PERL_SPELLINGS);
+            let paths = super::engine::mentions_of(idx, super::engine::MentionKind::Any, &key).read();
+            let mut tally = Vec::new();
+            for file in paths.iter() {
+                let part = super::engine::answer(
+                    idx,
+                    &EngineKey::DomainSites { owner: owner.clone(), field: field.clone(), file: file.clone() },
+                );
+                if let EngineValue::Tally(t) = part {
+                    tally = super::engine::add_tallies(&tally, &t);
+                }
+            }
+            EngineValue::Tally(tally)
+        }
+        EngineKey::DomainSites { owner, field, file } => {
+            let Some(cached) = super::engine::caller_view(idx, file) else {
+                return EngineValue::Tally(Vec::new());
+            };
+            EngineValue::Tally(idx.whole_present(&cached).domain_tally(owner, field, Some(idx)))
+        }
         EngineKey::Providers(att) => {
             let Some((owner, site)) = att.provider_owner() else {
                 return EngineValue::Value(ReducedValue::None);

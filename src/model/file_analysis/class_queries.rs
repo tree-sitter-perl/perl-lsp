@@ -711,74 +711,50 @@ impl FileAnalysis {
         self.field_domain_for_owner(&owner, field, module_index)
     }
 
-    /// Fold this file's domain sites for `Field{owner, field}` and query
-    /// `DomainCoherenceFold`. The witnesses are built into a scratch bag at
-    /// query time because a site's enum resolves cross-file (the module
-    /// index is only in hand here); the fold + majority rule live in the
-    /// reducer (`witnesses::domain_coherence`).
-    ///
-    /// Two gates keep the vote honest:
-    /// - **owner**: a site votes only when its own receiver resolves to the
-    ///   SAME declaring owner as the queried subject (`domain_site_owner`) —
-    ///   name-keyed pooling let `struct basket { int kind; }` contaminate
-    ///   `struct crate { int kind; }`. A site whose receiver doesn't resolve
-    ///   votes nowhere (we don't know whose slot it is).
-    /// - **counter-evidence**: a gathered site whose value operand is not an
-    ///   enumerator pushes `enum_type: None`, so the denominator is the
-    ///   slot's whole interaction story, not the enum-shaped subset.
+    /// The domain of `owner`'s slot `field`: a strict majority, over at
+    /// least two sites, of the enums its uses compare it against. With an
+    /// index the sites are every file's (the engine's `DomainVote`); without
+    /// one, or when no indexed file holds a site, this file's.
     pub fn field_domain_for_owner(
         &self,
         owner: &str,
         field: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<NominalDomain> {
-        use crate::model::witnesses::{
-            domain_coherence, ReducedValue, ReducerQuery, ReducerRegistry, Witness,
-            WitnessAttachment, WitnessBag, WitnessPayload, WitnessSource,
-        };
-        let att = WitnessAttachment::Field { owner: owner.to_string(), name: field.to_string() };
-        let mut bag = WitnessBag::new();
+        use crate::model::witnesses::engine::{answer, EngineKey, EngineValue};
+        let tally = module_index
+            .map(|idx| answer(idx, &EngineKey::DomainVote { owner: owner.to_string(), field: field.to_string() }))
+            .and_then(|v| match v {
+                EngineValue::Tally(t) if !t.is_empty() => Some(t),
+                _ => None,
+            })
+            .unwrap_or_else(|| self.domain_tally(owner, field, module_index));
+        domain_majority(&tally)
+    }
+
+    /// This file's sites for `owner`'s slot `field`, counted by the enum each
+    /// compares against. Two gates keep the vote honest:
+    /// - **owner**: a site votes only when its own receiver resolves to the
+    ///   SAME declaring owner (`domain_site_owner`) — name-keyed pooling let
+    ///   `struct basket { int kind; }` contaminate `struct crate { int kind; }`.
+    ///   A site whose receiver doesn't resolve votes nowhere.
+    /// - **counter-evidence**: a site whose value is not an enumerator counts
+    ///   under `None`, so the denominator is the slot's whole interaction
+    ///   story, not the enum-shaped subset.
+    pub fn domain_tally(
+        &self,
+        owner: &str,
+        field: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> crate::model::witnesses::engine::DomainTally {
+        let mut counts: std::collections::BTreeMap<Option<String>, u32> = Default::default();
         for site in &self.pack.domain_sites {
-            if site.slot != field {
+            if site.slot != field || self.domain_site_owner(site, module_index).as_deref() != Some(owner) {
                 continue;
             }
-            if self.domain_site_owner(site, module_index).as_deref() != Some(owner) {
-                continue;
-            }
-            let enum_name = self.resolve_enumerator_enum(&site.value, module_index);
-            bag.push(Witness {
-                attachment: att.clone(),
-                source: WitnessSource::Builder("field_domain".into()),
-                payload: WitnessPayload::DomainCompare { enum_type: enum_name },
-                span: site.slot_span,
-            });
+            *counts.entry(self.resolve_enumerator_enum(&site.value, module_index)).or_default() += 1;
         }
-        let reg = ReducerRegistry::with_defaults();
-        // No context: the vote is these sites and nothing else. With one, a
-        // slot whose vote fails falls through to the registry's cross-file
-        // `Field` ladder and answers the slot's declared VALUE as its domain.
-        let q = ReducerQuery {
-            attachment: &att,
-            point: None,
-            framework: crate::model::witnesses::FrameworkFact::Plain,
-            arity_hint: None,
-            receiver: None,
-            args: Vec::new(),
-            context: None,
-        };
-        let domain = match reg.query(&bag, &q) {
-            ReducedValue::Type(InferredType::ClassName(d)) => d,
-            ReducedValue::Type(_)
-            | ReducedValue::FactMap(_)
-            | ReducedValue::None => return None,
-        };
-        // Confidence = dominant share, recomputed from the same witnesses the
-        // reducer folded (the coherence helper reports it deterministically).
-        let ws: Vec<&Witness> = bag.all().iter().collect();
-        let confidence = domain_coherence(&ws)
-            .map(|(_, count, total)| count as f32 / total as f32)
-            .unwrap_or(0.0);
-        Some(NominalDomain { domain, confidence })
+        counts.into_iter().collect()
     }
 
     /// The canonical `Field` owner of one domain site: the member ref at the
@@ -1270,4 +1246,25 @@ impl FileAnalysis {
         }
         UseMapPins { pins, own_namespace: own_ns, spelled, visible, names: self.pack.names.clone() }
     }
+}
+
+/// The dominant enum of a domain tally and its share, when that share is a
+/// strict majority of every site (counter-evidence included) over at least
+/// two. Ties go to the smaller name: the tally is sorted, and the incumbent
+/// keeps a tie.
+fn domain_majority(tally: &crate::model::witnesses::engine::DomainTally) -> Option<NominalDomain> {
+    let total: u32 = tally.iter().map(|(_, n)| n).sum();
+    if total < 2 {
+        return None;
+    }
+    let mut best: Option<(&String, u32)> = None;
+    for (k, n) in tally {
+        if let Some(k) = k {
+            if best.is_none_or(|(_, b)| *n > b) {
+                best = Some((k, *n));
+            }
+        }
+    }
+    let (domain, count) = best?;
+    (count * 2 > total).then(|| NominalDomain { domain: domain.clone(), confidence: count as f32 / total as f32 })
 }
