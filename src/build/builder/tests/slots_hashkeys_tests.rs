@@ -700,37 +700,49 @@ fn nested_writes_descend_mixed_hash_and_array_hops() {
     let src = "\
 package T;
 sub a {
-    my $h = { list => [ { n => 1 } ] };
+    my $h = { list => [ { n => 1 } ], tail => [ 1 ] };
     $h->{list}[0]{m} = 'x';
     $h->{new}{deep} = 'z';
     $h->{rows}[0]{id} = 1;
     my $v = [ { a => 1 }, 2 ];
     $v->[0]{b} = 'y';
     $v->[2] = 3;
+    $h->{cells}[0] = opaque();
+    $v->[3] = opaque();
+    $h->{sparse}[2] = 1;
+    $h->{tail}[4] = 1;
     return;
 }
 ";
     let fa = build_fa(src);
-    let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(9, 0));
+    let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(13, 0));
     let keys_of = |t: &InferredType| match t {
         InferredType::HashWithKeys { keys, .. } => keys.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
         other => panic!("not a keyed hash: {:?}", other),
     };
     let h = at("$h").expect("$h typed");
     let InferredType::HashWithKeys { keys, .. } = &h else { panic!("$h: {:?}", h) };
-    let Some(InferredType::Sequence(list)) = keys[0].1.as_deref() else { panic!("list: {:?}", keys[0].1) };
+    let key = |name: &str| keys.iter().find(|(k, _)| k == name).and_then(|(_, v)| v.as_deref());
+    let Some(InferredType::Sequence(list)) = key("list") else { panic!("list: {:?}", key("list")) };
     assert_eq!(keys_of(&list[0]), ["n", "m"]);
-    let new = keys[1].1.as_deref().expect("new vivified");
+    let new = key("new").expect("new vivified");
     assert_eq!(new.closed_keys_lacking("deep"), None, "{:?}", new);
     let InferredType::HashWithKeys { keys: deep, open: false } = new else { panic!("new: {:?}", new) };
     assert_eq!(deep[0].1.as_deref(), Some(&InferredType::String));
-    let Some(InferredType::Sequence(rows)) = keys[2].1.as_deref() else { panic!("rows: {:?}", keys[2].1) };
+    let Some(InferredType::Sequence(rows)) = key("rows") else { panic!("rows: {:?}", key("rows")) };
     assert_eq!(keys_of(&rows[0]), ["id"]);
+    // An untyped value still makes the slot: a tuple has no untyped slot,
+    // so it holds `Unknown`.
+    assert_eq!(key("cells"), Some(&InferredType::Sequence(vec![InferredType::Unknown])));
+    // A write past the end leaves holes a tuple can't hold: it's an array.
+    assert_eq!(key("sparse"), Some(&InferredType::ArrayRef));
+    assert_eq!(key("tail"), Some(&InferredType::ArrayRef));
     let v = at("$v").expect("$v typed");
     let InferredType::Sequence(slots) = &v else { panic!("$v: {:?}", v) };
-    assert_eq!(slots.len(), 3, "{:?}", slots);
+    assert_eq!(slots.len(), 4, "{:?}", slots);
     assert_eq!(keys_of(&slots[0]), ["a", "b"]);
     assert_eq!(slots[2], InferredType::Numeric);
+    assert_eq!(slots[3], InferredType::Unknown);
 }
 
 /// The literal-hash spelling: `my %h = (k => v)` types through the

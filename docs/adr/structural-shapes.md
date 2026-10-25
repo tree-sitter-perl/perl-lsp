@@ -125,7 +125,10 @@ static hash keys and static indexes alike, as the `KeyWrite`'s `path`
 and extends the shape it lands in, `a`'s value here, by the same rules:
 a hash hop extends a keyed hash, an index hop retypes a tuple slot or
 appends at exactly `len`, and a missing level autovivifies as a closed
-shape holding just the written path (a missing tuple only at index 0).
+shape holding just the written path. A tuple has no holes and no untyped
+slot: a missing array becomes a tuple only at index 0 (an untyped value
+is an `Unknown` slot), and a write past `len` makes it an `ArrayRef`,
+which says nothing about elements.
 The RHS types the last hop; a list-assignment target takes its slot of
 the RHS. Through an object (`$self->{s}{k} = …`) the
 inner shape is the slot's, so the extended shape lands on

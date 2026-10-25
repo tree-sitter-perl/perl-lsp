@@ -136,8 +136,13 @@ pub fn query_variable_type(
 /// write says nothing new.
 /// The value a write autovivifies below a missing key, as Perl does: a
 /// closed shape holding just the written path, typed from the RHS at the
-/// leaf. A missing tuple only autovivifies at index 0, the one slot a fresh
-/// array can be written at without holes.
+/// leaf. A missing array autovivifies as a tuple only at index 0, the one
+/// slot a fresh array can be written at without holes (a slot the RHS can't
+/// type is `Unknown`, since a tuple has no untyped slot); at a later index
+/// it is an `ArrayRef`, which says nothing about elements.
+/// TODO(element-typed-array): a tuple is only right while nothing else
+/// writes the array; these writes move to an element-typed array when the
+/// lattice has one.
 fn vivify(hops: &[&crate::model::file_analysis::WriteKey], vtype: Option<&InferredType>) -> Option<InferredType> {
     use crate::model::file_analysis::{SharedKeys, WriteKey};
     let Some((first, rest)) = hops.split_first() else { return vtype.cloned() };
@@ -146,7 +151,10 @@ fn vivify(hops: &[&crate::model::file_analysis::WriteKey], vtype: Option<&Inferr
             keys: SharedKeys::new(vec![(k.clone(), vivify(rest, vtype).map(Box::new))]),
             open: false,
         }),
-        WriteKey::Index(0) => Some(InferredType::Sequence(vec![vivify(rest, vtype)?])),
+        WriteKey::Index(0) => {
+            Some(InferredType::Sequence(vec![vivify(rest, vtype).unwrap_or(InferredType::Unknown)]))
+        }
+        WriteKey::Index(i) if *i > 0 => Some(InferredType::ArrayRef),
         WriteKey::Index(_) | WriteKey::Unknown => None,
     }
 }
@@ -188,9 +196,9 @@ fn extend_shape(
             Some(InferredType::HashWithKeys { keys, open: *open })
         }
         // A tuple slot: only the sound moves, retyping an in-bounds slot or
-        // appending at exactly `len`. A tuple has no open flag to widen into,
-        // so a conditional, dynamic or out-of-bounds write changes nothing;
-        // `element_at`'s honest `None` covers the residual.
+        // appending at exactly `len`. A write past `len` leaves holes, so the
+        // tuple degrades to `ArrayRef`. A tuple has no open flag to widen
+        // into, so a conditional or dynamic write changes nothing.
         InferredType::Sequence(elems) => {
             let WriteKey::Index(i) = first else { return None };
             if widen || *i < 0 {
@@ -198,20 +206,22 @@ fn extend_shape(
             }
             let i = *i as usize;
             let mut elems = elems.clone();
+            if i > elems.len() {
+                return Some(InferredType::ArrayRef);
+            }
             if !rest.is_empty() {
                 if i == elems.len() {
-                    elems.push(vivify(rest, vtype)?);
+                    elems.push(vivify(rest, vtype).unwrap_or(InferredType::Unknown));
                 } else {
-                    let inner = extend_shape(elems.get(i)?, rest, vtype, widen)?;
+                    let inner = extend_shape(&elems[i], rest, vtype, widen)?;
                     elems[i] = inner;
                 }
             } else {
-                let vt = vtype?;
-                match i.cmp(&elems.len()) {
-                    std::cmp::Ordering::Less if elems[i] == *vt => return None,
-                    std::cmp::Ordering::Less => elems[i] = vt.clone(),
-                    std::cmp::Ordering::Equal => elems.push(vt.clone()),
-                    std::cmp::Ordering::Greater => return None,
+                match (i.cmp(&elems.len()), vtype) {
+                    (std::cmp::Ordering::Less, None) => return None,
+                    (std::cmp::Ordering::Less, Some(vt)) if elems[i] == *vt => return None,
+                    (std::cmp::Ordering::Less, Some(vt)) => elems[i] = vt.clone(),
+                    (_, vt) => elems.push(vt.cloned().unwrap_or(InferredType::Unknown)),
                 }
             }
             Some(InferredType::Sequence(elems))
