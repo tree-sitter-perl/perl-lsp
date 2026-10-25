@@ -3,13 +3,19 @@
 
 ; ---- namespaces ----
 ; `namespace A\B;` holds until the next one; the braced form holds for its
-; body. Classes declared under either join it to mint their identity.
+; body. Classes declared under either join it to mint their identity, and
+; either is the section its `use` rows bind in.
 (namespace_definition
   name: (namespace_name) @def.package.name @context.namespace
   !body) @def.package
 (namespace_definition
   name: (namespace_name) @def.package.name @context.namespace
   body: (compound_statement) @scope) @def.package
+; The global namespace's braced form opens a scope too, so the rows it
+; imports bind in its body alone.
+(namespace_definition
+  !name
+  body: (compound_statement) @scope)
 
 ; ---- classes, interfaces, traits ----
 ; One model kind; the body's members file under the class's identity. The

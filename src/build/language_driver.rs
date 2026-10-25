@@ -999,6 +999,7 @@ fn remap_spans(
         imports: _,
         import_sites,
         use_rows,
+        namespace_sections,
         scope_count: _,
         scopes,
         witnesses,
@@ -1105,6 +1106,10 @@ fn remap_spans(
     // `use` row name tokens — a class token inside one names the row.
     for row in use_rows.iter_mut() {
         row.span = rspan(row.span);
+        row.reach = rspan(row.reach);
+    }
+    for section in namespace_sections.iter_mut() {
+        section.span = rspan(section.span);
     }
     // Witness spans (the type tier). A length-changing splice (`PBF op_type` →
     // `unsigned op_type`) shifts every span AFTER it, so a declared-type

@@ -49,12 +49,25 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    (`PackFacts::use_rows`) at the namespace it was written in, once every
    row is in: absolute spelling → itself; head segment → its alias, else
    its `use` row (an aliased row binds the alias, never its leaf), else
-   the file's own namespace; the rest hangs off that. A row is minted as
-   the parts the extractor read (`@import.prefix` and the name's qualifier
-   as its namespace, the name's last segment as its leaf, `@import.alias`)
+   the namespace in force at the spelling's site; the rest hangs off that.
+   A row is minted as the parts the extractor read (`@import.prefix` and
+   the name's qualifier as its namespace, the name's last segment as its
+   leaf, `@import.alias`)
    and the ladder answers parts too (`QualifiedName`), so the only strings
    it splits are written spellings; the joined FQN is formed only where a
-   string key is needed (`QualifiedName::identity`). Parent clauses
+   string key is needed (`QualifiedName::identity`).
+   **Rows are lexically scoped.** Each row carries its `reach` — the
+   narrower of the scope it was written in and its namespace section
+   (`namespace A;` to the next one, `namespace A { … }` its body, the
+   global `namespace { … }` too) — minted by the extractor
+   (`imports::bind_reach`). A map is built for a site
+   (`FileAnalysis::use_map_at`) and sees only the rows that reach it,
+   with the namespace in force there (`PackFacts::namespace_sections`,
+   `namespace_at`) as its own; so every consumer passes a site — a
+   parent its clause, a class token its ref, an invocant its point — and
+   two sections of one file never read each other's rows. A language
+   whose imports bind from the import onward narrows the reach's start;
+   the consumers only ask `UseRow::binds_at`. Parent clauses
    resolve this way (`scopes::resolve_parents`); every other class
    spelling the extractor mints goes through the same ladder — an
    annotation type through
@@ -77,6 +90,11 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    the row's class in full) and compares identities — `use B\Collection; new Collection()`
    reaches `B\Collection` and never the same-leaf stranger.
 
+`PackFacts::namespace_sections` is a field of its own (the rule #14
+ratchet) because it is neither a witness nor a binding: it types and
+resolves nothing, it is the region map a site's resolution reads, the way
+`control_regions` is.
+
 ## Retired with it
 
 The leaf-era plumbing is gone, not gated: `PackFacts::parent_namespaces`
@@ -86,6 +104,16 @@ stranger's spelling never matches), the import-rows-only gate, and the
 leaf-space FQ family validation in `implementations_of`.
 
 ## Residuals
+
+- **The visibility pins have no site.** `UseMapPins` is per ORIGIN
+  (`VisibilityAxis::for_origin` takes a file, not a position), so it
+  folds every section's rows into one leaf table: a leaf two sections
+  import from different namespaces conflicts and pins to nothing (the
+  full table, unranked), and a file of several namespaces claims no own
+  namespace. An over-approximation, never a wrong pin; a class token's
+  own resolution (`spelled_identity`) is per-site and exact.
+  `qualified_spellings` carries no site either, so the pins resolve it
+  over the whole-file view (`UseMap { site: None }`).
 
 - **An anonymous class's identity joins the file namespace, not the
   enclosing class** (`T\class_anonymous_7_20` inside `T\Outer::make`),

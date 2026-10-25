@@ -35,13 +35,13 @@ impl FileAnalysis {
     /// The NATIVE spelling a declaration would be written with for an
     /// inferred type — `None` when the pack has no native spelling for it
     /// (an ambiguous engine type, a class not visible by its leaf here, a
-    /// composite). What a quick-fix may write into the source; display
-    /// vocabulary (`type_display`) is a different question.
-    pub fn native_type_spelling(&self, ty: &InferredType) -> Option<String> {
+    /// composite). What a quick-fix may write into the source at `site`;
+    /// display vocabulary (`type_display`) is a different question.
+    pub fn native_type_spelling(&self, ty: &InferredType, site: Point) -> Option<String> {
         if let InferredType::ClassName(n) = ty {
             let (ns, leaf) = split_qualified(n, self.names());
             // the leaf must mean THIS class where it would be written
-            let seen = self.leaf_namespace(leaf).or_else(|| self.use_map_pins().own_namespace.clone());
+            let seen = self.leaf_namespace(leaf).or_else(|| self.pack.namespace_at(site).map(str::to_string));
             return (ns.is_none() || seen.is_none() || ns.map(str::to_string) == seen)
                 .then(|| leaf.to_string());
         }

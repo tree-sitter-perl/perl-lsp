@@ -893,7 +893,7 @@ impl FileAnalysis {
         if let Some(InferredType::ClassName(c)) = self.sub_return_type_at_arity(bare, Some(0)) {
             return Some(InferredType::ClassName(c));
         }
-        Some(InferredType::ClassName(self.class_spelling_identity(invocant)))
+        Some(InferredType::ClassName(self.class_spelling_identity(invocant, point)))
     }
 
     /// Walk the scope chain to find the enclosing class or package.
@@ -1011,7 +1011,7 @@ impl FileAnalysis {
                 {
                     return Some(c);
                 }
-                Some(self.class_spelling_identity(invocant))
+                Some(self.class_spelling_identity(invocant, point))
             }
         }
     }

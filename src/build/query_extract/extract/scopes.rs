@@ -2,6 +2,7 @@
 //! container context, and the inheritance edges declared with a class.
 
 use super::*;
+use crate::model::file_analysis::{PackageKind, PackageRange};
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -14,9 +15,30 @@ pub(super) struct State {
     scope_start_by_match: HashMap<usize, usize>,
     pending_context: HashMap<usize, (ContextKind, String)>,
     /// Parent edges whose parent is still the written spelling: its index
-    /// in `out.parents` and the namespace in force where it was written.
-    /// Resolved through the use-map once every import row is in.
-    written_parents: Vec<(usize, Option<String>)>,
+    /// in `out.parents`, the namespace in force where it was written, and
+    /// where. Resolved through the use-map once every import row is in.
+    written_parents: Vec<(usize, Option<String>, Point)>,
+    /// Statement-form namespace sections still running, by the depth they
+    /// were declared at: the next one at that depth ends them.
+    open_sections: Vec<(usize, usize)>,
+}
+
+/// Record a namespace section under a use-map: a braced one is its body,
+/// a statement-form one runs to the end of the enclosing scope until the
+/// next one at its depth cuts it short.
+fn open_section(st: &mut ExtractState, namespace: &str, span: Span, kind: PackageKind) {
+    if st.pack.names.use_map_sep().is_none() {
+        return;
+    }
+    let depth = st.scope_stack.len();
+    if kind == PackageKind::Statement {
+        while st.scopes.open_sections.last().is_some_and(|&(d, _)| d >= depth) {
+            let (_, i) = st.scopes.open_sections.pop().unwrap();
+            st.out.namespace_sections[i].span.end = span.start;
+        }
+        st.scopes.open_sections.push((depth, st.out.namespace_sections.len()));
+    }
+    st.out.namespace_sections.push(PackageRange { package: namespace.to_string(), span, kind });
 }
 
 pub(super) fn collect(st: &mut ExtractState, e: &Event) {
@@ -57,6 +79,9 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 while st.context_stack.last().is_some_and(|&(d, ..)| d >= st.scope_stack.len()) {
                     st.context_stack.pop();
                 }
+                if kind == ContextKind::Namespace {
+                    open_section(st, &text, e.span(), PackageKind::Block);
+                }
                 st.context_stack.push((st.scope_stack.len(), kind, text));
             }
             narrowing::on_scope_push(st, e, id);
@@ -81,6 +106,10 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                     st.context_stack.pop();
                 }
                 let value = identity.unwrap_or_else(|| e.text.clone());
+                if kind == ContextKind::Namespace {
+                    let end = st.out.scopes[st.cur_scope.0 as usize].span.end;
+                    open_section(st, &value, Span { start: e.span().start, end }, PackageKind::Statement);
+                }
                 // A scope opened by this same match is the container the
                 // context names (php's class node), so a point anywhere in
                 // it, header included, is in that package.
@@ -104,7 +133,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 let edge = (st.class_identity(child), (pack.shape_name)(&e.text));
                 if pack.names.use_map_sep().is_some() {
                     let ns = st.namespace().map(str::to_string);
-                    st.scopes.written_parents.push((st.out.parents.len(), ns));
+                    st.scopes.written_parents.push((st.out.parents.len(), ns, e.span().start));
                 }
                 st.out.parents.push(edge);
             }
@@ -119,11 +148,12 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
 /// unimported leaf is the namespace's own.
 pub(super) fn resolve_parents(st: &mut ExtractState) {
     let Some(sep) = st.pack.names.use_map_sep() else { return };
-    for (i, ns) in std::mem::take(&mut st.scopes.written_parents) {
+    for (i, ns, site) in std::mem::take(&mut st.scopes.written_parents) {
         let map = crate::model::file_analysis::UseMap {
             rows: &st.out.use_rows,
             own_namespace: ns.as_deref(),
             sep,
+            site: Some(site),
         };
         st.out.parents[i].1 = map.resolve(&st.out.parents[i].1).identity(sep);
     }

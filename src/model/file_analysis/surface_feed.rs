@@ -76,6 +76,7 @@ impl FileAnalysis {
                     type_display: _type_display,     // LangPack-wide display vocabulary, same reasoning
                     specializes: _specializes,       // family edges; the file re-registers on its own rebuild even when Unchanged
                     use_rows: _use_rows,                   // this file's OWN spelling table: what its spellings mean, never what another file sees
+                    namespace_sections: _namespace_sections, // same: where this file's spellings resolve; its classes' identities already carry the namespace
                     qualified_spellings: _qualified_spellings, // same: how THIS file spells classes
                     names: _names,                   // language-wide convention, identical across the language's files
                     template_params: _template_params, // instantiation substitution reads the provider live

@@ -71,9 +71,25 @@ fn name_row(st: &mut ExtractState, e: &Event) {
         span: e.span(),
         name: crate::model::file_analysis::QualifiedName { namespace, leaf: leaf.to_string() },
         alias: st.imports.alias_by_match.get(&e.match_id).cloned(),
+        // the enclosing scope; `bind_reach` narrows it to the namespace
+        // section once every section's end is known
+        reach: st.out.scopes[st.cur_scope.0 as usize].span,
     };
     st.out.imports.push(row.name.identity(sep));
     st.out.use_rows.push(row);
+}
+
+/// Each row binds in its scope AND its namespace section, whichever is
+/// narrower: `namespace A; use X\M;` reaches to the next `namespace`, a
+/// row in a braced namespace to its closing brace.
+pub(super) fn bind_reach(st: &mut ExtractState) {
+    let sections = &st.out.namespace_sections;
+    for row in st.out.use_rows.iter_mut() {
+        if let Some(sec) = crate::model::file_analysis::section_at(sections, row.span.start) {
+            row.reach.start = row.reach.start.max(sec.span.start);
+            row.reach.end = row.reach.end.min(sec.span.end);
+        }
+    }
 }
 
 /// Import-call arguments → imports, the module as written.

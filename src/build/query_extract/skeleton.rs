@@ -94,6 +94,9 @@ pub struct SkeletonAnalysis {
     /// A use-map language's `use` rows. Carried onto
     /// `FileAnalysis.pack.use_rows`.
     pub use_rows: Vec<crate::model::file_analysis::UseRow>,
+    /// A use-map language's namespace sections. Carried onto
+    /// `FileAnalysis.pack.namespace_sections`.
+    pub namespace_sections: Vec<crate::model::file_analysis::PackageRange>,
     pub scope_count: usize,
     pub scopes: Vec<crate::model::file_analysis::Scope>,
     pub witnesses: Vec<crate::model::witnesses::Witness>,
@@ -1367,6 +1370,7 @@ impl SkeletonAnalysis {
                 .map(|(raw, span)| (span, raw))
                 .collect(),
             use_rows: std::mem::take(&mut self.use_rows),
+            namespace_sections: std::mem::take(&mut self.namespace_sections),
             domain_sites: std::mem::take(&mut self.domain_sites),
             moved_from: std::mem::take(&mut self.moved_from),
             control_regions: std::mem::take(&mut self.control_regions),

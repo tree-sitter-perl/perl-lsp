@@ -90,6 +90,13 @@ pub struct PackFacts {
     #[serde(default)]
     pub use_rows: Vec<UseRow>,
 
+    /// A use-map language's namespace sections — `namespace A;` running to
+    /// the next one, `namespace A { … }` its body — the namespace a bare
+    /// spelling resolves into at a site (`namespace_at`). A region map
+    /// like `control_regions`, not a per-site fact to join.
+    #[serde(default)]
+    pub namespace_sections: Vec<PackageRange>,
+
     /// Class spellings written with a qualifier: (leaf, written prefix —
     /// absolute when it starts with `\`, else relative to the file's
     /// namespace). A qualified spelling pins the leaf to that namespace
@@ -168,6 +175,11 @@ impl PackFacts {
             || self.include_directives.iter().any(|(row, _)| span_within(span, row))
     }
 
+    /// The namespace in force at `site` (`None` = the global namespace).
+    pub fn namespace_at(&self, site: tree_sitter::Point) -> Option<&str> {
+        super::use_map::section_at(&self.namespace_sections, site).map(|s| s.package.as_str())
+    }
+
     /// The `use` row whose name token covers `span`, if any.
     pub fn use_row_covering(&self, span: &Span) -> Option<&UseRow> {
         self.use_rows.iter().find(|row| span_within(span, &row.span))
@@ -199,6 +211,7 @@ impl PackFacts {
 
         h.cpp_extras += vcap(&self.macro_defs)
             + vcap(&self.use_rows)
+            + vcap(&self.namespace_sections)
             + vcap(&self.qualified_spellings)
             + vcap(&self.domain_sites)
             + vcap(&self.moved_from)

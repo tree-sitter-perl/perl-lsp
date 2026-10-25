@@ -1036,7 +1036,7 @@ impl FileAnalysis {
                 .inferred_type_via_bag(text, point)
                 .and_then(|t| t.class_name().map(str::to_string)),
             InvocantText::NonScalar(_) => None,
-            InvocantText::Bareword(b) => Some(self.class_spelling_identity(b)),
+            InvocantText::Bareword(b) => Some(self.class_spelling_identity(b, point)),
         }
     }
 
@@ -1061,8 +1061,11 @@ impl FileAnalysis {
     /// alias re-qualifies it (`use_map_tests::resolve_is_not_idempotent`).
     /// Symbols, parents and witnesses already carry identities (the
     /// extractor resolves as it mints); only ref text is written.
-    pub fn class_spelling_identity(&self, written: &str) -> String {
-        match self.use_map() {
+    ///
+    /// `site` is where the spelling is written: only the rows that reach
+    /// it, and the namespace in force there, take part.
+    pub fn class_spelling_identity(&self, written: &str, site: Point) -> String {
+        match self.use_map_at(site) {
             Some(map) => map.resolve(written).identity(map.sep),
             None => written.to_string(),
         }
@@ -1077,7 +1080,7 @@ impl FileAnalysis {
     pub fn spelled_identity(&self, r: &Ref) -> String {
         match (self.pack.names.use_map_sep(), self.pack.use_row_covering(&r.span)) {
             (Some(sep), Some(row)) => row.name.identity(sep),
-            _ => self.class_spelling_identity(&r.target_name),
+            _ => self.class_spelling_identity(&r.target_name, r.span.start),
         }
     }
 
@@ -1132,26 +1135,16 @@ impl FileAnalysis {
             .clone()
     }
 
-    /// This file's use-map resolver over its own namespace
-    /// (`own_namespace`); `use_map_with` takes the namespace from a caller
-    /// that already derived it.
-    pub fn use_map(&self) -> Option<UseMap<'_>> {
-        // The pins are a whole-file pass; a language without a use-map has
-        // no answer to build them for.
-        self.pack.names.use_map_sep()?;
-        let pins = self
-            .use_map_pins
-            .get_or_init(|| std::sync::Arc::new(self.leaf_namespace_pins()));
-        self.use_map_with(pins.own_namespace.as_deref())
-    }
-
-    /// `None` for a language whose spellings are identities as written
-    /// (`ClassSpelling::Identity`): there is no map to resolve through.
-    fn use_map_with<'a>(&'a self, own_namespace: Option<&'a str>) -> Option<UseMap<'a>> {
+    /// This file's use-map as seen from `site`: the rows that reach it and
+    /// the namespace in force there. `None` for a language whose spellings
+    /// are identities as written (`ClassSpelling::Identity`): there is no
+    /// map to resolve through.
+    pub fn use_map_at(&self, site: Point) -> Option<UseMap<'_>> {
         Some(UseMap {
             rows: &self.pack.use_rows,
-            own_namespace,
+            own_namespace: self.pack.namespace_at(site),
             sep: self.pack.names.use_map_sep()?,
+            site: Some(site),
         })
     }
 
@@ -1191,29 +1184,27 @@ impl FileAnalysis {
                 None => pin(&mut pins, leaf, ns),
             }
         }
-        let mut own: Option<String> = None;
-        let mut several = false;
         for s in self.symbols().iter() {
-            match s.kind {
-                SymKind::Class => {
-                    // the symbol is filed under its identity (the FQN for a
-                    // namespaced pack); the pin is keyed by the leaf it binds
-                    let ns = s.package.clone().unwrap_or_default();
-                    pin(&mut pins, &name_match_key(&s.name, self.names()), &ns);
-                }
-                SymKind::Package => {
-                    if own.as_deref().is_some_and(|o| o != s.name) {
-                        several = true;
-                    }
-                    own.get_or_insert_with(|| s.name.clone());
-                }
-                _ => {}
+            if s.kind == SymKind::Class {
+                // the symbol is filed under its identity (the FQN for a
+                // namespaced pack); the pin is keyed by the leaf it binds
+                let ns = s.package.clone().unwrap_or_default();
+                pin(&mut pins, &name_match_key(&s.name, self.names()), &ns);
             }
         }
-        let own_ns = if several { None } else { own.clone() };
+        // The pins answer for the whole origin, so its own namespace is
+        // one only when every section names the same; a file of several
+        // makes no own-namespace claim (its sites resolve their own).
+        let mut sections = self.pack.namespace_sections.iter().map(|s| s.package.as_str());
+        let own_ns = sections
+            .next()
+            .filter(|first| sections.all(|s| s == *first))
+            .map(str::to_string);
         // A qualified spelling names its namespace outright — the use-map
-        // resolver's answer for the qualifier it was written under.
-        if let Some(map) = self.use_map_with(own_ns.as_deref()) {
+        // resolver's answer for the qualifier it was written under. The
+        // spellings carry no site, so they read the whole-file view.
+        if let Some(sep) = self.pack.names.use_map_sep() {
+            let map = UseMap { rows: &self.pack.use_rows, own_namespace: own_ns.as_deref(), sep, site: None };
             for (leaf, prefix) in &self.pack.qualified_spellings {
                 pin(&mut pins, leaf, &map.resolve_in(prefix, leaf).namespace);
             }

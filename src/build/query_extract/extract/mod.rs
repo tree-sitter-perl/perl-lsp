@@ -327,6 +327,7 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     defs::tag_inline_namespaces(&mut st);
     flow::emit_keyed_shapes(&mut st);
     imports::finish(&mut st);
+    imports::bind_reach(&mut st);
     // A parent may be written above the import that names it, so it
     // resolves once every row is in.
     scopes::resolve_parents(&mut st);

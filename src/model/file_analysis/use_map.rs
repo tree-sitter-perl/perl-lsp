@@ -6,15 +6,21 @@
 //! re-deriving the head/alias/row/own-namespace ladder, so the rules cannot
 //! drift between them.
 //!
+//! A row binds only where it was written: each carries its `reach`, and a
+//! map is built FOR a site (`FileAnalysis::use_map_at`), seeing the rows
+//! that reach it and the namespace in force there. Two namespace sections
+//! of one file never read each other's rows.
+//!
 //! Pure `&str` over the pack lanes: no tree, no index. The separator is
 //! the pack's declared one (`PackFacts::names`); a language whose
 //! spellings are already identities (C's flat linkage) never builds one.
 //! Rows and answers are (namespace, leaf) parts: the only strings split
 //! here are written spellings, never an identity this code joined.
 
-use super::Span;
+use super::{contains_point, PackageRange, Span};
 use crate::model::conventions::join_qualified as join;
 use serde::{Deserialize, Serialize};
+use tree_sitter::Point;
 
 /// A class name as the parts its producer holds — the namespace (the
 /// global one is `""`) and the leaf. The joined identity is formed only
@@ -37,23 +43,47 @@ impl QualifiedName {
 }
 
 /// One `use` row of a use-map language: the class it imports, the span of
-/// its name token, and the alias it is bound under (`use A\B as C`).
+/// its name token, the alias it is bound under (`use A\B as C`), and the
+/// region it binds in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UseRow {
     pub span: Span,
     pub name: QualifiedName,
     pub alias: Option<String>,
+    /// Where the row binds, minted by the extractor from the scope and
+    /// namespace section it was written in. A language whose imports bind
+    /// only from the import onward narrows this span's start; consumers
+    /// only ever ask `binds_at`.
+    pub reach: Span,
 }
 
-/// One file's name-resolution context for class spellings.
+impl UseRow {
+    pub fn binds_at(&self, site: Point) -> bool {
+        contains_point(&self.reach, site)
+    }
+}
+
+/// The namespace section in force at `site`: the innermost
+/// (latest-starting) one containing it, `None` outside every section (the
+/// global namespace).
+pub fn section_at(sections: &[PackageRange], site: Point) -> Option<&PackageRange> {
+    sections.iter().filter(|s| contains_point(&s.span, site)).max_by_key(|s| s.span.start)
+}
+
+/// One file's name-resolution context for class spellings, as seen from
+/// one site.
 #[derive(Debug, Clone, Copy)]
 pub struct UseMap<'a> {
     /// The file's `use` rows (`PackFacts::use_rows`).
     pub rows: &'a [UseRow],
-    /// The namespace the file declares, when it declares exactly one.
+    /// The namespace in force at the site.
     pub own_namespace: Option<&'a str>,
     /// The namespace separator the spellings use (`PackFacts::names`).
     pub sep: &'a str,
+    /// Where the spelling being resolved is written; only rows that reach
+    /// it bind. `None` is the whole-file view the per-origin visibility
+    /// pins fold, which has no single site.
+    pub site: Option<Point>,
 }
 
 impl<'a> UseMap<'a> {
@@ -97,10 +127,10 @@ impl<'a> UseMap<'a> {
     /// never its leaf (`use A\Event as ScriptEvent` leaves `Event` to the
     /// file's own namespace) — then the file's own namespace.
     fn bind(&self, head: &str) -> QualifiedName {
-        self.rows
-            .iter()
+        let rows = || self.rows.iter().filter(|r| self.site.is_none_or(|p| r.binds_at(p)));
+        rows()
             .find(|r| r.alias.as_deref() == Some(head))
-            .or_else(|| self.rows.iter().find(|r| r.alias.is_none() && r.name.leaf == head))
+            .or_else(|| rows().find(|r| r.alias.is_none() && r.name.leaf == head))
             .map(|r| r.name.clone())
             .unwrap_or_else(|| QualifiedName::new(self.own_namespace.unwrap_or(""), head))
     }

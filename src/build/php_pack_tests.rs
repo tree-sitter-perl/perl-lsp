@@ -135,12 +135,13 @@ use const App\\Limits\\MAX;
     assert!(fa.pack.include_directives.is_empty());
 
     // The model reads the same map the extractor resolved parents through.
-    assert_eq!(fa.class_spelling_identity("Collection"), "Illuminate\\Support\\Collection");
-    assert_eq!(fa.class_spelling_identity("Talks"), "Vendor\\Pkg\\Speaker");
-    assert_eq!(fa.class_spelling_identity("Log"), "App\\Contracts\\Logger");
-    assert_eq!(fa.class_spelling_identity("Collection\\Item"), "Illuminate\\Support\\Collection\\Item");
+    let end = tree_sitter::Point::new(9, 0);
+    assert_eq!(fa.class_spelling_identity("Collection", end), "Illuminate\\Support\\Collection");
+    assert_eq!(fa.class_spelling_identity("Talks", end), "Vendor\\Pkg\\Speaker");
+    assert_eq!(fa.class_spelling_identity("Log", end), "App\\Contracts\\Logger");
+    assert_eq!(fa.class_spelling_identity("Collection\\Item", end), "Illuminate\\Support\\Collection\\Item");
     // an aliased row binds its alias, never its own leaf
-    assert_eq!(fa.class_spelling_identity("Speaker"), "App\\Speaker");
+    assert_eq!(fa.class_spelling_identity("Speaker", end), "App\\Speaker");
     assert_eq!(fa.leaf_namespace("Listener").as_deref(), Some("App\\Contracts"));
 }
 
@@ -294,6 +295,107 @@ fn an_aliased_imports_leaf_renames_the_imported_class() {
         Some(RenameKind::Package(ref c)) if c == "Lib\\Model"
     ));
     assert_eq!(fa.declared_parents("App\\Model"), ["Lib\\Model"]);
+}
+
+/// A `use` row binds in the namespace section it is written in: two
+/// sections of one file importing the same leaf from different places each
+/// resolve their own, in either namespace form.
+#[test]
+fn each_namespace_section_resolves_through_its_own_use_rows() {
+    use crate::model::file_analysis::RefKind;
+    let braced = "<?php
+namespace A {
+    use X\\Model;
+    class Foo extends Model {}
+}
+namespace B {
+    use Y\\Model;
+    class Bar extends Model {}
+}
+namespace {
+    use Z\\Model;
+}
+namespace C {
+    class Baz extends Model {}
+}
+";
+    let statement = "<?php
+namespace A;
+use X\\Model;
+class Foo extends Model {}
+namespace B;
+use Y\\Model;
+class Bar extends Model {}
+class Qux extends Foo {}
+";
+    for src in [braced, statement] {
+        let fa = php(src);
+        assert_eq!(fa.declared_parents("A\\Foo"), ["X\\Model"], "{src}");
+        assert_eq!(fa.declared_parents("B\\Bar"), ["Y\\Model"], "{src}");
+        // a row of the global section never reaches a named one
+        if src == braced {
+            assert_eq!(fa.declared_parents("C\\Baz"), ["C\\Model"]);
+        } else {
+            // a bare leaf resolves into the namespace in force at the site
+            assert_eq!(fa.declared_parents("B\\Qux"), ["B\\Foo"]);
+        }
+        let spelled: Vec<(usize, String)> = fa
+            .refs()
+            .iter()
+            .filter(|r| matches!(r.kind, RefKind::PackageRef) && r.target_name == "Model")
+            .map(|r| (r.span.start.row, fa.spelled_identity(r)))
+            .collect();
+        let want: &[(usize, &str)] = if src == braced {
+            &[(2, "X\\Model"), (3, "X\\Model"), (6, "Y\\Model"), (7, "Y\\Model"), (10, "Z\\Model"), (13, "C\\Model")]
+        } else {
+            &[(2, "X\\Model"), (3, "X\\Model"), (5, "Y\\Model"), (6, "Y\\Model")]
+        };
+        let want: Vec<(usize, String)> = want.iter().map(|(r, i)| (*r, i.to_string())).collect();
+        assert_eq!(spelled, want, "{src}");
+    }
+}
+
+/// Rename of a class reaches only the section that imports it: B's
+/// same-leaf import of another class is left alone.
+#[test]
+fn a_rename_stays_in_the_section_that_imports_the_class() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    use std::path::PathBuf;
+    let src_x = "<?php\nnamespace X;\nclass Model {}\n";
+    let src_y = "<?php\nnamespace Y;\nclass Model {}\n";
+    let src_user = "<?php\nnamespace A;\nuse X\\Model;\nclass Foo extends Model {}\nnamespace B;\nuse Y\\Model;\nclass Bar extends Model {}\n";
+    let (p_x, p_y, p_user) = (
+        PathBuf::from("/fake/php/X/Model.php"),
+        PathBuf::from("/fake/php/Y/Model.php"),
+        PathBuf::from("/fake/php/App/Both.php"),
+    );
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(p_x.clone(), php(src_x));
+    idx.insert_workspace_for_test(p_y.clone(), php(src_y));
+    idx.insert_workspace_for_test(p_user.clone(), php(src_user));
+    let store = OpenDocs::new();
+    let user = idx.workspace_file_for_test(&p_user).unwrap();
+
+    let edits_from = |row: usize| {
+        let at = tree_sitter::Point { row, column: 19 };
+        let cs = resolve(&store, &user, FileKey::Path(p_user.clone()), at, Some(&idx), OverrideScope::default());
+        let mut sites: Vec<(String, usize, usize)> = cs
+            .rename_edits("Entity")
+            .unwrap()
+            .into_iter()
+            .map(|(loc, _)| {
+                let FileKey::Path(p) = &loc.key else { panic!() };
+                let dir = p.parent().unwrap().file_name().unwrap().to_string_lossy().to_string();
+                (dir, loc.span.start.row, loc.span.start.column)
+            })
+            .collect();
+        sites.sort();
+        sites
+    };
+    let s = |d: &str, r: usize, c: usize| (d.to_string(), r, c);
+    assert_eq!(edits_from(3), [s("App", 2, 6), s("App", 3, 18), s("X", 2, 6)]);
+    assert_eq!(edits_from(6), [s("App", 5, 6), s("App", 6, 18), s("Y", 2, 6)]);
 }
 
 #[test]

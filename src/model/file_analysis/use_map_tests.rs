@@ -6,11 +6,12 @@ fn row(namespace: &str, leaf: &str, alias: Option<&str>) -> UseRow {
         span: Span { start: tree_sitter::Point::new(0, 0), end: tree_sitter::Point::new(0, 0) },
         name: QualifiedName::new(namespace, leaf),
         alias: alias.map(str::to_string),
+        reach: Span { start: tree_sitter::Point::new(0, 0), end: tree_sitter::Point::new(99, 0) },
     }
 }
 
 fn map<'a>(rows: &'a [UseRow], own: Option<&'a str>) -> UseMap<'a> {
-    UseMap { rows, own_namespace: own, sep: "\\" }
+    UseMap { rows, own_namespace: own, sep: "\\", site: Some(tree_sitter::Point::new(1, 0)) }
 }
 
 fn fqn(m: &UseMap<'_>, written: &str) -> String {
@@ -105,4 +106,19 @@ fn resolve_is_not_idempotent() {
     let twice = fqn(&m, &once);
     assert_eq!(twice, "Site\\Vendor\\App\\Models\\User", "a second pass re-qualifies");
     assert_ne!(once, twice);
+}
+
+/// A row binds only inside its reach: a site past it resolves the leaf as
+/// if the row were never written.
+#[test]
+fn a_row_binds_only_where_it_reaches() {
+    let mut r = row("Lib", "Model", None);
+    r.reach = Span { start: tree_sitter::Point::new(2, 0), end: tree_sitter::Point::new(5, 0) };
+    let rows = vec![r];
+    let at = |row: usize| UseMap { rows: &rows, own_namespace: Some("App"), sep: "\\", site: Some(tree_sitter::Point::new(row, 4)) };
+    assert_eq!(fqn(&at(3), "Model"), "Lib\\Model");
+    assert_eq!(fqn(&at(7), "Model"), "App\\Model");
+    // the whole-file view sees every row
+    let whole = UseMap { site: None, ..at(7) };
+    assert_eq!(fqn(&whole, "Model"), "Lib\\Model");
 }
