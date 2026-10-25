@@ -394,6 +394,24 @@ pub(crate) fn list_assignment_target_of<'a>(node: Node<'a>) -> Option<Node<'a>> 
     (assign.child_by_field_name("left")? == group).then_some(assign)
 }
 
+/// The list assignment `node` is a target slot of, with its position:
+/// `($a, $h->{k}) = …` puts `$h->{k}` at slot 1. Nested groups flatten, as
+/// Perl's list assignment does; a target after an array or hash has no
+/// slot, because the slurpy target took the rest.
+pub(crate) fn list_assignment_slot<'a>(node: Node<'a>) -> Option<(Node<'a>, usize)> {
+    let assign = list_assignment_target_of(node)?;
+    let targets = list_elements(assign.child_by_field_name("left")?);
+    let n = targets.iter().position(|t| *t == node)?;
+    let slurpy = |t: &Node| {
+        let t = match t.kind() {
+            "variable_declaration" => t.child_by_field_name("variable").unwrap_or(*t),
+            _ => *t,
+        };
+        matches!(t.kind(), "array" | "hash")
+    };
+    (!targets[..n].iter().any(slurpy)).then_some((assign, n))
+}
+
 /// `meth Class(ARGS)` / `meth Class ARGS` / `meth Class` — the spelling Perl
 /// may read as the indirect-object method call `Class->meth(ARGS)`. The
 /// grammar parses it as a call to `meth` whose argument is a call to (or a

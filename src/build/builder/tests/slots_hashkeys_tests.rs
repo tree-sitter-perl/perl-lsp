@@ -655,6 +655,43 @@ sub b {
     assert!(slot.closed_keys_lacking("z").is_none(), "slot still closed without z: {:?}", slot);
 }
 
+#[test]
+fn list_assignment_slots_bind_element_targets() {
+    // Each target of a list assignment takes its own slot: an element
+    // target before `$x` doesn't shift `$x` onto its value, and the
+    // element's key gets the slot's value, from a literal list or from
+    // element N of any other right-hand side.
+    let src = "\
+package T;
+sub pair { return (1, 'w') }
+sub a {
+    my $h = {};
+    my ($x, $y);
+    ($h->{a}, $x) = (1, 'str');
+    ($h->{b}, $h->{c}) = pair();
+    (my @all, $h->{d}) = (1, 2);
+    $y = $h->{c};
+    return $h;
+}
+";
+    let fa = build_fa(src);
+    let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(9, 0));
+    assert_eq!(at("$x"), Some(InferredType::String));
+    assert_eq!(at("$y"), Some(InferredType::String));
+    let t = at("$h").expect("$h typed");
+    let InferredType::HashWithKeys { keys, .. } = &t else { panic!("shape: {:?}", t) };
+    let got: Vec<(&str, Option<&InferredType>)> = keys.iter().map(|(k, v)| (k.as_str(), v.as_deref())).collect();
+    assert_eq!(
+        got,
+        [
+            ("a", Some(&InferredType::Numeric)),
+            ("b", Some(&InferredType::Numeric)),
+            ("c", Some(&InferredType::String)),
+            ("d", None),
+        ]
+    );
+}
+
 /// The literal-hash spelling: `my %h = (k => v)` types through the
 /// same shape builder as the hashref literal, `$h{k}` projects off
 /// `%h` (the canonical container name), mutation extension applies,

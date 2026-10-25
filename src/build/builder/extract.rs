@@ -148,11 +148,34 @@ impl<'a> Builder<'a> {
                 .unwrap_or(crate::model::file_analysis::ScopeId(0)),
             span,
             rhs_span: None,
+            rhs_slot: None,
             conditional: true,
         });
     }
 
-    pub(super) fn record_key_write(&mut self, left: Node<'a>, rhs: Option<Node<'a>>) {
+    /// An element written in place, with the value it receives when it is a
+    /// slot of a plain list assignment: a literal-list RHS gives the slot its
+    /// own element, any other RHS its element N, the same binding a
+    /// variable slot gets (`docs/adr/destructuring.md`).
+    pub(super) fn record_in_place_write(&mut self, elem: Node<'a>) {
+        let slot = crate::cst::list_assignment_slot(elem).filter(|(assign, _)| {
+            crate::cst::assign_op(*assign) == Some(crate::cst::AssignOp::Plain)
+        });
+        let Some((assign, n)) = slot else {
+            self.record_key_write(elem, None, None);
+            return;
+        };
+        let Some(rhs) = assign.child_by_field_name("right") else {
+            self.record_key_write(elem, None, None);
+            return;
+        };
+        match self.list_element_nodes(rhs) {
+            Some(nodes) => self.record_key_write(elem, nodes.get(n).copied(), None),
+            None => self.record_key_write(elem, Some(rhs), Some(n as i32)),
+        }
+    }
+
+    pub(super) fn record_key_write(&mut self, left: Node<'a>, rhs: Option<Node<'a>>, rhs_slot: Option<i32>) {
         let mut innermost = left;
         // The hops above the innermost, innermost-first.
         let mut outer_hops: Vec<Node<'a>> = Vec::new();
@@ -206,6 +229,7 @@ impl<'a> Builder<'a> {
                     .unwrap_or(crate::model::file_analysis::ScopeId(0)),
                 span,
                 rhs_span: rhs.map(node_to_span),
+                rhs_slot,
                 conditional: crate::cst::is_conditionally_executed(left),
             });
             return;
@@ -279,6 +303,7 @@ impl<'a> Builder<'a> {
                 .unwrap_or(crate::model::file_analysis::ScopeId(0)),
             span,
             rhs_span: if typed { rhs.map(node_to_span) } else { None },
+            rhs_slot,
             conditional: crate::cst::is_conditionally_executed(left),
         });
     }
@@ -476,11 +501,12 @@ impl<'a> Builder<'a> {
                 "scalar" => Extraction::Positional(pos),
                 "array" | "hash" => Extraction::Slurpy(pos),
                 // `my (undef, $x) = @_` — the placeholder takes a slot.
-                "undef_expression" => {
+                // `my (undef, $x) = @_` and `($h->{k}, $x) = …`: the
+                // placeholder or element target takes a slot too.
+                _ => {
                     pos += 1;
                     continue;
                 }
-                _ => continue,
             };
             if let Ok(t) = child.utf8_text(self.source) {
                 out.push((t.to_string(), extraction));

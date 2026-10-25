@@ -108,7 +108,7 @@ impl<'a> Builder<'a> {
             "array_element_expression" => {
                 self.infer_deref_type(node, TypeObservation::ArrayRefAccess);
                 if self.element_written_in_place(node) {
-                    self.record_key_write(node, None);
+                    self.record_in_place_write(node);
                 }
                 // Only the arrow form `$x->[i]` has a scalar-ref receiver; the
                 // direct `$arr[i]` indexes the named array.
