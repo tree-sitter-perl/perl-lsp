@@ -76,6 +76,7 @@ fn family(cap: Capture) -> Family {
         | C::OolDef
         | C::NestedTarget
         | C::RetType
+        | C::RetTypeEnclosing
         | C::SymAttr
         | C::SpecPrimary
         | C::NsInline
@@ -410,6 +411,8 @@ pub fn extract_in(
     // A parent may be written above the import that names it, so it
     // resolves once every row is in.
     scopes::resolve_parents(&mut st);
+    // A return type likewise.
+    defs::resolve_returns(&mut st);
     defs::dedup(&mut st);
     commands::finish(&mut st);
     defs::emit_type_aliases(&mut st);

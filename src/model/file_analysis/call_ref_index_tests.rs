@@ -449,3 +449,22 @@ foo(P->new->a->a);
     // `P->new->a->a->a`: `new` plus three `a` calls, all opening at `P`.
     assert_eq!(fa.refs.longest_call_chain(), 4);
 }
+
+/// A chain that starts with a function call (`create_user(5)->name->baz`):
+/// the start-anchored index holds `create_user` at the receiver's start,
+/// but `baz`'s receiver is `create_user(5)->name`, so `baz` dispatches on
+/// what `name` returns, not on what `create_user` returns.
+#[test]
+fn a_chain_from_a_function_call_dispatches_on_the_last_hop() {
+    let fa = parse(
+        "package Bar; sub new { bless {}, shift } sub baz {}
+package Foo; sub new { bless {}, shift } sub name { return Bar->new }
+package main;
+sub create_user { return Foo->new }
+create_user(5)->name->baz;
+",
+    );
+    let class = |name: &str| fa.method_call_invocant_class(&fa.refs[ref_idx(&fa, name, is_method_call)], None);
+    assert_eq!(class("name").as_deref(), Some("Foo"), "the function call is the whole receiver");
+    assert_eq!(class("baz").as_deref(), Some("Bar"), "the receiver is the chain's last hop");
+}

@@ -90,6 +90,12 @@ of the method the token is written in (php's `$this`, `self::`,
 `static::`). Which tokens these are is the document's: the extractor holds
 no receiver spelling.
 
+`@rettype` is a callable's declared return, captured in the def's match.
+`@rettype.enclosing` sits on a return the document says names the class the
+method is written in rather than a class by its spelling (php's `self`,
+`static`). It is a pattern of its own, joined to the def's `@rettype` by
+span.
+
 ## Decision: a kind's meaning lives on the kind
 
 What a kind means is a method on its enum, matched exhaustively:

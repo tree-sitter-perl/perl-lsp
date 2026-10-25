@@ -20,7 +20,14 @@ pub(super) struct State {
     /// method's declared return type) — pre-collected like names because the
     /// `@def` event fires before these inner captures.
     qualifier_by_match: HashMap<usize, String>,
-    rettype_by_match: HashMap<usize, String>,
+    rettype_by_match: HashMap<usize, (String, Point, Point)>,
+    /// `@rettype.enclosing`: the declared returns that name the class their
+    /// method is written in. Joined to a def's `@rettype` by span, because
+    /// the stating pattern is not the def's match.
+    enclosing_returns: std::collections::HashSet<(Point, Point)>,
+    /// (symbol index, site) of each declared return a class spelling may
+    /// name, resolved through the use-map once every row is in.
+    written_returns: Vec<(usize, Point)>,
     /// Flags the document states about the def whose name token sits at a
     /// span (`@mark.<flag>`, and `@param.receiver` → `RECEIVER`). Joined by
     /// span because the stating pattern is not the def's match.
@@ -128,7 +135,10 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
             d.qualifier_by_match.insert(e.match_id, e.text.clone());
         }
         Capture::RetType => {
-            d.rettype_by_match.insert(e.match_id, e.text.clone());
+            d.rettype_by_match.insert(e.match_id, (e.text.clone(), e.start, e.end));
+        }
+        Capture::RetTypeEnclosing => {
+            d.enclosing_returns.insert((e.start, e.end));
         }
         Capture::ParamReceiver => {
             *d.marks.entry((e.start, e.end)).or_default() |= crate::model::file_analysis::SymbolFlags::RECEIVER;
@@ -192,6 +202,21 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     if let Some(primary) = d.spec_primary_by_match.get(&e.match_id) {
         st.out.specializations.push((shaped.clone(), (pack.shape_name)(primary)));
     }
+    // A return naming the enclosing class is the def's own class, already an
+    // identity; any other spelling is a written type, read like a
+    // parameter's.
+    let return_type = match d.rettype_by_match.get(&e.match_id).cloned() {
+        Some((_, s, en)) if d.enclosing_returns.contains(&(s, en)) => pkg.clone().map(InferredType::ClassName),
+        Some((t, s, _)) => {
+            let t = (pack.annot_type)(&t);
+            if t.is_some() {
+                st.defs.written_returns.push((st.out.symbols.len(), s));
+            }
+            t
+        }
+        None => None,
+    };
+    let d = &st.defs;
     st.out.symbols.push(SkelSymbol {
         name: shaped,
         kind,
@@ -205,7 +230,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         scope: if kind == DefCap::Field { st.member_scope() } else { st.cur_scope },
         spelled: d.spelled_by_match.get(&(e.match_id, kind)).cloned(),
         pair: d.paired_matches.contains(&e.match_id).then_some(e.match_id),
-        return_type: d.rettype_by_match.get(&e.match_id).and_then(|t| (pack.annot_type)(t)),
+        return_type,
         deref_stack: d.nested_stacks.get(&e.match_id).cloned().unwrap_or_default(),
         attributes: {
             let mut a = d.attrs_by_match.get(&e.match_id).cloned().unwrap_or_default();
@@ -222,6 +247,17 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         qualifier_owned: d.qualifier_by_match.contains_key(&e.match_id),
         flags: d.marks.get(&(name_start, name_end)).copied().unwrap_or_default(),
     });
+}
+
+/// Resolve each written return to the identities it names at its site, the
+/// way a parameter's declared type is. Runs before dedup, while a symbol's
+/// index is still where its def pushed it.
+pub(super) fn resolve_returns(st: &mut ExtractState) {
+    for (i, site) in std::mem::take(&mut st.defs.written_returns) {
+        if let Some(t) = st.out.symbols[i].return_type.take() {
+            st.out.symbols[i].return_type = Some(written_type_at(&st.out, &st.pack.names, t, site));
+        }
+    }
 }
 
 /// Template params joined to their owner class — the owner shaped like a

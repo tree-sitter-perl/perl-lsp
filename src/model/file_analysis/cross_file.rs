@@ -197,13 +197,10 @@ impl<'a> SubInfo<'a> {
 
     /// Pass `module_index` so a return type produced by a cross-file method
     /// chain in the sub body resolves; `None` keeps it single-file.
+    /// The view wraps only callables, whatever detail their builder gave
+    /// them (a pack's callable carries none).
     pub fn return_type(&self, module_index: Option<&dyn CrossFileLookup>) -> Option<InferredType> {
-        match &self.primary.detail {
-            SymbolDetail::Sub { .. } => {
-                self.analysis.symbol_return_type_via_bag_ctx(self.primary.id, None, module_index)
-            }
-            _ => None,
-        }
+        self.analysis.symbol_return_type_via_bag_ctx(self.primary.id, None, module_index)
     }
 
     pub fn doc(&self) -> Option<&'a str> {

@@ -755,14 +755,28 @@ impl FileAnalysis {
             }
         }
 
-        // Function-call receiver (`create_user(5)->name`): the ref spans
-        // only the function NAME, so the exact-span read below can't see
-        // it — chase it here via `RefTable::call_at_start` (start-anchored,
-        // contained in the invocant). A method-call receiver is left to
-        // the exact-span read: its ref spans the whole receiver
-        // expression, and the start-anchored index deliberately holds the
-        // INNERMOST call at a point, which for a multi-hop chain is a
-        // strict prefix of the receiver — the wrong hop.
+        // The invocant's type, resolved tree-free from the bag at its
+        // exact span. Covers every recorded shape: scalar/array/hash
+        // reads, baked literals, and chain receivers — the exact-span
+        // call-ref arm inside `expr_type_at_span` reads the receiver
+        // call's bag return with Parametric flavors intact, so DBIC
+        // row-class narrowing survives the hop.
+        if let Some(span) = invocant_span {
+            if let Some(t) = self.expr_type_at_span(*span, module_index) {
+                if self.dispatch_class_of(&t, module_index).is_some() {
+                    return Some(t);
+                }
+            }
+        }
+
+        // Function-call receiver (`create_user(5)->name`) the exact-span
+        // read found no value for: the ref spans only the function NAME, so
+        // chase it via `RefTable::call_at_start` (start-anchored, contained
+        // in the invocant). It runs after the exact-span read because the
+        // start-anchored index holds the INNERMOST call at a point: under a
+        // chain that starts with a call (`f()->a->b`, `b`'s receiver is
+        // `f()->a`) the function is a strict prefix of the receiver — the
+        // wrong hop, which only the receiver's own value can rule out.
         if let Some(span) = invocant_span {
             if let Some(recv_idx) = self.refs.call_at_start(&span.start) {
                 let recv_span = self.refs[recv_idx].span;
@@ -781,20 +795,6 @@ impl FileAnalysis {
                             }
                         }
                     }
-                }
-            }
-        }
-
-        // The invocant's type, resolved tree-free from the bag at its
-        // exact span. Covers every recorded shape: scalar/array/hash
-        // reads, baked literals, and chain receivers — the exact-span
-        // call-ref arm inside `expr_type_at_span` reads the receiver
-        // call's bag return with Parametric flavors intact, so DBIC
-        // row-class narrowing survives the hop.
-        if let Some(span) = invocant_span {
-            if let Some(t) = self.expr_type_at_span(*span, module_index) {
-                if self.dispatch_class_of(&t, module_index).is_some() {
-                    return Some(t);
                 }
             }
         }
