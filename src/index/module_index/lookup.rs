@@ -755,6 +755,12 @@ impl CrossFileLookup for ModuleIndex {
         }
     }
 
+    fn leaf_def_candidates(&self, leaf: &str) -> Vec<Arc<CachedModule>> {
+        let mut v = self.core.leaf_defs.get(leaf).map(|c| c.clone()).unwrap_or_default();
+        v.sort_by(|a, b| a.path.cmp(&b.path));
+        v
+    }
+
     fn for_each_workspace_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) {
         self.for_each_registered_file(f)
     }

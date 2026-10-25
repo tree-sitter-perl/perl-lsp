@@ -46,6 +46,12 @@ pub struct SkelSymbol {
     pub flags: SymbolFlags,
 }
 
+impl crate::model::file_analysis::DeclaredClasses for Vec<SkelSymbol> {
+    fn declares_class(&self, identity: &str) -> bool {
+        self.iter().any(|s| matches!(s.kind, DefCap::Class | DefCap::Package) && s.name == identity)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SkelRef {
     pub kind: RefCap,
@@ -98,8 +104,8 @@ pub struct SkeletonAnalysis {
     /// `FileAnalysis.pack.use_rows`.
     pub use_rows: Vec<crate::model::file_analysis::UseRow>,
     /// A use-map language's namespace sections. Carried onto
-    /// `FileAnalysis.pack.namespace_sections`.
-    pub namespace_sections: Vec<crate::model::file_analysis::PackageRange>,
+    /// `FileAnalysis.namespace_ranges`.
+    pub namespace_ranges: Vec<crate::model::file_analysis::NamespaceRange>,
     pub scope_count: usize,
     pub scopes: Vec<crate::model::file_analysis::Scope>,
     pub witnesses: Vec<crate::model::witnesses::Witness>,
@@ -832,20 +838,23 @@ impl SkeletonAnalysis {
             // callable. Any other name is looked up across files at query
             // time; one nothing defines answers nothing (no name-case guess —
             // an unknown uppercase macro leaves the enclosing `auto x =
-            // F(..)` honestly untyped). Prefer a `Class` over a like-named
-            // callable (the constructor is the stronger claim). A method is
+            // F(..)` honestly untyped). Where calling a class constructs it
+            // (`NameSpellings::class_call`), prefer a `Class` over a
+            // like-named callable (the constructor is the stronger claim);
+            // elsewhere a class is no callee at all. A method is
             // never a free callee: a bare call in a member body reaches it
             // through `member_of`, with the class as its receiver.
             let class_identity_at = |written: &str, site: tree_sitter::Point| {
-                let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_sections, &self.names, site)?;
+                let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.names, site, &symbols)?;
                 Some(map.resolve(written).identity(map.sep))
             };
             let callee_sid: std::collections::HashMap<&str, SymbolId> = {
                 let mut m: std::collections::HashMap<&str, SymbolId> =
                     std::collections::HashMap::new();
+                let calls_construct = self.names.class_call == crate::model::file_analysis::ClassCall::Constructs;
                 for s in &symbols {
                     match s.kind {
-                        SymKind::Class => {
+                        SymKind::Class if calls_construct => {
                             m.insert(s.name.as_str(), s.id);
                         }
                         SymKind::Sub => {
@@ -1381,7 +1390,6 @@ impl SkeletonAnalysis {
                 .map(|(raw, span)| (span, raw))
                 .collect(),
             use_rows: std::mem::take(&mut self.use_rows),
-            namespace_sections: std::mem::take(&mut self.namespace_sections),
             domain_sites: std::mem::take(&mut self.domain_sites),
             moved_from: std::mem::take(&mut self.moved_from),
             control_regions: std::mem::take(&mut self.control_regions),
@@ -1398,6 +1406,7 @@ impl SkeletonAnalysis {
             packages,
             pack,
             flow_edges: std::mem::take(&mut self.flow_edges),
+            namespace_ranges: std::mem::take(&mut self.namespace_ranges),
             ..Default::default()
         });
         // Seal base_*_count so a later enrich pass (the CLI/--batch path
