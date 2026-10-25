@@ -481,3 +481,53 @@ class Broken implements Store {
         vec![row("App\\Broken", "App\\Store", "save"), row("App\\Disk", "App\\Base", "key")]
     );
 }
+
+/// `Foo()` calls the function `Foo` even where a class `Foo` is in scope:
+/// PHP constructs with `new`, so the call is no reference to the class
+/// and its value is no instance of it. (Python's `Foo()` is both —
+/// `python_pack_tests::calling_a_class_names_it`.)
+#[test]
+fn calling_a_class_name_is_a_function_call() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    use crate::model::file_analysis::{RefKind, RenameKind, Span};
+    use tree_sitter::Point;
+    // the document's free-call pattern, which this pack does not carry yet
+    let pack = LangPack {
+        query_source: concat!(
+            include_str!("../../queries/php/skeleton.scm"),
+            "\n(function_call_expression function: (name) @ref.call",
+            " arguments: (arguments ((_) @arity.arg \",\"?)*) @arity.args) @expr.call\n",
+        ),
+        ..php_pack()
+    };
+    let src = "<?php\nnamespace App;\nclass Foo {}\nclass Bar extends Foo {}\nFoo();\n";
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_php::LANGUAGE_PHP.into()).unwrap();
+    let tree = parser.parse(src, None).unwrap();
+    let fa = extract(&tree, src.as_bytes(), &pack).unwrap().into_file_analysis();
+
+    let call = fa
+        .refs()
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::FunctionCall) && r.target_name == "Foo")
+        .expect("the call is a ref");
+    assert_eq!(fa.class_named_by_call(call, None), None);
+    assert!(
+        !matches!(fa.rename_kind_at(Point::new(4, 1), None), Some(RenameKind::Package(_))),
+        "the call renames as a call"
+    );
+    let call_span = Span { start: Point::new(4, 0), end: Point::new(4, 5) };
+    assert_eq!(fa.expr_type_at_span(call_span, None), None);
+
+    // the class's references, from its parent clause, leave the call out
+    let path = std::path::PathBuf::from("/fake/php/App/Foo.php");
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), fa);
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let store = OpenDocs::new();
+    let cs = resolve(&store, &fa, FileKey::Path(path), Point::new(3, 19), Some(&idx), OverrideScope::default());
+    let mut rows: Vec<usize> = cs.rename_edits("Baz").unwrap().into_iter().map(|(l, _)| l.span.start.row).collect();
+    rows.sort();
+    assert_eq!(rows, [2, 3]);
+}

@@ -829,8 +829,10 @@ impl SkeletonAnalysis {
             // callable. Any other name is looked up across files at query
             // time; one nothing defines answers nothing (no name-case guess —
             // an unknown uppercase macro leaves the enclosing `auto x =
-            // F(..)` honestly untyped). Prefer a `Class` over a like-named
-            // callable (the constructor is the stronger claim). A method is
+            // F(..)` honestly untyped). Where calling a class constructs it
+            // (`NameSpellings::class_call`), prefer a `Class` over a
+            // like-named callable (the constructor is the stronger claim);
+            // elsewhere a class is no callee at all. A method is
             // never a free callee: a bare call in a member body reaches it
             // through `member_of`, with the class as its receiver.
             let class_identity_at = |written: &str, site: tree_sitter::Point| {
@@ -840,9 +842,10 @@ impl SkeletonAnalysis {
             let callee_sid: std::collections::HashMap<&str, SymbolId> = {
                 let mut m: std::collections::HashMap<&str, SymbolId> =
                     std::collections::HashMap::new();
+                let calls_construct = self.names.class_call == crate::model::file_analysis::ClassCall::Constructs;
                 for s in &symbols {
                     match s.kind {
-                        SymKind::Class => {
+                        SymKind::Class if calls_construct => {
                             m.insert(s.name.as_str(), s.id);
                         }
                         SymKind::Sub => {

@@ -252,6 +252,21 @@ pub struct NameSpellings {
     /// How a use-map language's import rows bind — read by the extractor
     /// as it mints each row, never by a consumer.
     pub imports: ImportRule,
+    /// What calling a name that is a class does.
+    pub class_call: ClassCall,
+}
+
+/// What a call whose callee names a class means in a language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ClassCall {
+    /// It is a function call like any other: construction has a syntax of
+    /// its own (PHP's `new Foo`, Perl's `Foo->new`), so `Foo()` never
+    /// reaches the class.
+    #[default]
+    FunctionCall,
+    /// It constructs an instance: Python's `User()`, C++'s functional
+    /// cast `Foo(x)`.
+    Constructs,
 }
 
 /// A use-map language's import semantics, as data the extractor mints a
@@ -309,6 +324,7 @@ impl NameSpellings {
         root_package: None,
         member_namespace: MemberNamespace::PerFamily,
         imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
+        class_call: ClassCall::FunctionCall,
     };
 
     /// A language with a namespace separator, no sigils, and spellings
@@ -322,6 +338,7 @@ impl NameSpellings {
             root_package: None,
             member_namespace: MemberNamespace::PerFamily,
             imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
+            class_call: ClassCall::FunctionCall,
         }
     }
 
@@ -336,6 +353,16 @@ impl NameSpellings {
         match self.class_spelling {
             ClassSpelling::UseMap => self.sep(),
             ClassSpelling::Identity => None,
+        }
+    }
+
+    /// The separator a call-shaped token resolves with when it can name a
+    /// class: a use-map language whose calls construct. `None` leaves every
+    /// call a call (`FileAnalysis::class_named_by_call`).
+    pub fn class_call_sep(&self) -> Option<&str> {
+        match self.class_call {
+            ClassCall::Constructs => self.use_map_sep(),
+            ClassCall::FunctionCall => None,
         }
     }
 

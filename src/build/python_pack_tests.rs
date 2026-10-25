@@ -211,3 +211,39 @@ fn calling_a_local_class_constructs_it() {
         fa.complete_methods_for_class("app.shapes.Widget", None).into_iter().map(|c| c.label).collect();
     assert!(members.iter().any(|m| m == "grow"), "{members:?}");
 }
+
+/// Calling a class constructs it, so the call is a reference to the class
+/// and its value an instance — the language data PHP declares the other
+/// way (`php_pack_tests::calling_a_class_name_is_a_function_call`).
+#[test]
+fn calling_a_class_names_it() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    use crate::model::file_analysis::{RefKind, RenameKind, Span};
+    let m = module(&["app"], false);
+    let fa = py_in("class Foo:\n    pass\nclass Bar(Foo):\n    pass\nFoo()\n", Some(&m));
+
+    let call = fa
+        .refs()
+        .iter()
+        .find(|r| matches!(r.kind, RefKind::FunctionCall) && r.target_name == "Foo")
+        .expect("the call is a ref");
+    assert_eq!(fa.class_named_by_call(call, None).as_deref(), Some("app.Foo"));
+    assert!(matches!(
+        fa.rename_kind_at(Point::new(4, 1), None),
+        Some(RenameKind::Package(ref c)) if c == "app.Foo"
+    ));
+    let call_span = Span { start: Point::new(4, 0), end: Point::new(4, 5) };
+    assert_eq!(fa.expr_type_at_span(call_span, None), Some(InferredType::ClassName("app.Foo".to_string())));
+
+    // the class's references, from its parent clause, take in the call
+    let path = std::path::PathBuf::from("/fake/py/app.py");
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), fa);
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let store = OpenDocs::new();
+    let cs = resolve(&store, &fa, FileKey::Path(path), Point::new(2, 11), Some(&idx), OverrideScope::default());
+    let mut rows: Vec<usize> = cs.rename_edits("Baz").unwrap().into_iter().map(|(l, _)| l.span.start.row).collect();
+    rows.sort();
+    assert_eq!(rows, [0, 2, 4]);
+}

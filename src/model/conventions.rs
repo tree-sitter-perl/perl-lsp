@@ -26,6 +26,8 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     // A call reaches a sub, never a `field` of the same name.
     member_namespace: MemberNamespace::PerFamily,
     imports: NameSpellings::NONE.imports,
+    // `Foo()` calls a sub; construction is `Foo->new`.
+    class_call: crate::model::file_analysis::ClassCall::FunctionCall,
 };
 
 /// Split a possibly-qualified name into `(Option<package>, basename)`.
@@ -477,6 +479,7 @@ mod tests {
             root_package: None,
             member_namespace: crate::model::file_analysis::MemberNamespace::PerFamily,
             imports: NameSpellings::NONE.imports,
+            class_call: NameSpellings::NONE.class_call,
         };
         assert_eq!(super::split_qualified("App\\Models\\User", &php), (Some("App\\Models"), "User"));
         assert_eq!(super::name_match_key("App\\Models\\User", &php), "User");
