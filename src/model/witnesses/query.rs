@@ -134,38 +134,90 @@ pub fn query_variable_type(
 /// extends that key's value; a dynamic or index key, or a write that may
 /// not have run (`widen`), opens the shape it lands on. `None` when the
 /// write says nothing new.
+/// The value a write autovivifies below a missing key, as Perl does: a
+/// closed shape holding just the written path, typed from the RHS at the
+/// leaf. A missing tuple only autovivifies at index 0, the one slot a fresh
+/// array can be written at without holes.
+fn vivify(hops: &[&crate::model::file_analysis::WriteKey], vtype: Option<&InferredType>) -> Option<InferredType> {
+    use crate::model::file_analysis::{SharedKeys, WriteKey};
+    let Some((first, rest)) = hops.split_first() else { return vtype.cloned() };
+    match first {
+        WriteKey::Hash(k) => Some(InferredType::HashWithKeys {
+            keys: SharedKeys::new(vec![(k.clone(), vivify(rest, vtype).map(Box::new))]),
+            open: false,
+        }),
+        WriteKey::Index(0) => Some(InferredType::Sequence(vec![vivify(rest, vtype)?])),
+        WriteKey::Index(_) | WriteKey::Unknown => None,
+    }
+}
+
 fn extend_shape(
     shape: &InferredType,
     hops: &[&crate::model::file_analysis::WriteKey],
     vtype: Option<&InferredType>,
     widen: bool,
 ) -> Option<InferredType> {
-    let InferredType::HashWithKeys { keys, open } = shape else { return None };
-    let opened = || (!*open).then(|| InferredType::HashWithKeys { keys: keys.clone(), open: true });
+    use crate::model::file_analysis::WriteKey;
     let (first, rest) = hops.split_first()?;
-    let crate::model::file_analysis::WriteKey::Hash(k) = first else { return opened() };
-    let mut keys = keys.clone();
-    // Copy-on-write: `to_mut` clones the key list only when the allocation
-    // is shared, so the pass pays per actual divergence, never per query.
-    let keys_mut = keys.to_mut();
-    match keys_mut.iter_mut().find(|(name, _)| name == k) {
-        Some(entry) if rest.is_empty() => {
-            if widen {
-                return opened();
+    match shape {
+        InferredType::HashWithKeys { keys, open } => {
+            let opened = || (!*open).then(|| InferredType::HashWithKeys { keys: keys.clone(), open: true });
+            let WriteKey::Hash(k) = first else { return opened() };
+            let mut keys = keys.clone();
+            // Copy-on-write: `to_mut` clones the key list only when the
+            // allocation is shared, so the pass pays per actual divergence,
+            // never per query.
+            let keys_mut = keys.to_mut();
+            match keys_mut.iter_mut().find(|(name, _)| name == k) {
+                Some(entry) if rest.is_empty() => {
+                    if widen {
+                        return opened();
+                    }
+                    if vtype.is_none() || entry.1.as_deref() == vtype {
+                        return None;
+                    }
+                    entry.1 = vtype.cloned().map(Box::new);
+                }
+                Some(entry) => {
+                    let inner = extend_shape(entry.1.as_deref()?, rest, vtype, widen)?;
+                    entry.1 = Some(Box::new(inner));
+                }
+                None if widen => return opened(),
+                None => keys_mut.push((k.to_string(), vivify(rest, vtype).map(Box::new))),
             }
-            if vtype.is_none() || entry.1.as_deref() == vtype {
+            Some(InferredType::HashWithKeys { keys, open: *open })
+        }
+        // A tuple slot: only the sound moves, retyping an in-bounds slot or
+        // appending at exactly `len`. A tuple has no open flag to widen into,
+        // so a conditional, dynamic or out-of-bounds write changes nothing;
+        // `element_at`'s honest `None` covers the residual.
+        InferredType::Sequence(elems) => {
+            let WriteKey::Index(i) = first else { return None };
+            if widen || *i < 0 {
                 return None;
             }
-            entry.1 = vtype.cloned().map(Box::new);
+            let i = *i as usize;
+            let mut elems = elems.clone();
+            if !rest.is_empty() {
+                if i == elems.len() {
+                    elems.push(vivify(rest, vtype)?);
+                } else {
+                    let inner = extend_shape(elems.get(i)?, rest, vtype, widen)?;
+                    elems[i] = inner;
+                }
+            } else {
+                let vt = vtype?;
+                match i.cmp(&elems.len()) {
+                    std::cmp::Ordering::Less if elems[i] == *vt => return None,
+                    std::cmp::Ordering::Less => elems[i] = vt.clone(),
+                    std::cmp::Ordering::Equal => elems.push(vt.clone()),
+                    std::cmp::Ordering::Greater => return None,
+                }
+            }
+            Some(InferredType::Sequence(elems))
         }
-        Some(entry) => {
-            let inner = extend_shape(entry.1.as_deref()?, rest, vtype, widen)?;
-            entry.1 = Some(Box::new(inner));
-        }
-        None if widen => return opened(),
-        None => keys_mut.push((k.to_string(), if rest.is_empty() { vtype.cloned().map(Box::new) } else { None })),
+        _ => None,
     }
-    Some(InferredType::HashWithKeys { keys, open: *open })
 }
 
 pub(crate) fn emit_mutation_extension_witnesses(
@@ -229,7 +281,7 @@ pub(crate) fn emit_mutation_extension_witnesses(
         };
         let vtype = w.rhs_span.and_then(rhs_type).and_then(slot_of);
         let shape = match base {
-            InferredType::HashWithKeys { .. } => {
+            InferredType::HashWithKeys { .. } | InferredType::Sequence(_) => {
                 let Some(shape) = extend_shape(&base, &hops, vtype.as_ref(), widen) else { continue };
                 shape
             }
@@ -261,32 +313,6 @@ pub(crate) fn emit_mutation_extension_witnesses(
                     span: Span { start: w.span.start, end: w.span.start },
                 });
                 continue;
-            }
-            // Sequence slot write: only the sound moves — retype an
-            // in-bounds slot, append at exactly len. Everything else
-            // (out-of-bounds, conditional, crossed, Unknown) is
-            // unmodeled: Sequence has no open flag to widen into, and
-            // a bare-ArrayRef downgrade loses to structure-dominates-
-            // rep subsumption. No array-index diagnostic exists, so
-            // `element_at`'s honest None covers the residual.
-            InferredType::Sequence(mut elems) => {
-                let crate::model::file_analysis::WriteKey::Index(i) = w.key else { continue };
-                if w.conditional || scope_crossed || i < 0 {
-                    continue;
-                }
-                let Some(vt) = w.rhs_span.and_then(rhs_type).and_then(slot_of) else { continue };
-                let i = i as usize;
-                if i < elems.len() {
-                    if elems[i] == vt {
-                        continue; // no new information
-                    }
-                    elems[i] = vt;
-                } else if i == elems.len() {
-                    elems.push(vt);
-                } else {
-                    continue;
-                }
-                InferredType::Sequence(elems)
             }
             _ => continue,
         };

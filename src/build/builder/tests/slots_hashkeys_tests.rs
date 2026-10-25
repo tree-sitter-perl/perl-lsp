@@ -692,6 +692,47 @@ sub a {
     );
 }
 
+#[test]
+fn nested_writes_descend_mixed_hash_and_array_hops() {
+    // A write path walks hash keys and static indexes alike: each hop
+    // extends the shape it lands in, whether a keyed hash or a tuple slot,
+    // and a missing level autovivifies as a closed shape of just the path.
+    let src = "\
+package T;
+sub a {
+    my $h = { list => [ { n => 1 } ] };
+    $h->{list}[0]{m} = 'x';
+    $h->{new}{deep} = 'z';
+    $h->{rows}[0]{id} = 1;
+    my $v = [ { a => 1 }, 2 ];
+    $v->[0]{b} = 'y';
+    $v->[2] = 3;
+    return;
+}
+";
+    let fa = build_fa(src);
+    let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(9, 0));
+    let keys_of = |t: &InferredType| match t {
+        InferredType::HashWithKeys { keys, .. } => keys.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+        other => panic!("not a keyed hash: {:?}", other),
+    };
+    let h = at("$h").expect("$h typed");
+    let InferredType::HashWithKeys { keys, .. } = &h else { panic!("$h: {:?}", h) };
+    let Some(InferredType::Sequence(list)) = keys[0].1.as_deref() else { panic!("list: {:?}", keys[0].1) };
+    assert_eq!(keys_of(&list[0]), ["n", "m"]);
+    let new = keys[1].1.as_deref().expect("new vivified");
+    assert_eq!(new.closed_keys_lacking("deep"), None, "{:?}", new);
+    let InferredType::HashWithKeys { keys: deep, open: false } = new else { panic!("new: {:?}", new) };
+    assert_eq!(deep[0].1.as_deref(), Some(&InferredType::String));
+    let Some(InferredType::Sequence(rows)) = keys[2].1.as_deref() else { panic!("rows: {:?}", keys[2].1) };
+    assert_eq!(keys_of(&rows[0]), ["id"]);
+    let v = at("$v").expect("$v typed");
+    let InferredType::Sequence(slots) = &v else { panic!("$v: {:?}", v) };
+    assert_eq!(slots.len(), 3, "{:?}", slots);
+    assert_eq!(keys_of(&slots[0]), ["a", "b"]);
+    assert_eq!(slots[2], InferredType::Numeric);
+}
+
 /// The literal-hash spelling: `my %h = (k => v)` types through the
 /// same shape builder as the hashref literal, `$h{k}` projects off
 /// `%h` (the canonical container name), mutation extension applies,

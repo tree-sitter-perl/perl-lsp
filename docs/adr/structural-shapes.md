@@ -120,9 +120,14 @@ A write is any place Perl stores through the element, not only
 and a container deref Perl autovivifies through (`push @{$v->{k}}, …`,
 `@{$v->{k}} = …`; the array-modifying builtins are
 `builtins::modifies_its_array_argument`). A nested write
-(`$v->{a}{b} = …`) carries its lower hops as the `KeyWrite`'s `path`
-and extends the shape it lands in, `a`'s value here, by the same rules;
-the RHS types the last key. Through an object (`$self->{s}{k} = …`) the
+(`$v->{a}{b} = …`, `$v->{rows}[0]{id} = …`) carries its lower hops,
+static hash keys and static indexes alike, as the `KeyWrite`'s `path`
+and extends the shape it lands in, `a`'s value here, by the same rules:
+a hash hop extends a keyed hash, an index hop retypes a tuple slot or
+appends at exactly `len`, and a missing level autovivifies as a closed
+shape holding just the written path (a missing tuple only at index 0).
+The RHS types the last hop; a list-assignment target takes its slot of
+the RHS. Through an object (`$self->{s}{k} = …`) the
 inner shape is the slot's, so the extended shape lands on
 `SlotType{class, s}`, where it joins the slot's other writes.
 
