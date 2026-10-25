@@ -61,7 +61,8 @@ fn a_file_is_the_module_its_package_chain_names() {
 fn imports_are_rows_of_the_parts_they_bind() {
     let m = module(&["pkg", "sub", "mod"], false);
     let skel = skel_in(
-        "from a.b import C as D\nimport a.b\nimport a.b as c\nfrom . import y\nfrom ..x import Z\n",
+        "from a.b import C as D\nimport a.b\nimport a.b as c\nfrom . import y\nfrom ..x import Z\n\
+         from .. import w\nfrom x import V\nfrom .m.n import U as T\n",
         Some(&m),
     );
     // the modules the statements load stay the import list
@@ -81,6 +82,9 @@ fn imports_are_rows_of_the_parts_they_bind() {
             ("a", "b", Some("c")),
             ("pkg.sub", "y", None),
             ("pkg.x", "Z", None),
+            ("pkg", "w", None),
+            ("x", "V", None),
+            ("pkg.sub.m.n", "U", Some("T")),
         ]
     );
 }
