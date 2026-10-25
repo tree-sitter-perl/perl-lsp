@@ -3,7 +3,9 @@
 
 use super::*;
 use crate::build::packs::{python_file_module, python_pack};
+use crate::build::walk_markers::{MarkedDirs, MarkerSnapshot};
 use crate::model::file_analysis::{FileAnalysis, InferredType, SymKind};
+use std::path::Path;
 use tree_sitter::Point;
 
 fn module(segments: &[&str], is_package: bool) -> FileModule {
@@ -50,11 +52,74 @@ fn a_file_is_the_module_its_package_chain_names() {
         ("src/pkg/sub/models.py", ""),
         ("loose/script.py", ""),
     ]);
-    let of = |rel: &str| python_file_module(&t.0.join(rel));
+    // no walk covers the tree: the disk answers
+    let of = |rel: &str| python_file_module(&t.0.join(rel), &MarkedDirs::on_disk("__init__.py"));
     assert_eq!(of("src/pkg/sub/models.py"), Some(module(&["pkg", "sub", "models"], false)));
     assert_eq!(of("src/pkg/sub/__init__.py"), Some(module(&["pkg", "sub"], true)));
     // no package above it, and no workspace root containing it: its stem
     assert_eq!(of("loose/script.py"), Some(module(&["script"], false)));
+    // a snapshot of another walk covers none of it
+    let other = MarkerSnapshot::from_walk("__init__.py", Path::new("/elsewhere"), &[]);
+    let of = |rel: &str| python_file_module(&t.0.join(rel), &MarkedDirs::over(&other));
+    assert_eq!(of("src/pkg/sub/models.py"), Some(module(&["pkg", "sub", "models"], false)));
+}
+
+/// The walk's snapshot names modules with no filesystem access: none of
+/// these directories exist.
+#[test]
+fn a_walk_snapshot_names_modules_without_the_disk() {
+    let root = Path::new("/no/such/workspace");
+    let files: Vec<std::path::PathBuf> = [
+        "src/pkg/__init__.py",
+        "src/pkg/sub/__init__.py",
+        "src/pkg/sub/models.py",
+        "src/pkg/plain/view.py",
+        "tools/run.py",
+    ]
+    .iter()
+    .map(|rel| root.join(rel))
+    .collect();
+    let snap = MarkerSnapshot::from_walk("__init__.py", root, &files);
+    let dirs = MarkedDirs::over(&snap);
+    let of = |rel: &str| python_file_module(&root.join(rel), &dirs);
+    assert_eq!(of("src/pkg/sub/models.py"), Some(module(&["pkg", "sub", "models"], false)));
+    assert_eq!(of("src/pkg/sub/__init__.py"), Some(module(&["pkg", "sub"], true)));
+    // its own directory is no package: named from the walk's root
+    assert_eq!(of("src/pkg/plain/view.py"), Some(module(&["src", "pkg", "plain", "view"], false)));
+    assert_eq!(of("tools/run.py"), Some(module(&["tools", "run"], false)));
+}
+
+/// A blob filed under a module its path no longer names is not current —
+/// the warm scan re-analyzes it — and a marker noted through the snapshot
+/// is what makes it so.
+#[cfg(feature = "python")]
+#[test]
+fn a_noted_marker_makes_old_filings_stale() {
+    use crate::build::walk_markers;
+    let t = Tree::new("noted", &[("src/pkg/mod.py", "class W:\n    pass\n")]);
+    let root = t.0.clone();
+    let file = root.join("src/pkg/mod.py");
+    let init = root.join("src/pkg/__init__.py");
+    walk_markers::record_walk("__init__.py", &root, std::slice::from_ref(&file));
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
+    let driver = reg.for_id("python").expect("python driver");
+    let before = driver.analyze_with_path("class W:\n    pass\n", Some(&file));
+    assert_eq!(before.pack.file_module, Some(module(&["src", "pkg", "mod"], false)));
+    assert!(driver.path_inputs_current(&file, &before));
+    let gen = walk_markers::generation_covering("__init__.py", &file).unwrap();
+
+    // The snapshot answers, not the disk: creating the file alone changes nothing.
+    std::fs::write(&init, "").unwrap();
+    assert!(driver.path_inputs_current(&file, &before));
+    assert_eq!(walk_markers::note_marker("__init__.py", &init, true), Some(root.join("src/pkg")));
+    assert!(walk_markers::generation_covering("__init__.py", &file).unwrap() > gen);
+    assert!(!driver.path_inputs_current(&file, &before), "filed as src.pkg.mod, now pkg.mod");
+    let after = driver.analyze_with_path("class W:\n    pass\n", Some(&file));
+    assert_eq!(after.pack.file_module, Some(module(&["pkg", "mod"], false)));
+    // noting what the snapshot already holds is no change
+    assert_eq!(walk_markers::note_marker("__init__.py", &init, true), None);
+    // a file of another name is no marker
+    assert_eq!(walk_markers::note_marker("__init__.py", &file, false), None);
 }
 
 #[test]
