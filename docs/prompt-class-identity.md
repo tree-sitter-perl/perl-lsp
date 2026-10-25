@@ -190,13 +190,11 @@ leaf-space FQ family validation in `implementations_of`.
   of its enclosing class there, so the call is untyped and goto-def finds
   nothing; the class reference spellings (a parent clause, an annotation)
   resolve.
-- **Cross-file goto-def on a qualified spelling reads the written
-  spelling.** The PackageRef lane of `definitions()` looks up
-  `visible_def_candidates(&r.target_name)`, so `class V(Outer.Inner)` in
-  another module lands on the same-leaf candidates' file tops instead of
-  `pkg.models.Outer.Inner` (references and rename match by
-  `spelled_identity` and are exact). PHP's relative qualified spellings
-  (`extends Sub\Model`) take the same lane.
+- **A dotted annotation mints no class reference.** `v: Outer.Inner`
+  types `v` as `pkg.models.Outer.Inner`, but its tokens are a
+  `FieldAccess` on `Outer`, not a `PackageRef`, so goto-def on `Inner`
+  there finds nothing; the parent clause `class V(Outer.Inner)` is a
+  `PackageRef` and lands on the declaration.
 
 - **The visibility pins have no site.** `UseMapPins` is per ORIGIN
   (`VisibilityAxis::for_origin` takes a file, not a position), so it
