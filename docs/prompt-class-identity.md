@@ -30,15 +30,27 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    spelling and its identity land in one bucket, and retrieval is never
    narrower than the matcher.
 3. **Resolution narrows on the FQN and widens on the leaf.** A candidate
-   whose FQN equals the origin's resolved spelling is exact; when the exact
-   set declares nothing, the walk admits the leaf-keyed set and STAMPS the
-   answer (`MethodResolution::CrossFile { widened: true }`). The stamp is
-   provenance on the value, so every projection inherits it without a
-   handler branch.
-4. **The loud half**: a `resolved-by-widening` diagnostics lane reads the
-   stamp and reports "member `m` found on `X\Y`, not on the class this
-   file names (`A\B`)". Same silence rules as `unresolved-method` (the
-   receiver is THE dispatch projection; an unknown receiver says nothing).
+   whose FQN equals the origin's resolved spelling is exact; when nothing
+   indexed declares the FQN, the walk admits the leaf-keyed set and STAMPS
+   the answer (`MethodResolution::CrossFile { widened: true }`). The stamp
+   is provenance on the value, so every projection inherits it without a
+   handler branch. The rule lives in the origin's scope: a pack whose
+   class spellings go through a use-map is routed `NameKeyed`
+   (`LanguageRegistry::pack_visibility`, read off its `names`), so its
+   `ScopedLookup` carries the `UseMap` axis and `use_map_candidates`
+   decides. A class target's goto-def (and so hover) lands on the
+   stand-ins only after every exact lane missed, labeled `widened: X
+   stands in for Y` (`widened_class_stand_ins`); references and rename
+   stay exact, so a rename never rewrites a stranger.
+4. **The loud half**: the `resolved-by-widening` diagnostics lane
+   (`lsp::symbols::widening_diagnostics`, part of `pack_diagnostics`)
+   fires on each class token whose identity nothing indexed declares and
+   a same-leaf class answers for (`FileAnalysis::widened_class_references`):
+   "nothing indexed declares `A\B`; resolved by its leaf to `X\B`". It
+   sits on the reference that names the class — the parent clause, the
+   `use` row's leaf — because that is where the fix is written. A member
+   found through such a class carries the stamp, but no lane reads it at
+   the member site: that would type every receiver on every publish.
 5. **Spellings resolve once, in extraction.** A class declaration joins
    the namespace in force at its position, the innermost
    `@context.namespace` (`ExtractState::class_identity`), so a class is
@@ -87,9 +99,16 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    cannot disagree. The capability is `ClassSpelling::UseMap` in
    `LangPack::names`, baked into `PackFacts::names`; a pack without it is
    untouched.
-6. **The index registers the identity AND its leaf.** `collect_linkage_feed`
-   feeds a namespaced symbol under both keys: the identity is the exact
-   key, the leaf the widening one (`ScopedLookup::use_map_candidates`).
+6. **The index registers the identity AND its leaf, in different
+   tables.** `collect_linkage_feed` feeds the identity into the candidate
+   table and the name slot, the exact key every lookup reads. The leaf of
+   each use-map class identity (`widening_leaves`, the row store's
+   `name_match_key`) goes into a relation of its own, `IndexCore::leaf_defs`,
+   read only through `CrossFileLookup::leaf_def_candidates` by
+   `use_map_candidates` once the exact set is empty. A leaf in the
+   candidate table would answer every bare-name lookup and compete for
+   the name slot, so a same-leaf stranger could win where the identity is
+   declared; kept apart, it never competes.
    A `TargetRef`'s `class_ns` is the identity's own namespace
    (`identity_namespace`), the origin's pin only for a bare spelling.
 7. **A class token references the target iff it names its identity.** The
@@ -151,10 +170,10 @@ leaf-space FQ family validation in `implementations_of`.
   and its symbol's `package` is that namespace. The identity is unique by
   construction (row and column), so nothing collides; it only reads
   oddly in an outline.
-- **The leaf key double-feeds the edge index.** The linkage feed registers
-  a namespaced symbol under its identity AND its leaf, and
-  `rebuild_name_registration` feeds the edge indexes once per key, so a
-  php class's inheritance and bridge edges are recorded twice (once per
-  spelling). Correctness is unaffected (buckets dedup members; walks
-  dedup by node); the cost is in `docs/scaling-limits.md` §7, unmeasured
-  on a large corpus.
+- **A global-namespace class never widens.** Widening reads
+  a QUALIFIED identity's leaf; a bare identity (a PHP class with no
+  namespace, `new \User`) is its own leaf and never widens to `X\User`.
+- **The leaf relation is a second candidate table.** One `leaf_defs`
+  entry per use-map class, an `Arc` clone beside its `all_defs` one, and
+  nothing in the edge indexes; `docs/scaling-limits.md` §7, unmeasured on
+  a large corpus.

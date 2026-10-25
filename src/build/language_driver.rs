@@ -1453,6 +1453,35 @@ impl LanguageRegistry {
             .any(|l| *l == id)
     }
 
+    /// The visibility routing fact for `id`'s language, which
+    /// `VisibilityAxis::for_origin` derives the origin's axis from: a pack
+    /// whose class spellings resolve through a use-map is scoped by that
+    /// use-map (`NameKeyed`), any other pack by its include closure, the
+    /// host by its search path. Read off the pack's own `names`, never a
+    /// language-name branch. Memoized like `is_pack_language`.
+    pub fn pack_visibility(id: &str) -> crate::model::file_analysis::PackVisibility {
+        use crate::model::file_analysis::PackVisibility;
+        static ROUTES: std::sync::OnceLock<Vec<(&'static str, PackVisibility)>> = std::sync::OnceLock::new();
+        ROUTES
+            .get_or_init(|| {
+                LanguageRegistry::compiled()
+                    .drivers
+                    .iter()
+                    .filter_map(|d| {
+                        let pack = d.lang_pack()?;
+                        let route = match pack.names.use_map_sep() {
+                            Some(_) => PackVisibility::NameKeyed,
+                            None => PackVisibility::IncludePaths,
+                        };
+                        Some((d.id(), route))
+                    })
+                    .collect()
+            })
+            .iter()
+            .find(|(l, _)| *l == id)
+            .map_or(PackVisibility::Host, |(_, route)| *route)
+    }
+
     /// The declared capabilities of `id`'s driver — THE generic capability
     /// asker (the collapse the two-boolean ceiling in docs/PARKED.md
     /// called for). An id no driver claims answers `DriverCaps::default()`

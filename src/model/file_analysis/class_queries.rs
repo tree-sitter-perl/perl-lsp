@@ -1111,6 +1111,41 @@ impl FileAnalysis {
             .map(|s| s.selection_span)
     }
 
+    /// This file's own class declaration whose leaf is `leaf`, under any
+    /// namespace: what a widened candidate stands in with.
+    pub fn declared_class_with_leaf(&self, leaf: &str) -> Option<&Symbol> {
+        self.symbols()
+            .iter()
+            .find(|s| matches!(s.kind, SymKind::Class) && name_match_key(&s.name, self.names()) == leaf)
+    }
+
+    /// The class references in this file whose identity nothing indexed
+    /// declares, answered instead by a same-leaf class of another namespace
+    /// — the widened answers the `resolved-by-widening` lane says out loud.
+    /// `index` is this file's own scoped view; a scope that never widens
+    /// (every language but a use-map one) yields nothing. A class this file
+    /// declares itself is never widened, indexed or not.
+    pub fn widened_class_references(&self, index: &dyn CrossFileLookup) -> Vec<WidenedClassRef> {
+        if self.names().use_map_sep().is_none() {
+            return Vec::new();
+        }
+        let mut verdicts: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+        let mut out = Vec::new();
+        for r in self.refs().iter().filter(|r| matches!(r.kind, RefKind::PackageRef)) {
+            let named = self.spelled_identity(r);
+            let stand_in = verdicts.entry(named.clone()).or_insert_with(|| {
+                if self.find_type_decl(&named).is_some() {
+                    return None;
+                }
+                widened_class_stand_ins(index, &named, self.names()).into_iter().next().map(|w| w.class)
+            });
+            if let Some(resolved) = stand_in {
+                out.push(WidenedClassRef { span: r.span, named, resolved: resolved.clone() });
+            }
+        }
+        out
+    }
+
     /// The namespace this file's own `class LEAF` declaration carries
     /// (`None` package = the global namespace, spelled `""`). `None` when
     /// the file declares no such class.

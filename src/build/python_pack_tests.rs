@@ -150,11 +150,10 @@ fn a_class_resolves_across_modules_by_identity() {
         ("pkg/models.py", "class User:\n    def name(self):\n        return 1\n"),
         ("pkg/legacy.py", "class User:\n    pass\n"),
         ("pkg/views.py", "from pkg.models import User\n\nclass Admin(User):\n    pass\n\nu = User()\n"),
-        ("pkg/vendored.py", "from vendor.lib import User as VU\n\nclass Sub(VU):\n    pass\n"),
     ]);
     let driver = LanguageRegistry::compiled().for_path(std::path::Path::new("x.py")).unwrap();
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
-    for rel in ["pkg/models.py", "pkg/legacy.py", "pkg/views.py", "pkg/vendored.py"] {
+    for rel in ["pkg/models.py", "pkg/legacy.py", "pkg/views.py"] {
         let p = t.0.join(rel);
         let src = std::fs::read_to_string(&p).unwrap();
         idx.insert_workspace_for_test(p.clone(), driver.analyze_with_path(&src, Some(&p)));
@@ -187,13 +186,6 @@ fn a_class_resolves_across_modules_by_identity() {
         edits.sort();
         assert_eq!(edits, want_edits, "rename from {at:?}");
     }
-
-    // a class named through a module nothing indexes keeps that identity;
-    // no same-leaf class stands in for it
-    let p_vendored = t.0.join("pkg/vendored.py");
-    let vendored = idx.workspace_file_for_test(&p_vendored).unwrap();
-    assert_eq!(vendored.declared_parents("pkg.vendored.Sub"), ["vendor.lib.User"]);
-    assert!(vendored.resolve_method_in_ancestors("pkg.vendored.Sub", "name", Some(&idx)).is_none());
 }
 
 /// A call of a class this module declares constructs it, whatever
@@ -246,4 +238,146 @@ fn calling_a_class_names_it() {
     let mut rows: Vec<usize> = cs.rename_edits("Baz").unwrap().into_iter().map(|(l, _)| l.span.start.row).collect();
     rows.sort();
     assert_eq!(rows, [0, 2, 4]);
+}
+
+
+/// Analyze `files` (relative to a scratch tree) through the python driver
+/// into one index, in the order given.
+#[cfg(feature = "python")]
+fn indexed(tag: &str, files: &[(&str, &str)]) -> (Tree, crate::index::module_index::ModuleIndex) {
+    use crate::build::language_driver::LanguageRegistry;
+    let t = Tree::new(tag, files);
+    let driver = LanguageRegistry::compiled().for_path(std::path::Path::new("x.py")).unwrap();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    for (rel, _) in files.iter().filter(|(rel, _)| !rel.ends_with("__init__.py")) {
+        let p = t.0.join(rel);
+        let src = std::fs::read_to_string(&p).unwrap();
+        idx.insert_workspace_for_test(p.clone(), driver.analyze_with_path(&src, Some(&p)));
+    }
+    (t, idx)
+}
+
+/// The defining files' names and rows of the set's goto-def answer at
+/// `at`, its hover candidate's file, and the labels it carries.
+#[cfg(feature = "python")]
+fn landing(
+    idx: &crate::index::module_index::ModuleIndex,
+    path: &std::path::Path,
+    at: Point,
+) -> (Vec<(String, usize)>, Option<String>, Vec<Option<String>>) {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let name_of = |k: &FileKey| match k {
+        FileKey::Path(p) => p.file_name().unwrap().to_string_lossy().to_string(),
+        FileKey::Url(u) => u.to_string(),
+    };
+    let fa = idx.workspace_file_for_test(path).unwrap();
+    let store = OpenDocs::new();
+    let cs = resolve(&store, &fa, FileKey::Path(path.to_path_buf()), at, Some(idx), OverrideScope::default());
+    let defs = cs.definitions();
+    (
+        defs.iter().map(|d| (name_of(&d.key), d.span.start.row)).collect(),
+        cs.hover_candidate().map(|d| name_of(&d.key)),
+        defs.iter().map(|d| d.label.clone()).collect(),
+    )
+}
+
+/// The member `name` as `class`'s ancestry answers it, through `path`'s
+/// own scope.
+#[cfg(feature = "python")]
+fn member_on(
+    idx: &crate::index::module_index::ModuleIndex,
+    path: &std::path::Path,
+    class: &str,
+) -> Option<crate::model::file_analysis::MethodResolution> {
+    use crate::build::language_driver::LanguageRegistry;
+    use crate::model::file_analysis::{CrossFileLookup, ScopedLookup, VisibilityAxis};
+    let fa = idx.workspace_file_for_test(path).unwrap();
+    let base: &dyn CrossFileLookup = idx;
+    let vis = LanguageRegistry::pack_visibility(&fa.language);
+    let scoped = ScopedLookup::new(base, &fa.pack.include_closure, None, VisibilityAxis::for_origin(&fa, None, base, vis));
+    fa.resolve_method_in_ancestors(class, "name", Some(&scoped))
+}
+
+#[cfg(feature = "python")]
+fn widening_codes(idx: &crate::index::module_index::ModuleIndex, path: &std::path::Path) -> Vec<(usize, usize, String)> {
+    let fa = idx.workspace_file_for_test(path).unwrap();
+    crate::lsp::symbols::widening_diagnostics(&fa, idx)
+        .into_iter()
+        .map(|d| (d.range.start.line as usize, d.range.start.character as usize, d.message))
+        .collect()
+}
+
+/// Two classes share the leaf `User`, and the stranger's file sorts first:
+/// the leaf is registered for widening, yet every lane lands on the
+/// identity the file imports.
+#[cfg(feature = "python")]
+#[test]
+fn a_same_leaf_class_never_competes_with_the_identity() {
+    use crate::model::file_analysis::{CrossFileLookup, MethodResolution};
+    let (t, idx) = indexed("leafexact", &[
+        ("pkg/__init__.py", ""),
+        ("pkg/a_legacy.py", "class User:\n    def name(self):\n        return 2\n"),
+        ("pkg/models.py", "class User:\n    def name(self):\n        return 1\n"),
+        ("pkg/views.py", "from pkg.models import User\n\nclass Admin(User):\n    pass\n"),
+    ]);
+    assert_eq!(idx.leaf_def_candidates("User").len(), 2, "the leaf is registered");
+    assert!(idx.def_candidates("User").is_empty(), "and answers no name lookup");
+    let views = t.0.join("pkg/views.py");
+    for at in [Point::new(0, 23), Point::new(2, 12)] {
+        let (defs, hover, labels) = landing(&idx, &views, at);
+        assert_eq!(defs, [("models.py".to_string(), 0)], "goto-def from {at:?}");
+        assert_eq!(hover.as_deref(), Some("models.py"), "hover from {at:?}");
+        assert_eq!(labels, [None]);
+    }
+    assert!(matches!(
+        member_on(&idx, &views, "pkg.views.Admin"),
+        Some(MethodResolution::CrossFile { ref class, widened: false, .. }) if class == "pkg.models.User"
+    ));
+    assert!(widening_codes(&idx, &views).is_empty());
+}
+
+/// A class imported from a module nothing indexes answers through its
+/// leaf, and says so: goto-def and hover land on the stand-in, labeled; a
+/// member found there is stamped widened; the diagnostic names both. Once
+/// the module is indexed, the identity takes over.
+#[cfg(feature = "python")]
+#[test]
+fn an_unindexed_identity_widens_to_its_leaf_out_loud() {
+    use crate::model::file_analysis::MethodResolution;
+    let files = [
+        ("pkg/__init__.py", ""),
+        ("pkg/legacy.py", "class User:\n    def name(self):\n        return 2\n"),
+        ("pkg/vendored.py", "from vendor.lib import User as VU\n\nclass Sub(VU):\n    pass\n"),
+    ];
+    let (t, idx) = indexed("leafwide", &files);
+    let vendored = t.0.join("pkg/vendored.py");
+    let fa = idx.workspace_file_for_test(&vendored).unwrap();
+    assert_eq!(fa.declared_parents("pkg.vendored.Sub"), ["vendor.lib.User"]);
+    let (defs, hover, labels) = landing(&idx, &vendored, Point::new(2, 10));
+    assert_eq!(defs, [("legacy.py".to_string(), 0)]);
+    assert_eq!(hover.as_deref(), Some("legacy.py"));
+    assert_eq!(labels, [Some("widened: `pkg.legacy.User` stands in for `vendor.lib.User`".to_string())]);
+    assert!(matches!(
+        member_on(&idx, &vendored, "pkg.vendored.Sub"),
+        Some(MethodResolution::CrossFile { ref class, widened: true, .. }) if class == "pkg.legacy.User"
+    ));
+    let msg = "nothing indexed declares `vendor.lib.User`; resolved by its leaf to `pkg.legacy.User`".to_string();
+    // at the class reference (an import's name is no class token here)
+    assert_eq!(widening_codes(&idx, &vendored), [(2, 10, msg)]);
+
+    // the module arrives: exact again, and quiet
+    let mut with_vendor = files.to_vec();
+    with_vendor.push(("vendor/__init__.py", ""));
+    with_vendor.push(("vendor/lib.py", "class User:\n    def name(self):\n        return 3\n"));
+    let (t, idx) = indexed("leafwide2", &with_vendor);
+    let vendored = t.0.join("pkg/vendored.py");
+    let (defs, _, labels) = landing(&idx, &vendored, Point::new(2, 10));
+    assert_eq!(defs, [("lib.py".to_string(), 0)]);
+    assert_eq!(labels, [None]);
+    assert!(matches!(
+        member_on(&idx, &vendored, "pkg.vendored.Sub"),
+        Some(MethodResolution::CrossFile { ref class, widened: false, .. }) if class == "vendor.lib.User"
+    ));
+    assert!(widening_codes(&idx, &vendored).is_empty());
 }
