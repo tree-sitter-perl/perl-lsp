@@ -617,6 +617,136 @@ $dyn->{$ENV{K}} = 1;
     );
 }
 
+/// Writes that are not a plain `$v->{k} = …` still land their key: `++`, a
+/// list-assignment target, a deref Perl autovivifies through, and a nested
+/// write, which extends the inner shape it lands in (an object's slot
+/// included, which no longer reads as just its literal).
+#[test]
+fn in_place_and_nested_writes_extend_shapes() {
+    let src = "\
+package T;
+sub a {
+    my $h = { a => { x => 1 } };
+    $h->{a}{y} = 'v';
+    push @{$h->{list}}, 1;
+    $h->{n}++;
+    ($h->{o}) = (1);
+    @{$h->{arr}} = ();
+    return $h;
+}
+sub b {
+    my $self = shift;
+    $self->{s} = { x => 1 };
+    $self->{s}{z} = 1;
+    return $self->{s};
+}
+";
+    let fa = build_fa(src);
+    let t = fa.inferred_type_via_bag("$h", Point::new(8, 0)).expect("$h typed");
+    let InferredType::HashWithKeys { keys, open: false } = &t else { panic!("shape: {:?}", t) };
+    let names: Vec<&str> = keys.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(names, ["a", "list", "n", "o", "arr"]);
+    let Some(InferredType::HashWithKeys { keys: inner, open: false }) = keys[0].1.as_deref() else {
+        panic!("inner shape: {:?}", keys[0].1)
+    };
+    assert_eq!(inner.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["x", "y"]);
+    assert_eq!(inner[1].1.as_deref(), Some(&InferredType::String));
+    let slot = fa
+        .sub_return_type_local("b")
+        .expect("slot typed");
+    assert!(slot.closed_keys_lacking("z").is_none(), "slot still closed without z: {:?}", slot);
+}
+
+#[test]
+fn list_assignment_slots_bind_element_targets() {
+    // Each target of a list assignment takes its own slot: an element
+    // target before `$x` doesn't shift `$x` onto its value, and the
+    // element's key gets the slot's value, from a literal list or from
+    // element N of any other right-hand side.
+    let src = "\
+package T;
+sub pair { return (1, 'w') }
+sub a {
+    my $h = {};
+    my ($x, $y);
+    ($h->{a}, $x) = (1, 'str');
+    ($h->{b}, $h->{c}) = pair();
+    (my @all, $h->{d}) = (1, 2);
+    $y = $h->{c};
+    return $h;
+}
+";
+    let fa = build_fa(src);
+    let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(9, 0));
+    assert_eq!(at("$x"), Some(InferredType::String));
+    assert_eq!(at("$y"), Some(InferredType::String));
+    let t = at("$h").expect("$h typed");
+    let InferredType::HashWithKeys { keys, .. } = &t else { panic!("shape: {:?}", t) };
+    let got: Vec<(&str, Option<&InferredType>)> = keys.iter().map(|(k, v)| (k.as_str(), v.as_deref())).collect();
+    assert_eq!(
+        got,
+        [
+            ("a", Some(&InferredType::Numeric)),
+            ("b", Some(&InferredType::Numeric)),
+            ("c", Some(&InferredType::String)),
+            ("d", None),
+        ]
+    );
+}
+
+#[test]
+fn nested_writes_descend_mixed_hash_and_array_hops() {
+    // A write path walks hash keys and static indexes alike: each hop
+    // extends the shape it lands in, whether a keyed hash or a tuple slot,
+    // and a missing level autovivifies as a closed shape of just the path.
+    let src = "\
+package T;
+sub a {
+    my $h = { list => [ { n => 1 } ], tail => [ 1 ] };
+    $h->{list}[0]{m} = 'x';
+    $h->{new}{deep} = 'z';
+    $h->{rows}[0]{id} = 1;
+    my $v = [ { a => 1 }, 2 ];
+    $v->[0]{b} = 'y';
+    $v->[2] = 3;
+    $h->{cells}[0] = opaque();
+    $v->[3] = opaque();
+    $h->{sparse}[2] = 1;
+    $h->{tail}[4] = 1;
+    return;
+}
+";
+    let fa = build_fa(src);
+    let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(13, 0));
+    let keys_of = |t: &InferredType| match t {
+        InferredType::HashWithKeys { keys, .. } => keys.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+        other => panic!("not a keyed hash: {:?}", other),
+    };
+    let h = at("$h").expect("$h typed");
+    let InferredType::HashWithKeys { keys, .. } = &h else { panic!("$h: {:?}", h) };
+    let key = |name: &str| keys.iter().find(|(k, _)| k == name).and_then(|(_, v)| v.as_deref());
+    let Some(InferredType::Sequence(list)) = key("list") else { panic!("list: {:?}", key("list")) };
+    assert_eq!(keys_of(&list[0]), ["n", "m"]);
+    let new = key("new").expect("new vivified");
+    assert_eq!(new.closed_keys_lacking("deep"), None, "{:?}", new);
+    let InferredType::HashWithKeys { keys: deep, open: false } = new else { panic!("new: {:?}", new) };
+    assert_eq!(deep[0].1.as_deref(), Some(&InferredType::String));
+    let Some(InferredType::Sequence(rows)) = key("rows") else { panic!("rows: {:?}", key("rows")) };
+    assert_eq!(keys_of(&rows[0]), ["id"]);
+    // An untyped value still makes the slot: a tuple has no untyped slot,
+    // so it holds `Unknown`.
+    assert_eq!(key("cells"), Some(&InferredType::Sequence(vec![InferredType::Unknown])));
+    // A write past the end leaves holes a tuple can't hold: it's an array.
+    assert_eq!(key("sparse"), Some(&InferredType::ArrayRef));
+    assert_eq!(key("tail"), Some(&InferredType::ArrayRef));
+    let v = at("$v").expect("$v typed");
+    let InferredType::Sequence(slots) = &v else { panic!("$v: {:?}", v) };
+    assert_eq!(slots.len(), 4, "{:?}", slots);
+    assert_eq!(keys_of(&slots[0]), ["a", "b"]);
+    assert_eq!(slots[2], InferredType::Numeric);
+    assert_eq!(slots[3], InferredType::Unknown);
+}
+
 /// The literal-hash spelling: `my %h = (k => v)` types through the
 /// same shape builder as the hashref literal, `$h{k}` projects off
 /// `%h` (the canonical container name), mutation extension applies,
