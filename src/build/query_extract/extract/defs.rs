@@ -68,8 +68,9 @@ pub(super) struct State {
 
 impl State {
     /// The name token a match captured for its def of `kind`.
-    pub(super) fn name_of(&self, match_id: usize, kind: DefCap) -> Option<&str> {
-        self.names_by_match.get(&(match_id, kind)).map(|(n, _, _)| n.as_str())
+    /// The match's `@def.<kind>.name` token: its text and where it starts.
+    pub(super) fn name_of(&self, match_id: usize, kind: DefCap) -> Option<(&str, Point)> {
+        self.names_by_match.get(&(match_id, kind)).map(|(n, s, _)| (n.as_str(), *s))
     }
 }
 
@@ -199,7 +200,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     // Under a use-map a class is filed under its identity, and its package
     // is the namespace that identity carries.
     let (shaped, pkg) = match (kind, pack.names.use_map_sep()) {
-        (DefCap::Class, Some(_)) => (st.class_identity(&shaped), st.namespace().map(str::to_string)),
+        (DefCap::Class, Some(_)) => (st.class_identity(&shaped, e.start), st.namespace_at(e.start).map(str::to_string)),
         _ => (shaped, pkg),
     };
     // A class-spec def carries its primary's name — the

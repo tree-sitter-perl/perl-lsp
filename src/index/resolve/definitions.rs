@@ -1116,6 +1116,30 @@ impl<'a> CandidateSet<'a> {
             }
         }
 
+        // A class identity nothing indexed declares lands on the same-leaf
+        // classes that stand in for it where the scope widens — after every
+        // exact lane, so a stranger never competes with the identity's own
+        // declaration, and labeled with the class it actually is.
+        if let Some(ResolvedTarget::Target(t)) = self.resolution() {
+            if matches!(t.kind, TargetKind::Package) {
+                let out: Vec<RefLocation> =
+                    crate::model::file_analysis::widened_class_stand_ins(idx, &t.name, &t.names)
+                        .into_iter()
+                        .filter(|w| Url::from_file_path(&w.path).is_ok())
+                        .map(|w| RefLocation {
+                            key: FileKey::Path(w.path),
+                            span: w.span,
+                            access: AccessKind::Declaration,
+                            rewritable: false,
+                            label: Some(format!("widened: `{}` stands in for `{}`", w.class, t.name)),
+                        })
+                        .collect();
+                if !out.is_empty() {
+                    return out;
+                }
+            }
+        }
+
         // Last resort (pack): a token no query captures — a namespace middle
         // segment (`StatusCode` in `absl::StatusCode::kNotFound` is a
         // namespace_identifier, ref-less) — resolves by word to a named

@@ -396,9 +396,9 @@ impl<'a> Builder<'a> {
     /// Walk a `{ ... }` block's children, reverting package context at block
     /// close. `package Foo;` is file-scoped in Perl, but a `{ }` block is a
     /// hard boundary: `{ package Inner; }` must not leak Inner to the
-    /// statements that follow. Saves the walk-time package name and the open
-    /// statement-range cursor, restores both on exit, and repairs the
-    /// `package_ranges` spans so `package_at` reverts past the block too.
+    /// statements that follow. The block is a region of the namespace lane,
+    /// so a statement-form package inside it ends at its close; the
+    /// walk-time package name is restored on exit.
     pub(super) fn walk_block_package_scoped(&mut self, node: Node<'a>) {
         self.walk_block_package_scoped_then(node, |_| {});
     }
@@ -411,27 +411,9 @@ impl<'a> Builder<'a> {
         work: impl FnOnce(&mut Builder<'a>) + 'a,
     ) {
         let saved_pkg = self.current_package.clone();
-        let saved_stmt_range = self.open_statement_package;
+        self.package_regions.push(node.end_position());
         self.queue_children_then(node, move |b| {
-            if b.open_statement_package != saved_stmt_range {
-                // A `package Inner;` inside the block opened a range to file-end;
-                // trim it to block close so it doesn't shadow the enclosing pkg.
-                if let Some(idx) = b.open_statement_package {
-                    b.package_ranges[idx].span.end = node.end_position();
-                }
-                // The enclosing `package Outer;` range (if any) was truncated to
-                // Inner's start when Inner opened — resume it to file-end so
-                // Outer covers the post-block tail.
-                if let Some(idx) = saved_stmt_range {
-                    let file_end = b
-                        .scope_stack
-                        .first()
-                        .map(|id| b.scopes[id.0 as usize].span.end)
-                        .unwrap_or_else(|| node.end_position());
-                    b.package_ranges[idx].span.end = file_end;
-                }
-                b.open_statement_package = saved_stmt_range;
-            }
+            b.package_regions.pop();
             b.current_package = saved_pkg;
             work(b);
         });
@@ -479,7 +461,7 @@ impl<'a> Builder<'a> {
         } else {
             // `package Foo;` — package context flows to the next
             // sibling `package X;` / `class X;` or end of file.
-            // `package_ranges` carries that for `package_at`; the
+            // `namespace_ranges` carries that for `package_at`; the
             // walk-time `current_package` drives synthesised
             // sub/method packages. No lexical scope is pushed —
             // `package Foo;` is not a lexical boundary in Perl.
@@ -567,7 +549,7 @@ impl<'a> Builder<'a> {
         } else {
             // Flat `class Foo;` — same semantics as non-block
             // `package Foo;`: package context flows in
-            // `package_ranges`; no lexical scope is pushed. The
+            // `namespace_ranges`; no lexical scope is pushed. The
             // Class SYMBOL was already emitted above.
             self.current_package = Some(name.clone());
             self.open_statement_package_range(name, node.start_position());

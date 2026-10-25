@@ -111,7 +111,7 @@ impl FileAnalysis {
     /// nested instead of flat (#62).
     ///
     /// A statement-form `package Foo;` is a namespace pin, not a lexical scope,
-    /// so its subs/vars live at file scope tagged via `package_ranges`; we
+    /// so its subs/vars live at file scope tagged via `namespace_ranges`; we
     /// attach each non-container sibling to the most recent preceding container
     /// whose range governs it (`package_at`). Block-form classes already nest
     /// through their lexical body scope and arrive with their children intact;

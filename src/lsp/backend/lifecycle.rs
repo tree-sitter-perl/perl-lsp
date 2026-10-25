@@ -130,7 +130,7 @@ impl PackHealCtx {
         let diags = self
             .open_docs
             .get_open(uri)
-            .map(|doc| symbols::pack_diagnostics(&doc.analysis, self.options));
+            .map(|doc| symbols::pack_diagnostics(&doc.analysis, &self.module_index, self.options));
         if let Some(diags) = diags {
             self.client
                 .publish_diagnostics(uri.clone(), diags, None)
@@ -272,7 +272,7 @@ impl Backend {
             }
             let diags = open_docs
                 .get_open(&uri)
-                .map(|doc| symbols::pack_diagnostics(&doc.analysis, options));
+                .map(|doc| symbols::pack_diagnostics(&doc.analysis, &module_index, options));
             if let Some(diags) = diags {
                 client.publish_diagnostics(uri.clone(), diags, None).await;
             }
@@ -511,7 +511,7 @@ impl DiagCtx {
             Some(_) => self
                 .open_docs
                 .get_open(uri)
-                .map(|doc| symbols::pack_diagnostics(&doc.analysis, self.options))
+                .map(|doc| symbols::pack_diagnostics(&doc.analysis, &self.module_index, self.options))
                 .unwrap_or_default(),
             None => vec![],
         };
@@ -615,7 +615,7 @@ pub(super) fn refresh_open_diagnostics(
             }
         } else {
             match open_docs.get_open(&uri) {
-                Some(doc) => symbols::pack_diagnostics(&doc.analysis, options),
+                Some(doc) => symbols::pack_diagnostics(&doc.analysis, module_index, options),
                 None => continue,
             }
         };
