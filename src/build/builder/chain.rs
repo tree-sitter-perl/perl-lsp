@@ -143,8 +143,7 @@ impl<'a> Builder<'a> {
                 // The call's `Expr` chase came up empty. Two
                 // receiver-relative fallbacks let a chain hop resolve
                 // DURING the fold — before `emit_method_call_return_edges`
-                // / `emit_invocant_expr_witnesses` (both post-fold) publish
-                // this call's edge. Without them, the variable a fluent /
+                // (post-fold) publishes this call's edge. Without them, the variable a fluent /
                 // projecting chain is bound to (`my $art = $rs->search(
                 // ...)->first`) never gets a build-time TC, so hover /
                 // goto-def on it (which read the TC) stay dark.
