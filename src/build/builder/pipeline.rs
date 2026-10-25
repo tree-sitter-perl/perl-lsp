@@ -8,6 +8,19 @@ use super::*;
 /// reducer cares about. Pure: reads only tree-sitter structural data,
 /// no Builder state. Same recursion shape (depth-first via
 /// `named_child(i)`) the three former independent walks all used.
+impl<'a> ChainTypingIndex<'a> {
+    /// Index the walk's indirect-object calls like `method_call_expression`s,
+    /// so every post-walk pass reads their receiver and arguments.
+    fn add_indirect_method_calls(&mut self, calls: &[(Node<'a>, Node<'a>, Option<Node<'a>>)]) {
+        for &(call, class, args) in calls {
+            self.invocant_nodes.insert((class.start_position(), class.end_position()), class);
+            if let Some(args) = args {
+                self.method_call_args.insert((call.start_position(), call.end_position()), args);
+            }
+        }
+    }
+}
+
 pub(super) fn build_chain_typing_index<'a>(tree: &'a Tree) -> ChainTypingIndex<'a> {
     let mut idx = ChainTypingIndex {
         assignment_nodes: Vec::new(),
@@ -293,6 +306,8 @@ fn build_once(
         refs: Vec::new(),
         deferred_var_types: Vec::new(),
         deferred_named_sub_param_types: Vec::new(),
+        method_or_helper_subs: Vec::new(),
+        plain_called_subs: std::collections::HashSet::new(),
         fold_ranges: Vec::new(),
         imports: Vec::new(),
         return_infos: Vec::new(),
@@ -371,6 +386,7 @@ fn build_once(
         key_writes: Vec::new(),
         method_call_args: std::collections::HashMap::new(),
         method_call_refs: std::collections::HashMap::new(),
+        indirect_method_calls: Vec::new(),
         parametric_emitted_refs: std::collections::HashSet::new(),
         method_call_ref_dedup: std::collections::HashSet::new(),
         defined_narrowings: Vec::new(),
@@ -496,6 +512,7 @@ fn build_once(
     // every sub scope + its params now exist, including forward-declared
     // ones.
     b.flush_deferred_named_sub_param_types();
+    b.mark_method_invocants();
 
     // Post-pass 1: resolve variable refs -> Symbol bindings
     bphase!("resolve_variable_refs", b.resolve_variable_refs());
@@ -590,7 +607,8 @@ fn build_once(
     // Deeper chains take more iterations; `MAX_FOLD_ITERATIONS`
     // (debug-only) catches dependency-tracking bugs that would
     // otherwise spin forever.
-    let chain_idx = bphase!("build_chain_typing_index", build_chain_typing_index(tree));
+    let mut chain_idx = bphase!("build_chain_typing_index", build_chain_typing_index(tree));
+    chain_idx.add_indirect_method_calls(&b.indirect_method_calls);
     bphase!("fold_to_fixed_point", b.fold_to_fixed_point(&chain_idx));
     // PostFold filled `invocant_class` on MethodCall refs after the
     // worklist exited; re-emit method-call return edges so
@@ -600,15 +618,6 @@ fn build_once(
     // freshly-published edges.
     bphase!("emit_mc_return_edges", b.emit_method_call_return_edges());
     bphase!("emit_array_push_witns", b.emit_array_push_witnesses());
-    // Record each method-call invocant's resolved type at its span so
-    // the tree-free query entry (`FileAnalysis::expr_type_at_span`) can
-    // answer "what is this expression?" without a CST. Runs after array
-    // pushes so `$arr[N]` invocants project against the settled
-    // `Variable{@arr}` Sequence. The build-time symbolic executor
-    // (`invocant_type_at_node`) is the single structure-discovery site;
-    // this pass records its answer.
-    bphase!("emit_invocant_expr_witns", b.emit_invocant_expr_witnesses(&chain_idx));
-
     // Fold-phase pattern dispatch: patterns declared `phase: "fold"`
     // run HERE — after PostFold, so their projections read settled
     // chain typing (route brands, resolved invocants). Matches
@@ -768,7 +777,7 @@ impl<'a> Builder<'a> {
 
     /// The per-package table as the walk has it so far — the one fold of
     /// the builder's lanes, read by the window seed and the final assembly.
-    fn package_facts(&self) -> std::collections::HashMap<String, PackageFacts> {
+    pub(super) fn package_facts(&self) -> std::collections::HashMap<String, PackageFacts> {
         PackageFacts::fold(
             self.package_parents.to_map(),
             self.package_uses.clone(),
@@ -794,17 +803,24 @@ impl<'a> Builder<'a> {
                 && w.span.start == self.scopes[scope.0 as usize].span.start => Some(*scope),
             _ => None,
         }).collect();
+        let method_names = self.method_call_names();
+        let mut heads = Vec::new();
         for i in 0..self.scopes.len() {
             let scope = &self.scopes[i];
-            let (is_method, anon) = match &scope.kind {
-                ScopeKind::Method { .. } => (true, false),
-                ScopeKind::Sub { name } => (false, name == "(anon)"),
+            let (is_method, named) = match &scope.kind {
+                ScopeKind::Method { .. } => (true, None),
+                ScopeKind::Sub { name } if name == "(anon)" => (false, None),
+                ScopeKind::Sub { name } => (false, Some(name.as_str())),
                 _ => continue,
             };
             let (Some(pkg), false) = (scope.package.clone(), seeded.contains(&scope.id)) else { continue };
-            let (id, span) = (scope.id, scope.span);
             let class_pkg = facts.get(&pkg).is_some_and(PackageFacts::is_class);
-            let head = (is_method || (class_pkg && !anon)).then(|| InferredType::FirstParam { package: pkg });
+            // A named sub of a class package is a method unless the file
+            // only ever calls it as a plain function.
+            let convention = named.is_some_and(|n| !self.is_plain_helper(&pkg, n, &method_names));
+            heads.push((scope.id, scope.span, (is_method || (class_pkg && convention)).then(|| InferredType::FirstParam { package: pkg })));
+        }
+        for (id, span, head) in heads {
             self.push_type_constraint(TypeConstraint {
                 variable: "@_".into(),
                 scope: id,
