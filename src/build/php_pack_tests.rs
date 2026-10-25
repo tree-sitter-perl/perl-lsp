@@ -1370,3 +1370,38 @@ namespace B {
     assert_eq!(fa.namespace_at(in_m), Some("A"));
     assert_eq!(fa.namespace_at(tree_sitter::Point::new(7, 20)), Some("B"));
 }
+
+/// A member call up an `extends` chain whose parent nothing indexes
+/// (`use Vendor\Model;`) lands on the same-leaf stand-in's member, and
+/// says so: the diagnostic fires on the class tokens naming the parent.
+/// A rename from the call never reaches the stand-in's declaration.
+#[cfg(feature = "php")]
+#[test]
+fn a_member_call_through_an_unindexed_parent_widens_out_loud() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let sub = ("/fake/php/App/Sub.php", "<?php\nnamespace App;\nuse Vendor\\Model;\nclass Sub extends Model {\n    function go() { $this->name(); }\n}\n");
+    let idx = php_indexed(&[PHP_STRANGER, sub]);
+    let call = at(sub.1, "name()", 0);
+    let (defs, hover) = php_landing(&idx, sub.0, call);
+    assert_eq!(defs, [("A/Model.php".to_string(), 2, None)]);
+    assert_eq!(hover.as_deref(), Some("A/Model.php"));
+    let widened = |row: u32, column: u32| {
+        (row, column, "nothing indexed declares `Vendor\\Model`; resolved by its leaf to `A\\Model`".to_string())
+    };
+    assert_eq!(php_widening(&idx, sub.0), [widened(2, 11), widened(3, 18)]);
+    let p = std::path::PathBuf::from(sub.0);
+    let fa = idx.workspace_file_for_test(&p).unwrap();
+    let store = OpenDocs::new();
+    let cs = resolve(&store, &fa, FileKey::Path(p.clone()), call, Some(&idx), OverrideScope::default());
+    let edits: Vec<std::path::PathBuf> = cs
+        .rename_edits("renamed")
+        .unwrap()
+        .into_iter()
+        .map(|(l, _)| match l.key {
+            FileKey::Path(p) => p,
+            FileKey::Url(u) => u.to_file_path().unwrap(),
+        })
+        .collect();
+    assert_eq!(edits, [p]);
+}
