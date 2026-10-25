@@ -91,7 +91,23 @@ match rather than one capture, so the extractor drops a captured comment.
   the nearest named callable around the token, so a closure in a method
   reads the method's class and a free function's body names none.
   `static::` is late-bound in php; here it names the writing class, as
-  `$this` does.
+  `$this` does. `@receiver.parent` names the first parent the writing
+  class declares (php's `new parent`), and `@receiver.declared` the class
+  the same token anchors (php's anonymous `class`).
+- A construction (`@expr.construct`, php's `new Foo(…)`) is a call of the
+  constructor on its `@member.recv`: `Method { name: <constructor>,
+  lookup, constructs: true }`, the constructor being the method the
+  document's `@mark.constructor` names. A constructor declares no return,
+  so the value falls to `constructs`: an instance of the receiver's class.
+  A receiver token that names a class (`Foo`, `self`, `parent`) looks the
+  constructor up there; `new $cls` dispatches on the variable's value, so
+  `$cls = Foo::class; new $cls` is a `Foo`. The site's reference to the
+  constructor is a `MethodCall` with `constructs: true` on the receiver
+  token, beside the class's own `PackageRef` there: a cursor companion,
+  so the token navigates to the class, and never rewritable, since it
+  spells the class, so a rename of the constructor refuses.
+- A class literal (`@expr.class`, php's `Foo::class`) is an edge to its
+  `@receiver.*` token's value, the class.
 - A pack callable's declared return (`@rettype`) is its `Symbol`'s value,
   so every `Invoke` that resolves to it carries that type and a chain types
   hop by hop. The spelling is read like a parameter's declared type (the

@@ -1344,7 +1344,8 @@ pub(super) fn collect_from_analysis(
                 key: key.clone(),
                 span,
                 access: r.access,
-                rewritable: !alias_matched && rewritable_at(span),
+                // A construction's token spells the class, not the member.
+                rewritable: !alias_matched && !r.constructs() && rewritable_at(span),
                 label: None
             });
             // A call folded from a variable (`my $m = 'process'; $self->$m()`)

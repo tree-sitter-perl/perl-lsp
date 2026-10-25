@@ -35,6 +35,32 @@ use tree_sitter::{Language, Point, Query, QueryCursor, StreamingIterator, Tree};
 pub(crate) struct CompiledPack {
     pub(crate) query: Query,
     pub(crate) captures: Vec<Option<Capture>>,
+    /// The constructor's name: the one spelling the document's
+    /// `@mark.constructor` admits, which `@expr.construct` sites call.
+    pub(crate) constructor: Option<&'static str>,
+}
+
+/// The literals the document's `#eq?` / `#any-of?` predicates admit for
+/// `capture`, read off the document's own text: the compiled query keeps
+/// text predicates private, and the document stays the one home of the
+/// spelling.
+fn predicate_literals(source: &'static str, capture: &str) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for line in source.lines() {
+        let code = line.split(';').next().unwrap_or("");
+        for head in ["(#eq? @", "(#any-of? @"] {
+            let mut rest = code;
+            while let Some(at) = rest.find(head) {
+                rest = &rest[at + head.len()..];
+                let Some(args) = rest.strip_prefix(capture).filter(|a| a.starts_with(char::is_whitespace)) else {
+                    continue;
+                };
+                let args = &args[..args.find(')').unwrap_or(args.len())];
+                out.extend(args.split('"').skip(1).step_by(2));
+            }
+        }
+    }
+    out
 }
 
 /// Compile each pack's skeleton query exactly once and reuse it.
@@ -68,7 +94,15 @@ fn cached_query(language: &Language, source: &'static str) -> Result<&'static Co
             format!("query: @link.from.{w} links for a walk whose root @{} the document never captures", w.root())
         }
     })?;
-    let leaked: &'static CompiledPack = Box::leak(Box::new(CompiledPack { query, captures }));
+    let constructor = match predicate_literals(source, "mark.constructor").as_slice() {
+        [] => None,
+        [one] => Some(*one),
+        _ => return Err("query: @mark.constructor admits more than one name".into()),
+    };
+    if constructor.is_none() && captures.contains(&Some(Capture::Expr(ExprCap::Construct))) {
+        return Err("query: @expr.construct calls the constructor, and no @mark.constructor names it".into());
+    }
+    let leaked: &'static CompiledPack = Box::leak(Box::new(CompiledPack { query, captures, constructor }));
     cache.lock().unwrap().insert(key, leaked);
     Ok(leaked)
 }

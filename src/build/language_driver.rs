@@ -1088,6 +1088,7 @@ fn remap_spans(
             invocant,
             member_op,
             arg_count: _,
+            constructs: _,
         } = rf;
         (*start, *end) = remap_span(*start, *end);
         // The invocant span is consumed via `expr_type_at_span` (member

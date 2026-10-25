@@ -1042,6 +1042,7 @@ impl<'a> Builder<'a> {
                                         method_name_span: crate::cst::fq_tail_span(method, name),
                                         member_op: None,
                                         named_by_string: false,
+                                        constructs: false,
                                     },
                                     span: node_to_span(n),
                                     scope,

@@ -19,8 +19,11 @@ pub struct LangPack {
     /// under (cpp canonicalizes template spellings). Applied to every
     /// captured name alike.
     pub shape_name: fn(raw: &str) -> String,
-    /// Name for defs with no name token (anonymous subs).
-    pub default_name: fn(kind: DefCap) -> Option<&'static str>,
+    /// Name for defs with no name token (anonymous subs, anonymous
+    /// classes), given where the def or its `@def.<kind>.anchor` starts. A
+    /// kind whose instances must stay distinct spells the position in;
+    /// a structure-only default (`(anon)`, `(union)`) ignores it.
+    pub default_name: fn(kind: DefCap, at: Point) -> Option<String>,
     /// Map a `@type.annot` token's text to a type — the pack predicate
     /// for languages whose ring 3 is partly in the tree (`x: int`).
     pub annot_type: fn(text: &str) -> Option<InferredType>,

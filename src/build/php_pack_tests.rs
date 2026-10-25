@@ -1505,3 +1505,156 @@ fn a_call_on_a_variable_resolves_across_files() {
     assert_eq!(ws.defs("Box.php", "tick();\n        $b", 0), vec![site("Clock.php", 4, 20)]);
     assert_eq!(ws.defs("Box.php", "stop()", 0), vec![site("Timer.php", 4, 20)]);
 }
+
+const NEW: &str = "<?php
+namespace App;
+
+use Lib\\Clock;
+
+class Base {
+    public function __construct(int $n) {}
+}
+class Box extends Base {
+    public function __construct(Clock $c) {}
+    public function make(Clock $k) {
+        $a = new Clock(1);
+        $b = new \\Lib\\Clock;
+        $c = new self(new Clock());
+        $d = new static($k);
+        $e = new parent(2);
+        $cls = Clock::class;
+        $f = new $cls();
+        $g = $cls::tick();
+        $h = new class($a) extends Base {
+            public function hi() { return $this; }
+        };
+        $h->hi();
+        $i = self::class;
+    }
+}
+";
+
+/// A construction's value is an instance of the class it names, through
+/// the use-map: `self` and `static` are the class the method is written in,
+/// `parent` the one it extends, `new $cls` the class the variable holds,
+/// and an anonymous class is its own class. A class literal is its class.
+#[test]
+fn a_construction_is_an_instance_of_its_class() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php(NEW);
+    let end = at(NEW, "    }\n}", 0);
+    let class = |c: &str| Some(T::ClassName(c.into()));
+    let ty = |v: &str| fa.inferred_type_via_bag(v, end);
+    assert_eq!(ty("a"), class("Lib\\Clock"));
+    assert_eq!(ty("b"), class("Lib\\Clock"), "fully qualified, without an argument list");
+    assert_eq!(ty("c"), class("App\\Box"));
+    assert_eq!(ty("d"), class("App\\Box"), "`static` is the writing class");
+    assert_eq!(ty("e"), class("App\\Base"));
+    assert_eq!(ty("cls"), class("Lib\\Clock"), "a class literal");
+    assert_eq!(ty("f"), class("Lib\\Clock"), "the class a variable holds");
+    assert_eq!(ty("h"), class("App\\class@anonymous:20:18"));
+    assert_eq!(ty("i"), class("App\\Box"));
+}
+
+/// A construction is an `Invoke` of the constructor on the class it
+/// names, with its arguments, and a reference to the constructor on its
+/// class token.
+#[test]
+fn a_construction_calls_its_classs_constructor() {
+    use crate::model::witnesses::{Callee, Lookup, WitnessPayload};
+    let fa = php(NEW);
+    let calls: Vec<(String, usize)> = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter_map(|w| match &w.payload {
+            WitnessPayload::Invoke { callee: Callee::Method { name, lookup, constructs: true }, args, .. } => {
+                assert_eq!(name, "__construct");
+                let on = match lookup {
+                    Lookup::Named(c) => c.clone(),
+                    Lookup::Receiver => "$receiver".to_string(),
+                    Lookup::Super { .. } => unreachable!(),
+                };
+                Some((on, args.as_ref().map_or(0, Vec::len)))
+            }
+            _ => None,
+        })
+        .collect();
+    let want: Vec<(String, usize)> = [
+        ("Lib\\Clock", 1),
+        ("Lib\\Clock", 0),
+        ("App\\Box", 1),
+        ("Lib\\Clock", 0),
+        ("App\\Box", 1),
+        ("App\\Base", 1),
+        ("$receiver", 0),
+        ("App\\class@anonymous:20:18", 1),
+    ]
+    .iter()
+    .map(|(c, n)| (c.to_string(), *n))
+    .collect();
+    assert_eq!(calls, want);
+    let sites: Vec<(usize, usize)> =
+        fa.refs().iter().filter(|r| r.constructs()).map(|r| (r.span.start.row, r.span.start.column)).collect();
+    assert_eq!(sites, [(11, 17), (12, 17), (13, 17), (13, 26), (14, 17), (15, 17), (17, 17), (19, 17)]);
+}
+
+/// The class token of a construction is the class: goto-def and a class
+/// rename reach it. The site is a reference to the constructor, which
+/// `self`, `static` and `parent` reach, and which rename leaves alone,
+/// since no site spells its name.
+#[cfg(feature = "php")]
+#[test]
+fn a_construction_names_its_class_and_reaches_its_constructor() {
+    let ws = Workspace::new(&[("/fake/php/App/Box.php", NEW), ("/fake/php/Lib/Clock.php", CLOCK)]);
+    let clock = vec![site("Clock.php", 3, 6)];
+    assert_eq!(ws.defs("Box.php", "Clock(1)", 0), clock);
+    assert_eq!(ws.defs("Box.php", "\\Lib\\Clock;", 5), clock);
+    assert_eq!(ws.defs("Box.php", "Clock::class", 0), clock);
+    assert_eq!(ws.defs("Box.php", "self(new", 0), vec![site("Box.php", 9, 20)]);
+    assert_eq!(ws.defs("Box.php", "parent(2)", 0), vec![site("Box.php", 6, 20)]);
+    assert_eq!(ws.defs("Box.php", "tick();", 0), vec![site("Clock.php", 4, 20)], "a class a variable holds");
+    let refs = ws.ask("Box.php", "__construct(Clock", 0, |cs| Workspace::sites(cs.references()));
+    // The constructor's references are its override family's: `parent`
+    // and the anonymous subclass construct `Base`'s.
+    let family = [(6, 20), (9, 20), (13, 17), (14, 17), (15, 17), (19, 17)];
+    assert_eq!(refs, family.map(|(r, c)| site("Box.php", r, c)));
+    assert!(ws.ask("Box.php", "__construct(Clock", 0, |cs| cs.rename_edits("make").is_err()));
+    let renamed = ws.renames("Clock.php", "Clock {", 0);
+    let in_box: Vec<(usize, usize)> =
+        renamed.iter().filter(|(f, ..)| f == "Box.php").map(|&(_, r, c)| (r, c)).collect();
+    assert_eq!(in_box, [(3, 8), (9, 32), (10, 25), (11, 17), (12, 22), (13, 26), (16, 15)]);
+}
+
+/// An anonymous class is a class of its own, named by where it is written:
+/// its members, its parents and `$this` are its, and its construction
+/// dispatches on it.
+#[cfg(feature = "php")]
+#[test]
+fn an_anonymous_class_is_a_class_of_its_own() {
+    let fa = php(NEW);
+    let anon = "App\\class@anonymous:20:18";
+    let sym = fa.symbols().iter().find(|s| s.name == anon).expect("the anonymous class");
+    assert_eq!((sym.kind, sym.selection_span.start.row, sym.selection_span.start.column), (SymKind::Class, 19, 17));
+    assert!(sym.attributes.iter().any(|a| a == "anonymous"));
+    assert_eq!(fa.declared_parents(anon), ["App\\Base"]);
+    let hi = fa.symbols().iter().find(|s| s.name == "hi").unwrap();
+    assert_eq!(hi.package.as_deref(), Some(anon));
+    let ws = Workspace::new(&[("/fake/php/App/Box.php", NEW)]);
+    assert_eq!(ws.defs("Box.php", "hi();", 0), vec![site("Box.php", 20, 28)]);
+    // two anonymous classes are two classes
+    let two = php("<?php\n$a = new class {};\n$b = new class {};\n");
+    let classes: Vec<String> =
+        two.symbols().iter().filter(|s| s.kind == SymKind::Class).map(|s| s.name.clone()).collect();
+    assert_eq!(classes, ["class@anonymous:2:10", "class@anonymous:3:10"]);
+}
+
+/// The constructor a construction calls is the method the document marks,
+/// and a document that constructs without marking one does not compile.
+#[test]
+fn a_construction_calls_the_method_the_document_marks() {
+    let lang: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP.into();
+    assert_eq!(super::cached_query(&lang, php_pack().query_source).unwrap().constructor, Some("__construct"));
+    let unmarked = super::cached_query(&lang, "(object_creation_expression) @expr.construct");
+    assert!(unmarked.is_err_and(|e| e.contains("@mark.constructor")));
+}

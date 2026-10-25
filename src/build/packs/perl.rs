@@ -10,8 +10,8 @@ pub fn perl_pack() -> LangPack {
         // re-attach: def.var captures the whole `(scalar)` node, so the
         // raw text already carries it.
         shape_name: |raw| raw.to_string(),
-        default_name: |kind| match kind {
-            DefCap::Anon => Some("(anon)"),
+        default_name: |kind, _| match kind {
+            DefCap::Anon => Some("(anon)".to_string()),
             _ => None,
         },
         annot_type: |_| None,

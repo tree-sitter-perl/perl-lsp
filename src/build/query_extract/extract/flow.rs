@@ -238,7 +238,52 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
                     receiver,
                     scope: cur_scope,
                     args,
+                    constructs: false,
                 });
+            }
+        }
+        Capture::Expr(ExprCap::Construct) => {
+            // The site calls the constructor on the class its receiver
+            // names, and the call's own reference sits on that token: it
+            // spells the class, so the class's own reference keeps the
+            // token for the cursor and for a class rename.
+            let in_match = |cap: Capture| events.iter().find(|x| x.match_id == e.match_id && x.cap == cap);
+            if let (Some(ctor), Some(recv)) = (st.constructor, in_match(Capture::Member(MemberCap::Recv))) {
+                let span = e.span();
+                f.lit_spans.push((e.start_byte, e.end_byte, span));
+                out.call_sites.push(crate::build::query_extract::CallSite {
+                    span,
+                    callee: ctor.to_string(),
+                    receiver: Some(recv.span()),
+                    scope: cur_scope,
+                    args: st.members.call_args(e.match_id),
+                    constructs: true,
+                });
+                out.refs.push(SkelRef {
+                    kind: RefCap::MemberCall,
+                    name: ctor.to_string(),
+                    start: recv.start,
+                    end: recv.end,
+                    scope: cur_scope,
+                    invocant: Some((recv.span(), recv.text.clone())),
+                    member_op: None,
+                    arg_count: st.members.arg_count(e.match_id),
+                    constructs: true,
+                });
+            }
+        }
+        Capture::Expr(ExprCap::Class) => {
+            // The value is the class the match's receiver token names.
+            let recv = events.iter().find(|x| x.match_id == e.match_id && matches!(x.cap, Capture::Receiver(_)));
+            if let Some(recv) = recv {
+                let span = e.span();
+                f.lit_spans.push((e.start_byte, e.end_byte, span));
+                out.witnesses.push(skeleton_witness(
+                    WitnessAttachment::Expr(span),
+                    "skeleton-class",
+                    WitnessPayload::Edge(WitnessAttachment::Expr(recv.span())),
+                    span,
+                ));
             }
         }
         Capture::Expr(ExprCap::Member) => {

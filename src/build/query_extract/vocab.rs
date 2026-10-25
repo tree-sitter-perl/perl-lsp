@@ -202,6 +202,14 @@ pub enum ExprCap {
     /// A member value read (`recv.field`): its `@member.recv` and
     /// `@ref.member.value` share the match.
     Member,
+    /// A construction (`new Foo(…)`): a call of the constructor of the
+    /// class its `@member.recv` names, on the match's arguments, whose
+    /// value is an instance of that class. The constructor is the method
+    /// the document's `@mark.constructor` admits.
+    Construct,
+    /// An expression whose value is the class its match's `@receiver.*`
+    /// token names (php's `Foo::class`).
+    Class,
 }
 
 spelled! {
@@ -245,6 +253,11 @@ spelled! {
         /// The class whose method the token is written in (`self::m()`,
         /// `$this->m()`).
         Enclosing = "enclosing",
+        /// The class that class extends (php's `new parent`).
+        Parent = "parent",
+        /// The class the same token anchors the declaration of (php's
+        /// `class` in `new class {…}`).
+        Declared = "declared",
     }
 }
 
@@ -335,6 +348,10 @@ pub enum DefPart {
     Node,
     Name,
     Spelled,
+    /// The token that opens a def written with no name (php's `class` in
+    /// `new class {…}`): the pack's `default_name` names the def from the
+    /// token's position, and the match's context and parents read that name.
+    Anchor,
 }
 
 /// One capture of a pack query document.
@@ -444,6 +461,7 @@ impl Capture {
             ["def", k] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Node },
             ["def", k, "name"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Name },
             ["def", k, "spelled"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Spelled },
+            ["def", k, "anchor"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Anchor },
             ["ref", "spelled"] => C::RefSpelled,
             ["ref", rest @ ..] => C::Ref(RefCap::parse(&rest.join("."))?),
             ["scope"] => C::Scope(ScopeCap::Block),
@@ -467,6 +485,8 @@ impl Capture {
             ["expr", "return", "value"] => C::Expr(ExprCap::ReturnValue),
             ["expr", "shape"] => C::Expr(ExprCap::Shape),
             ["expr", "member"] => C::Expr(ExprCap::Member),
+            ["expr", "construct"] => C::Expr(ExprCap::Construct),
+            ["expr", "class"] => C::Expr(ExprCap::Class),
             ["obs", k] => C::Obs(ObsKind::parse(k)?),
             ["narrow", k] => C::Narrow(NarrowCap::parse(k)?),
             ["move", k] => C::Move(MoveCap::parse(k)?),
@@ -516,6 +536,7 @@ impl fmt::Display for Capture {
             C::Def { kind, part: DefPart::Node } => write!(f, "def.{kind}"),
             C::Def { kind, part: DefPart::Name } => write!(f, "def.{kind}.name"),
             C::Def { kind, part: DefPart::Spelled } => write!(f, "def.{kind}.spelled"),
+            C::Def { kind, part: DefPart::Anchor } => write!(f, "def.{kind}.anchor"),
             C::DefPair => f.write_str("def.pair"),
             C::DefHoist => f.write_str("def.hoist"),
             C::AccessWrite => f.write_str("access.write"),
@@ -537,6 +558,8 @@ impl fmt::Display for Capture {
             C::Expr(ExprCap::ReturnValue) => f.write_str("expr.return.value"),
             C::Expr(ExprCap::Shape) => f.write_str("expr.shape"),
             C::Expr(ExprCap::Member) => f.write_str("expr.member"),
+            C::Expr(ExprCap::Construct) => f.write_str("expr.construct"),
+            C::Expr(ExprCap::Class) => f.write_str("expr.class"),
             C::Obs(k) => write!(f, "obs.{k}"),
             C::Narrow(k) => write!(f, "narrow.{k}"),
             C::Move(k) => write!(f, "move.{k}"),

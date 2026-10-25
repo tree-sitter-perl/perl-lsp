@@ -16,7 +16,12 @@ pub fn php_pack() -> LangPack {
             ..NameSpellings::NONE
         },
         shape_name: |raw| raw.to_string(),
-        default_name: |_| None,
+        // An anonymous class is one class per place it is written: PHP
+        // names it `class@anonymous` and where it stands.
+        default_name: |kind, at| match kind {
+            DefCap::Class => Some(format!("class@anonymous:{}:{}", at.row + 1, at.column + 1)),
+            _ => None,
+        },
         annot_type: declared_type,
         // Where a namespace lives is composer's autoload map, not a rule
         // over the name.

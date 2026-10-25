@@ -18,6 +18,8 @@ pub(super) struct State {
     paired_matches: std::collections::HashSet<usize>,
     /// Matches whose defs declare in the scope around them (`@def.hoist`).
     hoisted_matches: std::collections::HashSet<usize>,
+    /// Matches whose def is named from its anchor (`@def.<kind>.anchor`).
+    anchored_matches: std::collections::HashSet<usize>,
     /// `@qualifier` (a `Class::` on an out-of-line def) and `@rettype` (a
     /// method's declared return type) — pre-collected like names because the
     /// `@def` event fires before these inner captures.
@@ -70,6 +72,14 @@ impl State {
     /// The name token a match captured for its def of `kind`.
     pub(super) fn name_of(&self, match_id: usize, kind: DefCap) -> Option<&str> {
         self.names_by_match.get(&(match_id, kind)).map(|(n, _, _)| n.as_str())
+    }
+
+    /// The name a match's anchored def was given, which its context names.
+    pub(super) fn anchored_name(&self, match_id: usize) -> Option<&str> {
+        if !self.anchored_matches.contains(&match_id) {
+            return None;
+        }
+        self.names_by_match.iter().find(|((m, _), _)| *m == match_id).map(|(_, (n, _, _))| n.as_str())
     }
 }
 
@@ -133,6 +143,12 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
         Capture::DefHoist => {
             d.hoisted_matches.insert(e.match_id);
         }
+        Capture::Def { kind, part: DefPart::Anchor } => {
+            if let Some(name) = (st.pack.default_name)(kind, e.start) {
+                d.names_by_match.insert((e.match_id, kind), (name, e.start, e.end));
+                d.anchored_matches.insert(e.match_id);
+            }
+        }
         Capture::Def { kind, part: DefPart::Spelled } => {
             d.spelled_by_match.insert((e.match_id, kind), e.text.clone());
         }
@@ -189,8 +205,8 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         .names_by_match
         .get(&(e.match_id, kind))
         .cloned()
-        .map(|(n, s, en)| (n, s, en, false))
-        .or_else(|| (pack.default_name)(kind).map(|n| (n.to_string(), e.start, e.start, true)))
+        .map(|(n, s, en)| (n, s, en, d.anchored_matches.contains(&e.match_id)))
+        .or_else(|| (pack.default_name)(kind, e.start).map(|n| (n, e.start, e.start, true)))
         .unwrap_or((e.text.clone(), e.start, e.end, false));
     // An out-of-line def's qualifier names its owning class (the innermost
     // scope), overriding the enclosing-namespace context.

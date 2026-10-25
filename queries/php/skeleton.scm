@@ -282,9 +282,80 @@
   name: (name) @ref.member.call
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
  (#any-of? @receiver.enclosing "self" "static"))
+; `$cls::m()` calls the method of whatever class the variable holds.
+(scoped_call_expression
+  scope: (variable_name) @member.recv
+  name: (name) @ref.member.call
+  arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
 ; The class a static call names is a class reference.
 (scoped_call_expression scope: (name) @ref.type)
 (scoped_call_expression scope: (qualified_name (name) @ref.type) @ref.spelled)
+
+; ---- construction ----
+; `new Foo(…)` calls the constructor of the class `Foo` names on its
+; arguments, and its value is an instance of that class; with no argument
+; list it passes none. The class token is a reference to the class. `self`
+; and `static` name the class the method is written in, `parent` the class
+; it extends, and `new $cls` constructs whatever class the variable holds.
+((object_creation_expression
+   . (name) @member.recv @receiver.class @ref.type
+   (arguments ((_) @arity.arg ","?)*)?) @expr.construct @arity.args
+ (#not-any-of? @receiver.class "self" "static" "parent"))
+(object_creation_expression
+  . (qualified_name (name) @ref.type) @member.recv @receiver.class @ref.spelled
+  (arguments ((_) @arity.arg ","?)*)?) @expr.construct @arity.args
+((object_creation_expression
+   . (name) @member.recv @receiver.enclosing
+   (arguments ((_) @arity.arg ","?)*)?) @expr.construct @arity.args
+ (#any-of? @receiver.enclosing "self" "static"))
+((object_creation_expression
+   . (name) @member.recv @receiver.parent
+   (arguments ((_) @arity.arg ","?)*)?) @expr.construct @arity.args
+ (#eq? @receiver.parent "parent"))
+(object_creation_expression
+  . (variable_name) @member.recv
+  (arguments ((_) @arity.arg ","?)*)?) @expr.construct @arity.args
+; `new class(…) {…}` declares a class with no name, one per place it is
+; written, and constructs it there: its `class` keyword anchors both. Its
+; parents and its body are a class's.
+(anonymous_class "class" @def.class.anchor @context.class) @def.class @scope
+(anonymous_class
+  "class" @def.class.anchor
+  (base_clause
+    [(name) @parent @ref.type
+     (qualified_name (name) @ref.type) @parent @ref.spelled]))
+(anonymous_class
+  "class" @def.class.anchor
+  (class_interface_clause
+    [(name) @parent @ref.type
+     (qualified_name (name) @ref.type) @parent @ref.spelled]))
+(anonymous_class
+  "class" @def.class.anchor
+  body: (declaration_list
+    (use_declaration
+      [(name) @parent @ref.type
+       (qualified_name (name) @ref.type) @parent @ref.spelled])))
+(object_creation_expression
+  (anonymous_class
+    "class" @member.recv @receiver.declared
+    (arguments ((_) @arity.arg ","?)*)?)) @expr.construct @arity.args
+
+; ---- class literals ----
+; `Foo::class` is the class `Foo` names, as a value; `self::class` and
+; `static::class` are the class the method is written in. The class token
+; of a class literal and of a class constant `Foo::BAR` is a class
+; reference.
+((class_constant_access_expression
+   . [(name) (qualified_name)] @receiver.class
+   . (name) @_member) @expr.class
+ (#eq? @_member "class"))
+((class_constant_access_expression
+   . (relative_scope) @receiver.enclosing
+   . (name) @_member) @expr.class
+ (#any-of? @receiver.enclosing "self" "static")
+ (#eq? @_member "class"))
+(class_constant_access_expression . (name) @ref.type)
+(class_constant_access_expression . (qualified_name (name) @ref.type) @ref.spelled)
 
 ; ---- the use-map ----
 ; A row binds a class unless its keyword says it binds a function or a

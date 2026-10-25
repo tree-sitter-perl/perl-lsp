@@ -27,7 +27,15 @@ directions cannot disagree.
 `Capture::parse` turns a name into a `Capture`. Nothing else reads a
 capture name: the driver, the pack hooks and the projection all match on
 the enum. A pack hook that depends on a kind takes the typed kind
-(`default_name: fn(DefCap)`).
+(`default_name: fn(DefCap, Point)`).
+
+One literal is read back out of the document: the constructor's name, the
+single spelling `@mark.constructor`'s `#eq?` admits (`CompiledPack::constructor`).
+`@expr.construct` calls that method, so the declaration's flag and every
+construction site read one spelling. The compiled query keeps text
+predicates private, so `predicate_literals` reads the document's own
+text; a document that constructs without marking a constructor, or marks
+more than one name, does not compile.
 
 ## Decision: the vocabulary is checked when the query compiles
 
@@ -122,6 +130,17 @@ does not exist yet.
 `@access.write` sits on a token an assignment writes through a
 reference that is not a variable's (php's `$o->p = v`): the ref at that
 token is a write.
+
+## Decision: a def with no name is named from its anchor
+
+`@def.<kind>.anchor` is the token that opens a def written without a name
+(php's `class` in `new class {…}`). The pack's `default_name(kind, at)`
+names it from the anchor's position, so two anonymous classes in a file
+are two classes (`class@anonymous:20:18`), and the def carries the
+`anonymous` attribute. The match's `@context.*` and `@parent` read that
+name, so its members file under it and its parents edge from it.
+`@receiver.declared` on the same token makes the token's value that class.
+A structure-only default (`(anon)`, `(union)`) ignores the position.
 
 ## Decision: a kind's meaning lives on the kind
 

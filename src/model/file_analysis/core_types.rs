@@ -1301,7 +1301,13 @@ impl Ref {
     /// companion of the class token's own ref — the stacked-refs fork in
     /// `docs/open-forks.md` is where a second case would reopen the shape.
     pub fn is_cursor_companion(&self, pack: &PackFacts) -> bool {
-        self.handler_owner().is_some_and(|o| o.names_are_classes(pack))
+        self.constructs() || self.handler_owner().is_some_and(|o| o.names_are_classes(pack))
+    }
+
+    /// A construction site's call of the constructor (`RefKind::MethodCall`'s
+    /// `constructs`).
+    pub fn constructs(&self) -> bool {
+        matches!(self.kind, RefKind::MethodCall { constructs: true, .. })
     }
 
     /// Whether matching this ref against a target consults only the frozen
@@ -1619,6 +1625,12 @@ pub enum RefKind {
         /// callable (PHPUnit providers, key/value pairs).
         #[serde(default)]
         named_by_string: bool,
+        /// The site constructs an instance of the invocant's class (php's
+        /// `new Foo(…)`): it calls the constructor, but its token spells
+        /// the class. A reference to the constructor that rename never
+        /// rewrites, and a cursor companion of the class's own reference.
+        #[serde(default)]
+        constructs: bool,
     },
     PackageRef,
     /// Key access `$h{k}` / `$obj->{k}`. Which hash owns the key (and the

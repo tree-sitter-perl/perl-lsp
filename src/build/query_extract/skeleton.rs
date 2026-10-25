@@ -71,6 +71,9 @@ pub struct SkelRef {
     /// counted from the argument list the same match captured. Flows to
     /// `Ref.arg_count`; `None` for non-call refs.
     pub arg_count: Option<usize>,
+    /// A member call that constructs (`new Foo(…)`): its token spells the
+    /// class, not the member it calls.
+    pub constructs: bool,
 }
 
 /// One `@expr.call` site.
@@ -87,6 +90,9 @@ pub struct CallSite {
     /// (`@arity.spread`); `None` when the call's match captured no argument
     /// list.
     pub args: Option<Vec<(Span, bool)>>,
+    /// The call constructs an instance of its receiver's class
+    /// (`@expr.construct`).
+    pub constructs: bool,
 }
 
 /// A receiver token that names a class (`@receiver.*`). The class is
@@ -940,6 +946,17 @@ impl SkeletonAnalysis {
                     super::vocab::ReceiverCap::Class => {
                         Some(class_identity_at(&r.text, r.span.start).unwrap_or_else(|| r.text.clone()))
                     }
+                    // The first parent the class declares is the one it
+                    // extends: `extends` is written ahead of `implements`.
+                    super::vocab::ReceiverCap::Parent => {
+                        method_class.get(r.scope.0 as usize).cloned().flatten().and_then(|class| {
+                            self.parents.iter().find(|(child, _)| *child == class).map(|(_, p)| p.clone())
+                        })
+                    }
+                    super::vocab::ReceiverCap::Declared => symbols
+                        .iter()
+                        .find(|s| s.kind == SymKind::Class && s.selection_span == r.span)
+                        .map(|s| s.name.clone()),
                 };
                 let Some(class) = class else { continue };
                 bag.push(Witness {
@@ -1005,7 +1022,7 @@ impl SkeletonAnalysis {
                                 Some(class) => crate::model::witnesses::Lookup::Named(class.clone()),
                                 None => crate::model::witnesses::Lookup::Receiver,
                             },
-                            constructs: false,
+                            constructs: site.constructs,
                         },
                         Some(WA::Expr(recv)),
                     ),
@@ -1237,6 +1254,7 @@ impl SkeletonAnalysis {
                             method_name_span: Span { start: r.start, end: r.end },
                             member_op: r.member_op,
                             named_by_string: false,
+                            constructs: r.constructs,
                         }
                     }
                     // A type-position name (`Widget w;`, `struct op* o`, a

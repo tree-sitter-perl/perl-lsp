@@ -23,7 +23,7 @@ pub fn python_pack() -> LangPack {
             ..NameSpellings::NONE
         },
         shape_name: |raw| raw.to_string(),
-        default_name: |_| None,
+        default_name: |_, _| None,
         annot_type: |text| match text.trim() {
             "str" => Some(InferredType::String),
             "int" | "float" => Some(InferredType::Numeric),

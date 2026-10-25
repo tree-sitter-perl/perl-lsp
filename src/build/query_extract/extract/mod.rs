@@ -134,6 +134,8 @@ struct ExtractState<'p> {
     /// declaration without a namespace context of its own joins.
     file_module: Option<&'p FileModule>,
     file_namespace: Option<String>,
+    /// The constructor's name, as the document spells it.
+    constructor: Option<&'static str>,
 }
 
 /// The module a file is, for a language whose module names come from the
@@ -316,6 +318,7 @@ pub fn extract_in(
         imports: Default::default(),
         file_module,
         file_namespace: None,
+        constructor: compiled.constructor,
     };
     // A module named by its path is one section, the whole file.
     if let (Some(m), Some(sep)) = (file_module, pack.names.use_map_sep()) {

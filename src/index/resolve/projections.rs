@@ -309,9 +309,9 @@ impl<'a> CandidateSet<'a> {
                 let locations = refs_to(self.files, self.module_index, t, editable);
                 if self.pack && locations.iter().any(|l| !l.rewritable) {
                     return Err(format!(
-                        "rename of `{}` would leave sites spelled through a delegating macro \
-                         unchanged (the macro body is not rewritten) — refusing rather than \
-                         emitting a partial edit",
+                        "rename of `{}` would leave sites that do not spell its name (a use \
+                         through a delegating macro, a construction) unchanged — refusing rather \
+                         than emitting a partial edit",
                         t.name
                     ));
                 }

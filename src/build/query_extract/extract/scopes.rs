@@ -94,8 +94,9 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         Capture::Context(kind) => {
             // Shape the context like a def name (cpp canonicalizes a
             // spec's template spelling) so members' `package` matches
-            // the container Symbol's identity exactly.
-            let text = (pack.shape_name)(&e.text);
+            // the container Symbol's identity exactly. A def named from its
+            // anchor is the context its anchor opens.
+            let text = (pack.shape_name)(st.defs.anchored_name(e.match_id).unwrap_or(&e.text));
             // A class body's members file under the class's identity.
             let identity = (kind == ContextKind::Class && pack.names.use_map_sep().is_some())
                 .then(|| st.class_identity(&text));
@@ -110,7 +111,8 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 while st.context_stack.last().is_some_and(|&(d, ..)| d >= st.scope_stack.len()) {
                     st.context_stack.pop();
                 }
-                let value = identity.unwrap_or_else(|| e.text.clone());
+                let value = identity
+                    .unwrap_or_else(|| st.defs.anchored_name(e.match_id).unwrap_or(&e.text).to_string());
                 if kind == ContextKind::Namespace {
                     let end = st.out.scopes[st.cur_scope.0 as usize].span.end;
                     open_section(st, &value, Span { start: e.span().start, end }, PackageKind::Statement);
