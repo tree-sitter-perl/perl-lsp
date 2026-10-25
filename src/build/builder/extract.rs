@@ -176,6 +176,7 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn record_key_write(&mut self, left: Node<'a>, rhs: Option<Node<'a>>, rhs_slot: Option<i32>) {
+        use crate::model::file_analysis::{KeyWrite, ScopeId, WriteKey};
         let mut innermost = left;
         // The hops above the innermost, innermost-first.
         let mut outer_hops: Vec<Node<'a>> = Vec::new();
@@ -191,121 +192,76 @@ impl<'a> Builder<'a> {
             }
         }
         outer_hops.reverse();
-        // Direct `$v->[N] = …` — a Sequence slot write. Only the
-        // direct, static-index, arrow-deref form is modeled (the pass
-        // retypes the slot / appends at len); container `$arr[N]` and
-        // nested array hops stay unmodeled — there's no open flag on
-        // Sequence to widen into, and no array-index diagnostic to
-        // protect.
-        if innermost.kind() == "array_element_expression" {
-            if innermost != left {
-                return;
-            }
-            if !crate::cst::element_arrow_deref(innermost, self.source) {
-                return;
-            }
-            let Some(container) = innermost.named_child(0) else { return };
-            if container.kind() != "scalar" {
-                return;
-            }
-            let Ok(t) = container.utf8_text(self.source) else { return };
-            if !t.starts_with('$') {
-                return;
-            }
-            let Some(idx_node) = innermost.child_by_field_name("index") else { return };
-            let Ok(Ok(idx)) = idx_node.utf8_text(self.source).map(|s| s.parse::<i32>())
-            else {
-                return;
-            };
-            let span = node_to_span(idx_node);
-            self.key_writes.push(crate::model::file_analysis::KeyWrite {
-                var_text: t.to_string(),
-                key: crate::model::file_analysis::WriteKey::Index(idx),
-                path: Vec::new(),
-                scope: self
-                    .scope_stack
-                    .last()
-                    .copied()
-                    .unwrap_or(crate::model::file_analysis::ScopeId(0)),
-                span,
-                rhs_span: rhs.map(node_to_span),
-                rhs_slot,
-                conditional: crate::cst::is_conditionally_executed(left),
-            });
-            return;
-        }
-        if innermost.kind() != "hash_element_expression" {
-            return;
-        }
         let Some(container) = innermost.named_child(0) else { return };
-        // Container form `$h{k}` writes `%h` (canonical name); deref
-        // form `$v->{k}` writes through scalar `$v` — arrow required
+        // Container form `$h{k}` writes `%h` (canonical name); deref form
+        // `$v->{k}` / `$v->[N]` writes through scalar `$v`, arrow required
         // (`$foo{k}` without one would be `%foo` mis-keyed to `$foo`).
-        let var_text: String = if container.kind() == "container_variable" {
-            match crate::cst::canonical_container_name(container, self.source) {
-                Some(n) => n,
-                None => return,
+        // `$arr[N]` stays unmodeled: there is no tuple on `@arr` to extend.
+        let var_text: String = match (innermost.kind(), container.kind()) {
+            ("hash_element_expression", "container_variable") => {
+                match crate::cst::canonical_container_name(container, self.source) {
+                    Some(n) => n,
+                    None => return,
+                }
             }
-        } else {
-            if !crate::cst::element_arrow_deref(innermost, self.source) {
-                return;
+            (_, "container_variable") => return,
+            _ => {
+                if !crate::cst::element_arrow_deref(innermost, self.source) {
+                    return;
+                }
+                let Ok(t) = container.utf8_text(self.source) else { return };
+                if !t.starts_with('$') {
+                    return;
+                }
+                t.to_string()
             }
-            let Ok(t) = container.utf8_text(self.source) else { return };
-            if !t.starts_with('$') {
-                return;
-            }
-            t.to_string()
         };
-        let key_node = innermost.child_by_field_name("key");
-        let key = key_node
-            .and_then(|k| self.extract_key_text(k))
-            .and_then(|(t, dynamic)| (!dynamic).then_some(t))
-            .map_or(
-                crate::model::file_analysis::WriteKey::Unknown,
-                crate::model::file_analysis::WriteKey::Hash,
-            );
-        // A hop below the first is a write into that key's value: a static
-        // key extends it, an index or dynamic key widens it. The path stops
-        // at the first non-hash hop, whose key is the last thing it knows.
+        let (key, span) = self.write_key_of(innermost);
+        // A hop below the first is a write into that key's value. The path
+        // stops at the first dynamic hop, the last thing it knows.
         let mut path = Vec::new();
         for hop in &outer_hops {
-            let k = if hop.kind() == "hash_element_expression" {
-                hop.child_by_field_name("key")
-                    .and_then(|k| self.extract_key_text(k))
-                    .and_then(|(t, dynamic)| (!dynamic).then_some(t))
-                    .map_or(
-                        crate::model::file_analysis::WriteKey::Unknown,
-                        crate::model::file_analysis::WriteKey::Hash,
-                    )
-            } else {
-                crate::model::file_analysis::WriteKey::Unknown
-            };
-            let last = !matches!(k, crate::model::file_analysis::WriteKey::Hash(_));
+            let (k, _) = self.write_key_of(*hop);
+            let last = matches!(k, WriteKey::Unknown);
             path.push(k);
             if last {
                 break;
             }
         }
         // The RHS types the written key only when the path reaches it.
-        let typed = path.len() == outer_hops.len()
-            && path.last().map_or(true, |k| matches!(k, crate::model::file_analysis::WriteKey::Hash(_)));
-        let span = key_node
-            .map(node_to_span)
-            .unwrap_or_else(|| node_to_span(innermost));
-        self.key_writes.push(crate::model::file_analysis::KeyWrite {
-            var_text: var_text.to_string(),
+        let typed = path.len() == outer_hops.len() && path.last().map_or(true, |k| !matches!(k, WriteKey::Unknown));
+        self.key_writes.push(KeyWrite {
+            var_text,
             key,
             path,
-            scope: self
-                .scope_stack
-                .last()
-                .copied()
-                .unwrap_or(crate::model::file_analysis::ScopeId(0)),
+            scope: self.scope_stack.last().copied().unwrap_or(ScopeId(0)),
             span,
             rhs_span: if typed { rhs.map(node_to_span) } else { None },
             rhs_slot,
             conditional: crate::cst::is_conditionally_executed(left),
         });
+    }
+
+    /// What one element hop writes: a static hash key, a static index, or
+    /// `Unknown` for a dynamic one; with the key node's span.
+    fn write_key_of(&self, elem: Node<'a>) -> (crate::model::file_analysis::WriteKey, Span) {
+        use crate::model::file_analysis::WriteKey;
+        let (field, key) = if elem.kind() == "array_element_expression" {
+            let idx = elem.child_by_field_name("index");
+            let key = idx
+                .and_then(|i| i.utf8_text(self.source).ok())
+                .and_then(|t| t.parse::<i32>().ok())
+                .map_or(WriteKey::Unknown, WriteKey::Index);
+            (idx, key)
+        } else {
+            let k = elem.child_by_field_name("key");
+            let key = k
+                .and_then(|k| self.extract_key_text(k))
+                .and_then(|(t, dynamic)| (!dynamic).then_some(t))
+                .map_or(WriteKey::Unknown, WriteKey::Hash);
+            (k, key)
+        };
+        (key, node_to_span(field.unwrap_or(elem)))
     }
 
     pub(super) fn determine_access(&self, node: Node<'a>) -> AccessKind {
