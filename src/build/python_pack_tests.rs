@@ -126,7 +126,8 @@ fn a_noted_marker_makes_old_filings_stale() {
 fn imports_are_rows_of_the_parts_they_bind() {
     let m = module(&["pkg", "sub", "mod"], false);
     let skel = skel_in(
-        "from a.b import C as D\nimport a.b\nimport a.b as c\nfrom . import y\nfrom ..x import Z\n",
+        "from a.b import C as D\nimport a.b\nimport a.b as c\nfrom . import y\nfrom ..x import Z\n\
+         from .. import w\nfrom x import V\nfrom .m.n import U as T\n",
         Some(&m),
     );
     // the modules the statements load stay the import list
@@ -146,6 +147,9 @@ fn imports_are_rows_of_the_parts_they_bind() {
             ("a", "b", Some("c")),
             ("pkg.sub", "y", None),
             ("pkg.x", "Z", None),
+            ("pkg", "w", None),
+            ("x", "V", None),
+            ("pkg.sub.m.n", "U", Some("T")),
         ]
     );
 }
@@ -591,8 +595,8 @@ class Audit(Comment.Meta):
 
 /// `Outer.Inner` written in another module, after `from pkg.models import
 /// Outer`, names the nested class by its identity: as a parent, as an
-/// annotation, and as the reference a rename rewrites — never the
-/// same-leaf class of `pkg.other`.
+/// annotation, as the reference a rename rewrites, and as goto-def's
+/// landing — never the same-leaf class of `pkg.other`.
 #[cfg(feature = "python")]
 #[test]
 fn a_dotted_spelling_reaches_a_nested_class_across_modules() {
@@ -630,4 +634,8 @@ fn a_dotted_spelling_reaches_a_nested_class_across_modules() {
     edits.sort();
     assert_eq!(edits, [("models.py".to_string(), 1, 10), ("views.py".to_string(), 2, 14)]);
     assert!(widening_codes(&idx, &views).is_empty());
+    let (defs, hover, labels) = landing(&idx, &views, Point::new(2, 14));
+    assert_eq!(defs, [("models.py".to_string(), 1)], "goto-def lands on the nested class");
+    assert_eq!(hover.as_deref(), Some("models.py"));
+    assert_eq!(labels, [None]);
 }
