@@ -1911,3 +1911,17 @@ fn a_member_call_through_an_unindexed_parent_widens_out_loud() {
         .collect();
     assert_eq!(edits, [p]);
 }
+
+/// A fully-qualified class spelling (`\Lib\Clock`) names its identity:
+/// goto-def lands on the declaration, never the declaring file's top, and
+/// the spelling widens nothing.
+#[cfg(feature = "php")]
+#[test]
+fn a_fully_qualified_class_spelling_lands_on_its_declaration() {
+    let sub = ("/fake/php/App/Sub.php", "<?php\nnamespace App;\nclass Sub extends \\Lib\\Clock {}\n");
+    let idx = php_indexed(&[("/fake/php/Lib/Clock.php", CLOCK), sub]);
+    let (defs, hover) = php_landing(&idx, sub.0, tree_sitter::Point::new(2, 24));
+    assert_eq!(defs, [("Lib/Clock.php".to_string(), 3, None)]);
+    assert_eq!(hover.as_deref(), Some("Lib/Clock.php"));
+    assert!(php_widening(&idx, sub.0).is_empty());
+}
