@@ -71,6 +71,7 @@ fn family(cap: Capture) -> Family {
     match cap {
         C::Scope(_) | C::Context(_) | C::Parent => Family::Scopes,
         C::Def { .. }
+        | C::DefPair
         | C::Qualifier
         | C::OolDef
         | C::NestedTarget

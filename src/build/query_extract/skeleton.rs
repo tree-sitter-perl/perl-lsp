@@ -19,6 +19,10 @@ pub struct SkelSymbol {
     /// The declaration as written around its name token (`@def.<kind>.spelled`:
     /// php's `$x` around the member name `x`), listed in place of the name.
     pub spelled: Option<String>,
+    /// The `@def.pair` match this def shares its name token with: the two
+    /// defs carrying one id are one declaration (`Symbol::declared_with`).
+    /// A match id, not a position in `symbols`, so it survives every dedup.
+    pub pair: Option<usize>,
     /// Declared return type (`@rettype`), for methods/functions — drives
     /// method-return resolution + chaining through PackageSymbol.
     pub return_type: Option<InferredType>,
@@ -543,6 +547,19 @@ impl SkeletonAnalysis {
                 arity: s.arity,
             })
             .collect();
+        {
+            let mut pairs: std::collections::HashMap<usize, Vec<usize>> = Default::default();
+            for (i, s) in self.symbols.iter().enumerate() {
+                if let Some(id) = s.pair {
+                    pairs.entry(id).or_default().push(i);
+                }
+            }
+            for at in pairs.values() {
+                let [a, b] = at[..] else { continue };
+                symbols[a].declared_with = Some(SymbolId(b as u32));
+                symbols[b].declared_with = Some(SymbolId(a as u32));
+            }
+        }
         // Tag a typedef-struct's members with its name. `typedef struct
         // {...} T;` names the type AFTER its body, so @context.class can't
         // reach the members (already walked). For each class, members

@@ -73,6 +73,16 @@ what is written, the whole written spelling (`@def.<kind>.spelled`, php's
 twin of `@ref.spelled`: the token keys and is rewritten, the spelling is
 read.
 
+A variable read splits the same way. `@expr.read.var` is the node whose
+value the read is; `@expr.read.var.name`, when the node also writes a sigil
+(php's `$x`), is the token that is the reference, the name the read
+resolves by, and the span a rename rewrites.
+
+`@def.pair` sits on a name token one match declares as two defs (php's
+promoted constructor parameter, a property and a local). It is opt-in on
+the pattern because two defs in one match are a pair only when the
+document says so; the extractor links them as `Symbol::declared_with`.
+
 ## Decision: a kind's meaning lives on the kind
 
 What a kind means is a method on its enum, matched exhaustively:

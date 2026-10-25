@@ -336,6 +336,18 @@ impl<'a> CandidateSet<'a> {
                     editable,
                 )
             }
+            // A pack's lexical names are minted as their name tokens, so
+            // the references image IS the edit set, written as typed.
+            Some(_) if self.pack => self
+                .origin
+                .find_occurrences(self.point, self.idx())
+                .into_iter()
+                .map(|(span, access)| {
+                    let key = self.origin_key.clone();
+                    let loc = RefLocation { key, span, access, rewritable: true, label: None };
+                    (loc, self.bare_new_name(new_name).to_string())
+                })
+                .collect(),
             // Lexical variables, unowned hash keys, non-cross-file targets:
             // the origin file's rename machinery owns the edit set.
             Some(_) => self

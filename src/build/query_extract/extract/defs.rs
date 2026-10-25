@@ -14,6 +14,8 @@ pub(super) struct State {
     /// `@def.<kind>.spelled`: the declaration as written around its name
     /// token, joined to the def by match.
     spelled_by_match: HashMap<(usize, DefCap), String>,
+    /// Matches whose defs share one name token as one declaration (`@def.pair`).
+    paired_matches: std::collections::HashSet<usize>,
     /// `@qualifier` (a `Class::` on an out-of-line def) and `@rettype` (a
     /// method's declared return type) — pre-collected like names because the
     /// `@def` event fires before these inner captures.
@@ -116,6 +118,9 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
         Capture::Def { kind, part: DefPart::Name } => {
             d.names_by_match.insert((e.match_id, kind), (e.text.clone(), e.start, e.end));
         }
+        Capture::DefPair => {
+            d.paired_matches.insert(e.match_id);
+        }
         Capture::Def { kind, part: DefPart::Spelled } => {
             d.spelled_by_match.insert((e.match_id, kind), e.text.clone());
         }
@@ -199,6 +204,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         // inside a callable (php's constructor-promoted property).
         scope: if kind == DefCap::Field { st.member_scope() } else { st.cur_scope },
         spelled: d.spelled_by_match.get(&(e.match_id, kind)).cloned(),
+        pair: d.paired_matches.contains(&e.match_id).then_some(e.match_id),
         return_type: d.rettype_by_match.get(&e.match_id).and_then(|t| (pack.annot_type)(t)),
         deref_stack: d.nested_stacks.get(&e.match_id).cloned().unwrap_or_default(),
         attributes: {
@@ -258,10 +264,11 @@ pub(super) fn tag_inline_namespaces(st: &mut ExtractState) {
 /// trailing sibling (keep the rettype-bearing copy).
 pub(super) fn dedup(st: &mut ExtractState) {
     let symbols = &mut st.out.symbols;
-    let mut best: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut best: HashMap<(usize, usize, Option<DefCap>), usize> = HashMap::new();
     let mut keep = vec![true; symbols.len()];
     for (i, sym) in symbols.iter().enumerate() {
-        let key = (sym.name_start.row, sym.name_start.column);
+        // The defs a pair declares at one token are both kept.
+        let key = (sym.name_start.row, sym.name_start.column, sym.pair.map(|_| sym.kind));
         match best.get(&key) {
             None => {
                 best.insert(key, i);

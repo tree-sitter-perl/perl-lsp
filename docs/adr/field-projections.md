@@ -37,10 +37,18 @@ A `has` accessor and its constructor key are two symbols from one token;
 so are a DBIC column accessor and its bridged key, and a php promoted
 constructor parameter and its field. The minting site records the pair as
 `Symbol::declared_with` (each way), and every consumer — `attr_pair_group`,
-the promoted-param twin, the rename group's variable-use fold — reads that
-relation. Span equality and sigil-column arithmetic are never the signal
-(CLAUDE.md rule #11): a real `sub name` sharing a class with someone's ctor
-key is not a pair, and the minting site is the only place that knows.
+the promoted parameter's rename group — reads that relation. Span equality
+and sigil-column arithmetic are never the signal (CLAUDE.md rule #11): a
+real `sub name` sharing a class with someone's ctor key is not a pair, and
+the minting site is the only place that knows.
+
+A pack document states the pair with `@def.pair` on the token its match
+declares twice; the id that links the two is the match's, so no dedup can
+renumber it away, and the dedup that keeps one def per name site keeps
+both halves of a pair. The promoted parameter's group
+(`codeclared_member_group`) is the local's spellings in its file plus the
+property's member target. Every span in it is a name token, because a php
+variable's reference is the token after its `$`; nothing skips a sigil.
 
 ## Membership is strict, never `found_by`
 

@@ -984,59 +984,6 @@ impl FileAnalysis {
         None
     }
 
-    /// The Field twin of a promoted-constructor-property PARAM token: php's
-    /// `__construct(public readonly Level $level)` declares BOTH the ctor
-    /// param (a `$level` Variable, body uses) and the class Field (`level`,
-    /// member accesses) with ONE source token, and the extractor links the
-    /// two through `declared_with`. A cursor there lands on the Variable
-    /// (emitted first); resolution wants the member identity.
-    pub fn promoted_field_twin(&self, sym: &Symbol) -> Option<&Symbol> {
-        if !matches!(sym.kind, SymKind::Variable) {
-            return None;
-        }
-        sym.declared_with
-            .map(|id| self.symbol(id))
-            .filter(|f| matches!(f.kind, SymKind::Field))
-    }
-
-    /// The promoted param's (field decl span, variable USE spans) —
-    /// sigil-narrowed to the bare name — `Some` only when `member` on
-    /// `class` is a promoted constructor property here. The member's
-    /// identity group folds the uses in so rename rewrites every spelling
-    /// of the one name: the decl token, the member accesses (the walked
-    /// member target), AND the `$level` body uses that would otherwise be
-    /// left referencing a parameter that no longer exists.
-    pub fn promoted_param_use_spans(&self, member: &str, class: &str) -> Option<(Span, Vec<Span>)> {
-        let field = self
-            .symbols_named(member)
-            .iter()
-            .map(|&sid| self.symbol(sid))
-            .find(|f| {
-                matches!(f.kind, SymKind::Field)
-                    && f.package.as_deref() == Some(class)
-                    && self.symbol_is_class_content(f)
-            })?;
-        let var = field
-            .declared_with
-            .map(|id| self.symbol(id))
-            .filter(|v| matches!(v.kind, SymKind::Variable))?;
-        // A use span covers the sigiled variable; the group writes the bare
-        // member name, so each use narrows past the variable's OWN sigil.
-        let sigil_len = match &var.detail {
-            SymbolDetail::Variable { sigil, .. } => sigil.len_utf8(),
-            _ => 0,
-        };
-        let uses = self
-            .collect_refs_for_target(var.id, false, None)
-            .into_iter()
-            .map(|(span, _)| Span {
-                start: Point::new(span.start.row, span.start.column + sigil_len),
-                end: span.end,
-            })
-            .collect();
-        Some((field.selection_span, uses))
-    }
-
     /// The cross-file-facing view of the field group at `point`: the
     /// class + bare name + which projections exist, plus the origin-file
     /// variable spellings (fields are lexical to the class block, so the

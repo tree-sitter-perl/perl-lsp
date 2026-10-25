@@ -18,6 +18,8 @@ pub(super) struct State {
     pub(super) flow_rebinds: Vec<(String, ScopeId, Point)>,
     /// `@type.annot` — a declaration's type text, joined per match.
     annots: HashMap<usize, String>,
+    /// `@expr.read.var.name` — a read's name token, joined to its node.
+    read_names: HashMap<usize, (String, Span)>,
     /// expr-literal spans, for narrowing an Edge target onto the actual
     /// literal when the rhs node wraps it.
     lit_spans: Vec<(usize, usize, Span)>,
@@ -38,6 +40,9 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
     match e.cap {
         Capture::TypeAnnot => {
             st.flow.annots.insert(e.match_id, e.text.clone());
+        }
+        Capture::Expr(ExprCap::ReadVarName) => {
+            st.flow.read_names.insert(e.match_id, (e.text.clone(), e.span()));
         }
         Capture::Domain(DomainCap::Value) => {
             let v = if is_identifier_text(&e.text) { e.text.clone() } else { String::new() };
@@ -74,13 +79,19 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
             // builder's emit_expr_witness uses.
             let span = e.span();
             // …and a candidate local-var reference, resolved to its
-            // declaration in into_file_analysis (goto-def + hover).
-            out.var_reads.push(((pack.shape_name)(&e.text), cur_scope, span));
+            // declaration in into_file_analysis (goto-def + hover). Where the
+            // document names the read's name token, that token is the
+            // reference and the name; the node stays the value.
+            let (name, ref_span) = match f.read_names.get(&e.match_id) {
+                Some((text, token)) => ((pack.shape_name)(text), *token),
+                None => ((pack.shape_name)(&e.text), span),
+            };
+            out.var_reads.push((name.clone(), cur_scope, ref_span));
             out.witnesses.push(skeleton_witness(
                 WitnessAttachment::Expr(span),
                 "skeleton",
                 WitnessPayload::Edge(WitnessAttachment::Variable {
-                    name: (pack.shape_name)(&e.text),
+                    name,
                     scope: cur_scope,
                 }),
                 span,

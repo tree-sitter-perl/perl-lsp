@@ -34,9 +34,23 @@
 ; ---- callables ----
 (function_definition name: (name) @def.sub.name) @def.sub
 (method_declaration name: (name) @def.method.name) @def.method
-; Parameters and locals are body content, not members.
+; Parameters and locals are body content, not members. A closure's
+; parameters are its own.
 (function_definition) @scope.sub
 (method_declaration) @scope.sub
+(anonymous_function) @scope.sub
+(arrow_function) @scope.sub
+
+; ---- parameters ----
+; A parameter is a local of its callable, named like every variable by
+; the token after its `$`: a read of `$x` references `x` and leaves the
+; `$` alone. Its declared type is its value from the binding site on. A
+; variadic's declared type is its elements', so the local stays untyped.
+(simple_parameter
+  type: (_)? @type.annot
+  name: (variable_name (name) @def.local.name @flow.target)) @def.local
+(variadic_parameter
+  name: (variable_name (name) @def.local.name)) @def.local
 
 ; ---- properties ----
 ; A property is a data member of its class, named without the `$` it is
@@ -51,13 +65,23 @@
 ; A constructor parameter with a visibility or `readonly` is also a
 ; property of the class (PHP 8 promotion); the member belongs to the class
 ; body, not to the constructor whose parameter list declares it.
+; The same token is the constructor's local too, so the match declares
+; the two as one (`@def.pair`): a rename of either rewrites both.
 (property_promotion_parameter
   readonly: (readonly_modifier)? @sym.attr
   type: (_)? @type.annot
   name: [
-    (variable_name (name) @def.field.name @flow.target.member) @def.field.spelled
-    (by_ref (variable_name (name) @def.field.name @flow.target.member) @def.field.spelled)
-  ]) @def.field
+    (variable_name (name) @def.field.name @def.local.name @def.pair @flow.target.member) @def.field.spelled
+    (by_ref
+      (variable_name (name) @def.field.name @def.local.name @def.pair @flow.target.member) @def.field.spelled)
+  ]) @def.field @def.local
+; The local's own value, at its binding site in the constructor.
+(property_promotion_parameter
+  type: (_) @type.annot
+  name: [
+    (variable_name (name) @flow.target)
+    (by_ref (variable_name (name) @flow.target))
+  ])
 
 ; ---- what a declaration is, stated on its name ----
 ; Modifiers come in any order, so each fact is a pattern of its own.
@@ -131,6 +155,21 @@
     (use_declaration
       [(name) @parent @ref.type
        (qualified_name (name) @ref.type) @parent @ref.spelled])))
+
+; ---- type positions ----
+; Every class a type names is a class reference, wherever the type is
+; written (a parameter, a property, a return) and inside a nullable or a
+; union: rename of the class rewrites it. `self`, `parent` and `static`
+; name the class by where they are written, not by spelling.
+((named_type (name) @ref.type)
+ (#not-any-of? @ref.type "self" "parent" "static"))
+(named_type (qualified_name (name) @ref.type) @ref.spelled)
+
+; ---- variables ----
+; A variable read is the whole `$x`'s value and a reference to the name
+; `x`. A static property's `Foo::$x` is a member, not a variable.
+((variable_name (name) @expr.read.var.name) @expr.read.var
+ (#not-has-parent? @expr.read.var scoped_property_access_expression))
 
 ; ---- the use-map ----
 ; A row binds a class unless its keyword says it binds a function or a
