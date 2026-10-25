@@ -321,6 +321,12 @@ pub fn is_builtin(name: &str) -> bool {
     builtin_kind(name).is_some()
 }
 
+/// The builtins that modify the array they are handed first (`push @a, …`),
+/// so `push @{$h->{k}}, …` creates the key it dereferences.
+pub fn modifies_its_array_argument(name: &str) -> bool {
+    matches!(name, "pop" | "push" | "shift" | "splice" | "unshift")
+}
+
 /// The BUILTIN resolution tier's completion source: callable builtins only
 /// (keywords would be noise in an identifier slot; filehandles are
 /// suppression-side membership, not completion candidates).
