@@ -1330,49 +1330,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Record the resolved type of each method-call invocant the bag can't
-    /// type on its own, on `Expr(invocant_span)`. The query-time mirror
-    /// (`FileAnalysis::expr_type_at_span`) reads these to type an
-    /// expression without re-walking the CST. An invocant whose `Expr` the
-    /// walk already edged to its value keeps only that edge: a materialized
-    /// type beside it wins the latest-wins fold, and it was computed with
-    /// no caller, so `$class->new` inside an inherited method would read
-    /// the defining class at every call site instead of the caller's.
-    /// Chain receivers whose class is only knowable cross-file resolve to
-    /// `None` here and stay unrecorded; the query side's chain recursion
-    /// fills them at enrichment.
-    pub(super) fn emit_invocant_expr_witnesses(&mut self, idx: &ChainTypingIndex<'a>) {
-        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        let mut pending: Vec<(Span, Node<'a>)> = Vec::new();
-        for r in &self.refs {
-            if let RefKind::MethodCall {
-                invocant_span: Some(sp),
-                ..
-            } = &r.kind
-            {
-                if let Some(n) = idx.invocant_nodes.get(&(sp.start, sp.end)).copied() {
-                    pending.push((*sp, n));
-                }
-            }
-        }
-        // Type every invocant before recording any: a push moves the bag's
-        // generation and empties the invocant memo, so interleaving them
-        // would re-type each chain's prefix once per call in it.
-        let typed: Vec<(Span, InferredType)> = pending
-            .into_iter()
-            .filter(|(span, _)| self.bag_query_expr_span(*span).is_none())
-            .filter_map(|(span, node)| Some((span, self.invocant_type_at_node(node)?)))
-            .collect();
-        for (span, ty) in typed {
-            self.bag.push(Witness {
-                attachment: WitnessAttachment::Expr(span),
-                source: WitnessSource::Builder("invocant_expr".into()),
-                payload: WitnessPayload::InferredType(ty),
-                span,
-            });
-        }
-    }
-
     /// Extract exported function name(s) from a glob assignment in `sub import`.
     /// Handles: `*{"${caller}::np"} = \&np`, `*{"$caller\::$imported"} = \&p`,
     /// `*{$caller . '::confess'} = \&confess`, and loop patterns.

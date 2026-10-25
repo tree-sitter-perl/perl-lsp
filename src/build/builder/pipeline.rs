@@ -615,15 +615,6 @@ fn build_once(
     // freshly-published edges.
     bphase!("emit_mc_return_edges", b.emit_method_call_return_edges());
     bphase!("emit_array_push_witns", b.emit_array_push_witnesses());
-    // Record each method-call invocant's resolved type at its span so
-    // the tree-free query entry (`FileAnalysis::expr_type_at_span`) can
-    // answer "what is this expression?" without a CST. Runs after array
-    // pushes so `$arr[N]` invocants project against the settled
-    // `Variable{@arr}` Sequence. The build-time symbolic executor
-    // (`invocant_type_at_node`) is the single structure-discovery site;
-    // this pass records its answer.
-    bphase!("emit_invocant_expr_witns", b.emit_invocant_expr_witnesses(&chain_idx));
-
     // Fold-phase pattern dispatch: patterns declared `phase: "fold"`
     // run HERE — after PostFold, so their projections read settled
     // chain typing (route brands, resolved invocants). Matches
