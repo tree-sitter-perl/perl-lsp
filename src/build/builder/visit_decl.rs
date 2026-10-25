@@ -661,25 +661,23 @@ impl<'a> Builder<'a> {
         //     positional is the invocant.
         //   * Regular `sub` bodies use two Perl-native signals:
         //       - first positional named `$self`/`$class`/`$this`/`$proto`
-        //       - or the enclosing package declares inheritance (a sub
-        //         in a subclass is, by Perl OO convention, a method)
+        //       - or the enclosing package is a class (a sub in a class is,
+        //         by Perl OO convention, a method)
         //     Either triggers invocant marking; name stays free so the
         //     user can call it `$c`/`$ctx`/whatever.
         // Framework-specific invocant markers (`as_invocant_params` from
         // a plugin) stack on top via EmittedParam → ParamInfo.
-        // The subclass convention alone is settled post-walk
-        // (`settle_convention_invocants`): a sub the file calls as a plain
-        // function takes no invocant, and its callers may come later.
+        // The class convention alone is settled post-walk
+        // (`settle_convention_invocants`): whether the package is a class
+        // (a later `bless` or `use parent` decides it), and a sub the file
+        // calls as a plain function takes no invocant.
         let mut convention_only = false;
         if let Some(first) = params.first_mut() {
             let name_says_invocant =
                 crate::model::conventions::is_conventional_invocant_name(&first.name);
-            let pkg_is_subclass = self.current_package
-                .as_ref()
-                .map_or(false, |p| self.package_parents.contains_key(p));
             if is_method || name_says_invocant {
                 first.is_invocant = true;
-            } else if pkg_is_subclass && first.name.starts_with('$') {
+            } else if first.name.starts_with('$') {
                 convention_only = true;
             }
         }
@@ -1376,17 +1374,20 @@ impl<'a> Builder<'a> {
             .collect()
     }
 
-    /// Post-walk: a subclass's sub whose first parameter only the package
-    /// convention calls the invocant is a method unless the file calls it
-    /// as a plain function, which takes every call site into account.
+    /// Post-walk: a sub whose first parameter only the package convention
+    /// calls the invocant is a method when its package is a class
+    /// (`PackageFacts::is_class`, the rule `@_`'s head uses), unless the
+    /// file calls it as a plain function.
     pub(super) fn settle_convention_invocants(&mut self) {
         let pending = std::mem::take(&mut self.convention_invocant_subs);
         let mut settled = Vec::new();
         {
+            let facts = self.package_facts();
             let method_names = self.method_call_names();
             for c in pending {
                 let name = &self.symbols[c.sub_id.0 as usize].name;
-                if !self.called_only_as_function(&c.package, name, &method_names) {
+                let class_pkg = facts.get(&c.package).is_some_and(PackageFacts::is_class);
+                if class_pkg && !self.called_only_as_function(&c.package, name, &method_names) {
                     settled.push(c);
                 }
             }
