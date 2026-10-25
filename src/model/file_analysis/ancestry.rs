@@ -600,9 +600,7 @@ impl FileAnalysis {
                 });
                 let cand_cls: String = if widened {
                     whole
-                        .symbols
-                        .iter()
-                        .find(|s| matches!(s.kind, SymKind::Class) && name_match_key(&s.name, self.names()) == leaf)
+                        .declared_class_with_leaf(&leaf)
                         .map(|s| s.name.clone())
                         .unwrap_or_else(|| cls.to_string())
                 } else {

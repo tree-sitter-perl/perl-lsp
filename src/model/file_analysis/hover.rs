@@ -41,7 +41,9 @@ impl FileAnalysis {
         if let InferredType::ClassName(n) = ty {
             let (ns, leaf) = split_qualified(n, self.names());
             // the leaf must mean THIS class where it would be written
-            let seen = self.leaf_namespace(leaf).or_else(|| self.pack.namespace_at(site).map(str::to_string));
+            let seen = self
+                .leaf_namespace(leaf)
+                .or_else(|| self.use_map_at(site).and_then(|m| m.own_namespace).map(str::to_string));
             return (ns.is_none() || seen.is_none() || ns.map(str::to_string) == seen)
                 .then(|| leaf.to_string());
         }

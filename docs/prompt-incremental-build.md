@@ -74,7 +74,7 @@ The two hard parts, named honestly:
   exactly right or every downstream index quietly lies.
 * **Region ownership.** Every collected fact must be attributable to a
   region so "delete the dirty region's facts" is sound. Facts that are
-  derived ACROSS regions (package_ranges trimmed by successor decls,
+  derived ACROSS regions (namespace_ranges trimmed by successor decls,
   constant folds read at distance, `use` effects on later code) need
   either recomputation triggers or conservative widening ("an edit
   inside a package re-collects the package"). Widening to the enclosing
