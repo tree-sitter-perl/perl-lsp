@@ -558,7 +558,7 @@ impl<'a> Builder<'a> {
         let element_access =
             if in_place { AccessKind::Write } else { self.determine_access(node) };
         if in_place {
-            self.record_key_write(node, None);
+            self.record_in_place_write(node);
         }
 
         // READ drills get their Projected witness here, not only when

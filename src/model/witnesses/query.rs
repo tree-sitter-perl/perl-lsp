@@ -223,7 +223,11 @@ pub(crate) fn emit_mutation_extension_witnesses(
         let widen = w.conditional || scope_crossed;
         let hops: Vec<&crate::model::file_analysis::WriteKey> =
             std::iter::once(&w.key).chain(&w.path).collect();
-        let vtype = w.rhs_span.and_then(rhs_type);
+        let slot_of = |t: InferredType| match w.rhs_slot {
+            Some(n) => t.element_at(n).cloned(),
+            None => Some(t),
+        };
+        let vtype = w.rhs_span.and_then(rhs_type).and_then(slot_of);
         let shape = match base {
             InferredType::HashWithKeys { .. } => {
                 let Some(shape) = extend_shape(&base, &hops, vtype.as_ref(), widen) else { continue };
@@ -270,7 +274,7 @@ pub(crate) fn emit_mutation_extension_witnesses(
                 if w.conditional || scope_crossed || i < 0 {
                     continue;
                 }
-                let Some(vt) = w.rhs_span.and_then(rhs_type) else { continue };
+                let Some(vt) = w.rhs_span.and_then(rhs_type).and_then(slot_of) else { continue };
                 let i = i as usize;
                 if i < elems.len() {
                     if elems[i] == vt {

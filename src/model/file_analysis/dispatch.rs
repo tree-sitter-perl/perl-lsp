@@ -377,6 +377,10 @@ pub struct KeyWrite {
     pub span: Span,
     /// RHS expression span — types the extended key's value.
     pub rhs_span: Option<Span>,
+    /// A list-assignment slot (`($v->{k}, $x) = f()`): the value is element
+    /// N of the RHS, not the RHS itself.
+    #[serde(default)]
+    pub rhs_slot: Option<i32>,
     /// Syntactically conditional within its sub (if/postfix/ternary/
     /// loop/short-circuit). Scope-crossing writes (nested block or
     /// closure relative to the decl scope) are detected in the pass.
