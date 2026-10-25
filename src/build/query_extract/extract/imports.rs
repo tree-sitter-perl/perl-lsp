@@ -11,10 +11,11 @@ pub(super) struct State {
     /// import-call arguments per match (BTreeMap: match ids are
     /// source-ordered, so imports come out deterministic)
     import_args: BTreeMap<usize, String>,
-    /// A group import's shared namespace and an import's alias, joined to
-    /// the match's import name. The alias is written after the name, so
-    /// both are collected ahead of it.
+    /// A group import's shared namespace, a relative import's level and an
+    /// import's alias, joined to the match's import name. The alias is
+    /// written after the name, so all are collected ahead of it.
     prefix_by_match: HashMap<usize, String>,
+    levels_by_match: HashMap<usize, usize>,
     alias_by_match: HashMap<usize, String>,
 }
 
@@ -22,6 +23,11 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
     match e.cap {
         Capture::Import(ImportCap::Prefix) => {
             st.imports.prefix_by_match.insert(e.match_id, e.text.clone());
+        }
+        Capture::Import(ImportCap::Relative) => {
+            if let Some(sep) = st.pack.names.use_map_sep() {
+                st.imports.levels_by_match.insert(e.match_id, e.text.matches(sep).count());
+            }
         }
         Capture::Import(ImportCap::Alias) => {
             st.imports.alias_by_match.insert(e.match_id, e.text.clone());
@@ -44,8 +50,10 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             st.imports.import_args.insert(e.match_id, e.text.clone());
         }
         // The statement anchors its pattern; its name carries the meaning.
-        // A prefix and an alias are read through their import name.
-        Capture::Import(ImportCap::Statement | ImportCap::Prefix | ImportCap::Alias) => {}
+        // A prefix, a level and an alias are read through their import name.
+        Capture::Import(
+            ImportCap::Statement | ImportCap::Prefix | ImportCap::Relative | ImportCap::Alias,
+        ) => {}
         _ => {}
     }
 }
@@ -64,7 +72,7 @@ fn name_row(st: &mut ExtractState, e: &Event) {
     };
     let (qualifier, leaf) =
         crate::model::conventions::split_qualified(e.text.trim_start_matches(sep), names);
-    let prefix = st.imports.prefix_by_match.get(&e.match_id).map(|p| module_prefix(st, p, sep));
+    let prefix = module_prefix(st, e.match_id, sep);
     let namespace = match (prefix.as_deref(), qualifier) {
         (Some(p), Some(q)) => crate::model::conventions::join_qualified(p, q, sep),
         (p, q) => p.or(q).unwrap_or("").to_string(),
@@ -92,24 +100,27 @@ fn push_import(st: &mut ExtractState, module: &str) {
     }
 }
 
-/// The namespace an import's module prefix names. A leading separator is
-/// the language's to define: absolute (`use \A\B\{C}`), or relative to the
-/// file's own package, one level up per separator past the first (`from
-/// ..x import C` in `pkg.sub.mod` is `pkg.x`).
-fn module_prefix(st: &ExtractState, written: &str, sep: &str) -> String {
-    let absolute = written.trim_start_matches(sep);
-    match st.pack.names.imports.prefix {
-        ImportPrefix::Absolute => absolute.to_string(),
-        ImportPrefix::PackageRelative if absolute.len() == written.len() => absolute.to_string(),
-        ImportPrefix::PackageRelative => {
-            let levels = (written.len() - absolute.len()) / sep.len();
+/// The namespace a match's module prefix names, if it has one. A relative
+/// import's level (`@import.relative`) is the language's to define: under
+/// `PackageRelative` it climbs from the file's own package, one level up
+/// per separator past the first (`from ..x import C` in `pkg.sub.mod` is
+/// `pkg.x`). A prefix's own leading separator is absolute (`use
+/// \A\B\{C}`).
+fn module_prefix(st: &ExtractState, match_id: usize, sep: &str) -> Option<String> {
+    let written = st.imports.prefix_by_match.get(&match_id).map(|p| p.trim_start_matches(sep));
+    let levels = st.imports.levels_by_match.get(&match_id).copied();
+    match (st.pack.names.imports.prefix, levels) {
+        (ImportPrefix::PackageRelative, Some(levels)) => {
             let package = st.file_module.as_ref().map(|m| m.package()).unwrap_or_default();
-            let base = &package[..package.len().saturating_sub(levels - 1)];
-            base.iter()
-                .map(String::as_str)
-                .chain((!absolute.is_empty()).then_some(absolute))
-                .fold(String::new(), |ns, seg| crate::model::conventions::join_qualified(&ns, seg, sep))
+            let base = &package[..package.len().saturating_sub(levels.saturating_sub(1))];
+            Some(
+                base.iter()
+                    .map(String::as_str)
+                    .chain(written.filter(|w| !w.is_empty()))
+                    .fold(String::new(), |ns, seg| crate::model::conventions::join_qualified(&ns, seg, sep)),
+            )
         }
+        _ => written.map(str::to_string),
     }
 }
 

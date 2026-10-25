@@ -58,12 +58,18 @@
     name: (dotted_name) @import.name
     alias: (identifier) @import.alias))
 ; `from m import C [as D]`: each name hangs off the module, a relative one
-; (`from .m`, `from ..`) climbing from the file's package.
+; (`from .m`, `from ..`) climbing from the file's package by its dots.
 (import_from_statement
-  module_name: (_) @import.prefix
+  module_name: [(dotted_name) @import.prefix
+                (relative_import
+                  (import_prefix) @import.relative
+                  (dotted_name)? @import.prefix)]
   name: (dotted_name) @import.name)
 (import_from_statement
-  module_name: (_) @import.prefix
+  module_name: [(dotted_name) @import.prefix
+                (relative_import
+                  (import_prefix) @import.relative
+                  (dotted_name)? @import.prefix)]
   name: (aliased_import
     name: (dotted_name) @import.name
     alias: (identifier) @import.alias))
