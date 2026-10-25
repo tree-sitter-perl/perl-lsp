@@ -95,8 +95,8 @@ pub struct SkeletonAnalysis {
     /// `FileAnalysis.pack.use_rows`.
     pub use_rows: Vec<crate::model::file_analysis::UseRow>,
     /// A use-map language's namespace sections. Carried onto
-    /// `FileAnalysis.pack.namespace_sections`.
-    pub namespace_sections: Vec<crate::model::file_analysis::PackageRange>,
+    /// `FileAnalysis.namespace_ranges`.
+    pub namespace_ranges: Vec<crate::model::file_analysis::NamespaceRange>,
     pub scope_count: usize,
     pub scopes: Vec<crate::model::file_analysis::Scope>,
     pub witnesses: Vec<crate::model::witnesses::Witness>,
@@ -836,7 +836,7 @@ impl SkeletonAnalysis {
             // never a free callee: a bare call in a member body reaches it
             // through `member_of`, with the class as its receiver.
             let class_identity_at = |written: &str, site: tree_sitter::Point| {
-                let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_sections, &self.names, site)?;
+                let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.names, site)?;
                 Some(map.resolve(written).identity(map.sep))
             };
             let callee_sid: std::collections::HashMap<&str, SymbolId> = {
@@ -1381,7 +1381,6 @@ impl SkeletonAnalysis {
                 .map(|(raw, span)| (span, raw))
                 .collect(),
             use_rows: std::mem::take(&mut self.use_rows),
-            namespace_sections: std::mem::take(&mut self.namespace_sections),
             domain_sites: std::mem::take(&mut self.domain_sites),
             moved_from: std::mem::take(&mut self.moved_from),
             control_regions: std::mem::take(&mut self.control_regions),
@@ -1398,6 +1397,7 @@ impl SkeletonAnalysis {
             packages,
             pack,
             flow_edges: std::mem::take(&mut self.flow_edges),
+            namespace_ranges: std::mem::take(&mut self.namespace_ranges),
             ..Default::default()
         });
         // Seal base_*_count so a later enrich pass (the CLI/--batch path

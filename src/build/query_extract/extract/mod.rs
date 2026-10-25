@@ -186,7 +186,7 @@ impl ExtractState<'_> {
 /// the site and the namespace in force there. Runs once every row and
 /// section is in.
 fn written_type_at(out: &SkeletonAnalysis, names: &crate::model::file_analysis::NameSpellings, t: InferredType, site: Point) -> InferredType {
-    match crate::model::file_analysis::UseMap::at(&out.use_rows, &out.namespace_sections, names, site) {
+    match crate::model::file_analysis::UseMap::at(&out.use_rows, &out.namespace_ranges, names, site) {
         Some(map) => t.map_class_names(&mut |c| map.resolve(c).identity(map.sep)),
         None => t,
     }
@@ -305,10 +305,10 @@ pub fn extract_in(
     // A module named by its path is one section, the whole file.
     if let (Some(m), Some(sep)) = (file_module, pack.names.use_map_sep()) {
         let ns = m.segments.iter().fold(String::new(), |ns, seg| crate::model::conventions::join_qualified(&ns, seg, sep));
-        st.out.namespace_sections.push(crate::model::file_analysis::PackageRange {
-            package: ns.clone(),
+        st.out.namespace_ranges.push(crate::model::file_analysis::NamespaceRange {
+            namespace: ns.clone(),
             span: st.out.scopes[0].span,
-            kind: crate::model::file_analysis::PackageKind::Statement,
+            kind: crate::model::file_analysis::SectionKind::Statement,
         });
         st.file_namespace = Some(ns);
     }

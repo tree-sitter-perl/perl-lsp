@@ -657,3 +657,45 @@ fn an_unindexed_identity_widens_to_its_leaf_out_loud() {
     ));
     assert!(php_widening(&idx, sub.0).is_empty());
 }
+
+/// (namespace, start row, end row) of every lane section, in write order.
+fn lane(fa: &FileAnalysis) -> Vec<(&str, usize, usize)> {
+    fa.namespace_ranges.iter().map(|r| (r.namespace.as_str(), r.span.start.row, r.span.end.row)).collect()
+}
+
+#[test]
+fn statement_namespaces_fill_the_lane_and_a_method_belongs_to_its_class() {
+    let fa = php("<?php
+namespace A;
+class X {
+    function m() { return 1; }
+}
+namespace B;
+function f() { return 2; }
+");
+    assert_eq!(lane(&fa), vec![("A", 1, 5), ("B", 5, 7)]);
+    let in_m = tree_sitter::Point::new(3, 20);
+    // The namespace is not the class: `$this` in `m` is `A\X`.
+    assert_eq!(fa.package_at(in_m), Some("A\\X"));
+    assert_eq!(fa.namespace_at(in_m), Some("A"));
+    assert_eq!(fa.namespace_at(tree_sitter::Point::new(6, 16)), Some("B"));
+}
+
+#[test]
+fn braced_namespaces_cover_their_bodies() {
+    let fa = php("<?php
+namespace A {
+    class X {
+        function m() { return 1; }
+    }
+}
+namespace B {
+    function f() { return 2; }
+}
+");
+    assert_eq!(lane(&fa), vec![("A", 1, 5), ("B", 6, 8)]);
+    let in_m = tree_sitter::Point::new(3, 24);
+    assert_eq!(fa.package_at(in_m), Some("A\\X"));
+    assert_eq!(fa.namespace_at(in_m), Some("A"));
+    assert_eq!(fa.namespace_at(tree_sitter::Point::new(7, 20)), Some("B"));
+}

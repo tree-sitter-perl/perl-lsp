@@ -1012,7 +1012,7 @@ fn remap_spans(
         imports: _,
         import_sites,
         use_rows,
-        namespace_sections,
+        namespace_ranges,
         scope_count: _,
         scopes,
         witnesses,
@@ -1121,7 +1121,7 @@ fn remap_spans(
         row.span = rspan(row.span);
         row.reach = rspan(row.reach);
     }
-    for section in namespace_sections.iter_mut() {
+    for section in namespace_ranges.iter_mut() {
         section.span = rspan(section.span);
     }
     // Witness spans (the type tier). A length-changing splice (`PBF op_type` →

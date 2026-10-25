@@ -347,15 +347,15 @@ impl<'a> Builder<'a> {
     /// fallback. After the live walk, `current_package` is stale
     /// (= last package opened in the file). To make the typer
     /// package-correct at every assignment site, we query
-    /// `package_ranges` for the package at the assignment's
+    /// `namespace_ranges` for the package at the assignment's
     /// position and override `current_package` for the call.
     ///
-    /// Why `package_ranges` and not "track package_statement
+    /// Why `namespace_ranges` and not "track package_statement
     /// nodes": `package X;` is a SIBLING of the subs that follow
     /// it in the AST, not a parent — its scope extends forward
     /// through siblings until the next `package`. Walking the
     /// AST and saving/restoring on package_statement entry/exit
-    /// doesn't model that. `package_ranges` is the flat record
+    /// doesn't model that. `namespace_ranges` is the flat record
     /// populated at walk time and trimmed by successor decls;
     /// a point-query gives the right answer at any byte.
     pub(super) fn apply_chain_typing_assignments(&mut self, idx: &ChainTypingIndex<'a>) {

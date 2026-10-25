@@ -908,36 +908,16 @@ impl FileAnalysis {
         }
     }
 
-    /// Get the enclosing package name at a point.
-    ///
-    /// Resolves via `package_ranges` (innermost — latest-starting —
-    /// containing range wins). Falls back to a scope walk for older
-    /// cache blobs deserialised before `package_ranges` existed.
-    #[allow(dead_code)]
+    /// The class the code at `point` belongs to: the namespace in force
+    /// where the language makes a namespace its class
+    /// (`EnclosingClass::NamespaceInForce`, Perl), else the innermost scope
+    /// a class body names.
     pub fn package_at(&self, point: Point) -> Option<&str> {
-        if !self.package_ranges.is_empty() {
-            let mut best: Option<&PackageRange> = None;
-            for r in &self.package_ranges {
-                if !contains_point(&r.span, point) {
-                    continue;
-                }
-                let win = match best {
-                    None => true,
-                    Some(prev) => {
-                        // Latest-starting wins; on a tie, narrower span wins.
-                        let cur_start = (r.span.start.row, r.span.start.column);
-                        let prev_start = (prev.span.start.row, prev.span.start.column);
-                        cur_start > prev_start
-                            || (cur_start == prev_start && span_size(&r.span) < span_size(&prev.span))
-                    }
-                };
-                if win {
-                    best = Some(r);
-                }
-            }
-            return best.map(|r| r.package.as_str());
+        // A Perl file that declares no package has an empty lane; its
+        // scopes carry the implicit `main`.
+        if self.names().enclosing_class == EnclosingClass::NamespaceInForce && !self.namespace_ranges.is_empty() {
+            return self.namespace_at(point);
         }
-        // Fallback: legacy cache blob with no package_ranges.
         let scope = self.scope_at(point)?;
         let chain = self.scope_chain(scope);
         for scope_id in &chain {
@@ -947,6 +927,13 @@ impl FileAnalysis {
             }
         }
         None
+    }
+
+    /// The namespace in force at `point`, for every language (`None` =
+    /// outside every section: the global namespace, or Perl before its
+    /// first `package`).
+    pub fn namespace_at(&self, point: Point) -> Option<&str> {
+        namespace_range_at(&self.namespace_ranges, point).map(|r| r.namespace.as_str())
     }
 
     /// Iterate Handler symbols whose owner class is `owner_class` and
@@ -1191,7 +1178,7 @@ impl FileAnalysis {
     /// are identities as written (`ClassSpelling::Identity`): there is no
     /// map to resolve through.
     pub fn use_map_at(&self, site: Point) -> Option<UseMap<'_>> {
-        UseMap::at(&self.pack.use_rows, &self.pack.namespace_sections, &self.pack.names, site)
+        UseMap::at(&self.pack.use_rows, &self.namespace_ranges, &self.pack.names, site)
     }
 
     fn leaf_namespace_pins(&self) -> UseMapPins {
@@ -1241,7 +1228,7 @@ impl FileAnalysis {
         // The pins answer for the whole origin, so its own namespace is
         // one only when every section names the same; a file of several
         // makes no own-namespace claim (its sites resolve their own).
-        let mut sections = self.pack.namespace_sections.iter().map(|s| s.package.as_str());
+        let mut sections = self.namespace_ranges.iter().map(|s| s.namespace.as_str());
         let own_ns = sections
             .next()
             .filter(|first| sections.all(|s| s == *first))

@@ -2,7 +2,7 @@
 //! container context, and the inheritance edges declared with a class.
 
 use super::*;
-use crate::model::file_analysis::{PackageKind, PackageRange};
+use crate::model::file_analysis::{OpenSections, SectionKind};
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -18,27 +18,26 @@ pub(super) struct State {
     /// in `out.parents`, the namespace in force where it was written, and
     /// where. Resolved through the use-map once every import row is in.
     written_parents: Vec<(usize, Option<String>, Point)>,
-    /// Statement-form namespace sections still running, by the depth they
-    /// were declared at: the next one at that depth ends them.
-    open_sections: Vec<(usize, usize)>,
+    /// Statement-form namespace sections still running, by the scope
+    /// depth they were declared at.
+    open_sections: OpenSections,
 }
 
 /// Record a namespace section under a use-map: a braced one is its body,
 /// a statement-form one runs to the end of the enclosing scope until the
 /// next one at its depth cuts it short.
-fn open_section(st: &mut ExtractState, namespace: &str, span: Span, kind: PackageKind) {
+fn open_section(st: &mut ExtractState, namespace: &str, span: Span, kind: SectionKind) {
     if st.pack.names.use_map_sep().is_none() {
         return;
     }
-    let depth = st.scope_stack.len();
-    if kind == PackageKind::Statement {
-        while st.scopes.open_sections.last().is_some_and(|&(d, _)| d >= depth) {
-            let (_, i) = st.scopes.open_sections.pop().unwrap();
-            st.out.namespace_sections[i].span.end = span.start;
+    let lane = &mut st.out.namespace_ranges;
+    match kind {
+        SectionKind::Statement => {
+            let depth = st.scope_stack.len();
+            st.scopes.open_sections.open_statement(lane, namespace.to_string(), span.start, span.end, depth);
         }
-        st.scopes.open_sections.push((depth, st.out.namespace_sections.len()));
+        SectionKind::Block => OpenSections::push_block(lane, namespace.to_string(), span),
     }
-    st.out.namespace_sections.push(PackageRange { package: namespace.to_string(), span, kind });
 }
 
 pub(super) fn collect(st: &mut ExtractState, e: &Event) {
@@ -80,7 +79,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                     st.context_stack.pop();
                 }
                 if kind == ContextKind::Namespace {
-                    open_section(st, &text, e.span(), PackageKind::Block);
+                    open_section(st, &text, e.span(), SectionKind::Block);
                 }
                 st.context_stack.push((st.scope_stack.len(), kind, text));
             }
@@ -108,7 +107,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 let value = identity.unwrap_or_else(|| e.text.clone());
                 if kind == ContextKind::Namespace {
                     let end = st.out.scopes[st.cur_scope.0 as usize].span.end;
-                    open_section(st, &value, Span { start: e.span().start, end }, PackageKind::Statement);
+                    open_section(st, &value, Span { start: e.span().start, end }, SectionKind::Statement);
                 }
                 // A scope opened by this same match is the container the
                 // context names (php's class node), so a point anywhere in

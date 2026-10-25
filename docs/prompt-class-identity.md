@@ -74,7 +74,7 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    global `namespace { … }` too) — minted by the extractor
    (`imports::bind_reach`). A map is built for a site
    (`FileAnalysis::use_map_at`) and sees only the rows that reach it,
-   with the namespace in force there (`PackFacts::namespace_sections`,
+   with the namespace in force there (`FileAnalysis::namespace_ranges`,
    `namespace_at`) as its own; so every consumer passes a site — a
    parent its clause, a class token its ref, an invocant its point — and
    two sections of one file never read each other's rows. A language
@@ -130,10 +130,16 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    it only through a use-map, so C++, whose spellings are identities, keeps
    its calls calls.
 
-`PackFacts::namespace_sections` is a field of its own (the rule #14
-ratchet) because it is neither a witness nor a binding: it types and
+The namespace sections are the namespace lane every language shares,
+`FileAnalysis::namespace_ranges` — Perl's packages are written to it by the
+same section-closing rule (`OpenSections`) and read by the same lookup
+(`namespace_range_at`). It is neither a witness nor a binding: it types and
 resolves nothing, it is the region map a site's resolution reads, the way
-`control_regions` is.
+`control_regions` is. `namespace_at` reads it for every language; the
+enclosing class (`package_at`) reads it only where the language says a
+namespace IS the class (`NameSpellings::enclosing_class` —
+`NamespaceInForce` for Perl, `ScopeChain` for PHP and Python, whose
+classes are the bodies a namespace holds).
 
 ## Retired with it
 

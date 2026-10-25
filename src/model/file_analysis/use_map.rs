@@ -17,7 +17,7 @@
 //! Rows and answers are (namespace, leaf) parts: the only strings split
 //! here are written spellings, never an identity this code joined.
 
-use super::{contains_point, NameSpellings, PackageRange, Span};
+use super::{contains_point, namespace_range_at, NameSpellings, NamespaceRange, Span};
 use crate::model::conventions::join_qualified as join;
 use serde::{Deserialize, Serialize};
 use tree_sitter::Point;
@@ -63,13 +63,6 @@ impl UseRow {
     }
 }
 
-/// The namespace section in force at `site`: the innermost
-/// (latest-starting) one containing it, `None` outside every section (the
-/// global namespace).
-pub fn section_at(sections: &[PackageRange], site: Point) -> Option<&PackageRange> {
-    sections.iter().filter(|s| contains_point(&s.span, site)).max_by_key(|s| s.span.start)
-}
-
 /// One file's name-resolution context for class spellings, as seen from
 /// one site.
 #[derive(Debug, Clone, Copy)]
@@ -90,10 +83,10 @@ impl<'a> UseMap<'a> {
     /// The map a spelling written at `site` resolves through: the rows
     /// that reach it, the section in force there. `None` for a language
     /// whose spellings are identities as written.
-    pub fn at(rows: &'a [UseRow], sections: &'a [PackageRange], names: &'a NameSpellings, site: Point) -> Option<Self> {
+    pub fn at(rows: &'a [UseRow], sections: &'a [NamespaceRange], names: &'a NameSpellings, site: Point) -> Option<Self> {
         Some(UseMap {
             rows,
-            own_namespace: section_at(sections, site).map(|s| s.package.as_str()),
+            own_namespace: namespace_range_at(sections, site).map(|s| s.namespace.as_str()),
             sep: names.use_map_sep()?,
             site: Some(site),
         })
