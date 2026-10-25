@@ -1030,6 +1030,7 @@ fn remap_spans(
         // Populated in enrich_skeleton (post-remap) already in original coords.
         macro_call_arg_spans: _,
         call_sites,
+        receiver_sites,
         specializations: _,
         // name-keyed, ordered by byte position pre-remap — no spans to fix.
         template_params: _,
@@ -1108,6 +1109,9 @@ fn remap_spans(
         for (arg, _) in site.args.iter_mut().flatten() {
             *arg = rspan(*arg);
         }
+    }
+    for site in receiver_sites.iter_mut() {
+        site.span = rspan(site.span);
     }
     for (_, span) in return_sites.iter_mut() {
         *span = rspan(*span);

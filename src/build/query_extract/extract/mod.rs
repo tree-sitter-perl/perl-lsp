@@ -92,6 +92,7 @@ fn family(cap: Capture) -> Family {
         | C::Domain(_)
         | C::Shape(_)
         | C::TypeAnnot
+        | C::Receiver(_)
         | C::AnonAggMember => Family::Flow,
         C::Narrow(_) | C::Move(_) | C::GuardRegion | C::Unevaluated | C::ParamRegion => {
             Family::Narrowing

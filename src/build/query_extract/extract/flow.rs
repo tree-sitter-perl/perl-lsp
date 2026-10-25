@@ -177,8 +177,10 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
             // f(..)` flow edge targets it. A member call (`recv.m(..)`)
             // carries its receiver, the `@member.recv` of the same match.
             let in_match = |cap: Capture| events.iter().find(|x| x.match_id == e.match_id && x.cap == cap);
+            // A qualified free callee (`\Lib\f()`) is named by its whole
+            // spelling, which resolves through the use-map at the site.
             let callee = in_match(Capture::Ref(RefCap::Call))
-                .map(|x| (x.text.clone(), None))
+                .map(|x| (in_match(Capture::RefSpelled).unwrap_or(x).text.clone(), None))
                 .or_else(|| {
                     let name = in_match(Capture::Ref(RefCap::MemberCall))?;
                     let recv = in_match(Capture::Member(MemberCap::Recv))?;
@@ -219,6 +221,16 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
                     span,
                 ));
             }
+        }
+        Capture::Receiver(names) => {
+            // Which class the token names is answered once the use-map and
+            // the callables' owners are in (`into_file_analysis`).
+            out.receiver_sites.push(crate::build::query_extract::ReceiverSite {
+                span: e.span(),
+                scope: cur_scope,
+                names,
+                text: e.text.clone(),
+            });
         }
         // The assignment node anchors its pattern; its target and source
         // carry the meaning.

@@ -89,6 +89,18 @@ pub struct CallSite {
     pub args: Option<Vec<(Span, bool)>>,
 }
 
+/// A receiver token that names a class (`@receiver.*`). The class is
+/// resolved in `into_file_analysis`, where the use-map and the callables'
+/// owners are in hand.
+#[derive(Debug, Clone)]
+pub struct ReceiverSite {
+    pub span: Span,
+    pub scope: crate::model::file_analysis::ScopeId,
+    pub names: super::vocab::ReceiverCap,
+    /// The token as written: the spelling a `Class` receiver resolves.
+    pub text: String,
+}
+
 #[derive(Debug, Default)]
 pub struct SkeletonAnalysis {
     pub symbols: Vec<SkelSymbol>,
@@ -186,6 +198,8 @@ pub struct SkeletonAnalysis {
     /// across files at query time (no name-case guess —
     /// `docs/adr/macro-handling.md`).
     pub call_sites: Vec<CallSite>,
+    /// Receiver tokens that name a class (`@receiver.*`).
+    pub receiver_sites: Vec<ReceiverSite>,
     /// `return EXPR;` sites (`@expr.return.value`): (enclosing scope, the
     /// returned expression's span). Purely structural — this tier doesn't
     /// know what a `return` MEANS for any given language; the interpretation
@@ -693,6 +707,28 @@ impl SkeletonAnalysis {
             }
             out
         };
+        // The class whose method each scope is the body of, or sits inside:
+        // the nearest callable that declares one names it, so a closure in
+        // a method reads the method's, and a free function's body has none.
+        let method_class: Vec<Option<String>> = {
+            let mut out: Vec<Option<String>> = Vec::with_capacity(self.scopes.len());
+            for sc in &self.scopes {
+                let class = match sc.owner.and_then(|sid| symbols.get(sid.0 as usize)) {
+                    Some(owner) => owner.package.clone().filter(|_| matches!(owner.kind, SymKind::Method)),
+                    None => sc.parent.and_then(|p| out.get(p.0 as usize).cloned().flatten()),
+                };
+                out.push(class);
+            }
+            out
+        };
+        // What a use-map call names a function by (`function_identity`); the
+        // earliest declaration of a name wins.
+        let free_functions: FreeFunctions = symbols
+            .iter()
+            .rev()
+            .filter(|s| matches!(s.kind, SymKind::Sub))
+            .map(|s| ((s.package.as_deref().unwrap_or(""), s.name.as_str()), s.id))
+            .collect();
         // Per-class template parameter lists (declaration order) — the
         // `ParamOf` index axis. Built here so the writeback below can route
         // param-mentioning member returns through the deferred shape; rides
@@ -853,10 +889,32 @@ impl SkeletonAnalysis {
             // callable (the constructor is the stronger claim). A method is
             // never a free callee: a bare call in a member body reaches it
             // through `member_of`, with the class as its receiver.
+            let use_map_at = |site: tree_sitter::Point| {
+                crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_sections, &self.names, site)
+            };
             let class_identity_at = |written: &str, site: tree_sitter::Point| {
-                let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_sections, &self.names, site)?;
+                let map = use_map_at(site)?;
                 Some(map.resolve(written).identity(map.sep))
             };
+            // A receiver token that names a class has that class as its
+            // value, and a call on it dispatches there.
+            let mut receiver_class: std::collections::HashMap<Span, String> = Default::default();
+            for r in &self.receiver_sites {
+                let class = match r.names {
+                    super::vocab::ReceiverCap::Enclosing => method_class.get(r.scope.0 as usize).cloned().flatten(),
+                    super::vocab::ReceiverCap::Class => {
+                        Some(class_identity_at(&r.text, r.span.start).unwrap_or_else(|| r.text.clone()))
+                    }
+                };
+                let Some(class) = class else { continue };
+                bag.push(Witness {
+                    attachment: WA::Expr(r.span),
+                    source: WitnessSource::Builder("receiver_class".into()),
+                    payload: WP::InferredType(InferredType::ClassName(class.clone())),
+                    span: r.span,
+                });
+                receiver_class.insert(r.span, class);
+            }
             let callee_sid: std::collections::HashMap<&str, SymbolId> = {
                 let mut m: std::collections::HashMap<&str, SymbolId> =
                     std::collections::HashMap::new();
@@ -908,23 +966,42 @@ impl SkeletonAnalysis {
                     Some(recv) => (
                         crate::model::witnesses::Callee::Method {
                             name: name.clone(),
-                            lookup: crate::model::witnesses::Lookup::Receiver,
+                            lookup: match receiver_class.get(&recv) {
+                                Some(class) => crate::model::witnesses::Lookup::Named(class.clone()),
+                                None => crate::model::witnesses::Lookup::Receiver,
+                            },
                             constructs: false,
                         },
                         Some(WA::Expr(recv)),
                     ),
-                    None => (
-                        crate::model::witnesses::Callee::Function {
-                            name: name.clone(),
-                            local: callee_sid.get(name.as_str()).or_else(|| {
-                                // under a use-map a class is filed under the
-                                // identity its spelling names at the call
-                                callee_sid.get(class_identity_at(name, span.start)?.as_str())
-                            }).copied(),
-                            member_of: elided_class.get(site.scope.0 as usize).cloned().flatten(),
-                        },
-                        None,
-                    ),
+                    None => match use_map_at(span.start) {
+                        Some(map) => {
+                            let fq = function_identity(&map, name, &free_functions);
+                            let local = free_functions.get(&(fq.namespace.as_str(), fq.leaf.as_str())).copied().or_else(|| {
+                                // a bare name may name a class called as a
+                                // callable, filed under its identity
+                                (!name.contains(map.sep))
+                                    .then(|| callee_sid.get(map.resolve(name).identity(map.sep).as_str()).copied())
+                                    .flatten()
+                            });
+                            (
+                                crate::model::witnesses::Callee::Function {
+                                    name: fq.leaf,
+                                    local,
+                                    member_of: elided_class.get(site.scope.0 as usize).cloned().flatten(),
+                                },
+                                None,
+                            )
+                        }
+                        None => (
+                            crate::model::witnesses::Callee::Function {
+                                name: name.clone(),
+                                local: callee_sid.get(name.as_str()).copied(),
+                                member_of: elided_class.get(site.scope.0 as usize).cloned().flatten(),
+                            },
+                            None,
+                        ),
+                    },
                 };
                 bag.push(mk(WA::Expr(*span), WP::Invoke { callee, receiver, args }, *span));
             }
@@ -1044,7 +1121,16 @@ impl SkeletonAnalysis {
                 let mut span = Span { start: r.start, end: r.end };
                 let mut binding = None;
                 let kind = match r.kind {
-                    RefCap::Call => RefKind::FunctionCall,
+                    // Under a use-map a call is pinned to its function's
+                    // namespace (`\Lib\f()` → `Lib`).
+                    RefCap::Call => {
+                        let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_sections, &names, r.start);
+                        if let Some(map) = map {
+                            let namespace = function_identity(&map, &r.name, &free_functions).namespace;
+                            binding = (!namespace.is_empty()).then_some(RefBinding::Function { package: namespace });
+                        }
+                        RefKind::FunctionCall
+                    }
                     // Qualified call (`fmt::format_to(...)`): Perl parity —
                     // the full path rides `target_name`, the qualifier the
                     // `Function` binding, and the span narrows to the bare
@@ -1424,6 +1510,26 @@ impl SkeletonAnalysis {
         fa
     }
 }
+
+/// The free function `written` names at a use-map site, as its namespace
+/// and leaf. A qualified spelling resolves like a class spelling; a bare
+/// name is the namespace in force's own function when the file declares
+/// one there, else the global namespace's.
+fn function_identity(
+    map: &crate::model::file_analysis::UseMap,
+    written: &str,
+    free_functions: &FreeFunctions,
+) -> crate::model::file_analysis::QualifiedName {
+    use crate::model::file_analysis::QualifiedName;
+    if written.contains(map.sep) {
+        return map.resolve(written);
+    }
+    let own = map.own_namespace.unwrap_or("");
+    QualifiedName::new(if free_functions.contains_key(&(own, written)) { own } else { "" }, written)
+}
+
+/// A file's free functions by (namespace, leaf); the global namespace is `""`.
+type FreeFunctions<'a> = std::collections::HashMap<(&'a str, &'a str), crate::model::file_analysis::SymbolId>;
 
 /// The closed flag set a pack symbol carries, from the skeleton's kind and
 /// the pack's attribute vocabulary — the ONE place a pack's attribute

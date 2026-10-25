@@ -59,6 +59,14 @@ match rather than one capture, so the extractor drops a captured comment.
 
 - Pack free calls (`@ref.call` beside `@expr.call`) mint `Function`. A
   qualified pack call (`@ref.qcall`) mints no call value yet.
+- Under a use-map a free function is its namespace's
+  (`function_identity`): a qualified spelling (`@ref.call` under
+  `@ref.spelled`, php's `\Lib\f()`) resolves like a class spelling, and a
+  bare name is the namespace in force's own function when the file
+  declares one there, else the global one. The call's ref is pinned to
+  that namespace and `local` is that declaration; across files the name
+  is looked up by its leaf, so two namespaces' same-leaf functions can
+  answer for each other. php's `use function` rows are not read yet.
 - A body elides its receiver where the document marks its scope
   `@scope.sub.implicit_receiver` and the body belongs to a method. There a
   bare call carries `member_of`, and a bare read the file can't resolve to
@@ -74,14 +82,24 @@ match rather than one capture, so the extractor drops a captured comment.
   `expr_type_at_span`'s member-chain arm still asks first, and it walks
   the specializations, so a cursor on the chain sees the specialization;
   a variable the chain flows into sees the primary.
+- A receiver token that names a class has that class as its value
+  (`Expr(token) → ClassName`), and a call on it dispatches there with
+  `Lookup::Named`. The document says which tokens: `@receiver.class` on a
+  class spelling (php's `Foo::m()`), resolved through the use-map at the
+  site, and `@receiver.enclosing` on a token naming the class whose method
+  it is written in (php's `$this`, `self::`, `static::`): the class of
+  the nearest named callable around the token, so a closure in a method
+  reads the method's class and a free function's body names none.
+  `static::` is late-bound in php; here it names the writing class, as
+  `$this` does.
 - Perl's free calls mint `Function` too. The walk resolves a callee defined
   above the call; `resolve_forward_expr_witnesses` resolves one defined
   below it, and only a name still unresolved after that goes to the
   exporters. A qualified call that names another package (`Other::f()`)
   and a builtin mint no call value: the exporter lookup asks by bare name,
   and a builtin is not a sub.
-- A keyword argument (`f(x=1)`) is a positional `One`; nothing yet binds it
-  by name.
+- A keyword argument (python's `f(x=1)`, php's `f(x: 1)`) is a positional
+  `One` in its written place; nothing yet binds it by name.
 - A function-like macro whose return is its n-th argument keeps its
   call-site edge to that argument's own `Expr` (`docs/adr/macro-handling.md`),
   which carries more than the argument's type.

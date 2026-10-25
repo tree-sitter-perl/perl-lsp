@@ -83,6 +83,13 @@ promoted constructor parameter, a property and a local). It is opt-in on
 the pattern because two defs in one match are a pair only when the
 document says so; the extractor links them as `Symbol::declared_with`.
 
+`@receiver.<kind>` sits on a receiver token whose value is a class, so a
+call on it dispatches there (`Lookup::Named`). `class` names the class it
+spells (php's `Foo::m()`, through the use-map); `enclosing` names the class
+of the method the token is written in (php's `$this`, `self::`,
+`static::`). Which tokens these are is the document's: the extractor holds
+no receiver spelling.
+
 ## Decision: a kind's meaning lives on the kind
 
 What a kind means is a method on its enum, matched exhaustively:

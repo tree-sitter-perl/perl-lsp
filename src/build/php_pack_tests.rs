@@ -744,7 +744,7 @@ class Order {
 
 /// A promoted constructor parameter is the property and the constructor's
 /// local on one token, one declaration: rename from either side rewrites
-/// the token and the body's uses alike.
+/// the token, the body's uses and the property's reads alike.
 #[test]
 fn a_promoted_parameter_is_the_property_and_the_local_as_one() {
     let fa = php(PROMOTED);
@@ -759,7 +759,7 @@ fn a_promoted_parameter_is_the_property_and_the_local_as_one() {
 #[cfg(feature = "php")]
 #[test]
 fn a_promoted_parameter_renames_as_one_from_either_side() {
-    let both = [(2, 47, 51), (2, 56, 60)];
+    let both = [(2, 47, 51), (2, 56, 60), (3, 42, 46)];
     assert_eq!(renames(PROMOTED, 2, 48), both, "from the declaration");
     assert_eq!(renames(PROMOTED, 2, 57), both, "from a body use");
 }
@@ -807,4 +807,348 @@ class Job {
 fn a_cpp_local_renames_whole() {
     let src = "int f(int abc) {\n  return abc + 1;\n}\n";
     assert_eq!(renames_in("/fake/cpp/f.cpp", src, 1, 10), [(0, 10, 13), (1, 9, 12)]);
+}
+
+/// Where `needle` starts in `src`, `offset` bytes in.
+fn at(src: &str, needle: &str, offset: usize) -> tree_sitter::Point {
+    let i = src.find(needle).unwrap_or_else(|| panic!("`{needle}` in the source")) + offset;
+    let row = src[..i].matches('\n').count();
+    tree_sitter::Point { row, column: i - src[..i].rfind('\n').map_or(0, |n| n + 1) }
+}
+
+/// A workspace of php files, asked as the editor asks: by file and point.
+struct Workspace {
+    idx: crate::index::module_index::ModuleIndex,
+    store: crate::index::open_docs::OpenDocs,
+    files: Vec<(std::path::PathBuf, &'static str)>,
+}
+
+/// (file name, row, start column) of each location, sorted.
+type Sites = Vec<(String, usize, usize)>;
+
+impl Workspace {
+    fn new(files: &[(&str, &'static str)]) -> Self {
+        let idx = crate::index::module_index::ModuleIndex::new_for_test();
+        let files: Vec<_> = files.iter().map(|(p, src)| (std::path::PathBuf::from(p), *src)).collect();
+        for (path, src) in &files {
+            idx.insert_workspace_for_test(path.clone(), php(src));
+        }
+        Workspace { idx, store: crate::index::open_docs::OpenDocs::new(), files }
+    }
+
+    fn ask<T>(&self, file: &str, needle: &str, offset: usize, f: impl FnOnce(&crate::index::resolve::CandidateSet) -> T) -> T {
+        use crate::index::open_docs::FileKey;
+        use crate::index::resolve::{resolve, OverrideScope};
+        let (path, src) = self.files.iter().find(|(p, _)| p.ends_with(file)).expect("a workspace file");
+        let fa = self.idx.workspace_file_for_test(path).unwrap();
+        let point = at(src, needle, offset);
+        f(&resolve(&self.store, &fa, FileKey::Path(path.clone()), point, Some(&self.idx), OverrideScope::default()))
+    }
+
+    fn sites(locs: impl IntoIterator<Item = crate::index::resolve::RefLocation>) -> Sites {
+        use crate::index::open_docs::FileKey;
+        let mut out: Sites = locs
+            .into_iter()
+            .map(|l| {
+                let FileKey::Path(p) = &l.key else { panic!("a workspace file") };
+                (p.file_name().unwrap().to_string_lossy().to_string(), l.span.start.row, l.span.start.column)
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn defs(&self, file: &str, needle: &str, offset: usize) -> Sites {
+        self.ask(file, needle, offset, |cs| Self::sites(cs.definitions()))
+    }
+
+    fn renames(&self, file: &str, needle: &str, offset: usize) -> Sites {
+        self.ask(file, needle, offset, |cs| Self::sites(cs.rename_edits("renamed").unwrap().into_iter().map(|(l, _)| l)))
+    }
+}
+
+fn site(file: &str, row: usize, column: usize) -> (String, usize, usize) {
+    (file.to_string(), row, column)
+}
+
+const CALLS: &str = "<?php
+namespace App;
+
+class Clock { public function start() {} }
+
+class Timer {
+    public function __construct(private Clock $made) {}
+    public static function make() {}
+    public function name() {}
+    public string $name;
+    public function run(Clock $c, ?Timer $t, array $xs) {
+        $c->start(1, ...$xs);
+        $t?->name();
+        $t?->name;
+        $this->made->start();
+        $this->name();
+        self::make();
+        static::make();
+        Timer::make();
+        \\App\\Timer::make();
+        return fn() => $this->name;
+    }
+}
+";
+
+/// A member call is a call ref on the method's name token and an `Invoke`
+/// on its receiver; a property read is a value ref and the receiver's
+/// slot. A receiver that names its class (`$this`, `self`, `Timer`)
+/// dispatches on that class.
+#[test]
+fn member_calls_and_reads_name_their_member_on_the_receiver() {
+    use crate::model::file_analysis::RefKind;
+    use crate::model::witnesses::{CallArg, Callee, Lookup, WitnessPayload};
+    let fa = php(CALLS);
+    let members: Vec<(&str, usize, &str)> = fa
+        .refs()
+        .iter()
+        .filter_map(|r| match r.kind {
+            RefKind::MethodCall { .. } => Some(("call", r.span.start.row, r.target_name.as_str())),
+            RefKind::FieldAccess { .. } => Some(("read", r.span.start.row, r.target_name.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        members,
+        [
+            ("call", 11, "start"),
+            ("call", 12, "name"),
+            ("read", 13, "name"),
+            ("read", 14, "made"),
+            ("call", 14, "start"),
+            ("call", 15, "name"),
+            ("call", 16, "make"),
+            ("call", 17, "make"),
+            ("call", 18, "make"),
+            ("call", 19, "make"),
+            ("read", 20, "name"),
+        ]
+    );
+    let mut calls: Vec<(usize, String, Option<String>, Vec<bool>)> = fa
+        .witnesses
+        .all()
+        .iter()
+        .filter_map(|w| match &w.payload {
+            WitnessPayload::Invoke { callee: Callee::Method { name, lookup, .. }, args, .. } => Some((
+                w.span.start.row,
+                name.clone(),
+                match lookup {
+                    Lookup::Named(class) => Some(class.clone()),
+                    _ => None,
+                },
+                args.iter().flatten().map(|a| matches!(a, CallArg::Spread(_))).collect(),
+            )),
+            _ => None,
+        })
+        .collect();
+    calls.sort();
+    let timer = || Some("App\\Timer".to_string());
+    let call = |row: usize, name: &str, named: Option<String>, args: &[bool]| (row, name.to_string(), named, args.to_vec());
+    assert_eq!(
+        calls,
+        [
+            call(11, "start", None, &[false, true]),
+            call(12, "name", None, &[]),
+            call(14, "start", None, &[]),
+            call(15, "name", timer(), &[]),
+            call(16, "make", timer(), &[]),
+            call(17, "make", timer(), &[]),
+            call(18, "make", timer(), &[]),
+            call(19, "make", timer(), &[]),
+        ]
+    );
+    // `$this` is no local: no read of a variable `this`, and its value is
+    // the method's class, in a closure of the method too
+    assert!(fa.refs().iter().all(|r| r.target_name != "this"));
+    let this = |needle: &str| {
+        let start = at(CALLS, needle, 0);
+        let span = crate::model::file_analysis::Span { start, end: tree_sitter::Point { column: start.column + 5, ..start } };
+        fa.expr_type_at_span(span, None)
+    };
+    let timer = Some(crate::model::file_analysis::InferredType::ClassName("App\\Timer".into()));
+    assert_eq!(this("$this->made"), timer);
+    assert_eq!(this("$this->name;"), timer);
+}
+
+/// Goto-def from a member's name at a call site lands on its declaration,
+/// whatever typed the receiver: a parameter, a nullable parameter, a
+/// promoted property, `$this`, or a class named by `self`, `static` or its
+/// spelling. A property read lands on the property, never on the method
+/// that shares its name.
+#[test]
+fn a_member_at_a_call_site_resolves_to_its_declaration() {
+    let ws = Workspace::new(&[("/fake/php/App/Timer.php", CALLS)]);
+    let def = |needle: &str, offset: usize| ws.defs("Timer.php", needle, offset);
+    let decl = |row: usize, column: usize| vec![site("Timer.php", row, column)];
+    assert_eq!(def("start(1", 0), decl(3, 30), "a parameter's declared class");
+    assert_eq!(def("name();\n        $t?", 0), decl(8, 20), "nullsafe call");
+    assert_eq!(def("name;\n        $this->made", 0), decl(9, 19), "nullsafe read: the property");
+    assert_eq!(def("made->start", 0), decl(6, 47), "a promoted property");
+    assert_eq!(def("start();\n        $this->name", 0), decl(3, 30), "through a promoted property's type");
+    assert_eq!(def("name();\n        self", 0), decl(8, 20), "`$this`");
+    assert_eq!(def("make();\n        static", 0), decl(7, 27), "`self::`");
+    assert_eq!(def("make();\n        Timer", 0), decl(7, 27), "`static::`");
+    assert_eq!(def("make();\n        \\", 0), decl(7, 27), "a class named by its spelling");
+    assert_eq!(def("make();\n        return", 0), decl(7, 27), "a qualified spelling");
+    assert_eq!(def("name;\n    }", 0), decl(9, 19), "`$this` in a closure of the method");
+}
+
+/// A method and a property of one name are separate members: a rename of
+/// either rewrites its declaration and its own uses alone, from the
+/// declaration or from a use. A class named by a static call is a class
+/// reference.
+#[test]
+fn a_member_renames_with_its_call_sites_and_keeps_to_its_family() {
+    let ws = Workspace::new(&[("/fake/php/App/Timer.php", CALLS)]);
+    let rows = |sites: Sites| sites.into_iter().map(|(_, r, c)| (r, c)).collect::<Vec<_>>();
+    let method = [(8, 20), (12, 13), (15, 15)];
+    assert_eq!(rows(ws.renames("Timer.php", "name() {}", 0)), method, "from the declaration");
+    assert_eq!(rows(ws.renames("Timer.php", "name();\n        self", 0)), method, "from a call site");
+    let property = [(9, 19), (13, 13), (20, 30)];
+    assert_eq!(rows(ws.renames("Timer.php", "name;\n    public function run", 0)), property);
+    assert_eq!(rows(ws.renames("Timer.php", "name;\n    }", 0)), property);
+    let make = [(7, 27), (16, 14), (17, 16), (18, 15), (19, 20)];
+    assert_eq!(rows(ws.renames("Timer.php", "make();\n        Timer", 0)), make);
+    // the class token of a static call renames with the class
+    assert!(rows(ws.renames("Timer.php", "Timer {", 0)).contains(&(18, 8)));
+}
+
+const BASE: &str = "<?php
+namespace Lib;
+
+class Base {
+    public string $label;
+    public function greet() {}
+    public static function make() {}
+}
+";
+
+const CHILD: &str = "<?php
+namespace App;
+
+use Lib\\Base;
+
+class Child extends Base {
+    public function run(Child $c, ?Base $b) {
+        $c->greet();
+        $this->greet();
+        $b?->greet();
+        $c->label;
+        self::make();
+        Base::make();
+    }
+}
+";
+
+/// A member inherited from a class in another file resolves up the
+/// `extends` chain, and renames across both files from either side.
+#[test]
+fn an_inherited_member_resolves_and_renames_across_files() {
+    let ws = Workspace::new(&[("/fake/php/Lib/Base.php", BASE), ("/fake/php/App/Child.php", CHILD)]);
+    // a definition in another file is reported at its line
+    let greet = vec![site("Base.php", 5, 0)];
+    assert_eq!(ws.defs("Child.php", "greet();\n        $this", 0), greet, "a parameter typed by the child");
+    assert_eq!(ws.defs("Child.php", "greet();\n        $b", 0), greet, "`$this`");
+    assert_eq!(ws.defs("Child.php", "greet();\n        $c->label", 0), greet, "a nullsafe call");
+    assert_eq!(ws.defs("Child.php", "label", 0), vec![site("Base.php", 4, 19)], "an inherited property");
+    let make = vec![site("Base.php", 6, 0)];
+    assert_eq!(ws.defs("Child.php", "make();\n        Base", 0), make, "`self::` up the chain");
+    assert_eq!(ws.defs("Child.php", "make();\n    }", 0), make, "a class named through the use-map");
+
+    let greets = vec![site("Base.php", 5, 20), site("Child.php", 7, 12), site("Child.php", 8, 15), site("Child.php", 9, 13)];
+    assert_eq!(ws.renames("Base.php", "greet", 0), greets, "from the declaration");
+    assert_eq!(ws.renames("Child.php", "greet();\n        $this", 0), greets, "from a call site");
+    assert_eq!(ws.renames("Child.php", "label", 0), vec![site("Base.php", 4, 19), site("Child.php", 10, 12)]);
+}
+
+/// Hover on a member at a call site shows the declaration it resolves to.
+#[test]
+fn a_member_call_hovers_as_its_declaration() {
+    let fa = php(CALLS);
+    let hover = fa.hover_info(at(CALLS, "start(1", 0), CALLS, None).unwrap_or_default();
+    assert!(hover.contains("public function start()"), "{hover}");
+}
+
+const HELPERS: &str = "<?php
+namespace Lib;
+
+function helper(...$xs) {}
+";
+
+/// A free call is an `Invoke` of the function its name names, and its ref
+/// is pinned to that function's namespace: a bare name is the namespace in
+/// force's own function when the file declares one, else the global one; a
+/// qualified name resolves like a class spelling.
+#[test]
+fn a_free_call_is_an_invoke_of_its_function() {
+    use crate::model::file_analysis::RefKind;
+    let src = "<?php
+namespace App;
+
+function local() {}
+local(1, ...$xs);
+\\Lib\\helper(2);
+Sub\\helper();
+strlen('x');
+";
+    let fa = php(src);
+    assert_eq!(
+        call_invokes(&fa),
+        [
+            ("local".to_string(), true, Some(vec![false, true])),
+            ("helper".to_string(), false, Some(vec![false])),
+            ("helper".to_string(), false, Some(vec![])),
+            ("strlen".to_string(), false, Some(vec![false])),
+        ]
+    );
+    let pins: Vec<(&str, Option<&str>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::FunctionCall))
+        .map(|r| (r.target_name.as_str(), r.resolved_package()))
+        .collect();
+    assert_eq!(
+        pins,
+        [("local", Some("App")), ("\\Lib\\helper", Some("Lib")), ("Sub\\helper", Some("App\\Sub")), ("strlen", None)]
+    );
+
+    let ws = Workspace::new(&[("/fake/php/Lib/helpers.php", HELPERS), ("/fake/php/App/main.php", src)]);
+    assert_eq!(ws.defs("main.php", "helper(2)", 0), vec![site("helpers.php", 3, 0)]);
+    assert_eq!(ws.defs("main.php", "local(1", 0), vec![site("main.php", 3, 9)]);
+}
+
+/// (callee, defined in this file, which arguments spread) of each free call.
+fn call_invokes(fa: &FileAnalysis) -> Vec<(String, bool, Option<Vec<bool>>)> {
+    use crate::model::witnesses::{CallArg, Callee, WitnessPayload};
+    fa.witnesses
+        .all()
+        .iter()
+        .filter_map(|w| match &w.payload {
+            WitnessPayload::Invoke { callee: Callee::Function { name, local, .. }, args, .. } => Some((
+                name.clone(),
+                local.is_some(),
+                args.as_ref().map(|a| a.iter().map(|a| matches!(a, CallArg::Spread(_))).collect()),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A promoted property read in another file renames the property, the
+/// constructor's local and its body uses as one.
+#[test]
+fn a_promoted_property_renames_from_a_read_in_another_file() {
+    let user = "<?php\nfunction age(Order $o) { return $o->made; }\n";
+    let ws = Workspace::new(&[("/fake/php/Order.php", PROMOTED), ("/fake/php/user.php", user)]);
+    assert_eq!(
+        ws.renames("user.php", "made", 0),
+        [site("Order.php", 2, 47), site("Order.php", 2, 56), site("Order.php", 3, 42), site("user.php", 1, 36)]
+    );
 }

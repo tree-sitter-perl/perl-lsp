@@ -169,7 +169,61 @@
 ; A variable read is the whole `$x`'s value and a reference to the name
 ; `x`. A static property's `Foo::$x` is a member, not a variable.
 ((variable_name (name) @expr.read.var.name) @expr.read.var
- (#not-has-parent? @expr.read.var scoped_property_access_expression))
+ (#not-has-parent? @expr.read.var scoped_property_access_expression)
+ (#not-eq? @expr.read.var "$this"))
+; `$this` is no local: it is the object the enclosing method runs on, an
+; instance of the method's class.
+((variable_name) @receiver.enclosing
+ (#eq? @receiver.enclosing "$this"))
+
+; ---- calls ----
+; A call's value is an Invoke of its callee on its arguments, and the
+; argument list rides the callee's match. `...$xs` passes any number of
+; values. A named argument (`f(a: 1)`) is one more argument in its written
+; place; nothing binds it by name yet.
+(function_call_expression
+  function: (name) @ref.call
+  arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
+; A qualified function is named by its whole spelling and rewritten at its
+; leaf.
+(function_call_expression
+  function: (qualified_name (name) @ref.call) @ref.spelled
+  arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
+(arguments (argument (variadic_unpacking)) @arity.spread)
+
+; ---- members ----
+; `$x->m()` calls the method `m` of the receiver's class and `$x->p` reads
+; its property `p`, named without the `$` it is declared with; the nullsafe
+; `?->` reaches the same members. A dynamic name (`$x->$m()`) names none.
+(member_call_expression
+  object: (_) @member.recv
+  name: (name) @ref.member.call
+  arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
+(nullsafe_member_call_expression
+  object: (_) @member.recv
+  name: (name) @ref.member.call
+  arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
+(member_access_expression
+  object: (_) @member.recv
+  name: (name) @ref.member.value) @expr.member
+(nullsafe_member_access_expression
+  object: (_) @member.recv
+  name: (name) @ref.member.value) @expr.member
+; `Foo::m()` calls the method of the class `Foo` names; `self::` and
+; `static::` name the class whose method the call is written in. `parent::`
+; dispatches above it, which is no named class.
+(scoped_call_expression
+  scope: [(name) (qualified_name)] @member.recv @receiver.class
+  name: (name) @ref.member.call
+  arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
+((scoped_call_expression
+  scope: (relative_scope) @member.recv @receiver.enclosing
+  name: (name) @ref.member.call
+  arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
+ (#any-of? @receiver.enclosing "self" "static"))
+; The class a static call names is a class reference.
+(scoped_call_expression scope: (name) @ref.type)
+(scoped_call_expression scope: (qualified_name (name) @ref.type) @ref.spelled)
 
 ; ---- the use-map ----
 ; A row binds a class unless its keyword says it binds a function or a
