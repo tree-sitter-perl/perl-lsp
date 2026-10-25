@@ -908,36 +908,16 @@ impl FileAnalysis {
         }
     }
 
-    /// Get the enclosing package name at a point.
-    ///
-    /// Resolves via `package_ranges` (innermost — latest-starting —
-    /// containing range wins). Falls back to a scope walk for older
-    /// cache blobs deserialised before `package_ranges` existed.
-    #[allow(dead_code)]
+    /// The class the code at `point` belongs to: the namespace in force
+    /// where the language makes a namespace its class
+    /// (`EnclosingClass::NamespaceInForce`, Perl), else the innermost scope
+    /// a class body names.
     pub fn package_at(&self, point: Point) -> Option<&str> {
-        if !self.package_ranges.is_empty() {
-            let mut best: Option<&PackageRange> = None;
-            for r in &self.package_ranges {
-                if !contains_point(&r.span, point) {
-                    continue;
-                }
-                let win = match best {
-                    None => true,
-                    Some(prev) => {
-                        // Latest-starting wins; on a tie, narrower span wins.
-                        let cur_start = (r.span.start.row, r.span.start.column);
-                        let prev_start = (prev.span.start.row, prev.span.start.column);
-                        cur_start > prev_start
-                            || (cur_start == prev_start && span_size(&r.span) < span_size(&prev.span))
-                    }
-                };
-                if win {
-                    best = Some(r);
-                }
-            }
-            return best.map(|r| r.package.as_str());
+        // A Perl file that declares no package has an empty lane; its
+        // scopes carry the implicit `main`.
+        if self.names().enclosing_class == EnclosingClass::NamespaceInForce && !self.namespace_ranges.is_empty() {
+            return self.namespace_at(point);
         }
-        // Fallback: legacy cache blob with no package_ranges.
         let scope = self.scope_at(point)?;
         let chain = self.scope_chain(scope);
         for scope_id in &chain {
@@ -947,6 +927,13 @@ impl FileAnalysis {
             }
         }
         None
+    }
+
+    /// The namespace in force at `point`, for every language (`None` =
+    /// outside every section: the global namespace, or Perl before its
+    /// first `package`).
+    pub fn namespace_at(&self, point: Point) -> Option<&str> {
+        namespace_range_at(&self.namespace_ranges, point).map(|r| r.namespace.as_str())
     }
 
     /// Iterate Handler symbols whose owner class is `owner_class` and
@@ -1084,13 +1071,14 @@ impl FileAnalysis {
         }
     }
 
-    /// The class a call-shaped token names, for a use-map language whose
-    /// spellings can name a class anywhere a callable goes (python's
-    /// `from m import User`, `User()`): the token's spelled identity, when
-    /// a class is declared under it here or in a file the index holds.
-    /// `None` leaves the token a call.
+    /// The class a call-shaped token names, for a use-map language where
+    /// calling a class constructs it (python's `from m import User`,
+    /// `User()`; `NameSpellings::class_call`): the token's spelled
+    /// identity, when a class is declared under it here or in a file the
+    /// index holds. `None` leaves the token a call — always, in a language
+    /// that constructs with syntax of its own (PHP's `new`).
     pub fn class_named_by_call(&self, r: &Ref, index: Option<&dyn CrossFileLookup>) -> Option<String> {
-        self.pack.names.use_map_sep()?;
+        self.pack.names.class_call_sep()?;
         let identity = self.spelled_identity(r);
         let declared = self.find_type_decl(&identity).is_some()
             || index.is_some_and(|ix| {
@@ -1108,6 +1096,41 @@ impl FileAnalysis {
             .map(|&sid| self.symbol(sid))
             .find(|s| matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == identity)
             .map(|s| s.selection_span)
+    }
+
+    /// This file's own class declaration whose leaf is `leaf`, under any
+    /// namespace: what a widened candidate stands in with.
+    pub fn declared_class_with_leaf(&self, leaf: &str) -> Option<&Symbol> {
+        self.symbols()
+            .iter()
+            .find(|s| matches!(s.kind, SymKind::Class) && name_match_key(&s.name, self.names()) == leaf)
+    }
+
+    /// The class references in this file whose identity nothing indexed
+    /// declares, answered instead by a same-leaf class of another namespace
+    /// — the widened answers the `resolved-by-widening` lane says out loud.
+    /// `index` is this file's own scoped view; a scope that never widens
+    /// (every language but a use-map one) yields nothing. A class this file
+    /// declares itself is never widened, indexed or not.
+    pub fn widened_class_references(&self, index: &dyn CrossFileLookup) -> Vec<WidenedClassRef> {
+        if self.names().use_map_sep().is_none() {
+            return Vec::new();
+        }
+        let mut verdicts: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+        let mut out = Vec::new();
+        for r in self.refs().iter().filter(|r| matches!(r.kind, RefKind::PackageRef)) {
+            let named = self.spelled_identity(r);
+            let stand_in = verdicts.entry(named.clone()).or_insert_with(|| {
+                if self.find_type_decl(&named).is_some() {
+                    return None;
+                }
+                widened_class_stand_ins(index, &named, self.names()).into_iter().next().map(|w| w.class)
+            });
+            if let Some(resolved) = stand_in {
+                out.push(WidenedClassRef { span: r.span, named, resolved: resolved.clone() });
+            }
+        }
+        out
     }
 
     /// The namespace this file's own `class LEAF` declaration carries
@@ -1155,7 +1178,7 @@ impl FileAnalysis {
     /// are identities as written (`ClassSpelling::Identity`): there is no
     /// map to resolve through.
     pub fn use_map_at(&self, site: Point) -> Option<UseMap<'_>> {
-        UseMap::at(&self.pack.use_rows, &self.pack.namespace_sections, &self.pack.names, site)
+        UseMap::at(&self.pack.use_rows, &self.namespace_ranges, &self.pack.names, site, self)
     }
 
     fn leaf_namespace_pins(&self) -> UseMapPins {
@@ -1204,8 +1227,13 @@ impl FileAnalysis {
         }
         // The pins answer for the whole origin, so its own namespace is
         // one only when every section names the same; a file of several
-        // makes no own-namespace claim (its sites resolve their own).
-        let mut sections = self.pack.namespace_sections.iter().map(|s| s.package.as_str());
+        // makes no own-namespace claim (its sites resolve their own). A
+        // class body or a callable in one is no namespace of the file's.
+        let mut sections = self
+            .namespace_ranges
+            .iter()
+            .filter(|s| matches!(s.kind, SectionKind::Statement | SectionKind::Block))
+            .map(|s| s.namespace.as_str());
         let own_ns = sections
             .next()
             .filter(|first| sections.all(|s| s == *first))
@@ -1214,7 +1242,7 @@ impl FileAnalysis {
         // resolver's answer for the qualifier it was written under. The
         // spellings carry no site, so they read the whole-file view.
         if let Some(sep) = self.pack.names.use_map_sep() {
-            let map = UseMap { rows: &self.pack.use_rows, own_namespace: own_ns.as_deref(), sep, site: None };
+            let map = UseMap { rows: &self.pack.use_rows, class_body: None, own_namespace: own_ns.as_deref(), sep, site: None };
             for (leaf, prefix) in &self.pack.qualified_spellings {
                 pin(&mut pins, leaf, &map.resolve_in(prefix, leaf).namespace);
             }
@@ -1247,5 +1275,11 @@ impl FileAnalysis {
             }
         }
         UseMapPins { pins, own_namespace: own_ns, spelled, visible, names: self.pack.names.clone() }
+    }
+}
+
+impl DeclaredClasses for FileAnalysis {
+    fn declares_class(&self, identity: &str) -> bool {
+        self.find_type_decl(identity).is_some()
     }
 }

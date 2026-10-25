@@ -421,29 +421,10 @@ fn combined_walk<'r>(
 type SpecMatches<'t> = (&'static Query, Vec<(usize, Vec<(u32, Node<'t>)>)>);
 
 impl<'a> Builder<'a> {
-    /// Innermost package at a point, from the walk's `package_ranges`
-    /// (latest-starting containing range wins — same rule as
-    /// `FileAnalysis::package_at`), defaulting to the implicit `main`
-    /// before any explicit package statement.
+    /// The package in force at a point (`package_at_pos`), defaulting to
+    /// the implicit `main` before any explicit package statement.
     fn package_at_point(&self, point: tree_sitter::Point) -> String {
-        let mut best: Option<&crate::model::file_analysis::PackageRange> = None;
-        for r in &self.package_ranges {
-            if !crate::model::file_analysis::contains_point(&r.span, point) {
-                continue;
-            }
-            let win = match best {
-                None => true,
-                Some(prev) => {
-                    (r.span.start.row, r.span.start.column)
-                        > (prev.span.start.row, prev.span.start.column)
-                }
-            };
-            if win {
-                best = Some(r);
-            }
-        }
-        best.map(|r| r.package.clone())
-            .unwrap_or_else(|| "main".to_string())
+        self.package_at_pos(point).map(str::to_string).unwrap_or_else(|| "main".to_string())
     }
 
     /// Collect this round's matches for every eligible spec.
@@ -662,7 +643,7 @@ impl<'a> Builder<'a> {
                     }
                     // The gate runs for EVERY collected match, dispatched or
                     // not, and it is per-match work with per-package inputs:
-                    // an O(package_ranges) scan, two owned clones, and an
+                    // an O(namespace_ranges) scan, two owned clones, and an
                     // ancestry walk. Timed as one region because that is the
                     // unit a caller would skip.
                     let g = crate::util::ghost_stats::ScopedNs::start("pd.gate");

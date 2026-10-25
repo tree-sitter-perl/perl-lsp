@@ -30,26 +30,40 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    spelling and its identity land in one bucket, and retrieval is never
    narrower than the matcher.
 3. **Resolution narrows on the FQN and widens on the leaf.** A candidate
-   whose FQN equals the origin's resolved spelling is exact; when the exact
-   set declares nothing, the walk admits the leaf-keyed set and STAMPS the
-   answer (`MethodResolution::CrossFile { widened: true }`). The stamp is
-   provenance on the value, so every projection inherits it without a
-   handler branch.
-4. **The loud half**: a `resolved-by-widening` diagnostics lane reads the
-   stamp and reports "member `m` found on `X\Y`, not on the class this
-   file names (`A\B`)". Same silence rules as `unresolved-method` (the
-   receiver is THE dispatch projection; an unknown receiver says nothing).
+   whose FQN equals the origin's resolved spelling is exact; when nothing
+   indexed declares the FQN, the walk admits the leaf-keyed set and STAMPS
+   the answer (`MethodResolution::CrossFile { widened: true }`). The stamp
+   is provenance on the value, so every projection inherits it without a
+   handler branch. The rule lives in the origin's scope: a pack whose
+   class spellings go through a use-map is routed `NameKeyed`
+   (`LanguageRegistry::pack_visibility`, read off its `names`), so its
+   `ScopedLookup` carries the `UseMap` axis and `use_map_candidates`
+   decides. A class target's goto-def (and so hover) lands on the
+   stand-ins only after every exact lane missed, labeled `widened: X
+   stands in for Y` (`widened_class_stand_ins`); references and rename
+   stay exact, so a rename never rewrites a stranger.
+4. **The loud half**: the `resolved-by-widening` diagnostics lane
+   (`lsp::symbols::widening_diagnostics`, part of `pack_diagnostics`)
+   fires on each class token whose identity nothing indexed declares and
+   a same-leaf class answers for (`FileAnalysis::widened_class_references`):
+   "nothing indexed declares `A\B`; resolved by its leaf to `X\B`". It
+   sits on the reference that names the class — the parent clause, the
+   `use` row's leaf — because that is where the fix is written. A member
+   found through such a class carries the stamp, but no lane reads it at
+   the member site: that would type every receiver on every publish.
 5. **Spellings resolve once, in extraction.** A class declaration joins
-   the namespace in force at its position, the innermost
-   `@context.namespace` (`ExtractState::class_identity`), so a class is
-   filed under one key whatever container it is written in, and its
-   symbol's `package` is that namespace. A written spelling resolves
+   the namespace in force at its position — the section of the namespace
+   lane there (`ExtractState::class_identity`) — so a class is filed
+   under one key whatever container it is written in, and its symbol's
+   `package` is that namespace. A written spelling resolves
    through the pure `UseMap::resolve` ladder
    (`model/file_analysis/use_map.rs`) over the file's `use` rows
    (`PackFacts::use_rows`) at the namespace it was written in, once every
-   row is in: absolute spelling → itself; head segment → its alias, else
-   its `use` row (an aliased row binds the alias, never its leaf), else
-   the namespace in force at the spelling's site; the rest hangs off that.
+   row and class is in: absolute spelling → itself; head segment → the
+   nested class the enclosing class body declares (below), else its alias,
+   else its `use` row (an aliased row binds the alias, never its leaf),
+   else the namespace in force at the spelling's site; the rest hangs off
+   that.
    A row is minted as the parts the extractor read (`@import.prefix` and
    the name's qualifier as its namespace, the name's last segment as its
    leaf, `@import.alias`)
@@ -62,7 +76,7 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    global `namespace { … }` too) — minted by the extractor
    (`imports::bind_reach`). A map is built for a site
    (`FileAnalysis::use_map_at`) and sees only the rows that reach it,
-   with the namespace in force there (`PackFacts::namespace_sections`,
+   with the namespace in force there (`FileAnalysis::namespace_ranges`,
    `namespace_at`) as its own; so every consumer passes a site — a
    parent its clause, a class token its ref, an invocant its point — and
    two sections of one file never read each other's rows. A language
@@ -87,25 +101,67 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    cannot disagree. The capability is `ClassSpelling::UseMap` in
    `LangPack::names`, baked into `PackFacts::names`; a pack without it is
    untouched.
-6. **The index registers the identity AND its leaf.** `collect_linkage_feed`
-   feeds a namespaced symbol under both keys: the identity is the exact
-   key, the leaf the widening one (`ScopedLookup::use_map_candidates`).
+6. **The index registers the identity AND its leaf, in different
+   tables.** `collect_linkage_feed` feeds the identity into the candidate
+   table and the name slot, the exact key every lookup reads. The leaf of
+   each use-map class identity (`widening_leaves`, the row store's
+   `name_match_key`) goes into a relation of its own, `IndexCore::leaf_defs`,
+   read only through `CrossFileLookup::leaf_def_candidates` by
+   `use_map_candidates` once the exact set is empty. A leaf in the
+   candidate table would answer every bare-name lookup and compete for
+   the name slot, so a same-leaf stranger could win where the identity is
+   declared; kept apart, it never competes.
    A `TargetRef`'s `class_ns` is the identity's own namespace
    (`identity_namespace`), the origin's pin only for a bare spelling.
 7. **A class token references the target iff it names its identity.** The
    matcher resolves a `PackageRef` / construction-site spelling through the
    file's use-map (`spelled_identity`: a token inside an import row names
    the row's class in full) and compares identities — `use B\Collection; new Collection()`
-   reaches `B\Collection` and never the same-leaf stranger. A
-   call-shaped token names a class too when its spelled identity is a
+   reaches `B\Collection` and never the same-leaf stranger. In a
+   language where calling a class constructs it — language data,
+   `NameSpellings::class_call`, which Python and C++ declare `Constructs`
+   — a call-shaped token names a class too when its spelled identity is a
    class declared here or in an indexed file (`class_named_by_call`):
    python's `from pkg.models import User` and `User()` are references to
-   `pkg.models.User`, and a token naming no class stays a call.
+   `pkg.models.User`, and a token naming no class stays a call. PHP
+   declares `FunctionCall`: construction is `new Foo`, so `Foo()` is a
+   call of the function `Foo` whatever class shares its name, and is
+   neither a reference to the class nor a value of it. The same property
+   decides whether a file's own class is a free callee whose call yields
+   an instance (C++'s functional cast `Foo(x)`); the reference half reads
+   it only through a use-map, so C++, whose spellings are identities, keeps
+   its calls calls.
 
-`PackFacts::namespace_sections` is a field of its own (the rule #14
-ratchet) because it is neither a witness nor a binding: it types and
+**A class body can be a namespace.** A document that captures a class's
+body as `@section.class` (Python's) makes it a section of the lane,
+`SectionKind::ClassBody`, named by the class's identity: `class Outer:
+class Inner:` in `pkg/mod.py` files `Inner` as `pkg.mod.Outer.Inner`, so
+Django's per-model `class Meta:` is one class per model. The section
+covers the body, not the header, so a parent clause and the class's own
+name are written in the namespace around it. Its names are in force only
+for code written directly in it, as in Python's class scope: a bare head
+written there resolves to the nested class the body declares
+(`UseMap::class_body`, asked through `DeclaredClasses` — the symbol table,
+never a second list) before the ladder above, and otherwise falls through
+to the section around it (`namespace_range_around`). A callable written in
+the body opens a `SectionKind::Callable` section naming the namespace
+around the class, so a method never reaches its class's names bare, and
+a class nested one level further sees past its enclosing class to the
+module. A dotted spelling hangs off its head as any qualified spelling
+does: `Outer.Inner`, in the file or after `from pkg.mod import Outer`, is
+`pkg.mod.Outer.Inner`. PHP and C++ capture no class section; their lanes
+are unchanged.
+
+The namespace sections are the namespace lane every language shares,
+`FileAnalysis::namespace_ranges` — Perl's packages are written to it by the
+same section-closing rule (`OpenSections`) and read by the same lookup
+(`namespace_range_at`). It is neither a witness nor a binding: it types and
 resolves nothing, it is the region map a site's resolution reads, the way
-`control_regions` is.
+`control_regions` is. `namespace_at` reads it for every language; the
+enclosing class (`package_at`) reads it only where the language says a
+namespace IS the class (`NameSpellings::enclosing_class` —
+`NamespaceInForce` for Perl, `ScopeChain` for PHP and Python, whose
+classes are the bodies a namespace holds).
 
 ## Retired with it
 
@@ -122,10 +178,25 @@ leaf-space FQ family validation in `implementations_of`.
   but the cache keys on the file's source: adding or removing an
   `__init__.py` re-files a module's classes only once the file is
   re-analyzed.
-- **A nested Python class joins the module namespace** (`pkg.mod.Inner`
-  for `class Outer: class Inner:`), not Python's qualname
-  (`pkg.mod.Outer.Inner`) — the anonymous-class residual below, in
-  another language.
+- **A Python class body is a section over its whole span after the
+  header.** A method's parameter annotations and defaults are evaluated in
+  the class scope, but the method's `Callable` section covers its whole
+  definition, so they resolve past the class; an import written directly
+  in a class body reaches its methods too. A class inside a method is
+  filed under the module (`pkg.mod.Local`), not Python's
+  `Outer.build.<locals>.Local`.
+- **`Outer.Inner()` is a member call.** A call through an attribute is a
+  `MethodCall` on the receiver `Outer`, and a nested class is no member
+  of its enclosing class there, so the call is untyped and goto-def finds
+  nothing; the class reference spellings (a parent clause, an annotation)
+  resolve.
+- **Cross-file goto-def on a qualified spelling reads the written
+  spelling.** The PackageRef lane of `definitions()` looks up
+  `visible_def_candidates(&r.target_name)`, so `class V(Outer.Inner)` in
+  another module lands on the same-leaf candidates' file tops instead of
+  `pkg.models.Outer.Inner` (references and rename match by
+  `spelled_identity` and are exact). PHP's relative qualified spellings
+  (`extends Sub\Model`) take the same lane.
 
 - **The visibility pins have no site.** `UseMapPins` is per ORIGIN
   (`VisibilityAxis::for_origin` takes a file, not a position), so it
@@ -142,10 +213,10 @@ leaf-space FQ family validation in `implementations_of`.
   and its symbol's `package` is that namespace. The identity is unique by
   construction (row and column), so nothing collides; it only reads
   oddly in an outline.
-- **The leaf key double-feeds the edge index.** The linkage feed registers
-  a namespaced symbol under its identity AND its leaf, and
-  `rebuild_name_registration` feeds the edge indexes once per key, so a
-  php class's inheritance and bridge edges are recorded twice (once per
-  spelling). Correctness is unaffected (buckets dedup members; walks
-  dedup by node); the cost is in `docs/scaling-limits.md` §7, unmeasured
-  on a large corpus.
+- **A global-namespace class never widens.** Widening reads
+  a QUALIFIED identity's leaf; a bare identity (a PHP class with no
+  namespace, `new \User`) is its own leaf and never widens to `X\User`.
+- **The leaf relation is a second candidate table.** One `leaf_defs`
+  entry per use-map class, an `Arc` clone beside its `all_defs` one, and
+  nothing in the edge indexes; `docs/scaling-limits.md` §7, unmeasured on
+  a large corpus.

@@ -11,7 +11,7 @@ fn row(namespace: &str, leaf: &str, alias: Option<&str>) -> UseRow {
 }
 
 fn map<'a>(rows: &'a [UseRow], own: Option<&'a str>) -> UseMap<'a> {
-    UseMap { rows, own_namespace: own, sep: "\\", site: Some(tree_sitter::Point::new(1, 0)) }
+    UseMap { rows, class_body: None, own_namespace: own, sep: "\\", site: Some(tree_sitter::Point::new(1, 0)) }
 }
 
 fn fqn(m: &UseMap<'_>, written: &str) -> String {
@@ -115,7 +115,7 @@ fn a_row_binds_only_where_it_reaches() {
     let mut r = row("Lib", "Model", None);
     r.reach = Span { start: tree_sitter::Point::new(2, 0), end: tree_sitter::Point::new(5, 0) };
     let rows = vec![r];
-    let at = |row: usize| UseMap { rows: &rows, own_namespace: Some("App"), sep: "\\", site: Some(tree_sitter::Point::new(row, 4)) };
+    let at = |row: usize| UseMap { rows: &rows, class_body: None, own_namespace: Some("App"), sep: "\\", site: Some(tree_sitter::Point::new(row, 4)) };
     assert_eq!(fqn(&at(3), "Model"), "Lib\\Model");
     assert_eq!(fqn(&at(7), "Model"), "App\\Model");
     // the whole-file view sees every row
