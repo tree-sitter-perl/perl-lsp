@@ -458,6 +458,21 @@ fn test_extract_coderef_literal() {
 }
 
 #[test]
+fn test_refgen_types_by_what_it_references() {
+    // Only `\&name` is code: `\%h` and `\@a` are container refs, and a
+    // scalar ref is nothing the lattice models.
+    let fa = build_fa(
+        "my %h; my @a; my $s;\nmy $hr = \\%h;\nmy $ar = \\@a;\nmy $sr = \\$s;\nmy $cr = \\&foo;\nmy $dr = \\my @z;\nsub foo { 1 }\n",
+    );
+    let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(6, 0));
+    assert_eq!(at("$hr"), Some(InferredType::HashRef));
+    assert_eq!(at("$ar"), Some(InferredType::ArrayRef));
+    assert_eq!(at("$sr"), None);
+    assert!(matches!(at("$cr"), Some(InferredType::CodeRef { return_edge: Some(_) })), "{:?}", at("$cr"));
+    assert_eq!(at("$dr"), Some(InferredType::ArrayRef));
+}
+
+#[test]
 fn test_extract_regexp_literal() {
     let fa = build_fa("my $re = qr/pattern/;");
     let ty = fa.inferred_type_via_bag("$re", Point::new(0, 21));
@@ -1523,4 +1538,126 @@ fn main_qualified_call_binds_in_a_package_less_file() {
         fa.inferred_type_via_bag("$s", Point::new(1, 20)),
         Some(InferredType::String),
     );
+}
+
+#[test]
+fn test_indirect_object_call_is_a_method_call_on_its_class() {
+    // Inside a class with its own `new`, `new Other::Pkg(...)` is still
+    // `Other::Pkg->new(...)`: Perl reads it as a method call once the file
+    // has named the package. A sub named like the class makes it a call.
+    let fa = build_fa(
+        "package Mine;\nuse Other::Pkg;\nsub new { bless {}, shift }\nsub Helper { 1 }\nsub go {\n    my $a = new Other::Pkg(1, 2);\n    my $b = new Other::Pkg;\n    my $c = new Helper(1);\n    return;\n}\n",
+    );
+    let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(8, 0));
+    assert_eq!(at("$a"), Some(InferredType::ClassName("Other::Pkg".into())));
+    assert_eq!(at("$b"), Some(InferredType::ClassName("Other::Pkg".into())));
+    assert_ne!(at("$c"), Some(InferredType::ClassName("Helper".into())), "{:?}", at("$c"));
+    let calls: Vec<_> = fa
+        .refs()
+        .iter()
+        .filter_map(|r| match &r.kind {
+            RefKind::MethodCall { invocant, .. } => Some((r.target_name.clone(), invocant.as_name()?.to_string())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls, vec![("new".into(), "Other::Pkg".into()), ("new".into(), "Other::Pkg".into())]);
+}
+
+#[test]
+fn test_method_on_the_invocant_param_keeps_the_callers_receiver() {
+    // `$class->new` / `$class->SUPER::new` inside an inherited constructor
+    // dispatch on whoever called it, so a subclass call site reads the
+    // subclass, through every level of the chain.
+    let fa = build_fa(
+        "package Base;\nsub new { my $class = shift; return bless {}, $class; }\nsub make { my $class = shift; return $class->new; }\npackage Server;\nour @ISA = ('Base');\nsub new {\n    my $self = shift;\n    return $self if ref $self;\n    my $class = $self;\n    $self = $class->SUPER::new(@_);\n    return $self;\n}\npackage Daemon;\nour @ISA = ('Server');\nsub new {\n    my $self = shift;\n    my $class = $self;\n    $self = $class->SUPER::new;\n    return $self;\n}\nmy $d = Daemon->new;\nmy $m = Daemon->make;\n1;\n",
+    );
+    let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(22, 0));
+    assert_eq!(at("$d"), Some(InferredType::ClassName("Daemon".into())));
+    assert_eq!(at("$m"), Some(InferredType::ClassName("Daemon".into())));
+}
+
+#[test]
+fn test_subclass_sub_called_as_a_function_takes_no_invocant() {
+    // In a subclass every sub's first parameter is its invocant by
+    // convention, unless the file calls the sub as a plain function, and
+    // the call may come before or after the sub.
+    let fa = build_fa(
+        "package Base;\nsub new { bless {}, shift }\npackage R;\nuse base qw(Base);\nsub hook {\n    my ($self, $args) = @_;\n    _check($args);\n    return $self->_helper;\n}\nsub _check {\n    my ($flag) = @_;\n    return $flag;\n}\nsub _helper { my ($s) = @_; return $s; }\nsub _later { my ($t) = @_; return $t; }\n_later(1);\n1;\n",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$flag", Point::new(11, 4)), None);
+    assert_eq!(fa.inferred_type_via_bag("$t", Point::new(14, 30)), None);
+    let s = fa.inferred_type_via_bag("$s", Point::new(13, 30));
+    assert_eq!(s.as_ref().and_then(|t| t.class_name()), Some("R"), "{:?}", s);
+}
+
+#[test]
+fn test_class_sub_first_param_is_the_invocant_in_any_class() {
+    // The convention covers every class, not only subclasses: a package
+    // that blesses (even below the sub) makes its subs methods, except one
+    // the file calls as a plain function. A package that is no class
+    // marks nothing.
+    let fa = build_fa(
+        "package P;\nsub name { my ($o) = @_; return $o->{name} }\nsub _fmt { my ($d) = @_; return $d }\nsub new { my $c = shift; my $s = bless {}, $c; _fmt($s); return $s }\npackage Util;\nsub trim { my ($x) = @_; return $x }\n1;\n",
+    );
+    let first_is_invocant = |sub: &str| {
+        let sym = fa.symbols().iter().find(|s| s.name == sub).expect(sub);
+        let SymbolDetail::Sub { params, .. } = &sym.detail else { panic!("{sub}: {:?}", sym.detail) };
+        params[0].is_invocant
+    };
+    assert!(first_is_invocant("name"));
+    assert!(!first_is_invocant("_fmt"));
+    assert!(!first_is_invocant("trim"));
+}
+
+#[test]
+fn test_ref_eq_current_package_narrows_to_the_enclosing_class() {
+    // Path::Tiny's `path`: a function whose early return hands back its
+    // argument once `ref($p) eq __PACKAGE__` has proven it an object.
+    let fa = build_fa(
+        "package P;\nsub path {\n    my $p = shift;\n    if (!@_ && ref($p) eq __PACKAGE__ && !$p->[1]) {\n        return $p;\n    }\n    return _make($p);\n}\nsub _make { my $s = shift; bless [$s], __PACKAGE__; }\nsub other { return path('x'); }\n1;\n",
+    );
+    let p = fa.inferred_type_via_bag("$p", Point::new(4, 15));
+    assert_eq!(p.as_ref().and_then(|t| t.class_name()), Some("P"), "{:?}", p);
+    let ret = fa.sub_return_type_at_arity("path", None);
+    assert_eq!(ret.as_ref().and_then(|t| t.class_name()), Some("P"), "{:?}", ret);
+}
+
+#[test]
+fn test_indirect_object_call_reads_subs_of_the_current_package() {
+    // Perl looks the class name up as a sub in the package in force at the
+    // call: `sub Widget` in another package of the file leaves `new Widget`
+    // a method call, while one in this package, or a sub imported into it
+    // by name, makes it a function call.
+    let fa = build_fa(
+        "package Widget;\nsub new { bless {}, shift }\npackage Other;\nsub Widget { 1 }\npackage Gadget;\nsub new { bless {}, shift }\npackage Mine;\nsub go {\n    my $a = new Widget(1);\n    return;\n}\npackage Other;\nsub go {\n    my $b = new Widget(1);\n    return;\n}\npackage Third;\nuse Some::Lib qw(Gadget);\nsub go {\n    my $c = new Gadget(1);\n    return;\n}\npackage Fourth;\nsub go {\n    my $d = new Gadget(1);\n    return;\n}\n",
+    );
+    let calls: Vec<_> = fa
+        .refs()
+        .iter()
+        .filter_map(|r| match &r.kind {
+            RefKind::MethodCall { invocant, .. } => Some((r.span.start.row, invocant.as_name()?.to_string())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls, vec![(8, "Widget".into()), (24, "Gadget".into())]);
+}
+
+#[test]
+fn test_indirect_object_constructor_keys_bind_like_arrow_calls() {
+    // `new Widget(name => 'x')` binds its constructor keys exactly as
+    // `Widget->new(name => 'x')` does: one post-walk pass owns both.
+    let fa = build_fa(
+        "package Widget;\nuse Moo;\nhas name => (is => 'ro');\npackage main;\nmy $a = new Widget(name => 'x');\nmy $b = Widget->new(name => 'y');\n",
+    );
+    let owners: Vec<_> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "name")
+        .filter_map(|r| match &r.kind {
+            RefKind::HashKeyAccess { .. } => Some((r.span.start.row, r.hash_key_owner().cloned())),
+            _ => None,
+        })
+        .collect();
+    let want = Some(HashKeyOwner::Sub { package: Some("Widget".into()), name: "new".into() });
+    assert_eq!(owners, vec![(4, want.clone()), (5, want)]);
 }
