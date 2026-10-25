@@ -43,6 +43,12 @@ pub struct SkelSymbol {
     pub flags: SymbolFlags,
 }
 
+impl crate::model::file_analysis::DeclaredClasses for Vec<SkelSymbol> {
+    fn declares_class(&self, identity: &str) -> bool {
+        self.iter().any(|s| matches!(s.kind, DefCap::Class | DefCap::Package) && s.name == identity)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SkelRef {
     pub kind: RefCap,
@@ -836,7 +842,7 @@ impl SkeletonAnalysis {
             // never a free callee: a bare call in a member body reaches it
             // through `member_of`, with the class as its receiver.
             let class_identity_at = |written: &str, site: tree_sitter::Point| {
-                let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.names, site)?;
+                let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.names, site, &symbols)?;
                 Some(map.resolve(written).identity(map.sep))
             };
             let callee_sid: std::collections::HashMap<&str, SymbolId> = {

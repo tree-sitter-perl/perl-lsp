@@ -381,3 +381,188 @@ fn an_unindexed_identity_widens_to_its_leaf_out_loud() {
     ));
     assert!(widening_codes(&idx, &vendored).is_empty());
 }
+
+/// A class body is a namespace for the code written directly in it: a
+/// nested class is filed under its enclosing class, a bare name there
+/// that the class declares names the nested class first, and a method —
+/// or a class nested one level further — sees past it to the module.
+#[test]
+fn a_class_body_is_a_namespace_for_its_own_code() {
+    let m = module(&["pkg", "mod"], false);
+    let src = "\
+class Inner:
+    pass
+class Outer:
+    class Inner:
+        pass
+    child: Inner = make()
+    class Sub(Inner):
+        peer: Inner = make()
+    def build(self):
+        x: Inner = make()
+        class Local(Inner):
+            pass
+        return x
+class Other(Outer.Inner):
+    pass
+";
+    let fa = py_in(src, Some(&m));
+    let classes: Vec<(&str, Option<&str>)> = fa
+        .symbols()
+        .iter()
+        .filter(|s| s.kind == SymKind::Class)
+        .map(|s| (s.name.as_str(), s.package.as_deref()))
+        .collect();
+    assert_eq!(
+        classes,
+        [
+            ("pkg.mod.Inner", Some("pkg.mod")),
+            ("pkg.mod.Outer", Some("pkg.mod")),
+            ("pkg.mod.Outer.Inner", Some("pkg.mod.Outer")),
+            ("pkg.mod.Outer.Sub", Some("pkg.mod.Outer")),
+            // a class in a method joins the namespace the method sees
+            ("pkg.mod.Local", Some("pkg.mod")),
+            ("pkg.mod.Other", Some("pkg.mod")),
+        ]
+    );
+    // directly in Outer's body: the nested class, in an annotation and a
+    // parent clause alike
+    assert_eq!(fa.inferred_type_via_bag("child", Point::new(5, 4)), Some(InferredType::ClassName("pkg.mod.Outer.Inner".into())));
+    assert_eq!(fa.declared_parents("pkg.mod.Outer.Sub"), ["pkg.mod.Outer.Inner"]);
+    // Sub's body and build's body see past Outer to the module's class
+    assert_eq!(fa.inferred_type_via_bag("peer", Point::new(7, 8)), Some(InferredType::ClassName("pkg.mod.Inner".into())));
+    assert_eq!(fa.inferred_type_via_bag("x", Point::new(9, 8)), Some(InferredType::ClassName("pkg.mod.Inner".into())));
+    assert_eq!(fa.declared_parents("pkg.mod.Local"), ["pkg.mod.Inner"]);
+    // a dotted spelling hangs its leaf off the class its head names
+    assert_eq!(fa.declared_parents("pkg.mod.Other"), ["pkg.mod.Outer.Inner"]);
+    // the namespace in force: the class body, the module inside a method
+    assert_eq!(fa.namespace_at(Point::new(5, 4)), Some("pkg.mod.Outer"));
+    assert_eq!(fa.namespace_at(Point::new(9, 8)), Some("pkg.mod"));
+    // a class header is written in the namespace around the class
+    assert_eq!(fa.namespace_at(Point::new(6, 14)), Some("pkg.mod.Outer"));
+}
+
+/// Without a module-level class of that leaf, a bare name in a method
+/// names the module's (undeclared) class, never the nested one: the class
+/// reference widens to it, out loud, as any undeclared identity does.
+#[cfg(feature = "python")]
+#[test]
+fn a_method_never_reaches_its_class_body_by_a_bare_name() {
+    let (t, idx) = indexed("nestedmethod", &[
+        ("pkg/__init__.py", ""),
+        ("pkg/mod.py", "class Outer:\n    class Inner:\n        pass\n    def build(self):\n        class Local(Inner):\n            pass\n"),
+    ]);
+    let path = t.0.join("pkg/mod.py");
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    assert_eq!(fa.declared_parents("pkg.mod.Local"), ["pkg.mod.Inner"]);
+    let (defs, _, labels) = landing(&idx, &path, Point::new(4, 20));
+    assert_eq!(defs, [("mod.py".to_string(), 1)]);
+    assert_eq!(labels, [Some("widened: `pkg.mod.Outer.Inner` stands in for `pkg.mod.Inner`".to_string())]);
+    let msg = "nothing indexed declares `pkg.mod.Inner`; resolved by its leaf to `pkg.mod.Outer.Inner`".to_string();
+    assert_eq!(widening_codes(&idx, &path), [(4, 20, msg)]);
+}
+
+/// Django's per-model `class Meta:` — one leaf, one class per model. Each
+/// is an identity of its own: a reference reaches the one it names, a
+/// rename rewrites only it, and members never union across models.
+#[cfg(feature = "python")]
+#[test]
+fn same_leaf_nested_classes_stay_apart() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let models = "\
+class Base:
+    class Meta:
+        def abstract(self): pass
+class Article(Base):
+    class Meta(Base.Meta):
+        def ordering(self): pass
+class Comment(Base):
+    class Meta:
+        def verbose(self): pass
+class Audit(Comment.Meta):
+    pass
+";
+    let (t, idx) = indexed("djangometa", &[("app/__init__.py", ""), ("app/models.py", models)]);
+    let path = t.0.join("app/models.py");
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let metas: Vec<&str> =
+        fa.symbols().iter().filter(|s| s.kind == SymKind::Class && s.name.ends_with(".Meta")).map(|s| s.name.as_str()).collect();
+    assert_eq!(metas, ["app.models.Base.Meta", "app.models.Article.Meta", "app.models.Comment.Meta"]);
+    assert_eq!(fa.declared_parents("app.models.Article.Meta"), ["app.models.Base.Meta"]);
+
+    // the reference in Article.Meta's header names Base.Meta alone
+    let (defs, _, _) = landing(&idx, &path, Point::new(4, 20));
+    assert_eq!(defs, [("models.py".to_string(), 1)]);
+    let store = OpenDocs::new();
+    let edits_from = |at: Point| {
+        let cs = resolve(&store, &fa, FileKey::Path(path.clone()), at, Some(&idx), OverrideScope::default());
+        let mut e: Vec<(usize, usize)> =
+            cs.rename_edits("Options").unwrap().into_iter().map(|(l, _)| (l.span.start.row, l.span.start.column)).collect();
+        e.sort();
+        e
+    };
+    assert_eq!(edits_from(Point::new(4, 20)), [(1, 10), (4, 20)]);
+    let (defs, _, _) = landing(&idx, &path, Point::new(9, 20));
+    assert_eq!(defs, [("models.py".to_string(), 7)]);
+    assert_eq!(edits_from(Point::new(9, 20)), [(7, 10), (9, 20)]);
+
+    // the members each Meta declares, or inherits, of the three
+    let members = |class: &str| -> Vec<String> {
+        let mut v: Vec<String> = fa
+            .complete_methods_for_class(class, None)
+            .into_iter()
+            .map(|c| c.label)
+            .filter(|m| ["abstract", "ordering", "verbose"].contains(&m.as_str()))
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(members("app.models.Comment.Meta"), ["verbose"]);
+    assert_eq!(members("app.models.Base.Meta"), ["abstract"]);
+    // Article's Meta inherits Base's, and only Base's
+    assert_eq!(members("app.models.Article.Meta"), ["abstract", "ordering"]);
+}
+
+/// `Outer.Inner` written in another module, after `from pkg.models import
+/// Outer`, names the nested class by its identity: as a parent, as an
+/// annotation, and as the reference a rename rewrites — never the
+/// same-leaf class of `pkg.other`.
+#[cfg(feature = "python")]
+#[test]
+fn a_dotted_spelling_reaches_a_nested_class_across_modules() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    use crate::model::file_analysis::MethodResolution;
+    let (t, idx) = indexed("nestedxfile", &[
+        ("pkg/__init__.py", ""),
+        ("pkg/models.py", "class Outer:\n    class Inner:\n        def name(self):\n            return 1\n"),
+        ("pkg/other.py", "class Inner:\n    def name(self):\n        return 2\n"),
+        ("pkg/views.py", "from pkg.models import Outer\n\nclass V(Outer.Inner):\n    pass\n\nv: Outer.Inner = make()\n"),
+    ]);
+    let views = t.0.join("pkg/views.py");
+    let fa = idx.workspace_file_for_test(&views).unwrap();
+    assert_eq!(fa.declared_parents("pkg.views.V"), ["pkg.models.Outer.Inner"]);
+    assert_eq!(
+        fa.inferred_type_via_bag("v", Point::new(6, 0)),
+        Some(InferredType::ClassName("pkg.models.Outer.Inner".to_string()))
+    );
+    assert!(matches!(
+        member_on(&idx, &views, "pkg.views.V"),
+        Some(MethodResolution::CrossFile { ref class, widened: false, .. }) if class == "pkg.models.Outer.Inner"
+    ));
+    let store = OpenDocs::new();
+    let cs = resolve(&store, &fa, FileKey::Path(views.clone()), Point::new(2, 14), Some(&idx), OverrideScope::default());
+    let mut edits: Vec<(String, usize, usize)> = cs
+        .rename_edits("Nested")
+        .unwrap()
+        .into_iter()
+        .map(|(l, _)| match &l.key {
+            FileKey::Path(p) => (p.file_name().unwrap().to_string_lossy().to_string(), l.span.start.row, l.span.start.column),
+            FileKey::Url(u) => (u.to_string(), l.span.start.row, l.span.start.column),
+        })
+        .collect();
+    edits.sort();
+    assert_eq!(edits, [("models.py".to_string(), 1, 10), ("views.py".to_string(), 2, 14)]);
+    assert!(widening_codes(&idx, &views).is_empty());
+}

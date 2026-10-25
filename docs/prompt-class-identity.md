@@ -52,16 +52,18 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    found through such a class carries the stamp, but no lane reads it at
    the member site: that would type every receiver on every publish.
 5. **Spellings resolve once, in extraction.** A class declaration joins
-   the namespace in force at its position, the innermost
-   `@context.namespace` (`ExtractState::class_identity`), so a class is
-   filed under one key whatever container it is written in, and its
-   symbol's `package` is that namespace. A written spelling resolves
+   the namespace in force at its position — the section of the namespace
+   lane there (`ExtractState::class_identity`) — so a class is filed
+   under one key whatever container it is written in, and its symbol's
+   `package` is that namespace. A written spelling resolves
    through the pure `UseMap::resolve` ladder
    (`model/file_analysis/use_map.rs`) over the file's `use` rows
    (`PackFacts::use_rows`) at the namespace it was written in, once every
-   row is in: absolute spelling → itself; head segment → its alias, else
-   its `use` row (an aliased row binds the alias, never its leaf), else
-   the namespace in force at the spelling's site; the rest hangs off that.
+   row and class is in: absolute spelling → itself; head segment → the
+   nested class the enclosing class body declares (below), else its alias,
+   else its `use` row (an aliased row binds the alias, never its leaf),
+   else the namespace in force at the spelling's site; the rest hangs off
+   that.
    A row is minted as the parts the extractor read (`@import.prefix` and
    the name's qualifier as its namespace, the name's last segment as its
    leaf, `@import.alias`)
@@ -130,6 +132,26 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    it only through a use-map, so C++, whose spellings are identities, keeps
    its calls calls.
 
+**A class body can be a namespace.** A document that captures a class's
+body as `@section.class` (Python's) makes it a section of the lane,
+`SectionKind::ClassBody`, named by the class's identity: `class Outer:
+class Inner:` in `pkg/mod.py` files `Inner` as `pkg.mod.Outer.Inner`, so
+Django's per-model `class Meta:` is one class per model. The section
+covers the body, not the header, so a parent clause and the class's own
+name are written in the namespace around it. Its names are in force only
+for code written directly in it, as in Python's class scope: a bare head
+written there resolves to the nested class the body declares
+(`UseMap::class_body`, asked through `DeclaredClasses` — the symbol table,
+never a second list) before the ladder above, and otherwise falls through
+to the section around it (`namespace_range_around`). A callable written in
+the body opens a `SectionKind::Callable` section naming the namespace
+around the class, so a method never reaches its class's names bare, and
+a class nested one level further sees past its enclosing class to the
+module. A dotted spelling hangs off its head as any qualified spelling
+does: `Outer.Inner`, in the file or after `from pkg.mod import Outer`, is
+`pkg.mod.Outer.Inner`. PHP and C++ capture no class section; their lanes
+are unchanged.
+
 The namespace sections are the namespace lane every language shares,
 `FileAnalysis::namespace_ranges` — Perl's packages are written to it by the
 same section-closing rule (`OpenSections`) and read by the same lookup
@@ -156,10 +178,25 @@ leaf-space FQ family validation in `implementations_of`.
   but the cache keys on the file's source: adding or removing an
   `__init__.py` re-files a module's classes only once the file is
   re-analyzed.
-- **A nested Python class joins the module namespace** (`pkg.mod.Inner`
-  for `class Outer: class Inner:`), not Python's qualname
-  (`pkg.mod.Outer.Inner`) — the anonymous-class residual below, in
-  another language.
+- **A Python class body is a section over its whole span after the
+  header.** A method's parameter annotations and defaults are evaluated in
+  the class scope, but the method's `Callable` section covers its whole
+  definition, so they resolve past the class; an import written directly
+  in a class body reaches its methods too. A class inside a method is
+  filed under the module (`pkg.mod.Local`), not Python's
+  `Outer.build.<locals>.Local`.
+- **`Outer.Inner()` is a member call.** A call through an attribute is a
+  `MethodCall` on the receiver `Outer`, and a nested class is no member
+  of its enclosing class there, so the call is untyped and goto-def finds
+  nothing; the class reference spellings (a parent clause, an annotation)
+  resolve.
+- **Cross-file goto-def on a qualified spelling reads the written
+  spelling.** The PackageRef lane of `definitions()` looks up
+  `visible_def_candidates(&r.target_name)`, so `class V(Outer.Inner)` in
+  another module lands on the same-leaf candidates' file tops instead of
+  `pkg.models.Outer.Inner` (references and rename match by
+  `spelled_identity` and are exact). PHP's relative qualified spellings
+  (`extends Sub\Model`) take the same lane.
 
 - **The visibility pins have no site.** `UseMapPins` is per ORIGIN
   (`VisibilityAxis::for_origin` takes a file, not a position), so it

@@ -1178,7 +1178,7 @@ impl FileAnalysis {
     /// are identities as written (`ClassSpelling::Identity`): there is no
     /// map to resolve through.
     pub fn use_map_at(&self, site: Point) -> Option<UseMap<'_>> {
-        UseMap::at(&self.pack.use_rows, &self.namespace_ranges, &self.pack.names, site)
+        UseMap::at(&self.pack.use_rows, &self.namespace_ranges, &self.pack.names, site, self)
     }
 
     fn leaf_namespace_pins(&self) -> UseMapPins {
@@ -1227,8 +1227,13 @@ impl FileAnalysis {
         }
         // The pins answer for the whole origin, so its own namespace is
         // one only when every section names the same; a file of several
-        // makes no own-namespace claim (its sites resolve their own).
-        let mut sections = self.namespace_ranges.iter().map(|s| s.namespace.as_str());
+        // makes no own-namespace claim (its sites resolve their own). A
+        // class body or a callable in one is no namespace of the file's.
+        let mut sections = self
+            .namespace_ranges
+            .iter()
+            .filter(|s| matches!(s.kind, SectionKind::Statement | SectionKind::Block))
+            .map(|s| s.namespace.as_str());
         let own_ns = sections
             .next()
             .filter(|first| sections.all(|s| s == *first))
@@ -1237,7 +1242,7 @@ impl FileAnalysis {
         // resolver's answer for the qualifier it was written under. The
         // spellings carry no site, so they read the whole-file view.
         if let Some(sep) = self.pack.names.use_map_sep() {
-            let map = UseMap { rows: &self.pack.use_rows, own_namespace: own_ns.as_deref(), sep, site: None };
+            let map = UseMap { rows: &self.pack.use_rows, class_body: None, own_namespace: own_ns.as_deref(), sep, site: None };
             for (leaf, prefix) in &self.pack.qualified_spellings {
                 pin(&mut pins, leaf, &map.resolve_in(prefix, leaf).namespace);
             }
@@ -1270,5 +1275,11 @@ impl FileAnalysis {
             }
         }
         UseMapPins { pins, own_namespace: own_ns, spelled, visible, names: self.pack.names.clone() }
+    }
+}
+
+impl DeclaredClasses for FileAnalysis {
+    fn declares_class(&self, identity: &str) -> bool {
+        self.find_type_decl(identity).is_some()
     }
 }
