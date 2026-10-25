@@ -1494,7 +1494,7 @@ impl<'a> Builder<'a> {
             left.kind(),
             "hash_element_expression" | "array_element_expression"
         ) {
-            self.record_key_write(left, Some(stored), None);
+            self.record_key_write(left, Some(stored), None, self.current_scope());
         }
         // Slice / keyval writes (`@h{qw(a b)} = …`, `%h{k} = …`,
         // `@$h{…}`) land several keys at once — record an

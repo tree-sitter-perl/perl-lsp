@@ -15,6 +15,7 @@ use tree_sitter::{Node, Point, Tree};
 use crate::cst::node_to_span;
 use crate::model::file_analysis::{InferredType, ScopeId, Span};
 
+use super::extract::ListSlot;
 use super::{connector_keyword_between, point_lt, raw_leading_op, raw_mid_op, Builder};
 
 /// The subject a guard narrows — a plain scalar, or a hash/array place
@@ -781,15 +782,34 @@ impl<'a> Builder<'a> {
                 }
             }
             if let Some(lhs_node) = caps.lhs {
-                if let Some(targets) = self.lhs_list_targets(lhs_node) {
+                if let Some(slots) = self.lhs_list_slots(lhs_node) {
                     // List/destructuring: each slot edges to its literal element
-                    // (Whole) or a Positional projection — the logic that used
-                    // to live in `visit_assignment`'s paren arm, now driven by
-                    // the declarative capture.
+                    // (Whole) or a Positional projection; an element target
+                    // records its write with the same value.
                     let elem_nodes = self.list_element_nodes(src);
                     let at = write_at.unwrap_or_else(|| lhs_node.start_position());
                     let reassigns = lhs_node.kind() != "variable_declaration";
-                    for (vt, extraction) in targets {
+                    let plain = src
+                        .parent()
+                        .filter(|p| p.kind() == "assignment_expression")
+                        .map_or(true, |a| crate::cst::assign_op(a) == Some(crate::cst::AssignOp::Plain));
+                    for slot in slots {
+                        let (vt, extraction) = match slot {
+                            ListSlot::Var(vt, extraction) => (vt, extraction),
+                            ListSlot::Element(elem, n) => {
+                                let scope = self.scope_at_point(elem.start_position());
+                                match (n.filter(|_| plain), &elem_nodes) {
+                                    (Some(n), Some(nodes)) => {
+                                        self.record_key_write(elem, nodes.get(n).copied(), None, scope)
+                                    }
+                                    (Some(n), None) => {
+                                        self.record_key_write(elem, Some(src), Some(n as i32), scope)
+                                    }
+                                    (None, _) => self.record_key_write(elem, None, None, scope),
+                                }
+                                continue;
+                            }
+                        };
                         let (source, extraction) = match (&elem_nodes, &extraction) {
                             (Some(nodes), crate::model::file_analysis::Extraction::Positional(n))
                                 if *n < nodes.len() =>
