@@ -1568,14 +1568,27 @@ impl<'a> Builder<'a> {
     /// Whether Perl has seen a sub named `name` (as written) by `at`. A parse
     /// decision Perl makes while compiling reads this view: a sub declared
     /// further down does not count yet.
+    ///
+    /// An unqualified name is looked up in the package in force at `at`, as
+    /// Perl does: `sub Foo` in another package of the file does not count,
+    /// and a sub imported by name into this package does.
     pub(super) fn sub_declared_before(&self, name: &str, at: Point) -> bool {
         let (qualifier, bare) = crate::model::file_analysis::split_qualified(name, &crate::model::conventions::PERL_SPELLINGS);
-        self.symbols.iter().any(|s| {
+        let here = self.package_at_pos(at);
+        let qualifier = qualifier.or(Some(here.unwrap_or("main")));
+        let declared = self.symbols.iter().any(|s| {
             s.span.start < at
                 && s.name == bare
                 && matches!(s.kind, SymKind::Sub | SymKind::Method)
                 && qualifier_admits_local_sub(qualifier, s.package.as_deref())
-        })
+        });
+        declared
+            || (name == bare
+                && self.imports.iter().any(|i| {
+                    i.span.start < at
+                        && i.imported_symbols.iter().any(|s| s.local_name == bare)
+                        && self.package_at_pos(i.span.start) == here
+                }))
     }
 
     /// The bare name to look a call up by, for callers that resolve through a
