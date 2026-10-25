@@ -25,6 +25,7 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     root_package: Some(std::borrow::Cow::Borrowed("main")),
     // A call reaches a sub, never a `field` of the same name.
     member_namespace: MemberNamespace::PerFamily,
+    imports: NameSpellings::NONE.imports,
 };
 
 /// Split a possibly-qualified name into `(Option<package>, basename)`.
@@ -475,6 +476,7 @@ mod tests {
             class_spelling: ClassSpelling::UseMap,
             root_package: None,
             member_namespace: crate::model::file_analysis::MemberNamespace::PerFamily,
+            imports: NameSpellings::NONE.imports,
         };
         assert_eq!(super::split_qualified("App\\Models\\User", &php), (Some("App\\Models"), "User"));
         assert_eq!(super::name_match_key("App\\Models\\User", &php), "User");

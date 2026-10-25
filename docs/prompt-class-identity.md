@@ -67,7 +67,15 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    parent its clause, a class token its ref, an invocant its point — and
    two sections of one file never read each other's rows. A language
    whose imports bind from the import onward narrows the reach's start;
-   the consumers only ask `UseRow::binds_at`. Parent clauses
+   the consumers only ask `UseRow::binds_at`. How a row binds is the
+   language's data (`NameSpellings::imports`), read by the extractor as
+   it mints the row: PHP's reach their whole section and a leading
+   separator is absolute; Python's bind from the import onward and climb
+   from the file's package once per leading `.` past the first. A
+   language that names modules by path gets its namespace from the
+   driver (`FileModule`, gathered in phase 1 from the `__init__.py` chain,
+   else the workspace root): one whole-file section, so `pkg/models.py`
+   files `class User` as `pkg.models.User`. Parent clauses
    resolve this way (`scopes::resolve_parents`); every other class
    spelling the extractor mints goes through the same ladder — an
    annotation type through
@@ -88,7 +96,11 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    matcher resolves a `PackageRef` / construction-site spelling through the
    file's use-map (`spelled_identity`: a token inside an import row names
    the row's class in full) and compares identities — `use B\Collection; new Collection()`
-   reaches `B\Collection` and never the same-leaf stranger.
+   reaches `B\Collection` and never the same-leaf stranger. A
+   call-shaped token names a class too when its spelled identity is a
+   class declared here or in an indexed file (`class_named_by_call`):
+   python's `from pkg.models import User` and `User()` are references to
+   `pkg.models.User`, and a token naming no class stays a call.
 
 `PackFacts::namespace_sections` is a field of its own (the rule #14
 ratchet) because it is neither a witness nor a binding: it types and
@@ -104,6 +116,16 @@ stranger's spelling never matches), the import-rows-only gate, and the
 leaf-space FQ family validation in `implementations_of`.
 
 ## Residuals
+
+- **A Python module's name reads the filesystem, its blob does not.**
+  The `__init__.py` chain and the workspace root decide `FileModule`,
+  but the cache keys on the file's source: adding or removing an
+  `__init__.py` re-files a module's classes only once the file is
+  re-analyzed.
+- **A nested Python class joins the module namespace** (`pkg.mod.Inner`
+  for `class Outer: class Inner:`), not Python's qualname
+  (`pkg.mod.Outer.Inner`) — the anonymous-class residual below, in
+  another language.
 
 - **The visibility pins have no site.** `UseMapPins` is per ORIGIN
   (`VisibilityAxis::for_origin` takes a file, not a position), so it

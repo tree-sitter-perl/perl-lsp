@@ -276,6 +276,9 @@ pub struct PackDriver {
     /// concept). Stamps a `non_public` attribute on member symbols so
     /// completion can filter by visibility.
     access_regions: Option<fn(&mut tree_sitter::Parser, &str) -> Vec<crate::build::cpp_reparse::AccessRegion>>,
+    /// The module a file is, for a language that names modules by path
+    /// (python). Reads the filesystem, so it runs in the gather phase.
+    file_module: Option<fn(&Path) -> Option<crate::build::query_extract::FileModule>>,
 }
 
 /// Pre-parse external state gathered in phase 1 (`gather_pack_context`) and
@@ -285,6 +288,7 @@ pub struct PackDriver {
 struct PackContext {
     external: std::sync::Arc<crate::build::cpp_reparse::PreExpandedExternal>,
     plan: Option<crate::build::cpp_reparse::MemberBlockPlan>,
+    module: Option<crate::build::query_extract::FileModule>,
 }
 
 #[cfg(feature = "pack-langs")]
@@ -315,7 +319,9 @@ impl LanguageDriver for PackDriver {
     /// 1. `gather_pack_context` — pre-parse external inputs read from the
     ///    ORIGINAL source: the cross-file macro table (`gather_macros`) and
     ///    the member-block plan (blanks standalone macro-in-struct-body uses
-    ///    so the base parses clean). Produces `PackContext`.
+    ///    so the base parses clean), plus the module a path-named file is
+    ///    (`file_module`, which phase 3 files its classes under). Produces
+    ///    `PackContext`.
     /// 2. `transform_and_parse` — the macro-expansion reparse (`transform`)
     ///    over the plan's blanked source (or the original, when there's no
     ///    plan), then the real tree-sitter parse of the transformed text.
@@ -393,7 +399,7 @@ impl PackDriver {
             return fa;
         };
         let pack = (self.pack)();
-        match crate::build::query_extract::extract(&tree, src.as_bytes(), &pack) {
+        match crate::build::query_extract::extract_in(&tree, src.as_bytes(), &pack, ctx.module.as_ref()) {
             Ok(mut skel) => {
                 // remap extracted spans from transformed → original coords
                 // (no-op for identity / pass-through languages).
@@ -431,7 +437,8 @@ impl PackDriver {
 #[cfg(feature = "pack-langs")]
 impl PackDriver {
     /// Phase 1: pre-parse external context — the cross-file macro table and
-    /// the member-block plan. Both read the ORIGINAL source only.
+    /// the member-block plan, both read from the ORIGINAL source only, and
+    /// the module the file's path makes it.
     fn gather_pack_context(&self, parser: &mut tree_sitter::Parser, source: &str, path: Option<&Path>) -> PackContext {
         // Cross-file macros from #included headers (C++), so a macro
         // #defined elsewhere (SPDLOG_NAMESPACE_BEGIN) expands here.
@@ -446,7 +453,8 @@ impl PackDriver {
         // coordinates; the ORIGINAL source keeps the token (goto-def-on-`BASEOP`
         // untouched). `docs/adr/macro-handling.md`.
         let plan = self.member_blocks.map(|f| crate::util::timings::phase("cpp.member_blocks", || f(parser, source)));
-        PackContext { external, plan }
+        let module = self.file_module.zip(path).and_then(|(f, p)| f(p));
+        PackContext { external, plan, module }
     }
 
     /// Phase 2: the macro-expansion reparse over `ctx`'s blanked/original
@@ -630,6 +638,7 @@ fn cpp_driver() -> PackDriver {
         include_closure: Some(crate::build::cpp_reparse::include_closure),
         input_fingerprint: Some(crate::build::cpp_reparse::toolchain_fingerprint),
         access_regions: Some(crate::build::cpp_reparse::access_regions),
+        file_module: None,
     }
 }
 
@@ -653,6 +662,7 @@ fn python_driver() -> PackDriver {
         include_closure: None,
         input_fingerprint: None,
         access_regions: None,
+        file_module: Some(crate::build::packs::python_file_module),
     }
 }
 
@@ -679,6 +689,7 @@ fn php_driver() -> PackDriver {
         include_closure: None,
         input_fingerprint: None,
         access_regions: None,
+        file_module: None,
     }
 }
 
@@ -702,6 +713,7 @@ fn r_driver() -> PackDriver {
         include_closure: None,
         input_fingerprint: None,
         access_regions: None,
+        file_module: None,
     }
 }
 
@@ -726,6 +738,7 @@ fn cmake_driver() -> PackDriver {
         include_closure: None,
         input_fingerprint: None,
         access_regions: None,
+        file_module: None,
     }
 }
 

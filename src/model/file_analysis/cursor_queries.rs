@@ -1162,6 +1162,9 @@ impl FileAnalysis {
                     if r.resolved_package() == Some("CORE") {
                         return None;
                     }
+                    if let Some(class) = self.class_named_by_call(r, module_index) {
+                        return Some(RenameKind::Package(class));
+                    }
                     // A qualified call (`Foo::baz()`) carries the whole path
                     // in `target_name`; the renamable identifier is the bare
                     // tail, scoped by the `Function` binding (the qualifier). When

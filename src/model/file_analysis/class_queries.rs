@@ -1084,6 +1084,21 @@ impl FileAnalysis {
         }
     }
 
+    /// The class a call-shaped token names, for a use-map language whose
+    /// spellings can name a class anywhere a callable goes (python's
+    /// `from m import User`, `User()`): the token's spelled identity, when
+    /// a class is declared under it here or in a file the index holds.
+    /// `None` leaves the token a call.
+    pub fn class_named_by_call(&self, r: &Ref, index: Option<&dyn CrossFileLookup>) -> Option<String> {
+        self.pack.names.use_map_sep()?;
+        let identity = self.spelled_identity(r);
+        let declared = self.find_type_decl(&identity).is_some()
+            || index.is_some_and(|ix| {
+                ix.def_candidates(&identity).iter().any(|c| ix.symbols_present(c).find_type_decl(&identity).is_some())
+            });
+        declared.then_some(identity)
+    }
+
     /// This file's own Package/Class declaration filed under `identity` —
     /// an exact lookup, never a leaf match: for a namespaced pack the
     /// symbol carries the FQN, for Perl the package name IS the identity.
@@ -1140,12 +1155,7 @@ impl FileAnalysis {
     /// are identities as written (`ClassSpelling::Identity`): there is no
     /// map to resolve through.
     pub fn use_map_at(&self, site: Point) -> Option<UseMap<'_>> {
-        Some(UseMap {
-            rows: &self.pack.use_rows,
-            own_namespace: self.pack.namespace_at(site),
-            sep: self.pack.names.use_map_sep()?,
-            site: Some(site),
-        })
+        UseMap::at(&self.pack.use_rows, &self.pack.namespace_sections, &self.pack.names, site)
     }
 
     fn leaf_namespace_pins(&self) -> UseMapPins {

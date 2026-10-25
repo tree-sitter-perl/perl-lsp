@@ -17,7 +17,7 @@
 //! Rows and answers are (namespace, leaf) parts: the only strings split
 //! here are written spellings, never an identity this code joined.
 
-use super::{contains_point, PackageRange, Span};
+use super::{contains_point, NameSpellings, PackageRange, Span};
 use crate::model::conventions::join_qualified as join;
 use serde::{Deserialize, Serialize};
 use tree_sitter::Point;
@@ -87,6 +87,18 @@ pub struct UseMap<'a> {
 }
 
 impl<'a> UseMap<'a> {
+    /// The map a spelling written at `site` resolves through: the rows
+    /// that reach it, the section in force there. `None` for a language
+    /// whose spellings are identities as written.
+    pub fn at(rows: &'a [UseRow], sections: &'a [PackageRange], names: &'a NameSpellings, site: Point) -> Option<Self> {
+        Some(UseMap {
+            rows,
+            own_namespace: section_at(sections, site).map(|s| s.package.as_str()),
+            sep: names.use_map_sep()?,
+            site: Some(site),
+        })
+    }
+
     /// The class `written` names in this file. An absolute spelling
     /// (leading separator) names itself; otherwise the HEAD segment
     /// resolves — an alias to what it aliases, an imported leaf to its row,

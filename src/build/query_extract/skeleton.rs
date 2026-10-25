@@ -833,6 +833,10 @@ impl SkeletonAnalysis {
             // callable (the constructor is the stronger claim). A method is
             // never a free callee: a bare call in a member body reaches it
             // through `member_of`, with the class as its receiver.
+            let class_identity_at = |written: &str, site: tree_sitter::Point| {
+                let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_sections, &self.names, site)?;
+                Some(map.resolve(written).identity(map.sep))
+            };
             let callee_sid: std::collections::HashMap<&str, SymbolId> = {
                 let mut m: std::collections::HashMap<&str, SymbolId> =
                     std::collections::HashMap::new();
@@ -892,7 +896,11 @@ impl SkeletonAnalysis {
                     None => (
                         crate::model::witnesses::Callee::Function {
                             name: name.clone(),
-                            local: callee_sid.get(name.as_str()).copied(),
+                            local: callee_sid.get(name.as_str()).or_else(|| {
+                                // under a use-map a class is filed under the
+                                // identity its spelling names at the call
+                                callee_sid.get(class_identity_at(name, span.start)?.as_str())
+                            }).copied(),
                             member_of: elided_class.get(site.scope.0 as usize).cloned().flatten(),
                         },
                         None,

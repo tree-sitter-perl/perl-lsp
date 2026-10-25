@@ -102,3 +102,7 @@ mod cpp_typedef_alias_tests;
 #[cfg(test)]
 #[path = "../php_pack_tests.rs"]
 mod php_pack_tests;
+
+#[cfg(test)]
+#[path = "../python_pack_tests.rs"]
+mod python_pack_tests;

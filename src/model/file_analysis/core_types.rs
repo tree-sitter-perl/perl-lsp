@@ -249,6 +249,40 @@ pub struct NameSpellings {
     /// How the language's classes hold their members: the rule a member
     /// ask is answered by (`docs/adr/member-kinds.md`).
     pub member_namespace: MemberNamespace,
+    /// How a use-map language's import rows bind — read by the extractor
+    /// as it mints each row, never by a consumer.
+    pub imports: ImportRule,
+}
+
+/// A use-map language's import semantics, as data the extractor mints a
+/// row by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ImportRule {
+    pub reach: ImportReach,
+    pub prefix: ImportPrefix,
+}
+
+/// Where in its scope a row binds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ImportReach {
+    /// Its whole scope and namespace section, wherever it is written
+    /// (PHP's `use`, resolved at compile time).
+    #[default]
+    Section,
+    /// From the import statement onward (Python's `import`, a statement
+    /// that runs): a site above it never sees the row.
+    FromImport,
+}
+
+/// What a separator leading an imported module path means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ImportPrefix {
+    /// Absolute: PHP's `use \A\B` is `A\B`.
+    #[default]
+    Absolute,
+    /// Relative to the file's own package, one level up per separator past
+    /// the first: Python's `from .x import C` / `from .. import y`.
+    PackageRelative,
 }
 
 /// What a class spelling written in a file denotes — the capability the
@@ -274,6 +308,7 @@ impl NameSpellings {
         class_spelling: ClassSpelling::Identity,
         root_package: None,
         member_namespace: MemberNamespace::PerFamily,
+        imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
     };
 
     /// A language with a namespace separator, no sigils, and spellings
@@ -286,6 +321,7 @@ impl NameSpellings {
             class_spelling: ClassSpelling::Identity,
             root_package: None,
             member_namespace: MemberNamespace::PerFamily,
+            imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
         }
     }
 

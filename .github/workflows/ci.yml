@@ -57,12 +57,13 @@ jobs:
       # Perl only, so the pack half of the repo goes unchecked while the run stays
       # green — 61 unit tests never compiled, and gold reports its 255 pack rows
       # as lang-SKIPS rather than failures, which is the mode that hides a
-      # regression behind a passing check.
+      # regression behind a passing check. The unit gate adds `python`: its
+      # cross-file tests run files through the driver, which only it compiles.
       - name: Build
-        run: cargo build --features cpp,php
+        run: cargo build --features cpp,php,python
 
       - name: Test
-        run: cargo test --features cpp,php
+        run: cargo test --features cpp,php,python
 
   e2e-tests:
     name: E2E tests (headless nvim)

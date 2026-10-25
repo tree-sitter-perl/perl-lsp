@@ -126,6 +126,10 @@ spelled! {
         /// The module an import CALL names (R `library(pkg)`, CMake
         /// `include(f)`), as written.
         Arg = "arg",
+        /// The module an import STATEMENT loads, as written, where the
+        /// names it binds are rows of their own (python's `from a.b import
+        /// C` loads `a.b`).
+        Module = "module",
         /// The namespace a group import's names hang off (php's
         /// `use A\B\{C, D}`), joined to each name by match.
         Prefix = "prefix",

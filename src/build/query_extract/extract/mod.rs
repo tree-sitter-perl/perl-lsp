@@ -125,16 +125,45 @@ struct ExtractState<'p> {
     narrowing: narrowing::State,
     commands: commands::State,
     imports: imports::State,
+    /// The module the file IS, when its language names it by path and the
+    /// driver had one, and that module's dotted name: the namespace every
+    /// declaration without a namespace context of its own joins.
+    file_module: Option<&'p FileModule>,
+    file_namespace: Option<String>,
+}
+
+/// The module a file is, for a language whose module names come from the
+/// file's place on disk (python's `pkg/models.py` is `pkg.models`): its
+/// path segments, and whether the file is its package's own module
+/// (`pkg/__init__.py` is `pkg`, and relative imports start from `pkg`
+/// itself rather than its parent). Derived by the driver, which has the
+/// path; the extractor only reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileModule {
+    pub segments: Vec<String>,
+    pub is_package: bool,
+}
+
+impl FileModule {
+    /// The package relative imports resolve from.
+    pub fn package(&self) -> &[String] {
+        match self.is_package {
+            true => &self.segments,
+            false => &self.segments[..self.segments.len().saturating_sub(1)],
+        }
+    }
 }
 
 impl ExtractState<'_> {
-    /// The innermost namespace context in force at the current event.
+    /// The innermost namespace context in force at the current event, else
+    /// the file's own module.
     fn namespace(&self) -> Option<&str> {
         self.context_stack
             .iter()
             .rev()
             .find(|(_, kind, _)| *kind == ContextKind::Namespace)
             .map(|(.., ns)| ns.as_str())
+            .or(self.file_namespace.as_deref())
     }
 
     /// The identity a class named `leaf` and declared at the current event
@@ -149,6 +178,17 @@ impl ExtractState<'_> {
             }
             None => leaf.to_string(),
         }
+    }
+}
+
+/// A written type as the identities it names at `site`: under a use-map
+/// every class spelling it carries resolves through the rows that reach
+/// the site and the namespace in force there. Runs once every row and
+/// section is in.
+fn written_type_at(out: &SkeletonAnalysis, names: &crate::model::file_analysis::NameSpellings, t: InferredType, site: Point) -> InferredType {
+    match crate::model::file_analysis::UseMap::at(&out.use_rows, &out.namespace_sections, names, site) {
+        Some(map) => t.map_class_names(&mut |c| map.resolve(c).identity(map.sep)),
+        None => t,
     }
 }
 
@@ -214,7 +254,21 @@ impl<'t> DeclaratorPeel<'t> {
     }
 }
 
+/// `extract_in` for a file that is no module of its own.
+#[cfg(test)]
 pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAnalysis, String> {
+    extract_in(tree, source, pack, None)
+}
+
+/// Run the pack's document over a parsed file. `file_module` is the module
+/// the file is, for a language that names modules by path; its classes
+/// join that namespace.
+pub fn extract_in(
+    tree: &Tree,
+    source: &[u8],
+    pack: &LangPack,
+    file_module: Option<&FileModule>,
+) -> Result<SkeletonAnalysis, String> {
     let language = tree.language();
     let compiled = cached_query(&language, pack.query_source)?;
 
@@ -245,7 +299,19 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         narrowing: Default::default(),
         commands: Default::default(),
         imports: Default::default(),
+        file_module,
+        file_namespace: None,
     };
+    // A module named by its path is one section, the whole file.
+    if let (Some(m), Some(sep)) = (file_module, pack.names.use_map_sep()) {
+        let ns = m.segments.iter().fold(String::new(), |ns, seg| crate::model::conventions::join_qualified(&ns, seg, sep));
+        st.out.namespace_sections.push(crate::model::file_analysis::PackageRange {
+            package: ns.clone(),
+            span: st.out.scopes[0].span,
+            kind: crate::model::file_analysis::PackageKind::Statement,
+        });
+        st.file_namespace = Some(ns);
+    }
 
     // ---- flatten matches into ordered events ----
     let (links, captured) = record_matches(compiled, root, source);

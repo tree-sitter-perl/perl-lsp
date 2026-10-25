@@ -149,6 +149,7 @@ pub(super) fn finish(st: &mut ExtractState) {
     // got from its cutoff, now generic. Every LangPack that narrows (python
     // isinstance, cpp dynamic_cast + optional engagement) gets it free.
     for (name, refined, region, scope) in std::mem::take(&mut n.pending_narrow) {
+        let refined = written_type_at(out, &st.pack.names, refined, region.start);
         let end = crate::model::file_analysis::earliest_rebind_in(&out.flow_edges, &name, region)
             .unwrap_or(region.end);
         if (region.start.row, region.start.column) >= (end.row, end.column) {
