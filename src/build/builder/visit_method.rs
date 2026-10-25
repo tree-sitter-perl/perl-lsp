@@ -142,16 +142,8 @@ impl<'a> Builder<'a> {
         self.method_call_args.insert(idx, operands);
         self.method_call_refs.entry(node.id()).or_default().push(idx);
         self.add_ref(RefKind::PackageRef, class_span, class.clone(), AccessKind::Read);
+        self.indirect_method_calls.push((node, io.class, io.arguments));
         if let Some(a) = io.arguments {
-            let declared_here = self
-                .symbols
-                .iter()
-                .any(|s| s.name == class && matches!(s.kind, SymKind::Package | SymKind::Class));
-            let owner = HashKeyOwner::Sub { package: Some(class), name: method };
-            self.emit_call_arg_key_accesses(
-                a,
-                if declared_here { Gate::Strict(owner) } else { Gate::StrictOrDefer(owner) },
-            );
             self.queue_node(a);
         }
     }

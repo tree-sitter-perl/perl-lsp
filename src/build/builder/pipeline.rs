@@ -8,6 +8,19 @@ use super::*;
 /// reducer cares about. Pure: reads only tree-sitter structural data,
 /// no Builder state. Same recursion shape (depth-first via
 /// `named_child(i)`) the three former independent walks all used.
+impl<'a> ChainTypingIndex<'a> {
+    /// Index the walk's indirect-object calls like `method_call_expression`s,
+    /// so every post-walk pass reads their receiver and arguments.
+    fn add_indirect_method_calls(&mut self, calls: &[(Node<'a>, Node<'a>, Option<Node<'a>>)]) {
+        for &(call, class, args) in calls {
+            self.invocant_nodes.insert((class.start_position(), class.end_position()), class);
+            if let Some(args) = args {
+                self.method_call_args.insert((call.start_position(), call.end_position()), args);
+            }
+        }
+    }
+}
+
 pub(super) fn build_chain_typing_index<'a>(tree: &'a Tree) -> ChainTypingIndex<'a> {
     let mut idx = ChainTypingIndex {
         assignment_nodes: Vec::new(),
@@ -371,6 +384,7 @@ fn build_once(
         key_writes: Vec::new(),
         method_call_args: std::collections::HashMap::new(),
         method_call_refs: std::collections::HashMap::new(),
+        indirect_method_calls: Vec::new(),
         parametric_emitted_refs: std::collections::HashSet::new(),
         method_call_ref_dedup: std::collections::HashSet::new(),
         defined_narrowings: Vec::new(),
@@ -590,7 +604,8 @@ fn build_once(
     // Deeper chains take more iterations; `MAX_FOLD_ITERATIONS`
     // (debug-only) catches dependency-tracking bugs that would
     // otherwise spin forever.
-    let chain_idx = bphase!("build_chain_typing_index", build_chain_typing_index(tree));
+    let mut chain_idx = bphase!("build_chain_typing_index", build_chain_typing_index(tree));
+    chain_idx.add_indirect_method_calls(&b.indirect_method_calls);
     bphase!("fold_to_fixed_point", b.fold_to_fixed_point(&chain_idx));
     // PostFold filled `invocant_class` on MethodCall refs after the
     // worklist exited; re-emit method-call return edges so
