@@ -216,19 +216,20 @@ struct DeferredVarType {
     plugin_id: String,
 }
 
-/// Plugin-emitted `NamedSubParamType` request, resolved at end-of-build.
-/// Keyed by sub name + positional index rather than a span: a `\&name`
-/// registration arg carries no callback body span, and the named sub may
-/// be a forward reference not yet walked when the plugin fires.
-/// A named sub whose first parameter is its invocant only by the package
-/// convention, waiting on `settle_convention_invocants`.
-struct ConventionInvocant {
+/// A named sub of a package that may be a class, whose first parameter is
+/// its invocant if it is a method rather than a plain helper; decided by
+/// `mark_method_invocants`.
+struct MethodOrHelperSub {
     sub_id: SymbolId,
     scope: ScopeId,
     span: Span,
     package: String,
 }
 
+/// Plugin-emitted `NamedSubParamType` request, resolved at end-of-build.
+/// Keyed by sub name + positional index rather than a span: a `\&name`
+/// registration arg carries no callback body span, and the named sub may
+/// be a forward reference not yet walked when the plugin fires.
 struct DeferredNamedSubParamType {
     sub_name: String,
     /// `None` for a bare `\&name` (current package), `Some(pkg)` for a
@@ -276,7 +277,7 @@ struct Builder<'a> {
     /// resolved by sub name + index at end-of-build alongside
     /// `deferred_var_types`.
     deferred_named_sub_param_types: Vec<DeferredNamedSubParamType>,
-    convention_invocant_subs: Vec<ConventionInvocant>,
+    method_or_helper_subs: Vec<MethodOrHelperSub>,
     /// `(package, name)` of each sub the file calls as a plain function
     /// (`name(...)`; a `\&name` reference is not a call).
     plain_called_subs: std::collections::HashSet<(String, String)>,

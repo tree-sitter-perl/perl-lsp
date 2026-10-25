@@ -667,18 +667,18 @@ impl<'a> Builder<'a> {
         //     user can call it `$c`/`$ctx`/whatever.
         // Framework-specific invocant markers (`as_invocant_params` from
         // a plugin) stack on top via EmittedParam → ParamInfo.
-        // The class convention alone is settled post-walk
-        // (`settle_convention_invocants`): whether the package is a class
-        // (a later `bless` or `use parent` decides it), and a sub the file
-        // calls as a plain function takes no invocant.
-        let mut convention_only = false;
+        // The class convention alone is decided post-walk
+        // (`mark_method_invocants`): whether the package is a class
+        // (a later `bless` or `use parent` decides it), and whether the
+        // sub is a plain helper, called only as a function.
+        let mut method_or_helper = false;
         if let Some(first) = params.first_mut() {
             let name_says_invocant =
                 crate::model::conventions::is_conventional_invocant_name(&first.name);
             if is_method || name_says_invocant {
                 first.is_invocant = true;
             } else if first.name.starts_with('$') {
-                convention_only = true;
+                method_or_helper = true;
             }
         }
 
@@ -747,8 +747,8 @@ impl<'a> Builder<'a> {
 
         // Detect first-param-is-self pattern
         self.detect_first_param_type(&params, node);
-        if let (true, Some(package)) = (convention_only, self.current_package.clone()) {
-            self.convention_invocant_subs.push(ConventionInvocant {
+        if let (true, Some(package)) = (method_or_helper, self.current_package.clone()) {
+            self.method_or_helper_subs.push(MethodOrHelperSub {
                 sub_id,
                 scope: self.current_scope(),
                 span: node_to_span(node),
@@ -1361,7 +1361,7 @@ impl<'a> Builder<'a> {
     /// Whether the file calls `pkg`'s sub `name` as a plain function and
     /// never as a method, which is what decides that its first argument is
     /// not an invocant when only the package convention says it is.
-    pub(super) fn called_only_as_function(&self, pkg: &str, name: &str, method_names: &std::collections::HashSet<&str>) -> bool {
+    pub(super) fn is_plain_helper(&self, pkg: &str, name: &str, method_names: &std::collections::HashSet<&str>) -> bool {
         self.plain_called_subs.contains(&(pkg.to_string(), name.to_string())) && !method_names.contains(name)
     }
 
@@ -1376,10 +1376,10 @@ impl<'a> Builder<'a> {
 
     /// Post-walk: a sub whose first parameter only the package convention
     /// calls the invocant is a method when its package is a class
-    /// (`PackageFacts::is_class`, the rule `@_`'s head uses), unless the
-    /// file calls it as a plain function.
-    pub(super) fn settle_convention_invocants(&mut self) {
-        let pending = std::mem::take(&mut self.convention_invocant_subs);
+    /// (`PackageFacts::is_class`, the rule `@_`'s head uses) and it is not
+    /// a plain helper.
+    pub(super) fn mark_method_invocants(&mut self) {
+        let pending = std::mem::take(&mut self.method_or_helper_subs);
         let mut settled = Vec::new();
         {
             let facts = self.package_facts();
@@ -1387,7 +1387,7 @@ impl<'a> Builder<'a> {
             for c in pending {
                 let name = &self.symbols[c.sub_id.0 as usize].name;
                 let class_pkg = facts.get(&c.package).is_some_and(PackageFacts::is_class);
-                if class_pkg && !self.called_only_as_function(&c.package, name, &method_names) {
+                if class_pkg && !self.is_plain_helper(&c.package, name, &method_names) {
                     settled.push(c);
                 }
             }
