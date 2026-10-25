@@ -1576,6 +1576,25 @@ fn test_subclass_sub_called_as_a_function_takes_no_invocant() {
 }
 
 #[test]
+fn test_class_sub_first_param_is_the_invocant_in_any_class() {
+    // The convention covers every class, not only subclasses: a package
+    // that blesses (even below the sub) makes its subs methods, except one
+    // the file calls as a plain function. A package that is no class
+    // marks nothing.
+    let fa = build_fa(
+        "package P;\nsub name { my ($o) = @_; return $o->{name} }\nsub _fmt { my ($d) = @_; return $d }\nsub new { my $c = shift; my $s = bless {}, $c; _fmt($s); return $s }\npackage Util;\nsub trim { my ($x) = @_; return $x }\n1;\n",
+    );
+    let first_is_invocant = |sub: &str| {
+        let sym = fa.symbols().iter().find(|s| s.name == sub).expect(sub);
+        let SymbolDetail::Sub { params, .. } = &sym.detail else { panic!("{sub}: {:?}", sym.detail) };
+        params[0].is_invocant
+    };
+    assert!(first_is_invocant("name"));
+    assert!(!first_is_invocant("_fmt"));
+    assert!(!first_is_invocant("trim"));
+}
+
+#[test]
 fn test_ref_eq_current_package_narrows_to_the_enclosing_class() {
     // Path::Tiny's `path`: a function whose early return hands back its
     // argument once `ref($p) eq __PACKAGE__` has proven it an object.

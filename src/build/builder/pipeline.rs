@@ -777,7 +777,7 @@ impl<'a> Builder<'a> {
 
     /// The per-package table as the walk has it so far — the one fold of
     /// the builder's lanes, read by the window seed and the final assembly.
-    fn package_facts(&self) -> std::collections::HashMap<String, PackageFacts> {
+    pub(super) fn package_facts(&self) -> std::collections::HashMap<String, PackageFacts> {
         PackageFacts::fold(
             self.package_parents.to_map(),
             self.package_uses.clone(),
