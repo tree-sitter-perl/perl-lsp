@@ -87,6 +87,12 @@ pub fn split_qualified_var<'a>(name: &'a str, names: &'a NameSpellings) -> Optio
     pkg.map(|p| (names.qualifier_package(p), format!("{sigil}{base}")))
 }
 
+/// The qualified spelling of a variable: `('$', "Foo", "x")` → `$Foo::x`.
+/// The inverse of `split_qualified_var`.
+pub fn qualify_var(sigil: char, package: &str, base: &str, names: &NameSpellings) -> String {
+    format!("{sigil}{package}{}{base}", names.sep().unwrap_or_default())
+}
+
 /// Conventional invocant variable names — `sub f { my ($self) = @_ }` and
 /// friends. Accepts the bare identifier or the `$`-sigiled spelling so both
 /// param names (`"$self"`) and canonical varnames (`"self"`) route here.

@@ -71,15 +71,16 @@ impl<'a> Builder<'a> {
             // Fully-qualified read (`$Foo::Bar::x`): resolve by
             // `(package, sigil+basename)` against the declaring symbol, not
             // by lexical scope — the qualifier names the package directly,
-            // so the lexical chain is irrelevant (same seam as FQ calls).
-            // Cross-package goto-def for non-local packages happens at query
-            // time via `qualified_var_target()` + module_index.
+            // so the lexical chain is irrelevant (same seam as FQ calls), and
+            // a `my` of the same name is never the answer. Cross-package
+            // goto-def for non-local packages happens at query time via
+            // `qualified_var_target()` + module_index.
             if let Some((pkg, name)) = self.refs[idx]
                 .qualified_var_target(&crate::model::conventions::PERL_SPELLINGS)
                 .map(|(p, n)| (p.to_string(), n))
             {
                 if let Some(sym) = self.symbols.iter().find(|s| {
-                    matches!(s.kind, SymKind::Variable | SymKind::Field)
+                    matches!(s.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global())
                         && s.name == name
                         && s.package.as_deref() == Some(pkg.as_str())
                 }) {

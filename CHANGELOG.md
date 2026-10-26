@@ -40,6 +40,11 @@ crate / VS Code extension versions.
 - **`use English` variables are declared.** English builds its export list
   at runtime; a bundled `english` plugin states it, so `$ERRNO` and friends
   count as declared (match variables only without `-no_match_vars`).
+- **Symbolic references to a constant name are the variable they name.**
+  `${"abel"}`, `@{"Foo::q"}`, and `${$n}` where `$n` holds one string
+  literal reach the package variable — never a lexical of the same name —
+  so references and rename include them (rename rewrites the literal).
+  A qualified name likewise never binds a `my` that shares it.
 - **Plugins can declare package variables.** The new `PackageVariable`
   action declares a global the way `our` does, and `on_use` sees each
   use-list word with its span (`ctx.import_words`). `use vars` is now a

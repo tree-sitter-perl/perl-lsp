@@ -1368,6 +1368,40 @@ fn braced_spelling_is_the_same_variable() {
     assert!(edits.iter().all(|(_, t)| t == "why"));
 }
 
+/// A symbolic reference to a constant name is the package variable it
+/// names: a literal (`${"abel"}`) or a single-literal fold (`${$n}`), in
+/// the package in force. It never reaches a lexical of the same name, and a
+/// computed name binds nothing.
+#[test]
+fn symbolic_reference_to_a_constant_name_is_the_global() {
+    let src = "$abel = 1;\nmy $n = 'abel';\n{ my $abel = 2; print ${\"abel\"}, ${$n}, ${\"ab$n\"}; }\npackage Foo;\nour @q;\nprint @{\"q\"}, @{\"main::abel\"};\n";
+    let fa = build_fa(src);
+    let bound_to = |name: &str, pkg: &str| {
+        let id = fa
+            .symbols()
+            .iter()
+            .find(|s| {
+                s.name == name
+                    && s.package.as_deref() == Some(pkg)
+                    && matches!(s.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global())
+            })
+            .unwrap_or_else(|| panic!("{name} in {pkg}"))
+            .id;
+        let mut sites: Vec<(usize, usize)> = fa
+            .refs()
+            .iter()
+            .filter(|r| r.resolved_symbol() == Some(id))
+            .map(|r| (r.span.start.row, r.span.start.column))
+            .collect();
+        sites.sort();
+        sites
+    };
+    assert_eq!(bound_to("$abel", "main"), vec![(0, 0), (2, 25), (2, 33)], "literal and fold, not the lexical");
+    assert_eq!(bound_to("@q", "Foo"), vec![(4, 4), (5, 9)]);
+    let folded = fa.refs().iter().find(|r| r.span.start == Point::new(2, 33)).unwrap();
+    assert_eq!(folded.folded_from.map(|s| (s.start.row, s.start.column)), Some((1, 9)), "rename source is the literal");
+}
+
 /// A declared variable never mints a global, and `use vars` declares.
 #[test]
 fn declared_variables_mint_no_implicit_global() {

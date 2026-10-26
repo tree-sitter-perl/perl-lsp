@@ -789,13 +789,25 @@ pub(super) fn collect_package_var(
             // Qualified `$Pkg::var` (the sigil is canonicalized to the declared
             // one, so `@arr` element reads `$Pkg::arr[0]` still match `@arr`).
             if qpkg == package && qname == name {
+                // A symbolic ref folded through a variable (`${$n}`) has no
+                // name token of its own; the rewrite lands on the literal the
+                // fold came from (rule #9).
                 out.push(RefLocation {
                     key: key.clone(),
-                    span: tail(r.span),
+                    span: if r.folded_from.is_some() { r.span } else { tail(r.span) },
                     access: r.access,
-                    rewritable: true,
+                    rewritable: r.folded_from.is_none(),
                     label: None
                 });
+                if let Some(src) = r.folded_from {
+                    out.push(RefLocation {
+                        key: key.clone(),
+                        span: src,
+                        access: r.access,
+                        rewritable: true,
+                        label: None
+                    });
+                }
             }
         } else if r.target_name == name && r.resolved_symbol().is_some_and(is_our_decl) {
             // Unqualified — only this package's `our` var (resolved in-file).
