@@ -133,6 +133,10 @@ spelled! {
         /// The namespace a group import's names hang off (php's
         /// `use A\B\{C, D}`), joined to each name by match.
         Prefix = "prefix",
+        /// A relative import's leading dots (python's `import_prefix` in
+        /// `from ..x import C`), one level per separator it holds; what a
+        /// level climbs is the language's `ImportPrefix`.
+        Relative = "relative",
         /// The name an import binds in place of its own leaf
         /// (`use A\B as C`), joined to the import name by match.
         Alias = "alias",

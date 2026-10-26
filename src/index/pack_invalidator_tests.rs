@@ -74,7 +74,7 @@ fn register_pair(
     }
 }
 
-#[cfg(feature = "cpp")]
+#[cfg(any(feature = "cpp", feature = "python"))]
 fn arc_of(pack: &ModuleIndex, path: &Path) -> usize {
     let mut found = None;
     pack.for_each_registered_file(&mut |cm| {
@@ -381,4 +381,73 @@ fn a_file_whose_blob_did_not_land_is_not_stripped() {
         "a sibling whose blob DID land must still strip — the licence is per path"
     );
     let _ = std::fs::remove_dir_all(&f.dir);
+}
+
+#[cfg(feature = "python")]
+fn class_names(pack: &ModuleIndex, path: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    pack.for_each_registered_file(&mut |cm| {
+        if cm.path == path {
+            names = cm
+                .analysis
+                .symbols()
+                .iter()
+                .filter(|s| s.kind == crate::model::file_analysis::SymKind::Class)
+                .map(|s| s.name.clone())
+                .collect();
+        }
+    });
+    names
+}
+
+/// A package marker created through the watcher path re-files the modules
+/// under its directory — registered copies and open docs alike, though the
+/// marker's own surface says nothing about them — and deleting it un-files
+/// them. A save of a marker that already exists re-files nothing.
+#[cfg(feature = "python")]
+#[test]
+fn a_package_marker_from_the_watcher_refiles_the_modules_under_it() {
+    let dir = std::env::temp_dir().join(format!("pack-refile-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src/pkg")).unwrap();
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    let module = dir.join("src/pkg/mod.py");
+    let outside = dir.join("src/other.py");
+    let init = dir.join("src/pkg/__init__.py");
+    std::fs::write(&module, "class Widget:\n    pass\n").unwrap();
+    std::fs::write(&outside, "class Other:\n    pass\n").unwrap();
+    crate::build::walk_markers::record_walk("__init__.py", &dir, &[module.clone(), outside.clone()]);
+
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
+    let driver = reg.for_id("python").expect("python driver");
+    let pack = Arc::new(ModuleIndex::new_for_test());
+    for p in [&module, &outside] {
+        let src = std::fs::read_to_string(p).unwrap();
+        pack.register_symbols(p.to_path_buf(), Arc::new(driver.analyze_with_path(&src, Some(p))));
+    }
+    assert_eq!(class_names(&pack, &module), ["src.pkg.mod.Widget"]);
+    let files = OpenDocs::serving(driver);
+    let module_url = Url::from_file_path(&module).unwrap();
+    assert!(files.open(module_url.clone(), std::fs::read_to_string(&module).unwrap()));
+    let outside_before = arc_of(&pack, &outside);
+    let inv = PackInvalidator::serving(driver);
+
+    std::fs::write(&init, "").unwrap();
+    let outcome = inv.file_changed(None, &pack, &files, &init, false);
+    assert_eq!(class_names(&pack, &module), ["pkg.mod.Widget"], "pkg.mod appears");
+    assert_eq!(outcome.refresh_open, vec![module_url.clone()], "the open module re-files too");
+    assert_eq!(arc_of(&pack, &outside), outside_before, "a file outside the package is untouched");
+
+    // Editing the marker it already holds: no flip, nothing under it moves.
+    let module_before = arc_of(&pack, &module);
+    std::fs::write(&init, "VERSION = 1\n").unwrap();
+    let outcome = inv.file_changed(None, &pack, &files, &init, false);
+    assert_eq!(arc_of(&pack, &module), module_before, "no re-file on a marker save");
+    assert!(outcome.refresh_open.is_empty(), "{:?}", outcome.refresh_open);
+
+    std::fs::remove_file(&init).unwrap();
+    let outcome = inv.file_changed(None, &pack, &files, &init, true);
+    assert_eq!(class_names(&pack, &module), ["src.pkg.mod.Widget"], "un-filed");
+    assert_eq!(outcome.refresh_open, vec![module_url]);
+    let _ = std::fs::remove_dir_all(&dir);
 }
