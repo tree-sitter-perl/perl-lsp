@@ -999,7 +999,7 @@ impl SkeletonAnalysis {
                     scope: *read_scope,
                     target_name: name.clone(),
                     access: crate::model::file_analysis::AccessKind::Read,
-                    binding: Some(crate::model::file_analysis::RefBinding::Symbol(did)),
+                    binding: crate::model::file_analysis::Binding::from(Some(crate::model::file_analysis::RefBinding::Symbol(did))),
                     folded_from: None,
                     arg_count: None,
                 }),
@@ -1027,7 +1027,7 @@ impl SkeletonAnalysis {
                     scope: *ref_scope,
                     target_name: name.clone(),
                     access: crate::model::file_analysis::AccessKind::Read,
-                    binding: Some(crate::model::file_analysis::RefBinding::Symbol(did)),
+                    binding: crate::model::file_analysis::Binding::from(Some(crate::model::file_analysis::RefBinding::Symbol(did))),
                     folded_from: None,
                     arg_count: None,
                 });
@@ -1127,7 +1127,7 @@ impl SkeletonAnalysis {
                     scope: r.scope,
                     target_name: r.name.clone(),
                     access: crate::model::file_analysis::AccessKind::Read,
-                    binding,
+                    binding: binding.into(),
                     folded_from: None,
                     arg_count: r.arg_count,
                 })
@@ -1172,7 +1172,7 @@ impl SkeletonAnalysis {
                 scope,
                 target_name: name,
                 access: crate::model::file_analysis::AccessKind::Read,
-                binding: None,
+                binding: crate::model::file_analysis::Binding::NONE,
                 folded_from: None,
                 arg_count: None,
             });
@@ -1237,12 +1237,12 @@ impl SkeletonAnalysis {
                         // matches on `invocant_class`, and goto-def from the
                         // in-body use lands on `sym_id` — no query-time invocant
                         // typing (the receiver is an untypeable macro parameter).
-                        binding: Some(crate::model::file_analysis::RefBinding::Method(
+                        binding: crate::model::file_analysis::Binding::from(Some(crate::model::file_analysis::RefBinding::Method(
                             crate::model::file_analysis::MethodTarget::Local {
                                 sym_id: *sym_id,
                                 invocant_class: class.to_string(),
                             },
-                        )),
+                        ))),
                         folded_from: None,
                         arg_count: None,
                     });
@@ -1289,7 +1289,7 @@ impl SkeletonAnalysis {
                     let Some(class) = implicit_class(r.scope) else { continue };
                     let local = fields.get(&(class, r.target_name.as_str())).map(|&(fscope, fsym)| (fsym, fscope));
                     bare_reads.push((i, class.to_string(), local));
-                } else if matches!(r.kind, RefKind::FunctionCall) && r.binding.is_none() {
+                } else if matches!(r.kind, RefKind::FunctionCall) && r.settled_binding().is_none() {
                     let Some(class) = implicit_class(r.scope) else { continue };
                     if methods.contains(&(class, r.target_name.as_str())) {
                         sibling_calls.push((i, class.to_string()));
@@ -1348,17 +1348,15 @@ impl SkeletonAnalysis {
                     Some(map) => map.resolve(&r.target_name).identity(map.sep),
                     None => r.target_name.clone(),
                 };
-                r.binding = Some(match ElsewhereClass::unless_local(&symbols, identity.clone()) {
+                let binding = match ElsewhereClass::unless_local(&symbols, identity.clone()) {
                     None => RefBinding::NamesClass(identity),
-                    Some(class) => {
-                        let call = r.binding.take();
-                        RefBinding::Deferred(Box::new(Deferred::fork(
-                            Question::NamesClass(class),
-                            RefBinding::NamesClass(identity),
-                            call,
-                        )))
-                    }
-                });
+                    Some(class) => RefBinding::Deferred(Box::new(Deferred::fork(
+                        Question::NamesClass(class),
+                        RefBinding::NamesClass(identity),
+                        r.take_binding(),
+                    ))),
+                };
+                r.binding = binding.into();
             }
         }
         // Implicit return: a callable whose syntax declares no return takes

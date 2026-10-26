@@ -863,10 +863,10 @@ impl<'a> Builder<'a> {
                 scope: self.scope_at_point(span.start),
                 target_name: key_text,
                 access,
-                binding: Some(crate::model::file_analysis::RefBinding::HashKey {
+                binding: crate::model::file_analysis::Binding::from(Some(crate::model::file_analysis::RefBinding::HashKey {
                     owner,
                     sym: None,
-                }),
+                })),
                 folded_from: None,
                 arg_count: None,
             });

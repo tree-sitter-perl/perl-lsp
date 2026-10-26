@@ -1166,9 +1166,11 @@ pub struct Ref {
     /// `bind_*`/`link_*` mutators; read via the projection accessors
     /// (`resolved_symbol`, `method_target`, `resolved_package`,
     /// `hash_key_owner`, `handler_owner`) so consumers never match the
-    /// binding shape against the kind themselves.
+    /// binding shape against the kind themselves. The field is
+    /// [`Binding`], whose inside only this module reads, so a deferred
+    /// binding is never read raw.
     #[serde(default)]
-    pub binding: Option<RefBinding>,
+    pub binding: Binding,
     /// Provenance for a call whose name was constant-folded from a variable
     /// (`my $m = 'process'; $self->$m()`): the source string literal's
     /// content span. The call-site token (`$m`) is a non-rewritable variable
@@ -1246,6 +1248,29 @@ impl Ref {
     }
 }
 
+/// A ref's resolution outcome as a producer writes it. Readable only
+/// through the `Ref` accessors, which read a deferred binding as its
+/// undecided reading.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Binding(Option<RefBinding>);
+
+impl Binding {
+    pub const NONE: Binding = Binding(None);
+}
+
+impl From<Option<RefBinding>> for Binding {
+    fn from(b: Option<RefBinding>) -> Self {
+        Binding(b)
+    }
+}
+
+impl From<RefBinding> for Binding {
+    fn from(b: RefBinding) -> Self {
+        Binding(Some(b))
+    }
+}
+
 /// Projection accessors + binding mutators — the only vocabulary consumers
 /// use to read/write a ref's resolution outcome. Each accessor answers one
 /// question and returns `None` for kinds that don't carry that flavor, so
@@ -1257,7 +1282,7 @@ impl Ref {
     /// reader that wants the decided reading asks for it with the index
     /// (`FileAnalysis::class_named_by_call`).
     pub fn settled_binding(&self) -> Option<&RefBinding> {
-        match self.binding.as_ref()? {
+        match self.binding.0.as_ref()? {
             RefBinding::Deferred(d) => d.undecided(),
             b => Some(b),
         }
@@ -1349,23 +1374,37 @@ impl Ref {
         }
     }
 
+    /// The binding as written, deferred or not, for a producer that
+    /// rewraps it (a deferral keeps the call's own binding as a reading).
+    pub fn take_binding(&mut self) -> Option<RefBinding> {
+        self.binding.0.take()
+    }
+
+    /// The raw binding, for a reader that decides it with the index.
+    pub fn deferred_binding(&self) -> Option<&Deferred<RefBinding>> {
+        match self.binding.0.as_ref()? {
+            RefBinding::Deferred(d) => Some(d),
+            _ => None,
+        }
+    }
+
     pub fn bind_symbol(&mut self, sym: SymbolId) {
-        self.binding = Some(RefBinding::Symbol(sym));
+        self.binding.0 = Some(RefBinding::Symbol(sym));
     }
 
     pub fn bind_method(&mut self, target: MethodTarget) {
-        self.binding = Some(RefBinding::Method(target));
+        self.binding.0 = Some(RefBinding::Method(target));
     }
 
     pub fn bind_function_package(&mut self, package: String) {
-        self.binding = Some(RefBinding::Function { package });
+        self.binding.0 = Some(RefBinding::Function { package });
     }
 
     /// Stamp (or re-stamp) a `HashKeyAccess` owner. Drops any previously
     /// linked `HashKeyDef` — a new owner invalidates the old link; the
     /// linker (`build_indices` / enrichment) re-fills `sym` against it.
     pub fn bind_hash_key_owner(&mut self, owner: HashKeyOwner) {
-        self.binding = Some(RefBinding::HashKey { owner, sym: None });
+        self.binding.0 = Some(RefBinding::HashKey { owner, sym: None });
     }
 
     /// Fill the linked symbol on an owner-resolved `HashKey`/`Handler`
@@ -1373,7 +1412,7 @@ impl Ref {
     /// defs through one, so there is nothing to attach it to.
     pub fn link_owned_symbol(&mut self, sym_id: SymbolId) {
         if let Some(RefBinding::HashKey { sym, .. } | RefBinding::Handler { sym, .. }) =
-            self.binding.as_mut()
+            self.binding.0.as_mut()
         {
             *sym = Some(sym_id);
         }

@@ -2595,7 +2595,7 @@ fn binding_owner_restamp_drops_stale_symbol_link() {
         scope: ScopeId(0),
         target_name: "host".to_string(),
         access: AccessKind::Read,
-        binding: None,
+        binding: Binding::NONE,
         folded_from: None,
         arg_count: None,
     };
@@ -2925,9 +2925,7 @@ fn a_marked_file_re_stamps_and_an_unmarked_one_skips() {
 
     // Poison it. With no NEW mark, the file's stamp is at or past the only
     // mark there is, so the gate must skip and the poison must survive.
-    fa.refs[i].binding = Some(RefBinding::Method(MethodTarget::CrossFile {
-        invocant_class: "SENTINEL".into(),
-    }));
+    fa.refs[i].bind_method(MethodTarget::CrossFile { invocant_class: "SENTINEL".into() });
     fa.enrich_imported_types_with_keys_for(Some(&idx), Some(&path));
     assert_eq!(
         fa.refs[i].method_target().map(|t| t.invocant_class()),

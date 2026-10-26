@@ -364,10 +364,10 @@ impl<'a> Builder<'a> {
                     scope: self.current_scope(),
                     target_name: name,
                     access,
-                    binding: Some(crate::model::file_analysis::RefBinding::HashKey {
+                    binding: crate::model::file_analysis::Binding::from(Some(crate::model::file_analysis::RefBinding::HashKey {
                         owner,
                         sym: None,
-                    }),
+                    })),
                     folded_from: None,
                     arg_count: None,
                 });
@@ -458,7 +458,7 @@ impl<'a> Builder<'a> {
                     scope: self.current_scope(),
                     target_name: method_name,
                     access: AccessKind::Read,
-                    binding: None,
+                    binding: crate::model::file_analysis::Binding::NONE,
                     folded_from: None,
                     arg_count: None,
                 });
@@ -485,10 +485,10 @@ impl<'a> Builder<'a> {
                         scope: self.current_scope(),
                         target_name: name,
                         access: AccessKind::Read,
-                        binding: Some(crate::model::file_analysis::RefBinding::Handler {
+                        binding: crate::model::file_analysis::Binding::from(Some(crate::model::file_analysis::RefBinding::Handler {
                             owner,
                             sym: None,
-                        }),
+                        })),
                         folded_from: None,
                         arg_count: None,
                     });

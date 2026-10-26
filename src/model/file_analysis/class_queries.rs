@@ -1088,9 +1088,9 @@ impl FileAnalysis {
     /// says calling a class constructs it (`#names-class?`): python's `from
     /// m import User`, `User()`. `None` leaves the token a call.
     pub fn class_named_by_call(&self, r: &Ref, index: Option<&dyn CrossFileLookup>) -> Option<String> {
-        let reading = match r.binding.as_ref()? {
-            RefBinding::Deferred(d) => d.pick(self, index).reading?,
-            b => b,
+        let reading = match r.deferred_binding() {
+            Some(d) => d.pick(self, index).reading?,
+            None => r.settled_binding()?,
         };
         match reading {
             RefBinding::NamesClass(class) => Some(class.clone()),

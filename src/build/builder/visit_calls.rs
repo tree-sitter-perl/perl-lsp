@@ -893,7 +893,7 @@ impl<'a> Builder<'a> {
                 scope,
                 target_name: name,
                 access: AccessKind::Read,
-                binding: pkg.map(|package| RefBinding::Function { package }),
+                binding: crate::model::file_analysis::Binding::from(pkg.map(|package| RefBinding::Function { package })),
                 folded_from: None,
                 arg_count: None,
             });
@@ -925,7 +925,7 @@ impl<'a> Builder<'a> {
         }
         let mut pins: Vec<(usize, String)> = Vec::new();
         for (i, r) in self.refs.iter().enumerate() {
-            if !matches!(r.kind, RefKind::FunctionCall) || r.binding.is_some() {
+            if !matches!(r.kind, RefKind::FunctionCall) || r.settled_binding().is_some() {
                 continue;
             }
             if crate::model::file_analysis::split_qualified(&r.target_name, &crate::model::conventions::PERL_SPELLINGS).0.is_some() {
@@ -1015,8 +1015,8 @@ impl<'a> Builder<'a> {
                                 scope,
                                 target_name: name,
                                 access: AccessKind::Read,
-                                binding: resolved_package
-                                    .map(|package| RefBinding::Function { package }),
+                                binding: crate::model::file_analysis::Binding::from(resolved_package
+                                    .map(|package| RefBinding::Function { package })),
                                 folded_from: None,
                                 arg_count: None,
                             });
@@ -1054,7 +1054,7 @@ impl<'a> Builder<'a> {
                                     scope,
                                     target_name: name.to_string(),
                                     access: AccessKind::Read,
-                                    binding: None,
+                                    binding: crate::model::file_analysis::Binding::NONE,
                                     folded_from: None,
                                     arg_count: None,
                                 });
@@ -1072,7 +1072,7 @@ impl<'a> Builder<'a> {
                                 scope,
                                 target_name: t.to_string(),
                                 access: AccessKind::Read,
-                                binding: None,
+                                binding: crate::model::file_analysis::Binding::NONE,
                                 folded_from: None,
                                 arg_count: None,
                             });

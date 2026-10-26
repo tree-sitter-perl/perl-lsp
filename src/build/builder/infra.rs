@@ -319,7 +319,7 @@ impl<'a> Builder<'a> {
             scope: self.current_scope(),
             target_name,
             access,
-            binding,
+            binding: binding.into(),
             folded_from: None,
             arg_count: None,
         });

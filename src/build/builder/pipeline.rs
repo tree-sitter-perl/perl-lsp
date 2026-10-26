@@ -1067,7 +1067,7 @@ impl<'a> Builder<'a> {
         // whose target is one of the freshly minted names.
         for r in self.refs.iter_mut() {
             if matches!(r.kind, RefKind::FunctionCall) {
-                if r.binding.is_none() && synth_names.contains(&r.target_name) {
+                if r.settled_binding().is_none() && synth_names.contains(&r.target_name) {
                     let in_pkg = self
                         .package_ranges
                         .iter()

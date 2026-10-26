@@ -634,7 +634,7 @@ impl<'a> Builder<'a> {
                 scope: self.scope_at_point(span.start),
                 target_name: key,
                 access: AccessKind::Write,
-                binding: None,
+                binding: crate::model::file_analysis::Binding::NONE,
                 folded_from: None,
                 arg_count: None,
             });
@@ -760,7 +760,7 @@ impl<'a> Builder<'a> {
                 scope: self.scope_at_point(span.start),
                 target_name: key,
                 access,
-                binding: Some(binding),
+                binding: crate::model::file_analysis::Binding::from(Some(binding)),
                 folded_from: None,
                 arg_count: None,
             });

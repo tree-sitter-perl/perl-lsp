@@ -199,7 +199,7 @@ impl FileAnalysis {
                     scope,
                     target_name: gr.target_name.clone(),
                     access: gr.access,
-                    binding: gr.binding.clone(),
+                    binding: crate::model::file_analysis::Binding::from(gr.binding.clone()),
                     folded_from: None,
                     arg_count: None,
                 });
