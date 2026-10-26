@@ -25,16 +25,7 @@ impl FileAnalysis {
 
     /// Find the innermost scope containing a point.
     pub fn scope_at(&self, point: Point) -> Option<ScopeId> {
-        let mut best: Option<(ScopeId, usize)> = None; // (id, span_size)
-        for scope in &self.scopes {
-            if contains_point(&scope.span, point) {
-                let size = span_size(&scope.span);
-                if best.is_none() || size <= best.unwrap().1 {
-                    best = Some((scope.id, size));
-                }
-            }
-        }
-        best.map(|(id, _)| id)
+        innermost_scope_at(&self.scopes, point)
     }
 
     /// Walk the scope chain from a scope upward to file root.
@@ -76,7 +67,7 @@ impl FileAnalysis {
     /// Returns the innermost-scope match (Perl lexical scoping).
     pub fn resolve_variable(&self, name: &str, point: Point) -> Option<&Symbol> {
         let scope = self.scope_at(point)?;
-        let chain = self.scope_chain(scope);
+        let chain = lookup_chain(&self.scopes, scope);
         for scope_id in &chain {
             for sid in self.symbols.in_scope(*scope_id) {
                 let sym = &self.symbols[sid.0 as usize];
