@@ -24,15 +24,6 @@ pub(super) fn our_gate_admits(gate: Option<&str>, use_pkg: Option<&str>) -> bool
     }
 }
 
-/// A sigil and a plain identifier — the only spelling an implicit global is
-/// keyed by. `${name}` and computed names stay unbound.
-fn is_plain_variable_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    chars.next().is_some_and(|s| crate::model::conventions::PERL_SPELLINGS.is_sigil(s))
-        && chars.clone().next().is_some()
-        && chars.all(|c| c.is_alphanumeric() || c == '_')
-}
-
 impl<'a> Builder<'a> {
     // ---- Post-passes ----
 
@@ -131,7 +122,6 @@ impl<'a> Builder<'a> {
             // earlier `our` is still declared, so it is no implicit global.
             if self.refs[idx].binding.is_some()
                 || gated_our
-                || !is_plain_variable_name(&ref_target)
                 || crate::model::conventions::is_special_variable(&ref_target)
             {
                 continue;

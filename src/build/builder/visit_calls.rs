@@ -72,7 +72,20 @@ impl<'a> Builder<'a> {
             }
         }
 
-        if let Ok(text) = node.utf8_text(self.source) {
+        // `${name}` IS `$name`: key the ref on the canonical spelling and
+        // anchor it on the bare name token, so rename rewrites inside the
+        // braces and a string's `"${name}s"` keeps them.
+        let spelled = match crate::cst::braced_varname(node) {
+            Some(vn) => crate::cst::canonical_var_name(node, self.source)
+                .zip(vn.utf8_text(self.source).ok())
+                .map(|(name, bare)| (name, crate::cst::fq_tail_span(vn, bare))),
+            None => node
+                .utf8_text(self.source)
+                .ok()
+                .map(|text| (text.to_string(), fq_tail_span(node, text))),
+        };
+        if let Some((text, ref_span)) = spelled {
+            let text = text.as_str();
             let access = self.determine_access(node);
             // A scalar READ anywhere but an element-access base hands the
             // reference to code that may mutate the referent (call arg,
@@ -111,12 +124,11 @@ impl<'a> Builder<'a> {
                 self.escape_recorded.insert(text.to_string());
                 self.record_escape_write(text.to_string(), node);
             }
-            // Fully-qualified read (`$Foo::Bar::x`): narrow the span to the
-            // bare tail (rule #7) so rename rewrites only `x` and the
-            // qualifier survives, mirroring the FQ-call narrowing. The full
+            // Fully-qualified read (`$Foo::Bar::x`): the span is the bare
+            // tail (rule #7) so rename rewrites only `x` and the qualifier
+            // survives, mirroring the FQ-call narrowing. The full
             // `target_name` keeps the path; `qualified_var_target()` decodes
             // `(pkg, sigil+basename)` for cross-package resolution.
-            let ref_span = fq_tail_span(node, text);
             self.add_ref(
                 RefKind::Variable,
                 ref_span,

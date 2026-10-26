@@ -161,12 +161,9 @@ impl FileAnalysis {
         let mut vars: Vec<(&Symbol, usize)> = visible
             .into_iter()
             .filter(|s| matches!(s.kind, SymKind::Variable | SymKind::Field))
-            // A global anchored on the token being typed is that token.
-            .filter(|s| {
-                !(matches!(s.detail, SymbolDetail::Variable { decl_kind: DeclKind::Implicit, .. })
-                    && s.selection_span.start <= point
-                    && point <= s.selection_span.end)
-            })
+            // The token being typed is never its own completion — an
+            // undeclared one is already an implicit global anchored there.
+            .filter(|s| !(s.selection_span.start <= point && point <= s.selection_span.end))
             .filter_map(|s| {
                 if let SymbolDetail::Variable { .. } = &s.detail {
                     let scope = &self.scopes[s.scope.0 as usize];

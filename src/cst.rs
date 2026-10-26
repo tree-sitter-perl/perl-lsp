@@ -443,6 +443,15 @@ pub(crate) fn varname_child<'a>(node: Node<'a>) -> Option<Node<'a>> {
     node.named().find(|c| c.kind() == "varname")
 }
 
+/// The name token of a braced variable spelling (`${name}`, `@{ name }`) —
+/// the `varname` child, braces excluded. `None` for the plain spelling and
+/// for derefs (`${$ref}`, `@{[ ... ]}`).
+pub(crate) fn braced_varname<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    let vn = varname_child(node)?;
+    let braced = (0..node.child_count()).filter_map(|i| node.child(i)).any(|c| c.kind() == "{");
+    (braced && vn.named_child_count() == 0).then_some(vn)
+}
+
 /// Canonical sigiled spelling of a variable node: `${ sner }` → `$sner`
 /// (the grammar's `varname` child already excludes the braces). `None`
 /// for deref spellings (`${$ref}` — the varname child wraps a `block`,

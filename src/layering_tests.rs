@@ -1396,7 +1396,7 @@ fn language_spellings_have_one_home() {
         ("model/conventions.rs", 8, "Perl's home: `PERL_SPELLINGS` and the sigil sites, plus the test's php-shaped fixture spellings and its use-map assertion"),
         ("model/file_analysis/class_queries.rs", 1, "Perl sigil trim on a Corinna field (legacy)"),
         ("model/file_analysis/completion.rs", 10, "Perl sigils re-derived outside conventions.rs — legacy, shrink-only"),
-        ("model/file_analysis/cursor_queries.rs", 4, "Perl sigil sites (legacy)"),
+        ("model/file_analysis/cursor_queries.rs", 3, "Perl sigil sites (legacy)"),
         ("model/file_analysis/enrichment.rs", 1, "Perl sigil on a hash-key access (legacy)"),
         ("model/file_analysis/invocants.rs", 3, "Perl sigil sites (legacy)"),
         ("model/file_analysis/outline.rs", 1, "Perl sigil default (legacy)"),
@@ -1647,7 +1647,7 @@ fn positional_reads_skip_grammar_extras() {
         ("build/cursor_sentinel.rs", 11, "pack member-access probes over the sentinel reparse: legacy"),
         ("build/pod.rs", 21, "the POD grammar: legacy"),
         ("build/query_extract/extract/members.rs", 1, "receiver peel, filtering `is_extra()` itself"),
-        ("cst.rs", 26, "the typed view: `elements()` itself, and reads inside nodes that hold no extra"),
+        ("cst.rs", 27, "the typed view: `elements()` itself, reads inside nodes that hold no extra, and `braced_varname`'s scan of every child for the brace token (not positional)"),
         ("lsp/cursor_context.rs", 8, "the Perl cursor detector (rule #6): legacy"),
         ("lsp/symbols/signature.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),
     ];
