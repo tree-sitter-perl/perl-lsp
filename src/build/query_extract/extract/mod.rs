@@ -81,8 +81,9 @@ fn family(cap: Capture) -> Family {
         | C::Alias(_)
         | C::MacroAlias(_)
         | C::Tmpl(_)
-        | C::ParamReceiver => Family::Defs,
-        C::Ref(_) => Family::Refs,
+        | C::ParamReceiver
+        | C::Mark(_) => Family::Defs,
+        C::Ref(_) | C::RefSpelled => Family::Refs,
         C::Member(_) | C::MemberOp(_) | C::Arity(_) => Family::Members,
         C::Flow(_)
         | C::Expr(_)
@@ -109,20 +110,86 @@ struct ExtractState<'p> {
     /// (end_byte, ScopeId) — real Scope rows are minted as we go so the
     /// resulting FileAnalysis carries a genuine lexical tree.
     scope_stack: Vec<(usize, ScopeId)>,
-    /// (registered_at_depth, value) — a context set inside a scope pops
-    /// with it (Python class blocks); one set at file depth is sticky
+    /// (registered_at_depth, kind, value) — a context set inside a scope
+    /// pops with it (Python class blocks); one set at file depth is sticky
     /// (Perl's flat `package Foo;`).
-    context_stack: Vec<(usize, String)>,
+    context_stack: Vec<(usize, ContextKind, String)>,
     /// The innermost scope and sticky context at the current event.
     cur_scope: ScopeId,
     package: Option<String>,
     scopes: scopes::State,
     defs: defs::State,
+    refs: refs::State,
     members: members::State,
     flow: flow::State,
     narrowing: narrowing::State,
     commands: commands::State,
     imports: imports::State,
+    /// The module the file IS, when its language names it by path and the
+    /// driver had one, and that module's dotted name: the namespace every
+    /// declaration without a namespace context of its own joins.
+    file_module: Option<&'p FileModule>,
+    file_namespace: Option<String>,
+}
+
+/// The module a file is, for a language whose module names come from the
+/// file's place on disk (python's `pkg/models.py` is `pkg.models`): its
+/// path segments, and whether the file is its package's own module
+/// (`pkg/__init__.py` is `pkg`, and relative imports start from `pkg`
+/// itself rather than its parent). Derived by the driver, which has the
+/// path; the extractor only reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileModule {
+    pub segments: Vec<String>,
+    pub is_package: bool,
+}
+
+impl FileModule {
+    /// The package relative imports resolve from.
+    pub fn package(&self) -> &[String] {
+        match self.is_package {
+            true => &self.segments,
+            false => &self.segments[..self.segments.len().saturating_sub(1)],
+        }
+    }
+}
+
+impl ExtractState<'_> {
+    /// The innermost namespace context in force at the current event, else
+    /// the file's own module.
+    fn namespace(&self) -> Option<&str> {
+        self.context_stack
+            .iter()
+            .rev()
+            .find(|(_, kind, _)| *kind == ContextKind::Namespace)
+            .map(|(.., ns)| ns.as_str())
+            .or(self.file_namespace.as_deref())
+    }
+
+    /// The identity a class named `leaf` and declared at the current event
+    /// is filed under. Under a use-map it is the leaf joined to the
+    /// namespace in force, whatever container the class is written in, so
+    /// every spelling of the class resolves to the key it is filed under.
+    /// Otherwise the spelling is the identity.
+    fn class_identity(&self, leaf: &str) -> String {
+        match self.pack.names.use_map_sep() {
+            Some(sep) => {
+                crate::model::conventions::join_qualified(self.namespace().unwrap_or(""), leaf, sep)
+            }
+            None => leaf.to_string(),
+        }
+    }
+}
+
+/// A written type as the identities it names at `site`: under a use-map
+/// every class spelling it carries resolves through the rows that reach
+/// the site and the namespace in force there. Runs once every row and
+/// section is in.
+fn written_type_at(out: &SkeletonAnalysis, names: &crate::model::file_analysis::NameSpellings, t: InferredType, site: Point) -> InferredType {
+    match crate::model::file_analysis::UseMap::at(&out.use_rows, &out.namespace_ranges, names, site) {
+        Some(map) => t.map_class_names(&mut |c| map.resolve(c).identity(map.sep)),
+        None => t,
+    }
 }
 
 /// Run the document over `root`. Links and `@deref` marks are recorded
@@ -187,7 +254,21 @@ impl<'t> DeclaratorPeel<'t> {
     }
 }
 
+/// `extract_in` for a file that is no module of its own.
+#[cfg(test)]
 pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAnalysis, String> {
+    extract_in(tree, source, pack, None)
+}
+
+/// Run the pack's document over a parsed file. `file_module` is the module
+/// the file is, for a language that names modules by path; its classes
+/// join that namespace.
+pub fn extract_in(
+    tree: &Tree,
+    source: &[u8],
+    pack: &LangPack,
+    file_module: Option<&FileModule>,
+) -> Result<SkeletonAnalysis, String> {
     let language = tree.language();
     let compiled = cached_query(&language, pack.query_source)?;
 
@@ -212,12 +293,25 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
         package: None,
         scopes: Default::default(),
         defs: Default::default(),
+        refs: Default::default(),
         members: Default::default(),
         flow: Default::default(),
         narrowing: Default::default(),
         commands: Default::default(),
         imports: Default::default(),
+        file_module,
+        file_namespace: None,
     };
+    // A module named by its path is one section, the whole file.
+    if let (Some(m), Some(sep)) = (file_module, pack.names.use_map_sep()) {
+        let ns = m.segments.iter().fold(String::new(), |ns, seg| crate::model::conventions::join_qualified(&ns, seg, sep));
+        st.out.namespace_ranges.push(crate::model::file_analysis::NamespaceRange {
+            namespace: ns.clone(),
+            span: st.out.scopes[0].span,
+            kind: crate::model::file_analysis::SectionKind::Statement,
+        });
+        st.file_namespace = Some(ns);
+    }
 
     // ---- flatten matches into ordered events ----
     let (links, captured) = record_matches(compiled, root, source);
@@ -263,7 +357,9 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             Family::Flow => flow::collect(&mut st, e),
             Family::Narrowing => narrowing::collect(&mut st, e),
             Family::Members => members::collect(&mut st, e),
-            Family::Refs | Family::Commands | Family::Imports | Family::Links => {}
+            Family::Imports => imports::collect(&mut st, e),
+            Family::Refs => refs::collect(&mut st, e),
+            Family::Commands | Family::Links => {}
         }
     }
 
@@ -273,12 +369,12 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
             && st.scope_stack.last().is_some_and(|&(end, _)| e.start_byte >= end)
         {
             st.scope_stack.pop();
-            while st.context_stack.last().is_some_and(|&(d, _)| d > st.scope_stack.len()) {
+            while st.context_stack.last().is_some_and(|&(d, ..)| d > st.scope_stack.len()) {
                 st.context_stack.pop();
             }
         }
         st.cur_scope = st.scope_stack.last().unwrap().1;
-        st.package = st.context_stack.last().map(|(_, p)| p.clone());
+        st.package = st.context_stack.last().map(|(.., p)| p.clone());
         match family(e.cap) {
             Family::Scopes => scopes::handle(&mut st, e),
             Family::Defs => defs::handle(&mut st, e),
@@ -297,6 +393,10 @@ pub fn extract(tree: &Tree, source: &[u8], pack: &LangPack) -> Result<SkeletonAn
     defs::tag_inline_namespaces(&mut st);
     flow::emit_keyed_shapes(&mut st);
     imports::finish(&mut st);
+    imports::bind_reach(&mut st);
+    // A parent may be written above the import that names it, so it
+    // resolves once every row is in.
+    scopes::resolve_parents(&mut st);
     defs::dedup(&mut st);
     commands::finish(&mut st);
     defs::emit_type_aliases(&mut st);

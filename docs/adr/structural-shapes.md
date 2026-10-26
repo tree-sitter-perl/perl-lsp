@@ -115,6 +115,25 @@ Variable shape witnesses:
   `@$h{…}`/`%$h{k}`, `$h->@{…}`/`$h->%{…}`) record an open-switching
   `KeyWrite`.
 
+A write is any place Perl stores through the element, not only
+`$v->{k} = …`: `++`/`--`, a list-assignment target (`($v->{k}) = …`),
+and a container deref Perl autovivifies through (`push @{$v->{k}}, …`,
+`@{$v->{k}} = …`; the array-modifying builtins are
+`builtins::modifies_its_array_argument`). A nested write
+(`$v->{a}{b} = …`, `$v->{rows}[0]{id} = …`) carries its lower hops,
+static hash keys and static indexes alike, as the `KeyWrite`'s `path`
+and extends the shape it lands in, `a`'s value here, by the same rules:
+a hash hop extends a keyed hash, an index hop retypes a tuple slot or
+appends at exactly `len`, and a missing level autovivifies as a closed
+shape holding just the written path. A tuple has no holes and no untyped
+slot: a missing array becomes a tuple only at index 0 (an untyped value
+is an `Unknown` slot), and a write past `len` makes it an `ArrayRef`,
+which says nothing about elements.
+The RHS types the last hop; a list-assignment target takes its slot of
+the RHS. Through an object (`$self->{s}{k} = …`) the
+inner shape is the slot's, so the extended shape lands on
+`SlotType{class, s}`, where it joins the slot's other writes.
+
 An empty literal is a shape too: `{}`, `my %h;` and `my %h = ()` are a
 closed `HashWithKeys` with no keys, so `my $h = {}; $h->{k} = Foo->new`
 reads `k` back typed. The key-typo hint skips an empty shape: a typo

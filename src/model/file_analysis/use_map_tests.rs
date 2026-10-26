@@ -1,80 +1,96 @@
-use super::use_map::UseMap;
+use super::use_map::{QualifiedName, UseMap, UseRow};
 use super::Span;
 
-fn span() -> Span {
-    Span { start: tree_sitter::Point::new(0, 0), end: tree_sitter::Point::new(0, 0) }
+fn row(namespace: &str, leaf: &str, alias: Option<&str>) -> UseRow {
+    UseRow {
+        span: Span { start: tree_sitter::Point::new(0, 0), end: tree_sitter::Point::new(0, 0) },
+        name: QualifiedName::new(namespace, leaf),
+        alias: alias.map(str::to_string),
+        reach: Span { start: tree_sitter::Point::new(0, 0), end: tree_sitter::Point::new(99, 0) },
+    }
 }
 
-fn map<'a>(
-    rows: &'a [(Span, String)],
-    aliases: &'a [(String, String, String)],
-    own: Option<&'a str>,
-) -> UseMap<'a> {
-    UseMap { rows, aliases, own_namespace: own, sep: "\\" }
+fn map<'a>(rows: &'a [UseRow], own: Option<&'a str>) -> UseMap<'a> {
+    UseMap { rows, own_namespace: own, sep: "\\", site: Some(tree_sitter::Point::new(1, 0)) }
+}
+
+fn fqn(m: &UseMap<'_>, written: &str) -> String {
+    m.resolve(written).identity(m.sep)
 }
 
 #[test]
 fn absolute_spelling_is_its_own_identity() {
-    let m = map(&[], &[], Some("App"));
-    assert_eq!(m.resolve("\\Vendor\\Thing"), "Vendor\\Thing");
-    assert_eq!(m.resolve("\\Exception"), "Exception");
+    let m = map(&[], Some("App"));
+    assert_eq!(fqn(&m, "\\Vendor\\Thing"), "Vendor\\Thing");
+    assert_eq!(fqn(&m, "\\Exception"), "Exception");
 }
 
 #[test]
 fn bare_leaf_resolves_in_own_namespace_else_globally() {
-    let m = map(&[], &[], Some("App\\Models"));
-    assert_eq!(m.resolve("User"), "App\\Models\\User");
-    let g = map(&[], &[], None);
-    assert_eq!(g.resolve("User"), "User");
+    let m = map(&[], Some("App\\Models"));
+    assert_eq!(fqn(&m, "User"), "App\\Models\\User");
+    let g = map(&[], None);
+    assert_eq!(fqn(&g, "User"), "User");
 }
 
 #[test]
 fn use_row_binds_its_leaf_and_carries_a_tail() {
-    let rows = vec![(span(), "GuzzleHttp\\Psr7".to_string()), (span(), "\\Exception".to_string())];
-    let m = map(&rows, &[], Some("App"));
-    assert_eq!(m.resolve("Psr7"), "GuzzleHttp\\Psr7");
-    assert_eq!(m.resolve("Psr7\\Utils"), "GuzzleHttp\\Psr7\\Utils");
-    assert_eq!(m.resolve("Exception"), "Exception");
+    let rows = vec![row("GuzzleHttp", "Psr7", None), row("", "Exception", None)];
+    let m = map(&rows, Some("App"));
+    assert_eq!(fqn(&m, "Psr7"), "GuzzleHttp\\Psr7");
+    assert_eq!(fqn(&m, "Psr7\\Utils"), "GuzzleHttp\\Psr7\\Utils");
+    assert_eq!(fqn(&m, "Exception"), "Exception");
 }
 
 #[test]
 fn alias_wins_over_row_and_own_namespace() {
-    let rows = vec![(span(), "GuzzleHttp\\Promise".to_string())];
-    let aliases = vec![("P".to_string(), "GuzzleHttp".to_string(), "Promise".to_string())];
-    let m = map(&rows, &aliases, Some("App"));
-    assert_eq!(m.resolve("P"), "GuzzleHttp\\Promise");
-    assert_eq!(m.resolve("P\\Promise"), "GuzzleHttp\\Promise\\Promise");
+    let rows = vec![row("GuzzleHttp", "Promise", Some("P"))];
+    let m = map(&rows, Some("App"));
+    assert_eq!(fqn(&m, "P"), "GuzzleHttp\\Promise");
+    assert_eq!(fqn(&m, "P\\Promise"), "GuzzleHttp\\Promise\\Promise");
     // the real leaf of an aliased import is NOT bound by the alias row:
     // `Promise` is whatever else names it, i.e. the file's own namespace
-    assert_eq!(m.resolve("Promise"), "App\\Promise");
+    assert_eq!(fqn(&m, "Promise"), "App\\Promise");
 }
 
 #[test]
 fn an_aliased_row_binds_its_alias_never_its_leaf() {
-    // the row is in `rows` too (every import row is), yet `Event`
-    // means the file's own class, not the aliased import
-    let rows = vec![(span(), "B\\Event".to_string())];
-    let aliases = vec![("ScriptEvent".to_string(), "B".to_string(), "Event".to_string())];
-    let m = map(&rows, &aliases, Some("A"));
-    assert_eq!(m.resolve("ScriptEvent"), "B\\Event");
-    assert_eq!(m.resolve("Event"), "A\\Event");
+    let rows = vec![row("B", "Event", Some("ScriptEvent"))];
+    let m = map(&rows, Some("A"));
+    assert_eq!(fqn(&m, "ScriptEvent"), "B\\Event");
+    assert_eq!(fqn(&m, "Event"), "A\\Event");
+}
+
+/// A row is aliased or not on its own: importing a class under an alias
+/// does not unbind a second, bare import of the same class.
+#[test]
+fn a_bare_row_beside_an_aliased_one_still_binds_its_leaf() {
+    let rows = vec![row("B", "Event", Some("E")), row("B", "Event", None)];
+    let m = map(&rows, Some("A"));
+    assert_eq!(fqn(&m, "E"), "B\\Event");
+    assert_eq!(fqn(&m, "Event"), "B\\Event");
 }
 
 #[test]
-fn aliased_leaf_alone_falls_to_own_namespace() {
-    let aliases =
-        vec![("BaseCollection".to_string(), "Support".to_string(), "Collection".to_string())];
-    let m = map(&[], &aliases, Some("App"));
-    assert_eq!(m.resolve("BaseCollection"), "Support\\Collection");
-    assert_eq!(m.resolve("Collection"), "App\\Collection");
+fn resolve_answers_parts_with_the_global_namespace_empty() {
+    let m = map(&[], None);
+    assert_eq!(m.resolve("Exception"), QualifiedName::new("", "Exception"));
+    assert_eq!(m.resolve("\\Exception"), QualifiedName::new("", "Exception"));
+    let n = map(&[], Some("A\\B"));
+    assert_eq!(n.resolve("C"), QualifiedName::new("A\\B", "C"));
+    let rows = vec![row("GuzzleHttp", "Psr7", None)];
+    let r = map(&rows, Some("App"));
+    assert_eq!(r.resolve("Psr7\\Utils"), QualifiedName::new("GuzzleHttp\\Psr7", "Utils"));
 }
 
 #[test]
-fn split_keeps_the_global_namespace_empty() {
-    let m = map(&[], &[], None);
-    assert_eq!(m.resolve_split("Exception"), ("".to_string(), "Exception".to_string()));
-    let n = map(&[], &[], Some("A\\B"));
-    assert_eq!(n.resolve_split("C"), ("A\\B".to_string(), "C".to_string()));
+fn resolve_in_takes_the_qualifier_as_written() {
+    let rows = vec![row("GuzzleHttp", "Promise", Some("P"))];
+    let m = map(&rows, Some("App"));
+    assert_eq!(m.resolve_in("P", "Each"), QualifiedName::new("GuzzleHttp\\Promise", "Each"));
+    assert_eq!(m.resolve_in("Sub\\Deeper", "X"), QualifiedName::new("App\\Sub\\Deeper", "X"));
+    assert_eq!(m.resolve_in("\\Vendor", "X"), QualifiedName::new("Vendor", "X"));
+    assert_eq!(m.resolve_in("", "X"), QualifiedName::new("", "X"));
 }
 
 /// `resolve` takes a WRITTEN spelling. It is not idempotent: an identity
@@ -83,11 +99,26 @@ fn split_keeps_the_global_namespace_empty() {
 /// holds (`FileAnalysis::class_spelling_identity`'s contract).
 #[test]
 fn resolve_is_not_idempotent() {
-    let aliases = vec![("App".to_string(), "Vendor".to_string(), "App".to_string())];
-    let m = map(&[], &aliases, Some("Site"));
-    let once = m.resolve("App\\Models\\User");
+    let rows = vec![row("Vendor", "App", Some("App"))];
+    let m = map(&rows, Some("Site"));
+    let once = fqn(&m, "App\\Models\\User");
     assert_eq!(once, "Vendor\\App\\Models\\User");
-    let twice = m.resolve(&once);
+    let twice = fqn(&m, &once);
     assert_eq!(twice, "Site\\Vendor\\App\\Models\\User", "a second pass re-qualifies");
     assert_ne!(once, twice);
+}
+
+/// A row binds only inside its reach: a site past it resolves the leaf as
+/// if the row were never written.
+#[test]
+fn a_row_binds_only_where_it_reaches() {
+    let mut r = row("Lib", "Model", None);
+    r.reach = Span { start: tree_sitter::Point::new(2, 0), end: tree_sitter::Point::new(5, 0) };
+    let rows = vec![r];
+    let at = |row: usize| UseMap { rows: &rows, own_namespace: Some("App"), sep: "\\", site: Some(tree_sitter::Point::new(row, 4)) };
+    assert_eq!(fqn(&at(3), "Model"), "Lib\\Model");
+    assert_eq!(fqn(&at(7), "Model"), "App\\Model");
+    // the whole-file view sees every row
+    let whole = UseMap { site: None, ..at(7) };
+    assert_eq!(fqn(&whole, "Model"), "Lib\\Model");
 }
