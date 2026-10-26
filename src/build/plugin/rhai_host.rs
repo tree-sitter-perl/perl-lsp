@@ -680,6 +680,13 @@ pub fn set_workspace_root(root: Option<&str>) {
     }
 }
 
+/// The workspace root as `set_workspace_root` recorded it — what a
+/// language naming modules by path falls back to.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub fn workspace_root() -> Option<std::path::PathBuf> {
+    WORKSPACE_ROOT.read().ok().and_then(|g| g.clone())
+}
+
 /// Directories to load user `.rhai` plugins from, in priority order.
 ///
 /// 1. `$PERL_LSP_PLUGIN_DIR` — explicit global opt-in (a power user's

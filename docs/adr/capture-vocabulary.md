@@ -69,8 +69,10 @@ structural predicate pay it.
 What a kind means is a method on its enum, matched exhaustively:
 `DefCap::sym_kind` (the `SymKind` it projects to), `DefCap::marker`
 (the `union` / `reexport` / `macro` attribute and the `SymbolFlags` it
-implies), `LitKind::value_type`, `ObsKind::observation`. A new kind does
-not compile until it says what it is.
+implies), `MarkCap::flag` (the `SymbolFlags` a `@mark.<flag>` states about
+the declaration whose name token it captures), `LitKind::value_type`,
+`ObsKind::observation`. A new kind does not compile until it says what it
+is.
 
 ## Decision: each capture family has one handler file
 
@@ -100,6 +102,19 @@ A feature that teaches the extractor a capture touches the variant, the
 family routing line, and the family file it lives in. When a language
 needs extraction a query cannot express, its frontend adds a typed Rust
 handler in the same shape rather than a string-keyed hook on the pack.
+
+## Decision: a fact the grammar parses is a capture, not a text probe
+
+When the grammar already gives a fact its own node, the document captures
+that node and the driver reads the capture; it never re-derives the fact
+from the text of a wider capture. Python parses `from ..x import C` as
+`relative_import(import_prefix "..", dotted_name "x")`, so the dots are
+`@import.relative` and the module is `@import.prefix`, joined to each
+`@import.name` by match. Whether an import is relative is whether the
+capture fired, and its level is the number of separators the capture
+holds. What a level climbs from is the language's `ImportPrefix` rule
+(`PackageRelative` for Python); a language without relative imports
+(PHP's `use \A\B\{C}`) never captures one.
 
 ## Decision: depth is chained from links, never walked
 
