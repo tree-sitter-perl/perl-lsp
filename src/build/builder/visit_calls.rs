@@ -16,12 +16,12 @@ impl<'a> Builder<'a> {
         }
 
         // A symbolic reference to a constant name (`${"abel"}`, or `${$n}`
-        // with `$n` folded to one literal) is the package variable it names
-        // — never a lexical — so its ref is spelled qualified. The block is
-        // still visited below for the refs inside it.
-        if let Some((name, span, folded_from)) = self.symbolic_variable(node) {
+        // with `$n` folded) is the package variable it names — never a
+        // lexical — so its ref is spelled qualified. The block is still
+        // visited below for the refs inside it.
+        let access = self.determine_access(node);
+        for (name, span, folded_from) in self.symbolic_variables(node) {
             let idx = self.refs.len();
-            let access = self.determine_access(node);
             self.add_ref(RefKind::Variable, span, name, access);
             self.refs[idx].folded_from = folded_from;
         }
@@ -149,13 +149,14 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The variable a symbolic reference names when its name is a constant:
-    /// `(qualified name, ref span, rename source)`. A string literal is its
-    /// own rewrite site; a folded `$n` is not, so its rename follows
-    /// `folded_from` to the literal the fold came from, and a fold with no
-    /// single source names nothing. Unqualified names belong to the
-    /// package in force, as Perl resolves them.
-    fn symbolic_variable(&self, node: Node<'a>) -> Option<(String, Span, Option<Span>)> {
+    /// The variables a symbolic reference names when its name is a constant:
+    /// `(qualified name, ref span, rename source)` per value, the same shape
+    /// as a const-folded method call. A string literal is its own rewrite
+    /// site. A folded `$n` is not: its ref sits on the `$n` token, which
+    /// rename skips, and a single-literal fold carries the literal as
+    /// `folded_from` for rename to rewrite instead. Unqualified names belong
+    /// to the package in force, as Perl resolves them.
+    fn symbolic_variables(&self, node: Node<'a>) -> Vec<(String, Span, Option<Span>)> {
         use crate::cst::NodeExt;
         use crate::model::conventions::{
             is_special_variable, qualify_var, split_qualified, PERL_SPELLINGS,
@@ -164,47 +165,51 @@ impl<'a> Builder<'a> {
             "scalar" => '$',
             "array" => '@',
             "hash" => '%',
-            _ => return None,
+            _ => return Vec::new(),
         };
-        let block = crate::cst::varname_child(node)?.named().find(|c| c.kind() == "block")?;
-        let mut stmts = block.elements();
-        let stmt = stmts.next().filter(|s| s.kind() == "expression_statement")?;
-        if stmts.next().is_some() {
-            return None;
-        }
-        let mut exprs = stmt.elements();
-        let expr = exprs.next()?;
-        if exprs.next().is_some() {
-            return None;
-        }
-        let (name, span, folded_from) = match expr.kind() {
+        let Some(expr) = crate::cst::varname_child(node)
+            .and_then(|vn| vn.named().find(|c| c.kind() == "block"))
+            .and_then(|block| {
+                let mut stmts = block.elements();
+                let stmt = stmts.next().filter(|s| s.kind() == "expression_statement")?;
+                let mut exprs = stmt.elements();
+                let expr = exprs.next()?;
+                (stmts.next().is_none() && exprs.next().is_none()).then_some(expr)
+            })
+        else {
+            return Vec::new();
+        };
+        let (names, span, folded_from) = match expr.kind() {
             "scalar" => {
-                let var = crate::cst::canonical_var_name(expr, self.source)?;
-                let [value] = self.resolve_constant_strings(&var, expr)?.try_into().ok()?;
-                let source = self.constant_string_source(&var, expr)?;
-                (value, node_to_span(node), Some(source))
+                let Some(var) = crate::cst::canonical_var_name(expr, self.source) else { return Vec::new() };
+                let Some(values) = self.resolve_constant_strings(&var, expr) else { return Vec::new() };
+                let source = (values.len() == 1)
+                    .then(|| self.constant_string_source(&var, expr))
+                    .flatten();
+                (values, node_to_span(expr), source)
             }
-            _ => {
-                let value = crate::cst::plain_string_literal_text(expr, self.source)?;
-                (value, crate::cst::string_content_span(expr), None)
-            }
+            _ => match crate::cst::plain_string_literal_text(expr, self.source) {
+                Some(value) => (vec![value], crate::cst::string_content_span(expr), None),
+                None => return Vec::new(),
+            },
         };
-        let (pkg, base) = split_qualified(&name, &PERL_SPELLINGS);
-        if base.is_empty() || !base.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            return None;
-        }
-        let bare = format!("{sigil}{base}");
-        if is_special_variable(&bare) {
-            return None;
-        }
-        let qualified = match pkg {
-            Some(pkg) => qualify_var(sigil, PERL_SPELLINGS.qualifier_package(pkg), base, &PERL_SPELLINGS),
-            None => {
-                let pkg = self.current_package.as_deref().unwrap_or_else(|| PERL_SPELLINGS.qualifier_package(""));
-                qualify_var(sigil, pkg, base, &PERL_SPELLINGS)
-            }
-        };
-        Some((qualified, span, folded_from))
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let (pkg, base) = split_qualified(&name, &PERL_SPELLINGS);
+                if base.is_empty()
+                    || !base.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    || is_special_variable(&format!("{sigil}{base}"))
+                {
+                    return None;
+                }
+                let pkg = match pkg {
+                    Some(pkg) => PERL_SPELLINGS.qualifier_package(pkg),
+                    None => self.current_package.as_deref().unwrap_or_else(|| PERL_SPELLINGS.qualifier_package("")),
+                };
+                Some((qualify_var(sigil, pkg, base, &PERL_SPELLINGS), span, folded_from))
+            })
+            .collect()
     }
 
     /// Sigil-deref of a scalar (`%$x` / `@$x` / `$$x`): the outer sigil node

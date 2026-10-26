@@ -1374,7 +1374,7 @@ fn braced_spelling_is_the_same_variable() {
 /// computed name binds nothing.
 #[test]
 fn symbolic_reference_to_a_constant_name_is_the_global() {
-    let src = "$abel = 1;\nmy $n = 'abel';\n{ my $abel = 2; print ${\"abel\"}, ${$n}, ${\"ab$n\"}; }\npackage Foo;\nour @q;\nprint @{\"q\"}, @{\"main::abel\"};\n";
+    let src = "$abel = 1;\nmy $n = 'abel';\n{ my $abel = 2; print ${\"abel\"}, ${$n}, ${\"ab$n\"}; }\nfor my $v ('abel', 'cain') { print ${$v} }\npackage Foo;\nour @q;\nprint @{\"q\"}, @{\"main::abel\"};\n";
     let fa = build_fa(src);
     let bound_to = |name: &str, pkg: &str| {
         let id = fa
@@ -1396,10 +1396,23 @@ fn symbolic_reference_to_a_constant_name_is_the_global() {
         sites.sort();
         sites
     };
-    assert_eq!(bound_to("$abel", "main"), vec![(0, 0), (2, 25), (2, 33)], "literal and fold, not the lexical");
-    assert_eq!(bound_to("@q", "Foo"), vec![(4, 4), (5, 9)]);
-    let folded = fa.refs().iter().find(|r| r.span.start == Point::new(2, 33)).unwrap();
-    assert_eq!(folded.folded_from.map(|s| (s.start.row, s.start.column)), Some((1, 9)), "rename source is the literal");
+    assert_eq!(
+        bound_to("$abel", "main"),
+        vec![(0, 0), (2, 25), (2, 35), (3, 37)],
+        "literal, fold and loop fold — not the lexical",
+    );
+    assert_eq!(bound_to("@q", "Foo"), vec![(5, 4), (6, 9)]);
+    let folded_from = |at: Point, target: &str| {
+        fa.refs()
+            .iter()
+            .find(|r| r.span.start == at && r.target_name == target)
+            .unwrap()
+            .folded_from
+            .map(|s| (s.start.row, s.start.column))
+    };
+    assert_eq!(folded_from(Point::new(2, 35), "$main::abel"), Some((1, 9)), "rename source is the literal");
+    // A fold with several values names each one, with no single rename source.
+    assert_eq!(folded_from(Point::new(3, 37), "$main::cain"), None);
 }
 
 /// A declared variable never mints a global, and `use vars` declares.

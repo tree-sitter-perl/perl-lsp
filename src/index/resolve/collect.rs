@@ -789,14 +789,16 @@ pub(super) fn collect_package_var(
             // Qualified `$Pkg::var` (the sigil is canonicalized to the declared
             // one, so `@arr` element reads `$Pkg::arr[0]` still match `@arr`).
             if qpkg == package && qname == name {
-                // A symbolic ref folded through a variable (`${$n}`) has no
-                // name token of its own; the rewrite lands on the literal the
-                // fold came from (rule #9).
+                // A symbolic ref folded through a variable (`${$n}`) sits on
+                // the `$n` token, which rename must not rewrite; a
+                // single-literal fold's rewrite lands on that literal
+                // (rule #9), as for a const-folded method call.
+                let folded = span_is_folded_name(analysis, r.span, false, &r.target_name);
                 out.push(RefLocation {
                     key: key.clone(),
-                    span: if r.folded_from.is_some() { r.span } else { tail(r.span) },
+                    span: if folded { r.span } else { tail(r.span) },
                     access: r.access,
-                    rewritable: r.folded_from.is_none(),
+                    rewritable: !folded,
                     label: None
                 });
                 if let Some(src) = r.folded_from {
