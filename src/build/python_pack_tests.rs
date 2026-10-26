@@ -554,6 +554,46 @@ class Outer:
     assert_eq!(fa.inferred_type_via_bag("other", Point::new(5, 4)), Some(InferredType::ClassName("lib.models.Imported".into())));
 }
 
+/// A def's header runs where the def is written. In a method of `Outer`
+/// the parameter annotation, the default, the return annotation, like a
+/// sibling's base list, name `Outer`'s nested class; the method's body
+/// sees past the class to the module, and the parameter names are the
+/// method's locals.
+#[test]
+fn a_header_resolves_in_the_scope_its_def_is_written_in() {
+    use crate::model::file_analysis::{RefKind, ScopeKind};
+    let m = module(&["pkg", "mod"], false);
+    let src = "\
+class Inner:
+    pass
+class Outer:
+    class Inner:
+        pass
+    class Sub(Inner):
+        pass
+    def m(self, x: Inner = Inner()) -> Inner:
+        return Inner()
+";
+    let fa = py_in(src, Some(&m));
+    let named_at = |row: usize, column: usize| {
+        let r = fa.refs().iter().find(|r| r.span.start == Point::new(row, column)).expect("a reference");
+        fa.spelled_identity(r)
+    };
+    // the base list, the annotation, the default, the return annotation
+    assert_eq!(fa.declared_parents("pkg.mod.Outer.Sub"), ["pkg.mod.Outer.Inner"]);
+    for (at, what) in [((5, 14), "base"), ((7, 19), "annotation"), ((7, 27), "default"), ((7, 39), "return annotation")] {
+        assert_eq!(named_at(at.0, at.1), "pkg.mod.Outer.Inner", "the {what}");
+    }
+    let default = fa.refs().iter().find(|r| r.span.start == Point::new(7, 27) && matches!(r.kind, RefKind::FunctionCall)).unwrap();
+    assert_eq!(fa.class_named_by_call(default, None).as_deref(), Some("pkg.mod.Outer.Inner"));
+    // the body reads past the class
+    assert_eq!(named_at(8, 15), "pkg.mod.Inner");
+    // the parameters bind in the method, not in the class body
+    let x = fa.resolve_variable("x", Point::new(8, 8)).expect("x is in scope in the body");
+    assert!(matches!(fa.scope(x.scope).kind, ScopeKind::Sub { .. }), "{:?}", fa.scope(x.scope));
+    assert!(fa.resolve_variable("x", Point::new(4, 8)).is_none());
+}
+
 /// A class attribute is the class's, not its methods': a bare read in a
 /// method resolves to the module's variable of that name — the
 /// declaration goto-def lands on and the type the bag answers — exactly
@@ -757,12 +797,18 @@ fn a_dotted_spelling_reaches_a_nested_class_across_modules() {
         })
         .collect();
     edits.sort();
-    assert_eq!(edits, [("models.py".to_string(), 1, 10), ("views.py".to_string(), 2, 14)]);
+    // the parent clause and the annotation alike
+    assert_eq!(
+        edits,
+        [("models.py".to_string(), 1, 10), ("views.py".to_string(), 2, 14), ("views.py".to_string(), 5, 9)]
+    );
     assert!(widening_codes(&idx, &views).is_empty());
     let (defs, hover, labels) = landing(&idx, &views, Point::new(2, 14));
     assert_eq!(defs, [("models.py".to_string(), 1)], "goto-def lands on the nested class");
     assert_eq!(hover.as_deref(), Some("models.py"));
     assert_eq!(labels, [None]);
+    let (defs, _, _) = landing(&idx, &views, Point::new(5, 9));
+    assert_eq!(defs, [("models.py".to_string(), 1)], "and from the annotation");
 }
 
 /// A rename from a Python class's own name token, or from a local, writes
