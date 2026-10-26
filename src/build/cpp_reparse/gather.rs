@@ -55,6 +55,18 @@ impl PreExpandedExternal {
         PreExpandedExternal { degraded: true, ..Self::default() }
     }
 
+    /// Identity of the gathered table: two gathers with equal fingerprints
+    /// feed an analysis the same external macros. `None` for a placeholder.
+    pub fn fingerprint(&self) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        if self.degraded {
+            return None;
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        bincode::serialize(&*self.raw).ok()?.hash(&mut h);
+        Some(h.finish())
+    }
+
     pub(super) fn from_raw(raw: std::sync::Arc<MacroTable>) -> Self {
         // This mutual pre-expansion is the O(external) work the two-tier split
         // hoists out of every analyze — paid ONCE per include-set here, then

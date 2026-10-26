@@ -327,7 +327,10 @@ impl ModuleIndex {
             use std::hash::{Hash, Hasher};
             static PLUGINS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            self.inc_roots().hash(&mut h);
+            match self.core.pack_inputs.get() {
+                Some(inputs) => inputs.hash(&mut h),
+                None => self.inc_roots().hash(&mut h),
+            }
             self.workspace_root().hash(&mut h);
             PLUGINS.get_or_init(crate::build::plugin::rhai_host::plugin_fingerprint).hash(&mut h);
             h.finish()
@@ -357,14 +360,35 @@ impl ModuleIndex {
     pub fn answer_flusher(&self) -> impl FnOnce() + Send + 'static {
         let core = Arc::clone(&self.core);
         let root = self.workspace_root();
-        move || flush_answers_into(&core, root.as_deref())
+        let packs = Arc::clone(&self.pack_indexes);
+        move || {
+            flush_answers_into(&core, root.as_deref(), "perl");
+            for p in packs.iter() {
+                p.value().core.answers.flush_now();
+            }
+        }
     }
 
     /// Persist the answers computed since the last flush. Blocking (SQLite);
     /// the server calls it off the message loop, periodically and at
     /// shutdown, so a session's answers outlive a crash or a kill.
+    /// Persist this index's engine answers into `lang`'s DB: a pack
+    /// sub-index's answers read back from the DB its rows live in.
+    pub fn install_answer_flusher(&self, root: Option<&str>, lang: &str, inputs: u64) {
+        let _ = self.core.pack_inputs.set(inputs);
+        let core = Arc::downgrade(&self.core);
+        let (root, lang) = (root.map(String::from), lang.to_string());
+        self.core.answers.set_flusher(Arc::new(move || {
+            if let Some(core) = core.upgrade() {
+                flush_answers_into(&core, root.as_deref(), &lang);
+            }
+        }));
+    }
+
     pub fn flush_answers(&self) {
-        flush_answers_into(&self.core, self.workspace_root().as_deref());
+        flush_answers_into(&self.core, self.workspace_root().as_deref(), "perl");
+        // Each pack sub-index keeps its own store, written to its own DB.
+        self.for_each_pack_index(|_, p| p.core.answers.flush_now());
     }
 
     fn whole_ungated(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
@@ -575,7 +599,7 @@ impl CrossFileLookup for ModuleIndex {
             full |= cache.queue(row);
         }
         if full {
-            flush_answers_into(&self.core, self.workspace_root().as_deref());
+            self.core.answers.flush_now();
         }
         CallerRead { frame, slice }
     }
@@ -625,7 +649,7 @@ impl CrossFileLookup for ModuleIndex {
                 &wider.slice,
             );
             if cache.queue(row) {
-                flush_answers_into(&self.core, self.workspace_root().as_deref());
+                self.core.answers.flush_now();
             }
         }
         wider
@@ -1310,13 +1334,13 @@ mod member_prefilter_tests {
     }
 }
 
-pub(super) fn flush_answers_into(core: &super::index_core::IndexCore, root: Option<&str>) {
+pub(crate) fn flush_answers_into(core: &super::index_core::IndexCore, root: Option<&str>, lang: &str) {
     let rows = core.answers.take_pending();
     let slices = core.caller_slices.take_pending();
     if rows.is_empty() && slices.is_empty() {
         return;
     }
-    let Some(conn) = crate::index::module_cache::open_cache_db(root, "perl") else {
+    let Some(conn) = crate::index::module_cache::open_cache_db(root, lang) else {
         return;
     };
     if !rows.is_empty() {

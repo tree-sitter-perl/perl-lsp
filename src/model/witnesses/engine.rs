@@ -114,9 +114,11 @@ pub enum EngineKey {
     Consult(ConsultKey),
     /// The enums a storage slot is compared against, tallied over every
     /// file that mentions the slot's name.
-    DomainVote { owner: String, field: String },
-    /// One file's part of a `DomainVote`.
-    DomainSites { owner: String, field: String, file: PathBuf },
+    /// `rule` is how each file is scoped while its own sites are resolved,
+    /// so the answer is the same whoever asks.
+    DomainVote { owner: String, field: String, rule: Option<crate::model::file_analysis::PackVisibility> },
+    /// One file's part of a `DomainVote`, resolved in that file's own scope.
+    DomainSites { owner: String, field: String, rule: Option<crate::model::file_analysis::PackVisibility>, file: PathBuf },
 }
 
 /// Site counts per enum (`None`: a site whose value is no enumerator),
@@ -366,6 +368,14 @@ impl AnswerStore {
     pub fn set_flusher(&self, f: Arc<dyn Fn() + Send + Sync>) {
         if let Ok(mut g) = self.flusher.lock() {
             *g = Some(f);
+        }
+    }
+
+    /// Write the pending rows out now, through the owner's flusher.
+    pub fn flush_now(&self) {
+        let flusher = self.flusher.lock().ok().and_then(|g| g.clone());
+        if let Some(flush) = flusher {
+            flush();
         }
     }
 

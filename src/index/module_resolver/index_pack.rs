@@ -129,6 +129,11 @@ pub fn index_pack_languages(
                 module_cache::open_cache_db_readonly(cache_key_owned.as_deref(), lang)
             }));
         }
+        pack_index.install_answer_flusher(
+            cache_key,
+            lang,
+            reg.for_id(lang).map_or(0, |d| d.analysis_input_fingerprint()),
+        );
         let conn = module_cache::open_cache_db(cache_key, lang);
         // A generation built under different analysis inputs (toolchain
         // change — or its probe FAILURE, which empties the system include

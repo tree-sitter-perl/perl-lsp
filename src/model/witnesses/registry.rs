@@ -3892,14 +3892,19 @@ pub(super) fn compute_engine_key(
         EngineKey::Join(join) => reg.param_in_join(idx, join),
         EngineKey::Contribution { join, file } => reg.param_contribution(idx, join, file),
         EngineKey::Consult(c) => EngineValue::Value(reg.consult(idx, c)),
-        EngineKey::DomainVote { owner, field } => {
-            let key = crate::model::conventions::name_match_key(field, &crate::model::conventions::PERL_SPELLINGS);
-            let paths = super::engine::mentions_of(idx, super::engine::MentionKind::Any, &key).read();
+        EngineKey::DomainVote { owner, field, rule } => {
+            // A site's receiver is typed as the owner, so its file names the
+            // owner too: reading only files that mention both keeps a common
+            // field name (`type`, `kind`) from reading every struct's users.
+            let spell = |n: &str| crate::model::conventions::name_match_key(n, &crate::model::conventions::PERL_SPELLINGS);
+            let paths = super::engine::mentions_of(idx, super::engine::MentionKind::Any, &spell(field)).read();
+            let owners = super::engine::mentions_of(idx, super::engine::MentionKind::Any, &spell(owner)).read();
+            let owners: std::collections::HashSet<&std::path::PathBuf> = owners.iter().collect();
             let mut tally = Vec::new();
-            for file in paths.iter() {
+            for file in paths.iter().filter(|p| owners.contains(p)) {
                 let part = super::engine::answer(
                     idx,
-                    &EngineKey::DomainSites { owner: owner.clone(), field: field.clone(), file: file.clone() },
+                    &EngineKey::DomainSites { owner: owner.clone(), field: field.clone(), rule: *rule, file: file.clone() },
                 );
                 if let EngineValue::Tally(t) = part {
                     tally = super::engine::add_tallies(&tally, &t);
@@ -3907,11 +3912,20 @@ pub(super) fn compute_engine_key(
             }
             EngineValue::Tally(tally)
         }
-        EngineKey::DomainSites { owner, field, file } => {
+        EngineKey::DomainSites { owner, field, rule, file } => {
             let Some(cached) = super::engine::caller_view(idx, file) else {
                 return EngineValue::Tally(Vec::new());
             };
-            EngineValue::Tally(idx.whole_present(&cached).domain_tally(owner, field, Some(idx)))
+            let fa = idx.whole_present(&cached);
+            let tally = match rule {
+                Some(rule) => {
+                    let axis = crate::model::file_analysis::VisibilityAxis::for_origin(&fa, Some(file), idx, *rule);
+                    let scope = crate::model::file_analysis::ScopedLookup::new(idx, &fa.pack.include_closure, Some(file), axis);
+                    fa.domain_tally(owner, field, Some(&scope))
+                }
+                None => fa.domain_tally(owner, field, Some(idx)),
+            };
+            EngineValue::Tally(tally)
         }
         EngineKey::Providers(att) => {
             let Some((owner, site)) = att.provider_owner() else {

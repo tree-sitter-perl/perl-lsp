@@ -723,7 +723,10 @@ impl FileAnalysis {
     ) -> Option<NominalDomain> {
         use crate::model::witnesses::engine::{answer, EngineKey, EngineValue};
         let tally = module_index
-            .map(|idx| answer(idx, &EngineKey::DomainVote { owner: owner.to_string(), field: field.to_string() }))
+            .map(|idx| {
+                let key = EngineKey::DomainVote { owner: owner.to_string(), field: field.to_string(), rule: idx.visibility_rule() };
+                answer(idx.unscoped().unwrap_or(idx), &key)
+            })
             .and_then(|v| match v {
                 EngineValue::Tally(t) if !t.is_empty() => Some(t),
                 _ => None,

@@ -108,6 +108,10 @@ pub(crate) struct IndexCore {
     /// The world digest and every held file's source stamp, rebuilt when the
     /// counters that move with either do.
     pub(crate) world_digest: Mutex<Option<Arc<WorldDigest>>>,
+    /// A pack sub-index's analysis inputs (its driver's toolchain
+    /// fingerprint). Set, it stands in the world digest for the @INC roots,
+    /// which no pack analysis reads and which a warm start learns late.
+    pub(crate) pack_inputs: std::sync::OnceLock<u64>,
     /// Process-unique identity, for sweep stores that key per index: an
     /// `Arc` address can be reused by a later core and inherit its entries.
     pub(crate) core_id: u64,
@@ -210,6 +214,7 @@ impl IndexCore {
             open_callers: DashMap::new(),
             open_bumps: std::sync::atomic::AtomicU64::new(0),
             world_digest: Mutex::new(None),
+            pack_inputs: std::sync::OnceLock::new(),
             world_bumps: std::sync::atomic::AtomicU64::new(0),
             caller_slices: CallerSliceCache::default(),
             core_id: {

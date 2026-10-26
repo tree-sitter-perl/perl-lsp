@@ -436,6 +436,7 @@ impl PackDriver {
                 let macro_defs = self.enrich_skeleton(&mut skel, &mut parser, source, &src, &map, &ctx);
                 let mut fa = skel.into_file_analysis();
                 self.register_post_build(&mut fa, &mut parser, source, path, &ctx, &recovered, macro_defs);
+                fa.source_stamp = pack_source_stamp(source, &ctx, &fa);
                 fa
             }
             Err(e) => {
@@ -452,6 +453,26 @@ impl PackDriver {
             }
         }
     }
+}
+
+/// `FileAnalysis::source_stamp` for a pack file. A pack analysis also reads
+/// the macros its includes define and which includes resolve, so both go in
+/// with the source: a header edit must not leave an answer persisted against
+/// this file looking valid. Unstamped (0) when the macro gather was skipped.
+#[cfg(feature = "pack-langs")]
+fn pack_source_stamp(source: &str, ctx: &PackContext, fa: &FileAnalysis) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let Some(external) = (if ctx.external.degraded { None } else { Some(ctx.external.fingerprint()) }) else {
+        return 0;
+    };
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    crate::model::file_analysis::source_stamp_of(source.as_bytes()).hash(&mut h);
+    external.hash(&mut h);
+    // Interned ids differ per process; the paths don't.
+    let mut includes: Vec<std::sync::Arc<str>> = fa.pack.include_closure.iter_strs().collect();
+    includes.sort();
+    includes.hash(&mut h);
+    h.finish().max(1)
 }
 
 /// The pack analyze pipeline's phases (1/2/5/7 in `analyze_with_path`'s doc;

@@ -458,6 +458,19 @@ pub trait CrossFileLookup {
         None
     }
 
+    /// The index under a scoped view: where an answer that does not depend
+    /// on the asker's visibility is stored. `None` for an index that is its
+    /// own root.
+    fn unscoped(&self) -> Option<&dyn CrossFileLookup> {
+        None
+    }
+
+    /// The visibility rule of the asker this view scopes for, so an answer
+    /// computed on another file's behalf scopes that file the same way.
+    fn visibility_rule(&self) -> Option<PackVisibility> {
+        None
+    }
+
     /// Moves when a fact every engine answer assumes without reading it
     /// moves. An index without a store has no stored answer to keep, so the
     /// default moves with everything.
@@ -1166,7 +1179,7 @@ impl UseMapPins {
 /// How an origin's language scopes cross-file visibility — the routing
 /// fact `for_origin` consumes. Chosen at the call site from the registry,
 /// never a language-name branch here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum PackVisibility {
     /// Not a pack: the host's search-path derivation (`use lib` ∪ @INC).
     Host,
@@ -1458,6 +1471,17 @@ impl<'a> ScopedLookup<'a> {
 impl<'a> CrossFileLookup for ScopedLookup<'a> {
     fn resolution_epoch(&self) -> u64 {
         self.inner.resolution_epoch()
+    }
+    fn unscoped(&self) -> Option<&dyn CrossFileLookup> {
+        Some(self.inner.unscoped().unwrap_or(self.inner))
+    }
+    fn visibility_rule(&self) -> Option<PackVisibility> {
+        match self.axis {
+            VisibilityAxis::Transparent => None,
+            VisibilityAxis::Flat | VisibilityAxis::UseMap(_) => Some(PackVisibility::NameKeyed),
+            VisibilityAxis::IncludeClosure => Some(PackVisibility::IncludePaths),
+            VisibilityAxis::SearchPath(_) => Some(PackVisibility::Host),
+        }
     }
     fn is_dependency_path(&self, path: &std::path::Path) -> bool {
         self.inner.is_dependency_path(path)

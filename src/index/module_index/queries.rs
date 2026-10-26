@@ -55,7 +55,7 @@ impl ModuleIndex {
         let flush_root = root.map(String::from);
         self.core.answers.set_flusher(Arc::new(move || {
             if let Some(core) = core.upgrade() {
-                super::lookup::flush_answers_into(&core, flush_root.as_deref());
+                super::lookup::flush_answers_into(&core, flush_root.as_deref(), "perl");
             }
         }));
         // The hub's relational-ref-index reader: the SAME cache key the
