@@ -141,9 +141,11 @@ impl RefTable {
             .map(|(_, &i)| (self.refs[i].span.start, i))
     }
 
-    /// Every ref's relational row seed, in ref order.
-    pub fn row_seeds(&self, names: &NameSpellings) -> Vec<RefRowSeed> {
-        self.refs.iter().map(|r| r.row_seed(names)).collect()
+    /// The relational row seed of every ref but the dormant slots, then of
+    /// `held` (the readings' live refs): a row is a candidate, so a name
+    /// some view shows is listed.
+    pub fn row_seeds<'r>(&'r self, held: impl Iterator<Item = &'r Ref>, names: &NameSpellings) -> Vec<RefRowSeed> {
+        self.refs.iter().filter(|r| !r.is_dormant()).chain(held).map(|r| r.row_seed(names)).collect()
     }
 
     /// Rebuild every index from the current refs. Both the name/target
@@ -152,7 +154,7 @@ impl RefTable {
         self.by_key.clear();
         self.by_target.clear();
         self.calls_by_span.clear();
-        for (i, r) in self.refs.iter().enumerate() {
+        for (i, r) in self.refs.iter().enumerate().filter(|(_, r)| !r.is_dormant()) {
             self.by_key.entry(r.match_key(names)).or_default().push(i);
             if let Some(sym_id) = r.resolved_symbol() {
                 self.by_target.entry(sym_id).or_default().push(i);
@@ -169,23 +171,6 @@ impl RefTable {
             .map(<[usize]>::len)
             .max()
             .unwrap_or(0);
-    }
-
-    /// Refresh the name/target lookups only — the enrichment refresh.
-    /// `calls_by_span` is left alone on purpose: every entry it holds
-    /// points into the baseline prefix (it is built before the baseline is
-    /// sealed, and no post-build pass mints call refs), and enrichment
-    /// restores that prefix verbatim before appending only synthetic
-    /// key refs.
-    pub fn refresh_name_target_indices(&mut self, names: &NameSpellings) {
-        self.by_key.clear();
-        self.by_target.clear();
-        for (i, r) in self.refs.iter().enumerate() {
-            self.by_key.entry(r.match_key(names)).or_default().push(i);
-            if let Some(sym_id) = r.resolved_symbol() {
-                self.by_target.entry(sym_id).or_default().push(i);
-            }
-        }
     }
 
     /// Strip the resident refs and every index over them — the refs
@@ -304,6 +289,8 @@ impl FileAnalysis {
     /// (`docs/adr/relational-ref-index.md`) — the shredder's input, twin
     /// of `sym_row_seeds`.
     pub fn ref_row_seeds(&self) -> Vec<RefRowSeed> {
-        self.refs.row_seeds(&self.pack.names)
+        // A seed is a (name, file) candidate, so a held fallback ref seeded
+        // from both its slot and its reading only repeats a pair.
+        self.refs.row_seeds(self.readings.live_refs(), &self.pack.names)
     }
 }

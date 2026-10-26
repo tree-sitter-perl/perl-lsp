@@ -249,9 +249,7 @@ impl ModuleIndex {
                 })
             },
         );
-        member_prefilter_may_declare(
-            !cached.analysis().plugin.gated_emissions.is_empty(),
-            rows,
+        member_prefilter_may_declare(rows,
         )
     }
 
@@ -382,26 +380,33 @@ impl ModuleIndex {
         self.core.answers.flush_now();
     }
 
-    fn whole_ungated(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
+    fn whole_undecided(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
         if cached.analysis().is_fully_resident() {
             return cached.analysis().clone();
         }
         self.rehydrate_or_resident(cached)
     }
 
-    /// The view of `cached` with its deferred plugin emissions applied
-    /// wherever their `ClassIsa` gate holds through the index's ancestry
-    /// right now, or `None` when the file has none that fire (the caller
-    /// serves its ordinary view). The gate is asked at every read, so a
-    /// parent edit anywhere moves the answer with no invalidation path;
-    /// only the applied copy is cached, under the file's registration
-    /// generation and the fired set it was built for.
-    fn gate_applied(&self, cached: &Arc<CachedModule>) -> Option<Arc<FileAnalysis>> {
-        if cached.analysis().plugin.gated_emissions.is_empty() {
+    /// The view of `cached` with the readings its questions pick through
+    /// the index right now, or `None` when they pick the fallbacks the base
+    /// shows (the caller serves its ordinary view). The questions are asked
+    /// at every read, so an edit anywhere moves the answer with no
+    /// invalidation path; only the view is cached, under the file's
+    /// registration generation and the picks it was built for.
+    fn decided_view(&self, cached: &Arc<CachedModule>) -> Option<Arc<FileAnalysis>> {
+        let base = cached.analysis();
+        if base.readings.is_empty() {
             return None;
         }
-        let fired = cached.analysis().fired_gates(self);
-        if !fired.iter().any(|f| *f) {
+        // A question can read another file's view, whose questions can read
+        // this one's: a file already deciding on this thread answers with
+        // its fallbacks.
+        let Some(_deciding) = Deciding::enter(&cached.path) else {
+            crate::util::ghost_stats::count("decided_view.cycle");
+            return None;
+        };
+        let picks = base.picks(Some(self));
+        if picks == base.readings.fallbacks() {
             return None;
         }
         let generation = self
@@ -410,27 +415,53 @@ impl ModuleIndex {
             .get(&cached.path)
             .map(|g| *g)
             .unwrap_or(0);
-        if let Some(hit) = self.core.gated_views.get(&cached.path) {
-            if hit.generation == generation && hit.fired == fired {
-                crate::util::ghost_stats::count("gated_view.hit");
+        if let Some(hit) = self.core.decided_views.get(&cached.path) {
+            if hit.generation == generation && hit.picks == picks {
+                crate::util::ghost_stats::count("decided_view.hit");
                 return Some(Arc::clone(&hit.view));
             }
         }
-        crate::util::ghost_stats::count("gated_view.build");
-        let mut copy = (*self.whole_ungated(cached)).clone();
-        copy.apply_fired_gated_emissions(&fired);
-        let view = Arc::new(copy);
-        if self.core.gated_views.len() >= super::index_core::GATED_VIEW_CAP {
-            let victim = self.core.gated_views.iter().next().map(|e| e.key().clone());
+        crate::util::ghost_stats::count("decided_view.build");
+        let view = Arc::new(self.whole_undecided(cached).decided(&picks)?);
+        if self.core.decided_views.len() >= super::index_core::DECIDED_VIEW_CAP {
+            let victim = self.core.decided_views.iter().next().map(|e| e.key().clone());
             if let Some(v) = victim {
-                self.core.gated_views.remove(&v);
+                self.core.decided_views.remove(&v);
             }
         }
-        self.core.gated_views.insert(
+        self.core.decided_views.insert(
             cached.path.clone(),
-            super::index_core::GatedView { generation, fired, view: Arc::clone(&view) },
+            super::index_core::DecidedView { generation, picks, view: Arc::clone(&view) },
         );
         Some(view)
+    }
+}
+
+thread_local! {
+    static DECIDING: std::cell::RefCell<Vec<std::path::PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The files whose questions this thread is deciding.
+struct Deciding;
+
+impl Deciding {
+    fn enter(path: &std::path::Path) -> Option<Deciding> {
+        DECIDING.with(|d| {
+            let mut d = d.borrow_mut();
+            if d.iter().any(|p| p == path) {
+                return None;
+            }
+            d.push(path.to_path_buf());
+            Some(Deciding)
+        })
+    }
+}
+
+impl Drop for Deciding {
+    fn drop(&mut self) {
+        DECIDING.with(|d| {
+            d.borrow_mut().pop();
+        });
     }
 }
 
@@ -524,7 +555,7 @@ impl CrossFileLookup for ModuleIndex {
             crate::util::ghost_stats::count("caller_slice.unkept");
             return CallerRead::cut(&self.whole_present(cached), key);
         };
-        let cut_from = || if persisted { self.whole_ungated(cached) } else { self.whole_present(cached) };
+        let cut_from = || if persisted { self.whole_undecided(cached) } else { self.whole_present(cached) };
         let cache = &self.core.caller_slices;
         let path_str = path.to_string_lossy();
         // Only what neither memory nor the store holds is cut, and only the
@@ -638,7 +669,7 @@ impl CrossFileLookup for ModuleIndex {
             self.core.caller_slices.keep_slice(&cached.path, key, stamp, Arc::clone(&wider.slice));
             return wider;
         }
-        let wider = read.widened(&self.whole_ungated(cached), key, misses);
+        let wider = read.widened(&self.whole_undecided(cached), key, misses);
         let cache = &self.core.caller_slices;
         cache.keep_slice(&cached.path, key, stamp, Arc::clone(&wider.slice));
         if let Some(body) = crate::index::module_cache::encode_slice_body(&*wider.slice) {
@@ -658,17 +689,22 @@ impl CrossFileLookup for ModuleIndex {
 
     fn whole_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
         crate::model::witnesses::engine::note_file(self, &cached.path);
-        if let Some(v) = self.gate_applied(cached) {
+        if let Some(v) = self.decided_view(cached) {
             return v;
         }
-        self.whole_ungated(cached)
+        self.whole_undecided(cached)
     }
 
     fn symbols_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
-        crate::model::witnesses::engine::note_file(self, &cached.path);
-        if let Some(v) = self.gate_applied(cached) {
+        if let Some(v) = self.decided_view(cached) {
+            crate::model::witnesses::engine::note_file(self, &cached.path);
             return v;
         }
+        self.symbols_undecided(cached)
+    }
+
+    fn symbols_undecided(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
+        crate::model::witnesses::engine::note_file(self, &cached.path);
         // The @INC strip is bag-only, so import-tier copies (the MRO
         // walk's ancestor set) answer resident; workspace copies are
         // symbol-evicted and rehydrate through the rows-axes lane —
@@ -682,7 +718,7 @@ impl CrossFileLookup for ModuleIndex {
 
     fn refs_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
         crate::model::witnesses::engine::note_file(self, &cached.path);
-        if let Some(v) = self.gate_applied(cached) {
+        if let Some(v) = self.decided_view(cached) {
             return v;
         }
         // Backward-walk view: refs AND symbols usable (the matcher reads
@@ -782,9 +818,7 @@ impl CrossFileLookup for ModuleIndex {
                 })
             },
         );
-        member_prefilter_may_declare(
-            !cached.analysis().plugin.gated_emissions.is_empty(),
-            rows,
+        member_prefilter_may_declare(rows,
         )
     }
 
@@ -858,9 +892,7 @@ impl CrossFileLookup for ModuleIndex {
                 }
             })
         });
-        member_prefilter_may_declare(
-            !cached.analysis().plugin.gated_emissions.is_empty(),
-            rows,
+        member_prefilter_may_declare(rows,
         )
     }
 
@@ -1020,7 +1052,7 @@ impl CrossFileLookup for ModuleIndex {
 
     fn bag_present(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
         crate::model::witnesses::engine::note_file(self, &cached.path);
-        if let Some(v) = self.gate_applied(cached) {
+        if let Some(v) = self.decided_view(cached) {
             return v;
         }
         // Never-evicted copy (open docs, degraded files kept whole): a cheap
@@ -1293,18 +1325,10 @@ impl ModuleIndex {
 /// `sym_member_row_exists` behind `with_rows_conn`: outer `None` = no store,
 /// inner `None` = file never shredded.
 ///
-/// The ONLY skip is (no post-shred emissions, store present, file covered,
-/// provably no matching row). Deferred plugin emissions materialize into the
-/// resident copy AFTER the shred (`materialize_gated_emissions`), so their
-/// symbols have no rows — a file carrying any must fail open or a DBIC result
-/// class's synthesized accessors silently stop resolving.
-pub(crate) fn member_prefilter_may_declare(
-    has_gated_emissions: bool,
-    rows: Option<Option<bool>>,
-) -> bool {
-    if has_gated_emissions {
-        return true;
-    }
+/// The ONLY skip is (store present, file covered, provably no matching
+/// row). A held reading's symbol has its row whether or not a view picks it
+/// (`sym_row_seeds`), so a row's absence holds for every view.
+pub(crate) fn member_prefilter_may_declare(rows: Option<Option<bool>>) -> bool {
     !matches!(rows, Some(Some(false)))
 }
 
@@ -1318,30 +1342,21 @@ mod member_prefilter_tests {
     #[test]
     fn only_proven_absence_skips() {
         assert!(
-            member_prefilter_may_declare(false, None),
+            member_prefilter_may_declare(None),
             "no row store: the filter cannot speak, decode"
         );
         assert!(
-            member_prefilter_may_declare(false, Some(None)),
+            member_prefilter_may_declare(Some(None)),
             "file never shredded: the store does not cover it, decode"
         );
         assert!(
-            member_prefilter_may_declare(false, Some(Some(true))),
+            member_prefilter_may_declare(Some(Some(true))),
             "a matching row: the decode is warranted"
         );
         assert!(
-            !member_prefilter_may_declare(false, Some(Some(false))),
+            !member_prefilter_may_declare(Some(Some(false))),
             "covered and provably absent: the one skip"
         );
-    }
-
-    /// Post-shred plugin emissions beat everything: their symbols exist only
-    /// on the materialized resident copy, so the rows' "provably absent" is
-    /// a lie for exactly these files.
-    #[test]
-    fn gated_emissions_fail_open_over_a_provably_absent_row() {
-        assert!(member_prefilter_may_declare(true, Some(Some(false))));
-        assert!(member_prefilter_may_declare(true, None));
     }
 }
 
@@ -1406,15 +1421,13 @@ impl ModuleIndex {
         };
         // A stripped copy registers only after its chunk (blob AND rows)
         // commits, so its absence from the set is a per-file probe's
-        // `Some(false)`; resident and gated copies fail open as there.
+        // `Some(false)`; resident copies fail open as there.
         cands
             .iter()
             .map(|c| {
                 let a = c.analysis();
                 !a.symbols_are_evicted()
-                    || member_prefilter_may_declare(
-                        !a.plugin.gated_emissions.is_empty(),
-                        Some(Some(hits.contains(c.path.to_string_lossy().as_ref()))),
+                    || member_prefilter_may_declare(Some(Some(hits.contains(c.path.to_string_lossy().as_ref()))),
                     )
             })
             .collect()
@@ -1431,15 +1444,15 @@ struct SliceKeeping {
 impl ModuleIndex {
     /// An open buffer's slices are kept in memory under its overlay version
     /// (its text's, or one per publish); a disk file's under its source
-    /// stamp, in the store too. A gated disk view is rebuilt per fired set,
-    /// so it is kept nowhere.
+    /// stamp, in the store too. A file holding readings is read through a
+    /// view rebuilt per picks, so its slices are kept nowhere.
     fn slice_keeping(&self, cached: &Arc<CachedModule>) -> Option<SliceKeeping> {
         if let Some(open) = self.core.open_callers.get(&cached.path) {
             if Arc::ptr_eq(&open.1, cached) {
                 return Some(SliceKeeping { stamp: open.0, persisted: false });
             }
         }
-        if !cached.analysis().plugin.gated_emissions.is_empty() {
+        if !cached.analysis().readings.is_empty() {
             return None;
         }
         self.source_stamp(&cached.path).map(|stamp| SliceKeeping { stamp, persisted: true })

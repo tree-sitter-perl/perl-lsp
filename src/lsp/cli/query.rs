@@ -270,7 +270,7 @@ fn cli_open_document(file: &str, idx: &module_index::ModuleIndex) -> document::D
         eprintln!("Parse failed: {}", file);
         super::exit_with(1, "exit");
     }));
-    if let Some(applied) = tphase!("condition", doc.built.with_holding_gates(idx)) {
+    if let Some(applied) = tphase!("condition", doc.built.decided_with(idx)) {
         doc.analysis = std::sync::Arc::new(applied);
     }
     doc
@@ -280,7 +280,7 @@ fn cli_open_document(file: &str, idx: &module_index::ModuleIndex) -> document::D
 /// whole of what a CLI-built origin owes the index after its build (the
 /// server's `OpenDocs::condition_open`).
 fn condition(analysis: &mut file_analysis::FileAnalysis, idx: &module_index::ModuleIndex) {
-    if let Some(applied) = analysis.with_holding_gates(idx) {
+    if let Some(applied) = analysis.decided_with(idx) {
         *analysis = applied;
     }
 }

@@ -76,18 +76,18 @@ impl SymbolTable {
         self.by_scope.get(&scope).map_or(&[], |v| v.as_slice())
     }
 
-    /// Every symbol's relational row seed, in symbol order. The two
+    /// Every symbol's relational row seed, then every held reading's: a
+    /// row is a candidate, so a name some view shows is listed. The two
     /// analysis-level predicates are injected because they read tables
     /// this one doesn't own — linkage visibility needs the declaring
     /// scope's kind, exportedness the `@EXPORT`/`@EXPORT_OK` surface.
-    pub fn row_seeds(
-        &self,
+    pub fn row_seeds_of<'s>(
+        symbols: impl Iterator<Item = &'s Symbol>,
         names: &NameSpellings,
         linkage_visible: impl Fn(&Symbol) -> bool,
         exported: impl Fn(&str) -> bool,
     ) -> Vec<SymRowSeed> {
-        self.symbols
-            .iter()
+        symbols
             .map(|s| {
                 let mut flags = 0u8;
                 if linkage_visible(s) {
@@ -118,7 +118,7 @@ impl SymbolTable {
     pub fn rebuild_indices(&mut self) {
         self.by_name.clear();
         self.by_scope.clear();
-        for sym in &self.symbols {
+        for sym in self.symbols.iter().filter(|s| s.kind != SymKind::Dormant) {
             self.by_name.entry(sym.name.clone()).or_default().push(sym.id);
             self.by_scope.entry(sym.scope).or_default().push(sym.id);
         }
@@ -233,7 +233,14 @@ impl FileAnalysis {
     /// surface the Surface projection does (`exports_name` →
     /// `export_lookup`), so "exported" never drifts between the two.
     pub fn sym_row_seeds(&self) -> Vec<SymRowSeed> {
-        self.symbols
-            .row_seeds(&self.pack.names, |s| self.is_linkage_visible(s), |n| self.exports_name(n))
+        // A held slot's base entry is one of its readings: seed it once.
+        let held: HashSet<SymbolId> = self.readings.live_symbols().map(|s| s.id).collect();
+        let own = self.symbols.iter().filter(|s| s.kind != SymKind::Dormant && !held.contains(&s.id));
+        SymbolTable::row_seeds_of(
+            own.chain(self.readings.live_symbols()),
+            &self.pack.names,
+            |s| self.is_linkage_visible(s),
+            |n| self.exports_name(n),
+        )
     }
 }

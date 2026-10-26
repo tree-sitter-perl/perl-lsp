@@ -128,12 +128,13 @@ pub fn put_caller_slices(conn: &Connection, rows: &[CallerSliceRow]) -> rusqlite
 
 /// Every row of `fa` — its frame and each call name's slice — cut while the
 /// indexer holds the whole analysis, so no caller read decodes the file's
-/// bag to cut one. Empty for a gated view (rebuilt per fired set) or an
-/// unstamped analysis, which readers cut and never keep.
+/// bag to cut one. Empty for a file holding readings (read through a view
+/// rebuilt per picks) or an unstamped analysis, which readers cut and never
+/// keep.
 pub fn caller_slice_rows(path: &str, fa: &crate::model::file_analysis::FileAnalysis) -> Vec<CallerSliceRow> {
     use crate::model::witnesses::caller_slice::{CallerFrame, CallerSlice};
     let stamp = fa.source_stamp;
-    if stamp == 0 || !fa.plugin.gated_emissions.is_empty() {
+    if stamp == 0 || !fa.readings.is_empty() {
         return Vec::new();
     }
     let frame = CallerFrame::of(fa);

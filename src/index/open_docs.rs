@@ -143,7 +143,7 @@ impl OpenDocs {
             let doc = self.open.get(url)?;
             (Arc::clone(&doc.built), Arc::clone(&doc.analysis))
         };
-        let view = match built.with_holding_gates(idx) {
+        let view = match built.decided_with(idx) {
             Some(applied) => Arc::new(applied),
             None => Arc::clone(&built),
         };

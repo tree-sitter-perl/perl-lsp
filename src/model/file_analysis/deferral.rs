@@ -20,6 +20,9 @@ pub enum Question {
     NamesClass(ElsewhereClass),
     /// `meth Class(ARGS)` is `Class->meth(ARGS)` (`IndirectSite`).
     IndirectCall(IndirectSite),
+    /// `package` descends from a class under any of `prefixes` — a
+    /// plugin's `ClassIsa` trigger the file alone did not fire.
+    ClassIsaPrefix { package: String, prefixes: Vec<String> },
 }
 
 /// How a `ReceiverIsa` question names its receiver.
@@ -100,6 +103,7 @@ impl Question {
             Question::PackageIsa { .. } => "deferral.decide.package_isa",
             Question::NamesClass(_) => "deferral.decide.names_class",
             Question::IndirectCall(_) => "deferral.decide.indirect_call",
+            Question::ClassIsaPrefix { .. } => "deferral.decide.class_isa_prefix",
         };
         crate::util::ghost_stats::count(tag);
         crate::util::ghost_stats::timed(tag, || self.decide_untimed(facts))
@@ -129,7 +133,7 @@ impl Question {
                             .def_candidates(identity)
                             .read()
                             .iter()
-                            .any(|c| declares_class(ix.symbols_present(c).symbols(), identity));
+                            .any(|c| declares_class(ix.symbols_undecided(c).symbols(), identity));
                         if elsewhere { Verdict::Yes } else { Verdict::No }
                     }
                     None => Verdict::Unknown,
@@ -139,6 +143,12 @@ impl Question {
                 Some(ix) => site.decide(ix),
                 None => Verdict::Unknown,
             },
+            Question::ClassIsaPrefix { package, prefixes } => {
+                let holds = prefixes
+                    .iter()
+                    .any(|prefix| class_isa_prefix(package, prefix, facts.parents(), facts.index()));
+                if holds { Verdict::Yes } else { Verdict::No }
+            }
         }
     }
 
@@ -146,7 +156,7 @@ impl Question {
     pub fn when_unknown(&self) -> Fallback {
         match self {
             Question::ReceiverIsa { .. } | Question::PackageIsa { .. } => Fallback::Neither,
-            Question::NamesClass(_) => Fallback::Otherwise,
+            Question::NamesClass(_) | Question::ClassIsaPrefix { .. } => Fallback::Otherwise,
             Question::IndirectCall(site) => site.undecided,
         }
     }
@@ -239,7 +249,7 @@ impl IndirectSite {
             ix.def_candidates(&self.class)
                 .read()
                 .iter()
-                .any(|c| declares_class(ix.symbols_present(c).symbols(), &self.class))
+                .any(|c| declares_class(ix.symbols_undecided(c).symbols(), &self.class))
         };
         if self.class_named || declared_elsewhere() {
             Verdict::Yes
@@ -375,6 +385,7 @@ impl ProvisionalDispatch {
             Question::ReceiverIsa { class, .. } | Question::PackageIsa { class, .. } => class,
             Question::NamesClass(c) => c.identity(),
             Question::IndirectCall(site) => site.class(),
+            Question::ClassIsaPrefix { package, .. } => package,
         }
     }
 }

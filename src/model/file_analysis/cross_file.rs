@@ -749,6 +749,15 @@ pub trait CrossFileLookup {
     ) -> std::sync::Arc<FileAnalysis> {
         self.whole_present(cached)
     }
+    /// The symbols axis with every question at its fallback — what a
+    /// decider reads, so deciding one file never builds another's view
+    /// (two files whose questions read each other would recurse).
+    fn symbols_undecided(
+        &self,
+        cached: &std::sync::Arc<CachedModule>,
+    ) -> std::sync::Arc<FileAnalysis> {
+        self.symbols_present(cached)
+    }
     /// A sweep-scoped cross-file consult verdict: "what did candidate `path`
     /// contribute to this (point-free) query". `None` = not remembered.
     /// The default remembers nothing — only an index under an open sweep
@@ -1574,6 +1583,12 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
         // residency answer (the default would re-route to OUR whole_present,
         // losing the symbols-resident fast path).
         self.inner.symbols_present(cached)
+    }
+    fn symbols_undecided(
+        &self,
+        cached: &std::sync::Arc<CachedModule>,
+    ) -> std::sync::Arc<FileAnalysis> {
+        self.inner.symbols_undecided(cached)
     }
     fn refs_present(
         &self,

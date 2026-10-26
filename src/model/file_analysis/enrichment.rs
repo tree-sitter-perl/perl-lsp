@@ -1,150 +1,18 @@
-//! Deferred plugin emissions (applied by the index's gate-applied view),
-//! query-time dispatch/guard resolution, and the index rebuild after symbols
-//! are appended.
+//! Query-time dispatch/guard resolution, and the index rebuild after a
+//! decided view swaps held slots.
 
 use super::*;
 
 impl FileAnalysis {
-    /// Which deferred plugin emissions fire NOW: `fired[i]` when any of
-    /// `gated_emissions[i]`'s `ClassIsa` prefixes holds through the index's
-    /// ancestry. Asked at every read, never stored, so an ancestry edit
-    /// anywhere moves it with nothing to invalidate.
-    pub fn fired_gates(&self, module_index: &dyn CrossFileLookup) -> Vec<bool> {
-        self.plugin
-            .gated_emissions
-            .iter()
-            .map(|em| {
-                em.gate_prefixes.iter().any(|prefix| {
-                    class_isa_prefix(&em.package, prefix, &self.packages, Some(module_index))
-                })
-            })
-            .collect()
-    }
-
-    /// This analysis with the emissions whose gate holds applied, or `None`
-    /// when none fire — the open-document twin of the index's gate-applied
-    /// view, for an analysis the index does not hold.
-    pub fn with_holding_gates(&self, module_index: &dyn CrossFileLookup) -> Option<FileAnalysis> {
-        if self.plugin.gated_emissions.is_empty() {
-            return None;
-        }
-        let fired = self.fired_gates(module_index);
-        if !fired.iter().any(|f| *f) {
-            return None;
-        }
-        let mut copy = self.clone();
-        copy.apply_fired_gated_emissions(&fired);
-        Some(copy)
-    }
-
-    /// Test seam for an origin built outside an `OpenDocs`: apply the gates
-    /// that hold, as `OpenDocs::condition_open` does for an open doc.
+    /// Test seam for an origin built outside an `OpenDocs`: install the
+    /// readings its questions pick, as `OpenDocs::condition_open` does for
+    /// an open doc.
     #[cfg(test)]
     pub fn condition_with(&mut self, module_index: &dyn CrossFileLookup) {
-        if let Some(applied) = self.with_holding_gates(module_index) {
-            *self = applied;
+        if let Some(view) = self.decided_with(module_index) {
+            *self = view;
         }
     }
-
-    /// Apply the deferred plugin emissions whose gate the caller found
-    /// holding (`fired[i]` for `gated_emissions[i]`), then rebuild the
-    /// name/scope indices so the new symbols are findable. The index's
-    /// gate-applied view is the one caller: it asks the gates, this only
-    /// mints.
-    pub fn apply_fired_gated_emissions(&mut self, fired: &[bool]) {
-        self.apply_fired_gated_emissions_raw(fired);
-        self.rebuild_appended_indices();
-    }
-
-    fn apply_fired_gated_emissions_raw(&mut self, fired: &[bool]) {
-        if self.plugin.gated_emissions.is_empty() {
-            return;
-        }
-        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        // Snapshot: the borrow of `self.plugin.gated_emissions` can't overlap the
-        // `&mut self` symbol/ref/witness pushes below.
-        let emissions = std::mem::take(&mut self.plugin.gated_emissions);
-        for (i, em) in emissions.iter().enumerate() {
-            if !fired.get(i).copied().unwrap_or(false) {
-                continue;
-            }
-            let scope = self.scope_at(em.scope_point).unwrap_or(ScopeId(0));
-            let ns = Namespace::framework(em.plugin_id.clone());
-            for gs in &em.symbols {
-                let pkg = gs.on_class.clone().or_else(|| Some(em.package.clone()));
-                // Same dedup the builder's `apply_emit_action` runs: never
-                // stack a second identical synthesized symbol.
-                let dup = self.symbols.iter().any(|s| {
-                    s.name == gs.name
-                        && s.kind == gs.kind
-                        && s.package == pkg
-                        && s.namespace == ns
-                });
-                if dup {
-                    continue;
-                }
-                let id = SymbolId(self.symbols.len() as u32);
-                self.symbols.push(Symbol {
-                    id,
-                    name: gs.name.clone(),
-                    kind: gs.kind,
-                    span: gs.span,
-                    selection_span: gs.selection_span,
-                    scope,
-                    package: pkg.clone(),
-                    detail: gs.detail.clone(),
-                    namespace: ns.clone(),
-                    presentation: gs.presentation.clone(),
-                    attributes: Vec::new(),
-                    flags: Default::default(),
-                    declared_with: None,
-                    deref_stack: Vec::new(),
-                    arity: None,
-                });
-                if let Some(rt) = &gs.return_type {
-                    // Plugin-priority `Symbol(sid) → InferredType`, matching
-                    // the builder's Method emit. Class-scoped methods also get
-                    // the `PackageSymbol{package,name} → Edge(Symbol(sid))`
-                    // mirror the fold writeback would have pushed, so cross-
-                    // file return-type queries resolve the relationship shape.
-                    self.witnesses.push(Witness {
-                        attachment: WitnessAttachment::Symbol(id),
-                        source: WitnessSource::Plugin(em.plugin_id.clone()),
-                        payload: WitnessPayload::InferredType(rt.clone()),
-                        span: gs.span,
-                    });
-                    if matches!(gs.kind, SymKind::Method | SymKind::Sub) {
-                        if let Some(class) = &pkg {
-                            self.witnesses.push(Witness {
-                                attachment: WitnessAttachment::PackageSymbol {
-                                    package: class.clone(),
-                                    name: gs.name.clone(),
-                                },
-                                source: WitnessSource::Plugin(em.plugin_id.clone()),
-                                payload: WitnessPayload::Edge(WitnessAttachment::Symbol(id)),
-                                span: gs.span,
-                            });
-                        }
-                    }
-                }
-            }
-            for gr in &em.refs {
-                self.refs.push(Ref {
-                    kind: gr.kind.clone(),
-                    span: gr.span,
-                    scope,
-                    target_name: gr.target_name.clone(),
-                    access: gr.access,
-                    binding: crate::model::file_analysis::Binding::from(gr.binding.clone()),
-                    folded_from: None,
-                    arg_count: None,
-                });
-            }
-        }
-        self.plugin.gated_emissions = emissions;
-    }
-
-
 }
 
 impl FileAnalysis {
@@ -448,15 +316,11 @@ impl FileAnalysis {
     }
 
 
-    /// Rebuild the indices affected by enrichment (symbols, the ref
-    /// name/target lookups, HashKeyAccess linkage).
-    ///
-    /// Enrichment re-owns HashKeyAccess refs (dropping their stale
-    /// HashKeyDef links) and gated emissions can mint symbols. This
-    /// method re-runs the same `(target_name, owner)` linker that
-    /// `build_indices` uses, so the ref→target index stays accurate after a
-    /// cross-file hash-key binding resolves.
-    fn rebuild_appended_indices(&mut self) {
+    /// Rebuild the table indices after a view swapped held slots, and link
+    /// the HashKeyAccess refs the swap left unresolved to the HashKeyDefs it
+    /// installed — the same `(target_name, owner)` linker `build_indices`
+    /// runs.
+    pub fn rebuild_decided_indices(&mut self) {
         self.symbols.rebuild_indices();
 
         // Re-link HashKeyAccess refs to (possibly newly-injected) HashKeyDef
@@ -485,7 +349,7 @@ impl FileAnalysis {
             self.refs[idx].link_owned_symbol(sid);
         }
 
-        self.refs.refresh_name_target_indices(&self.pack.names);
+        self.refs.rebuild_indices(&self.pack.names);
     }
 
 

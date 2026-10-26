@@ -162,6 +162,56 @@ impl<'a> Builder<'a> {
         Some((io, IndirectReading::Deferred(site)))
     }
 
+    /// The head refs of both readings of a deferred `meth Class(ARGS)`:
+    /// `Class->meth(ARGS)`'s method call and package, `meth(Class(ARGS))`'s
+    /// two function calls. The walk mints the undecided reading's as usual;
+    /// these let the assembled analysis hold each under its arm. The
+    /// arguments are the same in both readings, so only the heads differ.
+    pub(super) fn hold_indirect_heads(
+        &mut self,
+        node: Node<'a>,
+        io: crate::cst::IndirectObjectCall<'a>,
+        site: crate::model::file_analysis::IndirectSite,
+    ) {
+        let (Ok(verb), Ok(class)) = (io.method.utf8_text(self.source), io.class.utf8_text(self.source)) else {
+            return;
+        };
+        let (verb, class) = (verb.to_string(), class.to_string());
+        let scope = self.current_scope();
+        let class_span = node_to_span(io.class);
+        let head = |kind: RefKind, span: Span, target_name: &str, binding: Option<RefBinding>| Ref {
+            kind,
+            span,
+            scope,
+            target_name: target_name.to_string(),
+            access: AccessKind::Read,
+            binding: binding.into(),
+            folded_from: None,
+            arg_count: None,
+        };
+        let method = vec![
+            head(
+                RefKind::MethodCall {
+                    invocant: crate::model::conventions::Invocant::assume_canonical(class.clone()),
+                    invocant_span: Some(class_span),
+                    method_name_span: node_to_span(io.method),
+                    member_op: None,
+                    named_by_string: false,
+                },
+                node_to_span(node),
+                &verb,
+                None,
+            ),
+            head(RefKind::PackageRef, class_span, &class, None),
+        ];
+        let pin = |name: &str| self.resolve_call_package(name).map(|package| RefBinding::Function { package });
+        let function = vec![
+            head(RefKind::FunctionCall, crate::cst::fq_tail_span(io.method, &verb), &verb, pin(&verb)),
+            head(RefKind::FunctionCall, crate::cst::fq_tail_span(io.class, &class), &class, pin(&class)),
+        ];
+        self.held_indirect.push(crate::model::file_analysis::IndirectHeads { site, method, function });
+    }
+
     /// An indirect-object call is a method call on its class: the same
     /// `MethodCall` ref, receiver and arguments `Class->meth(ARGS)` mints, so
     /// typing, navigation and diagnostics read one shape.

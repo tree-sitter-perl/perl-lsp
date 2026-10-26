@@ -505,11 +505,13 @@ struct Builder<'a> {
     /// enrichment once the receiver's cross-file class is known. See
     /// `file_analysis::ProvisionalDispatch`.
     provisional_dispatches: Vec<crate::model::file_analysis::ProvisionalDispatch>,
-    /// Plugin pattern emissions deferred because a `ClassIsa` trigger
-    /// couldn't be confirmed against LOCAL ancestry at build (rule #1). Each
-    /// is re-fired at enrichment when the package's ancestry resolves the
-    /// gate prefix cross-file. See `file_analysis::GatedEmission`.
+    /// Plugin pattern emissions whose `ClassIsa` trigger LOCAL ancestry
+    /// could not confirm (rule #1), held as readings once the analysis is
+    /// assembled (`FileAnalysis::hold_gated_emission`).
     gated_emissions: Vec<crate::model::file_analysis::GatedEmission>,
+    /// Both readings' head refs at each deferred `meth Class(ARGS)`, held
+    /// once the analysis is assembled (`FileAnalysis::hold_indirect`).
+    held_indirect: Vec<crate::model::file_analysis::IndirectHeads>,
     /// `param_types()` role-contract TCs, emitted ungated at the sub walk and
     /// gated on the enclosing package's `isa in_role` (checked cross-file at
     /// query time). See `FileAnalysis::gated_param_types`.

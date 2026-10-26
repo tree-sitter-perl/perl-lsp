@@ -427,7 +427,7 @@ impl DiagCtx {
             (
                 doc.baseline_surface.clone()?,
                 Arc::clone(&doc.analysis),
-                doc.built.plugin.gated_emissions.is_empty(),
+                doc.built.readings.is_empty(),
             )
         };
         let path = uri.to_file_path().ok()?;

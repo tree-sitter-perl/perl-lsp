@@ -242,6 +242,9 @@ impl<'a> Builder<'a> {
             self.queue_children(node);
             return;
         }
+        if let Some((io, site)) = self.indirect_deferred(node) {
+            self.hold_indirect_heads(node, io, site);
+        }
         if let Some(io) = self.indirect_method_call(node) {
             self.visit_indirect_method_call(node, io);
             return;

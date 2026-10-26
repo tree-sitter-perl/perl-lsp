@@ -163,9 +163,17 @@ impl Surface {
         let mut free_methods: Vec<MethodSurface> = Vec::new();
         // One pass over the (few) HashKeyDef symbols instead of an
         // O(symbols) scan per sub — projection runs per registration.
-        let hash_key_defs: Vec<&crate::model::file_analysis::Symbol> = feed
+        // A held slot's base entry is one of its readings: list it once.
+        let held: std::collections::HashSet<_> = feed.held_symbols.iter().map(|s| s.id).collect();
+        let symbols: Vec<&crate::model::file_analysis::Symbol> = feed
             .symbols
             .iter()
+            .filter(|s| s.kind != SymKind::Dormant && !held.contains(&s.id))
+            .chain(feed.held_symbols.iter().copied())
+            .collect();
+        let hash_key_defs: Vec<&crate::model::file_analysis::Symbol> = symbols
+            .iter()
+            .copied()
             .filter(|s| {
                 matches!(s.detail, crate::model::file_analysis::SymbolDetail::HashKeyDef { .. })
             })
@@ -199,7 +207,7 @@ impl Surface {
             entry.parents = parents;
             entry.is_role = *is_role;
         }
-        for sym in feed.symbols {
+        for sym in symbols {
             match sym.kind {
                 SymKind::Package | SymKind::Class | SymKind::Module => {
                     by_pkg.entry(sym.name.clone()).or_insert_with(|| PackageSurface {

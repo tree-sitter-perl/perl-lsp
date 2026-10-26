@@ -56,6 +56,8 @@ fn fa_sym_kind_to_lsp(kind: &FaSymKind) -> SymbolKind {
         // conservative default.
         FaSymKind::Handler => SymbolKind::EVENT,
         FaSymKind::Namespace => SymbolKind::NAMESPACE,
+        // Never listed: the outline and symbol sweeps skip held slots.
+        FaSymKind::Dormant => SymbolKind::NULL,
     }
 }
 

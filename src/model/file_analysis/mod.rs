@@ -30,6 +30,8 @@ mod dispatch;
 pub use dispatch::*;
 mod deferral;
 pub use deferral::*;
+mod readings;
+pub use readings::*;
 mod imports;
 pub use imports::*;
 mod outline;
@@ -200,6 +202,11 @@ pub struct FileAnalysis {
     /// See `docs/adr/receiver-gated-dispatch.md` (Phase 2).
     #[serde(default)]
     pub gated_param_types: Vec<Deferred<TypeConstraint>>,
+    /// Symbols, refs and witnesses that hold only under one answer to a
+    /// question other files decide (`readings.rs`). The base tables show
+    /// each question's fallback; `decided` installs a view's picks.
+    #[serde(default)]
+    pub readings: Readings,
     #[serde(default)]
     pub attr_projections: Vec<AttrProjection>,
 

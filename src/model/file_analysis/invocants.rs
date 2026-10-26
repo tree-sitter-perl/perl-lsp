@@ -17,6 +17,8 @@ impl FileAnalysis {
         // Check refs first
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
+                // `ref_at` never lands on a held slot.
+                RefKind::Dormant => {}
                 RefKind::Variable | RefKind::ContainerAccess => {
                     if let Some(sym_id) = r.resolved_symbol() {
                         return Some((sym_id, true));

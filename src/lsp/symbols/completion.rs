@@ -15,6 +15,7 @@ pub(crate) fn fa_completion_kind(kind: &FaSymKind) -> CompletionItemKind {
         FaSymKind::HashKeyDef => CompletionItemKind::PROPERTY,
         FaSymKind::Handler => CompletionItemKind::EVENT,
         FaSymKind::Namespace => CompletionItemKind::MODULE,
+        FaSymKind::Dormant => CompletionItemKind::TEXT,
     }
 }
 

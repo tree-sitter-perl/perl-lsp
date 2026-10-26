@@ -164,26 +164,25 @@ pub(crate) struct IndexCore {
     /// cache; absent on an index with no store, which simply keeps decoding.
     pub(crate) conclusion_cache:
         Arc<std::sync::RwLock<Option<Arc<crate::index::conclusion_cache::ConclusionCache>>>>,
-    /// Gate-applied views of files carrying deferred plugin emissions: the
-    /// whole analysis with exactly the emissions whose `ClassIsa` gate holds
-    /// NOW applied. Keyed by path; an entry is reused only while the file's
-    /// registration generation AND the fired set both still match, so an
-    /// ancestry change anywhere re-derives at the next read and nothing has
-    /// to remember to invalidate it. Count-capped (`GATED_VIEW_CAP`).
-    pub(crate) gated_views: DashMap<std::path::PathBuf, GatedView>,
+    /// Decided views of files holding readings (`readings.rs`): the whole
+    /// analysis with the picks its questions answer NOW installed. Keyed by
+    /// path; an entry is reused only while the file's registration
+    /// generation AND the picks both still match, so a change anywhere that
+    /// moves a verdict re-derives at the next read and nothing has to
+    /// remember to invalidate it. Count-capped (`DECIDED_VIEW_CAP`).
+    pub(crate) decided_views: DashMap<std::path::PathBuf, DecidedView>,
 }
 
-/// One gate-applied view (see `IndexCore::gated_views`).
-pub(crate) struct GatedView {
+/// One decided view (see `IndexCore::decided_views`).
+pub(crate) struct DecidedView {
     pub(crate) generation: u64,
-    pub(crate) fired: Vec<bool>,
+    pub(crate) picks: crate::model::file_analysis::Picks,
     pub(crate) view: Arc<FileAnalysis>,
 }
 
-/// How many gate-applied whole copies stay resident. Each is a whole
-/// analysis; only files whose plugin emissions are gated on cross-file
-/// ancestry (DBIC result classes) ever get one.
-pub(crate) const GATED_VIEW_CAP: usize = 512;
+/// How many decided whole copies stay resident. Only a file whose picks
+/// differ from its fallbacks ever gets one.
+pub(crate) const DECIDED_VIEW_CAP: usize = 512;
 
 impl IndexCore {
     pub(crate) fn new() -> Self {
@@ -229,7 +228,7 @@ impl IndexCore {
             long_lived: std::sync::atomic::AtomicBool::new(false),
             bag_cache: std::sync::RwLock::new(None),
             conclusion_cache: Arc::new(std::sync::RwLock::new(None)),
-            gated_views: DashMap::new(),
+            decided_views: DashMap::new(),
         }
     }
 

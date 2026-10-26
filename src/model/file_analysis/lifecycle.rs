@@ -115,6 +115,7 @@ impl FileAnalysis {
             guard_sites,
             arrow_deref_sites,
             gated_param_types,
+            readings: Readings::default(),
             attr_projections,
             reassigned_scalars,
             key_writes,
@@ -1256,6 +1257,9 @@ impl FileAnalysis {
             + vcap(&self.guard_sites)
             + vcap(&self.arrow_deref_sites)
             + vcap(&self.gated_param_types)
+            + vcap(&self.readings.symbols)
+            + vcap(&self.readings.refs)
+            + vcap(&self.readings.witnesses)
             + vcap(&self.attr_projections)
             + vcap(&self.key_writes)
             + vcap(&self.flow_edges)

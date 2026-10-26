@@ -18,6 +18,9 @@ use super::*;
 /// bypass the classification gate.
 pub struct SurfaceFeed<'a> {
     pub symbols: &'a [Symbol],
+    /// Every held reading's live symbol: a name some view shows is on the
+    /// Surface whichever view another file reads.
+    pub held_symbols: Vec<&'a Symbol>,
     pub packages: &'a HashMap<String, PackageFacts>,
     pub imports: &'a [Import],
     pub plugin_loads: &'a [PluginLoadFact],
@@ -93,7 +96,6 @@ impl FileAnalysis {
                     loads: plugin_loads,
                     app_surface_consumers,
                     diagnostics: _plugin_diagnostics, // own-file diagnostics presentation
-                    gated_emissions: _gated_emissions, // re-fired by this file's OWN enrichment
                     meta_methods: _meta_methods,     // baked registry union — identical for every file under one plugin set, so it is a property of the PLUGIN FINGERPRINT (which already hard-clears the cache), never of this file's cross-file surface
                 },
 
@@ -126,6 +128,7 @@ impl FileAnalysis {
             // policy state: they shape THIS file's answers, not what
             // another file's cached state observes of this file.
             gated_param_types: _gated_param_types, // types this file's own params, query-gated
+            readings, // held symbols project; their verdicts are asked live
             provisional_dispatches: _provisional_dispatches, // this file's call-site candidates; foreign readers resolve them live
             loader_config_params: _loader_config_params, // callee markers joined by this file's OWN enrichment
             framework_imports: _framework_imports, // local diagnostic suppression set
@@ -147,6 +150,7 @@ impl FileAnalysis {
         } = self;
         SurfaceFeed {
             symbols: symbols.as_slice(),
+            held_symbols: readings.live_symbols().collect(),
             packages,
             imports,
             plugin_loads,

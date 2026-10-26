@@ -367,6 +367,7 @@ fn build_once(
         any_requires_action_attr: false,
         provisional_dispatches: Vec::new(),
         gated_emissions: Vec::new(),
+        held_indirect: Vec::new(),
         gated_param_types: Vec::new(),
         method_call_invocant: std::collections::HashMap::new(),
         attr_projections: Vec::new(),
@@ -693,7 +694,6 @@ fn build_once(
             namespaces: b.plugin_namespaces,
             loads: b.plugin_loads,
             diagnostics: b.plugin_diagnostics,
-            gated_emissions: b.gated_emissions,
             app_surface_consumers: b.app_surface_consumers,
             meta_methods: b.meta_methods,
         },
@@ -719,6 +719,17 @@ fn build_once(
         loader_config_params: b.loader_config_params,
         flow_edges: b.flow_edges,
     });
+    // Held slots join the tables before the seals, so every view shares the
+    // base's ids.
+    for em in b.gated_emissions {
+        fa.hold_gated_emission(em);
+    }
+    for heads in b.held_indirect {
+        fa.hold_indirect(heads);
+    }
+    if !fa.readings.is_empty() {
+        fa.rebuild_decided_indices();
+    }
     // Finalize: owner fixup, target stamping, and the base-count seals.
     bphase!("finalize_post_walk", fa.finalize_post_walk());
     fa.source_stamp = crate::model::file_analysis::source_stamp_of(source);

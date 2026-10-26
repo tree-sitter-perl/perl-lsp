@@ -312,7 +312,7 @@ impl FileAnalysis {
                 // per `use GenericCo::Base 'Controller'`), but real ones are noise
                 // too. Modules still drive resolution; they're just not
                 // navigation targets.
-                SymKind::Module => continue,
+                SymKind::Module | SymKind::Dormant => continue,
                 SymKind::Variable => {
                     if self.scope_within_sub_body(sym.scope) { continue; }
                     // A union CONTAINER (named field-union / synthetic
@@ -570,6 +570,7 @@ impl FileAnalysis {
                 RefKind::HashKeyAccess { .. } => {
                     tokens.push(PerlSemanticToken { span: r.span, token_type: TOK_PROPERTY, modifiers: 0 });
                 }
+                RefKind::Dormant => {}
                 RefKind::DispatchCall { .. } => {
                     // Colors dispatch-call event names like property keys —
                     // same visual weight as other named members of a class.

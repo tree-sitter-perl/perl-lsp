@@ -66,6 +66,8 @@ impl FileAnalysis {
         // 1. Check if cursor is on a ref
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
+                // `ref_at` never lands on a held slot.
+                RefKind::Dormant => {}
                 RefKind::Variable => {
                     if let Some(sym_id) = r.resolved_symbol() {
                         return Some(self.symbol(sym_id).selection_span);
@@ -1172,6 +1174,8 @@ impl FileAnalysis {
     pub fn rename_kind_at(&self, point: Point, module_index: Option<&dyn CrossFileLookup>) -> Option<RenameKind> {
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
+                // `ref_at` never lands on a held slot.
+                RefKind::Dormant => {}
                 RefKind::Variable | RefKind::ContainerAccess => return Some(RenameKind::Variable),
                 RefKind::FunctionCall => {
                     // A CORE-bound ref is a builtin call keyword (`shift`,
