@@ -15,6 +15,17 @@ impl<'a> Builder<'a> {
             }
         }
 
+        // A symbolic reference to a constant name (`${"abel"}`, or `${$n}`
+        // with `$n` folded) is the package variable it names — never a
+        // lexical — so its ref is spelled qualified. The block is still
+        // visited below for the refs inside it.
+        let access = self.determine_access(node);
+        for (name, span, folded_from) in self.symbolic_variables(node) {
+            let idx = self.refs.len();
+            self.add_ref(RefKind::Variable, span, name, access);
+            self.refs[idx].folded_from = folded_from;
+        }
+
         // Check for block-based dereference: @{expr}, %{expr}, &{expr}
         // In tree-sitter-perl these parse as array/hash/function with a varname
         // child containing a block. The block holds the real expressions.
@@ -72,7 +83,20 @@ impl<'a> Builder<'a> {
             }
         }
 
-        if let Ok(text) = node.utf8_text(self.source) {
+        // `${name}` IS `$name`: key the ref on the canonical spelling and
+        // anchor it on the bare name token, so rename rewrites inside the
+        // braces and a string's `"${name}s"` keeps them.
+        let spelled = match crate::cst::braced_varname(node) {
+            Some(vn) => crate::cst::canonical_var_name(node, self.source)
+                .zip(vn.utf8_text(self.source).ok())
+                .map(|(name, bare)| (name, crate::cst::fq_tail_span(vn, bare))),
+            None => node
+                .utf8_text(self.source)
+                .ok()
+                .map(|text| (text.to_string(), fq_tail_span(node, text))),
+        };
+        if let Some((text, ref_span)) = spelled {
+            let text = text.as_str();
             let access = self.determine_access(node);
             // A scalar READ anywhere but an element-access base hands the
             // reference to code that may mutate the referent (call arg,
@@ -111,12 +135,11 @@ impl<'a> Builder<'a> {
                 self.escape_recorded.insert(text.to_string());
                 self.record_escape_write(text.to_string(), node);
             }
-            // Fully-qualified read (`$Foo::Bar::x`): narrow the span to the
-            // bare tail (rule #7) so rename rewrites only `x` and the
-            // qualifier survives, mirroring the FQ-call narrowing. The full
+            // Fully-qualified read (`$Foo::Bar::x`): the span is the bare
+            // tail (rule #7) so rename rewrites only `x` and the qualifier
+            // survives, mirroring the FQ-call narrowing. The full
             // `target_name` keeps the path; `qualified_var_target()` decodes
             // `(pkg, sigil+basename)` for cross-package resolution.
-            let ref_span = fq_tail_span(node, text);
             self.add_ref(
                 RefKind::Variable,
                 ref_span,
@@ -124,6 +147,69 @@ impl<'a> Builder<'a> {
                 access,
             );
         }
+    }
+
+    /// The variables a symbolic reference names when its name is a constant:
+    /// `(qualified name, ref span, rename source)` per value, the same shape
+    /// as a const-folded method call. A string literal is its own rewrite
+    /// site. A folded `$n` is not: its ref sits on the `$n` token, which
+    /// rename skips, and a single-literal fold carries the literal as
+    /// `folded_from` for rename to rewrite instead. Unqualified names belong
+    /// to the package in force, as Perl resolves them.
+    fn symbolic_variables(&self, node: Node<'a>) -> Vec<(String, Span, Option<Span>)> {
+        use crate::cst::NodeExt;
+        use crate::model::conventions::{
+            is_special_variable, qualify_var, split_qualified, PERL_SPELLINGS,
+        };
+        let sigil = match node.kind() {
+            "scalar" => '$',
+            "array" => '@',
+            "hash" => '%',
+            _ => return Vec::new(),
+        };
+        let Some(expr) = crate::cst::varname_child(node)
+            .and_then(|vn| vn.named().find(|c| c.kind() == "block"))
+            .and_then(|block| {
+                let mut stmts = block.elements();
+                let stmt = stmts.next().filter(|s| s.kind() == "expression_statement")?;
+                let mut exprs = stmt.elements();
+                let expr = exprs.next()?;
+                (stmts.next().is_none() && exprs.next().is_none()).then_some(expr)
+            })
+        else {
+            return Vec::new();
+        };
+        let (names, span, folded_from) = match expr.kind() {
+            "scalar" => {
+                let Some(var) = crate::cst::canonical_var_name(expr, self.source) else { return Vec::new() };
+                let Some(values) = self.resolve_constant_strings(&var, expr) else { return Vec::new() };
+                let source = (values.len() == 1)
+                    .then(|| self.constant_string_source(&var, expr))
+                    .flatten();
+                (values, node_to_span(expr), source)
+            }
+            _ => match crate::cst::plain_string_literal_text(expr, self.source) {
+                Some(value) => (vec![value], crate::cst::string_content_span(expr), None),
+                None => return Vec::new(),
+            },
+        };
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let (pkg, base) = split_qualified(&name, &PERL_SPELLINGS);
+                if base.is_empty()
+                    || !base.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    || is_special_variable(&format!("{sigil}{base}"))
+                {
+                    return None;
+                }
+                let pkg = match pkg {
+                    Some(pkg) => PERL_SPELLINGS.qualifier_package(pkg),
+                    None => self.current_package.as_deref().unwrap_or_else(|| PERL_SPELLINGS.qualifier_package("")),
+                };
+                Some((qualify_var(sigil, pkg, base, &PERL_SPELLINGS), span, folded_from))
+            })
+            .collect()
     }
 
     /// Sigil-deref of a scalar (`%$x` / `@$x` / `$$x`): the outer sigil node

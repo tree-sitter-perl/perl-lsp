@@ -17,7 +17,7 @@
 //! Rows and answers are (namespace, leaf) parts: the only strings split
 //! here are written spellings, never an identity this code joined.
 
-use super::{contains_point, namespace_range_around, namespace_range_for, NameSpellings, NamespaceRange, Scope, SectionKind, Span};
+use super::{contains_point, innermost_scope_at, lookup_chain, namespace_range_at, NameSpellings, NamespaceRange, Scope, ScopeId, Span};
 use crate::model::conventions::join_qualified as join;
 use serde::{Deserialize, Serialize};
 use tree_sitter::Point;
@@ -63,30 +63,46 @@ impl UseRow {
     }
 }
 
-/// The classes a file declares, asked by identity — what the class-body
-/// step of a resolution reads.
-pub trait DeclaredClasses {
-    fn declares_class(&self, identity: &str) -> bool;
+/// The classes a file declares, asked by the scope each is declared
+/// directly in — what the scope step of a resolution reads.
+pub trait ScopeClasses {
+    fn declares_in(&self, scope: ScopeId, identity: &str) -> bool;
 }
 
-impl DeclaredClasses for Vec<super::Symbol> {
-    fn declares_class(&self, identity: &str) -> bool {
-        self.iter().any(|s| matches!(s.kind, super::SymKind::Package | super::SymKind::Class) && s.name == identity)
+impl ScopeClasses for Vec<super::Symbol> {
+    fn declares_in(&self, scope: ScopeId, identity: &str) -> bool {
+        self.iter().any(|s| {
+            s.scope == scope && matches!(s.kind, super::SymKind::Package | super::SymKind::Class) && s.name == identity
+        })
     }
 }
 
-/// The class body a site is written in (`SectionKind::ClassBody`)
-/// and the file's classes: a bare head the class declares names its nested
-/// class before anything else binds it.
+/// Where a bare head is looked up before the rows: the site's lookup
+/// chain (`lookup_chain`), each scope on it offering the classes declared
+/// directly in it under its own package — the classes nested in a class
+/// whose body the site's code can see (`Inner` in `class Outer:`'s body
+/// is `Outer.Inner`).
 #[derive(Clone, Copy)]
-pub struct ClassBodyStep<'a> {
-    pub class: &'a str,
-    pub classes: &'a dyn DeclaredClasses,
+pub struct ScopeStep<'a> {
+    pub scopes: &'a [Scope],
+    /// The scope the spelling is written in.
+    pub from: ScopeId,
+    pub classes: &'a dyn ScopeClasses,
 }
 
-impl std::fmt::Debug for ClassBodyStep<'_> {
+impl ScopeStep<'_> {
+    fn member_class(&self, head: &str, sep: &str) -> Option<QualifiedName> {
+        lookup_chain(self.scopes, self.from).into_iter().find_map(|id| {
+            let owner = self.scopes[id.0 as usize].package.as_deref()?;
+            let nested = QualifiedName::new(owner, head);
+            self.classes.declares_in(id, &nested.identity(sep)).then_some(nested)
+        })
+    }
+}
+
+impl std::fmt::Debug for ScopeStep<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("ClassBodyStep").field(&self.class).finish()
+        f.debug_tuple("ScopeStep").field(&self.from).finish()
     }
 }
 
@@ -96,9 +112,9 @@ impl std::fmt::Debug for ClassBodyStep<'_> {
 pub struct UseMap<'a> {
     /// The file's `use` rows (`PackFacts::use_rows`).
     pub rows: &'a [UseRow],
-    /// The class body the site is written in, consulted first.
-    pub class_body: Option<ClassBodyStep<'a>>,
-    /// The namespace in force at the site, past any class body.
+    /// The scopes the site's code sees, consulted first.
+    pub scope_step: Option<ScopeStep<'a>>,
+    /// The namespace in force at the site.
     pub own_namespace: Option<&'a str>,
     /// The namespace separator the spellings use (`PackFacts::names`).
     pub sep: &'a str,
@@ -109,29 +125,52 @@ pub struct UseMap<'a> {
 }
 
 impl<'a> UseMap<'a> {
-    /// The map a spelling written at `site` resolves through: the rows
-    /// that reach it, the section in force there — a class body whose
-    /// names the site's lookup chain reaches, then the section around it.
-    /// `None` for a language whose spellings are identities as written.
+    /// The map a spelling written at `site` resolves through: the scopes
+    /// the site's code sees, the rows that reach it, the section in force
+    /// there. `None` for a language whose spellings are identities as
+    /// written.
     pub fn at(
         rows: &'a [UseRow],
         sections: &'a [NamespaceRange],
-        scopes: &[Scope],
+        scopes: &'a [Scope],
         names: &'a NameSpellings,
         site: Point,
-        classes: &'a dyn DeclaredClasses,
+        classes: &'a dyn ScopeClasses,
     ) -> Option<Self> {
-        let sep = names.use_map_sep()?;
-        let class_body = namespace_range_for(sections, scopes, site)
-            .filter(|s| s.kind == SectionKind::ClassBody)
-            .map(|s| ClassBodyStep { class: s.namespace.as_str(), classes });
+        Self::seen_from(rows, sections, scopes, names, site, innermost_scope_at(scopes, site), classes)
+    }
+
+    /// `at`, for a spelling whose scope is a fact of its own rather than
+    /// the innermost one around it — a base class, written in the scope
+    /// its class is declared in.
+    pub fn in_scope(
+        rows: &'a [UseRow],
+        sections: &'a [NamespaceRange],
+        scopes: &'a [Scope],
+        names: &'a NameSpellings,
+        site: Point,
+        from: ScopeId,
+        classes: &'a dyn ScopeClasses,
+    ) -> Option<Self> {
+        Self::seen_from(rows, sections, scopes, names, site, Some(from), classes)
+    }
+
+    fn seen_from(
+        rows: &'a [UseRow],
+        sections: &'a [NamespaceRange],
+        scopes: &'a [Scope],
+        names: &'a NameSpellings,
+        site: Point,
+        from: Option<ScopeId>,
+        classes: &'a dyn ScopeClasses,
+    ) -> Option<Self> {
         Some(UseMap {
             rows,
-            class_body,
-            own_namespace: namespace_range_around(sections, site)
+            scope_step: from.map(|from| ScopeStep { scopes, from, classes }),
+            own_namespace: namespace_range_at(sections, site)
                 .map(|s| s.namespace.as_str())
                 .filter(|ns| !ns.is_empty()),
-            sep,
+            sep: names.use_map_sep()?,
             site: Some(site),
         })
     }
@@ -171,18 +210,14 @@ impl<'a> UseMap<'a> {
         QualifiedName { namespace, leaf: leaf.to_string() }
     }
 
-    /// The class a single bare segment names: a class the enclosing class
-    /// body declares first (`Inner` in `class Outer:`'s body is
-    /// `Outer.Inner`), then an alias, then an unaliased row's leaf — a row
-    /// bound under an alias binds the alias, never its leaf (`use A\Event
-    /// as ScriptEvent` leaves `Event` to the file's own namespace) — then
-    /// the file's own namespace.
+    /// The class a single bare segment names: a class nested in a class
+    /// whose body the site sees first (`ScopeStep`), then an alias, then
+    /// an unaliased row's leaf — a row bound under an alias binds the
+    /// alias, never its leaf (`use A\Event as ScriptEvent` leaves `Event`
+    /// to the file's own namespace) — then the file's own namespace.
     fn bind(&self, head: &str) -> QualifiedName {
-        if let Some(body) = self.class_body {
-            let nested = QualifiedName::new(body.class, head);
-            if body.classes.declares_class(&nested.identity(self.sep)) {
-                return nested;
-            }
+        if let Some(nested) = self.scope_step.and_then(|step| step.member_class(head, self.sep)) {
+            return nested;
         }
         let rows = || self.rows.iter().filter(|r| self.site.is_none_or(|p| r.binds_at(p)));
         rows()

@@ -321,7 +321,7 @@ fn classic_perl_filehandle_fps_suppressed() {
     let module_index = crate::index::module_index::ModuleIndex::new_for_test();
     for src in [
         "print STDERR \"hi\";\n",
-        "printf STDERR \"%s\", $x;\n",
+        "my $x; printf STDERR \"%s\", $x;\n",
         "say STDOUT \"hi\";\n",
         "print DATA;\n",
         "STDOUT->autoflush(1);\n",
