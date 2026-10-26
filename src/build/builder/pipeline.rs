@@ -352,8 +352,9 @@ fn build_once(
         current_package: Some("main".to_string()),
         next_scope_id: 0,
         next_symbol_id: 0,
-        package_ranges: Vec::new(),
-        open_statement_package: None,
+        namespace_ranges: Vec::new(),
+        open_sections: Default::default(),
+        package_regions: Vec::new(),
         plugins,
         dispatch_manifest: std::collections::HashMap::new(),
         load_manifest: std::collections::HashMap::new(),
@@ -373,7 +374,6 @@ fn build_once(
         attr_projections: Vec::new(),
         escape_recorded: std::collections::HashSet::new(),
         role_requires: std::collections::HashMap::new(),
-        contract_symbols: std::collections::HashSet::new(),
         dynamic_parent_packages: std::collections::HashSet::new(),
         dynamic_dispatch_sites: 0,
         role_maker_modules: std::collections::HashSet::new(),
@@ -694,7 +694,7 @@ fn build_once(
             ..Default::default()
         },
         type_provenance: b.type_provenance,
-        package_ranges: b.package_ranges,
+        namespace_ranges: b.namespace_ranges,
         witnesses: b.bag,
         provisional_dispatches: b.provisional_dispatches,
         guard_sites: b.guard_sites,
@@ -703,7 +703,6 @@ fn build_once(
         gated_param_types: b.gated_param_types,
         reassigned_scalars: b.reassigned_scalars,
         key_writes: b.key_writes,
-        contract_symbols: b.contract_symbols,
         dynamic_dispatch_sites: b.dynamic_dispatch_sites,
         dbic_source_name: b.dbic_source_name,
         column_keyed_verbs: b.plugins.column_keyed_verbs().map(|s| s.to_string()).collect(),
@@ -988,11 +987,8 @@ impl<'a> Builder<'a> {
         // module that's the only package in the file.
         let data_start = data.start_position();
         let owner_pkg = self
-            .package_ranges
-            .iter()
-            .rev()
-            .find(|r| crate::model::file_analysis::contains_point(&r.span, data_start))
-            .map(|r| r.package.clone())
+            .package_at_pos(data_start)
+            .map(str::to_string)
             .or_else(|| self.current_package.clone());
 
         let Some(pkg) = owner_pkg else { return };
@@ -1066,12 +1062,8 @@ impl<'a> Builder<'a> {
         for r in self.refs.iter_mut() {
             if matches!(r.kind, RefKind::FunctionCall) {
                 if r.binding.is_none() && synth_names.contains(&r.target_name) {
-                    let in_pkg = self
-                        .package_ranges
-                        .iter()
-                        .rev()
-                        .find(|pr| crate::model::file_analysis::contains_point(&pr.span, r.span.start))
-                        .is_some_and(|pr| pr.package == pkg);
+                    let in_pkg = crate::model::file_analysis::namespace_range_at(&self.namespace_ranges, r.span.start)
+                        .is_some_and(|pr| pr.namespace == pkg);
                     if in_pkg {
                         r.bind_function_package(pkg.clone());
                     }

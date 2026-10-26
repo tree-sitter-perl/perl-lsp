@@ -133,11 +133,8 @@ fn query_skeleton_differential_report() {
                     // recall number speaks only about syntactic defs:
                     // plugin namespace, requires markers, and the
                     // has-accessor projection families.
-                    let sym_id = crate::model::file_analysis::SymbolId(
-                        fa.symbols().iter().position(|s2| std::ptr::eq(s2, sym)).unwrap() as u32,
-                    );
                     let plugin_or_marker = !matches!(sym.namespace, crate::model::file_analysis::Namespace::Language)
-                        || fa.contract_symbols.contains(&sym_id)
+                        || sym.flags.contains(crate::model::file_analysis::SymbolFlags::CONTRACT)
                         || fa.attr_projections.iter().any(|pr| {
                             pr.attr == sym.name
                                 && Some(pr.class.as_str()) == sym.package.as_deref()
@@ -1793,13 +1790,15 @@ void f() {
 }
 ";
     let fa = cpp_skel(src).into_file_analysis();
-    let off = crate::lsp::symbols::pack_diagnostics(&fa, crate::lsp::symbols::DiagnosticOptions::default());
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let off = crate::lsp::symbols::pack_diagnostics(&fa, &idx, crate::lsp::symbols::DiagnosticOptions::default());
     assert!(
         !off.iter().any(|d| matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(s)) if s == "use-after-move")),
         "off by default: {off:?}",
     );
     let on = crate::lsp::symbols::pack_diagnostics(
         &fa,
+        &idx,
         crate::lsp::symbols::DiagnosticOptions { use_after_move: true, ..Default::default() },
     );
     assert!(

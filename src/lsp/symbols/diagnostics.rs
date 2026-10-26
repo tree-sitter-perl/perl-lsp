@@ -16,6 +16,39 @@ pub mod codes {
     pub const HELPER_NOT_LOADED: &str = "helper-not-loaded";
     pub const UNRESOLVED_DISPATCH: &str = "unresolved-dispatch";
     pub const UNKNOWN_HASH_KEY: &str = "unknown-hash-key";
+    pub const RESOLVED_BY_WIDENING: &str = "resolved-by-widening";
+}
+
+/// `resolved-by-widening`: a class reference whose identity nothing indexed
+/// declares, answered by a same-leaf class of another namespace
+/// (`FileAnalysis::widened_class_references`). Always on, because the
+/// widened answer is a guess every class-shaped verb now acts on; the
+/// lookup is the file's own scope, so only a use-map language reaches it.
+pub fn widening_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex) -> Vec<Diagnostic> {
+    use crate::build::language_driver::LanguageRegistry;
+    use crate::model::file_analysis::{CrossFileLookup, PackVisibility, ScopedLookup, VisibilityAxis};
+    let visibility = LanguageRegistry::pack_visibility(&analysis.language);
+    if visibility != PackVisibility::NameKeyed {
+        return Vec::new();
+    }
+    let base: &dyn CrossFileLookup = module_index;
+    let axis = VisibilityAxis::for_origin(analysis, None, base, visibility);
+    let scoped = ScopedLookup::new(base, &analysis.pack.include_closure, None, axis);
+    analysis
+        .widened_class_references(&scoped)
+        .into_iter()
+        .map(|w| Diagnostic {
+            range: span_to_range(w.span),
+            severity: Some(DiagnosticSeverity::INFORMATION),
+            code: Some(NumberOrString::String(codes::RESOLVED_BY_WIDENING.into())),
+            source: Some("perl-lsp".into()),
+            message: format!(
+                "nothing indexed declares `{}`; resolved by its leaf to `{}`",
+                w.named, w.resolved
+            ),
+            ..Default::default()
+        })
+        .collect()
 }
 
 // ---- Diagnostics ----
@@ -547,14 +580,15 @@ pub fn collect_diagnostics(
     // check (docs/adr/role-contracts.md). WARNING, not HINT: Perl
     // dies at composition time for this. Anchored to the `with 'Role'`
     // PackageRef inside the composing package; the package decl is the
-    // fallback (e.g. the parent edge came from a raw `@ISA` push).
+    // fallback (e.g. the parent edge came from a raw `@ISA` push). The
+    // parent edge carries the identity, so the ref's spelling resolves first.
     for u in analysis.unfulfilled_role_requires(Some(module_index)) {
         let span = analysis
             .refs()
             .iter()
             .find(|r| {
                 matches!(r.kind, RefKind::PackageRef)
-                    && r.target_name == u.via_parent
+                    && analysis.spelled_identity(r) == u.via_parent
                     && analysis.package_at(r.span.start) == Some(u.package.as_str())
             })
             .map(|r| r.span)

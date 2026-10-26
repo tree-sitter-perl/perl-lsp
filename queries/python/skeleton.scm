@@ -2,14 +2,21 @@
 ; engine. ~40 lines for outline + lexical typing through the
 ; production witness bag.
 
+; A class is filed under its module's namespace; its body's members file
+; under the class's identity.
 (class_definition
-  name: (identifier) @def.class.name @context.package) @def.class @scope
+  name: (identifier) @def.class.name @context.class) @def.class @scope
 
 ; inheritance: `class Dog(Animal):` → Dog parent Animal (one @parent per
-; base; member completion + method resolution walk the ancestors).
+; base; member completion + method resolution walk the ancestors). The
+; written spelling resolves through the file's imports to the parent's
+; identity, and is a class reference — a dotted one by its whole spelling,
+; rewriting only its last name.
 (class_definition
   name: (identifier) @def.class.name
-  superclasses: (argument_list (identifier) @parent))
+  superclasses: (argument_list
+    [(identifier) @parent @ref.type
+     (attribute attribute: (identifier) @ref.type) @parent @ref.spelled]))
 
 (function_definition
   name: (identifier) @def.sub.name) @def.sub
@@ -20,7 +27,7 @@
 (function_definition) @scope.sub
 
 ; `self.attr = ...` → an instance attribute: a member of the enclosing
-; class (the sticky @context.package tags it). THE dominant Python member
+; class (the sticky @context.class tags it). THE dominant Python member
 ; idiom — without it `obj.` offers no data attributes.
 (assignment
   left: (attribute attribute: (identifier) @def.var.name @def.var))
@@ -33,10 +40,35 @@
 ((parameters . (identifier) @param.receiver)
   (#match? @param.receiver "^(self|cls)$"))
 
+; ---- imports: the module a statement loads, and the names it binds ----
 (import_statement
-  name: (dotted_name) @import.name) @import
+  name: [(dotted_name) @import.module
+         (aliased_import name: (dotted_name) @import.module)]) @import
 (import_from_statement
-  module_name: (dotted_name) @import.name) @import
+  module_name: (dotted_name) @import.module) @import
+; `import a.b` binds its head `a`; `import a.b as c` binds `c` to `a.b`.
+(import_statement
+  name: (dotted_name . (identifier) @import.name))
+(import_statement
+  name: (aliased_import
+    name: (dotted_name) @import.name
+    alias: (identifier) @import.alias))
+; `from m import C [as D]`: each name hangs off the module, a relative one
+; (`from .m`, `from ..`) climbing from the file's package by its dots.
+(import_from_statement
+  module_name: [(dotted_name) @import.prefix
+                (relative_import
+                  (import_prefix) @import.relative
+                  (dotted_name)? @import.prefix)]
+  name: (dotted_name) @import.name)
+(import_from_statement
+  module_name: [(dotted_name) @import.prefix
+                (relative_import
+                  (import_prefix) @import.relative
+                  (dotted_name)? @import.prefix)]
+  name: (aliased_import
+    name: (dotted_name) @import.name
+    alias: (identifier) @import.alias))
 
 ; Imported names are references to the remote def — this single
 ; pattern is what makes cross-file RENAME rewrite the import line too.

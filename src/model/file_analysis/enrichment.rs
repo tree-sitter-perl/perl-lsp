@@ -493,7 +493,7 @@ impl FileAnalysis {
                 "shadow.imports_len", self.imports.len() as u64);
             for import in &self.imports {
                 crate::util::ghost_stats::count("shadow.import_seen");
-                // `package_ranges`, not `enclosing_package_of`: the latter
+                // `package_at`, not `enclosing_package_of`: the latter
                 // wants a Package SYMBOL whose span contains the point, which
                 // is a brace-delimited pack namespace. Perl's `package Foo;`
                 // symbol spans one statement and contains nothing, so it

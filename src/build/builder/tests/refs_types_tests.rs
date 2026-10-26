@@ -1443,6 +1443,58 @@ fn test_block_scoped_package_reverts() {
     assert_eq!(fa.package_at(Point::new(3, 6)), Some("Inner"));
 }
 
+/// (namespace, start row, end row) of every lane section, in write order.
+fn lane(fa: &FileAnalysis) -> Vec<(&str, usize, usize)> {
+    fa.namespace_ranges.iter().map(|r| (r.namespace.as_str(), r.span.start.row, r.span.end.row)).collect()
+}
+
+#[test]
+fn perl_lane_statement_forms_run_to_the_next_and_the_file_end() {
+    let fa = build_fa("package A;\nsub a { }\npackage B;\nsub b { }\n");
+    assert_eq!(lane(&fa), vec![("A", 0, 2), ("B", 2, 4)]);
+    // In Perl the namespace in force IS the enclosing class.
+    for (row, pkg) in [(1, "A"), (3, "B")] {
+        assert_eq!(fa.package_at(Point::new(row, 5)), Some(pkg));
+        assert_eq!(fa.namespace_at(Point::new(row, 5)), Some(pkg));
+    }
+}
+
+#[test]
+fn perl_lane_nested_statement_form_ends_at_its_block() {
+    // `package Bar;` inside `package Foo { … }` runs to Foo's block close;
+    // Foo answers before it, Outer after the block.
+    let src = "package Outer;\npackage Foo {\n  sub f { }\n  package Bar;\n  sub g { }\n}\nsub o { }\n";
+    let fa = build_fa(src);
+    assert_eq!(lane(&fa), vec![("Outer", 0, 7), ("Foo", 1, 5), ("Bar", 3, 5)]);
+    for (row, pkg) in [(2, "Foo"), (4, "Bar"), (6, "Outer")] {
+        assert_eq!(fa.package_at(Point::new(row, 6)), Some(pkg), "row {row}");
+        assert_eq!(fa.namespace_at(Point::new(row, 6)), Some(pkg), "row {row}");
+    }
+    let g = fa.symbols().iter().find(|s| s.name == "g").expect("sub g");
+    assert_eq!(g.package.as_deref(), Some("Bar"));
+}
+
+#[test]
+fn perl_file_without_a_package_is_main() {
+    let fa = build_fa("sub a { }\n");
+    assert!(fa.namespace_ranges.is_empty());
+    assert_eq!(fa.package_at(Point::new(0, 5)), Some("main"));
+    assert_eq!(fa.namespace_at(Point::new(0, 5)), None);
+}
+
+#[test]
+fn namespace_lookup_prefers_the_narrower_section_on_a_tied_start() {
+    use crate::model::file_analysis::{namespace_range_at, NamespaceRange, SectionKind};
+    let range = |ns: &str, end: usize| NamespaceRange {
+        namespace: ns.to_string(),
+        span: Span { start: Point::new(0, 0), end: Point::new(end, 0) },
+        kind: SectionKind::Block,
+    };
+    for ranges in [vec![range("Wide", 9), range("Narrow", 3)], vec![range("Narrow", 3), range("Wide", 9)]] {
+        assert_eq!(namespace_range_at(&ranges, Point::new(1, 0)).map(|r| r.namespace.as_str()), Some("Narrow"));
+    }
+}
+
 #[test]
 fn test_non_block_package_unaffected() {
     // Regression: a normal statement-form `package Bar;` (no block) still
