@@ -338,6 +338,25 @@ pub struct NameSpellings {
     pub class_call: ClassCall,
     /// Which class a site's code belongs to (`FileAnalysis::package_at`).
     pub enclosing_class: EnclosingClass,
+    /// Whether a member access reaches an instance's slots
+    /// (`FileAnalysis::slot_class_of`).
+    pub instance_slots: InstanceSlots,
+}
+
+/// Whether a language's member access (`obj.x`) reaches the slots an
+/// instance holds (a class-owned `HashKeyDef`) as well as its class's
+/// members. A language declares it on its spellings; the member walk reads
+/// the value and never asks which language it serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum InstanceSlots {
+    /// Member access reaches only the class's members. Perl's slots are
+    /// reached by `$obj->{key}`, a syntax of their own.
+    #[default]
+    Apart,
+    /// Member access reads the instance's slots first, then its class's
+    /// members, ancestors included in each: Python's instance `__dict__`
+    /// before the class.
+    BeforeClass,
 }
 
 /// Where a language's code finds the class it belongs to — the class
@@ -426,6 +445,7 @@ impl NameSpellings {
         imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
         class_call: ClassCall::FunctionCall,
         enclosing_class: EnclosingClass::ScopeChain,
+        instance_slots: InstanceSlots::Apart,
     };
 
     /// A language with a namespace separator, no sigils, and spellings
@@ -441,6 +461,7 @@ impl NameSpellings {
             imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
             class_call: ClassCall::FunctionCall,
             enclosing_class: EnclosingClass::ScopeChain,
+            instance_slots: InstanceSlots::Apart,
         }
     }
 
@@ -549,11 +570,6 @@ bitflags::bitflags! {
         /// `__call` / `__get`): it has no closed member surface to check a
         /// name against.
         const DYNAMIC_MEMBERS = 1 << 19;
-        /// A member declared by a write through its class's receiver
-        /// (python `self.x = …`): reached through an instance, never a bare
-        /// name — not in the class body, not in the method that wrote it.
-        /// Minted from a capture, never spelled as an attribute.
-        const THROUGH_RECEIVER = 1 << 20;
     }
 }
 
@@ -991,13 +1007,6 @@ pub fn earliest_rebind_in(flow_edges: &[FlowEdge], var: &str, region: Span) -> O
 }
 
 impl Symbol {
-    /// Whether a bare use of this symbol's name binds it: a variable, or
-    /// a field its scope declares by name. A member written through a
-    /// receiver is reached through an instance only.
-    pub fn is_bare_name(&self) -> bool {
-        matches!(self.kind, SymKind::Variable | SymKind::Field) && !self.flags.contains(SymbolFlags::THROUGH_RECEIVER)
-    }
-
     /// A member RE-EXPORT (`using Base::insert;` in a class body): part of
     /// the class's API surface (outline/completion) but not a definition —
     /// member resolution sees through it to the origin ancestor.
