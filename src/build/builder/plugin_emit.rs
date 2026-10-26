@@ -598,7 +598,7 @@ impl<'a> Builder<'a> {
                 // `on_use` hooks, has-synthesizers, etc.) gets its own
                 // emitter's id through the regular `apply_emit_action`
                 // path; the namespace chain works out naturally.
-                self.process_use(module, args, imports, span, span, None, Some(plugin_id));
+                self.process_use(module, args, imports, Vec::new(), span, span, None, Some(plugin_id));
             }
             plugin::EmitAction::PluginNamespace {
                 id,
