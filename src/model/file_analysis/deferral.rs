@@ -15,9 +15,9 @@ pub enum Question {
     /// `package` descends from `class` (local parents ∪ cross-file).
     /// `None` = the site sits in no package, which never descends.
     PackageIsa { package: Option<String>, class: String },
-    /// A class is declared under `identity` (the spelled name, resolved
-    /// through the file's use-map at mint), here or in any indexed file.
-    NamesClass { identity: String },
+    /// A class is declared under the identity (the spelled name, resolved
+    /// through the file's use-map at mint) in some indexed file.
+    NamesClass(ElsewhereClass),
 }
 
 /// How a `ReceiverIsa` question names its receiver.
@@ -47,32 +47,71 @@ pub enum Fallback {
     Neither,
 }
 
+/// What a question reads to decide itself. Both homes of a deferred fact
+/// implement it, the analysis (`InFile`) and the bag's query context, so
+/// a question decides the same way wherever its fact lives.
+pub trait DecideFacts {
+    fn parents(&self) -> &dyn LocalParents;
+    fn index(&self) -> Option<&dyn CrossFileLookup>;
+    /// The class of a call ref's invocant. `None` where the ref table is
+    /// not in hand (the bag), which decides the question `Unknown`.
+    fn invocant_class(&self, call: RefIdx) -> Option<String>;
+}
+
+/// An analysis with the index it is asked under.
+pub struct InFile<'a> {
+    pub fa: &'a FileAnalysis,
+    pub index: Option<&'a dyn CrossFileLookup>,
+}
+
+impl DecideFacts for InFile<'_> {
+    fn parents(&self) -> &dyn LocalParents {
+        &self.fa.packages
+    }
+    fn index(&self) -> Option<&dyn CrossFileLookup> {
+        self.index
+    }
+    fn invocant_class(&self, RefIdx(i): RefIdx) -> Option<String> {
+        let r = self.fa.refs().get(i as usize)?;
+        self.fa.method_call_invocant_class(r, self.index)
+    }
+}
+
+impl DecideFacts for crate::model::witnesses::BagContext<'_> {
+    fn parents(&self) -> &dyn LocalParents {
+        self.package_parents
+    }
+    fn index(&self) -> Option<&dyn CrossFileLookup> {
+        self.module_index
+    }
+    fn invocant_class(&self, _: RefIdx) -> Option<String> {
+        None
+    }
+}
+
 impl Question {
-    /// The one decider. `index: None` answers from this file alone.
-    pub fn decide(&self, fa: &FileAnalysis, index: Option<&dyn CrossFileLookup>) -> Verdict {
+    /// The one decider. A facts source without an index answers from its
+    /// own file alone.
+    pub fn decide(&self, facts: &dyn DecideFacts) -> Verdict {
+        crate::util::ghost_stats::count("deferral.decide");
         match self {
             Question::ReceiverIsa { receiver, class } => {
                 let recv = match receiver {
                     Receiver::Class(c) => Some(c.clone()),
-                    Receiver::CallInvocant(RefIdx(i)) => fa
-                        .refs()
-                        .get(*i as usize)
-                        .and_then(|r| fa.method_call_invocant_class(r, index)),
+                    Receiver::CallInvocant(call) => facts.invocant_class(*call),
                 };
                 match recv {
-                    Some(c) if !c.is_empty() => isa_verdict(&c, class, fa, index),
+                    Some(c) if !c.is_empty() => isa_verdict(&c, class, facts),
                     _ => Verdict::Unknown,
                 }
             }
             Question::PackageIsa { package, class } => match package {
-                Some(p) => isa_verdict(p, class, fa, index),
+                Some(p) => isa_verdict(p, class, facts),
                 None => Verdict::No,
             },
-            Question::NamesClass { identity } => {
-                if declares_class(fa.symbols(), identity) {
-                    return Verdict::Yes;
-                }
-                match index {
+            Question::NamesClass(class) => {
+                let identity = class.identity();
+                match facts.index() {
                     Some(ix) => {
                         let elsewhere = ix
                             .def_candidates(identity)
@@ -90,7 +129,7 @@ impl Question {
     pub fn when_unknown(&self) -> Fallback {
         match self {
             Question::ReceiverIsa { .. } | Question::PackageIsa { .. } => Fallback::Neither,
-            Question::NamesClass { .. } => Fallback::Otherwise,
+            Question::NamesClass(_) => Fallback::Otherwise,
         }
     }
 }
@@ -102,8 +141,28 @@ pub fn declares_class(symbols: &[Symbol], identity: &str) -> bool {
     symbols.iter().any(|s| matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == identity)
 }
 
-fn isa_verdict(class: &str, ancestor: &str, fa: &FileAnalysis, index: Option<&dyn CrossFileLookup>) -> Verdict {
-    if class_isa(class, ancestor, &fa.packages, index) {
+/// A class identity this file does not declare. The only way to build one
+/// runs the local proof, so a `NamesClass` question is never asked about a
+/// class its own file settles, and a decider without the file's symbols
+/// (the bag) decides it whole.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ElsewhereClass {
+    identity: String,
+}
+
+impl ElsewhereClass {
+    /// `None` when `symbols` declare `identity`: the site is settled.
+    pub fn unless_local(symbols: &[Symbol], identity: String) -> Option<Self> {
+        (!declares_class(symbols, &identity)).then_some(Self { identity })
+    }
+
+    pub fn identity(&self) -> &str {
+        &self.identity
+    }
+}
+
+fn isa_verdict(class: &str, ancestor: &str, facts: &dyn DecideFacts) -> Verdict {
+    if class_isa(class, ancestor, facts.parents(), facts.index()) {
         Verdict::Yes
     } else {
         Verdict::No
@@ -144,8 +203,18 @@ impl<T> Deferred<T> {
         self.reading(self.when.when_unknown())
     }
 
+    /// Both readings, for a rewrite that must reach whichever is picked
+    /// (a span remap).
+    pub fn readings_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        std::iter::once(&mut self.then).chain(self.otherwise.as_mut())
+    }
+
     pub fn pick(&self, fa: &FileAnalysis, index: Option<&dyn CrossFileLookup>) -> Picked<&T> {
-        let verdict = self.when.decide(fa, index);
+        self.pick_in(&InFile { fa, index })
+    }
+
+    pub fn pick_in(&self, facts: &dyn DecideFacts) -> Picked<&T> {
+        let verdict = self.when.decide(facts);
         let side = match verdict {
             Verdict::Yes => Fallback::Then,
             Verdict::No => Fallback::Otherwise,
@@ -183,7 +252,7 @@ impl ProvisionalDispatch {
     pub fn gate(&self) -> &str {
         match &self.when {
             Question::ReceiverIsa { class, .. } | Question::PackageIsa { class, .. } => class,
-            Question::NamesClass { identity } => identity,
+            Question::NamesClass(c) => c.identity(),
         }
     }
 }

@@ -1311,7 +1311,7 @@ impl SkeletonAnalysis {
         // file declares the class, else a `NamesClass` deferral decided with
         // the index in hand, the call's own binding its other reading.
         {
-            use crate::model::file_analysis::{declares_class, Deferred, Question, RefBinding, RefKind, UseMap};
+            use crate::model::file_analysis::{Deferred, ElsewhereClass, Question, RefBinding, RefKind, UseMap};
             let constructing: std::collections::HashSet<(Point, Point)> = self
                 .refs
                 .iter()
@@ -1326,15 +1326,16 @@ impl SkeletonAnalysis {
                     Some(map) => map.resolve(&r.target_name).identity(map.sep),
                     None => r.target_name.clone(),
                 };
-                r.binding = Some(if declares_class(&symbols, &identity) {
-                    RefBinding::NamesClass(identity)
-                } else {
-                    let call = r.binding.take();
-                    RefBinding::Deferred(Box::new(Deferred::fork(
-                        Question::NamesClass { identity: identity.clone() },
-                        RefBinding::NamesClass(identity),
-                        call,
-                    )))
+                r.binding = Some(match ElsewhereClass::unless_local(&symbols, identity.clone()) {
+                    None => RefBinding::NamesClass(identity),
+                    Some(class) => {
+                        let call = r.binding.take();
+                        RefBinding::Deferred(Box::new(Deferred::fork(
+                            Question::NamesClass(class),
+                            RefBinding::NamesClass(identity),
+                            call,
+                        )))
+                    }
                 });
             }
         }
