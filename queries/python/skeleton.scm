@@ -11,6 +11,14 @@
 (class_definition
   name: (identifier) @def.class.name @context.class) @def.class @scope.direct
 
+; A def's header runs where the def is written: a class's base list, a
+; function's parameter annotations and defaults and its `-> T` are code of
+; the scope around the def, so a method's `x: Inner = Inner()` names the
+; class body's `Inner`. The parameter names still bind in the function.
+(class_definition superclasses: (argument_list) @scope.header)
+(function_definition parameters: (parameters) @scope.header)
+(function_definition return_type: (type) @scope.header)
+
 ; inheritance: `class Dog(Animal):` → Dog parent Animal (one @parent per
 ; base; member completion + method resolution walk the ancestors). The
 ; written spelling resolves through the file's imports to the parent's
@@ -50,6 +58,14 @@
 
 (parameters
   (identifier) @def.var.name @def.var)
+(typed_parameter . (identifier) @def.var.name @def.var)
+(default_parameter name: (identifier) @def.var.name @def.var)
+(typed_default_parameter name: (identifier) @def.var.name @def.var)
+
+; An annotation names a class: a dotted one by its whole spelling,
+; rewriting only its last name.
+(type (identifier) @ref.type)
+(type (attribute attribute: (identifier) @ref.type) @ref.spelled)
 
 ; a method's leading `self` / `cls` is its receiver: the object, not a member
 ; of the class it is declared in.

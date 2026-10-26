@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::model::file_analysis::{OpenSections, SectionKind};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 #[derive(Default)]
 pub(super) struct State {
@@ -15,13 +15,13 @@ pub(super) struct State {
     scope_start_by_match: HashMap<usize, usize>,
     pending_context: HashMap<usize, (ContextKind, String)>,
     /// Parent edges whose parent is still the written spelling: its index
-    /// in `out.parents`, where it was written, and the scope it is looked
-    /// up from — the one its class is declared in. Resolved through the
-    /// use-map once every import row and class is in.
+    /// in `out.parents`, where it was written, and the scope it is written
+    /// in. Resolved through the use-map once every import row and class is
+    /// in.
     written_parents: Vec<(usize, Point, ScopeId)>,
-    /// The matches that capture a `@parent`: a reference in one is
-    /// written in the class's header.
-    parent_matches: HashSet<usize>,
+    /// Each `@scope.header` scope, and the def scope whose header it is:
+    /// the scope a name the header declares binds in.
+    pub(super) headed: HashMap<ScopeId, ScopeId>,
     /// The scopes that are a class's own, opened by the match whose
     /// `@context.class` names it, and the class's identity.
     class_scopes: HashMap<ScopeId, String>,
@@ -68,26 +68,9 @@ pub(super) fn home_of<'s>(st: &'s ExtractState, from: ScopeId, at: Point) -> Opt
     st.namespace_at(at)
 }
 
-/// The scope a reference in match `match_id` is written in, when the
-/// match says so rather than the scope stack: a base class is written in
-/// the scope its class is declared in, though the class's own scope
-/// covers its header.
-pub(super) fn written_in(st: &ExtractState, match_id: usize) -> Option<ScopeId> {
-    if !st.scopes.parent_matches.contains(&match_id) {
-        return None;
-    }
-    st.defs.class_of_match(match_id).map(|c| c.declared_in)
-}
-
 pub(super) fn collect(st: &mut ExtractState, e: &Event) {
-    match e.cap {
-        Capture::Scope(_) => {
-            st.scopes.scope_start_by_match.entry(e.match_id).or_insert(e.start_byte);
-        }
-        Capture::Parent => {
-            st.scopes.parent_matches.insert(e.match_id);
-        }
-        _ => {}
+    if let Capture::Scope(_) = e.cap {
+        st.scopes.scope_start_by_match.entry(e.match_id).or_insert(e.start_byte);
     }
 }
 
@@ -103,17 +86,30 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         // of is joined as its `owner` at assembly.
         Capture::Scope(scope_cap) => {
             let id = ScopeId(st.out.scopes.len() as u32);
+            // A header is code of the scope around its def's own (the file,
+            // for a header the file scope holds).
+            let around = match scope_cap {
+                ScopeCap::Header => st.out.scopes[st.cur_scope.0 as usize].parent,
+                _ => None,
+            };
+            let (parent, package) = match around {
+                Some(around) => {
+                    st.scopes.headed.insert(id, st.cur_scope);
+                    (around, st.out.scopes[around.0 as usize].package.clone())
+                }
+                None => (st.cur_scope, st.package.clone()),
+            };
             st.out.scopes.push(Scope {
                 id,
-                parent: Some(st.cur_scope),
+                parent: Some(parent),
                 kind: match scope_cap {
                     ScopeCap::Sub | ScopeCap::SubImplicitReceiver | ScopeCap::SubClosed => {
                         ScopeKind::Sub { name: String::new() }
                     }
-                    ScopeCap::Block | ScopeCap::Direct => ScopeKind::Block,
+                    ScopeCap::Block | ScopeCap::Direct | ScopeCap::Header => ScopeKind::Block,
                 },
                 span: e.span(),
-                package: st.package.clone(),
+                package,
                 owner: None,
                 implicit_receiver: scope_cap == ScopeCap::SubImplicitReceiver,
                 direct: scope_cap == ScopeCap::Direct,
@@ -138,7 +134,9 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 }
                 st.context_stack.push((st.scope_stack.len(), kind, text));
             }
-            narrowing::on_scope_push(st, e, id);
+            if scope_cap != ScopeCap::Header {
+                narrowing::on_scope_push(st, e, id);
+            }
         }
         Capture::Context(kind) => {
             // Shape the context like a def name (cpp canonicalizes a
@@ -150,7 +148,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             let identity = (kind == ContextKind::Class && pack.names.use_map_sep().is_some()).then(|| {
                 st.defs
                     .class_of_match(e.match_id)
-                    .map(|c| c.identity.clone())
+                    .map(str::to_string)
                     .unwrap_or_else(|| st.class_identity(&text, st.cur_scope, e.start))
             });
             // If this match's `@scope` starts AFTER this context, the
@@ -192,11 +190,11 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             // class as its def minted it. The base is shaped like a def
             // name (cpp canonicalizes a template-spelled base) so the edge
             // joins the identity the target class was filed under.
-            if let Some(child) = st.defs.class_of_match(e.match_id).cloned() {
+            if let Some(child) = st.defs.class_of_match(e.match_id).map(str::to_string) {
                 if pack.names.use_map_sep().is_some() {
-                    st.scopes.written_parents.push((st.out.parents.len(), e.span().start, child.declared_in));
+                    st.scopes.written_parents.push((st.out.parents.len(), e.span().start, st.cur_scope));
                 }
-                st.out.parents.push((child.identity, (pack.shape_name)(&e.text)));
+                st.out.parents.push((child, (pack.shape_name)(&e.text)));
             }
         }
         _ => {}
@@ -204,8 +202,8 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
 }
 
 /// Resolve each written parent spelling to the identity it names, through
-/// the file's use-map where it was written, from the scope its class is
-/// declared in: `extends Model` after `use
+/// the file's use-map where it was written, from the scope it is written
+/// in (a header's, where the document marks one): `extends Model` after `use
 /// Illuminate\Database\Eloquent\Model;` is that class, an unimported leaf
 /// is the namespace's own, a sibling the enclosing class body declares is
 /// that nested class. Runs after every class is minted.

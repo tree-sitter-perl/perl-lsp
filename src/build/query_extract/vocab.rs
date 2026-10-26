@@ -122,6 +122,15 @@ spelled! {
         /// declared it, so `Scope::direct` and the one lookup walk over it
         /// (`lookup_chain`) serve any language that states the same rule.
         Direct = "direct",
+        /// A def's header: the code its node holds outside its body
+        /// (Python's parameter annotations and defaults, its `-> T`, a
+        /// class's base list), which runs in the scope the def is declared
+        /// in though the def's own scope covers it. Minted as a scope whose
+        /// parent is that declaring scope, so every use written in it, and
+        /// every lookup at a point in it, starts outside the def; a name
+        /// the header declares (a parameter) still binds in the def's own
+        /// scope.
+        Header = "header",
     }
 }
 
