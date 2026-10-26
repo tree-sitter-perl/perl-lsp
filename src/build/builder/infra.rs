@@ -80,6 +80,9 @@ impl<'a> Builder<'a> {
     /// variable fold is latest-wins in bag order, so the scope's shifts
     /// are replayed after it: each consumes the head of the window it
     /// follows, as `consume_arg_head` did at its own point.
+    // TODO(source-order-fold): evaluate making the variable fold latest-wins
+    // by source position (on the whole-program branch, design/whole-program-residuals.md);
+    // a late seed would then lose to the shifts below it and this replay goes.
     pub(super) fn seed_arg_window(&mut self, scope: ScopeId, span: Span, window: Vec<InferredType>) {
         self.push_arg_window(scope, span, window.clone());
         let consumes: Vec<(Point, bool)> = self
