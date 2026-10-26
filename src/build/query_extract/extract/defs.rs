@@ -341,7 +341,7 @@ pub(super) fn unify_assigned(st: &mut ExtractState) {
     for i in order {
         let s = &out.symbols[i];
         let seen = out.variable_lookup_chain(s.scope, &s.name)
-            .into_iter()
+            .scopes()
             .any(|sc| {
                 accepted.contains(&(sc, s.name.clone()))
                     || declared.get(&(sc, s.name.clone())).is_some_and(|&at| at <= s.name_start)
@@ -361,12 +361,11 @@ pub(super) fn unify_assigned(st: &mut ExtractState) {
 
 /// The class a member written through `recv` at `at` joins: the class of
 /// the receiver parameter that name binds there (`@param.receiver`), the
-/// nearest declaration of it up the scope chain. `None` when the name
+/// nearest declaration of it on the lookup chain. `None` when the name
 /// binds anything else, or nothing.
 fn receiver_class(st: &ExtractState, recv: &str, at: Point) -> Option<String> {
-    let chain = crate::model::file_analysis::scope_chain_of(&st.out.scopes, st.cur_scope);
-    let param = chain.iter().find_map(|sc| {
-        st.out.symbols.iter().rev().find(|s| s.scope == *sc && s.name == recv && s.kind != DefCap::Field && s.start <= at)
+    let param = crate::model::file_analysis::lookup_chain(&st.out.scopes, st.cur_scope).scopes().find_map(|sc| {
+        st.out.symbols.iter().rev().find(|s| s.scope == sc && s.name == recv && s.kind != DefCap::Field && s.start <= at)
     })?;
     param.flags.contains(crate::model::file_analysis::SymbolFlags::RECEIVER).then(|| param.package.clone()).flatten()
 }

@@ -96,9 +96,11 @@ edge-following traversals, and forcing them in would be contortion:
   partition, not a traversal, and stays.
 - **Lexical scope chains** are a single-parent linked-list climb to the
   file scope — no branching, no cycles, no cross-file. `walk`'s
-  machinery buys nothing. The one parent-climb is `scope_chain_of(&[Scope],
-  start)`, shared by `FileAnalysis::scope_chain` and the witness-bag
-  query path (which holds a `&[Scope]` slice, not a `&FileAnalysis`).
+  machinery buys nothing. The two climbs are `scope_chain_of(&[Scope],
+  start)` (containment) and `lookup_chain` (name lookup, which states
+  each scope's own rule), both free functions over a `&[Scope]` slice so
+  the witness-bag query path, which holds no `&FileAnalysis`, shares
+  them (`docs/adr/capture-vocabulary.md`).
 
 The migration ends when `PackageFacts::parents` and `PluginNamespace.bridges`
 have no direct consumers — every *reachability* question is a `walk`

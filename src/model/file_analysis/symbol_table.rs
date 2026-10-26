@@ -78,8 +78,10 @@ impl SymbolTable {
         self.by_name.get(name).map_or(&[], |v| v.as_slice())
     }
 
-    /// SymbolIds whose declaring scope is `scope`.
-    pub fn in_scope(&self, scope: ScopeId) -> &[SymbolId] {
+    /// SymbolIds whose declaring scope is `scope`: what the scope
+    /// DECLARES, for the outline and a class's members. Not a lookup — a
+    /// name use sees a scope's bindings only through `LookupChain`.
+    pub fn declared_directly_in(&self, scope: ScopeId) -> &[SymbolId] {
         self.by_scope.get(&scope).map_or(&[], |v| v.as_slice())
     }
 
