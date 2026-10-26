@@ -931,9 +931,11 @@ impl FileAnalysis {
 
     /// The namespace in force at `point`, for every language (`None` =
     /// outside every section: the global namespace, or Perl before its
-    /// first `package`).
+    /// first `package`). A section the point's lookup chain does not
+    /// reach is not in force there, so a method of a `direct` class body
+    /// reads the namespace around the class.
     pub fn namespace_at(&self, point: Point) -> Option<&str> {
-        namespace_range_at(&self.namespace_ranges, point).map(|r| r.namespace.as_str())
+        namespace_range_for(&self.namespace_ranges, &self.scopes, point).map(|r| r.namespace.as_str())
     }
 
     /// Iterate Handler symbols whose owner class is `owner_class` and
@@ -1178,7 +1180,7 @@ impl FileAnalysis {
     /// are identities as written (`ClassSpelling::Identity`): there is no
     /// map to resolve through.
     pub fn use_map_at(&self, site: Point) -> Option<UseMap<'_>> {
-        UseMap::at(&self.pack.use_rows, &self.namespace_ranges, &self.pack.names, site, self)
+        UseMap::at(&self.pack.use_rows, &self.namespace_ranges, &self.scopes, &self.pack.names, site, self)
     }
 
     fn leaf_namespace_pins(&self) -> UseMapPins {

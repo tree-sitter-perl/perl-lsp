@@ -6,9 +6,12 @@
 ; module's, or the class body it sits directly in (`pkg.mod.Outer.Inner`);
 ; its body's members file under the class's identity. The body is a
 ; namespace of its own: a name the class declares resolves there first.
+; `@scope.direct` is Python's class-scope rule — the body's names are in
+; force for the code written directly in it, so a method of the class
+; looks a bare name up in the module, not in the class.
 (class_definition
   name: (identifier) @def.class.name @context.class
-  body: (block) @section.class) @def.class @scope
+  body: (block) @section.class) @def.class @scope.direct
 
 ; inheritance: `class Dog(Animal):` → Dog parent Animal (one @parent per
 ; base; member completion + method resolution walk the ancestors). The

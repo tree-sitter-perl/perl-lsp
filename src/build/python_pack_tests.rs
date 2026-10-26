@@ -451,10 +451,10 @@ fn an_unindexed_identity_widens_to_its_leaf_out_loud() {
     assert!(widening_codes(&idx, &vendored).is_empty());
 }
 
-/// A class body is a namespace: a nested class is filed under its
-/// enclosing class, a bare name there that the class declares names the
-/// nested class first, and a class nested one level further sees past it
-/// to the module.
+/// A class body is a namespace for the code written directly in it: a
+/// nested class is filed under its enclosing class, a bare name there
+/// that the class declares names the nested class first, and a method —
+/// or a class nested one level further — sees past it to the module.
 #[test]
 fn a_class_body_is_a_namespace_for_its_own_code() {
     let m = module(&["pkg", "mod"], false);
@@ -467,6 +467,11 @@ class Outer:
     child: Inner = make()
     class Sub(Inner):
         peer: Inner = make()
+    def build(self):
+        x: Inner = make()
+        class Local(Inner):
+            pass
+        return x
 class Other(Outer.Inner):
     pass
 ";
@@ -484,6 +489,8 @@ class Other(Outer.Inner):
             ("pkg.mod.Outer", Some("pkg.mod")),
             ("pkg.mod.Outer.Inner", Some("pkg.mod.Outer")),
             ("pkg.mod.Outer.Sub", Some("pkg.mod.Outer")),
+            // a class in a method joins the namespace the method sees
+            ("pkg.mod.Local", Some("pkg.mod")),
             ("pkg.mod.Other", Some("pkg.mod")),
         ]
     );
@@ -491,14 +498,117 @@ class Other(Outer.Inner):
     // parent clause alike
     assert_eq!(fa.inferred_type_via_bag("child", Point::new(5, 4)), Some(InferredType::ClassName("pkg.mod.Outer.Inner".into())));
     assert_eq!(fa.declared_parents("pkg.mod.Outer.Sub"), ["pkg.mod.Outer.Inner"]);
-    // Sub's body sees past Outer to the module's class
+    // Sub's body and build's body see past Outer to the module's class
     assert_eq!(fa.inferred_type_via_bag("peer", Point::new(7, 8)), Some(InferredType::ClassName("pkg.mod.Inner".into())));
+    assert_eq!(fa.inferred_type_via_bag("x", Point::new(9, 8)), Some(InferredType::ClassName("pkg.mod.Inner".into())));
+    assert_eq!(fa.declared_parents("pkg.mod.Local"), ["pkg.mod.Inner"]);
     // a dotted spelling hangs its leaf off the class its head names
     assert_eq!(fa.declared_parents("pkg.mod.Other"), ["pkg.mod.Outer.Inner"]);
-    // the namespace in force: the class body
+    // the namespace in force: the class body, the module inside a method
     assert_eq!(fa.namespace_at(Point::new(5, 4)), Some("pkg.mod.Outer"));
+    assert_eq!(fa.namespace_at(Point::new(9, 8)), Some("pkg.mod"));
     // a class header is written in the namespace around the class
     assert_eq!(fa.namespace_at(Point::new(6, 14)), Some("pkg.mod.Outer"));
+}
+
+/// A class attribute is the class's, not its methods': a bare read in a
+/// method resolves to the module's variable of that name — the
+/// declaration goto-def lands on and the type the bag answers — exactly
+/// as Python reads it.
+#[test]
+fn a_method_reads_the_modules_variable_not_its_class_attribute() {
+    let m = module(&["pkg", "mod"], false);
+    let src = "\
+class Inner:
+    pass
+x: Inner = make()
+class Outer:
+    class Inner:
+        pass
+    x: Inner = make()
+    def build(self):
+        return x
+";
+    let fa = py_in(src, Some(&m));
+    // directly in the body, `x` is the class's own attribute
+    assert_eq!(fa.inferred_type_via_bag("x", Point::new(6, 4)), Some(InferredType::ClassName("pkg.mod.Outer.Inner".into())));
+    assert_eq!(fa.resolve_variable("x", Point::new(6, 5)).map(|s| s.span.start.row), Some(6));
+    // in the method, it is the module's
+    assert_eq!(fa.inferred_type_via_bag("x", Point::new(8, 15)), Some(InferredType::ClassName("pkg.mod.Inner".into())));
+    assert_eq!(fa.resolve_variable("x", Point::new(8, 15)).map(|s| s.span.start.row), Some(2));
+}
+
+/// A class body whose only statement is a callable has that callable's
+/// exact span. The body is written in the CLASS, so the section is the
+/// class's — and a use in the method still reads past it.
+#[test]
+fn a_one_method_class_body_is_the_classs_section() {
+    let m = module(&["pkg", "mod"], false);
+    let src = "\
+class Inner:
+    pass
+class Outer:
+    def build(self):
+        x: Inner = make()
+        return x
+";
+    let fa = py_in(src, Some(&m));
+    assert_eq!(fa.namespace_at(Point::new(4, 8)), Some("pkg.mod"));
+    assert_eq!(fa.inferred_type_via_bag("x", Point::new(5, 15)), Some(InferredType::ClassName("pkg.mod.Inner".into())));
+}
+
+/// A document that does not mark its class scope keeps the chain it
+/// always had: the same source, the same pack but for `@scope.direct`,
+/// and a method reads its class's attribute and files its classes under
+/// the class.
+#[test]
+fn an_unmarked_class_scope_still_reaches_its_methods() {
+    let m = module(&["pkg", "mod"], false);
+    let mut pack = python_pack();
+    let plain = pack.query_source.replace("@scope.direct", "@scope");
+    pack.query_source = Box::leak(plain.into_boxed_str());
+    let src = "\
+class Inner:
+    pass
+x: Inner = make()
+class Outer:
+    class Inner:
+        pass
+    x: Inner = make()
+    def build(self):
+        class Local(Inner):
+            pass
+        return x
+";
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_python::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(src, None).unwrap();
+    let fa = extract_in(&tree, src.as_bytes(), &pack, Some(&m)).unwrap().into_file_analysis();
+    assert_eq!(fa.inferred_type_via_bag("x", Point::new(10, 15)), Some(InferredType::ClassName("pkg.mod.Outer.Inner".into())));
+    assert_eq!(fa.resolve_variable("x", Point::new(10, 15)).map(|s| s.span.start.row), Some(6));
+    assert!(fa.symbols().iter().any(|s| s.kind == SymKind::Class && s.name == "pkg.mod.Outer.Local"), "{:?}",
+        fa.symbols().iter().filter(|s| s.kind == SymKind::Class).map(|s| s.name.as_str()).collect::<Vec<_>>());
+    assert_eq!(fa.namespace_at(Point::new(10, 15)), Some("pkg.mod.Outer"));
+}
+
+/// Without a module-level class of that leaf, a bare name in a method
+/// names the module's (undeclared) class, never the nested one: the class
+/// reference widens to it, out loud, as any undeclared identity does.
+#[cfg(feature = "python")]
+#[test]
+fn a_method_never_reaches_its_class_body_by_a_bare_name() {
+    let (t, idx) = indexed("nestedmethod", &[
+        ("pkg/__init__.py", ""),
+        ("pkg/mod.py", "class Outer:\n    class Inner:\n        pass\n    def build(self):\n        class Local(Inner):\n            pass\n"),
+    ]);
+    let path = t.0.join("pkg/mod.py");
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    assert_eq!(fa.declared_parents("pkg.mod.Local"), ["pkg.mod.Inner"]);
+    let (defs, _, labels) = landing(&idx, &path, Point::new(4, 20));
+    assert_eq!(defs, [("mod.py".to_string(), 1)]);
+    assert_eq!(labels, [Some("widened: `pkg.mod.Outer.Inner` stands in for `pkg.mod.Inner`".to_string())]);
+    let msg = "nothing indexed declares `pkg.mod.Inner`; resolved by its leaf to `pkg.mod.Outer.Inner`".to_string();
+    assert_eq!(widening_codes(&idx, &path), [(4, 20, msg)]);
 }
 
 /// Django's per-model `class Meta:` — one leaf, one class per model. Each

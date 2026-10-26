@@ -842,7 +842,7 @@ impl SkeletonAnalysis {
             // never a free callee: a bare call in a member body reaches it
             // through `member_of`, with the class as its receiver.
             let class_identity_at = |written: &str, site: tree_sitter::Point| {
-                let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.names, site, &symbols)?;
+                let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &self.names, site, &symbols)?;
                 Some(map.resolve(written).identity(map.sep))
             };
             let callee_sid: std::collections::HashMap<&str, SymbolId> = {
@@ -950,8 +950,10 @@ impl SkeletonAnalysis {
         for (name, read_scope, read_span) in &self.var_reads {
             let rp = (read_span.start.row, read_span.start.column);
             let resolved = defs_by_name.get(name).and_then(|cands| {
-                let mut cur = Some(*read_scope);
-                while let Some(sc) = cur {
+                // `lookup_chain`, not the raw climb: a scope whose names
+                // are in force only for code written directly in it is
+                // not on a nested callable's chain.
+                for sc in crate::model::file_analysis::lookup_chain(&self.scopes, *read_scope) {
                     // nearest decl of this name in THIS scope level, declared at
                     // or before the read (latest-wins for redeclaration).
                     let mut best: Option<((usize, usize), SymbolId)> = None;
@@ -964,7 +966,6 @@ impl SkeletonAnalysis {
                     if let Some((_, did)) = best {
                         return Some(did);
                     }
-                    cur = scope_parent.get(&sc).copied().flatten();
                 }
                 None
             });

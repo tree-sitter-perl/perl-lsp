@@ -105,6 +105,14 @@ spelled! {
         Sub = "sub",
         /// A sub body whose bare names may elide the member receiver.
         SubImplicitReceiver = "sub.implicit_receiver",
+        /// A scope whose names are in force only for code written
+        /// DIRECTLY in it: a callable nested inside looks a name up in the
+        /// scopes around the scope, never in it. Python's class body says
+        /// it of its class scope; a document that says nothing keeps the
+        /// plain chain. It names what the scope does, not which language
+        /// declared it, so `Scope::direct` and the one lookup walk over it
+        /// (`lookup_chain`) serve any language that states the same rule.
+        Direct = "direct",
     }
 }
 

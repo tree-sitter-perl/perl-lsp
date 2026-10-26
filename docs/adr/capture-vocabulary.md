@@ -103,6 +103,26 @@ family routing line, and the family file it lives in. When a language
 needs extraction a query cannot express, its frontend adds a typed Rust
 handler in the same shape rather than a string-keyed hook on the pack.
 
+## Decision: a scope capture says what the scope does
+
+A scope's name-lookup rule is the document's to state, never something a
+consumer reads off the shape of the scope or the language serving it.
+Python's class body is in force for the code written directly in it and
+not for a method of the class; PHP's function body sees no variable of
+the scopes around it but the ones it captures. Both are rules ABOUT a
+scope, so each is a `ScopeCap` spelling the document opts into
+(`@scope.direct`), minted as a field on the model's `Scope`
+(`Scope::direct`) — rule #11, at the producer — and read by ONE walk,
+`lookup_chain`, which every name lookup takes: a variable read, a bare
+class spelling, the namespace section in force at a site. A pack that
+says nothing keeps the plain lexical chain.
+
+The spelling names the behaviour, not the construct: `direct` is a scope
+whose names are in force only for code written directly in it, whatever
+the language calls that scope. A generic capture may never carry one
+language's rule — `@scope.sub` once minted a Python-only section kind,
+which is why the rule moved here.
+
 ## Decision: a fact the grammar parses is a capture, not a text probe
 
 When the grammar already gives a fact its own node, the document captures

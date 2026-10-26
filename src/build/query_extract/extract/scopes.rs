@@ -68,12 +68,13 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 parent: Some(st.cur_scope),
                 kind: match scope_cap {
                     ScopeCap::Sub | ScopeCap::SubImplicitReceiver => ScopeKind::Sub { name: String::new() },
-                    ScopeCap::Block => ScopeKind::Block,
+                    ScopeCap::Block | ScopeCap::Direct => ScopeKind::Block,
                 },
                 span: e.span(),
                 package: st.package.clone(),
                 owner: None,
                 implicit_receiver: scope_cap == ScopeCap::SubImplicitReceiver,
+                direct: scope_cap == ScopeCap::Direct,
             });
             st.scope_stack.push((e.end_byte, id));
             st.out.scope_count += 1;
@@ -163,7 +164,7 @@ pub(super) fn resolve_parents(st: &mut ExtractState) {
     let resolved: Vec<(usize, String)> = std::mem::take(&mut st.scopes.written_parents)
         .into_iter()
         .filter_map(|(i, site)| {
-            let map = crate::model::file_analysis::UseMap::at(&out.use_rows, &out.namespace_ranges, &st.pack.names, site, &out.symbols)?;
+            let map = crate::model::file_analysis::UseMap::at(&out.use_rows, &out.namespace_ranges, &out.scopes, &st.pack.names, site, &out.symbols)?;
             Some((i, map.resolve(&out.parents[i].1).identity(map.sep)))
         })
         .collect();

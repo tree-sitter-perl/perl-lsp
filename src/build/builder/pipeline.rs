@@ -152,6 +152,7 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
             package: Some("main".to_string()),
             owner: None,
             implicit_receiver: false,
+            direct: false,
         }],
         plugin: crate::model::file_analysis::PluginFacts {
             diagnostics: vec![PluginDiagnostic {

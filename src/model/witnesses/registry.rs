@@ -2888,7 +2888,7 @@ impl ReducerRegistry {
         receiver: Option<&InferredType>,
         state: &mut QueryState,
     ) -> Option<InferredType> {
-        let chain = crate::model::file_analysis::scope_chain_of(ctx.scopes, scope);
+        let chain = crate::model::file_analysis::lookup_chain(ctx.scopes, scope);
         let framework = chain
             .iter()
             .find_map(|sid| ctx.scopes[sid.0 as usize].package.as_ref())
