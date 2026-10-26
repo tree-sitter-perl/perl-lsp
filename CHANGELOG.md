@@ -31,7 +31,11 @@ crate / VS Code extension versions.
   renaming a variable rewrites inside the braces (`"${x}s"` used to be
   left behind).
 - **New default-on `missing-declaration` warning** on each use of a variable
-  nothing declares, mirroring `use strict 'vars'`. `$a`/`$b`, Perl's
+  nothing declares, wherever `strict 'vars'` is in force: after `use strict`
+  (bare or naming `vars`), `use v5.12` or later, or a module that turns
+  strict on (Moo, Moose, Mojo::Base, Modern::Perl, ...), to the end of the
+  enclosing block; a `no strict` / `no strict 'vars'` block switches it
+  off. Code without strict never fires. `$a`/`$b`, Perl's
   special variables and qualified names are exempt; a variable an import
   brings in (`use FindBin qw($Bin)`, an exported `*glob`) counts as
   declared. A file with a bare `use` whose module isn't resolved yet stays

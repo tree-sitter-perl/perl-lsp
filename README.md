@@ -264,7 +264,7 @@ Editor-agnostic settings, passed to the server via LSP `initializationOptions`
 | `diagnostics.redundantGuard` | `false` | `redundant-guard` / `contradictory-guard` (D3/D4) — a `defined`/`isa` guard whose outcome is constant given the subject's already-known type. Needs confident prior types + MRO relatedness, so it earns trust before default-on. |
 | `diagnostics.derefShape` | `false` | `deref-shape-mismatch` (D6) — a deref whose form demands one container rep while a `ref … eq` guard proved another (`$x->{k}` on an array/code ref, etc.) — a guaranteed runtime die. Guard-narrowed reps only. |
 | `diagnostics.unresolvedMethodCrossFile` | `false` | Extends `unresolved-method` (D8) past locally-defined classes to any cross-file-resolvable class with a complete ancestor chain. Cross-file classes carry codegen/XS methods the static walker can't see, so it's opt-in. |
-| `diagnostics.disableMissingDeclaration` | `false` | Turns off `missing-declaration`, the default-on warning on each use of a variable nothing declares (what `use strict 'vars'` rejects). `$a`/`$b`, special variables, qualified names and imported variables never fire. |
+| `diagnostics.disableMissingDeclaration` | `false` | Turns off `missing-declaration`, the default-on warning on each use of a variable nothing declares where `strict 'vars'` is in force (`use strict`, `use v5.12`+, or a module that turns strict on, until a `no strict` block). `$a`/`$b`, special variables, qualified names and imported variables never fire. |
 
 The provably-`undef` deref lint (D1) is always on — it's a definite bug, not a
 lint that needs trust. All the toggles above default off (`disableMissingDeclaration` is an opt-out); flip them per project
