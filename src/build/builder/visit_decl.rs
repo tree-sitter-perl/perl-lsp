@@ -1350,12 +1350,7 @@ impl<'a> Builder<'a> {
         });
         // `@_`'s argument window for this scope, headed by the same
         // invocant (`seed_arg_windows` covers the scopes without one).
-        self.push_type_constraint(TypeConstraint {
-            variable: "@_".into(),
-            scope,
-            constraint_span: span,
-            inferred_type: InferredType::Sequence(vec![head]),
-        });
+        self.seed_arg_window(scope, span, vec![head]);
     }
 
     /// Whether the file calls `pkg`'s sub `name` as a plain function and
