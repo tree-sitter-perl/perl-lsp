@@ -154,16 +154,24 @@ body as `@section.class` (Python's) makes it a section of the lane,
 class Inner:` in `pkg/mod.py` files `Inner` as `pkg.mod.Outer.Inner`, so
 Django's per-model `class Meta:` is one class per model. The section
 covers the body, not the header, so a parent clause and the class's own
-name are written in the namespace around it. Its names are in force only
-for code written directly in it, as in Python's class scope: a bare head
-written there resolves to the nested class the body declares
-(`UseMap::class_body`, asked through `DeclaredClasses` — the symbol table,
-never a second list) before the ladder above, and otherwise falls through
-to the section around it (`namespace_range_around`). A callable written in
-the body opens a `SectionKind::Callable` section naming the namespace
-around the class, so a method never reaches its class's names bare, and
-a class nested one level further sees past its enclosing class to the
-module. A dotted spelling hangs off its head as any qualified spelling
+name are written in the namespace around it. A bare head written in it
+resolves to the nested class the body declares (`UseMap::class_body`,
+asked through `DeclaredClasses` — the symbol table, never a second list)
+before the ladder above, and otherwise falls through to the section around
+it (`namespace_range_around`); a class nested one level further sees past
+its enclosing class to the module.
+
+How far a section's names reach is the SCOPE's rule, and the document
+states it: `@scope.direct` marks a scope whose names are in force only
+for code written directly in it (Python's class scope), minted as
+`Scope::direct` and read by `lookup_chain` — the one walk every name
+lookup takes. A section whose scope that walk skipped is not in force at
+the site (`namespace_range_in` / `namespace_range_for`, which
+`namespace_at`, `class_identity` and `UseMap::at` read), so a method of
+`Outer` resolves a bare `Inner` in the module and files a class it
+declares under the module. A pack that marks nothing keeps the plain
+chain: its class body reaches its methods, as PHP's and C++'s lanes do
+unchanged. A dotted spelling hangs off its head as any qualified spelling
 does: `Outer.Inner`, in the file or after `from pkg.mod import Outer`, is
 `pkg.mod.Outer.Inner`. PHP and C++ capture no class section; their lanes
 are unchanged.
@@ -197,13 +205,18 @@ leaf-space FQ family validation in `implementations_of`.
   An open document's debounced rebuild that named its module before a
   marker flip and lands after the invalidator's refresh keeps the old
   name until its next edit.
-- **A Python class body is a section over its whole span after the
-  header.** A method's parameter annotations and defaults are evaluated in
-  the class scope, but the method's `Callable` section covers its whole
-  definition, so they resolve past the class; an import written directly
-  in a class body reaches its methods too. A class inside a method is
-  filed under the module (`pkg.mod.Local`), not Python's
+- **A method's signature is inside its own scope.** Python evaluates a
+  method's parameter annotations and defaults in the class scope, but the
+  `@scope.sub` the document captures is the whole `function_definition`,
+  so they resolve past the class the way the body does. A class declared
+  in a method is filed under the module (`pkg.mod.Local`), not Python's
   `Outer.build.<locals>.Local`.
+- **Completion's in-scope lane still walks the raw chain.** The names
+  `lsp/symbols/completion.rs` offers at a point come from
+  `scope_chain`, so a method is offered its class body's variables
+  although no resolution lane binds a bare use of one. Over-offering, not
+  a wrong answer; moving that lane to `lookup_chain` is a change of its
+  own.
 - **`Outer.Inner()` is a member call.** A call through an attribute is a
   `MethodCall` on the receiver `Outer`, and a nested class is no member
   of its enclosing class there, so the call is untyped and goto-def finds

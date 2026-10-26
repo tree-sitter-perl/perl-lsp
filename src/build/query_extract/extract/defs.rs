@@ -319,7 +319,7 @@ pub(super) fn unify_assigned(st: &mut ExtractState) {
     let mut keep = vec![true; out.symbols.len()];
     for i in order {
         let s = &out.symbols[i];
-        let seen = super::variable_lookup_chain(&out.scopes, &out.closed_scopes, &out.captures, s.scope, &s.name)
+        let seen = out.variable_lookup_chain(s.scope, &s.name)
             .into_iter()
             .any(|sc| {
                 accepted.contains(&(sc, s.name.clone()))
