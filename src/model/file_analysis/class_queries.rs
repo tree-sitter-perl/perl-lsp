@@ -340,6 +340,22 @@ impl FileAnalysis {
             (outer.start.row, outer.start.column) <= (inner.start.row, inner.start.column)
                 && (inner.end.row, inner.end.column) <= (outer.end.row, outer.end.column)
         };
+        // An instance's slots first, as member access reads them.
+        for sym in &self.symbols {
+            if self.slot_class_of(sym) == Some(cls) && seen.insert(sym.name.clone()) {
+                candidates.push(CompletionCandidate {
+                    label: sym.name.clone(),
+                    kind: sym.kind,
+                    is_static: false,
+                    detail: None,
+                    insert_text: None,
+                    sort_priority: PRIORITY_LOCAL,
+                    additional_edits: vec![],
+                    import_fact: None,
+                    display_override: None,
+                });
+            }
+        }
         for sym in &self.symbols {
             if matches!(sym.kind, SymKind::Variable | SymKind::Field)
                 && self.symbol_in_class(sym.id, cls)
@@ -1067,7 +1083,12 @@ impl FileAnalysis {
     pub fn spelled_identity(&self, r: &Ref) -> String {
         match (self.pack.names.use_map_sep(), self.pack.use_row_covering(&r.span)) {
             (Some(sep), Some(row)) => row.name.identity(sep),
-            _ => self.class_spelling_identity(&r.target_name, r.span.start),
+            // the ref's own scope, not the innermost one around its site:
+            // extraction minted where the spelling is looked up
+            _ => match self.use_map_in(r.span.start, r.scope) {
+                Some(map) => map.resolve(&r.target_name).identity(map.sep),
+                None => r.target_name.clone(),
+            },
         }
     }
 
@@ -1178,7 +1199,14 @@ impl FileAnalysis {
     /// are identities as written (`ClassSpelling::Identity`): there is no
     /// map to resolve through.
     pub fn use_map_at(&self, site: Point) -> Option<UseMap<'_>> {
-        UseMap::at(&self.pack.use_rows, &self.namespace_ranges, &self.pack.names, site)
+        UseMap::at(&self.pack.use_rows, &self.namespace_ranges, &self.scopes, &self.pack.names, site, self)
+    }
+
+    /// `use_map_at` for a spelling whose scope is in hand — a ref's, which
+    /// extraction minted (a header's code, a base class's, is the header
+    /// scope's, outside the def's own).
+    fn use_map_in(&self, site: Point, scope: ScopeId) -> Option<UseMap<'_>> {
+        UseMap::in_scope(&self.pack.use_rows, &self.namespace_ranges, &self.scopes, &self.pack.names, site, scope, self)
     }
 
     fn leaf_namespace_pins(&self) -> UseMapPins {
@@ -1237,7 +1265,7 @@ impl FileAnalysis {
         // resolver's answer for the qualifier it was written under. The
         // spellings carry no site, so they read the whole-file view.
         if let Some(sep) = self.pack.names.use_map_sep() {
-            let map = UseMap { rows: &self.pack.use_rows, own_namespace: own_ns.as_deref(), sep, site: None };
+            let map = UseMap { rows: &self.pack.use_rows, scope_step: None, own_namespace: own_ns.as_deref(), sep, site: None };
             for (leaf, prefix) in &self.pack.qualified_spellings {
                 pin(&mut pins, leaf, &map.resolve_in(prefix, leaf).namespace);
             }
@@ -1270,5 +1298,14 @@ impl FileAnalysis {
             }
         }
         UseMapPins { pins, own_namespace: own_ns, spelled, visible, names: self.pack.names.clone() }
+    }
+}
+
+impl ScopeClasses for FileAnalysis {
+    fn declares_in(&self, scope: ScopeId, identity: &str) -> bool {
+        self.symbols.declared_directly_in(scope).iter().any(|sid| {
+            let s = &self.symbols[sid.0 as usize];
+            matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == identity
+        })
     }
 }

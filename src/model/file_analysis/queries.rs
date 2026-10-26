@@ -58,21 +58,24 @@ impl FileAnalysis {
 
     /// Find the innermost scope containing a point.
     pub fn scope_at(&self, point: Point) -> Option<ScopeId> {
-        let mut best: Option<(ScopeId, usize)> = None; // (id, span_size)
-        for scope in &self.scopes {
-            if contains_point(&scope.span, point) {
-                let size = span_size(&scope.span);
-                if best.is_none() || size <= best.unwrap().1 {
-                    best = Some((scope.id, size));
-                }
-            }
-        }
-        best.map(|(id, _)| id)
+        innermost_scope_at(&self.scopes, point)
     }
 
-    /// Walk the scope chain from a scope upward to file root.
+    /// What `start` is inside, innermost first (`scope_chain_of`) — a
+    /// containment climb that lists no names.
     pub fn scope_chain(&self, start: ScopeId) -> Vec<ScopeId> {
         scope_chain_of(&self.scopes, start)
+    }
+
+    /// Where a name used in `from` is looked up (`lookup_chain`).
+    pub fn lookup_chain(&self, from: ScopeId) -> LookupChain {
+        lookup_chain(&self.scopes, from)
+    }
+
+    /// Every symbol a use written in `from` can name bare, wherever it is
+    /// declared in its scope (`LookupChain::bindings`).
+    pub fn bindings_seen_from(&self, from: ScopeId) -> Vec<&Symbol> {
+        self.lookup_chain(from).bindings(&self.symbols).collect()
     }
 
     /// Get the scope struct by ID.
@@ -91,37 +94,23 @@ impl FileAnalysis {
             Some(s) => s,
             None => return Vec::new(),
         };
-        let chain = self.scope_chain(scope);
-        let mut result = Vec::new();
-        for scope_id in &chain {
-            for sid in self.symbols.in_scope(*scope_id) {
-                let sym = &self.symbols[sid.0 as usize];
-                // Symbol must be declared before the point (or be a sub/package/class)
-                if sym.span.start <= point || matches!(sym.kind, SymKind::Sub | SymKind::Method | SymKind::Package | SymKind::Class) {
-                    result.push(sym);
-                }
-            }
-        }
-        result
+        // Declared before the point, or a sub/package/class.
+        self.lookup_chain(scope)
+            .bindings(&self.symbols)
+            .filter(|sym| {
+                sym.span.start <= point
+                    || matches!(sym.kind, SymKind::Sub | SymKind::Method | SymKind::Package | SymKind::Class)
+            })
+            .collect()
     }
 
     /// Resolve a variable name to its declaration at a given point.
     /// Returns the innermost-scope match (Perl lexical scoping).
     pub fn resolve_variable(&self, name: &str, point: Point) -> Option<&Symbol> {
         let scope = self.scope_at(point)?;
-        let chain = self.scope_chain(scope);
-        for scope_id in &chain {
-            for sid in self.symbols.in_scope(*scope_id) {
-                let sym = &self.symbols[sid.0 as usize];
-                if sym.name == name
-                    && matches!(sym.kind, SymKind::Variable | SymKind::Field)
-                    && sym.span.start <= point
-                {
-                    return Some(sym);
-                }
-            }
-        }
-        None
+        self.lookup_chain(scope)
+            .bindings(&self.symbols)
+            .find(|sym| sym.name == name && matches!(sym.kind, SymKind::Variable | SymKind::Field) && sym.span.start <= point)
     }
 
     /// The pointer/reference declarator stack of the in-scope variable
@@ -204,10 +193,10 @@ impl FileAnalysis {
             // without subobject + path analysis. Detect param-ness by the moved
             // var's declaration landing inside a parameter list; only moves of
             // LOCALS are flagged. This is what clears the last real-header FPs.
-            let chain = scope_chain_of(&self.scopes, *move_scope);
+            let chain = self.lookup_chain(*move_scope);
             let moved_is_param = self.symbols.iter().any(|s| {
                 s.name == *name
-                    && chain.contains(&s.scope)
+                    && chain.contains(s.scope)
                     && self
                         .pack.param_regions
                         .iter()
@@ -386,13 +375,13 @@ impl FileAnalysis {
         if self.gated_param_types.is_empty() {
             return None;
         }
-        let chain = self.scope_chain(scope);
+        let chain = self.lookup_chain(scope);
         let pkg = self.package_at(point);
         for gated in &self.gated_param_types {
             if let GateResult::Applies(tc) =
                 gated.resolve_for(pkg, &self.packages, module_index)
             {
-                if tc.variable == var && chain.contains(&tc.scope) {
+                if tc.variable == var && chain.contains(tc.scope) {
                     return Some(tc.inferred_type.clone());
                 }
             }

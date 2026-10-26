@@ -15,9 +15,16 @@ pub(super) struct State {
     scope_start_by_match: HashMap<usize, usize>,
     pending_context: HashMap<usize, (ContextKind, String)>,
     /// Parent edges whose parent is still the written spelling: its index
-    /// in `out.parents`, the namespace in force where it was written, and
-    /// where. Resolved through the use-map once every import row is in.
-    written_parents: Vec<(usize, Option<String>, Point)>,
+    /// in `out.parents`, where it was written, and the scope it is written
+    /// in. Resolved through the use-map once every import row and class is
+    /// in.
+    written_parents: Vec<(usize, Point, ScopeId)>,
+    /// Each `@scope.header` scope, and the def scope whose header it is:
+    /// the scope a name the header declares binds in.
+    pub(super) headed: HashMap<ScopeId, ScopeId>,
+    /// The scopes that are a class's own, opened by the match whose
+    /// `@context.class` names it, and the class's identity.
+    class_scopes: HashMap<ScopeId, String>,
     /// Statement-form namespace sections still running, by the scope
     /// depth they were declared at.
     open_sections: OpenSections,
@@ -40,6 +47,30 @@ fn open_section(st: &mut ExtractState, namespace: &str, span: Span, kind: Sectio
     }
 }
 
+/// The home a declaration in `from` at `at` joins: the class whose own
+/// scope is on its `callable_reach`, else the namespace in force there. A
+/// class declared in `class Outer:`'s body is `Outer.Inner`; one declared
+/// in a method of `Outer` joins the namespace.
+pub(super) fn home_of<'s>(st: &'s ExtractState, from: ScopeId, at: Point) -> Option<&'s str> {
+    crate::model::file_analysis::callable_reach(&st.out.scopes, from)
+        .find_map(|id| st.scopes.class_scopes.get(&id))
+        .map(String::as_str)
+        .or_else(|| st.namespace_at(at))
+}
+
+/// The scope each class declared in this file opened as its own (its
+/// first, where a class reopens), by the class's identity.
+pub(super) fn class_scope_rows(st: &ExtractState) -> Vec<(String, ScopeId)> {
+    let mut first: HashMap<&str, ScopeId> = HashMap::new();
+    for (&id, class) in &st.scopes.class_scopes {
+        let at = first.entry(class.as_str()).or_insert(id);
+        *at = (*at).min(id);
+    }
+    let mut rows: Vec<(String, ScopeId)> = first.into_iter().map(|(c, id)| (c.to_string(), id)).collect();
+    rows.sort_by_key(|&(_, id)| id);
+    rows
+}
+
 pub(super) fn collect(st: &mut ExtractState, e: &Event) {
     if let Capture::Scope(_) = e.cap {
         st.scopes.scope_start_by_match.entry(e.match_id).or_insert(e.start_byte);
@@ -58,17 +89,31 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         // of is joined as its `owner` at assembly.
         Capture::Scope(scope_cap) => {
             let id = ScopeId(st.out.scopes.len() as u32);
+            // A header is code of the scope around its def's own (the file,
+            // for a header the file scope holds).
+            let around = match scope_cap {
+                ScopeCap::Header => st.out.scopes[st.cur_scope.0 as usize].parent,
+                _ => None,
+            };
+            let (parent, package) = match around {
+                Some(around) => {
+                    st.scopes.headed.insert(id, st.cur_scope);
+                    (around, st.out.scopes[around.0 as usize].package.clone())
+                }
+                None => (st.cur_scope, st.package.clone()),
+            };
             st.out.scopes.push(Scope {
                 id,
-                parent: Some(st.cur_scope),
+                parent: Some(parent),
                 kind: match scope_cap {
                     ScopeCap::Sub | ScopeCap::SubImplicitReceiver => ScopeKind::Sub { name: String::new() },
-                    ScopeCap::Block => ScopeKind::Block,
+                    ScopeCap::Block | ScopeCap::Direct | ScopeCap::Header => ScopeKind::Block,
                 },
                 span: e.span(),
-                package: st.package.clone(),
+                package,
                 owner: None,
                 implicit_receiver: scope_cap == ScopeCap::SubImplicitReceiver,
+                direct: scope_cap == ScopeCap::Direct,
                 declaration_rules: Vec::new(),
             });
             st.scope_stack.push((e.end_byte, id));
@@ -79,21 +124,32 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 while st.context_stack.last().is_some_and(|&(d, ..)| d >= st.scope_stack.len()) {
                     st.context_stack.pop();
                 }
-                if kind == ContextKind::Namespace {
-                    open_section(st, &text, e.span(), SectionKind::Block);
+                match kind {
+                    ContextKind::Namespace => open_section(st, &text, e.span(), SectionKind::Block),
+                    ContextKind::Class => {
+                        st.scopes.class_scopes.insert(id, text.clone());
+                    }
+                    _ => {}
                 }
                 st.context_stack.push((st.scope_stack.len(), kind, text));
             }
-            narrowing::on_scope_push(st, e, id);
+            if scope_cap != ScopeCap::Header {
+                narrowing::on_scope_push(st, e, id);
+            }
         }
         Capture::Context(kind) => {
             // Shape the context like a def name (cpp canonicalizes a
             // spec's template spelling) so members' `package` matches
             // the container Symbol's identity exactly.
             let text = (pack.shape_name)(&e.text);
-            // A class body's members file under the class's identity.
-            let identity = (kind == ContextKind::Class && pack.names.use_map_sep().is_some())
-                .then(|| st.class_identity(&text));
+            // A class body's members file under the class's identity, as
+            // the class's def minted it.
+            let identity = (kind == ContextKind::Class && pack.names.use_map_sep().is_some()).then(|| {
+                st.defs
+                    .class_of_match(e.match_id)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| st.class_identity(&text, st.cur_scope, e.start))
+            });
             // If this match's `@scope` starts AFTER this context, the
             // context belongs to that (not-yet-pushed) body — defer it
             // so it registers at the body depth and pops with the block.
@@ -116,6 +172,9 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 if st.scopes.scope_start_by_match.contains_key(&e.match_id) {
                     if let Some(&(_, id)) = st.scope_stack.last() {
                         st.out.scopes[id.0 as usize].package = Some(value.clone());
+                        if kind == ContextKind::Class {
+                            st.scopes.class_scopes.insert(id, value.clone());
+                        }
                     }
                 }
                 st.context_stack.push((st.scope_stack.len(), kind, value));
@@ -123,19 +182,15 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         }
         Capture::Parent => {
             // `@parent` (a base class) pairs with the `@def.class.name`
-            // in the same match — record the inheritance edge.
-            if let Some(child) = st.defs.name_of(e.match_id, DefCap::Class) {
-                // Shaped like the child's def name (cpp canonicalizes a
-                // template-spelled base) so the edge joins the identity
-                // the target class was filed under. The parent pattern is a
-                // match of its own, so the child's identity is minted here
-                // the way the def handler mints it.
-                let edge = (st.class_identity(child), (pack.shape_name)(&e.text));
+            // in the same match — record the inheritance edge from the
+            // class as its def minted it. The base is shaped like a def
+            // name (cpp canonicalizes a template-spelled base) so the edge
+            // joins the identity the target class was filed under.
+            if let Some(child) = st.defs.class_of_match(e.match_id).map(str::to_string) {
                 if pack.names.use_map_sep().is_some() {
-                    let ns = st.namespace().map(str::to_string);
-                    st.scopes.written_parents.push((st.out.parents.len(), ns, e.span().start));
+                    st.scopes.written_parents.push((st.out.parents.len(), e.span().start, st.cur_scope));
                 }
-                st.out.parents.push(edge);
+                st.out.parents.push((child, (pack.shape_name)(&e.text)));
             }
         }
         _ => {}
@@ -143,18 +198,21 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
 }
 
 /// Resolve each written parent spelling to the identity it names, through
-/// the file's use-map at the namespace it was written in: `extends Model`
-/// after `use Illuminate\Database\Eloquent\Model;` is that class, an
-/// unimported leaf is the namespace's own.
+/// the file's use-map where it was written, from the scope it is written
+/// in (a header's, where the document marks one): `extends Model` after `use
+/// Illuminate\Database\Eloquent\Model;` is that class, an unimported leaf
+/// is the namespace's own, a sibling the enclosing class body declares is
+/// that nested class. Runs after every class is minted.
 pub(super) fn resolve_parents(st: &mut ExtractState) {
-    let Some(sep) = st.pack.names.use_map_sep() else { return };
-    for (i, ns, site) in std::mem::take(&mut st.scopes.written_parents) {
-        let map = crate::model::file_analysis::UseMap {
-            rows: &st.out.use_rows,
-            own_namespace: ns.as_deref(),
-            sep,
-            site: Some(site),
-        };
-        st.out.parents[i].1 = map.resolve(&st.out.parents[i].1).identity(sep);
+    let out = &st.out;
+    let resolved: Vec<(usize, String)> = std::mem::take(&mut st.scopes.written_parents)
+        .into_iter()
+        .filter_map(|(i, site, from)| {
+            let map = crate::model::file_analysis::UseMap::in_scope(&out.use_rows, &out.namespace_ranges, &out.scopes, &st.pack.names, site, from, &out.symbols)?;
+            Some((i, map.resolve(&out.parents[i].1).identity(map.sep)))
+        })
+        .collect();
+    for (i, parent) in resolved {
+        st.out.parents[i].1 = parent;
     }
 }

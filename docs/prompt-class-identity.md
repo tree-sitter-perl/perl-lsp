@@ -52,16 +52,18 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    found through such a class carries the stamp, but no lane reads it at
    the member site: that would type every receiver on every publish.
 5. **Spellings resolve once, in extraction.** A class declaration joins
-   the namespace in force at its position, the innermost
-   `@context.namespace` (`ExtractState::class_identity`), so a class is
-   filed under one key whatever container it is written in, and its
-   symbol's `package` is that namespace. A written spelling resolves
+   its home (`ExtractState::class_identity`, `scopes::home_of`) — the
+   class whose own scope it is written in (below), else the section of
+   the namespace lane there — so a class is filed under one key whatever
+   container it is written in, and its symbol's `package` is that home. A written spelling resolves
    through the pure `UseMap::resolve` ladder
    (`model/file_analysis/use_map.rs`) over the file's `use` rows
    (`PackFacts::use_rows`) at the namespace it was written in, once every
-   row is in: absolute spelling → itself; head segment → its alias, else
-   its `use` row (an aliased row binds the alias, never its leaf), else
-   the namespace in force at the spelling's site; the rest hangs off that.
+   row and class is in: absolute spelling → itself; head segment → a
+   class nested in a class whose body the site sees (below), else its alias,
+   else its `use` row (an aliased row binds the alias, never its leaf),
+   else the namespace in force at the spelling's site; the rest hangs off
+   that.
    A row is minted as the parts the extractor read (`@import.prefix` and
    the name's qualifier as its namespace, the name's last segment as its
    leaf, `@import.alias`)
@@ -87,7 +89,23 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    language that names modules by path gets its namespace from the
    driver (`FileModule`, gathered in phase 1 from the `__init__.py` chain,
    else the workspace root): one whole-file section, so `pkg/models.py`
-   files `class User` as `pkg.models.User`. Parent clauses
+   files `class User` as `pkg.models.User`. Which directories hold an
+   `__init__.py` is the walk's answer, not a stat per ancestor per build:
+   the driver names its module marker (`FileModuleRule::marker`), the
+   pack indexer records where its walk saw one (`build/walk_markers.rs`,
+   a generation-stamped snapshot of the directories it walked and the
+   ones it saw marked), and the gather asks that snapshot. A path no walk
+   covers — a file opened before the index, a hidden or ignored
+   directory, a CLI file verb — asks the disk. The analysis carries the
+   module it was filed under (`PackFacts::file_module`: the one input it
+   read from outside its source, per file, and compared by the warm scan,
+   so neither a witness nor a convention); a warm row whose path names
+   another module now re-analyzes (`LanguageDriver::path_inputs_current`).
+   A marker created or deleted reaches the pack invalidator like any
+   `.py` change; it notes the marker in the snapshot (bumping its
+   generation) before anything re-analyzes, and re-analyzes every file
+   under that directory, open documents included, whatever the marker's
+   own surface verdict. Parent clauses
    resolve this way (`scopes::resolve_parents`); every other class
    spelling the extractor mints goes through the same ladder — an
    annotation type through
@@ -130,6 +148,56 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    it only through a use-map, so C++, whose spellings are identities, keeps
    its calls calls.
 
+**A class is a home, not a namespace.** Whose member a declaration is
+and how a name written somewhere resolves are two facts, and the scope
+tree carries both; the namespace lane holds real namespaces only (Perl's
+packages, PHP's namespaces, a Python module).
+
+*Ownership.* A class's `@scope` is opened by the match whose
+`@context.class` names it, so the extractor knows that scope is the
+class's own (`scopes::State::class_scopes`). A declaration's home is the
+class whose own scope it is written in, through any plain block but
+never across a callable — a method's declarations are its locals, not
+the class's members — else the namespace in force (`scopes::home_of`).
+The callable boundary is one primitive, `callable_reach` (the scopes out
+to and including the nearest callable), which `lookup_chain`'s direct
+arm reads too.
+`class Outer: class Inner:` in `pkg/mod.py` files `Inner` as
+`pkg.mod.Outer.Inner`, so Django's per-model `class Meta:` is one class
+per model; a class declared in a method of `Outer` is filed under the
+module. The class's def mints its identity once (`defs::State::
+classes_by_name`); its `@context.class` and its `@parent` matches read
+that, never mint it again.
+
+*Lookup.* A bare head walks `lookup_chain` from the scope it is written
+in, and each scope on it offers the classes declared directly in it
+under its own package (`UseMap::scope_step`, asked through
+`ScopeClasses` — the symbol table, never a second list) before the
+ladder above. How far a scope's names reach is the scope's rule, and the
+document states it: `@scope.direct` marks a scope whose names are in
+force only for code written directly in it (Python's class scope),
+minted as `Scope::direct`, so the walk drops it once it has come up out
+of a callable or out of another direct scope. A method of `Outer`, and a
+class nested in it, resolve a bare `Inner` in the module. A pack that
+marks nothing keeps the plain chain: its class body reaches its methods,
+and PHP's class scope, which declares no class, offers nothing. A
+dotted spelling hangs off its head as any qualified spelling does:
+`Outer.Inner`, in the file or after `from pkg.mod import Outer`, is
+`pkg.mod.Outer.Inner`.
+
+*Headers.* A def's own scope covers its header, but the header runs
+where the def is written: a class's bases, a function's parameter
+annotations and defaults and its `-> T`. The document marks each region
+`@scope.header` (`docs/adr/capture-vocabulary.md`), minted as a scope
+whose parent is the def's declaring scope, so a reference written there
+carries that scope (`Ref::scope`, which the query side resolves from
+through `UseMap::in_scope`), a parent edge resolves from it, and a
+positional lookup in it lands there too. `class B(A):` in `Outer`'s body
+names the sibling `Outer.A`, even when B declares an `A` of its own; a
+method's `x: Inner = Inner()` and `-> Inner` name `Outer.Inner` while
+its body reaches the module's `Inner`. The parameter names bind in the
+method.
+
 The namespace sections are the namespace lane every language shares,
 `FileAnalysis::namespace_ranges` — Perl's packages are written to it by the
 same section-closing rule (`OpenSections`) and read by the same lookup
@@ -151,15 +219,31 @@ leaf-space FQ family validation in `implementations_of`.
 
 ## Residuals
 
-- **A Python module's name reads the filesystem, its blob does not.**
-  The `__init__.py` chain and the workspace root decide `FileModule`,
-  but the cache keys on the file's source: adding or removing an
-  `__init__.py` re-files a module's classes only once the file is
-  re-analyzed.
-- **A nested Python class joins the module namespace** (`pkg.mod.Inner`
-  for `class Outer: class Inner:`), not Python's qualname
-  (`pkg.mod.Outer.Inner`) — the anonymous-class residual below, in
-  another language.
+- **A Python module's name is only as fresh as the watcher.** The
+  snapshot learns of an `__init__.py` created or deleted through
+  `didChangeWatchedFiles` (or a save); a client that sends no event for
+  it leaves the modules under it filed by the old state until the next
+  walk, which re-files them (the warm rows fail `path_inputs_current`).
+  An open document's debounced rebuild that named its module before a
+  marker flip and lands after the invalidator's refresh keeps the old
+  name until its next edit.
+- **A class declared in a method is filed under the module**
+  (`pkg.mod.Local`), not Python's `Outer.build.<locals>.Local`.
+- **A scope opened inside a header keeps the def's chain.** No Python
+  construct opens one today (a lambda is no scope), but a document that
+  marks one would see the def's own scope through it.
+- **The namespace in force inside a class body is the module.**
+  `namespace_at` reads the lane, which holds no class; the class a site's
+  code belongs to is `package_at`'s answer.
+- **`Outer.Inner()` is a member call.** A call through an attribute is a
+  `MethodCall` on the receiver `Outer`, and a nested class is no member
+  of its enclosing class there, so the call is untyped and goto-def finds
+  nothing; the class reference spellings (a parent clause, an annotation)
+  resolve.
+- **An annotation is a class reference by its spelling alone.** Every
+  name in a `type` is a `PackageRef` (`v: Outer.Inner` rewrites `Inner`
+  on a rename), so a builtin (`x: int`) is a reference that lands
+  nowhere.
 
 - **The visibility pins have no site.** `UseMapPins` is per ORIGIN
   (`VisibilityAxis::for_origin` takes a file, not a position), so it

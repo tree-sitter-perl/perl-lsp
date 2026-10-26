@@ -116,6 +116,14 @@ pub struct Scope {
     /// names no package, so nothing binds.
     #[serde(default)]
     pub implicit_receiver: bool,
+    /// The names declared in this scope are in force only for code
+    /// written directly in it (`@scope.direct`): a use inside a callable,
+    /// or inside another such scope, nested here looks past the scope, as
+    /// Python's class body does for its methods and its nested classes.
+    /// Read through `lookup_chain`, the one walk every name lookup takes,
+    /// so a language states the rule once.
+    #[serde(default)]
+    pub direct: bool,
     /// Where this scope switches "every variable must be declared" on or
     /// off (Perl's `use strict 'vars'` / `no strict 'vars'`), in source
     /// order. Lexical: a nested scope inherits the switch in force where it
@@ -201,6 +209,22 @@ pub fn namespace_range_at(ranges: &[NamespaceRange], point: Point) -> Option<&Na
         .iter()
         .filter(|r| contains_point(&r.span, point))
         .max_by_key(|r| (r.span.start, std::cmp::Reverse(r.span.end)))
+}
+
+/// The innermost scope containing `point`, over a bare slice — the
+/// lookup `FileAnalysis::scope_at` is the method form of, shared with the
+/// use-map, which holds scopes without a `FileAnalysis`.
+pub fn innermost_scope_at(scopes: &[Scope], point: Point) -> Option<ScopeId> {
+    let mut best: Option<(ScopeId, usize)> = None; // (id, span_size)
+    for scope in scopes {
+        if contains_point(&scope.span, point) {
+            let size = span_size(&scope.span);
+            if best.is_none() || size <= best.unwrap().1 {
+                best = Some((scope.id, size));
+            }
+        }
+    }
+    best.map(|(id, _)| id)
 }
 
 /// The statement-form sections a builder's walk still has running, by the
@@ -329,6 +353,25 @@ pub struct NameSpellings {
     pub class_call: ClassCall,
     /// Which class a site's code belongs to (`FileAnalysis::package_at`).
     pub enclosing_class: EnclosingClass,
+    /// Whether a member access reaches an instance's slots
+    /// (`FileAnalysis::slot_class_of`).
+    pub instance_slots: InstanceSlots,
+}
+
+/// Whether a language's member access (`obj.x`) reaches the slots an
+/// instance holds (a class-owned `HashKeyDef`) as well as its class's
+/// members. A language declares it on its spellings; the member walk reads
+/// the value and never asks which language it serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum InstanceSlots {
+    /// Member access reaches only the class's members. Perl's slots are
+    /// reached by `$obj->{key}`, a syntax of their own.
+    #[default]
+    Apart,
+    /// Member access reads the instance's slots first, then its class's
+    /// members, ancestors included in each: Python's instance `__dict__`
+    /// before the class.
+    BeforeClass,
 }
 
 /// Where a language's code finds the class it belongs to — the class
@@ -417,6 +460,7 @@ impl NameSpellings {
         imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
         class_call: ClassCall::FunctionCall,
         enclosing_class: EnclosingClass::ScopeChain,
+        instance_slots: InstanceSlots::Apart,
     };
 
     /// A language with a namespace separator, no sigils, and spellings
@@ -432,6 +476,7 @@ impl NameSpellings {
             imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
             class_call: ClassCall::FunctionCall,
             enclosing_class: EnclosingClass::ScopeChain,
+            instance_slots: InstanceSlots::Apart,
         }
     }
 
