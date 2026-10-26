@@ -221,7 +221,7 @@ pub fn scope_chain_of(scopes: &[Scope], start: ScopeId) -> Vec<ScopeId> {
 /// Where a name used in `from` is looked up, innermost first: the scope
 /// chain minus the scopes whose own rule says a use written here cannot
 /// see their names. THE walk for every name lookup — a variable read, a
-/// bare class spelling, the section in force at a site — so a language's
+/// bare class spelling (`UseMap`'s scope step) — so a language's
 /// scoping rule is stated once, as an arm here, and inherited by all of
 /// them. `scope_chain_of` stays the raw lexical climb (containment,
 /// packages, outline nesting); only name lookups take this one.
@@ -229,7 +229,8 @@ pub fn scope_chain_of(scopes: &[Scope], start: ScopeId) -> Vec<ScopeId> {
 /// Arms:
 /// - `Scope::direct` (`@scope.direct`): in force only for code written
 ///   directly in the scope, so it drops out once the walk has come up
-///   out of a callable (Python's class body, seen from its method).
+///   out of a callable or out of another direct scope (Python's class
+///   body, seen from its method or from a class nested in it).
 /// - a closed body (`@scope.sub.closed`): the walk ENDS at a body that
 ///   sees no variable around it but the ones it captures, unless it
 ///   captures the name. Only `lookup_chain_through` takes this arm.
@@ -244,17 +245,17 @@ pub fn lookup_chain(scopes: &[Scope], from: ScopeId) -> Vec<ScopeId> {
 /// over-approximates a type and never binds a name wrongly.
 pub fn lookup_chain_through(scopes: &[Scope], from: ScopeId, shut: impl Fn(ScopeId) -> bool) -> Vec<ScopeId> {
     let mut chain = Vec::new();
-    let mut left_callable = false;
+    let mut left_boundary = false;
     let mut current = Some(from);
     while let Some(id) = current {
         let scope = &scopes[id.0 as usize];
-        if !(scope.direct && left_callable) {
+        if !(scope.direct && left_boundary) {
             chain.push(id);
         }
         if shut(id) {
             break;
         }
-        left_callable |= matches!(scope.kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. });
+        left_boundary |= scope.direct || matches!(scope.kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. });
         current = scope.parent;
     }
     chain

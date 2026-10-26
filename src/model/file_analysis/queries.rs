@@ -21,6 +21,23 @@ impl FileAnalysis {
         }
     }
 
+    /// Every use of a variable no declaration reaches that `use strict
+    /// 'vars'` would reject: the refs bound to an implicit global, minus the
+    /// names strict exempts (`$a`/`$b`). Declarations a `use` brings in
+    /// (Exporter's `qw($x)`) are the caller's to rule out — they need the
+    /// producer's surface.
+    pub fn undeclared_variable_uses(&self) -> impl Iterator<Item = &Ref> + '_ {
+        // A qualified `$main::x` names its package, so strict accepts it.
+        self.refs().iter().filter(move |r| {
+            r.qualified_var_target(self.names()).is_none()
+                && r.resolved_symbol().is_some_and(|id| {
+                let s = self.symbol(id);
+                matches!(s.detail, SymbolDetail::Variable { decl_kind: DeclKind::Implicit, .. })
+                    && !crate::model::conventions::is_strict_vars_exempt(&s.name)
+                })
+        })
+    }
+
     // ---- Query methods ----
 
     /// Find the innermost scope containing a point.
@@ -55,6 +72,9 @@ impl FileAnalysis {
             for sid in self.symbols.in_scope(*scope_id) {
                 let sym = &self.symbols[sid.0 as usize];
                 // Symbol must be declared before the point (or be a sub/package/class)
+                if sym.flags.contains(SymbolFlags::THROUGH_RECEIVER) {
+                    continue;
+                }
                 if sym.span.start <= point || matches!(sym.kind, SymKind::Sub | SymKind::Method | SymKind::Package | SymKind::Class) {
                     result.push(sym);
                 }
@@ -72,7 +92,7 @@ impl FileAnalysis {
             for sid in self.symbols.in_scope(*scope_id) {
                 let sym = &self.symbols[sid.0 as usize];
                 if sym.name == name
-                    && matches!(sym.kind, SymKind::Variable | SymKind::Field)
+                    && sym.is_bare_name()
                     && sym.span.start <= point
                 {
                     return Some(sym);

@@ -104,6 +104,12 @@ pub fn split_qualified_var<'a>(name: &'a str, names: &'a NameSpellings) -> Optio
     pkg.map(|p| (names.qualifier_package(p), format!("{sigil}{base}")))
 }
 
+/// The qualified spelling of a variable: `('$', "Foo", "x")` → `$Foo::x`.
+/// The inverse of `split_qualified_var`.
+pub fn qualify_var(sigil: char, package: &str, base: &str, names: &NameSpellings) -> String {
+    format!("{sigil}{package}{}{base}", names.sep().unwrap_or_default())
+}
+
 /// Conventional invocant variable names — `sub f { my ($self) = @_ }` and
 /// friends. Accepts the bare identifier or the `$`-sigiled spelling so both
 /// param names (`"$self"`) and canonical varnames (`"self"`) route here.
@@ -127,6 +133,42 @@ pub fn is_conventional_invocant_name(name: &str) -> bool {
 /// their typed names pass through bare.
 pub fn strip_variable_sigils(name: &str) -> &str {
     name.trim_start_matches(['$', '@', '%'])
+}
+
+/// A variable Perl itself defines (perlvar): punctuation (`$_`, `$@`, `@_`),
+/// digit (`$0`, `$1`), caret (`${^W}`) and the identifiers Perl forces into
+/// `main` (`%ENV`, `@ARGV`, `%SIG`, ...). Such a name never needs a
+/// declaration and never names user state, so an undeclared use of one is
+/// not an implicit global. `name` is sigil-led, as a variable ref spells it.
+pub fn is_special_variable(name: &str) -> bool {
+    let base = name.get(1..).unwrap_or("");
+    let base = base.strip_prefix('{').and_then(|b| b.strip_suffix('}')).unwrap_or(base);
+    match base.chars().next() {
+        None => true,
+        Some(c) if !(c.is_alphabetic() || c == '_') => true,
+        _ => matches!(
+            base,
+            "_" | "ENV" | "INC" | "ARGV" | "ARGVOUT" | "SIG" | "STDIN" | "STDOUT" | "STDERR"
+        ),
+    }
+}
+
+/// `use strict 'vars'` exempts these from declaration on top of the special
+/// variables: `$a`/`$b` are `sort`'s comparator globals.
+pub fn is_strict_vars_exempt(name: &str) -> bool {
+    is_special_variable(name) || matches!(name, "$a" | "$b")
+}
+
+/// A name spelled as a variable or a glob (`$x`, `@x`, `*x`) rather than a
+/// sub — an import list carries both.
+pub fn is_variable_or_glob_spelling(name: &str) -> bool {
+    name.starts_with('*') || name.chars().next().is_some_and(|c| PERL_SPELLINGS.is_sigil(c))
+}
+
+/// The typeglob holding a variable's slot (`$x` → `*x`). Exporting the
+/// glob exports every sigil's variable of that name.
+pub fn glob_of_variable(name: &str) -> String {
+    format!("*{}", name.get(1..).unwrap_or(""))
 }
 
 /// Conventional constructor method name. Perl has no `new` keyword — this is

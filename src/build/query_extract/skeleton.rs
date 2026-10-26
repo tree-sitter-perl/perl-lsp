@@ -50,9 +50,9 @@ pub struct SkelSymbol {
     pub flags: SymbolFlags,
 }
 
-impl crate::model::file_analysis::DeclaredClasses for Vec<SkelSymbol> {
-    fn declares_class(&self, identity: &str) -> bool {
-        self.iter().any(|s| matches!(s.kind, DefCap::Class | DefCap::Package) && s.name == identity)
+impl crate::model::file_analysis::ScopeClasses for Vec<SkelSymbol> {
+    fn declares_in(&self, scope: crate::model::file_analysis::ScopeId, identity: &str) -> bool {
+        self.iter().any(|s| s.scope == scope && matches!(s.kind, DefCap::Class | DefCap::Package) && s.name == identity)
     }
 }
 
@@ -530,7 +530,7 @@ impl SkeletonAnalysis {
             });
         }
         let mut bag = crate::model::witnesses::WitnessBag::default();
-        for w in self.witnesses {
+        for w in std::mem::take(&mut self.witnesses) {
             bag.push(w);
         }
         // Associate each callable def with its parameter arity: the def's OWN
@@ -1045,23 +1045,26 @@ impl SkeletonAnalysis {
             }
         }
         // ---- Local/param vars: a variable READ resolves to the nearest
-        // visible Variable declaration by lexical scope walk → local
-        // goto-def + hover. Declarations are already Variable symbols
-        // (`@def.local`/`@def.var`); fields are excluded naturally (their
-        // class scope isn't on a local read's scope chain).
-        // A variable a write declares is its callable's from the top of
-        // the body, so a read above its first write (a loop's) reaches it.
+        // visible declaration of a bare name by the lookup walk → local
+        // goto-def + hover. A name is a Variable (`@def.local`/`@def.var`)
+        // or a Field its scope declares by name (python's class body); a
+        // member written through a receiver is no bare name anywhere. Where
+        // a body elides its receiver, a field is reached as a member of the
+        // elided receiver (the implicit-receiver pass below), not by the
+        // lexical walk. A variable a write declares is its callable's from
+        // the top of the body, so a read above its first write (a loop's)
+        // reaches it.
         let mut defs_by_name: std::collections::HashMap<
             String,
-            Vec<(crate::model::file_analysis::ScopeId, Span, SymbolId, bool)>,
+            Vec<(crate::model::file_analysis::ScopeId, Span, SymbolId, bool, bool)>,
         > = std::collections::HashMap::new();
         for s in &symbols {
-            if matches!(s.kind, SymKind::Variable) {
+            if s.is_bare_name() {
                 let scope_wide = self.symbols[s.id.0 as usize].kind == DefCap::Assigned;
                 defs_by_name
                     .entry(s.name.clone())
                     .or_default()
-                    .push((s.scope, s.selection_span, s.id, scope_wide));
+                    .push((s.scope, s.selection_span, s.id, scope_wide, s.kind == SymKind::Field));
             }
         }
         let scope_parent: std::collections::HashMap<
@@ -1078,14 +1081,15 @@ impl SkeletonAnalysis {
         let mut unresolved_reads: Vec<(String, crate::model::file_analysis::ScopeId, Span)> = Vec::new();
         let resolve_var = |name: &String, scope: crate::model::file_analysis::ScopeId, span: &Span| {
             let rp = (span.start.row, span.start.column);
+            let elides = elided_class.get(scope.0 as usize).is_some_and(Option::is_some);
             let cands = defs_by_name.get(name)?;
             for sc in self.variable_lookup_chain(scope, name) {
                 // nearest decl of this name in THIS scope level, declared at
                 // or before the use (latest-wins for redeclaration).
                 let mut best: Option<((usize, usize), SymbolId)> = None;
-                for (dscope, dspan, did, scope_wide) in cands {
+                for (dscope, dspan, did, scope_wide, field) in cands {
                     let dp = (dspan.start.row, dspan.start.column);
-                    if *dscope == sc && (dp <= rp || *scope_wide) && best.is_none_or(|(bp, _)| dp > bp) {
+                    if *dscope == sc && !(elides && *field) && (dp <= rp || *scope_wide) && best.is_none_or(|(bp, _)| dp > bp) {
                         best = Some((dp, *did));
                     }
                 }
@@ -1145,7 +1149,7 @@ impl SkeletonAnalysis {
             let mut cur = Some(*ref_scope);
             let mut resolved: Option<SymbolId> = None;
             while let Some(sc) = cur {
-                if let Some((_, _, did, _)) = cands.iter().find(|(dscope, ..)| *dscope == sc) {
+                if let Some((_, _, did, ..)) = cands.iter().find(|(dscope, ..)| *dscope == sc) {
                     resolved = Some(*did);
                     break;
                 }
