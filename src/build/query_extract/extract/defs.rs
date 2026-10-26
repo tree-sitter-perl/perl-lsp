@@ -51,18 +51,10 @@ pub(super) struct State {
     /// declaration, not a use (`refs::handle`).
     pub(super) def_name_spans: Vec<(usize, usize)>,
     /// Each class minted so far, by its name token's start: the identity
-    /// it is filed under and the scope it is declared in. A pattern that
-    /// names the class again (its `@context.class`, a `@parent` match)
-    /// reads the class from here rather than minting it a second time.
-    classes_by_name: HashMap<Point, MintedClass>,
-}
-
-/// A class as its def minted it.
-#[derive(Clone)]
-pub(super) struct MintedClass {
-    pub identity: String,
-    /// The scope the class is declared in — where its header is written.
-    pub declared_in: ScopeId,
+    /// it is filed under. A pattern that names the class again (its
+    /// `@context.class`, a `@parent` match) reads the class from here
+    /// rather than minting it a second time.
+    classes_by_name: HashMap<Point, String>,
 }
 
 impl State {
@@ -73,9 +65,9 @@ impl State {
 
     /// The class whose `@def.class.name` this match captured, as its def
     /// minted it.
-    pub(super) fn class_of_match(&self, match_id: usize) -> Option<&MintedClass> {
+    pub(super) fn class_of_match(&self, match_id: usize) -> Option<&str> {
         let (_, at) = self.name_of(match_id, DefCap::Class)?;
-        self.classes_by_name.get(&at)
+        self.classes_by_name.get(&at).map(String::as_str)
     }
 }
 
@@ -200,8 +192,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         _ => (shaped, pkg),
     };
     if kind == DefCap::Class {
-        let minted = MintedClass { identity: shaped.clone(), declared_in: st.cur_scope };
-        st.defs.classes_by_name.insert(name_start, minted);
+        st.defs.classes_by_name.insert(name_start, shaped.clone());
     }
     let d = &st.defs;
     // A class-spec def carries its primary's name — the
@@ -217,7 +208,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         name_start,
         name_end,
         package: pkg,
-        scope: st.cur_scope,
+        scope: st.bind_scope(),
         return_type: d.rettype_by_match.get(&e.match_id).and_then(|t| (pack.annot_type)(t)),
         deref_stack: d.nested_stacks.get(&e.match_id).cloned().unwrap_or_default(),
         attributes: {
