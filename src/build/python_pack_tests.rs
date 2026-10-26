@@ -885,6 +885,27 @@ fn the_first_write_through_self_declares_an_instance_field() {
     assert!(fa.resolve_variable("n", Point::new(12, 0)).is_none());
 }
 
+/// In-scope completion offers what a bare name can reach from the
+/// cursor: the class body's names to code written directly in it, never
+/// to its methods, and never a member written through `self`.
+#[test]
+fn in_scope_completion_follows_the_lookup_chain() {
+    let fa = members_fa();
+    let labels = |row: usize, column: usize| -> std::collections::HashSet<String> {
+        crate::lsp::symbols::in_scope_completion(&fa, Point::new(row, column)).into_iter().map(|c| c.label).collect()
+    };
+    let body = labels(4, 4);
+    for name in ["count", "a", "b"] {
+        assert!(body.contains(name), "{name} in the class body: {body:?}");
+    }
+    assert!(!body.contains("n"), "a member through self is no bare name: {body:?}");
+    let method = labels(11, 8);
+    assert!(method.contains("self") && method.contains("c"), "{method:?}");
+    for name in ["count", "a", "b", "total", "n"] {
+        assert!(!method.contains(name), "{name} is the class body's, not the method's: {method:?}");
+    }
+}
+
 /// Member completion on an instance offers the class-body fields, the
 /// instance fields and the methods.
 #[test]
