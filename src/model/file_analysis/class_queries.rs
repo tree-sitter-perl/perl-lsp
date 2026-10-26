@@ -1228,7 +1228,7 @@ impl FileAnalysis {
         // The pins answer for the whole origin, so its own namespace is
         // one only when every section names the same; a file of several
         // makes no own-namespace claim (its sites resolve their own). A
-        // class body or a callable in one is no namespace of the file's.
+        // class body is no namespace of the file's.
         let mut sections = self
             .namespace_ranges
             .iter()

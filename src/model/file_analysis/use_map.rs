@@ -75,7 +75,7 @@ impl DeclaredClasses for Vec<super::Symbol> {
     }
 }
 
-/// The class body a site is written directly in (`SectionKind::ClassBody`)
+/// The class body a site is written in (`SectionKind::ClassBody`)
 /// and the file's classes: a bare head the class declares names its nested
 /// class before anything else binds it.
 #[derive(Clone, Copy)]
@@ -96,7 +96,7 @@ impl std::fmt::Debug for ClassBodyStep<'_> {
 pub struct UseMap<'a> {
     /// The file's `use` rows (`PackFacts::use_rows`).
     pub rows: &'a [UseRow],
-    /// The class body the site is written directly in, consulted first.
+    /// The class body the site is written in, consulted first.
     pub class_body: Option<ClassBodyStep<'a>>,
     /// The namespace in force at the site, past any class body.
     pub own_namespace: Option<&'a str>,
@@ -111,7 +111,7 @@ pub struct UseMap<'a> {
 impl<'a> UseMap<'a> {
     /// The map a spelling written at `site` resolves through: the rows
     /// that reach it, the section in force there — a class body the site is
-    /// written directly in, then the section around it. `None` for a
+    /// written in, then the section around it. `None` for a
     /// language whose spellings are identities as written.
     pub fn at(
         rows: &'a [UseRow],
