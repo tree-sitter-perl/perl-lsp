@@ -51,6 +51,10 @@ spelled! {
         Assigned = "assigned",
         /// A struct/class data member.
         Field = "field",
+        /// An instance slot: a key of the per-instance store a write through
+        /// a receiver creates (python's `self.x = …`). A class-owned
+        /// `HashKeyDef`, Perl's `$self->{x}` slot.
+        Slot = "slot",
         Constant = "constant",
         Enumerator = "enumerator",
         Label = "label",
@@ -374,9 +378,9 @@ pub enum DefPart {
     /// `new class {…}`): the pack's `default_name` names the def from the
     /// token's position, and the match's context and parents read that name.
     Anchor,
-    /// The receiver a member def is written through (python's `self` in
-    /// `self.x = …`): the def declares a member of the receiver's class,
-    /// and only where that token names the enclosing method's receiver.
+    /// The receiver a slot def is written through (python's `self` in
+    /// `self.x = …`): the slot belongs to the class the receiver is typed
+    /// as at the write.
     Receiver,
 }
 
@@ -385,8 +389,9 @@ pub enum DefPart {
 pub enum Capture {
     Def { kind: DefCap, part: DefPart },
     /// The one name token two defs of this match declare together (php's
-    /// promoted constructor parameter: the property and the local). They
-    /// are one declaration, linked each way as `Symbol::declared_with`.
+    /// promoted constructor parameter: the property and the local; python's
+    /// class-body binding: the class's member and the name the body reads).
+    /// They are one declaration, linked each way as `Symbol::declared_with`.
     DefPair,
     /// The match's def declares in the scope around the one it is written
     /// in (php's `use (&$x)` creates `$x` in the function around the
@@ -687,6 +692,7 @@ impl DefCap {
             // `reexport` marker makes resolution see through it.
             DefCap::Method | DefCap::Reexport => SymKind::Method,
             DefCap::Field => SymKind::Field,
+            DefCap::Slot => SymKind::HashKeyDef,
             DefCap::Enumerator => SymKind::Enumerator,
             DefCap::Var | DefCap::Local | DefCap::Assigned | DefCap::Label | DefCap::UnionField => {
                 SymKind::Variable

@@ -1008,6 +1008,18 @@ pub(super) fn collect_from_analysis(
                 rewritable: rewritable_at(sym.selection_span),
                 label: None
             });
+            // A member declared with a lexical twin from one token (php's
+            // promoted constructor parameter, python's class-body binding)
+            // is one name with it: the twin's uses in this file are the
+            // member's too.
+            let twin = sym.declared_with.map(|id| analysis.symbol(id)).filter(|t| t.kind == SymKind::Variable);
+            if let Some(twin) = twin {
+                let all_refs = analysis.refs();
+                for &ri in analysis.refs_to_symbol(twin.id) {
+                    let r = &all_refs[ri];
+                    out.push(RefLocation { key: key.clone(), span: r.span, access: r.access, rewritable: true, label: None });
+                }
+            }
         }
     }
 

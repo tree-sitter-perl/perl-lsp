@@ -574,7 +574,14 @@ impl SkeletonAnalysis {
                 selection_span: Span { start: s.name_start, end: s.name_end },
                 scope: s.scope,
                 package: s.package.clone(),
-                detail: SymbolDetail::None,
+                // A slot is its class's instance key, as Perl's `$self->{k}`.
+                detail: match (s.kind, &s.package) {
+                    (DefCap::Slot, Some(class)) => SymbolDetail::HashKeyDef {
+                        owner: crate::model::file_analysis::HashKeyOwner::Class(class.clone()),
+                        is_dynamic: false,
+                    },
+                    _ => SymbolDetail::None,
+                },
                 namespace: crate::model::file_analysis::Namespace::Language,
                 presentation: crate::model::file_analysis::Presentation {
                     // An include-guard `#define` is compilation plumbing,
@@ -1062,26 +1069,23 @@ impl SkeletonAnalysis {
             }
         }
         // ---- Local/param vars: a variable READ resolves to the nearest
-        // visible declaration of a bare name by the lookup walk → local
-        // goto-def + hover. A name is a Variable (`@def.local`/`@def.var`)
-        // or a Field its scope declares by name (python's class body); a
-        // member written through a receiver is no bare name anywhere. Where
-        // a body elides its receiver, a field is reached as a member of the
-        // elided receiver (the implicit-receiver pass below), not by the
-        // lexical walk. A variable a write declares is its callable's from
-        // the top of the body, so a read above its first write (a loop's)
-        // reaches it.
+        // visible Variable declaration by the lookup walk → local
+        // goto-def + hover. Declarations are already Variable symbols
+        // (`@def.local`/`@def.var`; a python class-body binding's Variable
+        // twin); fields are members, reached through a receiver. A variable
+        // a write declares is its callable's from the top of the body, so a
+        // read above its first write (a loop's) reaches it.
         let mut defs_by_name: std::collections::HashMap<
             String,
-            Vec<(crate::model::file_analysis::ScopeId, Span, SymbolId, bool, bool)>,
+            Vec<(crate::model::file_analysis::ScopeId, Span, SymbolId, bool)>,
         > = std::collections::HashMap::new();
         for s in &symbols {
-            if s.is_bare_name() {
+            if matches!(s.kind, SymKind::Variable) {
                 let scope_wide = self.symbols[s.id.0 as usize].kind == DefCap::Assigned;
                 defs_by_name
                     .entry(s.name.clone())
                     .or_default()
-                    .push((s.scope, s.selection_span, s.id, scope_wide, s.kind == SymKind::Field));
+                    .push((s.scope, s.selection_span, s.id, scope_wide));
             }
         }
         let mut local_refs: Vec<crate::model::file_analysis::Ref> = Vec::new();
@@ -1094,15 +1098,14 @@ impl SkeletonAnalysis {
         let mut unresolved_reads: Vec<(String, crate::model::file_analysis::ScopeId, Span)> = Vec::new();
         let resolve_var = |name: &String, scope: crate::model::file_analysis::ScopeId, span: &Span| {
             let rp = (span.start.row, span.start.column);
-            let elides = elided_class.get(scope.0 as usize).is_some_and(Option::is_some);
             let cands = defs_by_name.get(name)?;
             for sc in self.variable_lookup_chain(scope, name).scopes() {
                 // nearest decl of this name in THIS scope level, declared at
                 // or before the use (latest-wins for redeclaration).
                 let mut best: Option<((usize, usize), SymbolId)> = None;
-                for (dscope, dspan, did, scope_wide, field) in cands {
+                for (dscope, dspan, did, scope_wide) in cands {
                     let dp = (dspan.start.row, dspan.start.column);
-                    if *dscope == sc && !(elides && *field) && (dp <= rp || *scope_wide) && best.is_none_or(|(bp, _)| dp > bp) {
+                    if *dscope == sc && (dp <= rp || *scope_wide) && best.is_none_or(|(bp, _)| dp > bp) {
                         best = Some((dp, *did));
                     }
                 }
