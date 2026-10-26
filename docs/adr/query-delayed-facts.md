@@ -49,6 +49,18 @@ never filters a match, it makes the match's `DispatchCall` emissions
 `ReceiverIsa` deferrals. Its capture must be the invocant of a method call
 whose ref is the dispatcher; the producer names that ref as the receiver.
 
+## Decision: an unknown owner is bound to its call, not deferred
+
+A hash-key argument whose owner needs other files (`Foo->new(name => …)`
+with `Foo` elsewhere, or a receiver that didn't type at build) is an
+unknown VALUE: the owner is `Sub { the call's invocant class, verb }`, or
+the column owner for a column-keyed verb. So it is not a `Question`. The
+producer binds the key to its call, `RefBinding::CallArgKey { call }`, and
+`deferred_hash_key_owner` and `fix_chain_receiver_hash_key_owners` read the
+call off the binding. Neither re-finds a call by span containment, and a
+`$h->{k}` deref that merely sits inside a call's arguments is never owned
+by that call.
+
 ## Consequences
 
 - The answer is computed at query time through `CrossFileLookup` only, so

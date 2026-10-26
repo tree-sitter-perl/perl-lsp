@@ -1199,7 +1199,15 @@ impl Ref {
         match self.binding.as_ref()? {
             RefBinding::Symbol(sym) => Some(*sym),
             RefBinding::HashKey { sym, .. } | RefBinding::Handler { sym, .. } => *sym,
-            RefBinding::Function { .. } | RefBinding::Method(_) => None,
+            RefBinding::Function { .. } | RefBinding::Method(_) | RefBinding::CallArgKey { .. } => None,
+        }
+    }
+
+    /// The call whose arguments a deferred-owner `HashKeyAccess` sits in.
+    pub fn arg_key_call(&self) -> Option<crate::model::witnesses::RefIdx> {
+        match self.binding.as_ref()? {
+            RefBinding::CallArgKey { call } => Some(*call),
+            _ => None,
         }
     }
 
@@ -1494,6 +1502,13 @@ pub enum RefBinding {
     /// against, plus the linked `Handler` symbol (first stacked def —
     /// `refs_to_symbol` walks all stacked defs separately).
     Handler { owner: HandlerOwner, sym: Option<SymbolId> },
+    /// `HashKeyAccess` among the arguments of the `MethodCall` at `call`,
+    /// whose owner needs other files (the receiver's class lives elsewhere,
+    /// or didn't type at build). The owner is decided from that call at
+    /// query time (`FileAnalysis::deferred_hash_key_owner`); the projection
+    /// accessors read it as unowned. Kept at the END for bincode
+    /// variant-index stability (bump `EXTRACT_VERSION`).
+    CallArgKey { call: crate::model::witnesses::RefIdx },
 }
 
 /// What kind of entity is being renamed — determines single-file vs cross-file scope.

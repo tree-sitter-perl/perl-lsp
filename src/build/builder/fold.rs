@@ -636,16 +636,14 @@ impl<'a> Builder<'a> {
         //    chain hop whose link-type lives in another file
         //    (helper-style: `$c->sner_r->search({...})`) returns
         //    None at this point. Emit `HashKeyAccess` refs
-        //    eagerly with `owner: None`; enrichment runs later
-        //    with `module_index` and fixes the owner once the
-        //    receiver type is resolvable. Same precedent as
-        //    cross-file invocant refresh (PR #34): build emits
-        //    what it can; enrichment fills gaps.
+        //    bound to their call (`CallArgKey`); the owner is
+        //    decided from that call once the receiver type is
+        //    resolvable (`docs/adr/query-delayed-facts.md`).
         enum Path<'a> {
             Claimed(HashKeyOwner, Node<'a>),
             Strict(HashKeyOwner, Node<'a>),
-            StrictOrDefer(HashKeyOwner, Node<'a>),
-            Deferred(Node<'a>),
+            StrictOrDefer(HashKeyOwner, RefIdx, Node<'a>),
+            Deferred(RefIdx, Node<'a>),
             ColumnKeyed(HashKeyOwner, Node<'a>),
         }
         // Plugin-declared verbs whose first hashref arg is column-keyed (owned
@@ -711,7 +709,7 @@ impl<'a> Builder<'a> {
                 } else {
                     // The class lives elsewhere — a local def miss can't
                     // veto; defer the gate to query time.
-                    Path::StrictOrDefer(owner, args)
+                    Path::StrictOrDefer(owner, RefIdx(i as u32), args)
                 });
                 continue;
             }
@@ -725,7 +723,7 @@ impl<'a> Builder<'a> {
                 .map(|n| n.kind() == "method_call_expression")
                 .unwrap_or(false);
             if is_chain_receiver {
-                pending.push(Path::Deferred(args));
+                pending.push(Path::Deferred(RefIdx(i as u32), args));
             }
         }
         for path in pending {
@@ -736,11 +734,11 @@ impl<'a> Builder<'a> {
                 Path::Strict(owner, args) => {
                     self.emit_call_arg_key_accesses(args, Gate::Strict(owner));
                 }
-                Path::StrictOrDefer(owner, args) => {
-                    self.emit_call_arg_key_accesses(args, Gate::StrictOrDefer(owner));
+                Path::StrictOrDefer(owner, call, args) => {
+                    self.emit_call_arg_key_accesses(args, Gate::StrictOrDefer(owner, call));
                 }
-                Path::Deferred(args) => {
-                    self.emit_call_arg_key_accesses(args, Gate::Deferred);
+                Path::Deferred(call, args) => {
+                    self.emit_call_arg_key_accesses(args, Gate::Deferred(call));
                 }
                 Path::ColumnKeyed(owner, args) => {
                     self.emit_call_arg_key_accesses(args, Gate::ColumnKeyed(owner));
