@@ -1187,8 +1187,8 @@ impl FileAnalysis {
     }
 
     /// `use_map_at` for a spelling whose scope is in hand — a ref's, which
-    /// extraction minted (a base class's is the scope its class is
-    /// declared in, not the class's own).
+    /// extraction minted (a header's code, a base class's, is the header
+    /// scope's, outside the def's own).
     fn use_map_in(&self, site: Point, scope: ScopeId) -> Option<UseMap<'_>> {
         UseMap::in_scope(&self.pack.use_rows, &self.namespace_ranges, &self.scopes, &self.pack.names, site, scope, self)
     }
