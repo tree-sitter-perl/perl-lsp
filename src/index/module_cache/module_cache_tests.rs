@@ -1107,6 +1107,7 @@ fn warm_stub_roundtrip_and_lane_selection() {
             conn,
             true,
             &mut |_p| true,
+            &mut |_p, _fa| true,
             &mut |_p, payload| match payload {
                 WarmPayload::Stub(_) => {
                     stubs += 1;
@@ -1126,7 +1127,7 @@ fn warm_stub_roundtrip_and_lane_selection() {
     assert_eq!(run(&conn, false), (1, 1));
     // use_stubs=false (NO_EVICT): straight to the full lane.
     let (mut stubs, mut fulls) = (0usize, 0usize);
-    warm_pack_stream_with_stubs(&conn, false, &mut |_p| true, &mut |_p, payload| {
+    warm_pack_stream_with_stubs(&conn, false, &mut |_p| true, &mut |_p, _fa| true, &mut |_p, payload| {
         match payload {
             WarmPayload::Stub(_) => stubs += 1,
             WarmPayload::Full(..) => fulls += 1,

@@ -156,6 +156,36 @@ pub struct PackFacts {
     /// the member exists; the undefined-member lanes stay silent there.
     #[serde(default)]
     pub probe_regions: Vec<Span>,
+    /// The module this file was filed under, for a language that names
+    /// modules by path — the one input the analysis read from outside its
+    /// source. Per file and not a witness: the warm scan compares it with
+    /// the module the path names NOW (`LanguageDriver::path_inputs_current`),
+    /// so a blob built before a package marker appeared re-analyzes
+    /// instead of serving classes under the old name.
+    #[serde(default)]
+    pub file_module: Option<FileModule>,
+}
+
+/// The module a file is, for a language whose module names come from the
+/// file's place on disk (python's `pkg/models.py` is `pkg.models`): its
+/// path segments, and whether the file is its package's own module
+/// (`pkg/__init__.py` is `pkg`, and relative imports start from `pkg`
+/// itself rather than its parent). Derived by the driver, which has the
+/// path; the extractor only reads it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileModule {
+    pub segments: Vec<String>,
+    pub is_package: bool,
+}
+
+impl FileModule {
+    /// The package relative imports resolve from.
+    pub fn package(&self) -> &[String] {
+        match self.is_package {
+            true => &self.segments,
+            false => &self.segments[..self.segments.len().saturating_sub(1)],
+        }
+    }
 }
 
 impl PackFacts {
@@ -213,7 +243,8 @@ impl PackFacts {
             + vcap(&self.native_type_spellings)
             + self.class_named_rails.iter().map(|a| a.capacity()).sum::<usize>()
             + vcap(&self.doc_mentions)
-            + vcap(&self.type_display);
+            + vcap(&self.type_display)
+            + self.file_module.as_ref().map_or(0, |m| vcap(&m.segments) + m.segments.iter().map(String::capacity).sum::<usize>());
     }
 }
 
