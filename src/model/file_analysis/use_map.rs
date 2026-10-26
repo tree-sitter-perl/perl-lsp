@@ -17,7 +17,7 @@
 //! Rows and answers are (namespace, leaf) parts: the only strings split
 //! here are written spellings, never an identity this code joined.
 
-use super::{contains_point, namespace_range_around, namespace_range_at, NameSpellings, NamespaceRange, SectionKind, Span};
+use super::{contains_point, namespace_range_around, namespace_range_for, NameSpellings, NamespaceRange, Scope, SectionKind, Span};
 use crate::model::conventions::join_qualified as join;
 use serde::{Deserialize, Serialize};
 use tree_sitter::Point;
@@ -75,7 +75,7 @@ impl DeclaredClasses for Vec<super::Symbol> {
     }
 }
 
-/// The class body a site is written directly in (`SectionKind::ClassBody`)
+/// The class body a site is written in (`SectionKind::ClassBody`)
 /// and the file's classes: a bare head the class declares names its nested
 /// class before anything else binds it.
 #[derive(Clone, Copy)]
@@ -96,7 +96,7 @@ impl std::fmt::Debug for ClassBodyStep<'_> {
 pub struct UseMap<'a> {
     /// The file's `use` rows (`PackFacts::use_rows`).
     pub rows: &'a [UseRow],
-    /// The class body the site is written directly in, consulted first.
+    /// The class body the site is written in, consulted first.
     pub class_body: Option<ClassBodyStep<'a>>,
     /// The namespace in force at the site, past any class body.
     pub own_namespace: Option<&'a str>,
@@ -110,18 +110,19 @@ pub struct UseMap<'a> {
 
 impl<'a> UseMap<'a> {
     /// The map a spelling written at `site` resolves through: the rows
-    /// that reach it, the section in force there — a class body the site is
-    /// written directly in, then the section around it. `None` for a
-    /// language whose spellings are identities as written.
+    /// that reach it, the section in force there — a class body whose
+    /// names the site's lookup chain reaches, then the section around it.
+    /// `None` for a language whose spellings are identities as written.
     pub fn at(
         rows: &'a [UseRow],
         sections: &'a [NamespaceRange],
+        scopes: &[Scope],
         names: &'a NameSpellings,
         site: Point,
         classes: &'a dyn DeclaredClasses,
     ) -> Option<Self> {
         let sep = names.use_map_sep()?;
-        let class_body = namespace_range_at(sections, site)
+        let class_body = namespace_range_for(sections, scopes, site)
             .filter(|s| s.kind == SectionKind::ClassBody)
             .map(|s| ClassBodyStep { class: s.namespace.as_str(), classes });
         Some(UseMap {

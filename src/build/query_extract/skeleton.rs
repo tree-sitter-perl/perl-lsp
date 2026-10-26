@@ -230,26 +230,20 @@ pub struct SkeletonAnalysis {
     pub param_sigs: Vec<(crate::model::file_analysis::Span, crate::model::file_analysis::ParamArity)>,
 }
 
-/// The scopes a use of the variable `name` in `from` looks it up in,
-/// innermost first. The chain ends at a closed body (`@scope.sub.closed`)
-/// unless that body captures the name (`@closure.capture`).
-pub fn variable_lookup_chain(
-    scopes: &[crate::model::file_analysis::Scope],
-    closed: &std::collections::HashSet<crate::model::file_analysis::ScopeId>,
-    captures: &std::collections::HashSet<(crate::model::file_analysis::ScopeId, String)>,
-    from: crate::model::file_analysis::ScopeId,
-    name: &str,
-) -> Vec<crate::model::file_analysis::ScopeId> {
-    let mut chain = Vec::new();
-    let mut cur = Some(from);
-    while let Some(sc) = cur {
-        chain.push(sc);
-        if closed.contains(&sc) && !captures.contains(&(sc, name.to_string())) {
-            break;
-        }
-        cur = scopes.get(sc.0 as usize).and_then(|s| s.parent);
+impl SkeletonAnalysis {
+    /// The scopes a use of the variable `name` in `from` looks it up in:
+    /// `lookup_chain` with its closed-body arm, which only the extractor
+    /// can take — it holds which bodies are closed (`@scope.sub.closed`)
+    /// and which names each captures (`@closure.capture`).
+    pub fn variable_lookup_chain(
+        &self,
+        from: crate::model::file_analysis::ScopeId,
+        name: &str,
+    ) -> Vec<crate::model::file_analysis::ScopeId> {
+        crate::model::file_analysis::lookup_chain_through(&self.scopes, from, |sc| {
+            self.closed_scopes.contains(&sc) && !self.captures.contains(&(sc, name.to_string()))
+        })
     }
-    chain
 }
 
 /// What a function-like macro's return resolves to (`SkeletonAnalysis::
@@ -933,7 +927,7 @@ impl SkeletonAnalysis {
             // never a free callee: a bare call in a member body reaches it
             // through `member_of`, with the class as its receiver.
             let use_map_at = |site: tree_sitter::Point| {
-                crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.names, site, &symbols)
+                crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &self.names, site, &symbols)
             };
             let class_identity_at = |written: &str, site: tree_sitter::Point| {
                 let map = use_map_at(site)?;
@@ -1085,7 +1079,7 @@ impl SkeletonAnalysis {
         let resolve_var = |name: &String, scope: crate::model::file_analysis::ScopeId, span: &Span| {
             let rp = (span.start.row, span.start.column);
             let cands = defs_by_name.get(name)?;
-            for sc in variable_lookup_chain(&self.scopes, &self.closed_scopes, &self.captures, scope, name) {
+            for sc in self.variable_lookup_chain(scope, name) {
                 // nearest decl of this name in THIS scope level, declared at
                 // or before the use (latest-wins for redeclaration).
                 let mut best: Option<((usize, usize), SymbolId)> = None;
@@ -1199,7 +1193,7 @@ impl SkeletonAnalysis {
                     // Under a use-map a call is pinned to its function's
                     // namespace (`\Lib\f()` → `Lib`).
                     RefCap::Call => {
-                        let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &names, r.start, &symbols);
+                        let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &names, r.start, &symbols);
                         if let Some(map) = map {
                             let namespace = function_identity(&map, &r.name, &free_functions).namespace;
                             binding = (!namespace.is_empty()).then_some(RefBinding::Function { package: namespace });

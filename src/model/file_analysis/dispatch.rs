@@ -218,6 +218,48 @@ pub fn scope_chain_of(scopes: &[Scope], start: ScopeId) -> Vec<ScopeId> {
     chain
 }
 
+/// Where a name used in `from` is looked up, innermost first: the scope
+/// chain minus the scopes whose own rule says a use written here cannot
+/// see their names. THE walk for every name lookup — a variable read, a
+/// bare class spelling, the section in force at a site — so a language's
+/// scoping rule is stated once, as an arm here, and inherited by all of
+/// them. `scope_chain_of` stays the raw lexical climb (containment,
+/// packages, outline nesting); only name lookups take this one.
+///
+/// Arms:
+/// - `Scope::direct` (`@scope.direct`): in force only for code written
+///   directly in the scope, so it drops out once the walk has come up
+///   out of a callable (Python's class body, seen from its method).
+/// - a closed body (`@scope.sub.closed`): the walk ENDS at a body that
+///   sees no variable around it but the ones it captures, unless it
+///   captures the name. Only `lookup_chain_through` takes this arm.
+pub fn lookup_chain(scopes: &[Scope], from: ScopeId) -> Vec<ScopeId> {
+    lookup_chain_through(scopes, from, |_| false)
+}
+
+/// `lookup_chain` with the closed-body arm: `shut(scope)` answers whether
+/// `scope` is a closed body that does not capture the name looked up.
+/// The extractor holds those facts (php's closures), so its binding pass
+/// is the one caller; the model's queries walk past closed bodies, which
+/// over-approximates a type and never binds a name wrongly.
+pub fn lookup_chain_through(scopes: &[Scope], from: ScopeId, shut: impl Fn(ScopeId) -> bool) -> Vec<ScopeId> {
+    let mut chain = Vec::new();
+    let mut left_callable = false;
+    let mut current = Some(from);
+    while let Some(id) = current {
+        let scope = &scopes[id.0 as usize];
+        if !(scope.direct && left_callable) {
+            chain.push(id);
+        }
+        if shut(id) {
+            break;
+        }
+        left_callable |= matches!(scope.kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. });
+        current = scope.parent;
+    }
+    chain
+}
+
 /// Three-way outcome of resolving a [`ReceiverGated`] value against a
 /// concrete receiver class. Splitting "doesn't apply" from "can't tell"
 /// is load-bearing: `DoesNotApply` is a settled negative (the receiver
