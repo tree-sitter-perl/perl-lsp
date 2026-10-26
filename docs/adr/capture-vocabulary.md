@@ -136,6 +136,23 @@ walk, `lookup_chain`, which every name lookup takes: a variable read, a
 bare class spelling. A pack that says nothing keeps the plain lexical
 chain.
 
+The walk is a type, so a lookup cannot route around it. `lookup_chain`
+returns a `LookupChain`, and that value is the only way to list the
+names a scope binds for lookup (`LookupChain::bindings`, which also
+drops a member declared through a receiver). The containment climb,
+`scope_chain_of` — what a scope is inside: its class, its callable, its
+package — returns bare ids and lists no names; what a scope DECLARES,
+for the outline and a class's members, is `SymbolTable::
+declared_directly_in`, named so no one reads it as a lookup. Every raw
+climb up `Scope::parent` outside the walkers is allowlisted with its
+containment reason (`layering_tests::raw_scope_climbs_are_containment_only`,
+count-exact, shrink-only): a new one fails `cargo test` until it moves
+onto the lookup chain or says why it is containment. In-scope
+completion, `visible_symbols`, the receiver a `self.x` write joins, and
+Perl's binders (`resolve_variable_refs`, the hash-key owner fallback,
+`visible_variable_decl`, gated parameter types) walk it; Perl marks no
+scope `direct`, so its answers are unchanged.
+
 Lookup is not ownership. Whose member a declaration is comes from the
 scope a class's own match opened (`@context.class` with its `@scope`),
 and stops at a callable whatever the document marks; how a name resolves

@@ -63,12 +63,6 @@ impl FileAnalysis {
         }
     }
 
-    /// Find all symbols in a given scope.
-    #[allow(dead_code)]
-    pub fn symbols_in_scope(&self, scope: ScopeId) -> &[SymbolId] {
-        self.symbols.in_scope(scope)
-    }
-
     /// Indexes (into `refs()`) of every ref whose `match_key` is `key`, in
     /// ref order — the in-file half of the relational narrowing. A key
     /// spelled through `name_match_key` retrieves everything any matcher
