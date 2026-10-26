@@ -1298,6 +1298,33 @@ pub enum DeclKind {
     Field,
     Param,
     ForVar,
+    /// No declaration: an undeclared variable is the package global Perl
+    /// creates on first mention (`$x = 1` in `main` is `$main::x`). The
+    /// builder mints the symbol at the first use in the file.
+    Implicit,
+}
+
+impl DeclKind {
+    /// A package global with a lexical alias (`our`) or none at all
+    /// (`Implicit`): reachable as `$Pkg::name`, and a bare use reaches it
+    /// only from its own package.
+    pub fn is_package_global(self) -> bool {
+        matches!(self, DeclKind::Our | DeclKind::Implicit)
+    }
+
+    /// The keyword the declaration was spelled with, as outline and
+    /// completion show it.
+    pub fn label(self) -> &'static str {
+        match self {
+            DeclKind::My => "my",
+            DeclKind::Our => "our",
+            DeclKind::State => "state",
+            DeclKind::Field => "field",
+            DeclKind::Param => "param",
+            DeclKind::ForVar => "for",
+            DeclKind::Implicit => "global",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

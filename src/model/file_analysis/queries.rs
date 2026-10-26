@@ -21,6 +21,23 @@ impl FileAnalysis {
         }
     }
 
+    /// Every use of a variable no declaration reaches that `use strict
+    /// 'vars'` would reject: the refs bound to an implicit global, minus the
+    /// names strict exempts (`$a`/`$b`). Declarations a `use` brings in
+    /// (Exporter's `qw($x)`) are the caller's to rule out — they need the
+    /// producer's surface.
+    pub fn undeclared_variable_uses(&self) -> impl Iterator<Item = &Ref> + '_ {
+        // A qualified `$main::x` names its package, so strict accepts it.
+        self.refs().iter().filter(move |r| {
+            r.qualified_var_target(self.names()).is_none()
+                && r.resolved_symbol().is_some_and(|id| {
+                let s = self.symbol(id);
+                matches!(s.detail, SymbolDetail::Variable { decl_kind: DeclKind::Implicit, .. })
+                    && !crate::model::conventions::is_strict_vars_exempt(&s.name)
+                })
+        })
+    }
+
     // ---- Query methods ----
 
     /// Find the innermost scope containing a point.
