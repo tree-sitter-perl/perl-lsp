@@ -16,9 +16,10 @@ pub(super) struct State {
     /// `@def` event fires before these inner captures.
     qualifier_by_match: HashMap<usize, String>,
     rettype_by_match: HashMap<usize, String>,
-    /// `@param.receiver` — a receiver parameter's name span; the symbol
-    /// declared at it carries `RECEIVER`.
-    receiver_spans: std::collections::HashSet<(Point, Point)>,
+    /// Flags the document states about the def whose name token sits at a
+    /// span (`@mark.<flag>`, and `@param.receiver` → `RECEIVER`). Joined by
+    /// span because the stating pattern is not the def's match.
+    marks: HashMap<(Point, Point), crate::model::file_analysis::SymbolFlags>,
     /// `@sym.attr` — a token whose TEXT rides onto the match's def symbol as
     /// an attribute (cpp: a declaration's storage class, so "extern" is a
     /// symbol-borne fact goto-def's decl→def ranking can ask the value for).
@@ -119,7 +120,10 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
             d.rettype_by_match.insert(e.match_id, e.text.clone());
         }
         Capture::ParamReceiver => {
-            d.receiver_spans.insert((e.start, e.end));
+            *d.marks.entry((e.start, e.end)).or_default() |= crate::model::file_analysis::SymbolFlags::RECEIVER;
+        }
+        Capture::Mark(m) => {
+            *d.marks.entry((e.start, e.end)).or_default() |= m.flag();
         }
         Capture::SymAttr => {
             d.attrs_by_match.entry(e.match_id).or_default().push(e.text.clone());
@@ -153,7 +157,8 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
 pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     let Capture::Def { kind, part: DefPart::Node } = e.cap else { return };
     let pack = st.pack;
-    let d = &mut st.defs;
+    st.defs.def_name_spans.push((e.start_byte, e.end_byte));
+    let d = &st.defs;
     let (name, name_start, name_end, defaulted) = d
         .names_by_match
         .get(&(e.match_id, kind))
@@ -161,11 +166,16 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         .map(|(n, s, en)| (n, s, en, false))
         .or_else(|| (pack.default_name)(kind).map(|n| (n.to_string(), e.start, e.start, true)))
         .unwrap_or((e.text.clone(), e.start, e.end, false));
-    d.def_name_spans.push((e.start_byte, e.end_byte));
     // An out-of-line def's qualifier names its owning class (the innermost
     // scope), overriding the enclosing-namespace context.
     let pkg = d.qualifier_by_match.get(&e.match_id).cloned().or_else(|| st.package.clone());
     let shaped = (pack.shape_name)(&name);
+    // Under a use-map a class is filed under its identity, and its package
+    // is the namespace that identity carries.
+    let (shaped, pkg) = match (kind, pack.names.use_map_sep()) {
+        (DefCap::Class, Some(_)) => (st.class_identity(&shaped), st.namespace().map(str::to_string)),
+        _ => (shaped, pkg),
+    };
     // A class-spec def carries its primary's name — the
     // (spec, primary) family edge `Specializes` derives from.
     if let Some(primary) = d.spec_primary_by_match.get(&e.match_id) {
@@ -195,11 +205,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         // `@arity.sig` match fires separately from this def name.
         arity: None,
         qualifier_owned: d.qualifier_by_match.contains_key(&e.match_id),
-        flags: if d.receiver_spans.contains(&(name_start, name_end)) {
-            crate::model::file_analysis::SymbolFlags::RECEIVER
-        } else {
-            crate::model::file_analysis::SymbolFlags::empty()
-        },
+        flags: d.marks.get(&(name_start, name_end)).copied().unwrap_or_default(),
     });
 }
 

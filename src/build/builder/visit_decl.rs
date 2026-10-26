@@ -108,6 +108,9 @@ impl<'a> Builder<'a> {
             // Dereference expressions → rep observations on the operand
             "array_element_expression" => {
                 self.infer_deref_type(node, TypeObservation::ArrayRefAccess);
+                if self.element_written_in_place(node) {
+                    self.record_in_place_write(node);
+                }
                 // Only the arrow form `$x->[i]` has a scalar-ref receiver; the
                 // direct `$arr[i]` indexes the named array.
                 if crate::cst::element_arrow_deref(node, self.source) {
@@ -397,9 +400,9 @@ impl<'a> Builder<'a> {
     /// Walk a `{ ... }` block's children, reverting package context at block
     /// close. `package Foo;` is file-scoped in Perl, but a `{ }` block is a
     /// hard boundary: `{ package Inner; }` must not leak Inner to the
-    /// statements that follow. Saves the walk-time package name and the open
-    /// statement-range cursor, restores both on exit, and repairs the
-    /// `package_ranges` spans so `package_at` reverts past the block too.
+    /// statements that follow. The block is a region of the namespace lane,
+    /// so a statement-form package inside it ends at its close; the
+    /// walk-time package name is restored on exit.
     pub(super) fn walk_block_package_scoped(&mut self, node: Node<'a>) {
         self.walk_block_package_scoped_then(node, |_| {});
     }
@@ -412,27 +415,9 @@ impl<'a> Builder<'a> {
         work: impl FnOnce(&mut Builder<'a>) + 'a,
     ) {
         let saved_pkg = self.current_package.clone();
-        let saved_stmt_range = self.open_statement_package;
+        self.package_regions.push(node.end_position());
         self.queue_children_then(node, move |b| {
-            if b.open_statement_package != saved_stmt_range {
-                // A `package Inner;` inside the block opened a range to file-end;
-                // trim it to block close so it doesn't shadow the enclosing pkg.
-                if let Some(idx) = b.open_statement_package {
-                    b.package_ranges[idx].span.end = node.end_position();
-                }
-                // The enclosing `package Outer;` range (if any) was truncated to
-                // Inner's start when Inner opened — resume it to file-end so
-                // Outer covers the post-block tail.
-                if let Some(idx) = saved_stmt_range {
-                    let file_end = b
-                        .scope_stack
-                        .first()
-                        .map(|id| b.scopes[id.0 as usize].span.end)
-                        .unwrap_or_else(|| node.end_position());
-                    b.package_ranges[idx].span.end = file_end;
-                }
-                b.open_statement_package = saved_stmt_range;
-            }
+            b.package_regions.pop();
             b.current_package = saved_pkg;
             work(b);
         });
@@ -480,7 +465,7 @@ impl<'a> Builder<'a> {
         } else {
             // `package Foo;` — package context flows to the next
             // sibling `package X;` / `class X;` or end of file.
-            // `package_ranges` carries that for `package_at`; the
+            // `namespace_ranges` carries that for `package_at`; the
             // walk-time `current_package` drives synthesised
             // sub/method packages. No lexical scope is pushed —
             // `package Foo;` is not a lexical boundary in Perl.
@@ -568,7 +553,7 @@ impl<'a> Builder<'a> {
         } else {
             // Flat `class Foo;` — same semantics as non-block
             // `package Foo;`: package context flows in
-            // `package_ranges`; no lexical scope is pushed. The
+            // `namespace_ranges`; no lexical scope is pushed. The
             // Class SYMBOL was already emitted above.
             self.current_package = Some(name.clone());
             self.open_statement_package_range(name, node.start_position());
@@ -659,20 +644,24 @@ impl<'a> Builder<'a> {
         //     positional is the invocant.
         //   * Regular `sub` bodies use two Perl-native signals:
         //       - first positional named `$self`/`$class`/`$this`/`$proto`
-        //       - or the enclosing package declares inheritance (a sub
-        //         in a subclass is, by Perl OO convention, a method)
+        //       - or the enclosing package is a class (a sub in a class is,
+        //         by Perl OO convention, a method)
         //     Either triggers invocant marking; name stays free so the
         //     user can call it `$c`/`$ctx`/whatever.
         // Framework-specific invocant markers (`as_invocant_params` from
         // a plugin) stack on top via EmittedParam → ParamInfo.
+        // The class convention alone is decided post-walk
+        // (`mark_method_invocants`): whether the package is a class
+        // (a later `bless` or `use parent` decides it), and whether the
+        // sub is a plain helper, called only as a function.
+        let mut method_or_helper = false;
         if let Some(first) = params.first_mut() {
             let name_says_invocant =
                 crate::model::conventions::is_conventional_invocant_name(&first.name);
-            let pkg_is_subclass = self.current_package
-                .as_ref()
-                .map_or(false, |p| self.package_parents.contains_key(p));
-            if is_method || name_says_invocant || pkg_is_subclass {
+            if is_method || name_says_invocant {
                 first.is_invocant = true;
+            } else if first.name.starts_with('$') {
+                method_or_helper = true;
             }
         }
 
@@ -741,6 +730,14 @@ impl<'a> Builder<'a> {
 
         // Detect first-param-is-self pattern
         self.detect_first_param_type(&params, node);
+        if let (true, Some(package)) = (method_or_helper, self.current_package.clone()) {
+            self.method_or_helper_subs.push(MethodOrHelperSub {
+                sub_id,
+                scope: self.current_scope(),
+                span: node_to_span(node),
+                package,
+            });
+        }
 
         // Role-contract param typing: a plugin `param_types()` rule may type
         // a named param (e.g. `$app` in a `GenericCo::Upgrade::OneTime` doer's
@@ -1308,33 +1305,79 @@ impl<'a> Builder<'a> {
             .iter()
             .find(|p| p.is_invocant && p.name.starts_with('$'));
         let invocant = match invocant {
-            Some(p) => p,
+            Some(p) => p.clone(),
             None => return,
         };
 
         if let Some(pkg) = self.current_package.clone() {
             let (scope, span) = (self.current_scope(), node_to_span(node));
-            let head = InferredType::FirstParam { package: pkg };
-            // Anchored at the invocant's binding token: the declaration's
-            // own write marker retires only what lies strictly before it.
-            let at = invocant
-                .binding_site
-                .map(|p| Span { start: p, end: p })
-                .unwrap_or(span);
-            self.push_type_constraint(TypeConstraint {
-                variable: invocant.name.clone(),
-                scope,
-                constraint_span: at,
-                inferred_type: head.clone(),
-            });
-            // `@_`'s argument window for this scope, headed by the same
-            // invocant (`seed_arg_windows` covers the scopes without one).
-            self.push_type_constraint(TypeConstraint {
-                variable: "@_".into(),
-                scope,
-                constraint_span: span,
-                inferred_type: InferredType::Sequence(vec![head]),
-            });
+            self.push_invocant_type(&invocant, pkg, scope, span);
+        }
+    }
+
+    /// Type `invocant` (and the head of `@_`'s window) as the class the sub
+    /// at `span` is called on.
+    pub(super) fn push_invocant_type(&mut self, invocant: &ParamInfo, pkg: String, scope: ScopeId, span: Span) {
+        let head = InferredType::FirstParam { package: pkg };
+        // Anchored at the invocant's binding token: the declaration's
+        // own write marker retires only what lies strictly before it.
+        let at = invocant
+            .binding_site
+            .map(|p| Span { start: p, end: p })
+            .unwrap_or(span);
+        self.push_type_constraint(TypeConstraint {
+            variable: invocant.name.clone(),
+            scope,
+            constraint_span: at,
+            inferred_type: head.clone(),
+        });
+        // `@_`'s argument window for this scope, headed by the same
+        // invocant (`seed_arg_windows` covers the scopes without one).
+        self.seed_arg_window(scope, span, vec![head]);
+    }
+
+    /// Whether the file calls `pkg`'s sub `name` as a plain function and
+    /// never as a method, which is what decides that its first argument is
+    /// not an invocant when only the package convention says it is.
+    pub(super) fn is_plain_helper(&self, pkg: &str, name: &str, method_names: &std::collections::HashSet<&str>) -> bool {
+        self.plain_called_subs.contains(&(pkg.to_string(), name.to_string())) && !method_names.contains(name)
+    }
+
+    /// The names this file calls as methods.
+    pub(super) fn method_call_names(&self) -> std::collections::HashSet<&str> {
+        self.refs
+            .iter()
+            .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }))
+            .map(|r| crate::model::conventions::MethodToken::parse(&r.target_name).name())
+            .collect()
+    }
+
+    /// Post-walk: a sub whose first parameter only the package convention
+    /// calls the invocant is a method when its package is a class
+    /// (`PackageFacts::is_class`, the rule `@_`'s head uses) and it is not
+    /// a plain helper.
+    pub(super) fn mark_method_invocants(&mut self) {
+        let pending = std::mem::take(&mut self.method_or_helper_subs);
+        let mut settled = Vec::new();
+        {
+            let facts = self.package_facts();
+            let method_names = self.method_call_names();
+            for c in pending {
+                let name = &self.symbols[c.sub_id.0 as usize].name;
+                let class_pkg = facts.get(&c.package).is_some_and(PackageFacts::is_class);
+                if class_pkg && !self.is_plain_helper(&c.package, name, &method_names) {
+                    settled.push(c);
+                }
+            }
+        }
+        for c in settled {
+            let SymbolDetail::Sub { params, .. } = &mut self.symbols[c.sub_id.0 as usize].detail else {
+                continue;
+            };
+            let Some(first) = params.first_mut() else { continue };
+            first.is_invocant = true;
+            let invocant = first.clone();
+            self.push_invocant_type(&invocant, c.package, c.scope, c.span);
         }
     }
 

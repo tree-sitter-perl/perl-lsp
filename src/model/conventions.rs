@@ -25,6 +25,11 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     root_package: Some(std::borrow::Cow::Borrowed("main")),
     // A call reaches a sub, never a `field` of the same name.
     member_namespace: MemberNamespace::PerFamily,
+    imports: NameSpellings::NONE.imports,
+    // `Foo()` calls a sub; construction is `Foo->new`.
+    class_call: crate::model::file_analysis::ClassCall::FunctionCall,
+    // A package is both the namespace and the class its code belongs to.
+    enclosing_class: crate::model::file_analysis::EnclosingClass::NamespaceInForce,
 };
 
 /// Split a possibly-qualified name into `(Option<package>, basename)`.
@@ -50,6 +55,18 @@ pub fn split_qualified<'a>(name: &'a str, names: &NameSpellings) -> (Option<&'a 
     match names.sep().and_then(|sep| name.rsplit_once(sep)) {
         Some((pkg, base)) => (Some(pkg), base),
         None => (None, name),
+    }
+}
+
+/// `split_qualified`'s inverse: a namespace and a leaf as one qualified
+/// name. The global namespace (an empty `namespace`) yields the bare leaf,
+/// never a dangling separator, so a caller need not ask first whether the
+/// name has a namespace.
+pub fn join_qualified(namespace: &str, leaf: &str, sep: &str) -> String {
+    if namespace.is_empty() {
+        leaf.to_string()
+    } else {
+        format!("{namespace}{sep}{leaf}")
     }
 }
 
@@ -493,6 +510,9 @@ mod tests {
             class_spelling: ClassSpelling::UseMap,
             root_package: None,
             member_namespace: crate::model::file_analysis::MemberNamespace::PerFamily,
+            imports: NameSpellings::NONE.imports,
+            class_call: NameSpellings::NONE.class_call,
+            enclosing_class: NameSpellings::NONE.enclosing_class,
         };
         assert_eq!(super::split_qualified("App\\Models\\User", &php), (Some("App\\Models"), "User"));
         assert_eq!(super::name_match_key("App\\Models\\User", &php), "User");

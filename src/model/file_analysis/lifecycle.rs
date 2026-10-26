@@ -74,7 +74,7 @@ impl FileAnalysis {
             reexport_modules,
             lib_roots,
             type_provenance,
-            package_ranges,
+            namespace_ranges,
             mut witnesses,
             provisional_dispatches,
             guard_sites,
@@ -83,7 +83,6 @@ impl FileAnalysis {
             attr_projections,
             reassigned_scalars,
             key_writes,
-            contract_symbols,
             dbic_source_name,
             column_keyed_verbs,
             dynamic_dispatch_sites,
@@ -102,7 +101,7 @@ impl FileAnalysis {
             imports,
             call_bindings,
             method_call_bindings,
-            package_ranges,
+            namespace_ranges,
             packages,
             framework_imports,
             export,
@@ -121,7 +120,6 @@ impl FileAnalysis {
             attr_projections,
             reassigned_scalars,
             key_writes,
-            contract_symbols,
             dbic_source_name,
             column_keyed_verbs,
             dynamic_dispatch_sites,
@@ -1289,7 +1287,7 @@ impl FileAnalysis {
             + vcap(&self.key_writes)
             + vcap(&self.flow_edges)
             + vcap(&self.loader_config_params)
-            + vcap(&self.package_ranges);
+            + vcap(&self.namespace_ranges);
 
         // per-package small maps/sets + export lists.
         h.misc += pkg_facts(&self.packages)

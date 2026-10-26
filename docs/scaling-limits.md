@@ -330,20 +330,16 @@ build and a short interval **re-adds per emission** (a 3,268-line file reported
 at build end, delta'd per build. That is what made this root-cause possible, and
 it is immune to both failure modes.
 
-## 7. The leaf key double-feeds the edge index — UNMEASURED
+## 7. The leaf relation is a second candidate table — UNMEASURED
 
-A namespaced pack's symbol registers under two keys — its identity
-(`App\Models\User`) and the leaf it binds (`User`) — because the identity is
-the exact lookup and the leaf the widening one (`docs/prompt-class-identity.md`).
-`rebuild_name_registration` feeds `ModuleEdgeIndexes` once per registered
-key, so every php class's parent, bridge and specialization edges are fed
-twice, and the INHERITS_INV descendant buckets carry both spellings of each
-child. Buckets dedup members and the graph walker dedups nodes, so answers are
-unchanged; the cost is a second feed per class at registration and a
-doubled descendant list to expand in `implementations`. Not yet measured on
-a large php corpus (WordPress core, laravel/framework); the fix, when the
-number warrants it, is to feed edges under the identity key only — the leaf
-registration needs the candidate table, never the edge indexes.
+A use-map class registers its identity (`App\Models\User`) in `all_defs` and
+the name slot, and its leaf (`User`) in `IndexCore::leaf_defs`, the widening
+relation (`docs/prompt-class-identity.md`, decision 6). The leaf costs one
+`Arc<CachedModule>` clone per class, a leaf derivation per registration and
+unregistration, and nothing in `ModuleEdgeIndexes`: edges stay keyed by
+identity alone. Not yet measured on a large php corpus (WordPress core,
+laravel/framework); the expected cost is the bucket overhead of one DashMap
+entry per distinct leaf.
 
 ## 8. An unresolved-method miss on an absent class — the probe is fixed, the repeat is not
 
