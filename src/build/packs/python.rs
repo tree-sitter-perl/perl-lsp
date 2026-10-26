@@ -4,6 +4,7 @@ use crate::build::query_extract::*;
 use crate::model::file_analysis::{
     ClassCall, ClassSpelling, ImportPrefix, ImportReach, ImportRule, InferredType, MemberNamespace, NameSpellings,
 };
+use crate::build::walk_markers::MarkedDirs;
 use std::path::Path;
 
 pub fn python_pack() -> LangPack {
@@ -56,11 +57,11 @@ pub fn python_pack() -> LangPack {
 }
 
 /// The module `path` is: its stem under the chain of package directories
-/// above it (walk up while `__init__.py` exists; the first directory
-/// without one is the import root), `__init__` naming its package. A file
-/// whose own directory is no package (a namespace package, a script dir)
-/// is named from the workspace root instead, when it lies under one.
-pub fn python_file_module(path: &Path) -> Option<FileModule> {
+/// above it (walk up while the directory is marked — holds `__init__.py`;
+/// the first unmarked one is the import root), `__init__` naming its
+/// package. A file whose own directory is no package (a namespace package,
+/// a script dir) is named from the root instead, when it lies under one.
+pub fn python_file_module(path: &Path, dirs: &MarkedDirs<'_>) -> Option<FileModule> {
     let stem = path.file_stem()?.to_str()?;
     let is_package = stem == "__init__";
     let mut segments: Vec<String> = Vec::new();
@@ -68,15 +69,13 @@ pub fn python_file_module(path: &Path) -> Option<FileModule> {
         segments.push(stem.to_string());
     }
     let mut dir = path.parent();
-    let in_package = dir.is_some_and(|d| d.join("__init__.py").is_file());
+    let in_package = dir.is_some_and(|d| dirs.is_marked(d));
     if in_package {
-        while let Some(d) = dir.filter(|d| d.join("__init__.py").is_file()) {
+        while let Some(d) = dir.filter(|d| dirs.is_marked(d)) {
             segments.push(d.file_name()?.to_str()?.to_string());
             dir = d.parent();
         }
-    } else if let Some(rel) = crate::build::plugin::rhai_host::workspace_root()
-        .and_then(|root| path.parent()?.strip_prefix(root).ok().map(Path::to_path_buf))
-    {
+    } else if let Some(rel) = path.parent().and_then(|d| dirs.root_relative(d)) {
         for c in rel.components().rev() {
             segments.push(c.as_os_str().to_str()?.to_string());
         }

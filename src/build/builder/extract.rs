@@ -8,6 +8,13 @@
 use super::*;
 use crate::cst::LiteralShape;
 
+/// One target of a list-assignment LHS.
+pub(super) enum ListSlot<'a> {
+    Var(String, crate::model::file_analysis::Extraction),
+    /// A written element and its position, `None` past a slurpy target.
+    Element(Node<'a>, Option<usize>),
+}
+
 impl<'a> Builder<'a> {
     pub(super) fn get_decl_keyword(&self, var_decl: Node<'a>) -> Option<String> {
         for i in 0..var_decl.child_count() {
@@ -81,12 +88,56 @@ impl<'a> Builder<'a> {
         None
     }
 
+    /// Whether `elem`, the outermost hop of an element chain, is written in
+    /// place by something other than a plain `elem = …` (which the
+    /// assignment visitor records with its RHS): `++`/`--`, a list
+    /// assignment target, or a container deref Perl autovivifies through
+    /// (`push @{$h->{k}}, …`, `@{$h->{k}} = …`).
+    pub(super) fn element_written_in_place(&self, elem: Node<'a>) -> bool {
+        if crate::cst::is_element_access_base(elem) {
+            return false;
+        }
+        if elem.parent().is_some_and(|p| matches!(p.kind(), "postinc_expression" | "preinc_expression")) {
+            return true;
+        }
+        if crate::cst::list_assignment_target_of(elem).is_some() {
+            return true;
+        }
+        let Some(container) = crate::cst::deref_container_of(elem) else { return false };
+        if let Some(p) = container.parent() {
+            if p.kind() == "assignment_expression" && p.child_by_field_name("left") == Some(container) {
+                return true;
+            }
+        }
+        if crate::cst::list_assignment_target_of(container).is_some() {
+            return true;
+        }
+        let call = match container.parent() {
+            Some(list) if crate::cst::is_list_literal(list) => {
+                if crate::cst::nth_element(list, 0) != Some(container) {
+                    return false;
+                }
+                list.parent()
+            }
+            other => other,
+        };
+        let Some(call) = call else { return false };
+        let name = match call.kind() {
+            "function_call_expression" | "ambiguous_function_call_expression" => {
+                call.child_by_field_name("function").and_then(|f| f.utf8_text(self.source).ok())
+            }
+            "func1op_call_expression" => call.child(0).and_then(|k| k.utf8_text(self.source).ok()),
+            _ => None,
+        };
+        name.is_some_and(crate::model::builtins::modifies_its_array_argument)
+    }
+
     /// Record a `$var->{key} = …` write for the mutation-extension
     /// pass. Walks subscript chains down to the scalar base: the FIRST
     /// hop's key is the one the write autovivifies onto the variable's
-    /// own shape (`$v->{a}{b} = …` adds `a`); only a direct single-hop
-    /// write types the key's value from the RHS. Plain `%foo` elements
-    /// (`$foo{k}`, no arrow) are a different variable — skipped.
+    /// own shape (`$v->{a}{b} = …` adds `a`), the hops below it ride
+    /// `path`, and the RHS types the key the path ends at. Plain `%foo`
+    /// elements (`$foo{k}`, no arrow) are a different variable — skipped.
     /// Record an escape as an open-switching `KeyWrite` (`key: None`)
     /// at the escape span — the modeled form of escape widening: once
     /// the reference is out of our sight, any key may have been
@@ -96,6 +147,7 @@ impl<'a> Builder<'a> {
         self.key_writes.push(crate::model::file_analysis::KeyWrite {
             var_text,
             key: crate::model::file_analysis::WriteKey::Unknown,
+            path: Vec::new(),
             scope: self
                 .scope_stack
                 .last()
@@ -103,107 +155,113 @@ impl<'a> Builder<'a> {
                 .unwrap_or(crate::model::file_analysis::ScopeId(0)),
             span,
             rhs_span: None,
+            rhs_slot: None,
             conditional: true,
         });
     }
 
-    pub(super) fn record_key_write(&mut self, left: Node<'a>, rhs: Option<Node<'a>>) {
+    /// An element written in place. A list-assignment target's write is the
+    /// list binder's (`mint_flow_edges_via_query`), which gives it its slot's
+    /// value the way it does a variable target's.
+    pub(super) fn record_in_place_write(&mut self, elem: Node<'a>) {
+        if crate::cst::list_assignment_target_of(elem).is_none() {
+            self.record_key_write(elem, None, None, self.current_scope());
+        }
+    }
+
+    pub(super) fn record_key_write(
+        &mut self,
+        left: Node<'a>,
+        rhs: Option<Node<'a>>,
+        rhs_slot: Option<i32>,
+        scope: crate::model::file_analysis::ScopeId,
+    ) {
+        use crate::model::file_analysis::{KeyWrite, WriteKey};
         let mut innermost = left;
+        // The hops above the innermost, innermost-first.
+        let mut outer_hops: Vec<Node<'a>> = Vec::new();
         loop {
             let Some(c) = innermost.named_child(0) else { return };
             match c.kind() {
-                "hash_element_expression" | "array_element_expression" => innermost = c,
+                "hash_element_expression" | "array_element_expression" => {
+                    outer_hops.push(innermost);
+                    innermost = c;
+                }
                 "scalar" | "container_variable" => break,
                 _ => return,
             }
         }
-        // Direct `$v->[N] = …` — a Sequence slot write. Only the
-        // direct, static-index, arrow-deref form is modeled (the pass
-        // retypes the slot / appends at len); container `$arr[N]` and
-        // nested array hops stay unmodeled — there's no open flag on
-        // Sequence to widen into, and no array-index diagnostic to
-        // protect.
-        if innermost.kind() == "array_element_expression" {
-            if innermost != left {
-                return;
-            }
-            if !crate::cst::element_arrow_deref(innermost, self.source) {
-                return;
-            }
-            let Some(container) = innermost.named_child(0) else { return };
-            if container.kind() != "scalar" {
-                return;
-            }
-            let Ok(t) = container.utf8_text(self.source) else { return };
-            if !t.starts_with('$') {
-                return;
-            }
-            let Some(idx_node) = innermost.child_by_field_name("index") else { return };
-            let Ok(Ok(idx)) = idx_node.utf8_text(self.source).map(|s| s.parse::<i32>())
-            else {
-                return;
-            };
-            let span = node_to_span(idx_node);
-            self.key_writes.push(crate::model::file_analysis::KeyWrite {
-                var_text: t.to_string(),
-                key: crate::model::file_analysis::WriteKey::Index(idx),
-                scope: self
-                    .scope_stack
-                    .last()
-                    .copied()
-                    .unwrap_or(crate::model::file_analysis::ScopeId(0)),
-                span,
-                rhs_span: rhs.map(node_to_span),
-                conditional: crate::cst::is_conditionally_executed(left),
-            });
-            return;
-        }
-        if innermost.kind() != "hash_element_expression" {
-            return;
-        }
+        outer_hops.reverse();
         let Some(container) = innermost.named_child(0) else { return };
-        // Container form `$h{k}` writes `%h` (canonical name); deref
-        // form `$v->{k}` writes through scalar `$v` — arrow required
+        // Container form `$h{k}` writes `%h` (canonical name); deref form
+        // `$v->{k}` / `$v->[N]` writes through scalar `$v`, arrow required
         // (`$foo{k}` without one would be `%foo` mis-keyed to `$foo`).
-        let var_text: String = if container.kind() == "container_variable" {
-            match crate::cst::canonical_container_name(container, self.source) {
-                Some(n) => n,
-                None => return,
+        // `$arr[N]` stays unmodeled: there is no tuple on `@arr` to extend.
+        let var_text: String = match (innermost.kind(), container.kind()) {
+            ("hash_element_expression", "container_variable") => {
+                match crate::cst::canonical_container_name(container, self.source) {
+                    Some(n) => n,
+                    None => return,
+                }
             }
-        } else {
-            if !crate::cst::element_arrow_deref(innermost, self.source) {
-                return;
+            (_, "container_variable") => return,
+            _ => {
+                if !crate::cst::element_arrow_deref(innermost, self.source) {
+                    return;
+                }
+                let Ok(t) = container.utf8_text(self.source) else { return };
+                if !t.starts_with('$') {
+                    return;
+                }
+                t.to_string()
             }
-            let Ok(t) = container.utf8_text(self.source) else { return };
-            if !t.starts_with('$') {
-                return;
-            }
-            t.to_string()
         };
-        let key_node = innermost.child_by_field_name("key");
-        let key = key_node
-            .and_then(|k| self.extract_key_text(k))
-            .and_then(|(t, dynamic)| (!dynamic).then_some(t))
-            .map_or(
-                crate::model::file_analysis::WriteKey::Unknown,
-                crate::model::file_analysis::WriteKey::Hash,
-            );
-        let direct = innermost == left;
-        let span = key_node
-            .map(node_to_span)
-            .unwrap_or_else(|| node_to_span(innermost));
-        self.key_writes.push(crate::model::file_analysis::KeyWrite {
-            var_text: var_text.to_string(),
+        let (key, span) = self.write_key_of(innermost);
+        // A hop below the first is a write into that key's value. The path
+        // stops at the first dynamic hop, the last thing it knows.
+        let mut path = Vec::new();
+        for hop in &outer_hops {
+            let (k, _) = self.write_key_of(*hop);
+            let last = matches!(k, WriteKey::Unknown);
+            path.push(k);
+            if last {
+                break;
+            }
+        }
+        // The RHS types the written key only when the path reaches it.
+        let typed = path.len() == outer_hops.len() && path.last().map_or(true, |k| !matches!(k, WriteKey::Unknown));
+        self.key_writes.push(KeyWrite {
+            var_text,
             key,
-            scope: self
-                .scope_stack
-                .last()
-                .copied()
-                .unwrap_or(crate::model::file_analysis::ScopeId(0)),
+            path,
+            scope,
             span,
-            rhs_span: if direct { rhs.map(node_to_span) } else { None },
+            rhs_span: if typed { rhs.map(node_to_span) } else { None },
+            rhs_slot,
             conditional: crate::cst::is_conditionally_executed(left),
         });
+    }
+
+    /// What one element hop writes: a static hash key, a static index, or
+    /// `Unknown` for a dynamic one; with the key node's span.
+    fn write_key_of(&self, elem: Node<'a>) -> (crate::model::file_analysis::WriteKey, Span) {
+        use crate::model::file_analysis::WriteKey;
+        let (field, key) = if elem.kind() == "array_element_expression" {
+            let idx = elem.child_by_field_name("index");
+            let key = idx
+                .and_then(|i| i.utf8_text(self.source).ok())
+                .and_then(|t| t.parse::<i32>().ok())
+                .map_or(WriteKey::Unknown, WriteKey::Index);
+            (idx, key)
+        } else {
+            let k = elem.child_by_field_name("key");
+            let key = k
+                .and_then(|k| self.extract_key_text(k))
+                .and_then(|(t, dynamic)| (!dynamic).then_some(t))
+                .map_or(WriteKey::Unknown, WriteKey::Hash);
+            (k, key)
+        };
+        (key, node_to_span(field.unwrap_or(elem)))
     }
 
     pub(super) fn determine_access(&self, node: Node<'a>) -> AccessKind {
@@ -274,6 +332,7 @@ impl<'a> Builder<'a> {
         // sub name; fall through to None when the variable isn't a known
         // compile-time constant.
         match node.kind() {
+            "ambiguous_function_call_expression" if self.indirect_method_call(node).is_some() => None,
             "function_call_expression" | "ambiguous_function_call_expression" => {
                 let name = crate::cst::extract_call_name(node, self.source)?;
                 if let Some(stripped) = name.strip_prefix('&') {
@@ -375,6 +434,22 @@ impl<'a> Builder<'a> {
         &self,
         lhs: Node<'a>,
     ) -> Option<Vec<(String, crate::model::file_analysis::Extraction)>> {
+        let out: Vec<_> = self
+            .lhs_list_slots(lhs)?
+            .into_iter()
+            .filter_map(|slot| match slot {
+                ListSlot::Var(name, extraction) => Some((name, extraction)),
+                ListSlot::Element(..) => None,
+            })
+            .collect();
+        (!out.is_empty()).then_some(out)
+    }
+
+    /// Every target slot of a list-assignment LHS, in order: variables and
+    /// written elements (`($x, $h->{k}) = …`). An element after a slurpy
+    /// target has no slot (`None`) — the slurpy took the rest. `undef` and
+    /// other placeholders take a position and yield nothing.
+    pub(super) fn lhs_list_slots(&self, lhs: Node<'a>) -> Option<Vec<ListSlot<'a>>> {
         use crate::model::file_analysis::Extraction;
         // `my ($a, $b)` (variable_declaration) OR a bare `($a, $b) = …`
         // reassignment (a grouping container LHS — no `my`).
@@ -392,24 +467,29 @@ impl<'a> Builder<'a> {
             _ => return None,
         };
         let mut out = Vec::new();
-        let mut pos = 0usize;
-        for child in elems {
-            let extraction = match child.kind() {
-                "scalar" => Extraction::Positional(pos),
-                "array" | "hash" => Extraction::Slurpy(pos),
-                // `my (undef, $x) = @_` — the placeholder takes a slot.
-                "undef_expression" => {
-                    pos += 1;
-                    continue;
+        let mut slurped = false;
+        for (pos, child) in elems.into_iter().enumerate() {
+            match child.kind() {
+                "scalar" | "array" | "hash" => {
+                    let slurpy = child.kind() != "scalar";
+                    let extraction =
+                        if slurpy { Extraction::Slurpy(pos) } else { Extraction::Positional(pos) };
+                    if let Ok(t) = child.utf8_text(self.source) {
+                        out.push(ListSlot::Var(t.to_string(), extraction));
+                    }
+                    slurped |= slurpy;
                 }
-                _ => continue,
-            };
-            if let Ok(t) = child.utf8_text(self.source) {
-                out.push((t.to_string(), extraction));
+                "hash_element_expression" | "array_element_expression" => {
+                    out.push(ListSlot::Element(child, (!slurped).then_some(pos)));
+                }
+                "variable_declaration" => {
+                    let inner = child.child_by_field_name("variable");
+                    slurped |= inner.is_some_and(|v| matches!(v.kind(), "array" | "hash"));
+                }
+                _ => {}
             }
-            pos += 1;
         }
-        (!out.is_empty()).then_some(out)
+        Some(out)
     }
 
     /// The per-element NODES of a literal-list RHS (`(10, "str")` → [10,

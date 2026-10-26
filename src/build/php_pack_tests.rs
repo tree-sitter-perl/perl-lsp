@@ -817,6 +817,7 @@ fn at(src: &str, needle: &str, offset: usize) -> tree_sitter::Point {
 }
 
 /// A workspace of php files, asked as the editor asks: by file and point.
+#[cfg(feature = "php")]
 struct Workspace {
     idx: crate::index::module_index::ModuleIndex,
     store: crate::index::open_docs::OpenDocs,
@@ -824,8 +825,10 @@ struct Workspace {
 }
 
 /// (file name, row, start column) of each location, sorted.
+#[cfg(feature = "php")]
 type Sites = Vec<(String, usize, usize)>;
 
+#[cfg(feature = "php")]
 impl Workspace {
     fn new(files: &[(&str, &'static str)]) -> Self {
         let idx = crate::index::module_index::ModuleIndex::new_for_test();
@@ -871,6 +874,7 @@ impl Workspace {
     }
 }
 
+#[cfg(feature = "php")]
 fn site(file: &str, row: usize, column: usize) -> (String, usize, usize) {
     (file.to_string(), row, column)
 }
@@ -985,6 +989,7 @@ fn member_calls_and_reads_name_their_member_on_the_receiver() {
 /// promoted property, `$this`, or a class named by `self`, `static` or its
 /// spelling. A property read lands on the property, never on the method
 /// that shares its name.
+#[cfg(feature = "php")]
 #[test]
 fn a_member_at_a_call_site_resolves_to_its_declaration() {
     let ws = Workspace::new(&[("/fake/php/App/Timer.php", CALLS)]);
@@ -1007,6 +1012,7 @@ fn a_member_at_a_call_site_resolves_to_its_declaration() {
 /// either rewrites its declaration and its own uses alone, from the
 /// declaration or from a use. A class named by a static call is a class
 /// reference.
+#[cfg(feature = "php")]
 #[test]
 fn a_member_renames_with_its_call_sites_and_keeps_to_its_family() {
     let ws = Workspace::new(&[("/fake/php/App/Timer.php", CALLS)]);
@@ -1052,6 +1058,7 @@ class Child extends Base {
 
 /// A member inherited from a class in another file resolves up the
 /// `extends` chain, and renames across both files from either side.
+#[cfg(feature = "php")]
 #[test]
 fn an_inherited_member_resolves_and_renames_across_files() {
     let ws = Workspace::new(&[("/fake/php/Lib/Base.php", BASE), ("/fake/php/App/Child.php", CHILD)]);
@@ -1088,6 +1095,7 @@ function helper(...$xs) {}
 /// is pinned to that function's namespace: a bare name is the namespace in
 /// force's own function when the file declares one, else the global one; a
 /// qualified name resolves like a class spelling.
+#[cfg(feature = "php")]
 #[test]
 fn a_free_call_is_an_invoke_of_its_function() {
     use crate::model::file_analysis::RefKind;
@@ -1145,6 +1153,7 @@ fn call_invokes(fa: &FileAnalysis) -> Vec<(String, bool, Option<Vec<bool>>)> {
 
 /// A promoted property read in another file renames the property, the
 /// constructor's local and its body uses as one.
+#[cfg(feature = "php")]
 #[test]
 fn a_promoted_property_renames_from_a_read_in_another_file() {
     let user = "<?php\nfunction age(Order $o) { return $o->made; }\n";
@@ -1246,6 +1255,7 @@ fn a_call_chain_types_through_declared_returns() {
 /// From a chained receiver, goto-def and rename reach the member of the
 /// class the previous call returns, in another file too, and hover on a
 /// call shows the return it resolves to.
+#[cfg(feature = "php")]
 #[test]
 fn a_chained_member_resolves_across_files_and_hovers_its_return() {
     let ws = Workspace::new(&[("/fake/php/Lib/Clock.php", CLOCK), ("/fake/php/App/Builder.php", RETURNS)]);
@@ -1295,6 +1305,7 @@ class Users extends Query {
 /// An inherited method's declared return types a chain off the child, and
 /// a `static` return names the class the method is written in: `where()`
 /// declared on `Query` answers `Query`, wherever it is called from.
+#[cfg(feature = "php")]
 #[test]
 fn an_inherited_declared_return_types_the_chain_across_files() {
     use crate::model::file_analysis::RefKind;
@@ -1494,6 +1505,7 @@ fn a_function_sees_no_variable_of_the_code_around_it() {
 
 /// A variable's call dispatches on the value written to it, in another
 /// file too.
+#[cfg(feature = "php")]
 #[test]
 fn a_call_on_a_variable_resolves_across_files() {
     let ws = Workspace::new(&[
@@ -1912,16 +1924,31 @@ fn a_member_call_through_an_unindexed_parent_widens_out_loud() {
     assert_eq!(edits, [p]);
 }
 
-/// A fully-qualified class spelling (`\Lib\Clock`) names its identity:
+/// A fully-qualified class spelling (`\Lib\Model`) names its identity:
 /// goto-def lands on the declaration, never the declaring file's top, and
 /// the spelling widens nothing.
 #[cfg(feature = "php")]
 #[test]
 fn a_fully_qualified_class_spelling_lands_on_its_declaration() {
-    let sub = ("/fake/php/App/Sub.php", "<?php\nnamespace App;\nclass Sub extends \\Lib\\Clock {}\n");
-    let idx = php_indexed(&[("/fake/php/Lib/Clock.php", CLOCK), sub]);
+    let sub = ("/fake/php/App/Sub.php", "<?php\nnamespace App;\nclass Sub extends \\Lib\\Model {}\n");
+    let idx = php_indexed(&[PHP_STRANGER, PHP_LIB, sub]);
     let (defs, hover) = php_landing(&idx, sub.0, tree_sitter::Point::new(2, 24));
-    assert_eq!(defs, [("Lib/Clock.php".to_string(), 3, None)]);
-    assert_eq!(hover.as_deref(), Some("Lib/Clock.php"));
+    assert_eq!(defs, [("Lib/Model.php".to_string(), 2, None)]);
+    assert_eq!(hover.as_deref(), Some("Lib/Model.php"));
     assert!(php_widening(&idx, sub.0).is_empty());
+}
+
+/// A relative qualified parent (`Sub\Model` in `namespace App`) names
+/// `App\Sub\Model`: goto-def lands on that declaration, never on the
+/// file tops of the same-leaf classes.
+#[cfg(feature = "php")]
+#[test]
+fn a_relative_qualified_parent_lands_on_its_resolved_class() {
+    let model = ("/fake/php/App/Sub/Model.php", "<?php\nnamespace App\\Sub;\nclass Model { function name() {} }\n");
+    let user = ("/fake/php/App/User.php", "<?php\nnamespace App;\nclass User extends Sub\\Model {}\n");
+    let idx = php_indexed(&[PHP_STRANGER, PHP_LIB, model, user]);
+    let (defs, hover) = php_landing(&idx, user.0, tree_sitter::Point::new(2, 23));
+    assert_eq!(defs, [("App/Sub/Model.php".to_string(), 2, None)]);
+    assert_eq!(hover.as_deref(), Some("App/Sub/Model.php"));
+    assert!(php_widening(&idx, user.0).is_empty());
 }
