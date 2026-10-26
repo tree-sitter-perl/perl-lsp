@@ -76,9 +76,6 @@ impl<'a> Builder<'a> {
         if module_name == "Class::Tiny" {
             self.visit_class_tiny_use(node);
         }
-        if module_name == "vars" {
-            self.declare_use_vars(node);
-        }
         // Don't recurse — use statements don't contain interesting sub-nodes
     }
 
@@ -143,26 +140,24 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// `use vars qw($x @y)` is the pre-`our` declaration form: each name is
-    /// a package global of the current package, declared at its word.
-    pub(super) fn declare_use_vars(&mut self, node: Node<'a>) {
-        let words = crate::cst::string_list(node, self.source, &mut |_| Vec::new());
-        for (name, span) in words {
-            let Some(sigil) = name.chars().next() else { continue };
-            if !crate::model::conventions::PERL_SPELLINGS.is_sigil(sigil)
-                || crate::model::conventions::split_qualified_var(&name, &crate::model::conventions::PERL_SPELLINGS).is_some()
-            {
-                continue;
-            }
-            self.add_symbol(
-                name.clone(),
-                SymKind::Variable,
-                node_to_span(node),
-                span,
-                SymbolDetail::Variable { sigil, decl_kind: DeclKind::Our },
-            );
-            self.add_ref(RefKind::Variable, span, name, AccessKind::Declaration);
+    /// A package global of the current package declared at `span`, as
+    /// `our` declares one (`EmitAction::PackageVariable`). A qualified or
+    /// sigil-less name declares nothing.
+    pub(super) fn declare_package_variable(&mut self, name: String, span: Span) {
+        let Some(sigil) = name.chars().next() else { return };
+        if !crate::model::conventions::PERL_SPELLINGS.is_sigil(sigil)
+            || crate::model::conventions::split_qualified_var(&name, &crate::model::conventions::PERL_SPELLINGS).is_some()
+        {
+            return;
         }
+        self.add_symbol(
+            name.clone(),
+            SymKind::Variable,
+            span,
+            span,
+            SymbolDetail::Variable { sigil, decl_kind: DeclKind::Our },
+        );
+        self.add_ref(RefKind::Variable, span, name, AccessKind::Declaration);
     }
 
     /// Walk a `use Class::Tiny ...` node's args for attribute names, handling
@@ -387,18 +382,20 @@ impl<'a> Builder<'a> {
         // Emit FunctionCall refs for imported symbol names (for goto-def on import args).
         // These refs pin to the module being imported from — the qw list
         // IS the authoritative source. Synthetic uses skip this — there's
-        // no source span for the imported names to live on. `use vars`
-        // names declarations, not imports (`declare_use_vars`).
-        if module_name != "parent" && module_name != "base" && module_name != "vars" {
+        // no source span for the imported names to live on.
+        if module_name != "parent" && module_name != "base" {
             if !imports.is_empty() {
                 if let Some(node) = node {
                     // `:tag` / `-tag` group selectors name a `%EXPORT_TAGS`
                     // entry, not a sub — they must not earn a FunctionCall ref
                     // (rule #7: a ref only on a real call target), or the
                     // unresolved-function diagnostic flags the selector itself.
+                    // A sigiled word names a variable, not a sub, for the
+                    // same reason.
                     let sym_set: std::collections::HashSet<&str> = imports
                         .iter()
                         .filter(|s| !s.starts_with(':') && !s.starts_with('-'))
+                        .filter(|s| !s.starts_with(|c| crate::model::conventions::PERL_SPELLINGS.is_sigil(c)))
                         .map(|s| s.as_str())
                         .collect();
                     self.emit_refs_for_strings(
@@ -481,10 +478,17 @@ impl<'a> Builder<'a> {
         // (without distinction) when a plugin emits SyntheticUse;
         // `use_dedup` breaks any cycle.
         if !self.plugins.is_empty() {
+            let import_words = node
+                .map(|n| crate::cst::string_list(n, self.source, &mut |_| Vec::new()))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(text, span)| plugin::ImportWord { text, span })
+                .collect();
             let ctx = plugin::UseContext {
                 module_name,
                 imports,
                 raw_args,
+                import_words,
                 current_package: self.current_package.clone(),
                 span,
             };

@@ -547,6 +547,9 @@ impl<'a> Builder<'a> {
                     empty_import: false,
                 });
             }
+            plugin::EmitAction::PackageVariable { name, span } => {
+                self.declare_package_variable(name, span);
+            }
             plugin::EmitAction::VarType { variable, at, inferred_type } => {
                 // Scope resolution is deferred to the end of the build —
                 // plugin dispatch runs BEFORE we recurse into call

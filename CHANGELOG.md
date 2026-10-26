@@ -40,6 +40,11 @@ crate / VS Code extension versions.
 - **`use English` variables are declared.** English builds its export list
   at runtime; a bundled `english` plugin states it, so `$ERRNO` and friends
   count as declared (match variables only without `-no_match_vars`).
+- **Plugins can declare package variables.** The new `PackageVariable`
+  action declares a global the way `our` does, and `on_use` sees each
+  use-list word with its span (`ctx.import_words`). `use vars` is now a
+  bundled plugin built on it, so an in-house module that declares globals
+  can get the same treatment from `PERL_LSP_PLUGIN_DIR`.
 
 ## v0.8.0 — 2026-10-19
 
