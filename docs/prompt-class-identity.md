@@ -175,6 +175,9 @@ class's own (`scopes::State::class_scopes`). A declaration's home is the
 class whose own scope it is written in, through any plain block but
 never across a callable — a method's declarations are its locals, not
 the class's members — else the namespace in force (`scopes::home_of`).
+The callable boundary is one primitive, `callable_reach` (the scopes out
+to and including the nearest callable), which `lookup_chain`'s direct
+arm reads too.
 `class Outer: class Inner:` in `pkg/mod.py` files `Inner` as
 `pkg.mod.Outer.Inner`, so Django's per-model `class Meta:` is one class
 per model; a class declared in a method of `Outer` is filed under the
