@@ -48,7 +48,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         name: (pack.shape_name)(st.refs.spelled_by_match.get(&e.match_id).unwrap_or(&e.text)),
         start: e.start,
         end: e.end,
-        scope: st.cur_scope,
+        scope: super::scopes::written_in(st, e.match_id).unwrap_or(st.cur_scope),
         invocant: m.member_recv.get(&e.match_id).cloned(),
         member_op,
         arg_count,

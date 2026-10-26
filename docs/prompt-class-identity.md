@@ -52,15 +52,15 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    found through such a class carries the stamp, but no lane reads it at
    the member site: that would type every receiver on every publish.
 5. **Spellings resolve once, in extraction.** A class declaration joins
-   the namespace in force at its position — the section of the namespace
-   lane there (`ExtractState::class_identity`) — so a class is filed
-   under one key whatever container it is written in, and its symbol's
-   `package` is that namespace. A written spelling resolves
+   its home (`ExtractState::class_identity`, `scopes::home_of`) — the
+   class whose own scope it is written in (below), else the section of
+   the namespace lane there — so a class is filed under one key whatever
+   container it is written in, and its symbol's `package` is that home. A written spelling resolves
    through the pure `UseMap::resolve` ladder
    (`model/file_analysis/use_map.rs`) over the file's `use` rows
    (`PackFacts::use_rows`) at the namespace it was written in, once every
-   row and class is in: absolute spelling → itself; head segment → the
-   nested class the enclosing class body declares (below), else its alias,
+   row and class is in: absolute spelling → itself; head segment → a
+   class nested in a class whose body the site sees (below), else its alias,
    else its `use` row (an aliased row binds the alias, never its leaf),
    else the namespace in force at the spelling's site; the rest hangs off
    that.
@@ -148,33 +148,47 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    it only through a use-map, so C++, whose spellings are identities, keeps
    its calls calls.
 
-**A class body can be a namespace.** A document that captures a class's
-body as `@section.class` (Python's) makes it a section of the lane,
-`SectionKind::ClassBody`, named by the class's identity: `class Outer:
-class Inner:` in `pkg/mod.py` files `Inner` as `pkg.mod.Outer.Inner`, so
-Django's per-model `class Meta:` is one class per model. The section
-covers the body, not the header, so a parent clause and the class's own
-name are written in the namespace around it. A bare head written in it
-resolves to the nested class the body declares (`UseMap::class_body`,
-asked through `DeclaredClasses` — the symbol table, never a second list)
-before the ladder above, and otherwise falls through to the section around
-it (`namespace_range_around`); a class nested one level further sees past
-its enclosing class to the module.
+**A class is a home, not a namespace.** Whose member a declaration is
+and how a name written somewhere resolves are two facts, and the scope
+tree carries both; the namespace lane holds real namespaces only (Perl's
+packages, PHP's namespaces, a Python module).
 
-How far a section's names reach is the SCOPE's rule, and the document
-states it: `@scope.direct` marks a scope whose names are in force only
-for code written directly in it (Python's class scope), minted as
-`Scope::direct` and read by `lookup_chain` — the one walk every name
-lookup takes. A section whose scope that walk skipped is not in force at
-the site (`namespace_range_in` / `namespace_range_for`, which
-`namespace_at`, `class_identity` and `UseMap::at` read), so a method of
-`Outer` resolves a bare `Inner` in the module and files a class it
-declares under the module. A pack that marks nothing keeps the plain
-chain: its class body reaches its methods, as PHP's and C++'s lanes do
-unchanged. A dotted spelling hangs off its head as any qualified spelling
-does: `Outer.Inner`, in the file or after `from pkg.mod import Outer`, is
-`pkg.mod.Outer.Inner`. PHP and C++ capture no class section; their lanes
-are unchanged.
+*Ownership.* A class's `@scope` is opened by the match whose
+`@context.class` names it, so the extractor knows that scope is the
+class's own (`scopes::State::class_scopes`). A declaration's home is the
+class whose own scope it is written in, through any plain block but
+never across a callable — a method's declarations are its locals, not
+the class's members — else the namespace in force (`scopes::home_of`).
+`class Outer: class Inner:` in `pkg/mod.py` files `Inner` as
+`pkg.mod.Outer.Inner`, so Django's per-model `class Meta:` is one class
+per model; a class declared in a method of `Outer` is filed under the
+module. The class's def mints its identity and the scope it is declared
+in once (`defs::MintedClass`); its `@context.class` and its `@parent`
+matches read that, never mint it again.
+
+*Lookup.* A bare head walks `lookup_chain` from the scope it is written
+in, and each scope on it offers the classes declared directly in it
+under its own package (`UseMap::scope_step`, asked through
+`ScopeClasses` — the symbol table, never a second list) before the
+ladder above. How far a scope's names reach is the scope's rule, and the
+document states it: `@scope.direct` marks a scope whose names are in
+force only for code written directly in it (Python's class scope),
+minted as `Scope::direct`, so the walk drops it once it has come up out
+of a callable or out of another direct scope. A method of `Outer`, and a
+class nested in it, resolve a bare `Inner` in the module. A pack that
+marks nothing keeps the plain chain: its class body reaches its methods,
+and PHP's class scope, which declares no class, offers nothing. A
+dotted spelling hangs off its head as any qualified spelling does:
+`Outer.Inner`, in the file or after `from pkg.mod import Outer`, is
+`pkg.mod.Outer.Inner`.
+
+*Headers.* A class's own scope covers its header, but a base is
+evaluated where the class is declared. The extractor states it: a
+reference in a `@parent` match is minted in the scope its class is
+declared in (`scopes::written_in`, the `Ref::scope` the query side
+resolves from through `UseMap::in_scope`), and the edge resolves from
+the same scope. `class B(A):` in `Outer`'s body names the sibling
+`Outer.A`, even when B declares an `A` of its own.
 
 The namespace sections are the namespace lane every language shares,
 `FileAnalysis::namespace_ranges` — Perl's packages are written to it by the
@@ -211,6 +225,9 @@ leaf-space FQ family validation in `implementations_of`.
   so they resolve past the class the way the body does. A class declared
   in a method is filed under the module (`pkg.mod.Local`), not Python's
   `Outer.build.<locals>.Local`.
+- **The namespace in force inside a class body is the module.**
+  `namespace_at` reads the lane, which holds no class; the class a site's
+  code belongs to is `package_at`'s answer.
 - **Completion's in-scope lane still walks the raw chain.** The names
   `lsp/symbols/completion.rs` offers at a point come from
   `scope_chain`, so a method is offered its class body's variables
