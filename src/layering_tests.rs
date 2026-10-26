@@ -1536,7 +1536,7 @@ fn rendered_strings_are_not_reparsed() {
     let fns = [".split(", ".rsplit(", ".split_once(", ".rsplit_once(", ".splitn(", ".rsplitn("];
     let seen = count_lines(&files, &|l| fns.iter().any(|f| l.contains(f)));
     let allow: &[(&str, usize, &str)] = &[
-        ("model/conventions.rs", 3, "source text: a name split on its language's declared separator, class-token segments, and Perl method tokens"),
+        ("model/conventions.rs", 6, "source text: a name split on its language's declared separator, class-token segments, Perl method tokens, and `use VERSION` literals"),
         ("model/file_analysis/enrichment.rs", 1, "Perl package leaf vs a load name — both source-spelled"),
         ("model/file_analysis/invocants.rs", 2, "Perl `::` on source-spelled class and sub names"),
         ("model/file_analysis/types.rs", 1, "canonical_template_spelling — a C++ instance as written in source"),

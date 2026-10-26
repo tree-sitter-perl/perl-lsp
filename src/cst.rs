@@ -408,6 +408,25 @@ pub(crate) struct IndirectObjectCall<'a> {
     pub arguments: Option<Node<'a>>,
 }
 
+/// `no MODULE ...`: the grammar has no `no_statement`, so a `no` is a
+/// `use_statement` whose leading keyword token reads `no`.
+pub(crate) fn is_no_statement(node: Node) -> bool {
+    node.kind() == "use_statement" && node.child(0).is_some_and(|k| k.kind() == "no")
+}
+
+/// Where the lexical scope a statement is written in ends: a pragma's
+/// effect (`use v5.36`, `no feature ...`) runs from the statement to here.
+pub(crate) fn lexical_scope_end(node: Node) -> tree_sitter::Point {
+    let mut cur = node.parent();
+    while let Some(n) = cur {
+        if matches!(n.kind(), "block" | "block_statement" | "source_file") {
+            return n.end_position();
+        }
+        cur = n.parent();
+    }
+    node.end_position()
+}
+
 pub(crate) fn indirect_object_call<'a>(node: Node<'a>, src: &[u8]) -> Option<IndirectObjectCall<'a>> {
     use crate::model::conventions::{is_bareword_class_name, PERL_SPELLINGS};
     if node.kind() != "ambiguous_function_call_expression" {

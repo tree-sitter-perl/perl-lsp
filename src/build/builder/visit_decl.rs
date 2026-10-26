@@ -18,6 +18,7 @@ impl<'a> Builder<'a> {
             "for_statement" => self.visit_for(node),
             "postfix_for_expression" => self.visit_postfix_for(node),
             "use_statement" => self.visit_use(node),
+            "use_version_statement" => self.visit_use_version(node),
             "require_expression" => self.visit_require(node),
             "assignment_expression" => self.visit_assignment(node),
 

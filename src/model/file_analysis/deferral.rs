@@ -18,6 +18,8 @@ pub enum Question {
     /// A class is declared under the identity (the spelled name, resolved
     /// through the file's use-map at mint) in some indexed file.
     NamesClass(ElsewhereClass),
+    /// `meth Class(ARGS)` is `Class->meth(ARGS)` (`IndirectSite`).
+    IndirectCall(IndirectSite),
 }
 
 /// How a `ReceiverIsa` question names its receiver.
@@ -40,7 +42,7 @@ pub enum Verdict {
 }
 
 /// Which reading an `Unknown` verdict stands for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Fallback {
     Then,
     Otherwise,
@@ -97,6 +99,7 @@ impl Question {
             Question::ReceiverIsa { .. } => "deferral.decide.receiver_isa",
             Question::PackageIsa { .. } => "deferral.decide.package_isa",
             Question::NamesClass(_) => "deferral.decide.names_class",
+            Question::IndirectCall(_) => "deferral.decide.indirect_call",
         };
         crate::util::ghost_stats::count(tag);
         crate::util::ghost_stats::timed(tag, || self.decide_untimed(facts))
@@ -131,6 +134,10 @@ impl Question {
                     None => Verdict::Unknown,
                 }
             }
+            Question::IndirectCall(site) => match facts.index() {
+                Some(ix) => site.decide(ix),
+                None => Verdict::Unknown,
+            },
         }
     }
 
@@ -139,6 +146,102 @@ impl Question {
         match self {
             Question::ReceiverIsa { .. } | Question::PackageIsa { .. } => Fallback::Neither,
             Question::NamesClass(_) => Fallback::Otherwise,
+            Question::IndirectCall(site) => site.undecided,
+        }
+    }
+}
+
+/// What Perl had not seen yet when it read `meth Class(ARGS)`: the builder
+/// settles the site from the file alone wherever it can (the indirect
+/// feature, a sub named by either word before the site, a package this file
+/// named), and asks this only about what other files decide — a sub in the
+/// package another file declares, a default export of a bare `use`, a
+/// package declared elsewhere. Perl's order (`toke.c` `intuit_method`): a
+/// class word that is a sub makes a function call; a verb that is not a sub
+/// makes a method call; a verb that is one makes a method call only on a
+/// known package (`docs/adr/query-delayed-facts.md`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IndirectSite {
+    package: String,
+    verb: String,
+    class: String,
+    /// The imports before the site that bind names the file can't list: a
+    /// bare `use` (the default set) or a tag (`:all`). Either may export
+    /// either word.
+    exporters: Vec<Exporter>,
+    /// This file named `class` as a package before the site.
+    class_named: bool,
+    /// The site's reading while undecided: the file's own answer.
+    undecided: Fallback,
+}
+
+/// One import an `IndirectSite` can't see through: its module, and the tags
+/// it names (none = a bare `use`, which binds the default set).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Exporter {
+    pub module: String,
+    pub tags: Vec<String>,
+}
+
+impl IndirectSite {
+    /// The builder's handoff, after it found nothing local that settles the
+    /// site. The undecided reading is the one the file alone supports: a
+    /// method call on a package it named, a function call otherwise.
+    pub fn unsettled(package: String, verb: String, class: String, exporters: Vec<Exporter>, class_named: bool) -> Self {
+        let undecided = if class_named { Fallback::Then } else { Fallback::Otherwise };
+        Self { package, verb, class, exporters, class_named, undecided }
+    }
+
+    pub fn class(&self) -> &str {
+        &self.class
+    }
+
+    /// The site reads as a method call while undecided.
+    pub fn undecided_method(&self) -> bool {
+        self.undecided == Fallback::Then
+    }
+
+    fn decide(&self, ix: &dyn CrossFileLookup) -> Verdict {
+        // `None`: an exporter the index can't see, or a tag it doesn't
+        // declare — what it binds is unknown.
+        let exported = |name: &str| -> Option<bool> {
+            let mut any = false;
+            for e in &self.exporters {
+                let cands = ix.visible_def_candidates(&e.module);
+                if cands.is_empty() {
+                    return None;
+                }
+                for c in &cands {
+                    let surface = c.analysis.export_surface_with_index(ix);
+                    if e.tags.is_empty() {
+                        any |= surface.default_set().iter().any(|n| n == name);
+                    }
+                    for tag in &e.tags {
+                        any |= surface.tag_members(tag)?.contains(&name);
+                    }
+                }
+            }
+            Some(any)
+        };
+        let sub_elsewhere = |name: &str| ix.candidate_defining_sub(&self.package, name).is_some();
+        let (Some(class_exported), Some(verb_exported)) = (exported(&self.class), exported(&self.verb)) else {
+            return Verdict::Unknown;
+        };
+        if class_exported || sub_elsewhere(&self.class) {
+            return Verdict::No;
+        }
+        if !(verb_exported || sub_elsewhere(&self.verb)) {
+            return Verdict::Yes;
+        }
+        let declared_elsewhere = || {
+            ix.def_candidates(&self.class)
+                .iter()
+                .any(|c| declares_class(ix.symbols_present(c).symbols(), &self.class))
+        };
+        if self.class_named || declared_elsewhere() {
+            Verdict::Yes
+        } else {
+            Verdict::No
         }
     }
 }
@@ -262,6 +365,7 @@ impl ProvisionalDispatch {
         match &self.when {
             Question::ReceiverIsa { class, .. } | Question::PackageIsa { class, .. } => class,
             Question::NamesClass(c) => c.identity(),
+            Question::IndirectCall(site) => site.class(),
         }
     }
 }

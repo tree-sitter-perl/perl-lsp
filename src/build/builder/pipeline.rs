@@ -376,6 +376,8 @@ fn build_once(
         dynamic_dispatch_sites: 0,
         role_maker_modules: std::collections::HashSet::new(),
         framework_mode_modules: std::collections::HashMap::new(),
+        feature_makers: std::collections::HashMap::new(),
+        feature_toggles: Vec::new(),
         role_packages: std::collections::HashSet::new(),
         dbic_source_name: None,
         topic_group_spans: Vec::new(),
@@ -437,6 +439,11 @@ fn build_once(
                 None
             }
         })
+        .collect();
+    b.feature_makers = b
+        .plugins
+        .feature_makers()
+        .map(|m| (m.module.clone(), (m.disables.clone(), m.enables.clone())))
         .collect();
     for pt in b.plugins.param_types() {
         match &pt.method {

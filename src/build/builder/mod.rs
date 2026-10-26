@@ -583,6 +583,14 @@ struct Builder<'a> {
     framework_mode_modules:
         std::collections::HashMap<String, (FrameworkMode, Vec<String>)>,
 
+    /// Module → (features it disables, features it enables) in the block it
+    /// is `use`d in: the union of every plugin's `feature_makers()`.
+    feature_makers: std::collections::HashMap<String, (Vec<String>, Vec<String>)>,
+
+    /// Every lexical feature switch the walk has seen, in source order: a
+    /// pragma's effect runs from its statement to the end of its block.
+    feature_toggles: Vec<FeatureToggle>,
+
     /// Per-file verdict: packages that ARE roles. Flushed into
     /// `FileAnalysis.role_packages`; `is_role_package` reads the baked
     /// set, never re-derives from use lists.
@@ -769,3 +777,15 @@ mod tests;
 #[cfg(test)]
 #[path = "type_inference_invariants_tests.rs"]
 mod invariants_tests;
+
+/// One lexical feature switch (`use v5.36`, `no feature 'indirect'`, a
+/// plugin-declared bundle importer): `feature` is `off` from `at` until the
+/// end of the enclosing block.
+#[derive(Debug, Clone)]
+pub(super) struct FeatureToggle {
+    feature: String,
+    at: Point,
+    until: Point,
+    off: bool,
+}
+

@@ -5,6 +5,68 @@ use super::*;
 use crate::cst::LiteralShape;
 
 impl<'a> Builder<'a> {
+    /// `use VERSION` switches to that version's feature bundle.
+    pub(super) fn visit_use_version(&mut self, node: Node<'a>) {
+        use crate::model::conventions::{bundle_disables, INDIRECT_FEATURE};
+        let Some(Ok(version)) = node.child_by_field_name("version").map(|v| v.utf8_text(self.source)) else {
+            return;
+        };
+        let off = bundle_disables(version).contains(&INDIRECT_FEATURE);
+        self.toggle_feature(node, INDIRECT_FEATURE, off);
+    }
+
+    /// The feature switches a `use`/`no` statement makes: the `feature`
+    /// pragma's own list, `no indirect`, and a plugin-declared module that
+    /// imports a feature bundle into its caller.
+    fn record_feature_pragma(&mut self, node: Node<'a>, module: &str, args: &[String]) {
+        use crate::model::conventions::{bundle_disables, FEATURE_PRAGMA, INDIRECT_FEATURE};
+        let no = crate::cst::is_no_statement(node);
+        if module == FEATURE_PRAGMA {
+            for arg in args {
+                match arg.strip_prefix(':') {
+                    Some("all") => self.toggle_feature(node, INDIRECT_FEATURE, no),
+                    Some(bundle) if !no => {
+                        let off = bundle_disables(bundle).contains(&INDIRECT_FEATURE);
+                        self.toggle_feature(node, INDIRECT_FEATURE, off)
+                    }
+                    Some(_) => {}
+                    None if arg == INDIRECT_FEATURE => self.toggle_feature(node, INDIRECT_FEATURE, no),
+                    None => {}
+                }
+            }
+        } else if module == INDIRECT_FEATURE {
+            self.toggle_feature(node, INDIRECT_FEATURE, no);
+        } else if !no {
+            if let Some((disables, enables)) = self.feature_makers.get(module).cloned() {
+                for f in disables {
+                    self.toggle_feature(node, &f, true);
+                }
+                for f in enables {
+                    self.toggle_feature(node, &f, false);
+                }
+            }
+        }
+    }
+
+    fn toggle_feature(&mut self, node: Node<'a>, feature: &str, off: bool) {
+        self.feature_toggles.push(super::FeatureToggle {
+            feature: feature.to_string(),
+            at: node.end_position(),
+            until: crate::cst::lexical_scope_end(node),
+            off,
+        });
+    }
+
+    /// Whether `feature` is switched off at `at`: the latest switch before
+    /// it whose block contains it decides, and none leaves the default on.
+    pub(super) fn feature_off_at(&self, feature: &str, at: Point) -> bool {
+        self.feature_toggles
+            .iter()
+            .filter(|t| t.feature == feature && t.at <= at && at < t.until)
+            .max_by_key(|t| t.at)
+            .is_some_and(|t| t.off)
+    }
+
     pub(super) fn visit_use(&mut self, node: Node<'a>) {
         // Thin shim: pull the value triple off the CST node and hand it
         // to the value-taking worker. `process_use` runs the actual
@@ -17,6 +79,7 @@ impl<'a> Builder<'a> {
         let Ok(module_name) = module_node.utf8_text(self.source) else { return };
         let raw_args = self.extract_mojo_base_args(node);
         let (imports, _qw_close) = self.extract_use_import_list(node);
+        self.record_feature_pragma(node, module_name, &imports);
 
         // `use lib` is not an import — it prepends search-path roots to the
         // asker's @INC, which is what decides WHICH file a module name means

@@ -129,6 +129,11 @@ impl<'a> Builder<'a> {
 
     pub(super) fn expr_payload(&mut self, node: Node<'a>) -> Option<crate::model::witnesses::WitnessPayload> {
         use crate::model::witnesses::{RefIdx, WitnessAttachment, WitnessPayload};
+        // `meth Class(ARGS)` the file can't settle: its value is the method
+        // call or the function call, as the index decides.
+        if let Some((io, site)) = self.indirect_deferred(node) {
+            return Some(self.indirect_choice(node, io, site));
+        }
         match node.kind() {
             // Closed-under-syntax — bake.
             "string_literal" | "interpolated_string_literal" => {
@@ -911,6 +916,39 @@ impl<'a> Builder<'a> {
             receiver: None,
             args: Some(self.call_operands(&args)),
         }
+    }
+
+    /// A deferred `meth Class(ARGS)`'s value: `Class->meth(ARGS)` when the
+    /// index says Perl reads it so, else `meth(Class(ARGS))` — `meth` is no
+    /// sub this file declares, or the site would have settled.
+    fn indirect_choice(
+        &mut self,
+        node: Node<'a>,
+        io: crate::cst::IndirectObjectCall<'a>,
+        site: crate::model::file_analysis::IndirectSite,
+    ) -> crate::model::witnesses::WitnessPayload {
+        use crate::model::witnesses::{Callee, Lookup, WitnessPayload};
+        let verb = io.method.utf8_text(self.source).unwrap_or_default().to_string();
+        let args: Vec<Node<'a>> = match io.arguments {
+            Some(a) if crate::cst::is_list_literal(a) => crate::cst::NodeExt::elements(&a).collect(),
+            Some(a) => vec![a],
+            None => Vec::new(),
+        };
+        let method = WitnessPayload::Invoke {
+            callee: Callee::Method {
+                constructs: crate::model::conventions::is_constructor_name(&verb),
+                name: verb.clone(),
+                lookup: Lookup::Named(site.class().to_string()),
+            },
+            receiver: None,
+            args: Some(self.call_operands(&args)),
+        };
+        let function = self.call_invoke(node, verb, None);
+        WitnessPayload::Choose(Box::new(crate::model::file_analysis::Deferred::fork(
+            crate::model::file_analysis::Question::IndirectCall(site),
+            method,
+            Some(function),
+        )))
     }
 
     /// A call this file never defines the callee of, once the symbol table is
