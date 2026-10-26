@@ -1263,7 +1263,7 @@ pub(super) fn collect_from_analysis(
                 };
                 match r.hash_key_owner() {
                     Some(HashKeyOwner::Sub { package: op, name: on }) => sub_matches(op, on),
-                    // owner `None` (build gate blind) OR `Variable` (the var is
+                    // bound to its call (build gate blind) OR `Variable` (the var is
                     // bound to an imported call enrichment didn't reach in this
                     // unenriched workspace file) — re-derive cross-file, the same
                     // lazy seam method dispatch + deferred owners use above. This
@@ -1281,7 +1281,7 @@ pub(super) fn collect_from_analysis(
                 // condition args (`$rs->search({ col => … })`), owned by the
                 // `Column` namespace — NOT `$row->{col}` derefs, which carry a
                 // `Class` lookup and so never match here (a column isn't a hash
-                // slot). The owner-`None` case is the cross-file deferred arg key.
+                // slot). The call-bound case is the cross-file deferred arg key.
                 let target_owner = HashKeyOwner::Bridged { class: wanted.clone() };
                 match r.hash_key_owner() {
                     Some(o) => o.found_by(&target_owner),

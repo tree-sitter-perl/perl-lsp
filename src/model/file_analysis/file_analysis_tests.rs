@@ -3294,3 +3294,23 @@ fn unknown_return_is_not_displayed() {
     assert_eq!(fa.find_method_return_type("Foo", "a", None, None), Some(InferredType::Unknown));
     assert_eq!(fa.method_detail("Foo", "a", None, None), "Foo");
 }
+
+// ---- Call-bound hash-key owners ----
+
+#[test]
+fn call_arg_key_owner_comes_from_its_call_and_a_nested_deref_stays_out() {
+    let fa = build_fa_from_source("use Foo;\nmy $h = { name => 1 };\nmy $f = Foo->new(name => $h->{name});\n");
+    let keys: Vec<&Ref> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::HashKeyAccess { .. }) && r.target_name == "name" && r.span.start.row == 2)
+        .collect();
+    let (arg, deref): (Vec<&Ref>, Vec<&Ref>) = keys.into_iter().partition(|r| r.arg_key_call().is_some());
+    assert_eq!((arg.len(), deref.len()), (1, 1), "one call-bound arg key, one deref");
+    assert_eq!(
+        fa.deferred_hash_key_owner(arg[0], None),
+        Some(HashKeyOwner::Sub { package: Some("Foo".into()), name: "new".into() }),
+    );
+    // The deref only sits inside the call's arguments; it is `$h`'s key.
+    assert_eq!(fa.deferred_hash_key_owner(deref[0], None), None);
+}

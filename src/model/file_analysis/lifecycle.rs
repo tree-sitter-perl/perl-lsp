@@ -787,45 +787,22 @@ impl FileAnalysis {
         }
     }
 
-    /// Set the owner binding on owner-less `HashKeyAccess` refs
-    /// whose enclosing `MethodCall`'s receiver types as a
+    /// Set the owner binding on call-bound `HashKeyAccess` refs
+    /// (`RefBinding::CallArgKey`) whose call's receiver types as a
     /// `Parametric` flavor that claims this method's args (DBIC's
-    /// `search`/`find`/`update`/...). Build emits these refs
-    /// eagerly with `owner: None` for chain receivers it can't
-    /// resolve at walk time; this routine fills them once the
-    /// receiver's type is resolvable.
+    /// `search`/`find`/`update`/...). Build binds these keys to the call
+    /// for receivers it can't resolve at walk time; this routine fills
+    /// them once the receiver's type is resolvable.
     ///
     /// `module_index = None` resolves only in-file chains. The
     /// same routine runs from enrichment with `module_index =
-    /// Some(_)` to fill cross-file gaps. Idempotent — only None-
-    /// owner refs are touched, so a second run leaves them alone.
+    /// Some(_)` to fill cross-file gaps. Idempotent — only call-bound
+    /// refs are touched, so a second run leaves them alone.
     pub(super) fn fix_chain_receiver_hash_key_owners(&mut self, module_index: Option<&dyn CrossFileLookup>) {
         let mut owner_fixes: Vec<(usize, HashKeyOwner)> = Vec::new();
         for (i, r) in self.refs.iter().enumerate() {
-            if !matches!(r.kind, RefKind::HashKeyAccess { .. }) || r.hash_key_owner().is_some() {
-                continue;
-            }
-            // Find the enclosing MethodCall ref by span
-            // containment — smallest-span containing MethodCall
-            // wins (innermost call's args).
-            let mut enclosing: Option<&Ref> = None;
-            let mut enclosing_area: u64 = u64::MAX;
-            for other in self.refs() {
-                if !matches!(other.kind, RefKind::MethodCall { .. }) {
-                    continue;
-                }
-                if !contains_point(&other.span, r.span.start) {
-                    continue;
-                }
-                let area = (other.span.end.row.saturating_sub(other.span.start.row)) as u64
-                    * 10_000
-                    + other.span.end.column as u64;
-                if area < enclosing_area {
-                    enclosing = Some(other);
-                    enclosing_area = area;
-                }
-            }
-            let Some(call) = enclosing else { continue };
+            let Some(crate::model::witnesses::RefIdx(c)) = r.arg_key_call() else { continue };
+            let Some(call) = self.refs.get(c as usize) else { continue };
             let Some(ty) = self.method_call_invocant_type(call, module_index) else {
                 continue;
             };

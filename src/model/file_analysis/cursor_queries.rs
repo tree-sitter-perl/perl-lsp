@@ -866,28 +866,17 @@ impl FileAnalysis {
         spans
     }
 
-    /// Query-time owner for a deferred (`owner: None`) hash-key access:
-    /// find the enclosing call ref and derive `Sub { invocant class,
-    /// method }` with the index in hand. The build-time gate deferred
-    /// exactly because the class wasn't visible locally — this is the
-    /// other half of that bargain (the receiver-gated discipline: the
-    /// type is the gate, resolved at query time).
+    /// Query-time owner for a hash-key access the build couldn't own: a key
+    /// bound to its call (`RefBinding::CallArgKey`) derives `Sub { invocant
+    /// class, method }` (or the column owner) from that call with the index
+    /// in hand; an unowned `$v->{k}` whose variable is bound to an imported
+    /// call takes the producer's owner.
     pub fn deferred_hash_key_owner(
         &self,
         key_ref: &Ref,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<HashKeyOwner> {
-        // Enclosing method call whose span covers this key (an arg key inside a
-        // call, or a `->{key}` deref of the call's return).
-        let enclosing_call = self
-            .refs
-            .iter()
-            .filter(|c| {
-                matches!(c.kind, RefKind::MethodCall { .. })
-                    && contains_point(&c.span, key_ref.span.start)
-                    && contains_point(&c.span, key_ref.span.end)
-            })
-            .min_by_key(|c| span_size(&c.span));
+        let enclosing_call = key_ref.arg_key_call().and_then(|crate::model::witnesses::RefIdx(i)| self.refs.get(i as usize));
 
         // Column-keyed call arg (`$rs->search({ name => … })`, columns
         // cross-file): the key is a COLUMN of the invocant class, not a key of
@@ -928,8 +917,8 @@ impl FileAnalysis {
             }
         }
 
-        // Inline method-chain receiver: `$obj->method->{key}` — the key
-        // belongs to `method`'s return value, owned `Sub{invocant_class, method}`.
+        // A key of the call's arguments: the callee's own key, owned
+        // `Sub{invocant_class, method}` (the constructor-key shape).
         if let Some(enclosing) = enclosing_call {
             // An owner is ONE producer: a union receiver's call has a
             // return per arm, and no single `Sub` owns the key.
