@@ -194,7 +194,17 @@ pub fn namespace_range_at(ranges: &[NamespaceRange], point: Point) -> Option<&Na
 /// the language (a Perl `{ … }` block, a pack scope); depth is how many
 /// enclose the declaration.
 #[derive(Debug, Default, Clone)]
-pub struct OpenSections(Vec<(usize, usize)>);
+pub struct OpenSections(Vec<RunningSection>);
+
+/// One statement-form section still running. It holds the lane index, not
+/// a reference, because the lane keeps growing while the section runs.
+#[derive(Debug, Clone, Copy)]
+struct RunningSection {
+    /// Regions enclosing the declaration.
+    depth: usize,
+    /// Its entry in the namespace lane.
+    lane_index: usize,
+}
 
 impl OpenSections {
     /// A statement form at `start`, `depth` regions deep: in force to
@@ -210,12 +220,11 @@ impl OpenSections {
         region_end: Point,
         depth: usize,
     ) {
-        while self.0.last().is_some_and(|&(d, _)| d >= depth) {
-            let (_, i) = self.0.pop().unwrap();
-            let end = &mut lane[i].span.end;
+        while let Some(running) = self.0.pop_if(|r| r.depth >= depth) {
+            let end = &mut lane[running.lane_index].span.end;
             *end = (*end).min(start);
         }
-        self.0.push((depth, lane.len()));
+        self.0.push(RunningSection { depth, lane_index: lane.len() });
         lane.push(NamespaceRange { namespace, span: Span { start, end: region_end }, kind: SectionKind::Statement });
     }
 
