@@ -36,8 +36,9 @@ struct ReceiverGate {
     target_class: String,
 }
 
-/// The one predicate a pattern may carry that is not evaluated at match time.
-const RECEIVER_ISA: &str = "receiver-isa?";
+/// The one predicate a plugin pattern may carry that is not evaluated at
+/// match time.
+const RECEIVER_ISA: &str = crate::build::query_predicates::Deferral::ReceiverIsa.spelling();
 
 /// Extract a pattern's `#receiver-isa? @cap "Class"` predicate, if any.
 /// Unknown predicate names land in `general_predicates` unevaluated —

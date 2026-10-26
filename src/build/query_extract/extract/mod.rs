@@ -130,6 +130,8 @@ struct ExtractState<'p> {
     /// declaration without a namespace context of its own joins.
     file_module: Option<&'p FileModule>,
     file_namespace: Option<String>,
+    /// Matches carrying `#names-class?`: their call may construct a class.
+    names_class: std::collections::HashSet<usize>,
 }
 
 /// The module a file is, for a language whose module names come from the
@@ -201,9 +203,13 @@ fn record_matches<'t>(
     compiled: &CompiledPack,
     root: tree_sitter::Node<'t>,
     source: &[u8],
-) -> (links::Links<'t>, Vec<(tree_sitter::Node<'t>, Capture, usize)>) {
+) -> (links::Links<'t>, Vec<(tree_sitter::Node<'t>, Capture, usize)>, std::collections::HashSet<usize>) {
+    use crate::build::query_predicates::Deferral;
     let mut links = links::Links::default();
     let mut captured = Vec::new();
+    let mut names_class = std::collections::HashSet::new();
+    let deferrals: Vec<Vec<Deferral>> =
+        (0..compiled.query.pattern_count()).map(|i| Deferral::of_pattern(&compiled.query, i)).collect();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&compiled.query, root, source);
     let mut match_counter = 0usize;
@@ -213,6 +219,9 @@ fn record_matches<'t>(
             continue;
         }
         match_counter += 1;
+        if deferrals[m.pattern_index].contains(&Deferral::NamesClass) {
+            names_class.insert(match_counter);
+        }
         let from = m.captures.iter().find_map(|c| match cap_of(c) {
             Some(Capture::LinkFrom(walk)) => Some((walk, c.node)),
             _ => None,
@@ -231,7 +240,7 @@ fn record_matches<'t>(
             }
         }
     }
-    (links, captured)
+    (links, captured, names_class)
 }
 
 /// The `deref` walk over a tree the extractor never saw (a macro body
@@ -301,6 +310,7 @@ pub fn extract_in(
         imports: Default::default(),
         file_module,
         file_namespace: None,
+        names_class: Default::default(),
     };
     // A module named by its path is one section, the whole file.
     if let (Some(m), Some(sep)) = (file_module, pack.names.use_map_sep()) {
@@ -314,7 +324,8 @@ pub fn extract_in(
     }
 
     // ---- flatten matches into ordered events ----
-    let (links, captured) = record_matches(compiled, root, source);
+    let (links, captured, names_class) = record_matches(compiled, root, source);
+    st.names_class = names_class;
     // A capture whose meaning needs its LIVE node (a declarator to peel, an
     // argument list to count) is read here, where the node is in hand;
     // everything else becomes an event carrying its text.

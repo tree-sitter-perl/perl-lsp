@@ -53,6 +53,37 @@ fn parse(p: &QueryPredicate) -> Option<Result<Structural<'_>, String>> {
     Some(parsed)
 }
 
+/// A predicate that is no filter: a match carrying one keeps all its facts,
+/// and the ones it mints become a reading decided at query time
+/// (`docs/adr/query-delayed-facts.md`). Each runner accepts the ones it
+/// knows how to mint (`check`'s `deferred`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Deferral {
+    /// `#receiver-isa? @recv "Class"`: the receiver descends from the class.
+    ReceiverIsa,
+    /// `#names-class? @name`: the name is a class's, so the call constructs it.
+    NamesClass,
+}
+
+impl Deferral {
+    pub const fn spelling(self) -> &'static str {
+        match self {
+            Deferral::ReceiverIsa => "receiver-isa?",
+            Deferral::NamesClass => "names-class?",
+        }
+    }
+
+    /// The deferrals pattern `pattern` carries.
+    pub fn of_pattern(query: &Query, pattern: usize) -> Vec<Deferral> {
+        let all = [Deferral::ReceiverIsa, Deferral::NamesClass];
+        query
+            .general_predicates(pattern)
+            .iter()
+            .filter_map(|p| all.into_iter().find(|d| d.spelling() == &*p.operator))
+            .collect()
+    }
+}
+
 /// Every general predicate in `query` is structural and well-formed (each
 /// kind a named kind of `language`), or one the caller evaluates itself
 /// (`deferred`). Anything else is a misspelling that would silently match

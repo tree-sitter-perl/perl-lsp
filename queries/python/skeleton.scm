@@ -71,9 +71,11 @@
     alias: (identifier) @import.alias))
 
 ; Imported names are references to the remote def — this single
-; pattern is what makes cross-file RENAME rewrite the import line too.
-(import_from_statement
+; pattern is what makes cross-file RENAME rewrite the import line too. The
+; def may be a class (#names-class?).
+((import_from_statement
   name: (dotted_name (identifier) @ref.call))
+ (#names-class? @ref.call))
 
 ; Assignment IS declaration in Python — the same identifier is both
 ; the def and the flow target.
@@ -95,10 +97,14 @@
 
 ; ---- calls: a call's value is an Invoke of its callee on its arguments. The
 ; argument list rides the callee's match, and a starred argument spreads. A
-; generator argument (`f(x for x in xs)`) is one value, not a list. ----
-(call
+; generator argument (`f(x for x in xs)`) is one value, not a list. Calling a
+; class constructs it, so a callee that names a class is a reference to it
+; (#names-class?, decided with the index in hand when the class is
+; elsewhere). ----
+((call
   function: (identifier) @ref.call
   arguments: [(argument_list ((_) @arity.arg ","?)*) @arity.args (generator_expression)]) @expr.call
+ (#names-class? @ref.call))
 (argument_list [(list_splat) (dictionary_splat)] @arity.spread)
 (call
   function: (attribute attribute: (identifier) @ref.method))

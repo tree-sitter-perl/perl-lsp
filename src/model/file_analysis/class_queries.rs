@@ -1084,20 +1084,18 @@ impl FileAnalysis {
         }
     }
 
-    /// The class a call-shaped token names, for a use-map language where
-    /// calling a class constructs it (python's `from m import User`,
-    /// `User()`; `NameSpellings::class_call`): the token's spelled
-    /// identity, when a class is declared under it here or in a file the
-    /// index holds. `None` leaves the token a call — always, in a language
-    /// that constructs with syntax of its own (PHP's `new`).
+    /// The class a call-shaped token names, where the language's document
+    /// says calling a class constructs it (`#names-class?`): python's `from
+    /// m import User`, `User()`. `None` leaves the token a call.
     pub fn class_named_by_call(&self, r: &Ref, index: Option<&dyn CrossFileLookup>) -> Option<String> {
-        self.pack.names.class_call_sep()?;
-        let identity = self.spelled_identity(r);
-        let declared = self.find_type_decl(&identity).is_some()
-            || index.is_some_and(|ix| {
-                ix.def_candidates(&identity).iter().any(|c| ix.symbols_present(c).find_type_decl(&identity).is_some())
-            });
-        declared.then_some(identity)
+        let reading = match r.binding.as_ref()? {
+            RefBinding::Deferred(d) => d.pick(self, index).reading?,
+            b => b,
+        };
+        match reading {
+            RefBinding::NamesClass(class) => Some(class.clone()),
+            _ => None,
+        }
     }
 
     /// This file's own Package/Class declaration filed under `identity` —

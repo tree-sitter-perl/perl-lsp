@@ -3088,3 +3088,19 @@ fn python_call_arg_count_skips_comments() {
     let call = skel.refs.iter().find(|r| r.name == "f" && r.invocant.is_some()).expect("f member call ref");
     assert_eq!(call.arg_count, Some(2));
 }
+
+/// C++'s call pattern carries `#names-class?`: a functional cast of a class
+/// this file declares names the class, and a plain call stays a call.
+#[test]
+fn cpp_functional_cast_names_its_class() {
+    use crate::model::file_analysis::RefKind;
+    let fa = cpp_fa("struct Foo { int x; };\nint f(int);\nvoid g() { Foo a = Foo(1); int b = f(2); }\n");
+    let call = |name: &str| {
+        fa.refs()
+            .iter()
+            .find(|r| matches!(r.kind, RefKind::FunctionCall) && r.target_name == name)
+            .unwrap_or_else(|| panic!("a `{name}` call ref"))
+    };
+    assert_eq!(fa.class_named_by_call(call("Foo"), None).as_deref(), Some("Foo"));
+    assert_eq!(fa.class_named_by_call(call("f"), None), None);
+}

@@ -1025,12 +1025,11 @@ pub(super) fn collect_from_analysis(
         // dispatch-class checks in the call arms below still pin the right
         // package/class). A member value read matches on the same tail;
         // every other ref kind matches by exact name.
-        // Where calling a class constructs it, a call-shaped token can name
-        // a class too (`class_named_by_call`), so a class target reads it
-        // as one.
+        // A call-shaped token can name a class (`class_named_by_call`), so
+        // a class target reads it as one.
         let call_names_class = matches!(r.kind, RefKind::FunctionCall)
             && matches!(target.kind, TargetKind::Package)
-            && analysis.pack.names.class_call_sep().is_some();
+            && analysis.class_named_by_call(r, module_index).is_some();
         let name_matches = if matches!(r.kind, RefKind::PackageRef) || call_names_class {
             // A class token names the class its file's use-map says it
             // does; the target is that identity.

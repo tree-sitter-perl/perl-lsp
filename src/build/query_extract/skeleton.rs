@@ -64,6 +64,9 @@ pub struct SkelRef {
     /// counted from the argument list the same match captured. Flows to
     /// `Ref.arg_count`; `None` for non-call refs.
     pub arg_count: Option<usize>,
+    /// The match carries `#names-class?`: the call constructs the class its
+    /// name spells, when one is declared under it.
+    pub names_class: bool,
 }
 
 /// One `@expr.call` site.
@@ -80,6 +83,8 @@ pub struct CallSite {
     /// (`@arity.spread`); `None` when the call's match captured no argument
     /// list.
     pub args: Option<Vec<(Span, bool)>>,
+    /// The match carries `#names-class?` (`SkelRef::names_class`).
+    pub names_class: bool,
 }
 
 #[derive(Debug, Default)]
@@ -829,33 +834,29 @@ impl SkeletonAnalysis {
             // callable. Any other name is looked up across files at query
             // time; one nothing defines answers nothing (no name-case guess —
             // an unknown uppercase macro leaves the enclosing `auto x =
-            // F(..)` honestly untyped). Where calling a class constructs it
-            // (`NameSpellings::class_call`), prefer a `Class` over a
-            // like-named callable (the constructor is the stronger claim);
-            // elsewhere a class is no callee at all. A method is
+            // F(..)` honestly untyped). Where the document says the call may
+            // construct (`#names-class?`), prefer a `Class` over a like-named
+            // callable (the constructor is the stronger claim); elsewhere a
+            // class is no callee at all. A method is
             // never a free callee: a bare call in a member body reaches it
             // through `member_of`, with the class as its receiver.
             let class_identity_at = |written: &str, site: tree_sitter::Point| {
                 let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_sections, &self.names, site)?;
                 Some(map.resolve(written).identity(map.sep))
             };
-            let callee_sid: std::collections::HashMap<&str, SymbolId> = {
-                let mut m: std::collections::HashMap<&str, SymbolId> =
-                    std::collections::HashMap::new();
-                let calls_construct = self.names.class_call == crate::model::file_analysis::ClassCall::Constructs;
-                for s in &symbols {
-                    match s.kind {
-                        SymKind::Class if calls_construct => {
-                            m.insert(s.name.as_str(), s.id);
-                        }
-                        SymKind::Sub => {
-                            m.entry(s.name.as_str()).or_insert(s.id);
-                        }
-                        _ => {}
+            let mut class_sid: std::collections::HashMap<&str, SymbolId> = std::collections::HashMap::new();
+            let mut sub_sid: std::collections::HashMap<&str, SymbolId> = std::collections::HashMap::new();
+            for s in &symbols {
+                match s.kind {
+                    SymKind::Class => {
+                        class_sid.insert(s.name.as_str(), s.id);
                     }
+                    SymKind::Sub => {
+                        sub_sid.entry(s.name.as_str()).or_insert(s.id);
+                    }
+                    _ => {}
                 }
-                m
-            };
+            }
             // Per-call-site argument spans (original coords) so a `Param(n)`
             // call resolves to its n-th argument's value witness.
             let call_args: std::collections::HashMap<Span, &Vec<Span>> =
@@ -899,11 +900,18 @@ impl SkeletonAnalysis {
                     None => (
                         crate::model::witnesses::Callee::Function {
                             name: name.clone(),
-                            local: callee_sid.get(name.as_str()).or_else(|| {
-                                // under a use-map a class is filed under the
-                                // identity its spelling names at the call
-                                callee_sid.get(class_identity_at(name, span.start)?.as_str())
-                            }).copied(),
+                            local: site
+                                .names_class
+                                .then(|| {
+                                    class_sid.get(name.as_str()).or_else(|| {
+                                        // under a use-map a class is filed under the
+                                        // identity its spelling names at the call
+                                        class_sid.get(class_identity_at(name, span.start)?.as_str())
+                                    })
+                                })
+                                .flatten()
+                                .or_else(|| sub_sid.get(name.as_str()))
+                                .copied(),
                             member_of: elided_class.get(site.scope.0 as usize).cloned().flatten(),
                         },
                         None,
@@ -1296,6 +1304,38 @@ impl SkeletonAnalysis {
             // name no member answers stays free.
             for (i, class) in sibling_calls {
                 refs[i].bind_function_package(class);
+            }
+        }
+        // A call the document says may construct (`#names-class?`) reads as
+        // a reference to the class its name spells: settled here when this
+        // file declares the class, else a `NamesClass` deferral decided with
+        // the index in hand, the call's own binding its other reading.
+        {
+            use crate::model::file_analysis::{declares_class, Deferred, Question, RefBinding, RefKind, UseMap};
+            let constructing: std::collections::HashSet<(Point, Point)> = self
+                .refs
+                .iter()
+                .filter(|r| r.names_class && r.kind == super::vocab::RefCap::Call)
+                .map(|r| (r.start, r.end))
+                .collect();
+            for r in refs.iter_mut() {
+                if !matches!(r.kind, RefKind::FunctionCall) || !constructing.contains(&(r.span.start, r.span.end)) {
+                    continue;
+                }
+                let identity = match UseMap::at(&self.use_rows, &self.namespace_sections, &self.names, r.span.start) {
+                    Some(map) => map.resolve(&r.target_name).identity(map.sep),
+                    None => r.target_name.clone(),
+                };
+                r.binding = Some(if declares_class(&symbols, &identity) {
+                    RefBinding::NamesClass(identity)
+                } else {
+                    let call = r.binding.take();
+                    RefBinding::Deferred(Box::new(Deferred::fork(
+                        Question::NamesClass { identity: identity.clone() },
+                        RefBinding::NamesClass(identity),
+                        call,
+                    )))
+                });
             }
         }
         // Implicit return: a callable whose syntax declares no return takes

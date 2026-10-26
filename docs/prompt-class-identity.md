@@ -96,20 +96,19 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    matcher resolves a `PackageRef` / construction-site spelling through the
    file's use-map (`spelled_identity`: a token inside an import row names
    the row's class in full) and compares identities — `use B\Collection; new Collection()`
-   reaches `B\Collection` and never the same-leaf stranger. In a
-   language where calling a class constructs it — language data,
-   `NameSpellings::class_call`, which Python and C++ declare `Constructs`
-   — a call-shaped token names a class too when its spelled identity is a
-   class declared here or in an indexed file (`class_named_by_call`):
-   python's `from pkg.models import User` and `User()` are references to
-   `pkg.models.User`, and a token naming no class stays a call. PHP
-   declares `FunctionCall`: construction is `new Foo`, so `Foo()` is a
-   call of the function `Foo` whatever class shares its name, and is
-   neither a reference to the class nor a value of it. The same property
-   decides whether a file's own class is a free callee whose call yields
-   an instance (C++'s functional cast `Foo(x)`); the reference half reads
-   it only through a use-map, so C++, whose spellings are identities, keeps
-   its calls calls.
+   reaches `B\Collection` and never the same-leaf stranger. Where
+   calling a class constructs it, the language's document says so on the
+   call pattern (`#names-class?`, Python and C++): a call-shaped token
+   names a class when its spelled identity is a class declared here or in
+   an indexed file (`class_named_by_call`, a `NamesClass` deferral,
+   `docs/adr/query-delayed-facts.md`). python's `from pkg.models import
+   User` and `User()` are references to `pkg.models.User`, and a token
+   naming no class stays a call. PHP's document carries no such pattern:
+   construction is `new Foo`, so `Foo()` is a call of the function `Foo`
+   whatever class shares its name, and is neither a reference to the class
+   nor a value of it. The same predicate decides whether a file's own
+   class is a free callee whose call yields an instance (C++'s functional
+   cast `Foo(x)`).
 
 `PackFacts::namespace_sections` is a field of its own (the rule #14
 ratchet) because it is neither a witness nor a binding: it types and

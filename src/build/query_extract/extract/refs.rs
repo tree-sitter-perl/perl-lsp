@@ -52,5 +52,6 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         invocant: m.member_recv.get(&e.match_id).cloned(),
         member_op,
         arg_count,
+        names_class: st.names_class.contains(&e.match_id),
     });
 }

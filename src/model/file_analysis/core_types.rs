@@ -252,21 +252,6 @@ pub struct NameSpellings {
     /// How a use-map language's import rows bind — read by the extractor
     /// as it mints each row, never by a consumer.
     pub imports: ImportRule,
-    /// What calling a name that is a class does.
-    pub class_call: ClassCall,
-}
-
-/// What a call whose callee names a class means in a language.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum ClassCall {
-    /// It is a function call like any other: construction has a syntax of
-    /// its own (PHP's `new Foo`, Perl's `Foo->new`), so `Foo()` never
-    /// reaches the class.
-    #[default]
-    FunctionCall,
-    /// It constructs an instance: Python's `User()`, C++'s functional
-    /// cast `Foo(x)`.
-    Constructs,
 }
 
 /// A use-map language's import semantics, as data the extractor mints a
@@ -325,7 +310,6 @@ impl NameSpellings {
         root_package: None,
         member_namespace: MemberNamespace::PerFamily,
         imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
-        class_call: ClassCall::FunctionCall,
     };
 
     /// A language with a namespace separator, no sigils, and spellings
@@ -339,7 +323,6 @@ impl NameSpellings {
             root_package: None,
             member_namespace: MemberNamespace::PerFamily,
             imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
-            class_call: ClassCall::FunctionCall,
         }
     }
 
@@ -354,16 +337,6 @@ impl NameSpellings {
         match self.class_spelling {
             ClassSpelling::UseMap => self.sep(),
             ClassSpelling::Identity => None,
-        }
-    }
-
-    /// The separator a call-shaped token resolves with when it can name a
-    /// class: a use-map language whose calls construct. `None` leaves every
-    /// call a call (`FileAnalysis::class_named_by_call`).
-    pub fn class_call_sep(&self) -> Option<&str> {
-        match self.class_call {
-            ClassCall::Constructs => self.use_map_sep(),
-            ClassCall::FunctionCall => None,
         }
     }
 
@@ -1278,21 +1251,37 @@ impl Ref {
 /// question and returns `None` for kinds that don't carry that flavor, so
 /// call sites never match `RefBinding` against `RefKind` themselves.
 impl Ref {
+    /// The binding as it reads with no index in hand: a deferred reading
+    /// reads as its question's fallback (`Question::when_unknown`), so the
+    /// accessors below answer as they would for the undecided site. A
+    /// reader that wants the decided reading asks for it with the index
+    /// (`FileAnalysis::class_named_by_call`).
+    pub fn settled_binding(&self) -> Option<&RefBinding> {
+        match self.binding.as_ref()? {
+            RefBinding::Deferred(d) => d.undecided(),
+            b => Some(b),
+        }
+    }
+
     /// The declaring symbol this ref resolved to, whatever flavor carried
     /// it (lexical `Symbol`, a linked `HashKeyDef`, a linked `Handler`).
     /// Method dispatch is NOT projected here — its symbol rides
     /// `method_target()` with the frozen invocant class.
     pub fn resolved_symbol(&self) -> Option<SymbolId> {
-        match self.binding.as_ref()? {
+        match self.settled_binding()? {
             RefBinding::Symbol(sym) => Some(*sym),
             RefBinding::HashKey { sym, .. } | RefBinding::Handler { sym, .. } => *sym,
-            RefBinding::Function { .. } | RefBinding::Method(_) | RefBinding::CallArgKey { .. } => None,
+            RefBinding::Function { .. }
+            | RefBinding::Method(_)
+            | RefBinding::CallArgKey { .. }
+            | RefBinding::NamesClass(_)
+            | RefBinding::Deferred(_) => None,
         }
     }
 
     /// The call whose arguments a deferred-owner `HashKeyAccess` sits in.
     pub fn arg_key_call(&self) -> Option<crate::model::witnesses::RefIdx> {
-        match self.binding.as_ref()? {
+        match self.settled_binding()? {
             RefBinding::CallArgKey { call } => Some(*call),
             _ => None,
         }
@@ -1300,7 +1289,7 @@ impl Ref {
 
     /// The frozen dispatch target of a `MethodCall` ref.
     pub fn method_target(&self) -> Option<&MethodTarget> {
-        match self.binding.as_ref()? {
+        match self.settled_binding()? {
             RefBinding::Method(t) => Some(t),
             _ => None,
         }
@@ -1308,7 +1297,7 @@ impl Ref {
 
     /// The package pin of a `FunctionCall` ref.
     pub fn resolved_package(&self) -> Option<&str> {
-        match self.binding.as_ref()? {
+        match self.settled_binding()? {
             RefBinding::Function { package } => Some(package),
             _ => None,
         }
@@ -1316,7 +1305,7 @@ impl Ref {
 
     /// The resolved owner of a `HashKeyAccess` ref.
     pub fn hash_key_owner(&self) -> Option<&HashKeyOwner> {
-        match self.binding.as_ref()? {
+        match self.settled_binding()? {
             RefBinding::HashKey { owner, .. } => Some(owner),
             _ => None,
         }
@@ -1324,7 +1313,7 @@ impl Ref {
 
     /// The resolved owner of a `DispatchCall` ref.
     pub fn handler_owner(&self) -> Option<&HandlerOwner> {
-        match self.binding.as_ref()? {
+        match self.settled_binding()? {
             RefBinding::Handler { owner, .. } => Some(owner),
             _ => None,
         }
@@ -1596,6 +1585,13 @@ pub enum RefBinding {
     /// accessors read it as unowned. Kept at the END for bincode
     /// variant-index stability (bump `EXTRACT_VERSION`).
     CallArgKey { call: crate::model::witnesses::RefIdx },
+    /// A call-shaped token that names a class (python's `User()`): a
+    /// reference to the class identity, not to a callable.
+    NamesClass(String),
+    /// A reading decided at query time (`docs/adr/query-delayed-facts.md`);
+    /// the projection accessors read it as unresolved. Kept at the END for
+    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
+    Deferred(Box<Deferred<RefBinding>>),
 }
 
 /// What kind of entity is being renamed — determines single-file vs cross-file scope.

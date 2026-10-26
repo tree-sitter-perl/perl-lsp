@@ -39,15 +39,32 @@ Today's carriers:
 |---|---|---|
 | `provisional_dispatches: Vec<Deferred<DispatchCandidate>>` | `ReceiverIsa` | `applicable_dispatches`, `dispatch_at`, `untyped_dispatches` |
 | `gated_param_types: Vec<Deferred<TypeConstraint>>` | `PackageIsa` | `gated_param_type_for` |
+| `RefBinding::Deferred(Box<Deferred<RefBinding>>)` | `NamesClass` | `class_named_by_call` |
 
 The dispatch half is `docs/adr/receiver-gated-dispatch.md`.
 
 ## Decision: patterns state it with a deferred predicate
 
-A plugin pattern defers with `#receiver-isa? @recv "Class"`: the predicate
-never filters a match, it makes the match's `DispatchCall` emissions
-`ReceiverIsa` deferrals. Its capture must be the invocant of a method call
-whose ref is the dispatcher; the producer names that ref as the receiver.
+A deferred predicate (`query_predicates::Deferral`) never filters a
+match: the facts the match mints become readings decided at query time.
+Each query runner accepts the ones it knows how to mint.
+
+- Plugin patterns: `#receiver-isa? @recv "Class"` makes the match's
+  `DispatchCall` emissions `ReceiverIsa` deferrals. Its capture must be
+  the invocant of a method call whose ref is the dispatcher; the producer
+  names that ref as the receiver.
+- Pack documents: `#names-class? @ref.call` says the call constructs the
+  class its name spells (python's `User()`, C++'s functional cast `Foo(x)`).
+  The extractor settles it when the file declares the class
+  (`declares_class`, the same local proof `decide` runs), else binds the
+  ref `RefBinding::Deferred(NamesClass { identity })` with the call's own
+  binding as the other reading. A language whose construction is syntax of
+  its own (PHP's `new`) carries no such pattern, so its `Foo()` is a call.
+  A call's local callee prefers a like-named class only in such a match.
+
+A deferred `RefBinding` reads as its question's fallback through the
+`Ref` accessors (`settled_binding`), so a reader that never decides sees
+the undecided site; `class_named_by_call` is the reader that decides.
 
 ## Decision: an unknown owner is bound to its call, not deferred
 

@@ -947,7 +947,7 @@ impl FileAnalysis {
         call_ref: &Ref,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<String> {
-        if !matches!(call_ref.kind, RefKind::FunctionCall) || call_ref.binding.is_some() {
+        if !matches!(call_ref.kind, RefKind::FunctionCall) || call_ref.settled_binding().is_some() {
             return None;
         }
         // Qualified calls (`Foo::bar`) pin at build time; only truly-bare

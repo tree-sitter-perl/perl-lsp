@@ -15,6 +15,9 @@ pub enum Question {
     /// `package` descends from `class` (local parents ∪ cross-file).
     /// `None` = the site sits in no package, which never descends.
     PackageIsa { package: Option<String>, class: String },
+    /// A class is declared under `identity` (the spelled name, resolved
+    /// through the file's use-map at mint), here or in any indexed file.
+    NamesClass { identity: String },
 }
 
 /// How a `ReceiverIsa` question names its receiver.
@@ -65,6 +68,21 @@ impl Question {
                 Some(p) => isa_verdict(p, class, fa, index),
                 None => Verdict::No,
             },
+            Question::NamesClass { identity } => {
+                if declares_class(fa.symbols(), identity) {
+                    return Verdict::Yes;
+                }
+                match index {
+                    Some(ix) => {
+                        let elsewhere = ix
+                            .def_candidates(identity)
+                            .iter()
+                            .any(|c| declares_class(ix.symbols_present(c).symbols(), identity));
+                        if elsewhere { Verdict::Yes } else { Verdict::No }
+                    }
+                    None => Verdict::Unknown,
+                }
+            }
         }
     }
 
@@ -72,8 +90,16 @@ impl Question {
     pub fn when_unknown(&self) -> Fallback {
         match self {
             Question::ReceiverIsa { .. } | Question::PackageIsa { .. } => Fallback::Neither,
+            Question::NamesClass { .. } => Fallback::Otherwise,
         }
     }
+}
+
+/// `NamesClass`'s local proof, over a symbol table: the decider reads the
+/// analysis's, the extractor the one it is still assembling, so the two
+/// halves of the question are one function.
+pub fn declares_class(symbols: &[Symbol], identity: &str) -> bool {
+    symbols.iter().any(|s| matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == identity)
 }
 
 fn isa_verdict(class: &str, ancestor: &str, fa: &FileAnalysis, index: Option<&dyn CrossFileLookup>) -> Verdict {
@@ -87,7 +113,7 @@ fn isa_verdict(class: &str, ancestor: &str, fa: &FileAnalysis, index: Option<&dy
 /// A reading that holds only when `when` says so. The fields are private
 /// and [`pick`](Self::pick) is the only reader, so no consumer can see a
 /// reading without deciding its question first.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Deferred<T> {
     when: Question,
     then: T,
@@ -107,6 +133,17 @@ impl<T> Deferred<T> {
         Self { when, then, otherwise: None }
     }
 
+    /// A choice between two readings of one site.
+    pub fn fork(when: Question, then: T, otherwise: Option<T>) -> Self {
+        Self { when, then, otherwise }
+    }
+
+    /// The reading an `Unknown` verdict selects: what the site reads as
+    /// before anyone decides it.
+    pub fn undecided(&self) -> Option<&T> {
+        self.reading(self.when.when_unknown())
+    }
+
     pub fn pick(&self, fa: &FileAnalysis, index: Option<&dyn CrossFileLookup>) -> Picked<&T> {
         let verdict = self.when.decide(fa, index);
         let side = match verdict {
@@ -114,12 +151,15 @@ impl<T> Deferred<T> {
             Verdict::No => Fallback::Otherwise,
             Verdict::Unknown => self.when.when_unknown(),
         };
-        let reading = match side {
+        Picked { verdict, reading: self.reading(side) }
+    }
+
+    fn reading(&self, side: Fallback) -> Option<&T> {
+        match side {
             Fallback::Then => Some(&self.then),
             Fallback::Otherwise => self.otherwise.as_ref(),
             Fallback::Neither => None,
-        };
-        Picked { verdict, reading }
+        }
     }
 }
 
@@ -143,6 +183,7 @@ impl ProvisionalDispatch {
     pub fn gate(&self) -> &str {
         match &self.when {
             Question::ReceiverIsa { class, .. } | Question::PackageIsa { class, .. } => class,
+            Question::NamesClass { identity } => identity,
         }
     }
 }

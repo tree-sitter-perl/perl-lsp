@@ -166,6 +166,15 @@ fn a_class_resolves_across_modules_by_identity() {
     let p_views = t.0.join("pkg/views.py");
     let fa = idx.workspace_file_for_test(&p_views).unwrap();
     assert_eq!(fa.declared_parents("pkg.views.Admin"), ["pkg.models.User"]);
+    // the class lives in another module, so the constructing call is a
+    // deferral: a call on its own, the class once the index decides it
+    let call = fa
+        .refs()
+        .iter()
+        .find(|r| matches!(r.kind, crate::model::file_analysis::RefKind::FunctionCall) && r.span.start.row == 5)
+        .expect("the constructing call");
+    assert_eq!(fa.class_named_by_call(call, None), None);
+    assert_eq!(fa.class_named_by_call(call, Some(&idx)).as_deref(), Some("pkg.models.User"));
     let store = OpenDocs::new();
     let name_of = |k: &FileKey| match k {
         FileKey::Path(p) => p.file_name().unwrap().to_string_lossy().to_string(),

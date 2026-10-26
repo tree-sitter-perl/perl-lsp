@@ -181,6 +181,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
                     receiver,
                     scope: cur_scope,
                     args,
+                    names_class: st.names_class.contains(&e.match_id),
                 });
             }
         }
