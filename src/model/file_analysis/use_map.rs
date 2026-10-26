@@ -92,7 +92,7 @@ pub struct ScopeStep<'a> {
 
 impl ScopeStep<'_> {
     fn member_class(&self, head: &str, sep: &str) -> Option<QualifiedName> {
-        lookup_chain(self.scopes, self.from).into_iter().find_map(|id| {
+        lookup_chain(self.scopes, self.from).scopes().find_map(|id| {
             let owner = self.scopes[id.0 as usize].package.as_deref()?;
             let nested = QualifiedName::new(owner, head);
             self.classes.declares_in(id, &nested.identity(sep)).then_some(nested)
