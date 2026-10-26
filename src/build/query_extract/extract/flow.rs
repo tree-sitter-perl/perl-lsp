@@ -99,6 +99,7 @@ fn skeleton_witness(attachment: WitnessAttachment, source: &str, payload: Witnes
 pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
     let pack = st.pack;
     let cur_scope = st.cur_scope;
+    let bind_scope = st.bind_scope();
     let member_scope = st.member_scope();
     let f = &mut st.flow;
     let out = &mut st.out;
@@ -146,7 +147,9 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
             out.return_sites.push((cur_scope, e.span()));
         }
         Capture::Flow(target @ (FlowCap::Target | FlowCap::TargetMember)) => {
-            let scope = if target == FlowCap::TargetMember { member_scope } else { cur_scope };
+            // a target a def's header declares (an annotated parameter)
+            // binds in the def's own scope
+            let scope = if target == FlowCap::TargetMember { member_scope } else { bind_scope };
             let at = written_at(f, out, (pack.shape_name)(&e.text), scope, e);
             f.flow_targets.insert(e.match_id, ((pack.shape_name)(&e.text), scope, at, e.start));
             // Record the declared-type text keyed by (var, DECLARING scope)

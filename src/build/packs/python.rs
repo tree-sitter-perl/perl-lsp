@@ -2,7 +2,7 @@
 
 use crate::build::query_extract::*;
 use crate::model::file_analysis::{
-    ClassCall, ClassSpelling, ImportPrefix, ImportReach, ImportRule, InferredType, MemberNamespace, NameSpellings,
+    ClassCall, ClassSpelling, ImportPrefix, InstanceSlots, ImportReach, ImportRule, InferredType, MemberNamespace, NameSpellings,
 };
 use crate::build::walk_markers::MarkedDirs;
 use std::path::Path;
@@ -16,13 +16,15 @@ pub fn python_pack() -> LangPack {
         // from where it is written; a leading `.` climbs from the file's
         // package. Calling a class constructs it. One member namespace: the
         // nearest declaration of a name wins, whether it is a data member
-        // or a member function.
+        // or a member function. An instance holds its own attributes (the
+        // slots `self.x = …` writes), read before its class's members.
         names: NameSpellings {
             namespace_sep: Some(std::borrow::Cow::Borrowed(".")),
             class_spelling: ClassSpelling::UseMap,
             member_namespace: MemberNamespace::Shared,
             imports: ImportRule { reach: ImportReach::FromImport, prefix: ImportPrefix::PackageRelative },
             class_call: ClassCall::Constructs,
+            instance_slots: InstanceSlots::BeforeClass,
             ..NameSpellings::NONE
         },
         shape_name: |raw| raw.to_string(),
