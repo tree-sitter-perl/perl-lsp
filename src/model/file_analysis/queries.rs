@@ -94,7 +94,7 @@ impl FileAnalysis {
         let scope = self.scope_at(point)?;
         self.lookup_chain(scope)
             .bindings(&self.symbols)
-            .find(|sym| sym.name == name && sym.is_bare_name() && sym.span.start <= point)
+            .find(|sym| sym.name == name && matches!(sym.kind, SymKind::Variable | SymKind::Field) && sym.span.start <= point)
     }
 
     /// The pointer/reference declarator stack of the in-scope variable

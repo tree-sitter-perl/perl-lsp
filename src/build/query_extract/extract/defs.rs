@@ -58,11 +58,13 @@ pub(super) struct State {
     /// `@context.class`, a `@parent` match) reads the class from here
     /// rather than minting it a second time.
     classes_by_name: HashMap<Point, String>,
-    /// Members written through a receiver (`obj.x = …`), by name token
+    /// Slots written through a receiver (`obj.x = …`), by name token
     /// start: the receiver's text, the scope the write is in, and the
     /// member scope there. Their owner is the receiver's type, read once
-    /// the type witnesses are in (`declare_through_receivers`).
-    through_writes: HashMap<Point, (String, ScopeId, ScopeId)>,
+    /// the type witnesses are in (`declare_slots`).
+    slot_writes: HashMap<Point, (String, ScopeId, ScopeId)>,
+    /// Matches whose defs share one name token as one declaration (`@def.pair`).
+    paired_matches: std::collections::HashSet<usize>,
 }
 
 impl State {
@@ -133,6 +135,9 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
         Capture::Def { kind, part: DefPart::Name } => {
             d.names_by_match.insert((e.match_id, kind), (e.text.clone(), e.start, e.end));
         }
+        Capture::DefPair => {
+            d.paired_matches.insert(e.match_id);
+        }
         Capture::Def { kind, part: DefPart::Receiver } => {
             d.receivers_by_match.insert((e.match_id, kind), e.text.clone());
         }
@@ -188,15 +193,15 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         .map(|(n, s, en)| (n, s, en, false))
         .or_else(|| (pack.default_name)(kind).map(|n| (n.to_string(), e.start, e.start, true)))
         .unwrap_or((e.text.clone(), e.start, e.end, false));
-    // A member written through a receiver is a candidate: its owner is the
-    // receiver's type, which `declare_through_receivers` reads once the type
-    // witnesses are in, and which decides whether the write declares. Until
-    // then its name token stays the member reference it is if it does not.
+    // A slot written through a receiver is a candidate: its owner is the
+    // receiver's type, which `declare_slots` reads once the type witnesses
+    // are in, and which decides whether the write declares. Until then its
+    // name token stays the member reference it is if it does not.
     let through = d.receivers_by_match.get(&(e.match_id, kind)).cloned();
     match &through {
         Some(recv) => {
             let at = (recv.clone(), st.cur_scope, st.member_scope());
-            st.defs.through_writes.insert(name_start, at);
+            st.defs.slot_writes.insert(name_start, at);
         }
         None => st.defs.def_name_spans.push((e.start_byte, e.end_byte)),
     }
@@ -236,7 +241,8 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         package: pkg,
         // A data member belongs to its class body even where it is written
         // inside a callable.
-        scope: if kind == DefCap::Field { st.member_scope() } else { st.bind_scope() },
+        scope: if matches!(kind, DefCap::Field | DefCap::Slot) { st.member_scope() } else { st.bind_scope() },
+        pair: d.paired_matches.contains(&e.match_id).then_some(e.match_id),
         return_type: d.rettype_by_match.get(&e.match_id).and_then(|t| (pack.annot_type)(t)),
         deref_stack: d.nested_stacks.get(&e.match_id).cloned().unwrap_or_default(),
         attributes: {
@@ -252,8 +258,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         // `@arity.sig` match fires separately from this def name.
         arity: None,
         qualifier_owned: d.qualifier_by_match.contains_key(&e.match_id),
-        flags: d.marks.get(&(name_start, name_end)).copied().unwrap_or_default()
-            | if through.is_some() { crate::model::file_analysis::SymbolFlags::THROUGH_RECEIVER } else { Default::default() },
+        flags: d.marks.get(&(name_start, name_end)).copied().unwrap_or_default(),
     });
 }
 
@@ -282,20 +287,25 @@ pub(super) fn emit_receiver_types(st: &mut ExtractState) {
     st.out.witnesses.extend(typed);
 }
 
-/// Settle each member written through a receiver. Its owner is the class
-/// the receiver is typed as at the write, through the witness registry: the
+/// Settle each slot written through a receiver. Its owner is the class the
+/// receiver is typed as at the write, through the witness registry: the
 /// receiver parameter's class (`emit_receiver_types`), an annotated
 /// parameter's or local's annotation. A write through an untyped receiver
-/// declares nothing. Of the writes that name one member of one class, the
-/// first in source declares it unless the class body binds it; every other
-/// write stays a reference to the member.
+/// declares nothing. A write declares the slot only when neither its class
+/// nor an ancestor already declares the name — a class-body binding, a
+/// member, an earlier slot of the class, or any slot write of an
+/// ancestor's — and every other write stays a reference to that member.
 ///
 /// Runs after `flow::finish`, so the annotation witnesses are in. A local
 /// typed only by its value (`o = Counter()`) has no type here yet: the call
-/// witnesses are minted at assembly.
-pub(super) fn declare_through_receivers(st: &mut ExtractState) {
+/// witnesses are minted at assembly. Ancestors are the file's own parents;
+/// a base class in another file is not seen.
+///
+/// TODO(assigned-unify): php's `unify_assigned` (held php-5) is this rule
+/// for variables over the lookup chain; the two passes become one there.
+pub(super) fn declare_slots(st: &mut ExtractState) {
     use crate::model::witnesses::{BagContext, FrameworkFact, WitnessBag};
-    let pending = std::mem::take(&mut st.defs.through_writes);
+    let pending = std::mem::take(&mut st.defs.slot_writes);
     if pending.is_empty() {
         return;
     }
@@ -304,7 +314,10 @@ pub(super) fn declare_through_receivers(st: &mut ExtractState) {
         bag.push(w.clone());
     }
     let frameworks: HashMap<String, FrameworkFact> = HashMap::new();
-    let parents: HashMap<String, Vec<String>> = HashMap::new();
+    let mut parents: HashMap<String, Vec<String>> = HashMap::new();
+    for (child, parent) in &st.out.parents {
+        parents.entry(child.clone()).or_default().push(parent.clone());
+    }
     let ctx = BagContext {
         scopes: &st.out.scopes,
         package_framework: &frameworks,
@@ -315,32 +328,54 @@ pub(super) fn declare_through_receivers(st: &mut ExtractState) {
     let mut order: Vec<usize> =
         (0..st.out.symbols.len()).filter(|&i| pending.contains_key(&st.out.symbols[i].name_start)).collect();
     order.sort_by_key(|&i| st.out.symbols[i].name_start);
+    // Each write's owner, by the receiver's type at the write.
+    let owners: Vec<(usize, Option<String>)> = order
+        .iter()
+        .map(|&i| {
+            let s = &st.out.symbols[i];
+            let (recv, write_scope, _) = &pending[&s.name_start];
+            let owner = crate::model::witnesses::query_variable_type(&bag, &ctx, recv, *write_scope, s.start)
+                .and_then(|t| t.class_name().map(str::to_string));
+            (i, owner)
+        })
+        .collect();
+    let written: std::collections::HashSet<(String, String)> = owners
+        .iter()
+        .filter_map(|(i, o)| Some((o.clone()?, st.out.symbols[*i].name.clone())))
+        .collect();
     let mut keep = vec![true; st.out.symbols.len()];
-    let mut declared: Vec<(Point, Point)> = Vec::new();
-    for i in order {
-        let s = &st.out.symbols[i];
-        let (recv, write_scope, member_scope) = &pending[&s.name_start];
-        let owner = crate::model::witnesses::query_variable_type(&bag, &ctx, recv, *write_scope, s.start)
-            .and_then(|t| t.class_name().map(str::to_string));
-        let Some(class) = owner.filter(|c| !declares_member(&st.out.symbols, c, &s.name)) else {
-            keep[i] = false;
-            continue;
+    let mut accepted: Vec<(usize, String)> = Vec::new();
+    for (i, owner) in &owners {
+        let name = st.out.symbols[*i].name.clone();
+        // A slot write is filed under its class only once accepted, so a
+        // slot here is an earlier write that declared.
+        let symbols = &st.out.symbols;
+        let declares = |class: &str| {
+            symbols.iter().any(|m| {
+                m.name == name
+                    && m.package.as_deref() == Some(class)
+                    && matches!(m.kind, DefCap::Field | DefCap::Sub | DefCap::Method | DefCap::Slot)
+            }) || (Some(class) != owner.as_deref() && written.contains(&(class.to_string(), name.clone())))
         };
-        declared.push((s.name_start, s.name_end));
-        let scope = super::scopes::scope_of_class(st, &class).unwrap_or(*member_scope);
-        let s = &mut st.out.symbols[i];
-        s.package = Some(class);
+        match owner {
+            Some(class) if !crate::model::file_analysis::class_or_ancestor(class, &parents, declares) => {
+                accepted.push((*i, class.clone()));
+                st.out.symbols[*i].package = Some(class.clone());
+            }
+            _ => keep[*i] = false,
+        }
+    }
+    let mut declared: Vec<(Point, Point)> = Vec::new();
+    for (i, class) in &accepted {
+        let scope = super::scopes::scope_of_class(st, class).unwrap_or(pending[&st.out.symbols[*i].name_start].2);
+        let s = &mut st.out.symbols[*i];
         s.scope = scope;
+        declared.push((s.name_start, s.name_end));
     }
     let mut it = keep.iter();
     st.out.symbols.retain(|_| *it.next().unwrap());
     // a write that declares is the declaration, not a use of the member
     st.out.refs.retain(|r| !(r.kind == RefCap::MemberValue && declared.contains(&(r.start, r.end))));
-}
-
-/// Whether `class` already has a member `name` this file declared.
-fn declares_member(symbols: &[SkelSymbol], class: &str, name: &str) -> bool {
-    symbols.iter().any(|s| s.kind == DefCap::Field && s.name == name && s.package.as_deref() == Some(class))
 }
 
 /// Template params joined to their owner class — the owner shaped like a
@@ -383,10 +418,21 @@ pub(super) fn tag_inline_namespaces(st: &mut ExtractState) {
 /// trailing sibling (keep the rettype-bearing copy).
 pub(super) fn dedup(st: &mut ExtractState) {
     let symbols = &mut st.out.symbols;
-    let mut best: HashMap<(usize, usize), usize> = HashMap::new();
+    // The defs a pair declares at one token are both kept, and stand in
+    // for any other match's def of the same kind there.
+    let paired: std::collections::HashSet<(usize, usize, DefCap)> = symbols
+        .iter()
+        .filter(|s| s.pair.is_some())
+        .map(|s| (s.name_start.row, s.name_start.column, s.kind))
+        .collect();
+    let mut best: HashMap<(usize, usize, Option<DefCap>), usize> = HashMap::new();
     let mut keep = vec![true; symbols.len()];
     for (i, sym) in symbols.iter().enumerate() {
-        let key = (sym.name_start.row, sym.name_start.column);
+        if sym.pair.is_none() && paired.contains(&(sym.name_start.row, sym.name_start.column, sym.kind)) {
+            keep[i] = false;
+            continue;
+        }
+        let key = (sym.name_start.row, sym.name_start.column, sym.pair.map(|_| sym.kind));
         match best.get(&key) {
             None => {
                 best.insert(key, i);

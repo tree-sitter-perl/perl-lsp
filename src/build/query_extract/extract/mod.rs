@@ -71,6 +71,7 @@ fn family(cap: Capture) -> Family {
     match cap {
         C::Scope(_) | C::Context(_) | C::Parent => Family::Scopes,
         C::Def { .. }
+        | C::DefPair
         | C::Qualifier
         | C::OolDef
         | C::NestedTarget
@@ -402,7 +403,7 @@ pub fn extract_in(
     // Reads the symbol table after dedup and the command defs.
     flow::finish(&mut st, &events);
     // Reads the annotation witnesses flow lowered.
-    defs::declare_through_receivers(&mut st);
+    defs::declare_slots(&mut st);
     // The narrowing cutoff reads the flow edges.
     narrowing::finish(&mut st);
     members::finish(&mut st);
