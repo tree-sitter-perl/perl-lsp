@@ -1080,9 +1080,12 @@ fn remap_spans(
         // Populated later (enrich_skeleton) already in original coords — no remap.
         macro_body_member_reads: _,
         names: _,
+        slot_writes,
+        // scope-keyed — no spans to fix.
+        class_scopes: _,
     } = skel;
 
-    for s in symbols.iter_mut() {
+    for s in symbols.iter_mut().chain(slot_writes.iter_mut().map(|w| &mut w.symbol)) {
         let crate::build::query_extract::SkelSymbol {
             kind: _,
             name: _,
