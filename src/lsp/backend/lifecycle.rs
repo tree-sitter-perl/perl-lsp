@@ -79,13 +79,12 @@ impl PackHealCtx {
     /// `run_gather_loop` owns retirement. A stale-text result is dropped
     /// (no clobber); the loop's `finish` decides whether to re-run.
     async fn run_gather_once(&self, uri: &Url) {
+        // Every requester decided this doc has something to re-gather: a
+        // gather-dependent language's heal, or the invalidator naming a doc
+        // whose path inputs changed (a python module re-filed by a marker).
         let Some((text, path, language)) = self
             .open_docs
             .get_open(uri)
-            .filter(|d| {
-                // Only a gather-dependent language has anything to re-gather.
-                crate::build::language_driver::LanguageRegistry::caps(d.language).context_gather
-            })
             .map(|d| (d.text.clone(), d.path.clone(), d.language))
         else {
             return;
