@@ -278,6 +278,10 @@ struct Builder<'a> {
     /// `deferred_var_types`.
     deferred_named_sub_param_types: Vec<DeferredNamedSubParamType>,
     method_or_helper_subs: Vec<MethodOrHelperSub>,
+    /// Each straight-line or conditional `shift` of `@_` the walk saw, in
+    /// source order: `(sub scope, point after it, conditional)`, replayed
+    /// by `seed_arg_window`.
+    arg_head_consumes: Vec<(ScopeId, Point, bool)>,
     /// `(package, name)` of each sub the file calls as a plain function
     /// (`name(...)`; a `\&name` reference is not a call).
     plain_called_subs: std::collections::HashSet<(String, String)>,
