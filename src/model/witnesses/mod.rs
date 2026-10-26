@@ -28,6 +28,8 @@ mod reducers;
 pub use reducers::*;
 pub(crate) mod registry;
 pub use registry::*;
+mod mutation_extension;
+pub(crate) use mutation_extension::*;
 mod query;
 pub use query::*;
 mod session;

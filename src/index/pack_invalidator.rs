@@ -19,14 +19,18 @@
 //! evicts/re-analyzes/swaps is private, so a new invalidation path cannot
 //! compile around the lock, the coordinator, or the generation guard.
 //!
-//! **The consumer rule is spelled once** (`is_consumer`): a consumer is any
-//! analysis whose include closure contains the changed path. Both the
-//! registered-file re-analysis storm and the open-document refresh set apply
-//! it, and BOTH sit behind the surface gate — an Unchanged verdict (body/
-//! comment edit in a header) re-analyzes the changed file alone and returns
-//! an empty consumer set, open documents included: their analyses are still
-//! semantically valid (macro bodies and include directives are ON the
-//! surface), so re-gathering them would be pure storm.
+//! **The consumer rule is spelled once** (`consumes`): a consumer is any
+//! analysis whose include closure contains the changed path, or — when the
+//! change created or deleted a module marker (`LanguageDriver::module_marker`,
+//! python's `__init__.py`) — any file under the marker's directory, whose
+//! module name just changed. Both the registered-file re-analysis storm and
+//! the open-document refresh set apply it. Closure consumers sit behind the
+//! surface gate — an Unchanged verdict (body/comment edit in a header)
+//! re-analyzes the changed file alone and returns an empty consumer set,
+//! open documents included: their analyses are still semantically valid
+//! (macro bodies and include directives are ON the surface), so
+//! re-gathering them would be pure storm. Marker consumers do not: their
+//! name moved whatever the marker file says.
 //!
 //! Lock order: `change_lock` is the subsystem's OUTERMOST lock — acquired
 //! only from the entry points with no other lock held. Everything the worker
@@ -46,11 +50,39 @@ use crate::index::module_cache;
 use crate::index::module_index::{CachedModule, ModuleIndex};
 use crate::model::file_analysis::FileAnalysis;
 
+/// One change, as the consumer rule reads it.
+struct Change<'a> {
+    canon_str: &'a str,
+    /// The directory whose marked state the change flipped.
+    refiled: Option<&'a Path>,
+}
+
+/// Why an analysis is stale after a change.
+#[derive(PartialEq, Eq)]
+enum Consumes {
+    /// Its include closure reaches the changed file (surface-gated).
+    Closure,
+    /// It lies under a directory whose marker came or went: the module it
+    /// is filed under changed.
+    Refile,
+}
+
 /// THE consumer rule: the include closure is the cross-file visibility key,
-/// so it is also the REVERSE-dependency key. Every consumer set — registered
-/// files and open documents alike — is computed through this one predicate.
-fn is_consumer(analysis: &FileAnalysis, canon_str: &str) -> bool {
-    analysis.pack.include_closure.contains(canon_str)
+/// so it is also the REVERSE-dependency key; a flipped marker re-files
+/// everything under its directory. Every consumer set — registered files
+/// and open documents alike — is computed through this one predicate.
+/// `path` is only asked (canonicalized) when a marker flipped.
+fn consumes(path: impl FnOnce() -> Option<PathBuf>, analysis: &FileAnalysis, change: &Change<'_>) -> Option<Consumes> {
+    if let Some(dir) = change.refiled {
+        if path().is_some_and(|p| p.starts_with(dir) && p.as_os_str() != change.canon_str) {
+            return Some(Consumes::Refile);
+        }
+    }
+    analysis.pack.include_closure.contains(change.canon_str).then_some(Consumes::Closure)
+}
+
+fn canonical(p: &Path) -> PathBuf {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
 }
 
 /// What a `file_changed` call decided, for the caller to act on. The
@@ -62,10 +94,20 @@ pub struct InvalidationOutcome {
     /// deferred (H9-2). Nothing to publish now; `finish_bulk_index`
     /// reconciles it and the end-of-index open-doc heal covers the refresh.
     pub deferred: bool,
-    /// OPEN documents to re-gather: the changed file itself (when open and
-    /// not deleted) plus every open consumer — the latter gated by the
-    /// surface verdict exactly like the registered-consumer storm.
+    /// OPEN documents to re-gather: the changed file itself (when open, not
+    /// deleted, and its language gathers context) plus every open consumer
+    /// — closure consumers gated by the surface verdict exactly like the
+    /// registered-consumer storm.
     pub refresh_open: Vec<Url>,
+}
+
+/// What one invalidation sweep decided, for the open-document half.
+#[derive(Default)]
+struct Swept {
+    /// The surface gate skipped the closure consumers.
+    skip_consumers: bool,
+    /// The directory a created/deleted marker re-filed.
+    refiled: Option<PathBuf>,
 }
 
 impl InvalidationOutcome {
@@ -197,7 +239,7 @@ impl PackInvalidator {
             return InvalidationOutcome::deferred();
         }
         let manifest = index.is_dependency_input(&canon);
-        let skip_consumers = {
+        let swept = {
             let _g = self.change_lock.lock().unwrap_or_else(|e| e.into_inner());
             self.pack_file_changed(root_uri, index, &canon, deleted)
         };
@@ -211,7 +253,7 @@ impl PackInvalidator {
             open_docs.for_each_open(|u, _| all.push(u.clone()));
             all
         } else {
-            self.open_docs_to_refresh(open_docs, &canon, deleted, skip_consumers)
+            self.open_docs_to_refresh(open_docs, &canon, deleted, &swept)
         };
         InvalidationOutcome { deferred: false, refresh_open }
     }
@@ -246,17 +288,23 @@ impl PackInvalidator {
         open_docs: &OpenDocs,
         canon: &Path,
         deleted: bool,
-        skip_consumers: bool,
+        swept: &Swept,
     ) -> Vec<Url> {
         let canon_str = canon.to_string_lossy().into_owned();
+        let change = Change { canon_str: &canon_str, refiled: swept.refiled.as_deref() };
+        // A language that gathers no context has nothing to re-gather when
+        // its own bytes change: the open buffer is its source.
+        let gathers = self.driver.caps().context_gather;
         let mut out: Vec<Url> = Vec::new();
         open_docs.for_each_open(|u, doc| {
-            let is_self = !deleted
-                && u.to_file_path()
-                    .ok()
-                    .map(|p| p.canonicalize().unwrap_or(p) == canon)
-                    .unwrap_or(false);
-            if is_self || (!skip_consumers && is_consumer(&doc.analysis, &canon_str)) {
+            let doc_path = || u.to_file_path().ok().map(|p| canonical(&p));
+            let is_self = gathers && !deleted && doc_path().is_some_and(|p| p == canon);
+            let stale = match consumes(doc_path, &doc.analysis, &change) {
+                Some(Consumes::Refile) => true,
+                Some(Consumes::Closure) => !swept.skip_consumers,
+                None => false,
+            };
+            if is_self || stale {
                 out.push(u.clone());
             }
         });
@@ -302,25 +350,27 @@ impl PackInvalidator {
     /// deleted pack file — the H1 seam. Order matters: evict the per-file
     /// analysis caches FIRST (macro tables, pre-expanded variants, closures)
     /// so the re-analyses here — and the open documents' background refresh
-    /// after — re-gather instead of serving the frozen tables. Returns
-    /// whether the surface gate skipped the consumer storm. Private: callers
-    /// go through `file_changed` / `finish_bulk_index`, which hold
-    /// `change_lock` and consult the coordinator.
+    /// after — re-gather instead of serving the frozen tables; and note a
+    /// created/deleted module marker in the walk snapshot BEFORE anything
+    /// re-analyzes, so every re-analysis names its module from the new
+    /// state. Returns what the sweep decided for the open-doc half.
+    /// Private: callers go through `file_changed` / `finish_bulk_index`,
+    /// which hold `change_lock` and consult the coordinator.
     fn pack_file_changed(
         &self,
         root_uri: Option<&str>,
         index: &ModuleIndex,
         path: &Path,
         deleted: bool,
-    ) -> bool {
+    ) -> Swept {
         use rayon::prelude::*;
         let driver = self.driver;
         // Only invalidator-owned languages route here; Perl's changes are the direct re-index path's business.
         if !driver.caps().pack_invalidation {
-            return false;
+            return Swept::default();
         }
         let lang = driver.id();
-        let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let canon = canonical(path);
         let canon_str = canon.to_string_lossy().into_owned();
         let pack = index;
         // The dependency tier's own events: a manifest moves the map (a new
@@ -331,11 +381,15 @@ impl PackInvalidator {
             if crate::index::module_resolver::refresh_dependency_map_again(index) {
                 crate::index::module_resolver::acquire_dependencies(index, index.dependency_demand());
             }
-            return true;
+            return Swept { skip_consumers: true, ..Default::default() };
         }
         if index.dependency_roots().iter().any(|r| canon.starts_with(r)) {
-            return true;
+            return Swept { skip_consumers: true, ..Default::default() };
         }
+        let refiled = driver
+            .module_marker()
+            .and_then(|m| crate::build::walk_markers::note_marker(m, &canon, !deleted));
+        let change = Change { canon_str: &canon_str, refiled: refiled.as_deref() };
 
         // The source generation this invalidation registers under (H9-1): the
         // changed file's mtime, captured at call time. Every result (the changed
@@ -344,14 +398,22 @@ impl PackInvalidator {
         // stale re-analysis (a smaller mtime) is rejected at the swap. A delete has
         // no mtime; use wall-clock now, which is monotone-forward past any prior
         // save and lets the deletion win.
-        let event_gen = module_cache::file_mtime_nanos(&canon).unwrap_or_else(|| {
+        // A marker flip is an event NOW, whatever the marker's mtime says
+        // (`mv` keeps an old one): the re-filed modules must outrank the
+        // generations their last saves registered.
+        let now = || {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as i64)
                 .unwrap_or(i64::MAX)
-        });
+        };
+        let event_gen = match refiled {
+            Some(_) => now(),
+            None => module_cache::file_mtime_nanos(&canon).unwrap_or_else(now),
+        };
 
         let mut consumers: Vec<PathBuf> = Vec::new();
+        let mut refile: Vec<PathBuf> = Vec::new();
         // Closures ride along for the Unchanged case: the consumers' persisted
         // deps_stamps must be recomputed (the edited header's mtime moved) or
         // the next warm scan rejects every consumer row and the cold storm the
@@ -359,9 +421,13 @@ impl PackInvalidator {
         let mut consumer_closures: Vec<(PathBuf, crate::model::file_analysis::path_intern::ClosureList)> =
             Vec::new();
         pack.for_each_registered_file(&mut |cm| {
-            if is_consumer(&cm.analysis, &canon_str) {
-                consumers.push(cm.path.clone());
-                consumer_closures.push((cm.path.clone(), cm.analysis.pack.include_closure.clone()));
+            match consumes(|| Some(canonical(&cm.path)), &cm.analysis, &change) {
+                Some(Consumes::Closure) => {
+                    consumers.push(cm.path.clone());
+                    consumer_closures.push((cm.path.clone(), cm.analysis.pack.include_closure.clone()));
+                }
+                Some(Consumes::Refile) => refile.push(cm.path.clone()),
+                None => {}
             }
         });
 
@@ -397,7 +463,14 @@ impl PackInvalidator {
             }
         }
         let skip_consumers = matches!(changed_verdict, crate::model::surface::SurfaceVerdict::Unchanged);
-        if !skip_consumers && !consumers.is_empty() {
+        if !skip_consumers {
+            consumers.append(&mut refile);
+        } else {
+            // Re-filed modules re-analyze whatever the marker's own surface
+            // says; the closure consumers keep their (still valid) rows.
+            std::mem::swap(&mut consumers, &mut refile);
+        }
+        if !consumers.is_empty() {
             // The changed file's own caches were evicted before the probe and are
             // fresh — evict only the consumers' so they re-gather.
             crate::build::cpp_reparse::evict_analysis_caches(&consumers.iter().cloned().collect());
@@ -412,9 +485,7 @@ impl PackInvalidator {
         if !deleted && changed_fa.is_none() {
             targets.push(canon.clone());
         }
-        if !skip_consumers {
-            targets.extend(consumers);
-        }
+        targets.extend(consumers);
         targets.sort();
         targets.dedup();
         targets.retain(|p| changed_fa.is_none() || *p != canon);
@@ -526,7 +597,7 @@ impl PackInvalidator {
             }
         }
         crate::index::module_resolver::acquire_dependencies(pack, demand);
-        skip_consumers
+        Swept { skip_consumers, refiled }
     }
 
     /// The registration half of a swap, for one file. `landed` is the strip

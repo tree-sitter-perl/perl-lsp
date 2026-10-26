@@ -147,6 +147,19 @@ pub trait LanguageDriver: Send + Sync {
     fn dependency_manifests(&self) -> &[&'static str] {
         &[]
     }
+    /// The file whose presence gives a directory meaning to this
+    /// language's analyses (python's `__init__.py`). The index records
+    /// where a walk saw it (`walk_markers`) and the pack invalidator notes
+    /// each one created or deleted. `None` = no such file.
+    fn module_marker(&self) -> Option<&'static str> {
+        None
+    }
+    /// Whether what `analysis` read about `path` from outside its source
+    /// still holds — the module a path-named file is. A warm row that
+    /// fails it re-analyzes.
+    fn path_inputs_current(&self, _path: &Path, _analysis: &FileAnalysis) -> bool {
+        true
+    }
 }
 
 /// The dependency tier's map for one project: a name nothing in the
@@ -162,6 +175,16 @@ pub trait DependencyLocator: Send + Sync {
     fn roots(&self) -> &[std::path::PathBuf];
     /// The manifests this map was read from: a change to any is a new map.
     fn inputs(&self) -> &[std::path::PathBuf];
+}
+
+/// How a language that names modules by path names one: the marker file
+/// that makes a directory a package, and the namer that walks the marked
+/// directories above a file.
+#[cfg(feature = "pack-langs")]
+#[derive(Clone, Copy)]
+pub struct FileModuleRule {
+    pub marker: &'static str,
+    pub name: fn(&Path, &crate::build::walk_markers::MarkedDirs<'_>) -> Option<crate::build::query_extract::FileModule>,
 }
 
 /// Perl — the reference driver. Wraps the production builder; behaviour
@@ -304,8 +327,9 @@ pub struct PackDriver {
     /// completion can filter by visibility.
     access_regions: Option<fn(&mut tree_sitter::Parser, &str) -> Vec<crate::build::cpp_reparse::AccessRegion>>,
     /// The module a file is, for a language that names modules by path
-    /// (python). Reads the filesystem, so it runs in the gather phase.
-    file_module: Option<fn(&Path) -> Option<crate::build::query_extract::FileModule>>,
+    /// (python). Asks the walk's marker snapshot, else the disk, so it
+    /// runs in the gather phase.
+    file_module: Option<FileModuleRule>,
     /// The project's dependency map (php: Composer). `None` = the workspace
     /// walk is the whole story.
     dependencies: Option<PackDependencies>,
@@ -428,10 +452,23 @@ impl LanguageDriver for PackDriver {
     fn dependency_manifests(&self) -> &[&'static str] {
         self.dependencies.map(|d| d.manifests).unwrap_or(&[])
     }
+    fn module_marker(&self) -> Option<&'static str> {
+        self.file_module.map(|r| r.marker)
+    }
+    fn path_inputs_current(&self, path: &Path, analysis: &FileAnalysis) -> bool {
+        self.file_module.is_none() || self.module_of(path) == analysis.pack.file_module
+    }
 }
 
 #[cfg(feature = "pack-langs")]
 impl PackDriver {
+    /// The module `path` is, by the language's rule over the marked
+    /// directories the walk saw (the disk, outside any walk).
+    fn module_of(&self, path: &Path) -> Option<crate::build::query_extract::FileModule> {
+        let rule = self.file_module?;
+        crate::build::walk_markers::with_dirs(rule.marker, path, |dirs| (rule.name)(path, dirs))
+    }
+
     /// The phase pipeline `analyze_with_path` documents; the trait method
     /// wraps it to stamp `FileAnalysis.language` on every exit.
     fn analyze_pipeline(&self, source: &str, path: Option<&Path>) -> FileAnalysis {
@@ -498,7 +535,7 @@ impl PackDriver {
         // coordinates; the ORIGINAL source keeps the token (goto-def-on-`BASEOP`
         // untouched). `docs/adr/macro-handling.md`.
         let plan = self.member_blocks.map(|f| crate::util::timings::phase("cpp.member_blocks", || f(parser, source)));
-        let module = self.file_module.zip(path).and_then(|(f, p)| f(p));
+        let module = path.and_then(|p| self.module_of(p));
         PackContext { external, plan, module }
     }
 
@@ -628,6 +665,7 @@ impl PackDriver {
         macro_defs: Vec<crate::model::file_analysis::MacroDef>,
     ) {
         fa.pack.macro_defs = macro_defs;
+        fa.pack.file_module = ctx.module.clone();
         apply_attribute_macros(fa, recovered);
         // Access-specifier regions: a fresh parse of the ORIGINAL source
         // (spans already in original coords, no remap needed) tags each
@@ -708,7 +746,7 @@ fn python_driver() -> PackDriver {
         include_closure: None,
         input_fingerprint: None,
         access_regions: None,
-        file_module: Some(crate::build::packs::python_file_module),
+        file_module: Some(FileModuleRule { marker: "__init__.py", name: crate::build::packs::python_file_module }),
         dependencies: None,
     }
 }

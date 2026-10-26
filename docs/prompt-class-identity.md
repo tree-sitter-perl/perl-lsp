@@ -89,7 +89,23 @@ yet written), so the over-approximation is WANTED — but it has to be loud.
    language that names modules by path gets its namespace from the
    driver (`FileModule`, gathered in phase 1 from the `__init__.py` chain,
    else the workspace root): one whole-file section, so `pkg/models.py`
-   files `class User` as `pkg.models.User`. Parent clauses
+   files `class User` as `pkg.models.User`. Which directories hold an
+   `__init__.py` is the walk's answer, not a stat per ancestor per build:
+   the driver names its module marker (`FileModuleRule::marker`), the
+   pack indexer records where its walk saw one (`build/walk_markers.rs`,
+   a generation-stamped snapshot of the directories it walked and the
+   ones it saw marked), and the gather asks that snapshot. A path no walk
+   covers — a file opened before the index, a hidden or ignored
+   directory, a CLI file verb — asks the disk. The analysis carries the
+   module it was filed under (`PackFacts::file_module`: the one input it
+   read from outside its source, per file, and compared by the warm scan,
+   so neither a witness nor a convention); a warm row whose path names
+   another module now re-analyzes (`LanguageDriver::path_inputs_current`).
+   A marker created or deleted reaches the pack invalidator like any
+   `.py` change; it notes the marker in the snapshot (bumping its
+   generation) before anything re-analyzes, and re-analyzes every file
+   under that directory, open documents included, whatever the marker's
+   own surface verdict. Parent clauses
    resolve this way (`scopes::resolve_parents`); every other class
    spelling the extractor mints goes through the same ladder — an
    annotation type through
@@ -189,11 +205,14 @@ leaf-space FQ family validation in `implementations_of`.
 
 ## Residuals
 
-- **A Python module's name reads the filesystem, its blob does not.**
-  The `__init__.py` chain and the workspace root decide `FileModule`,
-  but the cache keys on the file's source: adding or removing an
-  `__init__.py` re-files a module's classes only once the file is
-  re-analyzed.
+- **A Python module's name is only as fresh as the watcher.** The
+  snapshot learns of an `__init__.py` created or deleted through
+  `didChangeWatchedFiles` (or a save); a client that sends no event for
+  it leaves the modules under it filed by the old state until the next
+  walk, which re-files them (the warm rows fail `path_inputs_current`).
+  An open document's debounced rebuild that named its module before a
+  marker flip and lands after the invalidator's refresh keeps the old
+  name until its next edit.
 - **A Python class body is a section over its whole span after the
   header.** A method's parameter annotations and defaults are evaluated in
   the class scope, but the method's `Callable` section covers its whole
@@ -206,13 +225,11 @@ leaf-space FQ family validation in `implementations_of`.
   of its enclosing class there, so the call is untyped and goto-def finds
   nothing; the class reference spellings (a parent clause, an annotation)
   resolve.
-- **Cross-file goto-def on a qualified spelling reads the written
-  spelling.** The PackageRef lane of `definitions()` looks up
-  `visible_def_candidates(&r.target_name)`, so `class V(Outer.Inner)` in
-  another module lands on the same-leaf candidates' file tops instead of
-  `pkg.models.Outer.Inner` (references and rename match by
-  `spelled_identity` and are exact). PHP's relative qualified spellings
-  (`extends Sub\Model`) take the same lane.
+- **A dotted annotation mints no class reference.** `v: Outer.Inner`
+  types `v` as `pkg.models.Outer.Inner`, but its tokens are a
+  `FieldAccess` on `Outer`, not a `PackageRef`, so goto-def on `Inner`
+  there finds nothing; the parent clause `class V(Outer.Inner)` is a
+  `PackageRef` and lands on the declaration.
 
 - **The visibility pins have no site.** `UseMapPins` is per ORIGIN
   (`VisibilityAxis::for_origin` takes a file, not a position), so it

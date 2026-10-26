@@ -72,6 +72,12 @@ pub fn index_pack_language(
         }
     };
     let grand_total = paths.len();
+    // The walk already yielded every marker file (they are source files of
+    // the language): record where, so naming a module asks this snapshot
+    // instead of stating each ancestor directory per build.
+    if let Some(marker) = driver.module_marker() {
+        crate::build::walk_markers::record_walk(marker, root, &paths);
+    }
 
     let total = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
@@ -173,6 +179,10 @@ pub fn index_pack_language(
                     dead_rows.push(path.to_path_buf());
                     false
                 },
+                // A row filed under a module its path no longer names (a
+                // package marker came or went since it was written)
+                // re-analyzes from the walk.
+                &mut |path, analysis| driver.path_inputs_current(path, analysis),
                 &mut |path, payload| {
                     use module_cache::{WarmDirective, WarmPayload};
                     let path_str = path.to_string_lossy().into_owned();

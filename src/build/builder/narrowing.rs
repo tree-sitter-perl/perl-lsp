@@ -15,6 +15,7 @@ use tree_sitter::{Node, Point, Tree};
 use crate::cst::node_to_span;
 use crate::model::file_analysis::{InferredType, ScopeId, Span};
 
+use super::extract::ListSlot;
 use super::{connector_keyword_between, point_lt, raw_leading_op, raw_mid_op, Builder};
 
 /// The subject a guard narrows — a plain scalar, or a hash/array place
@@ -188,7 +189,7 @@ fn recognize_guards<'a>(builder: &Builder<'a>, cond: Node<'a>, source: &[u8]) ->
             out
         }
         "method_call_expression" => recognize_isa_guard(builder, cond, source).into_iter().collect(),
-        "equality_expression" => recognize_ref_eq_guard(cond, source).into_iter().collect(),
+        "equality_expression" => recognize_ref_eq_guard(builder, cond, source).into_iter().collect(),
         "func1op_call_expression" => recognize_defined_guard(cond, source).into_iter().collect(),
         "ambiguous_function_call_expression" | "function_call_expression" => {
             recognize_blessed_guard(cond, source).into_iter().collect()
@@ -243,7 +244,8 @@ fn recognize_isa_guard<'a>(builder: &Builder<'a>, call: Node<'a>, source: &[u8])
     let subject = narrow_subject_of(mc.invocant()?, source)?;
     let arg = call.child_by_field_name("arguments")?;
     let class = crate::cst::plain_string_literal_text(arg, source)
-        .or_else(|| builder.folded_class_name_arg(arg))?;
+        .or_else(|| builder.folded_class_name_arg(arg))
+        .or_else(|| builder.current_package_literal(arg))?;
     Some(GuardFact {
         subject,
         op: NarrowOp::To(InferredType::ClassName(class)),
@@ -252,8 +254,9 @@ fn recognize_isa_guard<'a>(builder: &Builder<'a>, call: Node<'a>, source: &[u8])
 }
 
 /// `ref($x) eq 'Foo'` / `reftype($x) eq 'HASH'` (either operand order) →
-/// narrow `$x` to the proven type.
-fn recognize_ref_eq_guard(eq: Node, source: &[u8]) -> Option<GuardFact> {
+/// narrow `$x` to the proven type. `ref($x) eq __PACKAGE__` proves the
+/// enclosing class.
+fn recognize_ref_eq_guard<'a>(builder: &Builder<'a>, eq: Node<'a>, source: &[u8]) -> Option<GuardFact> {
     if raw_mid_op(eq, source) != "eq" {
         return None;
     }
@@ -271,7 +274,10 @@ fn recognize_ref_eq_guard(eq: Node, source: &[u8]) -> Option<GuardFact> {
         return None;
     }
     let subject = narrow_subject_of(func1op_subject_arg(ref_call)?, source)?;
-    let ty = ref_string_to_type(&crate::cst::plain_string_literal_text(lit, source)?)?;
+    let ty = match crate::cst::plain_string_literal_text(lit, source) {
+        Some(s) => ref_string_to_type(&s)?,
+        None => InferredType::ClassName(builder.current_package_literal(lit)?),
+    };
     Some(GuardFact {
         subject,
         op: NarrowOp::To(ty),
@@ -312,6 +318,15 @@ fn subject_key(subject: &NarrowSubject) -> String {
 }
 
 impl<'a> Builder<'a> {
+    /// `__PACKAGE__` as a class operand: the enclosing package.
+    fn current_package_literal(&self, node: Node<'a>) -> Option<String> {
+        let text = node.utf8_text(self.source).ok()?;
+        if !crate::model::conventions::is_current_package_token(text) {
+            return None;
+        }
+        self.package_for_node(node)
+    }
+
     /// A scalar `isa`/`DOES` argument (`$x->isa($C)`) that the constant
     /// fold pins to exactly one class name. A multi-valued fold can't name
     /// a single dispatch class, so it doesn't narrow. `None` for non-scalar
@@ -781,15 +796,34 @@ impl<'a> Builder<'a> {
                 }
             }
             if let Some(lhs_node) = caps.lhs {
-                if let Some(targets) = self.lhs_list_targets(lhs_node) {
+                if let Some(slots) = self.lhs_list_slots(lhs_node) {
                     // List/destructuring: each slot edges to its literal element
-                    // (Whole) or a Positional projection — the logic that used
-                    // to live in `visit_assignment`'s paren arm, now driven by
-                    // the declarative capture.
+                    // (Whole) or a Positional projection; an element target
+                    // records its write with the same value.
                     let elem_nodes = self.list_element_nodes(src);
                     let at = write_at.unwrap_or_else(|| lhs_node.start_position());
                     let reassigns = lhs_node.kind() != "variable_declaration";
-                    for (vt, extraction) in targets {
+                    let plain = src
+                        .parent()
+                        .filter(|p| p.kind() == "assignment_expression")
+                        .map_or(true, |a| crate::cst::assign_op(a) == Some(crate::cst::AssignOp::Plain));
+                    for slot in slots {
+                        let (vt, extraction) = match slot {
+                            ListSlot::Var(vt, extraction) => (vt, extraction),
+                            ListSlot::Element(elem, n) => {
+                                let scope = self.scope_at_point(elem.start_position());
+                                match (n.filter(|_| plain), &elem_nodes) {
+                                    (Some(n), Some(nodes)) => {
+                                        self.record_key_write(elem, nodes.get(n).copied(), None, scope)
+                                    }
+                                    (Some(n), None) => {
+                                        self.record_key_write(elem, Some(src), Some(n as i32), scope)
+                                    }
+                                    (None, _) => self.record_key_write(elem, None, None, scope),
+                                }
+                                continue;
+                            }
+                        };
                         let (source, extraction) = match (&elem_nodes, &extraction) {
                             (Some(nodes), crate::model::file_analysis::Extraction::Positional(n))
                                 if *n < nodes.len() =>
