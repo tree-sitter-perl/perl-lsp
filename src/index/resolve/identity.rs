@@ -457,11 +457,11 @@ pub(super) fn class_member_bare_constant(
 }
 
 /// A class member and a local declared by ONE token (php's promoted
-/// constructor parameter, `Symbol::declared_with`) are one name: from the
-/// token or a use of either, the group is the local's spellings plus the
-/// member's target, so a rename rewrites both. A read of the member in
-/// another file mints the group from the declaring file, its spellings
-/// pinned there.
+/// constructor parameter, python's class-body binding,
+/// `Symbol::declared_with`) are one name: from the token or a use of
+/// either, the group is the local's spellings plus the member's target, so
+/// a rename rewrites both. A read of the member in another file mints the
+/// group from the declaring file, its spellings pinned there.
 fn codeclared_member_group(
     analysis: &FileAnalysis,
     point: tree_sitter::Point,
