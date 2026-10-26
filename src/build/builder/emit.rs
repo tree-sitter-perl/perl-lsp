@@ -152,9 +152,9 @@ impl<'a> Builder<'a> {
 
     pub(super) fn expr_payload(&mut self, node: Node<'a>) -> Option<crate::model::witnesses::WitnessPayload> {
         use crate::model::witnesses::{RefIdx, WitnessAttachment, WitnessPayload};
-        // `meth Class(ARGS)` the file can't settle: its value is the method
-        // call or the function call, as the index decides.
-        if let Some((io, site)) = self.indirect_deferred(node) {
+        // `meth Class(ARGS)`: its value is the method call or the function
+        // call, as its question decides.
+        if let Some((io, site)) = self.indirect_site(node) {
             return Some(self.indirect_choice(node, io, site));
         }
         match node.kind() {
@@ -1034,9 +1034,8 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// A deferred `meth Class(ARGS)`'s value: `Class->meth(ARGS)` when the
-    /// index says Perl reads it so, else `meth(Class(ARGS))` — `meth` is no
-    /// sub this file declares, or the site would have settled.
+    /// A `meth Class(ARGS)`'s value: `Class->meth(ARGS)` when Perl reads it
+    /// so, else `meth(Class(ARGS))`.
     fn indirect_choice(
         &mut self,
         node: Node<'a>,
@@ -1059,7 +1058,8 @@ impl<'a> Builder<'a> {
             receiver: None,
             args: Some(self.call_operands(&args)),
         };
-        let function = self.call_invoke(node, verb, None, None);
+        let local = self.find_callee_symbol(&verb);
+        let function = self.call_invoke(node, verb, local, None);
         WitnessPayload::Choose(Box::new(crate::model::file_analysis::Deferred::fork(
             crate::model::file_analysis::Question::IndirectCall(site),
             method,

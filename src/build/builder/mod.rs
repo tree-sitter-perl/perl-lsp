@@ -315,6 +315,7 @@ struct Builder<'a> {
     package_parents: crate::model::file_analysis::PackageParents,
     /// `invocant_type_at_node` answers by CST node; see `InvocantMemo`.
     invocant_memo: std::cell::RefCell<chain::InvocantMemo>,
+    indirect_memo: std::cell::RefCell<std::collections::HashMap<usize, Option<visit_method::IndirectReading>>>,
     /// Modules the current package has `use`d, in source order. Used by
     /// `PluginRegistry::applicable` for `Trigger::UsesModule` matching.
     package_uses: std::collections::HashMap<String, Vec<String>>,

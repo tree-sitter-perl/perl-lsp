@@ -62,7 +62,7 @@ impl ImportedSymbol {
 }
 
 /// A `use Foo::Bar qw(func1 func2)` statement parsed from the source.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Import {
     /// Module name, e.g. "List::Util".
     pub module_name: String,
@@ -178,6 +178,39 @@ enum ImportSelector<'a> {
     Name(&'a str),
 }
 
+impl<'a> ImportSelector<'a> {
+    fn of(sym: &'a ImportedSymbol) -> Self {
+        if sym.remote_name.is_some() {
+            ImportSelector::Rename { local: &sym.local_name, remote: sym.remote() }
+        } else if let Some(tag) = sym
+            .local_name
+            .strip_prefix(':')
+            .or_else(|| sym.local_name.strip_prefix('-'))
+        {
+            ImportSelector::Tag(tag)
+        } else {
+            ImportSelector::Name(&sym.local_name)
+        }
+    }
+}
+
+/// The names `import` binds whatever its producer exports: the ones it
+/// lists by name or renames. `imported_names` on any surface binds these.
+pub fn listed_names(import: &Import) -> impl Iterator<Item = &str> {
+    import.imported_symbols.iter().filter_map(|sym| match ImportSelector::of(sym) {
+        ImportSelector::Name(local) | ImportSelector::Rename { local, .. } => Some(local),
+        ImportSelector::Tag(_) => None,
+    })
+}
+
+/// `import` binds names only its producer's surface can list: a bare
+/// `use M;` (the default set) or a tag.
+pub fn binds_from_surface(import: &Import) -> bool {
+    !import.empty_import
+        && (import.imported_symbols.is_empty()
+            || import.imported_symbols.iter().any(|sym| matches!(ImportSelector::of(sym), ImportSelector::Tag(_))))
+}
+
 /// Evaluate a consumer's import against a producer's export surface, yielding
 /// the locally-bound `(local_name, origin_name)` pairs. The one place Perl
 /// import semantics live, so diagnostics and nav can never disagree on the
@@ -220,19 +253,7 @@ pub fn imported_names(
     }
 
     for sym in &import.imported_symbols {
-        let selector = if sym.remote_name.is_some() {
-            ImportSelector::Rename { local: &sym.local_name, remote: sym.remote() }
-        } else if let Some(tag) = sym
-            .local_name
-            .strip_prefix(':')
-            .or_else(|| sym.local_name.strip_prefix('-'))
-        {
-            ImportSelector::Tag(tag)
-        } else {
-            ImportSelector::Name(&sym.local_name)
-        };
-
-        match selector {
+        match ImportSelector::of(sym) {
             ImportSelector::Tag(tag) => {
                 if let Some(members) = surface.tag_members(tag) {
                     for m in members {

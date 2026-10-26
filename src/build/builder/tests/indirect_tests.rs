@@ -157,6 +157,21 @@ fn every_spelling_of_a_536_bundle_turns_indirect_off() {
 }
 
 #[test]
+fn a_name_the_file_binds_decides_without_its_producer() {
+    // An explicit import list binds its names whatever the producer
+    // exports, so `use Lib qw(new)` makes `new` a sub with `Lib` unindexed.
+    let site = "package main;\nuse Lib qw(new);\nmy $a = new Ghost(1);\n";
+    assert_eq!(decide(site, &[]), (Verdict::No, "function"));
+    // A sub named like the class, declared before the site, decides it
+    // with no index at all.
+    let fa = build_fa("package main;\nsub Helper { 1 }\nmy $a = new Helper(1);\n");
+    let cs = choices(&fa);
+    assert_eq!(cs.len(), 1);
+    let picked = cs[0].pick(&fa, None);
+    assert_eq!((picked.verdict, reading_kind(picked.reading)), (Verdict::No, "function"));
+}
+
+#[test]
 fn a_decided_site_navigates_through_its_reading_at_the_same_ids() {
     // `new Thing(1)` reads as `new(Thing(1))` undecided (nothing names
     // `Thing`); an index declaring `Thing` decides it a method call. The

@@ -319,6 +319,7 @@ fn build_once(
         pod_texts: Vec::new(),
         package_parents: Default::default(),
         invocant_memo: Default::default(),
+        indirect_memo: Default::default(),
         package_uses: std::collections::HashMap::new(),
         use_dedup: std::collections::HashSet::new(),
         dispatch_dedup: std::collections::HashSet::new(),
