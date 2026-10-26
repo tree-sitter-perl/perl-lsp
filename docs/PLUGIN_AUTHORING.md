@@ -231,6 +231,10 @@ The most common emissions:
 - **`PackageParent`** — register an inheritance edge.
 - **`FrameworkImport`** — declare names that show up as if `use`-d
   (suppresses unresolved-function diagnostics).
+- **`PackageVariable`** — declare a package global of the current
+  package at a span, as `our` would (`frameworks/vars.rhai`). Anchor it
+  on the word that names it: `ctx.import_words` carries each use-list
+  word's `text` and `span`.
 
 ### Query hooks (cursor time)
 

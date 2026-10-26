@@ -401,23 +401,25 @@ impl FileAnalysis {
             return None;
         }
 
-        // Determine if this is a variable (sigil handling needed)
-        let is_variable = self.ref_at(point)
-            .map(|r| matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess))
-            .or_else(|| self.symbol_at(point).map(|s| matches!(s.kind, SymKind::Variable | SymKind::Field)))
-            .unwrap_or(false);
+        // A variable's name: rename rewrites only its trailing name token,
+        // anchored at the span end, since a ref span may carry the sigil
+        // (`$x`) or already be the bare token (`${x}`).
+        let variable_name = self
+            .ref_at(point)
+            .filter(|r| matches!(r.kind, RefKind::Variable | RefKind::ContainerAccess))
+            .map(|r| r.target_name.as_str())
+            .or_else(|| {
+                self.symbol_at(point)
+                    .filter(|s| matches!(s.kind, SymKind::Variable | SymKind::Field))
+                    .map(|s| s.name.as_str())
+            });
 
-        let edits: Vec<(Span, String)> = if is_variable {
-            // Strip sigil from new_name if present
-            let bare_name = if new_name.starts_with('$') || new_name.starts_with('@') || new_name.starts_with('%') {
-                &new_name[1..]
-            } else {
-                new_name
-            };
+        let edits: Vec<(Span, String)> = if let Some(old) = variable_name {
+            let bare_name = crate::model::conventions::strip_variable_sigils(new_name);
+            let base_len = crate::model::conventions::strip_variable_sigils(old).len();
             refs.into_iter().map(|span| {
-                // Each ref span includes the sigil; replace only the name part (after sigil)
                 let name_span = Span {
-                    start: Point::new(span.start.row, span.start.column + 1),
+                    start: Point::new(span.end.row, span.end.column.saturating_sub(base_len)),
                     end: span.end,
                 };
                 (name_span, bare_name.to_string())
@@ -1311,14 +1313,14 @@ impl FileAnalysis {
                     .map(|id| self.symbol(id))
                     .or_else(|| self.resolve_variable(&r.target_name, point));
                 if let Some(s) = sym {
-                    if let SymbolDetail::Variable { decl_kind: DeclKind::Our, .. } = s.detail {
+                    if matches!(s.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global()) {
                         return Some((s.package.clone()?, s.name.clone()));
                     }
                 }
             }
         }
         if let Some(s) = self.symbol_at(point) {
-            if let SymbolDetail::Variable { decl_kind: DeclKind::Our, .. } = s.detail {
+            if matches!(s.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global()) {
                 return Some((s.package.clone()?, s.name.clone()));
             }
         }
