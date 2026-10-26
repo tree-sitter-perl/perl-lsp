@@ -108,14 +108,23 @@ handler in the same shape rather than a string-keyed hook on the pack.
 A scope's name-lookup rule is the document's to state, never something a
 consumer reads off the shape of the scope or the language serving it.
 Python's class body is in force for the code written directly in it and
-not for a method of the class; PHP's function body sees no variable of
-the scopes around it but the ones it captures. Both are rules ABOUT a
-scope, so each is a `ScopeCap` spelling the document opts into
-(`@scope.direct`), minted as a field on the model's `Scope`
-(`Scope::direct`) — rule #11, at the producer — and read by ONE walk,
-`lookup_chain`, which every name lookup takes: a variable read, a bare
-class spelling, the namespace section in force at a site. A pack that
-says nothing keeps the plain lexical chain.
+not for a method of the class or a class nested in it; PHP's function
+body sees no variable of the scopes around it but the ones it captures.
+Both are rules ABOUT a scope, so each is a `ScopeCap` spelling the
+document opts into (`@scope.direct`), minted as a field on the model's
+`Scope` (`Scope::direct`) — rule #11, at the producer — and read by ONE
+walk, `lookup_chain`, which every name lookup takes: a variable read, a
+bare class spelling. A pack that says nothing keeps the plain lexical
+chain.
+
+Lookup is not ownership. Whose member a declaration is comes from the
+scope a class's own match opened (`@context.class` with its `@scope`),
+and stops at a callable whatever the document marks; how a name resolves
+comes from `lookup_chain`. Neither is a namespace section: the lane holds
+namespaces only. A fact the match states about where a token is written
+is minted with the token — a base in a `@parent` match is written in the
+scope its class is declared in, though the class's `@scope` covers the
+header — so no consumer compares its position against the class body.
 
 The spelling names the behaviour, not the construct: `direct` is a scope
 whose names are in force only for code written directly in it, whatever

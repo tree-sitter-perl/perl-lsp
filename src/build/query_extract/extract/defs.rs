@@ -50,13 +50,32 @@ pub(super) struct State {
     /// Byte ranges of the def nodes seen so far; a ref inside one is the
     /// declaration, not a use (`refs::handle`).
     pub(super) def_name_spans: Vec<(usize, usize)>,
+    /// Each class minted so far, by its name token's start: the identity
+    /// it is filed under and the scope it is declared in. A pattern that
+    /// names the class again (its `@context.class`, a `@parent` match)
+    /// reads the class from here rather than minting it a second time.
+    classes_by_name: HashMap<Point, MintedClass>,
+}
+
+/// A class as its def minted it.
+#[derive(Clone)]
+pub(super) struct MintedClass {
+    pub identity: String,
+    /// The scope the class is declared in — where its header is written.
+    pub declared_in: ScopeId,
 }
 
 impl State {
-    /// The name token a match captured for its def of `kind`.
     /// The match's `@def.<kind>.name` token: its text and where it starts.
     pub(super) fn name_of(&self, match_id: usize, kind: DefCap) -> Option<(&str, Point)> {
         self.names_by_match.get(&(match_id, kind)).map(|(n, s, _)| (n.as_str(), *s))
+    }
+
+    /// The class whose `@def.class.name` this match captured, as its def
+    /// minted it.
+    pub(super) fn class_of_match(&self, match_id: usize) -> Option<&MintedClass> {
+        let (_, at) = self.name_of(match_id, DefCap::Class)?;
+        self.classes_by_name.get(&at)
     }
 }
 
@@ -172,11 +191,19 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     let pkg = d.qualifier_by_match.get(&e.match_id).cloned().or_else(|| st.package.clone());
     let shaped = (pack.shape_name)(&name);
     // Under a use-map a class is filed under its identity, and its package
-    // is the namespace that identity carries.
+    // is the home that identity joins (`scopes::home_of`).
     let (shaped, pkg) = match (kind, pack.names.use_map_sep()) {
-        (DefCap::Class, Some(_)) => (st.class_identity(&shaped, e.start), st.namespace_at(e.start).map(str::to_string)),
+        (DefCap::Class, Some(sep)) => {
+            let home = super::scopes::home_of(st, st.cur_scope, e.start).map(str::to_string);
+            (crate::model::conventions::join_qualified(home.as_deref().unwrap_or(""), &shaped, sep), home)
+        }
         _ => (shaped, pkg),
     };
+    if kind == DefCap::Class {
+        let minted = MintedClass { identity: shaped.clone(), declared_in: st.cur_scope };
+        st.defs.classes_by_name.insert(name_start, minted);
+    }
+    let d = &st.defs;
     // A class-spec def carries its primary's name — the
     // (spec, primary) family edge `Specializes` derives from.
     if let Some(primary) = d.spec_primary_by_match.get(&e.match_id) {

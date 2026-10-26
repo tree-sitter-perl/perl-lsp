@@ -43,9 +43,9 @@ pub struct SkelSymbol {
     pub flags: SymbolFlags,
 }
 
-impl crate::model::file_analysis::DeclaredClasses for Vec<SkelSymbol> {
-    fn declares_class(&self, identity: &str) -> bool {
-        self.iter().any(|s| matches!(s.kind, DefCap::Class | DefCap::Package) && s.name == identity)
+impl crate::model::file_analysis::ScopeClasses for Vec<SkelSymbol> {
+    fn declares_in(&self, scope: crate::model::file_analysis::ScopeId, identity: &str) -> bool {
+        self.iter().any(|s| s.scope == scope && matches!(s.kind, DefCap::Class | DefCap::Package) && s.name == identity)
     }
 }
 

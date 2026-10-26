@@ -117,10 +117,11 @@ pub struct Scope {
     #[serde(default)]
     pub implicit_receiver: bool,
     /// The names declared in this scope are in force only for code
-    /// written directly in it (`@scope.direct`): a use inside a callable
-    /// nested here looks past the scope, as Python's class body does for
-    /// its methods. Read through `lookup_chain`, the one walk every name
-    /// lookup takes, so a language states the rule once.
+    /// written directly in it (`@scope.direct`): a use inside a callable,
+    /// or inside another such scope, nested here looks past the scope, as
+    /// Python's class body does for its methods and its nested classes.
+    /// Read through `lookup_chain`, the one walk every name lookup takes,
+    /// so a language states the rule once.
     #[serde(default)]
     pub direct: bool,
 }
@@ -182,30 +183,22 @@ pub enum SectionKind {
     Statement,
     /// `package Foo { … }` / `namespace A { … }` — span equals the block.
     Block,
-    /// A class body a language makes a namespace (`@section.class`, Python's
-    /// class scope): its class's identity, over the body. A name the class
-    /// does not declare resolves in the section around it.
-    ClassBody,
 }
 
 /// The section in force at `point`: the innermost containing one — the
 /// latest-starting, and on a tie the narrower. `None` outside every
-/// section. The one lookup over a namespace lane, for
-/// the model and both builders alike.
+/// section. The one lookup over a namespace lane, for the model and both
+/// builders alike.
 pub fn namespace_range_at(ranges: &[NamespaceRange], point: Point) -> Option<&NamespaceRange> {
-    innermost_range(ranges, point, |_| true)
-}
-
-/// The section a name written at `point` falls back to when no class body
-/// declares it: the innermost containing section that is not a
-/// `ClassBody`.
-pub fn namespace_range_around(ranges: &[NamespaceRange], point: Point) -> Option<&NamespaceRange> {
-    innermost_range(ranges, point, |r| r.kind != SectionKind::ClassBody)
+    ranges
+        .iter()
+        .filter(|r| contains_point(&r.span, point))
+        .max_by_key(|r| (r.span.start, std::cmp::Reverse(r.span.end)))
 }
 
 /// The innermost scope containing `point`, over a bare slice — the
 /// lookup `FileAnalysis::scope_at` is the method form of, shared with the
-/// namespace-lane readers that hold scopes without a `FileAnalysis`.
+/// use-map, which holds scopes without a `FileAnalysis`.
 pub fn innermost_scope_at(scopes: &[Scope], point: Point) -> Option<ScopeId> {
     let mut best: Option<(ScopeId, usize)> = None; // (id, span_size)
     for scope in scopes {
@@ -217,48 +210,6 @@ pub fn innermost_scope_at(scopes: &[Scope], point: Point) -> Option<ScopeId> {
         }
     }
     best.map(|(id, _)| id)
-}
-
-/// The section in force for a use written at `point` in `from`: the
-/// innermost one `lookup_chain` still reaches — a section whose own scope
-/// the chain skipped (a `direct` class body, from a method of it) is not
-/// in force there. The lane reader every name resolution uses; the
-/// span-only `namespace_range_at` is the raw lane.
-pub fn namespace_range_in<'a>(
-    ranges: &'a [NamespaceRange],
-    scopes: &[Scope],
-    from: ScopeId,
-    point: Point,
-) -> Option<&'a NamespaceRange> {
-    let reached = lookup_chain(scopes, from);
-    let chain = scope_chain_of(scopes, from);
-    innermost_range(ranges, point, |r| section_scope(scopes, &chain, &r.span).is_none_or(|h| reached.contains(&h)))
-}
-
-/// `namespace_range_in` for a point whose scope is not in hand.
-pub fn namespace_range_for<'a>(ranges: &'a [NamespaceRange], scopes: &[Scope], point: Point) -> Option<&'a NamespaceRange> {
-    match innermost_scope_at(scopes, point) {
-        Some(from) => namespace_range_in(ranges, scopes, from, point),
-        None => namespace_range_at(ranges, point),
-    }
-}
-
-/// The scope a section is written IN: the innermost scope of `chain`
-/// whose span PROPERLY contains the section's. Proper, because a class
-/// body whose only statement is a callable has that callable's exact
-/// span — the body is written in the class, not in the callable.
-fn section_scope(scopes: &[Scope], chain: &[ScopeId], span: &Span) -> Option<ScopeId> {
-    chain.iter().copied().find(|id| {
-        let s = &scopes[id.0 as usize].span;
-        contains_point(s, span.start) && contains_point(s, span.end) && (s.start != span.start || s.end != span.end)
-    })
-}
-
-fn innermost_range(ranges: &[NamespaceRange], point: Point, admit: impl Fn(&NamespaceRange) -> bool) -> Option<&NamespaceRange> {
-    ranges
-        .iter()
-        .filter(|r| admit(r) && contains_point(&r.span, point))
-        .max_by_key(|r| (r.span.start, std::cmp::Reverse(r.span.end)))
 }
 
 /// The statement-form sections a builder's walk still has running, by the
@@ -303,14 +254,7 @@ impl OpenSections {
 
     /// A braced form: its block is its section, and it ends nothing.
     pub fn push_block(lane: &mut Vec<NamespaceRange>, namespace: String, span: Span) {
-        Self::push_section(lane, namespace, span, SectionKind::Block);
-    }
-
-    /// A section that is exactly its span — a braced form, a class body —
-    /// and ends nothing.
-    pub fn push_section(lane: &mut Vec<NamespaceRange>, namespace: String, span: Span, kind: SectionKind) {
-        debug_assert!(kind != SectionKind::Statement, "a statement form opens through open_statement");
-        lane.push(NamespaceRange { namespace, span, kind });
+        lane.push(NamespaceRange { namespace, span, kind: SectionKind::Block });
     }
 }
 

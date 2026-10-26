@@ -504,11 +504,54 @@ class Other(Outer.Inner):
     assert_eq!(fa.declared_parents("pkg.mod.Local"), ["pkg.mod.Inner"]);
     // a dotted spelling hangs its leaf off the class its head names
     assert_eq!(fa.declared_parents("pkg.mod.Other"), ["pkg.mod.Outer.Inner"]);
-    // the namespace in force: the class body, the module inside a method
-    assert_eq!(fa.namespace_at(Point::new(5, 4)), Some("pkg.mod.Outer"));
+    // the lane holds the module alone: a class body is no namespace
+    assert_eq!(fa.namespace_at(Point::new(5, 4)), Some("pkg.mod"));
     assert_eq!(fa.namespace_at(Point::new(9, 8)), Some("pkg.mod"));
-    // a class header is written in the namespace around the class
-    assert_eq!(fa.namespace_at(Point::new(6, 14)), Some("pkg.mod.Outer"));
+    // a class header is written in the scope around the class, so the
+    // reference there names what the edge does
+    let header = fa.refs().iter().find(|r| r.span.start == Point::new(6, 14)).expect("the base is a reference");
+    assert_eq!(fa.spelled_identity(header), "pkg.mod.Outer.Inner");
+}
+
+/// A base is written in the scope its class is declared in: `B(A)` in
+/// `Outer`'s body names the sibling `Outer.A`, never a class B declares
+/// itself, though B's own scope covers its header.
+#[test]
+fn a_parent_clause_names_a_sibling_nested_class() {
+    let m = module(&["pkg", "mod"], false);
+    let src = "\
+class A:
+    pass
+class Outer:
+    class A:
+        pass
+    class B(A):
+        class A:
+            pass
+";
+    let fa = py_in(src, Some(&m));
+    assert_eq!(fa.declared_parents("pkg.mod.Outer.B"), ["pkg.mod.Outer.A"]);
+    assert!(fa.symbols().iter().any(|s| s.kind == SymKind::Class && s.name == "pkg.mod.Outer.B.A"));
+    let base = fa.refs().iter().find(|r| r.span.start == Point::new(5, 12)).expect("the base is a reference");
+    assert_eq!(fa.spelled_identity(base), "pkg.mod.Outer.A");
+}
+
+/// A bare head no scope on the chain declares falls to the module, where
+/// the file's imports bind first, exactly as at module level.
+#[test]
+fn a_head_the_class_does_not_declare_falls_to_the_module() {
+    let m = module(&["pkg", "mod"], false);
+    let src = "\
+from lib.models import Imported
+class Outer:
+    class Inner:
+        pass
+    own: Helper = make()
+    other: Imported = make()
+";
+    let fa = py_in(src, Some(&m));
+    assert_eq!(fa.inferred_type_via_bag("own", Point::new(4, 4)), Some(InferredType::ClassName("pkg.mod.Helper".into())));
+    assert_eq!(fa.inferred_type_via_bag("other", Point::new(5, 4)), Some(InferredType::ClassName("lib.models.Imported".into())));
 }
 
 /// A class attribute is the class's, not its methods': a bare read in a
@@ -559,8 +602,9 @@ class Outer:
 
 /// A document that does not mark its class scope keeps the chain it
 /// always had: the same source, the same pack but for `@scope.direct`,
-/// and a method reads its class's attribute and files its classes under
-/// the class.
+/// and a method reads its class's attribute. Where a class is filed is no
+/// lookup: one declared in a method is the method's, not a member of the
+/// class, either way.
 #[test]
 fn an_unmarked_class_scope_still_reaches_its_methods() {
     let m = module(&["pkg", "mod"], false);
@@ -586,9 +630,10 @@ class Outer:
     let fa = extract_in(&tree, src.as_bytes(), &pack, Some(&m)).unwrap().into_file_analysis();
     assert_eq!(fa.inferred_type_via_bag("x", Point::new(10, 15)), Some(InferredType::ClassName("pkg.mod.Outer.Inner".into())));
     assert_eq!(fa.resolve_variable("x", Point::new(10, 15)).map(|s| s.span.start.row), Some(6));
-    assert!(fa.symbols().iter().any(|s| s.kind == SymKind::Class && s.name == "pkg.mod.Outer.Local"), "{:?}",
+    assert!(fa.symbols().iter().any(|s| s.kind == SymKind::Class && s.name == "pkg.mod.Local"), "{:?}",
         fa.symbols().iter().filter(|s| s.kind == SymKind::Class).map(|s| s.name.as_str()).collect::<Vec<_>>());
-    assert_eq!(fa.namespace_at(Point::new(10, 15)), Some("pkg.mod.Outer"));
+    // the base in its header sees the class body the method sees
+    assert_eq!(fa.declared_parents("pkg.mod.Local"), ["pkg.mod.Outer.Inner"]);
 }
 
 /// Without a module-level class of that leaf, a bare name in a method
