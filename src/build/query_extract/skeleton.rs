@@ -941,10 +941,6 @@ impl SkeletonAnalysis {
                     .push((s.scope, s.selection_span, s.id, s.kind == SymKind::Field));
             }
         }
-        let scope_parent: std::collections::HashMap<
-            crate::model::file_analysis::ScopeId,
-            Option<crate::model::file_analysis::ScopeId>,
-        > = self.scopes.iter().map(|s| (s.id, s.parent)).collect();
         let mut local_refs: Vec<crate::model::file_analysis::Ref> = Vec::new();
         // Reads that found no LOCAL decl — a Variable ref is still minted for
         // each (below, once call/member spans are known) so query-time
@@ -957,10 +953,9 @@ impl SkeletonAnalysis {
             let rp = (read_span.start.row, read_span.start.column);
             let elides = elided_class.get(read_scope.0 as usize).is_some_and(Option::is_some);
             let resolved = defs_by_name.get(name).and_then(|cands| {
-                // `lookup_chain`, not the raw climb: a scope whose names
-                // are in force only for code written directly in it is
-                // not on a nested callable's chain.
-                for sc in crate::model::file_analysis::lookup_chain(&self.scopes, *read_scope) {
+                // a scope whose names are in force only for code written
+                // directly in it is not on a nested callable's chain
+                for sc in crate::model::file_analysis::lookup_chain(&self.scopes, *read_scope).scopes() {
                     // nearest decl of this name in THIS scope level, declared at
                     // or before the read (latest-wins for redeclaration).
                     let mut best: Option<((usize, usize), SymbolId)> = None;
@@ -991,19 +986,13 @@ impl SkeletonAnalysis {
             }
         }
         // `goto LABEL` → the `LABEL:` def, function-wide: first matching
-        // Variable on the scope chain, NO declared-before constraint (a
+        // Variable on the lookup chain, NO declared-before constraint (a
         // forward goto is valid).
         for (name, ref_scope, ref_span) in &self.label_refs {
             let Some(cands) = defs_by_name.get(name) else { continue };
-            let mut cur = Some(*ref_scope);
-            let mut resolved: Option<SymbolId> = None;
-            while let Some(sc) = cur {
-                if let Some((_, _, did, _)) = cands.iter().find(|(dscope, ..)| *dscope == sc) {
-                    resolved = Some(*did);
-                    break;
-                }
-                cur = scope_parent.get(&sc).copied().flatten();
-            }
+            let resolved: Option<SymbolId> = crate::model::file_analysis::lookup_chain(&self.scopes, *ref_scope)
+                .scopes()
+                .find_map(|sc| cands.iter().find(|(dscope, ..)| *dscope == sc).map(|(_, _, did, _)| *did));
             if let Some(did) = resolved {
                 local_refs.push(crate::model::file_analysis::Ref {
                     kind: crate::model::file_analysis::RefKind::Variable,
@@ -1323,7 +1312,8 @@ impl SkeletonAnalysis {
             // would read, so the first arm would block every later one.
             let mut undeclared: std::collections::HashMap<SymbolId, bool> = Default::default();
             for (ret_scope, ret_span) in &self.return_sites {
-                let owner = std::iter::successors(Some(*ret_scope), |sc| scope_parent.get(sc).copied().flatten())
+                let owner = crate::model::file_analysis::scope_chain_of(&self.scopes, *ret_scope)
+                    .into_iter()
                     .find_map(|sc| self.scopes.get(sc.0 as usize).and_then(|s| s.owner));
                 let Some(sid) = owner else { continue };
                 let first = !undeclared.contains_key(&sid);

@@ -1287,7 +1287,7 @@ impl FileAnalysis {
 
 impl ScopeClasses for FileAnalysis {
     fn declares_in(&self, scope: ScopeId, identity: &str) -> bool {
-        self.symbols.in_scope(scope).iter().any(|sid| {
+        self.symbols.declared_directly_in(scope).iter().any(|sid| {
             let s = &self.symbols[sid.0 as usize];
             matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == identity
         })

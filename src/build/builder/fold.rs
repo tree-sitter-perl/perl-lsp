@@ -97,8 +97,7 @@ impl<'a> Builder<'a> {
             // declared before this ref, matching name, and (for `our`)
             // sharing the use's enclosing package.
             let mut gated_our = false;
-            let mut current = Some(ref_scope);
-            while let Some(scope_id) = current {
+            for scope_id in crate::model::file_analysis::lookup_chain(&self.scopes, ref_scope).scopes() {
                 let mut found = None;
                 for (name, sym_id, decl_point, gating_package) in
                     scope_symbols.get(&scope_id).into_iter().flatten()
@@ -116,7 +115,6 @@ impl<'a> Builder<'a> {
                     self.refs[idx].bind_symbol(sym_id);
                     break;
                 }
-                current = self.scopes[scope_id.0 as usize].parent;
             }
 
             // `our` is lexical: a use the package gate turned away from an
@@ -2087,8 +2085,7 @@ impl<'a> Builder<'a> {
                 // Fall back to variable identity
                 if let Some(defs) = var_defs.get(&vt) {
                     // Find the innermost declaration before this ref
-                    let mut scope = Some(r.scope);
-                    while let Some(sid) = scope {
+                    for sid in crate::model::file_analysis::lookup_chain(&self.scopes, r.scope).scopes() {
                         if let Some((def_scope, _sym_id)) = defs.iter().find(|(s, _)| *s == sid) {
                             r.bind_hash_key_owner(HashKeyOwner::Variable {
                                 name: vt.clone(),
@@ -2096,7 +2093,6 @@ impl<'a> Builder<'a> {
                             });
                             break;
                         }
-                        scope = self.scopes[sid.0 as usize].parent;
                     }
                 }
 
