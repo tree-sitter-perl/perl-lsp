@@ -970,6 +970,23 @@ fn diagnostic_options_deserialize_from_lsp_shape() {
     assert!(!opts.unresolved_dispatch, "absent key defaults to false");
 }
 
+/// `use strict;` and `use Moo;` are bare imports: until their producers are
+/// cached the valve keeps the file silent, so the lint's tests seed them the
+/// way @INC resolution does in the server.
+fn pragma_index() -> crate::index::module_index::ModuleIndex {
+    let module_index = crate::index::module_index::ModuleIndex::new_for_test();
+    for name in ["strict", "Moo"] {
+        module_index.insert_cache(
+            name,
+            Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+                std::path::PathBuf::from(format!("/fake/{name}.pm")),
+                std::sync::Arc::new(parse_analysis(&format!("package {name};\nsub import {{}}\n1;\n"))),
+            ))),
+        );
+    }
+    module_index
+}
+
 fn missing_declarations(diags: &[Diagnostic]) -> Vec<(u32, String)> {
     diags
         .iter()
@@ -983,9 +1000,9 @@ fn missing_declarations(diags: &[Diagnostic]) -> Vec<(u32, String)> {
 /// spellings and the `scalar` keyword are not.
 #[test]
 fn missing_declaration_flags_each_undeclared_use() {
-    let source = "$a = 1;\n$abel = 3;\nprint \"$a $abel $_ $0 $ENV{X} @ARGV $main::abel\";\nmy @s = sort { $a <=> $b } @ARGV;\nmy $ok = scalar @s; print $ok;\n";
+    let source = "use strict; $a = 1;\n$abel = 3;\nprint \"$a $abel $_ $0 $ENV{X} @ARGV $main::abel\";\nmy @s = sort { $a <=> $b } @ARGV;\nmy $ok = scalar @s; print $ok;\n";
     let analysis = parse_analysis(source);
-    let module_index = crate::index::module_index::ModuleIndex::new_for_test();
+    let module_index = pragma_index();
     let diags = collect_diagnostics(&analysis, &module_index, Default::default());
     let found = missing_declarations(&diags);
     let lines: Vec<u32> = found.iter().map(|(l, _)| *l).collect();
@@ -1002,9 +1019,9 @@ fn missing_declaration_flags_each_undeclared_use() {
 /// still the global: the lexical isn't in scope yet.
 #[test]
 fn missing_declaration_sees_lexical_declared_later() {
-    let source = "sub f { return $later }\nmy $later = 1;\nprint $later;\n";
+    let source = "use strict; sub f { return $later }\nmy $later = 1;\nprint $later;\n";
     let analysis = parse_analysis(source);
-    let module_index = crate::index::module_index::ModuleIndex::new_for_test();
+    let module_index = pragma_index();
     let found = missing_declarations(&collect_diagnostics(&analysis, &module_index, Default::default()));
     assert_eq!(found.iter().map(|(l, _)| *l).collect::<Vec<_>>(), vec![0], "{found:?}");
 }
@@ -1013,9 +1030,9 @@ fn missing_declaration_sees_lexical_declared_later() {
 /// glob declares too.
 #[test]
 fn missing_declaration_respects_declarations_and_imports() {
-    let source = "package P;\nour $o = 1;\nuse vars qw($v @w);\nuse vars ('%h');\nuse FakeVars qw($imported);\nuse FakeGlobs;\n$o++; $v++; push @w, 1; $h{k} = 1; print $imported, $globbed;\n";
+    let source = "use strict; package P;\nour $o = 1;\nuse vars qw($v @w);\nuse vars ('%h');\nuse FakeVars qw($imported);\nuse FakeGlobs;\n$o++; $v++; push @w, 1; $h{k} = 1; print $imported, $globbed;\n";
     let analysis = parse_analysis(source);
-    let module_index = crate::index::module_index::ModuleIndex::new_for_test();
+    let module_index = pragma_index();
     for (name, src) in [
         ("FakeVars", "package FakeVars;\nour @EXPORT_OK = qw($imported);\nour $imported;\n1;\n"),
         ("FakeGlobs", "package FakeGlobs;\nour @EXPORT = qw(*globbed);\nour $globbed;\n1;\n"),
@@ -1036,9 +1053,9 @@ fn missing_declaration_respects_declarations_and_imports() {
 /// silent until it resolves rather than flag what it might declare.
 #[test]
 fn missing_declaration_silent_while_a_bare_import_is_unresolved() {
-    let source = "use NotCachedYet;\n$x = 1;\n";
+    let source = "use strict; use NotCachedYet;\n$x = 1;\n";
     let analysis = parse_analysis(source);
-    let module_index = crate::index::module_index::ModuleIndex::new_for_test();
+    let module_index = pragma_index();
     let found = missing_declarations(&collect_diagnostics(&analysis, &module_index, Default::default()));
     assert!(found.is_empty(), "{found:?}");
 }
@@ -1046,8 +1063,8 @@ fn missing_declaration_silent_while_a_bare_import_is_unresolved() {
 /// `disableMissingDeclaration` turns the default-on lint off.
 #[test]
 fn missing_declaration_opt_out() {
-    let analysis = parse_analysis("$abel = 1;\n");
-    let module_index = crate::index::module_index::ModuleIndex::new_for_test();
+    let analysis = parse_analysis("use strict; $abel = 1;\n");
+    let module_index = pragma_index();
     assert_eq!(missing_declarations(&collect_diagnostics(&analysis, &module_index, Default::default())).len(), 1);
     let opts: DiagnosticOptions =
         serde_json::from_value(serde_json::json!({ "disableMissingDeclaration": true })).unwrap();
@@ -1059,7 +1076,7 @@ fn missing_declaration_opt_out() {
 /// match variables under `-no_match_vars`.
 #[test]
 fn missing_declaration_knows_use_english() {
-    let module_index = crate::index::module_index::ModuleIndex::new_for_test();
+    let module_index = pragma_index();
     module_index.insert_cache(
         "English",
         Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
@@ -1067,12 +1084,41 @@ fn missing_declaration_knows_use_english() {
             std::sync::Arc::new(parse_analysis("package English;\nsub import {}\n1;\n")),
         ))),
     );
-    let bare = parse_analysis("use English;\nprint $ERRNO, $EVAL_ERROR, @ARG, $MATCH, @LAST_MATCH_START;\n");
+    let bare = parse_analysis("use strict; use English;\nprint $ERRNO, $EVAL_ERROR, @ARG, $MATCH, @LAST_MATCH_START;\n");
     let found = missing_declarations(&collect_diagnostics(&bare, &module_index, Default::default()));
     assert!(found.is_empty(), "{found:?}");
 
-    let no_match = parse_analysis("use English qw(-no_match_vars);\nprint $ERRNO, $MATCH;\n");
+    let no_match = parse_analysis("use strict; use English qw(-no_match_vars);\nprint $ERRNO, $MATCH;\n");
     let found = missing_declarations(&collect_diagnostics(&no_match, &module_index, Default::default()));
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(found[0].1.contains("'$MATCH'"), "{found:?}");
+}
+
+/// The lint is `use strict 'vars'`: silent where strict isn't in force.
+/// Strict is lexical — on from its statement to the end of the enclosing
+/// scope, off in a `no strict 'vars'` block — and `use v5.12`+ or a module
+/// that imports strict (Moo) turns it on; `no strict 'refs'` leaves it.
+#[test]
+fn missing_declaration_only_under_strict_vars() {
+    let source = "$before = 1;\nuse strict;\n$on = 1;\n{ no strict 'vars'; $off = 1; }\n{ no strict 'refs'; $still = 1; }\n$after = 1;\n";
+    let analysis = parse_analysis(source);
+    let module_index = pragma_index();
+    let names: Vec<String> = missing_declarations(&collect_diagnostics(&analysis, &module_index, Default::default()))
+        .into_iter()
+        .map(|(_, m)| m)
+        .collect();
+    assert_eq!(names.len(), 3, "{names:?}");
+    for (msg, name) in names.iter().zip(["$on", "$still", "$after"]) {
+        assert!(msg.contains(&format!("'{name}'")), "{names:?}");
+    }
+
+    let count = |src: &str| {
+        missing_declarations(&collect_diagnostics(&parse_analysis(src), &module_index, Default::default())).len()
+    };
+    assert_eq!(count("$x = 1;\n"), 0, "no strict at all");
+    assert_eq!(count("use v5.36;\n$x = 1;\n"), 1);
+    assert_eq!(count("use 5.012;\n$x = 1;\n"), 1);
+    assert_eq!(count("use 5.010_001;\n$x = 1;\n"), 0);
+    assert_eq!(count("package P;\nuse Moo;\n$x = 1;\n"), 1);
+    assert_eq!(count("sub f { use strict; $x = 1 }\n$y = 1;\n"), 1, "strict ends with its block");
 }

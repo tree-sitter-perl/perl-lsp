@@ -23,6 +23,7 @@ impl<'a> Builder<'a> {
             span,
             owner: None,
             implicit_receiver: false,
+            declaration_rules: Vec::new(),
             package: pkg,
         });
         self.scope_stack.push(id);
@@ -31,6 +32,15 @@ impl<'a> Builder<'a> {
 
     pub(super) fn pop_scope(&mut self) -> Option<ScopeId> {
         self.scope_stack.pop()
+    }
+
+    /// Switch the declaration rule from the end of `span` on, in the scope
+    /// `span` sits in.
+    pub(super) fn switch_declaration_rule(&mut self, span: Span, required: bool) {
+        let scope = self.scope_at_point(span.start);
+        self.scopes[scope.0 as usize]
+            .declaration_rules
+            .push(crate::model::file_analysis::DeclarationRule { at: span.end, required });
     }
 
     pub(super) fn current_scope(&self) -> ScopeId {

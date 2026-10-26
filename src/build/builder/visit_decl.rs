@@ -18,6 +18,13 @@ impl<'a> Builder<'a> {
             "for_statement" => self.visit_for(node),
             "postfix_for_expression" => self.visit_postfix_for(node),
             "use_statement" => self.visit_use(node),
+            "use_version_statement" => {
+                if let Some(version) = node.child_by_field_name("version").and_then(|v| v.utf8_text(self.source).ok()) {
+                    if crate::model::conventions::version_enables_strict(version) {
+                        self.switch_declaration_rule(node_to_span(node), true);
+                    }
+                }
+            }
             "require_expression" => self.visit_require(node),
             "assignment_expression" => self.visit_assignment(node),
 

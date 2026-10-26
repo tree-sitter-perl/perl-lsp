@@ -116,6 +116,21 @@ pub struct Scope {
     /// names no package, so nothing binds.
     #[serde(default)]
     pub implicit_receiver: bool,
+    /// Where this scope switches "every variable must be declared" on or
+    /// off (Perl's `use strict 'vars'` / `no strict 'vars'`), in source
+    /// order. Lexical: a nested scope inherits the switch in force where it
+    /// opens, and its own switches end with it.
+    #[serde(default)]
+    pub declaration_rules: Vec<DeclarationRule>,
+}
+
+/// One switch of a scope's declaration rule: from `at` on, an undeclared
+/// variable is (`required`) or is not an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclarationRule {
+    #[serde(with = "PointDef")]
+    pub at: Point,
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

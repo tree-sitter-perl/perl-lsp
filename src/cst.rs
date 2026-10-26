@@ -539,6 +539,12 @@ pub(crate) fn varname_child<'a>(node: Node<'a>) -> Option<Node<'a>> {
     node.named().find(|c| c.kind() == "varname")
 }
 
+/// `no Module LIST`: a `use_statement` led by the `no` keyword (the grammar
+/// has no `no_statement` kind).
+pub(crate) fn is_negated_use(node: Node) -> bool {
+    (0..node.child_count()).filter_map(|i| node.child(i)).any(|c| !c.is_named() && c.kind() == "no")
+}
+
 /// The name token of a braced variable spelling (`${name}`, `@{ name }`) —
 /// the `varname` child, braces excluded. `None` for the plain spelling and
 /// for derefs (`${$ref}`, `@{[ ... ]}`).
