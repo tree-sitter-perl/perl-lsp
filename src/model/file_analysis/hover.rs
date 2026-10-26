@@ -556,7 +556,7 @@ impl FileAnalysis {
         // Append inferred type for variables/fields (bag-routed so
         // framework / branch / arity rules refine the answer). The index lets
         // a role-contract param type (`$c` in a Catalyst action) resolve
-        // through cross-file ancestry via the `ReceiverGated` gate.
+        // through cross-file ancestry via the `ReceiverIsa` deferral.
         if matches!(sym.kind, SymKind::Variable | SymKind::Field) {
             if let Some(it) = self
                 .inferred_type_via_bag_ctx(&sym.name, at, module_index)

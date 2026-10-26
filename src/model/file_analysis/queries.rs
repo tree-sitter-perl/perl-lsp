@@ -334,31 +334,27 @@ impl FileAnalysis {
         // Role-contract param types are gated on the enclosing package's
         // cross-file ancestry, so they resolve here (index in hand), not in
         // the bag the index-free builder seeded.
-        self.gated_param_type_for(var_name, scope, point, module_index)
+        self.gated_param_type_for(var_name, scope, module_index)
     }
 
     /// Resolve a `param_types()` role-contract TC for `var` at `point`: find a
     /// gated TC whose scope is on the chain and whose variable matches, then
     /// read its inner type ONLY if the enclosing package `isa` the rule's
-    /// gate (`in_role`), resolved cross-file via `resolve_for` — so a
+    /// gate (`in_role`), decided cross-file by its `PackageIsa` question — so a
     /// controller whose `Catalyst::Controller` ancestry runs through a
     /// cross-file base still types its `$c`.
     fn gated_param_type_for(
         &self,
         var: &str,
         scope: ScopeId,
-        point: Point,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
         if self.gated_param_types.is_empty() {
             return None;
         }
         let chain = self.scope_chain(scope);
-        let pkg = self.package_at(point);
         for gated in &self.gated_param_types {
-            if let GateResult::Applies(tc) =
-                gated.resolve_for(pkg, &self.packages, module_index)
-            {
+            if let Some(tc) = gated.pick(self, module_index).reading {
                 if tc.variable == var && chain.contains(&tc.scope) {
                     return Some(tc.inferred_type.clone());
                 }

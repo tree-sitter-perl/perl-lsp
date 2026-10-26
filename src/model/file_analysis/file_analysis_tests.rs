@@ -2103,47 +2103,45 @@ fn test_route_controller_token_disambiguates_by_ownership() {
     );
 }
 
-// ---- ReceiverGated seam ----
+// ---- Deferred readings ----
 
-#[test]
-fn receiver_gated_applies_on_exact_gate() {
-    let pp: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    let gated = ReceiverGated::new("Minion", 7u32);
-    assert_eq!(
-        gated.resolve_for(Some("Minion"), &pp, None),
-        GateResult::Applies(&7u32),
-    );
+fn receiver_isa(class: &str) -> Question {
+    Question::ReceiverIsa { receiver: Receiver::Class(class.into()), class: "Minion".into() }
 }
 
 #[test]
-fn receiver_gated_applies_through_local_ancestry() {
-    let mut pp: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    pp.insert("My::Minion".into(), vec!["Minion".into()]);
-    let gated = ReceiverGated::new("Minion", "payload");
-    // A descendant resolves through the single `class_isa` walk.
-    assert_eq!(
-        gated.resolve_for(Some("My::Minion"), &pp, None),
-        GateResult::Applies(&"payload"),
-    );
+fn deferred_applies_on_exact_gate() {
+    let fa = build_fa_from_source("package P;\n1;\n");
+    let d = Deferred::new(receiver_isa("Minion"), 7u32);
+    assert_eq!(d.pick(&fa, None), Picked { verdict: Verdict::Yes, reading: Some(&7u32) });
 }
 
 #[test]
-fn receiver_gated_does_not_apply_for_unrelated_class() {
-    let pp: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    let gated = ReceiverGated::new("Minion", 1u8);
-    // A concrete, unrelated receiver is a settled negative — NOT untyped.
-    assert_eq!(
-        gated.resolve_for(Some("Some::Other"), &pp, None),
-        GateResult::DoesNotApply,
-    );
+fn deferred_applies_through_local_ancestry() {
+    let fa = build_fa_from_source("package My::Minion;\nuse parent -norequire, 'Minion';\n1;\n");
+    let d = Deferred::new(receiver_isa("My::Minion"), "payload");
+    assert_eq!(d.pick(&fa, None).reading, Some(&"payload"));
 }
 
 #[test]
-fn receiver_gated_untyped_for_unknown_receiver() {
-    let pp: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    let gated = ReceiverGated::new("Minion", 1u8);
-    assert_eq!(gated.resolve_for(None, &pp, None), GateResult::ReceiverUntyped);
-    assert_eq!(gated.resolve_for(Some(""), &pp, None), GateResult::ReceiverUntyped);
+fn deferred_unrelated_receiver_is_a_settled_no() {
+    let fa = build_fa_from_source("package P;\n1;\n");
+    let d = Deferred::new(receiver_isa("Some::Other"), 1u8);
+    assert_eq!(d.pick(&fa, None), Picked { verdict: Verdict::No, reading: None });
+}
+
+#[test]
+fn deferred_untyped_receiver_is_unknown() {
+    let fa = build_fa_from_source("package P;\n1;\n");
+    let d = Deferred::new(receiver_isa(""), 1u8);
+    assert_eq!(d.pick(&fa, None), Picked { verdict: Verdict::Unknown, reading: None });
+}
+
+#[test]
+fn deferred_package_outside_any_package_never_descends() {
+    let fa = build_fa_from_source("1;\n");
+    let d = Deferred::new(Question::PackageIsa { package: None, class: "Minion".into() }, 1u8);
+    assert_eq!(d.pick(&fa, None).verdict, Verdict::No);
 }
 
 // ---- %EXPORT_TAGS membership folds into the export surface (B-tag / NAV-B) ----

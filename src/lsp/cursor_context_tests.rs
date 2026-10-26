@@ -457,7 +457,7 @@ fn test_detect_qualified_path_with_unicode_segment() {
 }
 
 /// Gate 4: `resolve_node_type`'s scalar/array/hash arm now threads `module_index`
-/// into `inferred_type_via_bag_ctx`. Without the fix, a `ReceiverGated` TC for
+/// into `inferred_type_via_bag_ctx`. Without the fix, a `PackageIsa`-deferred TC for
 /// `$c` (typed `Catalyst` only when the package `isa Catalyst::Controller`) would
 /// not resolve in the cursor-context path — the bag query without a module index
 /// cannot chase cross-file ancestry. This test exercises the tree-based path
@@ -466,16 +466,16 @@ fn test_detect_qualified_path_with_unicode_segment() {
 #[test]
 fn test_resolve_node_type_scalar_threads_module_index() {
     use crate::index::module_index::ModuleIndex;
-    // Build a controller that has $c typed via a cross-file ReceiverGated TC.
+    // Build a controller that has $c typed via a cross-file `PackageIsa`-deferred TC.
     // We use the real builder (not a plugin) — instead, give $c an explicit
     // TypeConstraint via a known-type assignment so the test doesn't need a
     // plugin registry, but DOES need cross-file ancestry to resolve.
     //
     // Simpler: build a source where $c is directly typed by the builder (a
     // normal variable assignment), then confirm the cursor-context path surfaces
-    // the type. The module_index threading matters for ReceiverGated TCs; the
+    // the type. The module_index threading matters for deferred TCs; the
     // direct-TC case passes even without the fix, so we note the e2e catalys test
-    // covers the full ReceiverGated path. This test covers the code path change.
+    // covers the full deferred path. This test covers the code path change.
     let source = "package Foo;\nmy $c = Foo->new();\n$c->";
     let tree = parse(source);
     let fa = crate::build::builder::build(&tree, source.as_bytes());

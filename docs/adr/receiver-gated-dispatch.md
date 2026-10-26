@@ -12,39 +12,26 @@ helper returns a `Minion` subclass). Two facts force the design:
   are built and never enriched, so any promotion that runs at enrichment
   never reaches them.
 
-## The seam: `ReceiverGated<T>`
+## The seam: a `ReceiverIsa` deferral
 
-```rust
-pub struct ReceiverGated<T> { gate: String /*ClassName*/, inner: T }
-pub enum GateResult<U> { Applies(U), DoesNotApply, ReceiverUntyped }
-impl<T> ReceiverGated<T> {
-    pub fn resolve_for(&self, receiver_class: Option<&str>,
-        local: &dyn LocalParents, module_index: Option<&dyn CrossFileLookup>) -> GateResult<&T>;
-}
-```
+A candidate is a `Deferred<DispatchCandidate>` (`ProvisionalDispatch`)
+whose question is `Question::ReceiverIsa { receiver, class }`
+(`docs/adr/query-delayed-facts.md`). The reading is private; `pick` is the
+only reader, and it decides the question first. A caller that forgets the
+filter is a compile error, not a silent drift: rule #10 made structural.
 
-The inner payload is readable through exactly one method, `resolve_for`,
-which gates on the receiver. `inner` has no `pub` field, no `Deref`, no
-`into_inner` — a consumer **cannot** observe gated content without first
-asking "does this receiver qualify?". A future caller that forgets the
-filter is a compile error, not a silent drift. This is rule #10 made
-structural: the type carries the rule, the consumer can't re-decide it.
-
-`resolve_for` walks the single isa seam — the free `class_isa(class,
-target, local, module_index)` over local `PackageFacts::parents` ∪
-cross-file `parents_cached`. That is real ancestry only — a strict
-subset of what `parents_of` enumerates, which also appends the synthetic
-app-surface edge (see "Still deferred," below). No second ancestry walk
-exists.
-
-The `gate` is one `ClassName` in Phase 1. Widening it to a small set later
-is a change to `resolve_for`'s body, not to call sites — they only ever
-see the three `GateResult` arms.
+The producer names the receiver: `Receiver::Class` when the walk typed it,
+else `Receiver::CallInvocant(ref)`, the call's own `MethodCall` ref, typed
+at decide time through `method_call_invocant_class` (bag-routed, cross-file
+aware). The decider walks the single isa seam, the free `class_isa` over
+local `PackageFacts::parents` ∪ cross-file `parents_cached`: real ancestry
+only, a strict subset of what `parents_of` enumerates (no app-surface edge,
+see "Still deferred," below).
 
 ## Query-time dispatch (option C)
 
-Each per-file dispatch candidate rides the cache as
-`ReceiverGated<DispatchCandidate>`, recorded at build, ungated, per-file
+Each per-file dispatch candidate rides the cache as a
+`ProvisionalDispatch`, recorded at build, ungated, per-file
 (the builder still owns the CST walk that finds the call). The receiver
 isa-check runs at **query time**:
 
@@ -53,10 +40,8 @@ isa-check runs at **query time**:
   (`refs_to` for a `Handler` target) and dispatch goto-def
   (`FileAnalysis::dispatch_at`) both route through it, so a call site in a
   NON-open workspace/dependency file surfaces exactly like an open one.
-- The receiver class comes from the existing invocant resolution
-  (build-time `ClassName` hint, else `method_call_invocant_class`, bag-
-  routed and cross-file aware) — gate *input*, distinct from gated
-  *content*. Only the handler-link payload (name, owner) is protected.
+- The receiver is gate *input*, on the question; only the handler-link
+  payload (name, owner) is the protected reading.
 
 Why C over the alternatives:
 
@@ -80,16 +65,16 @@ in sync: the materialized refs are the emit-hook's own output, and the
 gated candidates are the only thing the manifest path produces — there is
 no enrichment-time promotion of candidates into refs.
 
-## The 3-way `GateResult` + opt-in diagnostic
+## The 3-way `Verdict` + opt-in diagnostic
 
-Splitting `DoesNotApply` from `ReceiverUntyped` is load-bearing.
-`DoesNotApply` is a settled negative (the receiver typed, it just isn't a
-descendant of the gate). `ReceiverUntyped` is a typing gap — the receiver
+Splitting `No` from `Unknown` is load-bearing. `No` is a settled
+negative (the receiver typed, it just isn't a descendant of the gate).
+`Unknown` is a typing gap — the receiver
 of a known dispatch verb couldn't be pinned to any class, so applicability
 is unknown.
 
-The opt-in `unresolved-dispatch` diagnostic fires ONLY on
-`ReceiverUntyped`, NEVER on `DoesNotApply`. Collapsing the two would
+The opt-in `unresolved-dispatch` diagnostic fires ONLY on `Unknown`,
+NEVER on `No`. Collapsing the two would
 either bury real gaps or spew an INFO on every unrelated receiver. It is a
 QA/plugin-author tool, so it is **off by default**, behind
 `initializationOptions.diagnostics.unresolvedDispatch` (LSP) and
@@ -100,16 +85,16 @@ QA/plugin-author tool, so it is **off by default**, behind
 
 The receiver-isa rule is one instance of a broader shape: *a plugin
 emission applies only when an ancestry/role/surface predicate holds, and
-that predicate is cross-file*. The same `ReceiverGated` producer mints
+that predicate is cross-file*. The same `Deferred` carrier holds
 the other deferred emission-conditionals (see
 `docs/prompt-enrichment-inheritance-residual.md`).
 
 **`param_types` `in_role`.** A plugin `param_types()` rule types a
 named param when the enclosing package `isa` the rule's `in_role` class. The
-builder now emits one `ReceiverGated<TypeConstraint>` per matching sub
-(`gate = in_role`), UNGATED — no local-ancestry precondition, preserving the
-index-free contract. `FileAnalysis::gated_param_type_for` resolves it at
-query time via `resolve_for(enclosing_package, …)`, so a controller whose
+builder emits one `Deferred<TypeConstraint>` per matching sub, asking
+`PackageIsa { package: the sub's package, class: in_role }`, with no
+local-ancestry precondition, preserving the index-free contract.
+`FileAnalysis::gated_param_type_for` decides it at query time, so a controller whose
 `Catalyst::Controller` ancestor is reachable only through a cross-file base
 types its `$c`. The gated TC is a *value read through one query seam*
 (`inferred_type_via_bag_ctx`), which is what makes the single-seam gate
@@ -132,5 +117,5 @@ fork in `docs/open-forks.md`.
 Still deferred:
 
 - the app-surface consumer set (already isa-shaped via `parents_of` +
-  `app_surface_consumers`; folding it onto `resolve_for` is a small
+  `app_surface_consumers`; folding it into `Question::decide` is a small
   consolidation, not a correctness gap).

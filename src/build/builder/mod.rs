@@ -513,7 +513,7 @@ struct Builder<'a> {
     /// `param_types()` role-contract TCs, emitted ungated at the sub walk and
     /// gated on the enclosing package's `isa in_role` (checked cross-file at
     /// query time). See `FileAnalysis::gated_param_types`.
-    gated_param_types: Vec<crate::model::file_analysis::ReceiverGated<crate::model::file_analysis::TypeConstraint>>,
+    gated_param_types: Vec<crate::model::file_analysis::Deferred<crate::model::file_analysis::TypeConstraint>>,
 
     /// Build-time chain-typing cache for MethodCall ref invocants.
     /// Keyed by `refs[idx]`. Walk-time fills it for syntactic cases
