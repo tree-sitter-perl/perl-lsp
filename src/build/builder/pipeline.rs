@@ -110,11 +110,19 @@ pub(crate) const MAX_CST_DEPTH: usize = 100_000;
 /// Maximum node depth of the tree, measured iteratively (`TreeCursor`, no
 /// recursion — safe to run on exactly the trees the walk cannot handle).
 pub(crate) fn cst_depth(tree: &Tree) -> usize {
-    let mut cursor = tree.root_node().walk();
+    survey(tree.root_node(), |_| {})
+}
+
+/// Depth of the tree under `root`, calling `visit` on every node on the way
+/// — one iterative pass for every whole-tree screen the build needs.
+fn survey<'t>(root: Node<'t>, mut visit: impl FnMut(Node<'t>)) -> usize {
+    let mut cursor = root.walk();
     let mut depth = 0usize;
     let mut max_depth = 0usize;
+    visit(root);
     loop {
         if cursor.goto_first_child() {
+            visit(cursor.node());
             depth += 1;
             if depth > max_depth {
                 max_depth = depth;
@@ -123,6 +131,7 @@ pub(crate) fn cst_depth(tree: &Tree) -> usize {
         }
         loop {
             if cursor.goto_next_sibling() {
+                visit(cursor.node());
                 break;
             }
             if !cursor.goto_parent() {
@@ -131,6 +140,31 @@ pub(crate) fn cst_depth(tree: &Tree) -> usize {
             depth -= 1;
         }
     }
+}
+
+/// Every `s///e` replacement parsed as Perl over the file's own bytes
+/// (tree-sitter included ranges), so its nodes index `source` and the walk
+/// visits them as code. Keyed by the replacement's start byte; replacements
+/// nested inside one are parsed too.
+fn parse_eval_replacements(mut ranges: Vec<tree_sitter::Range>, source: &[u8]) -> Vec<(usize, Tree)> {
+    let mut out = Vec::new();
+    if ranges.is_empty() {
+        return out;
+    }
+    let mut parser = super::create_parser();
+    while let Some(range) = ranges.pop() {
+        if parser.set_included_ranges(&[range]).is_err() {
+            continue;
+        }
+        let Some(code) = parser.parse(source, None) else { continue };
+        survey(code.root_node(), |n| {
+            if let Some(r) = crate::cst::eval_replacement(n, source) {
+                ranges.push(r.range());
+            }
+        });
+        out.push((range.start_byte, code));
+    }
+    out
 }
 
 /// Honest degradation for a tree too deep to walk: no analysis, and a
@@ -293,14 +327,21 @@ fn build_once(
     // Cheap structural bound, measured iteratively so it is safe on exactly
     // the trees it screens. See `MAX_CST_DEPTH` for why the number is what
     // it is and what it does — and no longer does.
-    let depth = cst_depth(tree);
+    let mut evals = Vec::new();
+    let depth = survey(tree.root_node(), |n| {
+        if let Some(r) = crate::cst::eval_replacement(n, source) {
+            evals.push(r.range());
+        }
+    });
     if depth > MAX_CST_DEPTH {
         return too_deep_analysis(tree, depth);
     }
+    let eval_trees = parse_eval_replacements(evals, source);
     let topic_dsls: Vec<plugin::TopicRouteDsl> =
         plugins.all().filter_map(|pl| pl.topic_route_dsl()).collect();
     let mut b = Builder {
         source,
+        eval_injections: eval_trees.iter().map(|(at, t)| (*at, t.root_node())).collect(),
         scopes: Vec::new(),
         symbols: Vec::new(),
         owner_scope: std::collections::HashMap::new(),

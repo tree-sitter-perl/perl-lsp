@@ -60,6 +60,18 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 }
 
+/// The replacement of an `s///e` (or `/ee`, which evals the result once
+/// more): Perl compiles it as code, the grammar reads it as a string.
+pub(crate) fn eval_replacement<'a>(node: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
+    if node.kind() != "substitution_regexp" {
+        return None;
+    }
+    if !node.child_by_field_name("modifiers")?.text(src)?.contains('e') {
+        return None;
+    }
+    node.elements().find(|c| c.kind() == "replacement")
+}
+
 pub(crate) fn node_to_span(node: Node) -> Span {
     Span {
         start: node.start_position(),

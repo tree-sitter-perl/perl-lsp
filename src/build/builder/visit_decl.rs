@@ -228,32 +228,30 @@ impl<'a> Builder<'a> {
             "quoted_regexp" | "match_regexp" => {
                 self.queue_children(node);
             }
-            "substitution_regexp" => {
-                // `s///e`: the replacement is Perl *code*, but the grammar
-                // emits it as a plain `replacement` node (not parsed as code).
-                // Re-parse it so calls/vars inside resolve (rule #7), mapping
-                // spans back to the file. Same idea as the __END__/ISA re-parses.
-                let repl = self.subst_replacement_is_eval(node).then(|| {
-                    (0..node.named_child_count())
-                        .filter_map(|i| node.named_child(i))
-                        .find(|c| c.kind() == "replacement")
-                }).flatten();
-                // The grammar reads an `/e` replacement as an interpolated
-                // string, so its own children are the string view (`$h{k}`
-                // as a `$h` scalar): walking them too mints refs to
-                // variables the code never names.
-                match repl {
-                    Some(repl) => {
-                        self.emit_refs_in_eval_replacement(repl);
-                        // Reversed: the driver pops from the end.
-                        let rest: Vec<_> = crate::cst::NodeExt::elements(&node).filter(|c| *c != repl).collect();
-                        for c in rest.into_iter().rev() {
-                            self.queue_node(c);
+            // The grammar reads an `/e` replacement as an interpolated
+            // string: its own children are the string view (`$h{k}` as a `$h`
+            // scalar). The code is the replacement's own parse, walked in a
+            // block scope of its own.
+            "substitution_regexp" => match crate::cst::eval_replacement(node, self.source) {
+                Some(repl) => {
+                    let code = self.eval_injections.get(&repl.start_byte()).copied();
+                    let mut steps: Vec<Box<dyn FnOnce(&mut Builder<'a>) + 'a>> = Vec::new();
+                    for c in crate::cst::NodeExt::elements(&node) {
+                        if c != repl {
+                            steps.push(Box::new(move |b: &mut Builder<'a>| b.queue_node(c)));
+                        } else if let Some(root) = code {
+                            steps.push(Box::new(move |b: &mut Builder<'a>| {
+                                b.push_scope(ScopeKind::Block, node_to_span(repl), None);
+                                b.queue_children_then(root, |b| {
+                                    b.pop_scope();
+                                });
+                            }));
                         }
                     }
-                    None => self.queue_children(node),
+                    self.queue_sequence(steps);
                 }
-            }
+                None => self.queue_children(node),
+            },
 
             // ERROR nodes: recover structural declarations (the file's skeleton)
             // but skip expressions/refs which are unreliable inside broken regions
