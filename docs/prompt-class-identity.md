@@ -178,9 +178,9 @@ the class's members — else the namespace in force (`scopes::home_of`).
 `class Outer: class Inner:` in `pkg/mod.py` files `Inner` as
 `pkg.mod.Outer.Inner`, so Django's per-model `class Meta:` is one class
 per model; a class declared in a method of `Outer` is filed under the
-module. The class's def mints its identity and the scope it is declared
-in once (`defs::MintedClass`); its `@context.class` and its `@parent`
-matches read that, never mint it again.
+module. The class's def mints its identity once (`defs::State::
+classes_by_name`); its `@context.class` and its `@parent` matches read
+that, never mint it again.
 
 *Lookup.* A bare head walks `lookup_chain` from the scope it is written
 in, and each scope on it offers the classes declared directly in it
@@ -198,13 +198,18 @@ dotted spelling hangs off its head as any qualified spelling does:
 `Outer.Inner`, in the file or after `from pkg.mod import Outer`, is
 `pkg.mod.Outer.Inner`.
 
-*Headers.* A class's own scope covers its header, but a base is
-evaluated where the class is declared. The extractor states it: a
-reference in a `@parent` match is minted in the scope its class is
-declared in (`scopes::written_in`, the `Ref::scope` the query side
-resolves from through `UseMap::in_scope`), and the edge resolves from
-the same scope. `class B(A):` in `Outer`'s body names the sibling
-`Outer.A`, even when B declares an `A` of its own.
+*Headers.* A def's own scope covers its header, but the header runs
+where the def is written: a class's bases, a function's parameter
+annotations and defaults and its `-> T`. The document marks each region
+`@scope.header` (`docs/adr/capture-vocabulary.md`), minted as a scope
+whose parent is the def's declaring scope, so a reference written there
+carries that scope (`Ref::scope`, which the query side resolves from
+through `UseMap::in_scope`), a parent edge resolves from it, and a
+positional lookup in it lands there too. `class B(A):` in `Outer`'s body
+names the sibling `Outer.A`, even when B declares an `A` of its own; a
+method's `x: Inner = Inner()` and `-> Inner` name `Outer.Inner` while
+its body reaches the module's `Inner`. The parameter names bind in the
+method.
 
 The namespace sections are the namespace lane every language shares,
 `FileAnalysis::namespace_ranges` — Perl's packages are written to it by the
@@ -235,12 +240,11 @@ leaf-space FQ family validation in `implementations_of`.
   An open document's debounced rebuild that named its module before a
   marker flip and lands after the invalidator's refresh keeps the old
   name until its next edit.
-- **A method's signature is inside its own scope.** Python evaluates a
-  method's parameter annotations and defaults in the class scope, but the
-  `@scope.sub` the document captures is the whole `function_definition`,
-  so they resolve past the class the way the body does. A class declared
-  in a method is filed under the module (`pkg.mod.Local`), not Python's
-  `Outer.build.<locals>.Local`.
+- **A class declared in a method is filed under the module**
+  (`pkg.mod.Local`), not Python's `Outer.build.<locals>.Local`.
+- **A scope opened inside a header keeps the def's chain.** No Python
+  construct opens one today (a lambda is no scope), but a document that
+  marks one would see the def's own scope through it.
 - **The namespace in force inside a class body is the module.**
   `namespace_at` reads the lane, which holds no class; the class a site's
   code belongs to is `package_at`'s answer.
@@ -255,11 +259,10 @@ leaf-space FQ family validation in `implementations_of`.
   of its enclosing class there, so the call is untyped and goto-def finds
   nothing; the class reference spellings (a parent clause, an annotation)
   resolve.
-- **A dotted annotation mints no class reference.** `v: Outer.Inner`
-  types `v` as `pkg.models.Outer.Inner`, but its tokens are a
-  `FieldAccess` on `Outer`, not a `PackageRef`, so goto-def on `Inner`
-  there finds nothing; the parent clause `class V(Outer.Inner)` is a
-  `PackageRef` and lands on the declaration.
+- **An annotation is a class reference by its spelling alone.** Every
+  name in a `type` is a `PackageRef` (`v: Outer.Inner` rewrites `Inner`
+  on a rename), so a builtin (`x: int`) is a reference that lands
+  nowhere.
 
 - **The visibility pins have no site.** `UseMapPins` is per ORIGIN
   (`VisibilityAxis::for_origin` takes a file, not a position), so it
