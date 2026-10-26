@@ -1409,6 +1409,21 @@ impl FileAnalysis {
         false
     }
 
+    /// The class whose instance slot `sym` is, where this language's member
+    /// access reaches slots (`InstanceSlots::BeforeClass`): a `HashKeyDef`
+    /// its class owns (`HashKeyOwner::Class`). `None` for any other symbol,
+    /// and for every slot of a language that reaches slots by a syntax of
+    /// their own (Perl's `$obj->{key}`).
+    pub fn slot_class_of<'s>(&self, sym: &'s Symbol) -> Option<&'s str> {
+        if self.names().instance_slots != InstanceSlots::BeforeClass {
+            return None;
+        }
+        match &sym.detail {
+            SymbolDetail::HashKeyDef { owner: HashKeyOwner::Class(c), .. } => Some(c),
+            _ => None,
+        }
+    }
+
     /// Is `sym` a class's OWN content — a member declared in the class body
     /// (struct field, member-block-macro role member) or an enum constant
     /// (which leaks into the scope that contains the enum) — as opposed to a
@@ -1428,7 +1443,20 @@ impl FileAnalysis {
     /// def forward: members via the ancestor walk, enum constants via the
     /// bare-name cross-file lookup. Perl symbols never qualify (variables
     /// and Corinna fields carry sigils; callables aren't Variable/Field).
+    /// An instance slot member access reaches (`slot_class_of`) is its
+    /// class's content by its owner, wherever the write that declared it is.
     pub(crate) fn symbol_is_class_content(&self, sym: &Symbol) -> bool {
+        if self.slot_class_of(sym).is_some() {
+            return true;
+        }
+        // A class-body binding's lexical twin (`Symbol::declared_with`): the
+        // member it was declared with is the class's content, the twin is
+        // the bare name code in the body reads.
+        if sym.kind == SymKind::Variable
+            && sym.declared_with.is_some_and(|id| self.symbol_is_class_content(self.symbol(id)))
+        {
+            return false;
+        }
         if !matches!(sym.kind, SymKind::Variable | SymKind::Field | SymKind::Enumerator) {
             return false;
         }

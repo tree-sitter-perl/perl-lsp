@@ -340,6 +340,22 @@ impl FileAnalysis {
             (outer.start.row, outer.start.column) <= (inner.start.row, inner.start.column)
                 && (inner.end.row, inner.end.column) <= (outer.end.row, outer.end.column)
         };
+        // An instance's slots first, as member access reads them.
+        for sym in &self.symbols {
+            if self.slot_class_of(sym) == Some(cls) && seen.insert(sym.name.clone()) {
+                candidates.push(CompletionCandidate {
+                    label: sym.name.clone(),
+                    kind: sym.kind,
+                    is_static: false,
+                    detail: None,
+                    insert_text: None,
+                    sort_priority: PRIORITY_LOCAL,
+                    additional_edits: vec![],
+                    import_fact: None,
+                    display_override: None,
+                });
+            }
+        }
         for sym in &self.symbols {
             if matches!(sym.kind, SymKind::Variable | SymKind::Field)
                 && self.symbol_in_class(sym.id, cls)

@@ -38,24 +38,35 @@
 ; class package; the Sub boundary is what marks it a local, not a member).
 (function_definition) @scope.sub
 
-; A name a class body binds — `count = 0`, `a: int`, `b: int = 5` — is a
-; data member of the class, and a name in the class scope: code written
-; directly in the body reads it bare. Its value is the assignment's flow
-; target below, typed by an annotation where there is one.
+; A name a class body binds — `count = 0`, `a: int`, `b: int = 5` — is two
+; things from one token: a data member of the class (`Counter.count`) and a
+; name in the class scope (code written directly in the body reads it
+; bare). The match declares the two as one (`@def.pair`), so a rename of
+; either rewrites both. Its value is the assignment's flow target below,
+; typed by an annotation where there is one.
 (class_definition
   body: (block
     (expression_statement
-      (assignment left: (identifier) @def.field.name) @def.field)))
+      (assignment
+        left: (identifier) @def.field.name @def.var.name @def.pair) @def.field @def.var)))
 
-; `self.attr = ...` → an instance attribute: a member of the class the
-; receiver is typed as (`self`, or an annotated `other: Counter`), declared
-; by the first such write in the file. THE dominant Python member idiom —
-; without it `obj.` offers no data attributes. It is no bare name anywhere;
-; a later write, or one through an untyped receiver, is a use of it.
+; A class-body binding with a value is the class's own attribute, read
+; through the class itself; a bare annotation declares an instance's.
+(class_definition
+  body: (block
+    (expression_statement
+      (assignment left: (identifier) @mark.static right: (_)))))
+
+; `self.attr = ...` → an instance slot of the class the receiver is typed
+; as (`self`, or an annotated `other: Counter`), declared by a write only
+; when neither the class nor an ancestor declares the name already. THE
+; dominant Python member idiom — without it `obj.` offers no data
+; attributes. It is no bare name anywhere; a later write, or one through an
+; untyped receiver, is a use of it.
 (assignment
   left: (attribute
-    object: (identifier) @def.field.receiver
-    attribute: (identifier) @def.field.name) @def.field)
+    object: (identifier) @def.slot.receiver
+    attribute: (identifier) @def.slot.name) @def.slot)
 
 (parameters
   (identifier) @def.var.name @def.var)

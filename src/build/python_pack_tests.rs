@@ -834,12 +834,13 @@ fn members_fa() -> FileAnalysis {
     py_in(MEMBERS, Some(&module(&["pkg", "mod"], false)))
 }
 
+/// The class's members as (name, row, is an instance slot): a class-body
+/// field, or a class-owned key a receiver write declares.
 fn fields_of(fa: &FileAnalysis) -> Vec<(&str, usize, bool)> {
-    use crate::model::file_analysis::SymbolFlags;
     fa.symbols()
         .iter()
-        .filter(|s| s.kind == SymKind::Field && s.package.as_deref() == Some("pkg.mod.Counter"))
-        .map(|s| (s.name.as_str(), s.span.start.row, s.flags.contains(SymbolFlags::THROUGH_RECEIVER)))
+        .filter(|s| matches!(s.kind, SymKind::Field | SymKind::HashKeyDef) && s.package.as_deref() == Some("pkg.mod.Counter"))
+        .map(|s| (s.name.as_str(), s.span.start.row, s.kind == SymKind::HashKeyDef))
         .collect()
 }
 
@@ -858,29 +859,32 @@ fn a_class_body_binding_is_a_field_of_the_class() {
     }
 }
 
-/// A class-body field is a bare name for the code written directly in the
-/// body, and for nothing nested in it.
+/// A class-body binding's Variable twin is a bare name for the code
+/// written directly in the body, and for nothing nested in it.
 #[test]
-fn a_class_body_field_is_a_bare_name_in_the_body_only() {
+fn a_class_body_binding_is_a_bare_name_in_the_body_only() {
     let fa = members_fa();
     let read = Point::new(4, 12);
-    assert_eq!(fa.resolve_variable("count", read).map(|s| (s.kind, s.span.start.row)), Some((SymKind::Field, 1)));
     let r = fa.refs().iter().find(|r| r.span.start == read).expect("the read is a reference");
-    assert_eq!(r.resolved_symbol().map(|sid| fa.symbol(sid).span.start.row), Some(1));
+    let bound = r.resolved_symbol().map(|sid| fa.symbol(sid)).expect("the read binds");
+    assert_eq!((bound.kind, bound.span.start.row), (SymKind::Variable, 1));
+    let field = fa.symbol(bound.declared_with.expect("declared with its field"));
+    assert_eq!((field.kind, field.package.as_deref()), (SymKind::Field, Some("pkg.mod.Counter")));
     // the method reads past the class body
     assert!(fa.resolve_variable("count", Point::new(11, 24)).is_none());
 }
 
-/// The first write through a method's receiver declares an instance field
+/// The first write through a method's receiver declares an instance slot
 /// on the receiver's class; later writes declare nothing, a write through
-/// an untyped name declares nothing, and the field is no bare name.
+/// an untyped name declares nothing, a write of a class-body name declares
+/// nothing, and the slot is no bare name.
 #[test]
-fn the_first_write_through_self_declares_an_instance_field() {
+fn the_first_write_through_self_declares_an_instance_slot() {
     let fa = members_fa();
     let ns: Vec<_> = fields_of(&fa).into_iter().filter(|&(n, ..)| n == "n").collect();
     assert_eq!(ns, [("n", 6, true)]);
     assert!(!fa.symbols().iter().any(|s| s.name == "z"), "a write through an untyped parameter declares nothing");
-    assert!(!fa.symbols().iter().any(|s| s.kind == SymKind::Field && s.name == "count" && s.span.start.row != 1));
+    assert!(!fa.symbols().iter().any(|s| s.name == "count" && s.span.start.row != 1));
     assert!(fa.resolve_variable("n", Point::new(11, 20)).is_none());
     assert!(fa.resolve_variable("n", Point::new(12, 0)).is_none());
 }
@@ -933,4 +937,171 @@ fn a_member_through_self_lands_on_its_field() {
         let (defs, _, _) = landing(&idx, &path, at);
         assert_eq!(defs, [("mod.py".to_string(), row)], "goto-def from {at:?}");
     }
+}
+
+/// A class-body binding with a value is the class's own attribute; a bare
+/// annotation declares an instance's and stays unmarked.
+#[test]
+fn a_valued_class_body_binding_is_static() {
+    use crate::model::file_analysis::SymbolFlags;
+    let fa = members_fa();
+    let field = |name: &str| {
+        fa.symbols()
+            .iter()
+            .find(|s| s.kind == SymKind::Field && s.name == name)
+            .unwrap_or_else(|| panic!("{name} is a field"))
+    };
+    for name in ["count", "b", "total"] {
+        assert!(field(name).flags.contains(SymbolFlags::STATIC), "{name}");
+    }
+    assert!(!field("a").flags.contains(SymbolFlags::STATIC));
+}
+
+const SLOTS: &str = "\
+class Counter:
+    count = 0
+    def __init__(self):
+        self.n = 1
+    def bump(self):
+        self.n = 2
+        self.count = 5
+    b = count + 1
+
+c = Counter()
+x = c.n
+y = Counter.count
+";
+
+/// Every edit a rename to `new` from `at` writes, as (row, column).
+#[cfg(feature = "python")]
+fn renamed_at(
+    idx: &crate::index::module_index::ModuleIndex,
+    path: &std::path::Path,
+    at: Point,
+    new: &str,
+) -> Vec<(usize, usize)> {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let fa = idx.workspace_file_for_test(path).unwrap();
+    let store = OpenDocs::new();
+    let cs = resolve(&store, &fa, FileKey::Path(path.to_path_buf()), at, Some(idx), OverrideScope::default());
+    let mut e: Vec<(usize, usize)> = cs
+        .rename_edits(new)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(l, text)| {
+            assert_eq!(text, new);
+            (l.span.start.row, l.span.start.column)
+        })
+        .collect();
+    e.sort();
+    e.dedup();
+    e
+}
+
+/// A write through `self` declares one instance slot of the class — a
+/// class-owned key, as Perl's `$self->{n}` — however many methods write
+/// it, and none for a name the class body binds. A read through an
+/// instance lands on it and a rename from any spelling moves them all.
+#[cfg(feature = "python")]
+#[test]
+fn a_write_through_self_declares_one_class_owned_slot() {
+    use crate::model::file_analysis::{HashKeyOwner, SymbolDetail};
+    let (t, idx) = indexed("pyslots", &[("pkg/__init__.py", ""), ("pkg/mod.py", SLOTS)]);
+    let path = t.0.join("pkg/mod.py");
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let mut members = fields_of(&fa);
+    members.sort();
+    assert_eq!(members, [("b", 7, false), ("count", 1, false), ("n", 3, true)]);
+    let slot = fa.symbols().iter().find(|s| s.kind == SymKind::HashKeyDef).unwrap();
+    assert!(matches!(
+        &slot.detail,
+        SymbolDetail::HashKeyDef { owner: HashKeyOwner::Class(c), .. } if c == "pkg.mod.Counter"
+    ));
+    for at in [Point::new(5, 13), Point::new(10, 6)] {
+        let (defs, _, _) = landing(&idx, &path, at);
+        assert_eq!(defs, [("mod.py".to_string(), 3)], "goto-def from {at:?}");
+    }
+    let all = [(3, 13), (5, 13), (10, 6)];
+    assert_eq!(renamed_at(&idx, &path, Point::new(10, 6), "m"), all);
+    assert_eq!(renamed_at(&idx, &path, Point::new(3, 13), "m"), all);
+}
+
+/// A class-body binding is two names from one token: the class's member
+/// `Counter.count` and the bare name the body reads. Each spelling binds
+/// its own, and a rename from either moves both.
+#[cfg(feature = "python")]
+#[test]
+fn a_class_body_binding_is_a_member_and_a_bare_name_renamed_together() {
+    let (t, idx) = indexed("pytwin", &[("pkg/__init__.py", ""), ("pkg/mod.py", SLOTS)]);
+    let path = t.0.join("pkg/mod.py");
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let read = fa.refs().iter().find(|r| r.span.start == Point::new(7, 8)).expect("the body read is a reference");
+    assert_eq!(read.resolved_symbol().map(|sid| fa.symbol(sid).kind), Some(SymKind::Variable));
+    for at in [Point::new(7, 8), Point::new(11, 12), Point::new(6, 13)] {
+        let (defs, _, _) = landing(&idx, &path, at);
+        assert_eq!(defs, [("mod.py".to_string(), 1)], "goto-def from {at:?}");
+    }
+    let all = [(1, 4), (6, 13), (7, 8), (11, 12)];
+    for at in [Point::new(1, 4), Point::new(7, 8), Point::new(11, 12)] {
+        assert_eq!(renamed_at(&idx, &path, at, "total"), all, "rename from {at:?}");
+    }
+}
+
+/// A subclass's write of a name its base declares — by a class-body
+/// binding or a slot of its own — is a use of the base's member.
+#[test]
+fn a_write_of_an_inherited_name_declares_no_slot() {
+    let src = "\
+class Base:
+    n = 0
+    def __init__(self):
+        self.k = 1
+class Sub(Base):
+    def go(self):
+        self.n = 1
+        self.k = 2
+        self.m = 3
+";
+    let fa = py_in(src, Some(&module(&["pkg", "mod"], false)));
+    let mut slots: Vec<(&str, Option<&str>)> = fa
+        .symbols()
+        .iter()
+        .filter(|s| s.kind == SymKind::HashKeyDef)
+        .map(|s| (s.name.as_str(), s.package.as_deref()))
+        .collect();
+    slots.sort();
+    assert_eq!(slots, [("k", Some("pkg.mod.Base")), ("m", Some("pkg.mod.Sub"))]);
+}
+
+/// Member completion after `obj.` offers the instance's slots alongside
+/// the class's fields and methods.
+#[cfg(feature = "python")]
+#[test]
+fn completion_after_an_instance_offers_slots_and_members() {
+    let src = "\
+class Counter:
+    count = 0
+    def __init__(self):
+        self.n = 1
+    def bump(self):
+        pass
+
+def f(c: Counter):
+    c.
+";
+    let (t, idx) = indexed("pycomplete", &[("pkg/__init__.py", ""), ("pkg/mod.py", src)]);
+    let path = t.0.join("pkg/mod.py");
+    let fa = idx.workspace_file_for_test(&path).unwrap();
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_python::LANGUAGE.into()).unwrap();
+    let tree = parser.parse(src, None).unwrap();
+    let store = crate::index::open_docs::OpenDocs::new();
+    let (items, _) =
+        crate::lsp::backend::pack_completion(&store, &fa, src, &tree, Point::new(8, 6), "python", Some(&path), &idx);
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    for name in ["n", "count", "bump", "__init__"] {
+        assert!(labels.contains(&name), "{name} in {labels:?}");
+    }
+    assert_eq!(labels.iter().filter(|&&l| l == "count").count(), 1, "one entry per member: {labels:?}");
 }
