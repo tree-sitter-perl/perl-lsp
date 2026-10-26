@@ -21,15 +21,31 @@ impl FileAnalysis {
         }
     }
 
+    /// Whether every variable must be declared at `at` in `scope`: the
+    /// latest switch on the scope chain, innermost first. Off by default —
+    /// Perl without `strict` creates globals on first mention.
+    pub fn declaration_required_at(&self, scope: ScopeId, at: Point) -> bool {
+        let mut current = Some(scope);
+        while let Some(id) = current {
+            let s = self.scope(id);
+            if let Some(rule) = s.declaration_rules.iter().rev().find(|r| r.at <= at) {
+                return rule.required;
+            }
+            current = s.parent;
+        }
+        false
+    }
+
     /// Every use of a variable no declaration reaches that `use strict
-    /// 'vars'` would reject: the refs bound to an implicit global, minus the
-    /// names strict exempts (`$a`/`$b`). Declarations a `use` brings in
-    /// (Exporter's `qw($x)`) are the caller's to rule out — they need the
-    /// producer's surface.
+    /// 'vars'` rejects: the refs bound to an implicit global where
+    /// declarations are required, minus the names strict exempts
+    /// (`$a`/`$b`). Declarations a `use` brings in (Exporter's `qw($x)`)
+    /// are the caller's to rule out — they need the producer's surface.
     pub fn undeclared_variable_uses(&self) -> impl Iterator<Item = &Ref> + '_ {
         // A qualified `$main::x` names its package, so strict accepts it.
         self.refs().iter().filter(move |r| {
-            r.qualified_var_target(self.names()).is_none()
+            self.declaration_required_at(r.scope, r.span.start)
+                && r.qualified_var_target(self.names()).is_none()
                 && r.resolved_symbol().is_some_and(|id| {
                 let s = self.symbol(id);
                 matches!(s.detail, SymbolDetail::Variable { decl_kind: DeclKind::Implicit, .. })
