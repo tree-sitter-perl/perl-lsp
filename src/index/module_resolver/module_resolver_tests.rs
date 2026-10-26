@@ -183,9 +183,9 @@ fn workspace_index_progress_is_throttled_monotone_and_completes() {
         }
     };
 
-    let files = crate::index::file_store::FileStore::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let indexed =
-        index_workspace_with_index(&dir, &files, None, Some(&cb as &(dyn Fn(usize, usize) + Sync)), None);
+        index_workspace_with_index(&dir, &idx, Some(&cb as &(dyn Fn(usize, usize) + Sync)), None);
     std::fs::remove_dir_all(&dir).ok();
 
     assert_eq!(indexed, n_files, "all files indexed");

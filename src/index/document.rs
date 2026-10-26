@@ -19,16 +19,16 @@ pub struct Document {
     pub text: String,
     pub tree: Tree,
     /// `Arc` so a request handler can clone a cheap owned handle and DROP the
-    /// `FileStore` read guard before running `resolve()` — which re-locks the
+    /// `OpenDocs` read guard before running `resolve()` — which re-locks the
     /// open shards via `for_each_open`. Holding the guard across that reentrant
     /// read deadlocks against a concurrently queued writer (an edit's rebuild
-    /// or `FileStore::condition_open`'s swap): parking_lot's writer-preference
+    /// or `OpenDocs::condition_open`'s swap): parking_lot's writer-preference
     /// blocks the second read behind the queued writer, which waits on the
     /// first read.
     pub analysis: Arc<FileAnalysis>,
     /// The analysis exactly as built from `text`. `analysis` is this, or this
     /// with the deferred plugin emissions whose gate holds applied
-    /// (`FileStore::condition_open`), which always re-derives from here so a
+    /// (`OpenDocs::condition_open`), which always re-derives from here so a
     /// gate that stops holding takes its symbols with it.
     pub built: Arc<FileAnalysis>,
     pub stable_outline: StableOutline,
@@ -38,7 +38,7 @@ pub struct Document {
     /// consult the driver's declared `DriverCaps` through this id.
     pub language: &'static str,
     /// The freshness record's source: this doc's Surface, projected at BUILD
-    /// time from the pristine analysis — before `FileStore::condition_open`
+    /// time from the pristine analysis — before `OpenDocs::condition_open`
     /// swaps a gate-applied copy into `analysis`. `Surface::project`'s
     /// contract is the file's OWN facts. Retained per open doc (bounded by
     /// editor tabs) so the record never depends on when the swap ran. Perl-only; pack freshness is the
@@ -128,7 +128,7 @@ impl Document {
         {
             return;
         }
-        let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+        let reg = crate::build::language_driver::LanguageRegistry::compiled();
         if let Some(driver) = reg.for_id(self.language) {
             let mut parser = driver.make_parser();
             if let Some(tree) = parser.parse(&new_text, None) {
@@ -161,7 +161,7 @@ impl Document {
             .synchronous_rebuild
         {
             self.update_text_only(new_text);
-            let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+            let reg = crate::build::language_driver::LanguageRegistry::compiled();
             if let Some(driver) = reg.for_id(self.language) {
                 self.set_built(driver.analyze_with_path(&self.text, self.path.as_deref()));
                 self.stable_outline.update(&self.analysis, &self.text);
@@ -227,7 +227,7 @@ impl Document {
 }
 
 impl StableOutline {
-    fn from_analysis(analysis: &FileAnalysis) -> Self {
+    pub(crate) fn from_analysis(analysis: &FileAnalysis) -> Self {
         let mut outline = StableOutline::default();
         for sym in analysis.symbols() {
             match sym.kind {

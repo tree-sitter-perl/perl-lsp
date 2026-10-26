@@ -38,7 +38,7 @@ pub mod codes {
 #[serde(rename_all = "camelCase", default)]
 pub struct DiagnosticOptions {
     /// Fire `unresolved-dispatch` when a known dispatch verb's receiver can't
-    /// be typed (`GateResult::ReceiverUntyped`) — never on a settled
+    /// be typed (`Verdict::Unknown`) — never on a settled
     /// `DoesNotApply`. Off by default.
     pub unresolved_dispatch: bool,
     /// Fire `use-after-move` on the decidable subset (straight-line, in-function,
@@ -583,14 +583,15 @@ pub fn collect_diagnostics(
     // check (docs/adr/role-contracts.md). WARNING, not HINT: Perl
     // dies at composition time for this. Anchored to the `with 'Role'`
     // PackageRef inside the composing package; the package decl is the
-    // fallback (e.g. the parent edge came from a raw `@ISA` push).
+    // fallback (e.g. the parent edge came from a raw `@ISA` push). The
+    // parent edge carries the identity, so the ref's spelling resolves first.
     for u in analysis.unfulfilled_role_requires(Some(module_index)) {
         let span = analysis
             .refs()
             .iter()
             .find(|r| {
                 matches!(r.kind, RefKind::PackageRef)
-                    && r.target_name == u.via_parent
+                    && analysis.spelled_identity(r) == u.via_parent
                     && analysis.package_at(r.span.start) == Some(u.package.as_str())
             })
             .map(|r| r.span)
@@ -683,7 +684,7 @@ pub fn collect_diagnostics(
     // Opt-in `unresolved-dispatch`: a known dispatch verb whose receiver
     // couldn't be typed, so we can't tell if the dispatch applies. Fires ONLY
     // on `ReceiverUntyped` (a real typing gap), never on `DoesNotApply` — the
-    // 3-way `GateResult` keeps the two apart so the diagnostic can't spew on
+    // 3-way `Verdict` keeps the two apart so the diagnostic can't spew on
     // every unrelated receiver. QA/plugin-author tool, hence default-off.
     if options.unresolved_dispatch {
         let _g_dispatch =

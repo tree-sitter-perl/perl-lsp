@@ -459,7 +459,7 @@ The shred makes a class of "interesting data" queries buildable as SQL over
   fan-in includes `_test.cc` files clangd misses returns the same count,
   same files, with refs evicted.
 - Gold + e2e nets green; `cargo test` under default and `--features
-  all-langs`.
+  cpp`.
 - RSS: `PERL_LSP_HEAP_DUMP` on abseil shows the `refs`/`symbols`/
   `rebuilt_indices` buckets ≈ 0 for index copies; the Chromium stress
   corpus completes inside the 20 GB guard.

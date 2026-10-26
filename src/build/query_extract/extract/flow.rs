@@ -181,6 +181,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
                     receiver,
                     scope: cur_scope,
                     args,
+                    names_class: st.names_class.contains(&e.match_id),
                 });
             }
         }
@@ -285,7 +286,8 @@ pub(super) fn finish(st: &mut ExtractState, events: &[Event]) {
             // primitives stay leaves; `None` (auto/void) defers to the flow
             // edge as before. `TypeName` chases the typedef or falls back to
             // the same `ClassName`, so a plain struct/class is unchanged.
-            let annot_type = (st.pack.annot_type)(annot);
+            let annot_type =
+                (st.pack.annot_type)(annot).map(|t| written_type_at(out, &st.pack.names, t, annot_span.start));
             if let (Some(t), true) = (&annot_type, field_scope_span.contains_key(&(name.clone(), *scope))) {
                 out.field_types.push((name.clone(), *scope, t.clone()));
             }

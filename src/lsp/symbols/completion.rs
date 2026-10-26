@@ -262,8 +262,8 @@ pub fn in_scope_completion(analysis: &FileAnalysis, point: Point) -> Vec<Complet
 }
 
 pub fn completion_items(
-    files: &crate::index::file_store::FileStore,
-    origin_key: &crate::index::file_store::FileKey,
+    files: &crate::index::open_docs::OpenDocs,
+    origin_key: &crate::index::open_docs::FileKey,
     analysis: &FileAnalysis,
     tree: &Tree,
     source: &str,
@@ -329,8 +329,8 @@ pub fn completion_items_for_test(
     module_index: &ModuleIndex,
     stable_packages: Option<&[(String, usize)]>,
 ) -> Vec<CompletionItem> {
-    let files = crate::index::file_store::FileStore::new();
-    let key = crate::index::file_store::FileKey::Path(std::path::PathBuf::from("/test/origin.pl"));
+    let files = crate::index::open_docs::OpenDocs::new();
+    let key = crate::index::open_docs::FileKey::Path(std::path::PathBuf::from("/test/origin.pl"));
     completion_items(&files, &key, analysis, tree, source, pos, module_index, stable_packages).0
 }
 
@@ -338,8 +338,8 @@ pub fn completion_items_for_test(
 /// wrapper above falls through to it.
 #[allow(clippy::too_many_arguments)]
 fn completion_items_native(
-    files: &crate::index::file_store::FileStore,
-    origin_key: &crate::index::file_store::FileKey,
+    files: &crate::index::open_docs::OpenDocs,
+    origin_key: &crate::index::open_docs::FileKey,
     analysis: &FileAnalysis,
     tree: &Tree,
     source: &str,

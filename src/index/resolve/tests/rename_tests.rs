@@ -74,11 +74,11 @@ $d->ping;
     let mut consumer_fa = parse(consumer_src);
     consumer_fa.condition_with(&idx);
 
-    let store = FileStore::new();
-    store.insert_workspace(base_path.clone(), parse(base_src));
-    store.insert_workspace(child_path.clone(), parse(child_src));
-    store.insert_workspace(consumer_path.clone(), consumer_fa);
-    store.insert_workspace(decoy_path.clone(), parse(decoy_src));
+    let store = OpenDocs::new();
+    idx.insert_workspace_for_test(base_path.clone(), parse(base_src));
+    idx.insert_workspace_for_test(child_path.clone(), parse(child_src));
+    idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa);
+    idx.insert_workspace_for_test(decoy_path.clone(), parse(decoy_src));
 
     // Targeting Base::ping (where rename cursor would sit at the `sub ping` declaration).
     let target = TargetRef {
@@ -117,7 +117,7 @@ $d->ping;
 }
 
 /// Rename never edits dependency files. A `ping` method that also appears
-/// in a dep module (registered in ModuleIndex, not in the workspace store)
+/// in a dep module (an @INC provider in the module index)
 /// must not produce edits for that dep file — `RoleMask::EDITABLE` stops
 /// at OPEN + WORKSPACE, which is what `rename_via_refs_to` uses.
 #[test]
@@ -135,8 +135,15 @@ sub ping { "pong" }
 "#;
     let dep_path = PathBuf::from("/tmp/rename_dep_base.pm");
 
+    // An @INC provider: the name-keyed cache, not a front-door registration.
     let idx = ModuleIndex::new_for_test();
-    idx.register_workspace_module(dep_path.clone(), Arc::new(parse(dep_src)));
+    idx.insert_cache(
+        "Base",
+        Some(Arc::new(crate::index::sealed::cached_module(
+            dep_path.clone(),
+            Arc::new(parse(dep_src)),
+        ))),
+    );
 
     // Consumer in the workspace calls ping on a Base invocant.
     let consumer_src = r#"
@@ -147,8 +154,8 @@ $b->ping;
 "#;
     let consumer_path = PathBuf::from("/tmp/rename_dep_consumer.pm");
 
-    let store = FileStore::new();
-    store.insert_workspace(consumer_path.clone(), parse(consumer_src));
+    let store = OpenDocs::new();
+    idx.insert_workspace_for_test(consumer_path.clone(), parse(consumer_src));
 
     let target = TargetRef {
         names: crate::model::conventions::PERL_SPELLINGS,
@@ -217,10 +224,10 @@ $g->hello;
     let mut consumer_fa = parse(consumer_src);
     consumer_fa.condition_with(&idx);
 
-    let store = FileStore::new();
-    store.insert_workspace(base_path.clone(), parse(base_src));
-    store.insert_workspace(child_path.clone(), parse(child_src));
-    store.insert_workspace(consumer_path.clone(), consumer_fa);
+    let store = OpenDocs::new();
+    idx.insert_workspace_for_test(base_path.clone(), parse(base_src));
+    idx.insert_workspace_for_test(child_path.clone(), parse(child_src));
+    idx.insert_workspace_for_test(consumer_path.clone(), consumer_fa);
 
     let target = TargetRef {
         names: crate::model::conventions::PERL_SPELLINGS,
@@ -317,10 +324,10 @@ fn rename_from_child_call_site_includes_inherited_base_declaration() {
         target.method_classes,
     );
 
-    let store = FileStore::new();
-    store.insert_workspace(base_path.clone(), parse(base_src));
-    store.insert_workspace(child_path.clone(), parse(child_src));
-    store.insert_workspace(script_path.clone(), script_fa);
+    let store = OpenDocs::new();
+    idx.insert_workspace_for_test(base_path.clone(), parse(base_src));
+    idx.insert_workspace_for_test(child_path.clone(), parse(child_src));
+    idx.insert_workspace_for_test(script_path.clone(), script_fa);
 
     let locs = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
     let hit = |p: &PathBuf| locs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if x == p));

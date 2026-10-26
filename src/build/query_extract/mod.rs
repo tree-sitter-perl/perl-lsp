@@ -58,7 +58,8 @@ fn cached_query(language: &Language, source: &'static str) -> Result<&'static Co
     }
     let query = Query::new(language, source).map_err(|e| format!("query: {e}"))?;
     let captures = vocab::capture_table(query.capture_names()).map_err(|e| format!("query: {e}"))?;
-    crate::build::query_predicates::check(&query, language, &[]).map_err(|e| format!("query: {e}"))?;
+    crate::build::query_predicates::check(&query, language, &[crate::build::query_predicates::Deferral::NamesClass.spelling()])
+        .map_err(|e| format!("query: {e}"))?;
     vocab::check_links(&query, &captures).map_err(|e| match e {
         vocab::LinkError::Pattern(at) => {
             let line = source[..at].lines().count() + 1;
@@ -98,3 +99,11 @@ mod tests;
 #[cfg(test)]
 #[path = "../cpp_typedef_alias_tests.rs"]
 mod cpp_typedef_alias_tests;
+
+#[cfg(test)]
+#[path = "../php_pack_tests.rs"]
+mod php_pack_tests;
+
+#[cfg(test)]
+#[path = "../python_pack_tests.rs"]
+mod python_pack_tests;

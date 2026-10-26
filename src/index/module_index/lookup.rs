@@ -359,14 +359,7 @@ impl ModuleIndex {
     /// process exit without holding the index.
     pub fn answer_flusher(&self) -> impl FnOnce() + Send + 'static {
         let core = Arc::clone(&self.core);
-        let root = self.workspace_root();
-        let packs = Arc::clone(&self.pack_indexes);
-        move || {
-            flush_answers_into(&core, root.as_deref(), "perl");
-            for p in packs.iter() {
-                p.value().core.answers.flush_now();
-            }
-        }
+        move || core.answers.flush_now()
     }
 
     /// Persist the answers computed since the last flush. Blocking (SQLite);
@@ -386,9 +379,7 @@ impl ModuleIndex {
     }
 
     pub fn flush_answers(&self) {
-        flush_answers_into(&self.core, self.workspace_root().as_deref(), "perl");
-        // Each pack sub-index keeps its own store, written to its own DB.
-        self.for_each_pack_index(|_, p| p.core.answers.flush_now());
+        self.core.answers.flush_now();
     }
 
     fn whole_ungated(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
@@ -893,10 +884,16 @@ impl CrossFileLookup for ModuleIndex {
         .unwrap_or_default()
     }
 
+    fn is_dependency_path(&self, path: &std::path::Path) -> bool {
+        // `all_files` holds exactly what a workspace/pack front door
+        // registered; the @INC tier writes only the name-keyed cache.
+        !self.all_files.contains_key(path)
+    }
+
     fn cached_by_path(&self, path: &std::path::Path) -> Tracked<Option<Arc<CachedModule>>> {
-        // Pack sub-indexes: the per-path registry is O(1). The Perl hub's
-        // cache is name-keyed with unique paths — linear fallback (hub
-        // candidate sets are @INC-sized, not tree-sized).
+        // Registered files: the per-path registry is O(1). The @INC cache is
+        // name-keyed with unique paths — linear fallback (its candidate sets
+        // are @INC-sized, not tree-sized).
         let held = match self.all_files.get(path) {
             Some(cm) => Some(cm.value().clone()),
             None => self.core.cache.iter().find_map(|entry| {
@@ -1090,6 +1087,10 @@ impl CrossFileLookup for ModuleIndex {
 
     fn def_candidates(&self, name: &str) -> Tracked<Vec<Arc<CachedModule>>> {
         Tracked::new(Lookup::DefCandidates(name.to_string()), self.def_candidates_now(name))
+    }
+
+    fn for_each_workspace_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) {
+        self.for_each_registered_file(f)
     }
 
     fn for_each_cached_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) -> Tracked<()> {

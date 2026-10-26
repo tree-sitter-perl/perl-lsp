@@ -44,7 +44,7 @@ type InferredTypeOwned = crate::model::file_analysis::InferredType;
 
 /// Rehydration misses on evicted copies this process served degraded
 /// (`rehydrate_or_resident`'s invariant-break arm). Process-global: the
-/// residency story spans the hub and every pack sub-index, and the flake
+/// residency story spans every tier, and the flake
 /// this polices ("inputs vanished" cold runs) is a per-process verdict.
 static REHYDRATION_MISSES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -196,11 +196,6 @@ pub struct ModuleIndex {
     /// forgot to load); installed CPAN plugins keep the generous
     /// "downloaded = intended" resolution.
     workspace_modules: Arc<DashMap<String, ()>>,
-    /// Per-language sub-indexes (`"cpp"`, `"python"`, …) — kept SEPARATE
-    /// (own cache, own `modules-{lang}.db`) so names never comingle across
-    /// languages. The Perl index is the hub; query routing picks the right
-    /// one by the queried file's language. Generic: any pack language.
-    pack_indexes: Arc<DashMap<String, Arc<ModuleIndex>>>,
     /// Canonical paths of currently-open docs whose surface record the
     /// open-doc path owns (`SurfaceWrite` — background writes yield).
     /// Marked by the backend on didOpen, cleared + reconciled on didClose.
@@ -234,21 +229,10 @@ pub struct ModuleIndex {
     /// evicted, and rehydration after an edit persists would fetch the NEW
     /// generation's names.
     registered_names: Arc<DashMap<std::path::PathBuf, Vec<(String, bool)>>>,
-    /// The SIBLING tier's rehydration store, for copies this index does not
-    /// own. Sweeps mint `CachedModule`s from FileStore entries and ask
-    /// whatever index the query routed to — a cpp query's workspace sweep
-    /// hands PERL paths to the cpp sub-index, whose own loader (keyed to
-    /// `modules-{lang}.db`) can never serve them. `attach_pack_index`
-    /// shares the hub's `bag_cache` cell here so a foreign path routes to
-    /// its owner instead of degrading to the stripped resident. The hub's
-    /// converse route (a pack path asked of the hub) walks `pack_indexes`.
-    foreign_bag_cache: std::sync::RwLock<
-        Option<Arc<std::sync::RwLock<Option<Arc<crate::index::pack_bag_cache::PackBagCache>>>>>,
-    >,
     /// Read-connection opener for the relational ref index
     /// (`docs/adr/relational-ref-index.md`) — set once per index onto the
-    /// per-language DB (`modules.db` for the Perl hub, `modules-{lang}.db`
-    /// for pack sub-indexes). Opened per retrieval (WAL readers are cheap
+    /// served language's DB (`modules.db` for Perl, `modules-{lang}.db`
+    /// for a pack language). Opened per retrieval (WAL readers are cheap
     /// and `rusqlite::Connection` isn't `Sync`); `None` (tests, no cache
     /// dir) contributes no candidates and the resident sweep still covers.
     ref_rows_opener:
@@ -263,26 +247,6 @@ pub struct ModuleIndex {
     /// forever — an inode change (or missing file) drops the conn so the
     /// next query reopens the recreated DB.
     ref_rows_conn: crate::index::module_cache::RetainedReader,
-}
-
-/// The store `ModuleIndex::lookup_for` routed a language to. Owning enum:
-/// a pack sub-index is an `Arc` out of the hub's registry and must stay
-/// alive for the query's lifetime (the caller holds this value), while the
-/// hub case stays borrow-only.
-pub enum RoutedIndex<'a> {
-    Hub(&'a ModuleIndex),
-    Pack(Arc<ModuleIndex>),
-}
-
-impl RoutedIndex<'_> {
-    /// The routed store as the lookup trait `resolve()` and the slot-shaped
-    /// pre-set lanes (include tokens, raw-word fallbacks) consume.
-    pub fn as_lookup(&self) -> &dyn crate::model::file_analysis::CrossFileLookup {
-        match self {
-            RoutedIndex::Hub(h) => *h,
-            RoutedIndex::Pack(p) => p.as_ref(),
-        }
-    }
 }
 
 // ---- Module-level helpers ----

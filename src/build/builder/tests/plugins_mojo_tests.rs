@@ -176,7 +176,7 @@ sub wire {
 #[test]
 fn plugin_mojo_events_cross_file_ref_pairing() {
     use crate::model::file_analysis::HandlerOwner;
-    use crate::index::file_store::FileStore;
+    use crate::index::open_docs::OpenDocs;
     use crate::index::resolve::{refs_to, RoleMask, TargetKind, TargetRef};
     use std::path::PathBuf;
 
@@ -204,16 +204,17 @@ sub run {
 1;
 "#;
 
-    let store = FileStore::new();
+    let store = OpenDocs::new();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let producer_path = PathBuf::from("/tmp/plugin_producer.pm");
     let consumer_path = PathBuf::from("/tmp/plugin_consumer.pm");
 
-    store.insert_workspace(producer_path.clone(), build_fa(producer_src));
-    store.insert_workspace(consumer_path.clone(), build_fa(consumer_src));
+    idx.insert_workspace_for_test(producer_path.clone(), build_fa(producer_src));
+    idx.insert_workspace_for_test(consumer_path.clone(), build_fa(consumer_src));
 
     let results = refs_to(
         &store,
-        None,
+        Some(&idx),
         &TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "ready".to_string(),
@@ -228,11 +229,11 @@ sub run {
 
     let producer_hits = results
         .iter()
-        .filter(|r| matches!(&r.key, crate::index::file_store::FileKey::Path(p) if p == &producer_path))
+        .filter(|r| matches!(&r.key, crate::index::open_docs::FileKey::Path(p) if p == &producer_path))
         .count();
     let consumer_hits = results
         .iter()
-        .filter(|r| matches!(&r.key, crate::index::file_store::FileKey::Path(p) if p == &consumer_path))
+        .filter(|r| matches!(&r.key, crate::index::open_docs::FileKey::Path(p) if p == &consumer_path))
         .count();
 
     assert!(
@@ -800,7 +801,7 @@ $r->post('/users')->to(controller => 'Users', action => 'create');
 /// cross-file MethodCall path in `symbols::find_definition`
 /// surfaces the Users::list def's location.
 ///
-/// Before the fix, workspace modules lived only in FileStore so
+/// Before the fix, workspace modules lived only in OpenDocs so
 /// lookups that key on module name (all cross-file method
 /// resolution) missed them and gd fell through to noise.
 #[test]

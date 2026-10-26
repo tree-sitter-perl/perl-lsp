@@ -9,7 +9,7 @@ use tree_sitter::{Node, Point, Tree};
 
 use crate::cst::{fq_tail_span, node_to_span};
 use crate::model::file_analysis::*;
-use crate::model::witnesses::TypeObservation;
+use crate::model::witnesses::{RefIdx, TypeObservation};
 
 /// A ready-to-parse tree-sitter Parser for the Perl grammar — the one
 /// constructor every parse site (resolver, document, CLI, the s///e
@@ -216,6 +216,16 @@ struct DeferredVarType {
     plugin_id: String,
 }
 
+/// A named sub of a package that may be a class, whose first parameter is
+/// its invocant if it is a method rather than a plain helper; decided by
+/// `mark_method_invocants`.
+struct MethodOrHelperSub {
+    sub_id: SymbolId,
+    scope: ScopeId,
+    span: Span,
+    package: String,
+}
+
 /// Plugin-emitted `NamedSubParamType` request, resolved at end-of-build.
 /// Keyed by sub name + positional index rather than a span: a `\&name`
 /// registration arg carries no callback body span, and the named sub may
@@ -267,6 +277,10 @@ struct Builder<'a> {
     /// resolved by sub name + index at end-of-build alongside
     /// `deferred_var_types`.
     deferred_named_sub_param_types: Vec<DeferredNamedSubParamType>,
+    method_or_helper_subs: Vec<MethodOrHelperSub>,
+    /// `(package, name)` of each sub the file calls as a plain function
+    /// (`name(...)`; a `\&name` reference is not a call).
+    plain_called_subs: std::collections::HashSet<(String, String)>,
     fold_ranges: Vec<FoldRange>,
     imports: Vec<Import>,
     /// Return values collected during the walk (explicit `return` + implicit last expr).
@@ -499,7 +513,7 @@ struct Builder<'a> {
     /// `param_types()` role-contract TCs, emitted ungated at the sub walk and
     /// gated on the enclosing package's `isa in_role` (checked cross-file at
     /// query time). See `FileAnalysis::gated_param_types`.
-    gated_param_types: Vec<crate::model::file_analysis::ReceiverGated<crate::model::file_analysis::TypeConstraint>>,
+    gated_param_types: Vec<crate::model::file_analysis::Deferred<crate::model::file_analysis::TypeConstraint>>,
 
     /// Build-time chain-typing cache for MethodCall ref invocants.
     /// Keyed by `refs[idx]`. Walk-time fills it for syntactic cases
@@ -539,10 +553,6 @@ struct Builder<'a> {
     /// `FileAnalysis.role_requires`.
     role_requires: std::collections::HashMap<String, Vec<String>>,
 
-    /// SymbolIds of `requires`-synthesized contract markers. Flushed
-    /// into `FileAnalysis.contract_symbols`.
-    contract_symbols: std::collections::HashSet<crate::model::file_analysis::SymbolId>,
-
     /// Packages with at least one parent edge we could not fold to a
     /// literal name (runtime-generated roles). Flushed into
     /// `FileAnalysis.dynamic_parent_packages`.
@@ -572,6 +582,14 @@ struct Builder<'a> {
     /// not in this map — its `-base` gate is structural, not a name match.
     framework_mode_modules:
         std::collections::HashMap<String, (FrameworkMode, Vec<String>)>,
+
+    /// Module → (features it disables, features it enables) in the block it
+    /// is `use`d in: the union of every plugin's `feature_makers()`.
+    feature_makers: std::collections::HashMap<String, (Vec<String>, Vec<String>)>,
+
+    /// Every lexical feature switch the walk has seen, in source order: a
+    /// pragma's effect runs from its statement to the end of its block.
+    feature_toggles: Vec<FeatureToggle>,
 
     /// Per-file verdict: packages that ARE roles. Flushed into
     /// `FileAnalysis.role_packages`; `is_role_package` reads the baked
@@ -604,6 +622,13 @@ struct Builder<'a> {
     /// of a dynamic `$o->$m`), so an assignment binds to its call's refs.
     /// **Build-only**.
     method_call_refs: std::collections::HashMap<usize, Vec<usize>>,
+
+    /// Indirect-object calls (`new Foo(ARGS)`): `(call, class, args)`. The
+    /// chain-typing index finds a call's receiver and arguments by
+    /// `method_call_expression` node, and only the walk knows a
+    /// function-call node is one of these, so the walk hands them over.
+    /// **Build-only**.
+    indirect_method_calls: Vec<(Node<'a>, Node<'a>, Option<Node<'a>>)>,
 
     /// MethodCall ref indices for which we've published an
     /// `InferredType::Parametric` witness on `Expression(refidx)`
@@ -712,13 +737,13 @@ enum Gate {
     Strict(HashKeyOwner),
     /// Strict, but the owner's class is not defined in this file, so a
     /// local def miss is NOT authoritative (the def may live with the
-    /// class, cross-file). Emits `owner: None` on miss; the query-time
-    /// class check in `refs_to`'s key arm decides — same discipline as
-    /// receiver-gated dispatch (the type is the gate, resolved with the
-    /// index in hand).
-    StrictOrDefer(HashKeyOwner),
+    /// class, cross-file). A miss binds the key to its call (`CallArgKey`),
+    /// whose owner is decided at query time with the index in hand.
+    StrictOrDefer(HashKeyOwner, RefIdx),
     Open(HashKeyOwner),
-    Deferred,
+    /// The call's receiver didn't type at build: every key binds to the
+    /// call (`CallArgKey`).
+    Deferred(RefIdx),
     /// A plugin-declared column-keyed verb (DBIC `search`/`create`/…): walk only
     /// the FIRST hashref arg (the `\%cond`/`\%cols`; the trailing `\%attrs` hash
     /// is not column-keyed). A key that is a `Class` column of the receiver gets
@@ -771,3 +796,15 @@ mod tests;
 #[cfg(test)]
 #[path = "type_inference_invariants_tests.rs"]
 mod invariants_tests;
+
+/// One lexical feature switch (`use v5.36`, `no feature 'indirect'`, a
+/// plugin-declared bundle importer): `feature` is `off` from `at` until the
+/// end of the enclosing block.
+#[derive(Debug, Clone)]
+pub(super) struct FeatureToggle {
+    feature: String,
+    at: Point,
+    until: Point,
+    off: bool,
+}
+

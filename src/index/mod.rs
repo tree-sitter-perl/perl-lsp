@@ -1,10 +1,10 @@
 //! Layer 3 — cross-file. Module/workspace indexing, the SQLite cache,
-//! the unified `FileStore`, and `resolve` — the resolution
+//! the unified `OpenDocs`, and `resolve` — the resolution
 //! CandidateSet every cross-file query routes through.
 
 pub mod builtins_pod;
 pub mod document;
-pub mod file_store;
+pub mod open_docs;
 pub mod module_cache;
 pub mod module_index;
 pub mod module_resolver;

@@ -22,9 +22,7 @@ pub(crate) fn cli_check(args: &[String]) {
     }
     timings::enable_from_env();
 
-    // `--check` reports diagnostics for pack files too (the pack-index
-    // sweep below), so it needs every family.
-    let (ws, module_index) = cli_full_startup(root, language_driver::LanguageScope::All);
+    let (_ws, module_index) = cli_full_startup(root);
 
     // Dump the per-module breakdown before diagnostics output so the table
     // isn't buried under (and the early `exit(1)` below doesn't swallow it).
@@ -41,7 +39,7 @@ pub(crate) fn cli_check(args: &[String]) {
     if json_mode {
         println!("[");
     }
-    for_each_tree_diagnostic(&ws, &module_index, options, &mut |file, d| {
+    for_each_tree_diagnostic(&module_index, options, &mut |file, d| {
         let sev = match d.severity {
             Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::ERROR => "error",
             Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::WARNING => "warning",
@@ -90,7 +88,7 @@ pub(crate) fn cli_check(args: &[String]) {
         }
         println!("]");
     } else {
-        eprintln!("{} diagnostics in {} files", total, ws.workspace_len());
+        eprintln!("{} diagnostics in {} files", total, module_index.registered_file_count());
     }
 
     if total > 0 {
@@ -119,14 +117,13 @@ pub(crate) fn cli_hover_single_file(file: &str, line_str: &str, col_str: &str) {
     // language-agnostic set projection (matches the LSP); no index here, so
     // cross-file function hover is unavailable in this form (use the root
     // form for that).
-    let reg = language_driver::LanguageRegistry::with_enabled();
-    let driver = reg.driver_or_fallback(std::path::Path::new(file), &source);
+    let driver = language_driver::LanguageRegistry::served();
     let markdown = if !driver.caps().hover_info {
-        let files = file_store::FileStore::new();
+        let files = open_docs::OpenDocs::new();
         let cs = resolve::resolve(
             &files,
             &analysis,
-            file_store::FileKey::Path(std::path::PathBuf::from(file)),
+            open_docs::FileKey::Path(std::path::PathBuf::from(file)),
             point,
             None,
             resolve::OverrideScope::default(),
@@ -172,7 +169,7 @@ pub(crate) fn cli_type_at(file: &str, line_str: &str, col_str: &str) {
 /// `Err` to stderr with exit-1 (preserves the "miss → exit 1" behavior every
 /// single-mode command had). `fmt` selects the output coordinate dialect.
 fn print_run_one(
-    ws: &file_store::FileStore,
+    ws: &open_docs::OpenDocs,
     idx: &module_index::ModuleIndex,
     req: &BatchReq,
     fmt: CoordFmt,
@@ -201,10 +198,8 @@ pub(crate) fn cli_cursor(q: &str, root: &str, rest: &[String]) {
         super::exit_with(2, "exit");
     });
     emit_pos_annotation(&target);
-    let (ws, idx) = cli_full_startup(
-        root,
-        language_driver::LanguageScope::of_file(std::path::Path::new(&target.file)),
-    );
+    super::lock_for_file(std::path::Path::new(&target.file));
+    let (ws, idx) = cli_full_startup(root);
     let req = BatchReq {
         id: String::new(),
         q: q.to_string(),
@@ -220,8 +215,8 @@ pub(crate) fn cli_cursor(q: &str, root: &str, rest: &[String]) {
 /// --document-link <root> <file> — the non-symbol clickable ranges (POD
 /// L<> links, comment URLs, string-path loads).
 pub(crate) fn cli_document_link(root: &str, file: &str) {
-    let (ws, idx) =
-        cli_full_startup(root, language_driver::LanguageScope::of_file(std::path::Path::new(file)));
+    super::lock_for_file(std::path::Path::new(file));
+    let (ws, idx) = cli_full_startup(root);
     let req = BatchReq {
         id: String::new(),
         q: "document-link".into(),
@@ -236,8 +231,8 @@ pub(crate) fn cli_document_link(root: &str, file: &str) {
 
 /// --semantic-tokens <root> <file> — token classification for the file.
 pub(crate) fn cli_semantic_tokens(root: &str, file: &str) {
-    let (ws, idx) =
-        cli_full_startup(root, language_driver::LanguageScope::of_file(std::path::Path::new(file)));
+    super::lock_for_file(std::path::Path::new(file));
+    let (ws, idx) = cli_full_startup(root);
     let req = BatchReq {
         id: String::new(),
         q: "semantic-tokens".into(),
@@ -260,13 +255,11 @@ fn cli_open_document(file: &str, idx: &module_index::ModuleIndex) -> document::D
         eprintln!("Cannot read {}: {}", file, e);
         super::exit_with(1, "exit");
     });
-    // Route by driver so the CLI cursor handlers (definition/references/
-    // highlight/…) match the LSP server. A hub-enriched language keeps the
-    // native constructor + enrichment (`Document::new` is the reference
+    // The served driver, as the LSP server opens it. A hub-enriched
+    // language keeps the native constructor + enrichment (`Document::new` is the reference
     // pipeline the hub's freshness/enrichment lanes are built around);
     // everything else goes through the generic driver constructor.
-    let reg = language_driver::LanguageRegistry::with_enabled();
-    let driver = reg.driver_or_fallback(std::path::Path::new(file), &text);
+    let driver = language_driver::LanguageRegistry::served();
     if !driver.caps().hub_enrichment {
         return tphase!("Document::new_routed", document::Document::new_routed(text, driver, Some(std::path::PathBuf::from(file))).unwrap_or_else(|| {
             eprintln!("Parse failed: {}", file);
@@ -285,7 +278,7 @@ fn cli_open_document(file: &str, idx: &module_index::ModuleIndex) -> document::D
 
 /// Apply the deferred plugin emissions whose gate holds through `idx` — the
 /// whole of what a CLI-built origin owes the index after its build (the
-/// server's `FileStore::condition_open`).
+/// server's `OpenDocs::condition_open`).
 fn condition(analysis: &mut file_analysis::FileAnalysis, idx: &module_index::ModuleIndex) {
     if let Some(applied) = analysis.with_holding_gates(idx) {
         *analysis = applied;
@@ -307,47 +300,51 @@ struct BatchReq {
 /// single-mode `cli_*` wrappers and `--batch` call this, so their stdout can
 /// never drift. The expensive startup state (`ws` + `idx`) is built once by the
 /// caller and shared; this re-parses only the one target file per call. Returns
-/// Stage an analysis in the workspace store for the lifetime of one cross-file
-/// query (references/rename need `refs_to` to see the freshly-enriched target),
-/// restoring the prior entry on drop. `--batch` shares one FileStore across all
-/// requests; without this restore a references/rename request would leave its
-/// enrichment-synthesized symbols in the store, so a later workspace-symbol or
-/// diagnostics request in the same batch would see different results depending
-/// on ordering.
-struct ScopedWorkspaceEntry<'a> {
-    ws: &'a file_store::FileStore,
-    path: std::path::PathBuf,
-    prior: Option<std::sync::Arc<file_analysis::FileAnalysis>>,
+/// Stage the query file as an OPEN doc for one cross-file query: the CLI
+/// answers what the server answers with the file open in the editor, where
+/// the open doc shadows the file's index copy. Closed on drop, so `--batch`
+/// requests never see each other's staging (a references/rename request
+/// would otherwise leave its enrichment-synthesized symbols behind for a
+/// later workspace-symbol or diagnostics request).
+struct ScopedOpenDoc<'a> {
+    ws: &'a open_docs::OpenDocs,
+    url: tower_lsp::lsp_types::Url,
 }
 
-impl<'a> ScopedWorkspaceEntry<'a> {
-    fn insert(
-        ws: &'a file_store::FileStore,
-        path: std::path::PathBuf,
-        analysis: file_analysis::FileAnalysis,
-    ) -> Self {
-        let prior = ws.workspace_raw().get(&path).map(|r| r.value().clone());
-        ws.insert_workspace(path.clone(), analysis);
-        Self { ws, path, prior }
-    }
-
-    fn insert_arc(
-        ws: &'a file_store::FileStore,
-        path: std::path::PathBuf,
+impl<'a> ScopedOpenDoc<'a> {
+    /// Returns the guard, the staged analysis, and its origin key.
+    fn stage(
+        ws: &'a open_docs::OpenDocs,
+        path: &std::path::Path,
         analysis: std::sync::Arc<file_analysis::FileAnalysis>,
-    ) -> Self {
-        let prior = ws.workspace_raw().get(&path).map(|r| r.value().clone());
-        ws.insert_workspace_arc(path.clone(), analysis);
-        Self { ws, path, prior }
+    ) -> (Self, std::sync::Arc<file_analysis::FileAnalysis>, open_docs::FileKey) {
+        let url = tower_lsp::lsp_types::Url::from_file_path(path)
+            .unwrap_or_else(|_| tower_lsp::lsp_types::Url::parse("file:///unknown").unwrap());
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let driver = language_driver::LanguageRegistry::served();
+        let tree = driver.make_parser().parse(&text, None).unwrap_or_else(|| {
+            eprintln!("Parse failed: {}", path.display());
+            super::exit_with(1, "exit");
+        });
+        let doc = document::Document {
+            stable_outline: document::StableOutline::from_analysis(&analysis),
+            text,
+            tree,
+            analysis: std::sync::Arc::clone(&analysis),
+            built: std::sync::Arc::clone(&analysis),
+            language: driver.id(),
+            baseline_surface: None,
+            path: Some(path.to_path_buf()),
+        };
+        ws.insert_open(url.clone(), doc);
+        let key = open_docs::FileKey::Url(url.clone());
+        (Self { ws, url }, analysis, key)
     }
 }
 
-impl Drop for ScopedWorkspaceEntry<'_> {
+impl Drop for ScopedOpenDoc<'_> {
     fn drop(&mut self) {
-        match self.prior.take() {
-            Some(arc) => self.ws.insert_workspace_arc(self.path.clone(), arc),
-            None => self.ws.remove_workspace(&self.path),
-        }
+        self.ws.close(&self.url);
     }
 }
 
@@ -382,7 +379,7 @@ fn resolve_imports_blocking(
 }
 
 fn run_one(
-    ws: &file_store::FileStore,
+    ws: &open_docs::OpenDocs,
     idx: &module_index::ModuleIndex,
     req: &BatchReq,
     fmt: CoordFmt,
@@ -397,6 +394,12 @@ fn run_one(
     if needs_file && (file.is_empty() || !std::path::Path::new(file).exists()) {
         return Err(format!("file not found: {}", file));
     }
+    if needs_file {
+        language_driver::LanguageRegistry::admits(
+            language_driver::LanguageRegistry::served(),
+            std::path::Path::new(file),
+        )?;
+    }
 
     match req.q.as_str() {
         "definition" => {
@@ -406,13 +409,8 @@ fn run_one(
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
             let uri = tower_lsp::lsp_types::Url::from_file_path(&abs)
                 .unwrap_or_else(|_| tower_lsp::lsp_types::Url::parse("file:///unknown").unwrap());
-            // Store selection by driver id — `lookup_for` is the one
-            // speller (a language's own sub-index when attached, else the
-            // hub).
-            let reg = language_driver::LanguageRegistry::with_enabled();
-            let lang_id = reg.driver_or_fallback(std::path::Path::new(file), &source).id();
-            let routed = idx.lookup_for(lang_id);
-            let base_idx = routed.as_lookup();
+            let lang_id = language_driver::LanguageRegistry::served().id();
+            let base_idx: &dyn file_analysis::CrossFileLookup = idx;
             // `#include "x.h"` path → the resolved header (`#include` = `use`).
             // A path token, not a name — slot-shaped, stays ahead of the set.
             // The pack declares whether it has include tokens; asked, never
@@ -432,11 +430,9 @@ fn run_one(
             // Print EVERY offered location (one per line), ranked as
             // returned — macro variants config-active first (labels shown),
             // a domain-typed field decl FIRST then its domain enum def.
-            let _staged = ScopedWorkspaceEntry::insert(ws, abs.clone(), analysis);
-            let origin = ws.workspace_raw().get(&abs).map(|r| r.value().clone())
-                .expect("origin staged above");
+            let (_staged, origin, origin_key) = ScopedOpenDoc::stage(ws, &abs, std::sync::Arc::new(analysis));
             let cs = resolve::resolve(
-                ws, &origin, file_store::FileKey::Path(abs), point,
+                ws, &origin, origin_key, point,
                 Some(base_idx), resolve::OverrideScope::default(),
             )
             .with_source(&source);
@@ -446,8 +442,8 @@ fn run_one(
                 let mut lines = Vec::new();
                 for loc in locs {
                     let path = match &loc.key {
-                        file_store::FileKey::Path(p) => p.display().to_string(),
-                        file_store::FileKey::Url(u) => u.to_file_path()
+                        open_docs::FileKey::Path(p) => p.display().to_string(),
+                        open_docs::FileKey::Url(u) => u.to_file_path()
                             .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
                     };
                     let (line, col) = sources.display(
@@ -460,21 +456,15 @@ fn run_one(
             Err(format!("No definition found at {}:{}", req.line, req.col))
         }
         "references" => {
-            let (s, _t, mut analysis) = parse_file(file);
+            let (_s, _t, mut analysis) = parse_file(file);
             resolve_imports_blocking(idx, &analysis);
             condition(&mut analysis, idx);
             let file_path = std::path::Path::new(file).canonicalize()
                 .unwrap_or_else(|_| std::path::PathBuf::from(file));
             let mut sources = SourceCache::new(fmt);
             let mut results = Vec::new();
-            // Store selection by driver id (matches goto-def and the LSP
-            // server): a sub-indexed language must route to its own store —
-            // the hub only knows Perl modules, so resolving/collecting
-            // against it silently misses every cross-file cpp use.
-            let reg = language_driver::LanguageRegistry::with_enabled();
-            let lang_id = reg.driver_or_fallback(std::path::Path::new(file), &s).id();
-            let routed = idx.lookup_for(lang_id);
-            let base_idx = routed.as_lookup();
+            let lang_id = language_driver::LanguageRegistry::served().id();
+            let base_idx: &dyn file_analysis::CrossFileLookup = idx;
             // `#include` reverse — "who includes this header" — owns the path
             // token exclusively (its backward mirror of include goto-def).
             // The pack declares whether it has include tokens; asked, never
@@ -496,17 +486,15 @@ fn run_one(
             // shape as the LSP handler, so CLI and editor answers can't
             // diverge. Pack routing + the origin's closure scope are
             // construction facts on the set.
-            let _staged = ScopedWorkspaceEntry::insert(ws, file_path.clone(), analysis);
-            let origin = ws.workspace_raw().get(&file_path).map(|r| r.value().clone())
-                .expect("origin staged above");
+            let (_staged, origin, origin_key) = ScopedOpenDoc::stage(ws, &file_path, std::sync::Arc::new(analysis));
             let cs = resolve::resolve(
-                ws, &origin, file_store::FileKey::Path(file_path), point,
+                ws, &origin, origin_key, point,
                 Some(base_idx), override_scope_from_env(),
             );
             for loc in cs.references() {
                 let path = match &loc.key {
-                    file_store::FileKey::Path(p) => p.display().to_string(),
-                    file_store::FileKey::Url(u) => u.to_file_path()
+                    open_docs::FileKey::Path(p) => p.display().to_string(),
+                    open_docs::FileKey::Url(u) => u.to_file_path()
                         .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
                 };
                 let (line, col) = sources.display(&path, loc.span.start.row, loc.span.start.column);
@@ -515,7 +503,7 @@ fn run_one(
             Ok(serde_json::to_string_pretty(&results).unwrap())
         }
         "implementations" => {
-            let (s, _t, mut analysis) = parse_file(file);
+            let (_s, _t, mut analysis) = parse_file(file);
             resolve_imports_blocking(idx, &analysis);
             condition(&mut analysis, idx);
             let file_path = std::path::Path::new(file).canonicalize()
@@ -525,20 +513,15 @@ fn run_one(
             // Same store routing as the LSP handler, so the CLI mirror can't
             // diverge: the domain bridge (enum def → field-slot sites) and
             // the family/spec walks are one projection.
-            let reg = language_driver::LanguageRegistry::with_enabled();
-            let lang_id = reg.driver_or_fallback(std::path::Path::new(file), &s).id();
-            let routed = idx.lookup_for(lang_id);
-            let _staged = ScopedWorkspaceEntry::insert(ws, file_path.clone(), analysis);
-            let origin = ws.workspace_raw().get(&file_path).map(|r| r.value().clone())
-                .expect("origin staged above");
+            let (_staged, origin, origin_key) = ScopedOpenDoc::stage(ws, &file_path, std::sync::Arc::new(analysis));
             let cs = resolve::resolve(
-                ws, &origin, file_store::FileKey::Path(file_path), point,
-                Some(routed.as_lookup()), resolve::OverrideScope::default(),
+                ws, &origin, origin_key, point,
+                Some(idx), resolve::OverrideScope::default(),
             );
             for loc in cs.implementations() {
                 let path = match &loc.key {
-                    file_store::FileKey::Path(p) => p.display().to_string(),
-                    file_store::FileKey::Url(u) => u.to_file_path()
+                    open_docs::FileKey::Path(p) => p.display().to_string(),
+                    open_docs::FileKey::Url(u) => u.to_file_path()
                         .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
                 };
                 let (line, col) = sources.display(&path, loc.span.start.row, loc.span.start.column);
@@ -553,15 +536,10 @@ fn run_one(
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
             // Same store routing + staging as goto-def; the projection is the
             // type axis of the same set (value type → dispatch class → def).
-            let reg = language_driver::LanguageRegistry::with_enabled();
-            let lang_id = reg.driver_or_fallback(std::path::Path::new(file), &s).id();
-            let routed = idx.lookup_for(lang_id);
-            let _staged = ScopedWorkspaceEntry::insert(ws, abs.clone(), analysis);
-            let origin = ws.workspace_raw().get(&abs).map(|r| r.value().clone())
-                .expect("origin staged above");
+            let (_staged, origin, origin_key) = ScopedOpenDoc::stage(ws, &abs, std::sync::Arc::new(analysis));
             let cs = resolve::resolve(
-                ws, &origin, file_store::FileKey::Path(abs), point,
-                Some(routed.as_lookup()), resolve::OverrideScope::default(),
+                ws, &origin, origin_key, point,
+                Some(idx), resolve::OverrideScope::default(),
             )
             .with_source(&s);
             let locs = cs.type_definitions();
@@ -578,19 +556,14 @@ fn run_one(
             Ok(lines.join("\n"))
         }
         "type-hierarchy" | "call-hierarchy" => {
-            let (s, _t, mut analysis) = parse_file(file);
+            let (_s, _t, mut analysis) = parse_file(file);
             resolve_imports_blocking(idx, &analysis);
             condition(&mut analysis, idx);
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
-            let reg = language_driver::LanguageRegistry::with_enabled();
-            let lang_id = reg.driver_or_fallback(std::path::Path::new(file), &s).id();
-            let routed = idx.lookup_for(lang_id);
-            let _staged = ScopedWorkspaceEntry::insert(ws, abs.clone(), analysis);
-            let origin = ws.workspace_raw().get(&abs).map(|r| r.value().clone())
-                .expect("origin staged above");
+            let (_staged, origin, origin_key) = ScopedOpenDoc::stage(ws, &abs, std::sync::Arc::new(analysis));
             let cs = resolve::resolve(
-                ws, &origin, file_store::FileKey::Path(abs), point,
-                Some(routed.as_lookup()), resolve::OverrideScope::default(),
+                ws, &origin, origin_key, point,
+                Some(idx), resolve::OverrideScope::default(),
             );
             let is_type = req.q == "type-hierarchy";
             let item = if is_type { cs.hierarchy_type_item() } else { cs.hierarchy_call_item() };
@@ -609,11 +582,11 @@ fn run_one(
             // refs); the cursor file only had the call/use site.
             let anchor = item.location.clone();
             let anchor_analysis =
-                resolve::analysis_for_key(ws, Some(routed.as_lookup()), &anchor.key)
+                resolve::analysis_for_key(ws, Some(idx), &anchor.key)
                     .unwrap_or_else(|| std::sync::Arc::clone(&origin));
             let acs = resolve::resolve(
                 ws, &anchor_analysis, anchor.key.clone(), anchor.span.start,
-                Some(routed.as_lookup()), resolve::OverrideScope::default(),
+                Some(idx), resolve::OverrideScope::default(),
             );
             let mut sources = SourceCache::new(fmt);
             let mut item_json = |sources: &mut SourceCache, it: &resolve::HierarchyItem| {
@@ -668,19 +641,15 @@ fn run_one(
             // A language without the analysis-native `hover_info` renderer
             // presents the CandidateSet's hover projection (matches the LSP
             // server — the same construction goto-def uses).
-            let reg = language_driver::LanguageRegistry::with_enabled();
-            let driver = reg.driver_or_fallback(std::path::Path::new(file), &source);
+            let driver = language_driver::LanguageRegistry::served();
             if !driver.caps().hover_info {
                 let lang = driver.id();
-                let routed = idx.lookup_for(lang);
                 let abs = std::fs::canonicalize(file)
                     .unwrap_or_else(|_| std::path::PathBuf::from(file));
-                let _staged = ScopedWorkspaceEntry::insert(ws, abs.clone(), analysis);
-                let origin = ws.workspace_raw().get(&abs).map(|r| r.value().clone())
-                    .expect("origin staged above");
+                let (_staged, origin, origin_key) = ScopedOpenDoc::stage(ws, &abs, std::sync::Arc::new(analysis));
                 let cs = resolve::resolve(
-                    ws, &origin, file_store::FileKey::Path(abs), point,
-                    Some(routed.as_lookup()), resolve::OverrideScope::default(),
+                    ws, &origin, origin_key, point,
+                    Some(idx), resolve::OverrideScope::default(),
                 )
                 .with_source(&source);
                 return symbols::pack_hover_markdown(&cs, lang)
@@ -694,11 +663,9 @@ fn run_one(
             // fallback are both reachable here or in neither.
             let abs = std::fs::canonicalize(file)
                 .unwrap_or_else(|_| std::path::PathBuf::from(file));
-            let _staged = ScopedWorkspaceEntry::insert(ws, abs.clone(), analysis);
-            let origin = ws.workspace_raw().get(&abs).map(|r| r.value().clone())
-                .expect("origin staged above");
+            let (_staged, origin, origin_key) = ScopedOpenDoc::stage(ws, &abs, std::sync::Arc::new(analysis));
             let cs = resolve::resolve(
-                ws, &origin, file_store::FileKey::Path(abs), point,
+                ws, &origin, origin_key, point,
                 Some(idx), resolve::OverrideScope::default(),
             )
             .with_source(&source);
@@ -733,7 +700,7 @@ fn run_one(
                 let file_path = std::path::Path::new(file).canonicalize()
                     .unwrap_or_else(|_| std::path::PathBuf::from(file));
                 tphase!("completion_items", symbols::completion_items(
-                    ws, &file_store::FileKey::Path(file_path),
+                    ws, &open_docs::FileKey::Path(file_path),
                     &doc.analysis, &doc.tree, &doc.text, pos, idx,
                     Some(doc.stable_outline.package_lines())))
             };
@@ -785,18 +752,15 @@ fn run_one(
         }
         "document-highlight" => {
             let doc = cli_open_document(file, idx);
-            // Same construction as the LSP handler (routed index, origin
+            // Same construction as the LSP handler (process index, origin
             // key): highlights is the set's origin-narrowed projection.
-            // Staging classifies the origin as workspace tier, matching how
-            // the references verb attributes the queried file.
             let abs = std::fs::canonicalize(file)
                 .unwrap_or_else(|_| std::path::PathBuf::from(file));
-            let routed = idx.lookup_for(doc.language);
-            let _staged = ScopedWorkspaceEntry::insert_arc(
-                ws, abs.clone(), std::sync::Arc::clone(&doc.analysis));
+            let (_staged, origin, origin_key) =
+                ScopedOpenDoc::stage(ws, &abs, std::sync::Arc::clone(&doc.analysis));
             let cs = resolve::resolve(
-                ws, &doc.analysis, file_store::FileKey::Path(abs), point,
-                Some(routed.as_lookup()), override_scope_from_env(),
+                ws, &origin, origin_key, point,
+                Some(idx), override_scope_from_env(),
             );
             let highlights = symbols::document_highlights(&cs);
             let mut sources = SourceCache::new(fmt);
@@ -819,12 +783,11 @@ fn run_one(
                 .unwrap_or_else(|_| file.to_string());
             let abs = std::fs::canonicalize(file)
                 .unwrap_or_else(|_| std::path::PathBuf::from(file));
-            let routed = idx.lookup_for(doc.language);
-            let _staged = ScopedWorkspaceEntry::insert_arc(
-                ws, abs.clone(), std::sync::Arc::clone(&doc.analysis));
+            let (_staged, origin, origin_key) =
+                ScopedOpenDoc::stage(ws, &abs, std::sync::Arc::clone(&doc.analysis));
             let cs = resolve::resolve(
-                ws, &doc.analysis, file_store::FileKey::Path(abs), point,
-                Some(routed.as_lookup()), override_scope_from_env(),
+                ws, &origin, origin_key, point,
+                Some(idx), override_scope_from_env(),
             );
             match symbols::linked_editing_ranges(&cs) {
                 Some(ranges) => {
@@ -843,9 +806,6 @@ fn run_one(
             let text = std::fs::read_to_string(file)
                 .map_err(|e| format!("Cannot read {}: {}", file, e))?;
             let abs = std::fs::canonicalize(file).unwrap_or_else(|_| std::path::PathBuf::from(file));
-            let reg = language_driver::LanguageRegistry::with_enabled();
-            let lang_id = reg.driver_or_fallback(std::path::Path::new(file), &text).id();
-            let routed = idx.lookup_for(lang_id);
             let root = idx
                 .workspace_root()
                 .and_then(|r| tower_lsp::lsp_types::Url::parse(&r).ok())
@@ -854,7 +814,7 @@ fn run_one(
                 &text,
                 abs.parent(),
                 root.as_deref(),
-                Some(routed.as_lookup()),
+                Some(idx),
             );
             let mut sources = SourceCache::new(fmt);
             let path = abs.display().to_string();
@@ -914,25 +874,8 @@ fn run_one(
             // rows-guaranteed and answer from the store.
             let mut covered: std::collections::HashSet<std::path::PathBuf> =
                 std::collections::HashSet::new();
-            for entry in ws.workspace_raw().iter() {
-                let file = entry.key().display().to_string();
-                if !entry.value().symbols_are_evicted() {
-                    if let Ok(canon) = std::fs::canonicalize(entry.key()) {
-                        covered.insert(canon);
-                    }
-                    covered.insert(entry.key().clone());
-                }
-                for sym in entry.value().symbols() {
-                    if sym.hidden_in_outline() {
-                        continue;
-                    }
-                    push(&sym.name, &sym.kind, file.clone(), sym.selection_span);
-                }
-            }
-            // Pack-language (C/C++/…) symbols live in per-language sub-indexes,
-            // not the Perl workspace map — sweep them so a C typedef/class/free
-            // function surfaces in workspace search too.
-            idx.for_each_pack_registered_file(&mut |path, analysis| {
+            idx.for_each_registered_file(&mut |cached| {
+                let (path, analysis) = (cached.path.as_path(), &cached.analysis());
                 let file = path.display().to_string();
                 if !analysis.symbols_are_evicted() {
                     covered.insert(path.to_path_buf());
@@ -944,7 +887,7 @@ fn run_one(
                     push(&sym.name, &sym.kind, file.clone(), sym.selection_span);
                 }
             });
-            for hit in symbols::sym_row_search(idx, &q) {
+            for hit in idx.sym_search(&q) {
                 let path = std::path::PathBuf::from(&hit.path);
                 if covered.contains(&path) {
                     continue;
@@ -970,17 +913,17 @@ fn run_one(
             // `run_rename` directly and passes the input dialect instead.
             run_rename(ws, idx, file, point, &new_name, CoordFmt::ZeroBasedByte)
         }
-        "diagnostics" => Ok(batch_diagnostics(ws, idx)),
+        "diagnostics" => Ok(batch_diagnostics(idx)),
         other => Err(format!("unknown query: {}", other)),
     }
 }
 
 /// Render a `FileKey` as a display path (the repeated match every
 /// location-emitting arm needs).
-fn key_display(key: &file_store::FileKey) -> String {
+fn key_display(key: &open_docs::FileKey) -> String {
     match key {
-        file_store::FileKey::Path(p) => p.display().to_string(),
-        file_store::FileKey::Url(u) => u
+        open_docs::FileKey::Path(p) => p.display().to_string(),
+        open_docs::FileKey::Url(u) => u
             .to_file_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| u.to_string()),
@@ -1080,7 +1023,7 @@ pub(super) fn override_scope_from_env() -> resolve::OverrideScope {
 /// Cross-file rename edit-set as the pretty-JSON object string (shared by
 /// `cli_rename` and `run_one`). `file` is the originating file; `point` the cursor.
 fn run_rename(
-    ws: &file_store::FileStore,
+    ws: &open_docs::OpenDocs,
     idx: &module_index::ModuleIndex,
     file: &str,
     point: tree_sitter::Point,
@@ -1098,15 +1041,10 @@ fn run_rename(
     // Same shape as the LSP handler: stage the origin, construct the set
     // once, project the rename — the per-arm policy (cross-file vs group vs
     // single-file, rewritability, the pack full-or-refuse) lives on the set.
-    let reg = language_driver::LanguageRegistry::with_enabled();
-    let lang_id = reg.driver_or_fallback(std::path::Path::new(file), &s).id();
-    let routed = idx.lookup_for(lang_id);
-    let _staged = ScopedWorkspaceEntry::insert(ws, file_path.clone(), analysis);
-    let origin = ws.workspace_raw().get(&file_path).map(|r| r.value().clone())
-        .expect("origin staged above");
+    let (_staged, origin, origin_key) = ScopedOpenDoc::stage(ws, &file_path, std::sync::Arc::new(analysis));
     let cs = resolve::resolve(
-        ws, &origin, file_store::FileKey::Path(file_path), point,
-        Some(routed.as_lookup()), override_scope_from_env(),
+        ws, &origin, origin_key, point,
+        Some(idx), override_scope_from_env(),
     );
     if cs.resolution().is_none() {
         return Err(format!("Nothing renameable at {}:{}", point.row, point.column));
@@ -1115,8 +1053,8 @@ fn run_rename(
     let mut all_edits: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
     for (loc, text) in cs.rename_edits(new_name)? {
         let path = match &loc.key {
-            file_store::FileKey::Path(p) => p.display().to_string(),
-            file_store::FileKey::Url(u) => u.to_file_path()
+            open_docs::FileKey::Path(p) => p.display().to_string(),
+            open_docs::FileKey::Url(u) => u.to_file_path()
                 .map(|p| p.display().to_string()).unwrap_or_else(|_| u.to_string()),
         };
         let edit = span_to_json(&mut sources, &path, loc.span, text);
@@ -1131,12 +1069,11 @@ fn run_rename(
 /// Collected form for callers that need the whole set at once (`--batch`
 /// diagnostics answers one JSON payload per request by protocol).
 fn tree_diagnostics(
-    ws: &file_store::FileStore,
     idx: &module_index::ModuleIndex,
     options: symbols::DiagnosticOptions,
 ) -> Vec<(String, tower_lsp::lsp_types::Diagnostic)> {
     let mut all = Vec::new();
-    for_each_tree_diagnostic(ws, idx, options, &mut |file, d| {
+    for_each_tree_diagnostic(idx, options, &mut |file, d| {
         all.push((file.to_string(), d));
     });
     all
@@ -1247,7 +1184,6 @@ fn sweep_one_file(
 /// — a 0-byte output file at hour two answers "has anything been
 /// PRINTED", not "has anything been found").
 fn for_each_tree_diagnostic(
-    ws: &file_store::FileStore,
     idx: &module_index::ModuleIndex,
     options: symbols::DiagnosticOptions,
     emit: &mut dyn FnMut(&str, tower_lsp::lsp_types::Diagnostic),
@@ -1255,12 +1191,17 @@ fn for_each_tree_diagnostic(
     // Snapshot before working: values are `Arc`s, so this is a pointer copy
     // per file, and it releases the DashMap shard guards an `iter()` would
     // otherwise hold closed to writers for the whole sweep.
+    // A pack language's files take `pack_diagnostics` instead (below) —
+    // the backend's language dispatch, on the process's one language.
+    let hub = language_driver::LanguageRegistry::served().caps().hub_enrichment;
     let _g_snap = crate::util::timings::PhaseGuard::start("cli::diag_snapshot");
-    let entries: Vec<(std::path::PathBuf, std::sync::Arc<file_analysis::FileAnalysis>)> = ws
-        .workspace_raw()
-        .iter()
-        .map(|e| (e.key().clone(), std::sync::Arc::clone(e.value())))
-        .collect();
+    let mut entries: Vec<(std::path::PathBuf, std::sync::Arc<file_analysis::FileAnalysis>)> =
+        Vec::new();
+    if hub {
+        idx.for_each_registered_file(&mut |cm| {
+            entries.push((cm.path.clone(), std::sync::Arc::clone(&cm.analysis())));
+        });
+    }
     // Streaming survives the parallelism: workers send as each file finishes
     // and the calling thread drains, so `--check` still produces output
     // THROUGHOUT the run rather than buffering it into a final print a
@@ -1357,30 +1298,30 @@ fn for_each_tree_diagnostic(
         peak_pending.load(std::sync::atomic::Ordering::Relaxed).max(0) as u64,
     );
 
-    // Pack-language files (C++/…) live in the per-language sub-indexes, not the
-    // Perl-only `FileStore` above. Mirror the backend's language dispatch: they
-    // get `pack_diagnostics` (Mode B — member-op swap + peel), so `--batch
-    // diagnostics` / `--check` / gold see the same Mode-B answers the LSP
-    // publishes. No enrichment (pack files aren't cross-file-enriched).
-    idx.for_each_pack_index(|_lang, pack| {
-        pack.for_each_registered_file(&mut |cm| {
-            let file = cm.path.display().to_string();
-            // Same whole-view routing: pack index copies are evicted.
-            let whole = file_analysis::CrossFileLookup::whole_present(pack.as_ref(), cm);
-            for d in symbols::pack_diagnostics(&whole, options) {
-                emit(&file, d);
-            }
-        });
+    // Pack-language files (C++/…) get `pack_diagnostics` (Mode B —
+    // member-op swap + peel), so `--batch diagnostics` / `--check` / gold
+    // see the same Mode-B answers the LSP publishes. No enrichment (pack
+    // files aren't cross-file-enriched).
+    if hub {
+        return;
+    }
+    idx.for_each_registered_file(&mut |cm| {
+        let file = cm.path.display().to_string();
+        // Same whole-view routing: pack index copies are evicted.
+        let whole = file_analysis::CrossFileLookup::whole_present(idx, cm);
+        for d in symbols::pack_diagnostics(&whole, options) {
+            emit(&file, d);
+        }
     });
 }
 
 /// Whole-tree diagnostics as the pretty-JSON array string (warning+; shared by
 /// `--batch` diagnostics requests). Mirrors `cli_check`'s JSON path.
 
-fn batch_diagnostics(ws: &file_store::FileStore, idx: &module_index::ModuleIndex) -> String {
+fn batch_diagnostics(idx: &module_index::ModuleIndex) -> String {
     let options = symbols::DiagnosticOptions::default();
     let mut all = Vec::new();
-    for (file, d) in tree_diagnostics(ws, idx, options) {
+    for (file, d) in tree_diagnostics(idx, options) {
         let sev = match d.severity {
             Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::ERROR => "error",
             Some(s) if s == tower_lsp::lsp_types::DiagnosticSeverity::WARNING => "warning",
@@ -1406,10 +1347,10 @@ fn batch_diagnostics(ws: &file_store::FileStore, idx: &module_index::ModuleIndex
 /// + @INC cost across every query instead of paying it per process.
 pub(crate) fn cli_batch(root: &str) {
     use std::io::{BufRead, Write};
-    // The requests arrive on stdin AFTER startup, so their languages are not
-    // knowable here — and a batch legitimately mixes them (the gold harness
-    // groups rows by ROOT, not by language).
-    let (ws, idx) = cli_full_startup(root, language_driver::LanguageScope::All);
+    // The requests arrive on stdin AFTER startup, so the batch serves the
+    // `--lang` language (Perl without one); the gold harness groups rows by
+    // root AND language.
+    let (ws, idx) = cli_full_startup(root);
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -1425,11 +1366,11 @@ pub(crate) fn cli_batch(root: &str) {
             }
         };
         // Whole-tree diagnostics are request-independent within one
-        // batch process (ScopedWorkspaceEntry restores any staging) —
+        // batch process (ScopedOpenDoc closes any staging) —
         // compute the enriched pass once, replay it for every row.
         let result = if req.q == "diagnostics" {
             Ok(diag_memo
-                .get_or_insert_with(|| batch_diagnostics(&ws, &idx))
+                .get_or_insert_with(|| batch_diagnostics(&idx))
                 .clone())
         } else {
             // The batch protocol's input is engine-native (0-based/byte) and its
@@ -1459,12 +1400,10 @@ pub(crate) fn cli_rename(root: &str, cursor: &[String], new_name: &str) {
         super::exit_with(2, "exit");
     });
     emit_pos_annotation(&target);
+    super::lock_for_file(std::path::Path::new(&target.file));
     // Full startup so workspace files are built with the same plugins, type
     // inference, and enrichment that the LSP backend would use.
-    let (ws, idx) = cli_full_startup(
-        root,
-        language_driver::LanguageScope::of_file(std::path::Path::new(&target.file)),
-    );
+    let (ws, idx) = cli_full_startup(root);
     match run_rename(&ws, &idx, &target.file, target.point, new_name, target.fmt) {
         Ok(s) => println!("{}", s),
         Err(e) => {
@@ -1478,7 +1417,7 @@ pub(crate) fn cli_rename(root: &str, cursor: &[String], new_name: &str) {
 ///
 /// Extracted so the property has a name and a test: this verb must collect
 /// ALL declaring files and order them, never take whichever one an unordered
-/// map yields first. `workspace_raw()` is a `DashMap`, so a `break` on the
+/// map yields first. The registry is a `DashMap`, so a `break` on the
 /// first hit made the answer for any reopened package vary run to run.
 fn order_declaring_files<T>(mut matches: Vec<(String, T)>) -> Vec<(String, T)> {
     matches.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1496,9 +1435,7 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
     use std::sync::Arc;
     use file_analysis::{SymKind, SymbolDetail};
 
-    // A package's type inference is a reference-language question; no pack
-    // store can hold one.
-    let (ws, module_index) = cli_full_startup(root, language_driver::LanguageScope::reference_only());
+    let (_ws, module_index) = cli_full_startup(root);
 
     // Find a FileAnalysis whose package matches. Workspace first; fall
     // back to cached @INC modules. No bespoke discovery — only what
@@ -1506,7 +1443,7 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
     //
     // EVERY match, then sorted — not the first the iteration reaches. A Perl
     // package is open: `PPI::XSAccessor` reopens `PPI::Token`, so two
-    // workspace files declare it, and `workspace_raw()` is a `DashMap` whose
+    // workspace files declare it, and the index's registry is a `DashMap` whose
     // iteration order varies run to run. This verb used to `break` on the
     // first hit, which made its answer for any reopened package a coin flip —
     // `--dump-package PPI::Token` alternated between `Token.pm` and
@@ -1517,20 +1454,16 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
     // project's own measurement notes). A flaky oracle silently launders a
     // real difference into noise, and noise into a real difference.
     let mut matches: Vec<(String, Arc<file_analysis::CachedModule>)> = Vec::new();
-    for entry in ws.workspace_raw().iter() {
-        let cm = std::sync::Arc::new(crate::index::sealed::cached_module(
-            entry.key().clone(),
-            std::sync::Arc::clone(entry.value()),
-        ));
-        let analysis = file_analysis::CrossFileLookup::whole_present(&module_index, &cm);
+    module_index.for_each_registered_file(&mut |cm| {
+        let analysis = file_analysis::CrossFileLookup::whole_present(&module_index, cm);
         let has_package = analysis.symbols().iter().any(|s| {
             matches!(s.kind, SymKind::Package | SymKind::Class)
                 && s.name == package_name
         });
         if has_package {
-            matches.push((entry.key().display().to_string(), cm));
+            matches.push((cm.path.display().to_string(), Arc::clone(cm)));
         }
-    }
+    });
     let matches = order_declaring_files(matches);
     if matches.len() > 1 {
         // Named, not just deduped. A reopened package is exactly the situation
@@ -1774,8 +1707,7 @@ pub(crate) fn cli_dump_package(root: &str, package_name: &str) {
 pub(crate) fn cli_workspace_symbol(root: &str, query: &str) {
     // Full startup so workspace symbols reflect plugin-synthesized entities
     // (helpers, routes, accessors), built with `root`'s plugins not cwd's.
-    // `sym_row_search` fans across the hub AND every pack sub-index.
-    let (ws, idx) = cli_full_startup(root, language_driver::LanguageScope::All);
+    let (ws, idx) = cli_full_startup(root);
     let req = BatchReq {
         id: String::new(), q: "workspace-symbol".into(),
         file: String::new(), line: 0, col: 0,

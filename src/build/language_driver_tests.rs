@@ -10,7 +10,7 @@ fn perl_driver_analyzes() {
 
 #[test]
 fn registry_serves_perl_by_default() {
-    let reg = LanguageRegistry::with_enabled();
+    let reg = LanguageRegistry::compiled();
     assert!(reg.languages().contains(&"perl"));
     assert_eq!(reg.for_path(std::path::Path::new("Foo.pm")).map(|d| d.id()), Some("perl"));
 }
@@ -87,7 +87,7 @@ fn cpp_include_guard_define_is_hidden_from_outline_but_resolvable() {
 #[cfg(feature = "cpp")]
 #[test]
 fn registry_serves_cpp_when_enabled() {
-    let reg = LanguageRegistry::with_enabled();
+    let reg = LanguageRegistry::compiled();
     assert!(reg.languages().contains(&"cpp"));
     assert_eq!(reg.for_path(std::path::Path::new("x.cpp")).map(|d| d.id()), Some("cpp"));
 }
@@ -111,18 +111,19 @@ fn cpp_macro_recovered_spans_are_in_original_coords() {
 
 #[test]
 fn perl_trigger_chars_unchanged() {
-    let tc = LanguageRegistry::with_enabled().trigger_chars();
-    // The Perl reference set — a perl-only build must keep exactly these.
+    let tc = PerlDriver.trigger_chars();
+    // The Perl reference set — a Perl process advertises exactly these.
     for c in ["$", "@", "%", ">", ":", "{", "(", ","] {
-        assert!(tc.iter().any(|s| s == c), "missing perl trigger {c}");
+        assert!(tc.contains(&c), "missing perl trigger {c}");
     }
 }
 
 #[cfg(feature = "cpp")]
 #[test]
-fn cpp_adds_dot_trigger() {
-    let tc = LanguageRegistry::with_enabled().trigger_chars();
-    assert!(tc.iter().any(|s| s == "."), "cpp build should add '.' trigger: {tc:?}");
+fn cpp_triggers_on_dot() {
+    let driver = cpp_driver();
+    let tc = driver.trigger_chars();
+    assert!(tc.contains(&"."), "a cpp process should trigger on '.': {tc:?}");
 }
 
 #[cfg(feature = "cpp")]
@@ -969,7 +970,7 @@ void RE::Init() {\n\
 // caps struct decays back into the language branching it replaced.
 #[test]
 fn driver_caps_axes_are_reviewed_exhaustively() {
-    let reg = LanguageRegistry::with_enabled();
+    let reg = LanguageRegistry::compiled();
     for d in reg.languages().into_iter().filter_map(|id| reg.for_id(id)) {
         let DriverCaps {
             hub_enrichment,
@@ -1004,17 +1005,30 @@ fn driver_caps_axes_are_reviewed_exhaustively() {
     }
 }
 
-// Exactly one driver serves unclaimed files — the fallback is a declared
-// property, never a registry position.
+// A process serves one language: the lock refuses an id the build lacks,
+// and the served driver is Perl until something locks another. The latch
+// itself is process-wide, so this asks only what a test may (no lock).
 #[test]
-fn exactly_one_fallback_driver() {
-    let reg = LanguageRegistry::with_enabled();
-    let n = reg
-        .languages()
-        .into_iter()
-        .filter_map(|id| reg.for_id(id))
-        .filter(|d| d.claims_unclaimed())
-        .count();
-    assert_eq!(n, 1, "exactly one driver claims unclaimed files");
-    assert!(reg.fallback().claims_unclaimed());
+fn lock_refuses_an_unknown_language() {
+    let Err(err) = LanguageRegistry::lock_process_language("cobol") else {
+        panic!("an id the build lacks must be refused");
+    };
+    assert!(err.contains("cobol") && err.contains("perl"), "{err}");
+}
+
+// A file another compiled driver claims is refused, never read in the
+// wrong language; an unclaimed one is the served driver's to try.
+#[test]
+fn admits_refuses_files_another_driver_claims() {
+    let perl = LanguageRegistry::compiled().for_id("perl").unwrap();
+    assert!(LanguageRegistry::admits(perl, std::path::Path::new("Foo.pm")).is_ok());
+    assert!(LanguageRegistry::admits(perl, std::path::Path::new("script")).is_ok());
+    #[cfg(feature = "cpp")]
+    {
+        let err = LanguageRegistry::admits(perl, std::path::Path::new("x.cpp")).unwrap_err();
+        assert!(err.contains("--lang cpp"), "{err}");
+        let cpp = LanguageRegistry::compiled().for_id("cpp").unwrap();
+        assert!(LanguageRegistry::admits(cpp, std::path::Path::new("Foo.pm")).is_err());
+        assert!(LanguageRegistry::admits(cpp, std::path::Path::new("commands.def")).is_ok());
+    }
 }

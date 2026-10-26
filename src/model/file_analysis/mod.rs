@@ -28,6 +28,8 @@ mod types;
 pub use types::*;
 mod dispatch;
 pub use dispatch::*;
+mod deferral;
+pub use deferral::*;
 mod imports;
 pub use imports::*;
 mod outline;
@@ -169,9 +171,8 @@ pub struct FileAnalysis {
     /// The builder records one per call matching a plugin `DispatchVerb`,
     /// ungated and per-file; the gate (`isa target_class`) is checked at
     /// QUERY time by `applicable_dispatches` (cross-file receiver isa), so
-    /// candidates in non-open files surface the same as open ones. The
-    /// `ReceiverGated` wrapper makes the inner handler payload unreadable
-    /// without that check. See `docs/adr/receiver-gated-dispatch.md`.
+    /// candidates in non-open files surface the same as open ones. See
+    /// `docs/adr/receiver-gated-dispatch.md`.
     #[serde(default)]
     pub provisional_dispatches: Vec<ProvisionalDispatch>,
 
@@ -195,11 +196,10 @@ pub struct FileAnalysis {
     /// `in_role` ancestor is reachable only CROSS-FILE still carries the
     /// candidate. The gate (`isa in_role`) is checked at QUERY time in
     /// `inferred_type_via_bag_ctx`, where the module index resolves the
-    /// enclosing package's ancestry cross-file. The `ReceiverGated` wrapper
-    /// keeps the typed TC unreadable without that check (rule #10). See
-    /// `docs/adr/receiver-gated-dispatch.md` (Phase 2).
+    /// enclosing package's ancestry cross-file (a `PackageIsa` deferral).
+    /// See `docs/adr/receiver-gated-dispatch.md` (Phase 2).
     #[serde(default)]
-    pub gated_param_types: Vec<ReceiverGated<TypeConstraint>>,
+    pub gated_param_types: Vec<Deferred<TypeConstraint>>,
     #[serde(default)]
     pub attr_projections: Vec<AttrProjection>,
 
@@ -217,15 +217,6 @@ pub struct FileAnalysis {
     /// pass — see [`KeyWrite`].
     #[serde(default)]
     pub key_writes: Vec<KeyWrite>,
-
-    /// SymbolIds of `requires`-synthesized contract markers. A marker
-    /// resolves like a Method (in-role `$self->name` dispatch, hover,
-    /// goto-def land on the contract) but is NOT a provision — the
-    /// composer-mismatch check excludes these by id, so a role that
-    /// both requires AND defines a name (the default-implementation
-    /// pattern) still counts the real def.
-    #[serde(default)]
-    pub contract_symbols: HashSet<SymbolId>,
 
     /// DBIC `__PACKAGE__->source_name('X')` override for this file's result
     /// class — the registered SOURCE moniker when it differs from the class
@@ -601,11 +592,10 @@ pub struct FileAnalysisParts {
     pub provisional_dispatches: Vec<ProvisionalDispatch>,
     pub guard_sites: Vec<GuardSite>,
     pub arrow_deref_sites: Vec<ArrowDerefSite>,
-    pub gated_param_types: Vec<ReceiverGated<TypeConstraint>>,
+    pub gated_param_types: Vec<Deferred<TypeConstraint>>,
     pub attr_projections: Vec<AttrProjection>,
     pub reassigned_scalars: HashSet<String>,
     pub key_writes: Vec<KeyWrite>,
-    pub contract_symbols: HashSet<SymbolId>,
     pub dbic_source_name: Option<String>,
     pub column_keyed_verbs: HashSet<String>,
     pub dynamic_dispatch_sites: u32,

@@ -64,6 +64,9 @@ pub struct SkelRef {
     /// counted from the argument list the same match captured. Flows to
     /// `Ref.arg_count`; `None` for non-call refs.
     pub arg_count: Option<usize>,
+    /// The match carries `#names-class?`: the call constructs the class its
+    /// name spells, when one is declared under it.
+    pub names_class: bool,
 }
 
 /// One `@expr.call` site.
@@ -80,6 +83,8 @@ pub struct CallSite {
     /// (`@arity.spread`); `None` when the call's match captured no argument
     /// list.
     pub args: Option<Vec<(Span, bool)>>,
+    /// The match carries `#names-class?` (`SkelRef::names_class`).
+    pub names_class: bool,
 }
 
 #[derive(Debug, Default)]
@@ -91,6 +96,12 @@ pub struct SkeletonAnalysis {
     /// span). Goto-def on the token resolves the header; the span is what the
     /// bare `imports` list drops. Carried onto `FileAnalysis.pack.include_directives`.
     pub import_sites: Vec<(String, crate::model::file_analysis::Span)>,
+    /// A use-map language's `use` rows. Carried onto
+    /// `FileAnalysis.pack.use_rows`.
+    pub use_rows: Vec<crate::model::file_analysis::UseRow>,
+    /// A use-map language's namespace sections. Carried onto
+    /// `FileAnalysis.pack.namespace_sections`.
+    pub namespace_sections: Vec<crate::model::file_analysis::PackageRange>,
     pub scope_count: usize,
     pub scopes: Vec<crate::model::file_analysis::Scope>,
     pub witnesses: Vec<crate::model::witnesses::Witness>,
@@ -823,26 +834,29 @@ impl SkeletonAnalysis {
             // callable. Any other name is looked up across files at query
             // time; one nothing defines answers nothing (no name-case guess —
             // an unknown uppercase macro leaves the enclosing `auto x =
-            // F(..)` honestly untyped). Prefer a `Class` over a like-named
-            // callable (the constructor is the stronger claim). A method is
+            // F(..)` honestly untyped). Where the document says the call may
+            // construct (`#names-class?`), prefer a `Class` over a like-named
+            // callable (the constructor is the stronger claim); elsewhere a
+            // class is no callee at all. A method is
             // never a free callee: a bare call in a member body reaches it
             // through `member_of`, with the class as its receiver.
-            let callee_sid: std::collections::HashMap<&str, SymbolId> = {
-                let mut m: std::collections::HashMap<&str, SymbolId> =
-                    std::collections::HashMap::new();
-                for s in &symbols {
-                    match s.kind {
-                        SymKind::Class => {
-                            m.insert(s.name.as_str(), s.id);
-                        }
-                        SymKind::Sub => {
-                            m.entry(s.name.as_str()).or_insert(s.id);
-                        }
-                        _ => {}
-                    }
-                }
-                m
+            let class_identity_at = |written: &str, site: tree_sitter::Point| {
+                let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_sections, &self.names, site)?;
+                Some(map.resolve(written).identity(map.sep))
             };
+            let mut class_sid: std::collections::HashMap<&str, SymbolId> = std::collections::HashMap::new();
+            let mut sub_sid: std::collections::HashMap<&str, SymbolId> = std::collections::HashMap::new();
+            for s in &symbols {
+                match s.kind {
+                    SymKind::Class => {
+                        class_sid.insert(s.name.as_str(), s.id);
+                    }
+                    SymKind::Sub => {
+                        sub_sid.entry(s.name.as_str()).or_insert(s.id);
+                    }
+                    _ => {}
+                }
+            }
             // Per-call-site argument spans (original coords) so a `Param(n)`
             // call resolves to its n-th argument's value witness.
             let call_args: std::collections::HashMap<Span, &Vec<Span>> =
@@ -886,14 +900,47 @@ impl SkeletonAnalysis {
                     None => (
                         crate::model::witnesses::Callee::Function {
                             name: name.clone(),
-                            local: callee_sid.get(name.as_str()).copied(),
+                            local: site
+                                .names_class
+                                .then(|| {
+                                    class_sid.get(name.as_str()).or_else(|| {
+                                        // under a use-map a class is filed under the
+                                        // identity its spelling names at the call
+                                        class_sid.get(class_identity_at(name, span.start)?.as_str())
+                                    })
+                                })
+                                .flatten()
+                                .or_else(|| sub_sid.get(name.as_str()))
+                                .copied(),
                             member_of: elided_class.get(site.scope.0 as usize).cloned().flatten(),
                             package: None,
                         },
                         None,
                     ),
                 };
-                bag.push(mk(WA::Expr(*span), WP::Invoke { callee, receiver, args }, *span));
+                let invoke = WP::Invoke { callee, receiver, args };
+                // A call that may construct a class another file declares is
+                // that class's instance once the index says the class exists,
+                // and stays a call otherwise.
+                let unsettled = match &invoke {
+                    WP::Invoke { callee: crate::model::witnesses::Callee::Function { local: None, .. }, receiver: None, .. }
+                        if site.names_class =>
+                    {
+                        let identity = class_identity_at(name, span.start).unwrap_or_else(|| name.clone());
+                        crate::model::file_analysis::ElsewhereClass::unless_local(&symbols, identity.clone())
+                            .map(|class| (class, identity))
+                    }
+                    _ => None,
+                };
+                let payload = match unsettled {
+                    Some((class, identity)) => WP::Choose(Box::new(crate::model::file_analysis::Deferred::fork(
+                        crate::model::file_analysis::Question::NamesClass(class),
+                        WP::InferredType(InferredType::ClassName(identity)),
+                        Some(invoke),
+                    ))),
+                    None => invoke,
+                };
+                bag.push(mk(WA::Expr(*span), payload, *span));
             }
         }
         // ---- Local/param vars: a variable READ resolves to the nearest
@@ -953,7 +1000,7 @@ impl SkeletonAnalysis {
                     scope: *read_scope,
                     target_name: name.clone(),
                     access: crate::model::file_analysis::AccessKind::Read,
-                    binding: Some(crate::model::file_analysis::RefBinding::Symbol(did)),
+                    binding: crate::model::file_analysis::Binding::from(Some(crate::model::file_analysis::RefBinding::Symbol(did))),
                     folded_from: None,
                     arg_count: None,
                 }),
@@ -981,7 +1028,7 @@ impl SkeletonAnalysis {
                     scope: *ref_scope,
                     target_name: name.clone(),
                     access: crate::model::file_analysis::AccessKind::Read,
-                    binding: Some(crate::model::file_analysis::RefBinding::Symbol(did)),
+                    binding: crate::model::file_analysis::Binding::from(Some(crate::model::file_analysis::RefBinding::Symbol(did))),
                     folded_from: None,
                     arg_count: None,
                 });
@@ -1081,7 +1128,7 @@ impl SkeletonAnalysis {
                     scope: r.scope,
                     target_name: r.name.clone(),
                     access: crate::model::file_analysis::AccessKind::Read,
-                    binding,
+                    binding: binding.into(),
                     folded_from: None,
                     arg_count: r.arg_count,
                 })
@@ -1126,7 +1173,7 @@ impl SkeletonAnalysis {
                 scope,
                 target_name: name,
                 access: crate::model::file_analysis::AccessKind::Read,
-                binding: None,
+                binding: crate::model::file_analysis::Binding::NONE,
                 folded_from: None,
                 arg_count: None,
             });
@@ -1191,12 +1238,12 @@ impl SkeletonAnalysis {
                         // matches on `invocant_class`, and goto-def from the
                         // in-body use lands on `sym_id` — no query-time invocant
                         // typing (the receiver is an untypeable macro parameter).
-                        binding: Some(crate::model::file_analysis::RefBinding::Method(
+                        binding: crate::model::file_analysis::Binding::from(Some(crate::model::file_analysis::RefBinding::Method(
                             crate::model::file_analysis::MethodTarget::Local {
                                 sym_id: *sym_id,
                                 invocant_class: class.to_string(),
                             },
-                        )),
+                        ))),
                         folded_from: None,
                         arg_count: None,
                     });
@@ -1243,7 +1290,7 @@ impl SkeletonAnalysis {
                     let Some(class) = implicit_class(r.scope) else { continue };
                     let local = fields.get(&(class, r.target_name.as_str())).map(|&(fscope, fsym)| (fsym, fscope));
                     bare_reads.push((i, class.to_string(), local));
-                } else if matches!(r.kind, RefKind::FunctionCall) && r.binding.is_none() {
+                } else if matches!(r.kind, RefKind::FunctionCall) && r.settled_binding().is_none() {
                     let Some(class) = implicit_class(r.scope) else { continue };
                     if methods.contains(&(class, r.target_name.as_str())) {
                         sibling_calls.push((i, class.to_string()));
@@ -1280,6 +1327,37 @@ impl SkeletonAnalysis {
             // name no member answers stays free.
             for (i, class) in sibling_calls {
                 refs[i].bind_function_package(class);
+            }
+        }
+        // A call the document says may construct (`#names-class?`) reads as
+        // a reference to the class its name spells: settled here when this
+        // file declares the class, else a `NamesClass` deferral decided with
+        // the index in hand, the call's own binding its other reading.
+        {
+            use crate::model::file_analysis::{Deferred, ElsewhereClass, Question, RefBinding, RefKind, UseMap};
+            let constructing: std::collections::HashSet<(Point, Point)> = self
+                .refs
+                .iter()
+                .filter(|r| r.names_class && r.kind == super::vocab::RefCap::Call)
+                .map(|r| (r.start, r.end))
+                .collect();
+            for r in refs.iter_mut() {
+                if !matches!(r.kind, RefKind::FunctionCall) || !constructing.contains(&(r.span.start, r.span.end)) {
+                    continue;
+                }
+                let identity = match UseMap::at(&self.use_rows, &self.namespace_sections, &self.names, r.span.start) {
+                    Some(map) => map.resolve(&r.target_name).identity(map.sep),
+                    None => r.target_name.clone(),
+                };
+                let binding = match ElsewhereClass::unless_local(&symbols, identity.clone()) {
+                    None => RefBinding::NamesClass(identity),
+                    Some(class) => RefBinding::Deferred(Box::new(Deferred::fork(
+                        Question::NamesClass(class),
+                        RefBinding::NamesClass(identity),
+                        r.take_binding(),
+                    ))),
+                };
+                r.binding = binding.into();
             }
         }
         // Implicit return: a callable whose syntax declares no return takes
@@ -1327,6 +1405,23 @@ impl SkeletonAnalysis {
         for (child, parent) in &self.parents {
             packages.entry(child.clone()).or_default().parents.push(parent.clone());
         }
+        // A class that defers its obligations to a composer (an interface, a
+        // trait, an abstract class) is a role, and each contract it declares
+        // is a require of it (docs/adr/role-contracts.md).
+        for sym in &symbols {
+            let defers = SymbolFlags::INTERFACE | SymbolFlags::TRAIT | SymbolFlags::ABSTRACT;
+            if sym.kind == SymKind::Class && sym.flags.intersects(defers) {
+                packages.entry(sym.name.clone()).or_default().is_role = true;
+            }
+            if sym.flags.contains(SymbolFlags::CONTRACT) {
+                if let Some(pkg) = &sym.package {
+                    let requires = &mut packages.entry(pkg.clone()).or_default().requires;
+                    if !requires.contains(&sym.name) {
+                        requires.push(sym.name.clone());
+                    }
+                }
+            }
+        }
         let pack = crate::model::file_analysis::PackFacts {
             names: std::mem::take(&mut self.names),
             // Specialization family edges (spec → primary). NOT an inheritance
@@ -1347,6 +1442,8 @@ impl SkeletonAnalysis {
                 .drain(..)
                 .map(|(raw, span)| (span, raw))
                 .collect(),
+            use_rows: std::mem::take(&mut self.use_rows),
+            namespace_sections: std::mem::take(&mut self.namespace_sections),
             domain_sites: std::mem::take(&mut self.domain_sites),
             moved_from: std::mem::take(&mut self.moved_from),
             control_regions: std::mem::take(&mut self.control_regions),

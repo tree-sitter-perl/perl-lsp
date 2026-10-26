@@ -153,16 +153,13 @@ pub(crate) struct IndexCore {
     /// one-shot invocation reuses. (`--check`/`--dump-package` consume
     /// `enriched_snapshot` directly and are unaffected by this gate.)
     pub(crate) long_lived: std::sync::atomic::AtomicBool,
-    /// Slice-2 rehydration store CELL. Pack sub-indexes get theirs at
-    /// construction (keyed to `modules-{lang}.db`); the Perl hub gets its
-    /// own in `set_workspace_root` (keyed to `modules.db`). A type query
-    /// reaching into an evicted file rehydrates the exact persisted bag
-    /// through this LRU (`bag_present`). Kept behind its own `Arc` because
-    /// `attach_pack_index` shares the cell itself (not its contents) into
-    /// sub-indexes' `foreign_bag_cache`, so a later `set_workspace_root`
-    /// install stays visible to them. See `docs/adr/memory-slice-2-lru.md`.
+    /// Slice-2 rehydration store, keyed to the served language's DB
+    /// (`modules.db` installed by `set_workspace_root`, `modules-{lang}.db`
+    /// by the pack indexer). A type query reaching into an evicted file
+    /// rehydrates the exact persisted bag through this LRU (`bag_present`).
+    /// See `docs/adr/memory-slice-2-lru.md`.
     pub(crate) bag_cache:
-        Arc<std::sync::RwLock<Option<Arc<crate::index::pack_bag_cache::PackBagCache>>>>,
+        std::sync::RwLock<Option<Arc<crate::index::pack_bag_cache::PackBagCache>>>,
     /// Resident baked conclusions, byte-bounded. Installed alongside the bag
     /// cache; absent on an index with no store, which simply keeps decoding.
     pub(crate) conclusion_cache:
@@ -230,7 +227,7 @@ impl IndexCore {
             flush_epoch: std::sync::atomic::AtomicU64::new(0),
             provider_diff_gen: DashMap::new(),
             long_lived: std::sync::atomic::AtomicBool::new(false),
-            bag_cache: Arc::new(std::sync::RwLock::new(None)),
+            bag_cache: std::sync::RwLock::new(None),
             conclusion_cache: Arc::new(std::sync::RwLock::new(None)),
             gated_views: DashMap::new(),
         }

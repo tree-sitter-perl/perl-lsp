@@ -14,6 +14,8 @@ macro_rules! spelled {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         pub enum $name { $($(#[$vm])* $var),* }
         impl $name {
+            #[cfg(test)]
+            pub const ALL: &'static [Self] = &[$($name::$var),*];
             pub fn spelling(self) -> &'static str {
                 match self { $($name::$var => $s),* }
             }
@@ -59,6 +61,22 @@ spelled! {
 }
 
 spelled! {
+    /// What a `@mark.<flag>` states about the declaration whose NAME token
+    /// it captures. The document says it in a pattern of its own, so a
+    /// modifier in any order, a keyword that is not the flag's spelling
+    /// (`private` → non-public) and a fact about a class read off its body
+    /// all reach the symbol as the flag `flag` names.
+    pub enum MarkCap {
+        Static = "static",
+        Abstract = "abstract",
+        NonPublic = "non_public",
+        Constructor = "constructor",
+        Contract = "contract",
+        DynamicMembers = "dynamic_members",
+    }
+}
+
+spelled! {
     /// What a `@ref.<kind>` refers through.
     pub enum RefCap {
         Call = "call",
@@ -91,8 +109,9 @@ spelled! {
 }
 
 spelled! {
-    /// A sticky container context. The kinds are handled alike; the
-    /// spelling says what the document means.
+    /// A sticky container context. A `Namespace` is also the namespace a
+    /// class declared inside it joins when spellings resolve through a
+    /// use-map; otherwise the kinds are handled alike.
     pub enum ContextKind { Class = "class", Namespace = "namespace", Package = "package" }
 }
 
@@ -107,6 +126,20 @@ spelled! {
         /// The module an import CALL names (R `library(pkg)`, CMake
         /// `include(f)`), as written.
         Arg = "arg",
+        /// The module an import STATEMENT loads, as written, where the
+        /// names it binds are rows of their own (python's `from a.b import
+        /// C` loads `a.b`).
+        Module = "module",
+        /// The namespace a group import's names hang off (php's
+        /// `use A\B\{C, D}`), joined to each name by match.
+        Prefix = "prefix",
+        /// A relative import's leading dots (python's `import_prefix` in
+        /// `from ..x import C`), one level per separator it holds; what a
+        /// level climbs is the language's `ImportPrefix`.
+        Relative = "relative",
+        /// The name an import binds in place of its own leaf
+        /// (`use A\B as C`), joined to the import name by match.
+        Alias = "alias",
     }
 }
 
@@ -278,6 +311,10 @@ pub enum DefPart {
 pub enum Capture {
     Def { kind: DefCap, part: DefPart },
     Ref(RefCap),
+    /// The whole written spelling of the match's reference when its token
+    /// is only the leaf (`Base\Model` around `Model`): the reference
+    /// resolves by the spelling and rewrites only the leaf.
+    RefSpelled,
     Scope(ScopeCap),
     Context(ContextKind),
     /// A base class, paired with the match's `@def.class.name`.
@@ -302,6 +339,8 @@ pub enum Capture {
     /// A method's receiver parameter (python `self`): the object, not a
     /// member.
     ParamReceiver,
+    /// A fact the document states about the declaration at this name token.
+    Mark(MarkCap),
     Arity(ArityCap),
     Domain(DomainCap),
     Shape(ShapeCap),
@@ -352,6 +391,7 @@ impl Capture {
         Some(match segs.as_slice() {
             ["def", k] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Node },
             ["def", k, "name"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Name },
+            ["ref", "spelled"] => C::RefSpelled,
             ["ref", rest @ ..] => C::Ref(RefCap::parse(&rest.join("."))?),
             ["scope"] => C::Scope(ScopeCap::Block),
             ["scope", "sub", "implicit_receiver"] => C::Scope(ScopeCap::SubImplicitReceiver),
@@ -380,6 +420,7 @@ impl Capture {
                 "receiver" => C::ParamReceiver,
                 _ => return None,
             },
+            ["mark", k] => C::Mark(MarkCap::parse(k)?),
             ["member", "op", k] => C::MemberOp(MemberOpCap::parse(k)?),
             ["member", k] => C::Member(MemberCap::parse(k)?),
             ["arity", k] => C::Arity(ArityCap::parse(k)?),
@@ -416,6 +457,7 @@ impl fmt::Display for Capture {
             C::Def { kind, part: DefPart::Node } => write!(f, "def.{kind}"),
             C::Def { kind, part: DefPart::Name } => write!(f, "def.{kind}.name"),
             C::Ref(k) => write!(f, "ref.{k}"),
+            C::RefSpelled => f.write_str("ref.spelled"),
             C::Scope(k) => family(f, "scope", k.spelling()),
             C::Context(k) => write!(f, "context.{k}"),
             C::Parent => f.write_str("parent"),
@@ -439,6 +481,7 @@ impl fmt::Display for Capture {
             C::Member(k) => write!(f, "member.{k}"),
             C::MemberOp(k) => write!(f, "member.op.{k}"),
             C::ParamReceiver => f.write_str("param.receiver"),
+            C::Mark(k) => write!(f, "mark.{k}"),
             C::Arity(k) => write!(f, "arity.{k}"),
             C::Domain(k) => write!(f, "domain.{k}"),
             C::Shape(k) => write!(f, "shape.{k}"),
@@ -540,6 +583,20 @@ impl DefCap {
             DefCap::Reexport => Some("reexport"),
             DefCap::Macro => Some("macro"),
             _ => None,
+        }
+    }
+}
+
+impl MarkCap {
+    pub fn flag(self) -> crate::model::file_analysis::SymbolFlags {
+        use crate::model::file_analysis::SymbolFlags as F;
+        match self {
+            MarkCap::Static => F::STATIC,
+            MarkCap::Abstract => F::ABSTRACT,
+            MarkCap::NonPublic => F::NON_PUBLIC,
+            MarkCap::Constructor => F::CONSTRUCTOR,
+            MarkCap::Contract => F::CONTRACT,
+            MarkCap::DynamicMembers => F::DYNAMIC_MEMBERS,
         }
     }
 }

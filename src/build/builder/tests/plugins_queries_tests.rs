@@ -692,7 +692,7 @@ sub to { my $self = shift; return $self; }
         Arc::new(build_fa(route_pm)),
     );
 
-    // Cross-file enrichment — mirrors `FileStore::enrich_open`.
+    // Cross-file enrichment — mirrors `OpenDocs::enrich_open`.
     // Without this pass, MethodCallBindings whose resolution needs
     // a cross-file return type (e.g. `$r = app->routes` needs real
     // Mojolicious.pm's `routes` accessor) don't land in

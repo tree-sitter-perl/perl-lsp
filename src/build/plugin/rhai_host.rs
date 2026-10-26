@@ -285,6 +285,7 @@ pub struct RhaiPlugin {
     app_surface_consumers: Vec<String>,
     role_makers: Vec<String>,
     framework_mode_makers: Vec<FrameworkModeMaker>,
+    feature_makers: Vec<crate::build::plugin::FeatureMaker>,
     column_keyed_verbs: Vec<String>,
     fluent_verbs: Vec<String>,
     meta_methods: Vec<String>,
@@ -351,6 +352,8 @@ impl RhaiPlugin {
             read_manifest_list(&engine, &ast, &signatures, &id, "role_makers");
         let framework_mode_makers: Vec<FrameworkModeMaker> =
             read_manifest_list(&engine, &ast, &signatures, &id, "framework_mode_makers");
+        let feature_makers: Vec<crate::build::plugin::FeatureMaker> =
+            read_manifest_list(&engine, &ast, &signatures, &id, "feature_makers");
         let column_keyed_verbs: Vec<String> =
             read_manifest_list(&engine, &ast, &signatures, &id, "column_keyed_verbs");
         let fluent_verbs: Vec<String> =
@@ -390,6 +393,7 @@ impl RhaiPlugin {
             app_surface_consumers,
             role_makers,
             framework_mode_makers,
+            feature_makers,
             column_keyed_verbs,
             fluent_verbs,
             meta_methods,
@@ -505,6 +509,10 @@ impl FrameworkPlugin for RhaiPlugin {
 
     fn framework_mode_makers(&self) -> &[FrameworkModeMaker] {
         &self.framework_mode_makers
+    }
+
+    fn feature_makers(&self) -> &[crate::build::plugin::FeatureMaker] {
+        &self.feature_makers
     }
 
     fn column_keyed_verbs(&self) -> &[String] {
@@ -676,6 +684,13 @@ pub fn set_workspace_root(root: Option<&str>) {
     if let Ok(mut guard) = WORKSPACE_ROOT.write() {
         *guard = path;
     }
+}
+
+/// The workspace root as `set_workspace_root` recorded it — what a
+/// language naming modules by path falls back to.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub fn workspace_root() -> Option<std::path::PathBuf> {
+    WORKSPACE_ROOT.read().ok().and_then(|g| g.clone())
 }
 
 /// Directories to load user `.rhai` plugins from, in priority order.

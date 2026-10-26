@@ -895,7 +895,7 @@ impl FileAnalysis {
         {
             return Some(InferredType::ClassName(c));
         }
-        Some(InferredType::ClassName(self.class_spelling_identity(invocant)))
+        Some(InferredType::ClassName(self.class_spelling_identity(invocant, point)))
     }
 
     /// Walk the scope chain to find the enclosing class or package.
@@ -1019,7 +1019,7 @@ impl FileAnalysis {
                 {
                     return Some(c);
                 }
-                Some(self.class_spelling_identity(invocant))
+                Some(self.class_spelling_identity(invocant, point))
             }
         }
     }
@@ -1286,7 +1286,7 @@ impl FileAnalysis {
             let sym = self.symbol(sid);
             if matches!(sym.kind, SymKind::Sub | SymKind::Method)
                 && self.symbol_in_class(sid, cls)
-                && !self.contract_symbols.contains(&sid)
+                && !sym.flags.contains(SymbolFlags::CONTRACT)
             {
                 return true;
             }
@@ -1308,10 +1308,10 @@ impl FileAnalysis {
     /// pattern: a role that both requires AND defines a name must
     /// count as providing it.
     pub fn provides_method_anywhere(&self, name: &str) -> bool {
-        self.symbols.iter().enumerate().any(|(i, s)| {
+        self.symbols.iter().any(|s| {
             s.name == name
                 && matches!(s.kind, SymKind::Sub | SymKind::Method)
-                && !self.contract_symbols.contains(&SymbolId(i as u32))
+                && !s.flags.contains(SymbolFlags::CONTRACT)
         })
     }
 
@@ -1319,11 +1319,11 @@ impl FileAnalysis {
     /// `package` — the contract-excluded sibling of
     /// `has_sub_in_package`, for the typeglob-install provision arm.
     pub fn provides_method_in_package(&self, name: &str, package: &str) -> bool {
-        self.symbols.iter().enumerate().any(|(i, s)| {
+        self.symbols.iter().any(|s| {
             s.name == name
                 && matches!(s.kind, SymKind::Sub | SymKind::Method)
                 && s.package.as_deref() == Some(package)
-                && !self.contract_symbols.contains(&SymbolId(i as u32))
+                && !s.flags.contains(SymbolFlags::CONTRACT)
         })
     }
 

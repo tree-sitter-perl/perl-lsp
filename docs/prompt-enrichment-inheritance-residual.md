@@ -14,7 +14,7 @@ The short verdict:
   floor for any FA that skipped enrichment.
 
 - **Plugin EMISSION gated on the class's ancestry** — both axes now landed.
-  `param_types` `in_role` rides the `ReceiverGated` query seam;
+  `param_types` `in_role` rides the `Deferred` query seam;
   the **`ClassIsa` trigger** axis (H7-5) rides the `GatedEmission` deferral:
   the build records the syntactically-matched-but-ungated emission and
   enrichment re-fires it once `class_isa_prefix` resolves the ancestry
@@ -24,7 +24,7 @@ The short verdict:
 
 - **Dispatch-verb promotion in non-open files** WAS a real gap caused by
   the resolver lifecycle (only OPEN documents enriched). **Landed:** the
-  `ReceiverGated<DispatchCandidate>` seam resolves the receiver isa-check at
+  `ProvisionalDispatch` (`Deferred<DispatchCandidate>`) seam resolves the receiver isa-check at
   query time (`docs/adr/receiver-gated-dispatch.md`), so call sites in non-
   open workspace/dependency files surface like open ones.
 
@@ -40,9 +40,9 @@ cross-file/isa-based already, or (iii) BROKEN.
 | Manifest member | Applicability gate | Verdict |
 |---|---|---|
 | `overrides()` | Trigger-INDEPENDENT post-pass (`apply_type_overrides`, `builder.rs:320`). Applied to every build regardless of `use`s. | **(ii) correct.** Plugin-priority witness on `Symbol(sid)`; the home module picks it up even without `use Mojolicious`. Cross-file consumers reach it via the `PackageSymbol → Edge(Symbol)` writeback + cross-file primary lookup. |
-| `dispatch_verbs()` | RECEIVER-isa at QUERY time (`FileAnalysis::applicable_dispatches`). Each candidate rides the cache as `ReceiverGated<DispatchCandidate>`; `resolve_for` walks the single `class_isa` seam (local `package_parents` ∪ `module_index.parents_cached`). | **(ii) correct, all files.** The emit-hook path (`EmitAction::DispatchCall`) covers files that `use Minion`; the manifest path covers cross-file/subclass receivers and now resolves lazily at the query, so non-open workspace/dependency files surface identically. See `docs/adr/receiver-gated-dispatch.md`. |
+| `dispatch_verbs()` | RECEIVER-isa at QUERY time (`FileAnalysis::applicable_dispatches`). Each candidate rides the cache as `ProvisionalDispatch` (`Deferred<DispatchCandidate>`); `resolve_for` walks the single `class_isa` seam (local `package_parents` ∪ `module_index.parents_cached`). | **(ii) correct, all files.** The emit-hook path (`EmitAction::DispatchCall`) covers files that `use Minion`; the manifest path covers cross-file/subclass receivers and now resolves lazily at the query, so non-open workspace/dependency files surface identically. See `docs/adr/receiver-gated-dispatch.md`. |
 | `type_constraint_names()` / `type_constraint_inner()` | Syntactic gate on constraint-constructor call names where the `has`/`isa` appears. | **(i) correctly local.** The constraint vocabulary applies where the constructor expression is written. Not an inheritance question. |
-| `param_types()` | `in_role` gate on the enclosing package, checked CROSS-FILE at QUERY time. The builder emits one `ReceiverGated<TypeConstraint>` per matching sub (ungated, `gate = in_role`); `FileAnalysis::gated_param_type_for` resolves it via `resolve_for(enclosing_package, …)` when the variable is typed. | **(ii) correct, all files.** A controller whose `in_role` ancestor is reachable only through a cross-file intermediate now types its param (the catalyst `$c` case). Resolution shares the single `class_isa` seam; the `ReceiverGated` wrapper keeps the typed TC unreadable without the isa check. Landed via the receiver-gated Phase 2 (`docs/adr/receiver-gated-dispatch.md`). |
+| `param_types()` | `in_role` gate on the enclosing package, checked CROSS-FILE at QUERY time. The builder emits one `Deferred<TypeConstraint>` per matching sub (ungated, `gate = in_role`); `FileAnalysis::gated_param_type_for` resolves it via `resolve_for(enclosing_package, …)` when the variable is typed. | **(ii) correct, all files.** A controller whose `in_role` ancestor is reachable only through a cross-file intermediate now types its param (the catalyst `$c` case). Resolution shares the single `class_isa` seam; the `Deferred` wrapper keeps the typed TC unreadable without the isa check. Landed via the receiver-gated Phase 2 (`docs/adr/receiver-gated-dispatch.md`). |
 | `app_surface_consumers()` | Trigger-INDEPENDENT bake (`builder.rs:254`) onto `FileAnalysis.plugin.app_surface_consumers`; consumed by `parents_of` as the synthetic `APP_SURFACE_CLASS` edge. | **(ii) correct.** `parents_of` is the single seam; the `PackageSymbol` walk + ancestor walks all route through it, so the surface resolves cross-file from every consumer. |
 
 ### The `ClassIsa` trigger axis (not a manifest member, same root cause)
@@ -94,7 +94,7 @@ fork ledger.
 synthesis, the cross-file `inheritance_cross` edge projection, and
 the MCB→bag bridge `emit_method_call_binding_edges`) is called ONLY for:
 
-- OPEN documents — through `FileStore::enrich_open`, the one open-doc
+- OPEN documents — through `OpenDocs::enrich_open`, the one open-doc
   enrichment writer (invoked by `publish_diagnostics`, the resolver refresh,
   and the cold-open heal).
 - The CLI focus file — `lsp/cli/query.rs` (`cli_open_document` + the
@@ -105,7 +105,7 @@ and **workspace-index files** (`index_workspace_with_index:655`) are built
 via `crate::builder::build(...)` which ends at `finalize_post_walk()` —
 they NEVER get `enrich_imported_types_with_keys`. The resolver refresh
 callback re-enriches only open docs (`refresh_open_diagnostics` →
-`FileStore::enrich_open`).
+`OpenDocs::enrich_open`).
 
 What this means per enrichment pass:
 
@@ -113,7 +113,7 @@ What this means per enrichment pass:
 |---|---|---|
 | `inheritance_cross` edge projection | No | **Yes** — `query_rec`'s structural `PackageSymbol` fallback (`witnesses.rs:1190`+) walks `parents_of` + recurses into cached bags + `for_each_entity_bridged_to`, with `BagContext.module_index` set. So a dep class inheriting from another dep, or bridging a plugin namespace, still resolves method return types. The build-time edges are an optimization the dep misses, not a correctness floor. |
 | imported hash-key synthesis + `emit_method_call_binding_edges` | No | Partially — cross-file method-return queries route through the same `PackageSymbol` walk; imported-hash-key COMPLETION on a binding inside a non-open dep file would miss the synthetic `HashKeyDef`, but that's a completion-in-a-dependency scenario the LSP doesn't surface (you complete in open files). |
-| dispatch resolution | N/A (no enrichment pass) | **Yes — query-time.** Gated candidates ride the cache; `resolve::refs_to` for a Handler calls `applicable_dispatches`, which resolves the receiver isa-check on demand against the module index. A `$minion->enqueue('task')` in a non-open workspace file whose receiver isa-Minion is cross-file (and which doesn't `use Minion`) now surfaces. The `ReceiverGated` seam makes the inner handler payload unreadable without that check (`docs/adr/receiver-gated-dispatch.md`). |
+| dispatch resolution | N/A (no enrichment pass) | **Yes — query-time.** Gated candidates ride the cache; `resolve::refs_to` for a Handler calls `applicable_dispatches`, which resolves the receiver isa-check on demand against the module index. A `$minion->enqueue('task')` in a non-open workspace file whose receiver isa-Minion is cross-file (and which doesn't `use Minion`) now surfaces. The `Deferred` seam makes the inner handler payload unreadable without that check (`docs/adr/receiver-gated-dispatch.md`). |
 
 ### Verdict on B
 
@@ -131,10 +131,10 @@ way the `PackageSymbol` walk resolves types — so dispatch resolution now
 joins type resolution as a query-time answer, not an enrichment-time ref.
 
 The landed shape: dispatch candidates ride the cache as
-`ReceiverGated<DispatchCandidate>`; `refs_to` calls
+`ProvisionalDispatch` (`Deferred<DispatchCandidate>`); `refs_to` calls
 `FileAnalysis::applicable_dispatches`, which resolves each candidate's
 receiver isa at query time. Keeps the "no enrichment over deps" invariant,
-mirrors the type path, and the `ReceiverGated` type makes the inner handler
+mirrors the type path, and the `Deferred` type makes the inner handler
 payload unreadable without the isa filter (`docs/adr/receiver-gated-dispatch.md`).
 
 ---
@@ -148,7 +148,7 @@ payload unreadable without the isa filter (`docs/adr/receiver-gated-dispatch.md`
   enrichment-bypassing callers.
 
 - **Landed:** dispatch-verb resolution in non-open files, via the
-  query-time `ReceiverGated` seam (`docs/adr/receiver-gated-dispatch.md`);
+  query-time `Deferred` seam (`docs/adr/receiver-gated-dispatch.md`);
   `param_types` `in_role` cross-file, on the same seam; and cross-file
   `ClassIsa`-trigger emission (H7-5), via the `GatedEmission` deferral +
   post-index `materialize_gated_emissions`. All three moved the

@@ -5,6 +5,68 @@ use super::*;
 use crate::cst::LiteralShape;
 
 impl<'a> Builder<'a> {
+    /// `use VERSION` switches to that version's feature bundle.
+    pub(super) fn visit_use_version(&mut self, node: Node<'a>) {
+        use crate::model::conventions::{bundle_disables, INDIRECT_FEATURE};
+        let Some(Ok(version)) = node.child_by_field_name("version").map(|v| v.utf8_text(self.source)) else {
+            return;
+        };
+        let off = bundle_disables(version).contains(&INDIRECT_FEATURE);
+        self.toggle_feature(node, INDIRECT_FEATURE, off);
+    }
+
+    /// The feature switches a `use`/`no` statement makes: the `feature`
+    /// pragma's own list, `no indirect`, and a plugin-declared module that
+    /// imports a feature bundle into its caller.
+    fn record_feature_pragma(&mut self, node: Node<'a>, module: &str, args: &[String]) {
+        use crate::model::conventions::{bundle_disables, FEATURE_PRAGMA, INDIRECT_FEATURE};
+        let no = crate::cst::is_no_statement(node);
+        if module == FEATURE_PRAGMA {
+            for arg in args {
+                match arg.strip_prefix(':') {
+                    Some("all") => self.toggle_feature(node, INDIRECT_FEATURE, no),
+                    Some(bundle) if !no => {
+                        let off = bundle_disables(bundle).contains(&INDIRECT_FEATURE);
+                        self.toggle_feature(node, INDIRECT_FEATURE, off)
+                    }
+                    Some(_) => {}
+                    None if arg == INDIRECT_FEATURE => self.toggle_feature(node, INDIRECT_FEATURE, no),
+                    None => {}
+                }
+            }
+        } else if module == INDIRECT_FEATURE {
+            self.toggle_feature(node, INDIRECT_FEATURE, no);
+        } else if !no {
+            if let Some((disables, enables)) = self.feature_makers.get(module).cloned() {
+                for f in disables {
+                    self.toggle_feature(node, &f, true);
+                }
+                for f in enables {
+                    self.toggle_feature(node, &f, false);
+                }
+            }
+        }
+    }
+
+    fn toggle_feature(&mut self, node: Node<'a>, feature: &str, off: bool) {
+        self.feature_toggles.push(super::FeatureToggle {
+            feature: feature.to_string(),
+            at: node.end_position(),
+            until: crate::cst::lexical_scope_end(node),
+            off,
+        });
+    }
+
+    /// Whether `feature` is switched off at `at`: the latest switch before
+    /// it whose block contains it decides, and none leaves the default on.
+    pub(super) fn feature_off_at(&self, feature: &str, at: Point) -> bool {
+        self.feature_toggles
+            .iter()
+            .filter(|t| t.feature == feature && t.at <= at && at < t.until)
+            .max_by_key(|t| t.at)
+            .is_some_and(|t| t.off)
+    }
+
     pub(super) fn visit_use(&mut self, node: Node<'a>) {
         // Thin shim: pull the value triple off the CST node and hand it
         // to the value-taking worker. `process_use` runs the actual
@@ -17,6 +79,7 @@ impl<'a> Builder<'a> {
         let Ok(module_name) = module_node.utf8_text(self.source) else { return };
         let raw_args = self.extract_mojo_base_args(node);
         let (imports, _qw_close) = self.extract_use_import_list(node);
+        self.record_feature_pragma(node, module_name, &imports);
 
         // `use lib` is not an import — it prepends search-path roots to the
         // asker's @INC, which is what decides WHICH file a module name means
@@ -1502,7 +1565,7 @@ impl<'a> Builder<'a> {
             left.kind(),
             "hash_element_expression" | "array_element_expression"
         ) {
-            self.record_key_write(left, Some(stored));
+            self.record_key_write(left, Some(stored), None, self.current_scope());
         }
         // Slice / keyval writes (`@h{qw(a b)} = …`, `%h{k} = …`,
         // `@$h{…}`) land several keys at once — record an
@@ -1538,6 +1601,7 @@ impl<'a> Builder<'a> {
                     self.key_writes.push(crate::model::file_analysis::KeyWrite {
                         var_text,
                         key: crate::model::file_analysis::WriteKey::Unknown,
+                        path: Vec::new(),
                         scope: self
                             .scope_stack
                             .last()
@@ -1545,6 +1609,7 @@ impl<'a> Builder<'a> {
                             .unwrap_or(crate::model::file_analysis::ScopeId(0)),
                         span,
                         rhs_span: None,
+                        rhs_slot: None,
                         conditional: true,
                     });
                 }
@@ -1571,6 +1636,32 @@ impl<'a> Builder<'a> {
                     && qualifier_admits_local_sub(qualifier, s.package.as_deref())
             })
             .map(|s| s.id)
+    }
+
+    /// Whether Perl has seen a sub named `name` (as written) by `at`. A parse
+    /// decision Perl makes while compiling reads this view: a sub declared
+    /// further down does not count yet.
+    ///
+    /// An unqualified name is looked up in the package in force at `at`, as
+    /// Perl does: `sub Foo` in another package of the file does not count,
+    /// and a sub imported by name into this package does.
+    pub(super) fn sub_declared_before(&self, name: &str, at: Point) -> bool {
+        let (qualifier, bare) = crate::model::file_analysis::split_qualified(name, &crate::model::conventions::PERL_SPELLINGS);
+        let here = self.package_at_pos(at);
+        let qualifier = qualifier.or(Some(here.unwrap_or("main")));
+        let declared = self.symbols.iter().any(|s| {
+            s.span.start < at
+                && s.name == bare
+                && matches!(s.kind, SymKind::Sub | SymKind::Method)
+                && qualifier_admits_local_sub(qualifier, s.package.as_deref())
+        });
+        declared
+            || (name == bare
+                && self.imports.iter().any(|i| {
+                    i.span.start < at
+                        && i.imported_symbols.iter().any(|s| s.local_name == bare)
+                        && self.package_at_pos(i.span.start) == here
+                }))
     }
 
     /// The bare name to look a call up by, for callers that resolve through a

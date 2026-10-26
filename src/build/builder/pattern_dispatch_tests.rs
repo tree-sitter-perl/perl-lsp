@@ -298,7 +298,7 @@ fn plugin_diagnostics_render_through_collect() {
 // ---- #receiver-isa? deferred predicate ----
 //
 // The gate is NOT a match-time filter: it routes DispatchCall
-// emissions onto the ReceiverGated query-time seam
+// emissions onto the `Deferred` query-time seam
 // (docs/adr/receiver-gated-dispatch.md), same as dispatch_verbs().
 
 struct QueuePlugin {
@@ -389,7 +389,7 @@ fn receiver_isa_gate_defers_dispatch_to_query_time() {
         )),
         "a gated match's DispatchCall must not materialize at build time"
     );
-    // It landed as a ReceiverGated candidate instead.
+    // It landed as a `ReceiverIsa` deferral instead.
     assert_eq!(
         fa.provisional_dispatches.len(),
         1,

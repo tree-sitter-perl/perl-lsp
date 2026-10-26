@@ -894,6 +894,20 @@ pub struct FrameworkModeMaker {
     pub imports: Vec<String>,
 }
 
+/// A module whose `use` changes the lexical feature set of the block it is
+/// written in, the way `use v5.36` does: `disables` and `enables` name
+/// Perl features (`indirect`, `bitwise`, …). For a module that imports a
+/// feature bundle into its caller (`use Modern::Perl`), so the builder reads
+/// the code after it the way Perl compiles it. Matched on the module name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeatureMaker {
+    pub module: String,
+    #[serde(default)]
+    pub disables: Vec<String>,
+    #[serde(default)]
+    pub enables: Vec<String>,
+}
+
 /// A plugin-asserted return type for a known sub/method. Plugins ship
 /// these as a static manifest (`overrides()` on the trait, `fn
 /// overrides()` at the top of a `.rhai` script) for cases where
@@ -1166,6 +1180,12 @@ pub trait FrameworkPlugin: Send + Sync {
     /// `frameworks/moo.rhai`; any plugin can declare another re-exporter.
     /// Default empty.
     fn framework_mode_makers(&self) -> &[FrameworkModeMaker] {
+        &[]
+    }
+
+    /// Modules whose `use` changes the caller's feature set — see
+    /// [`FeatureMaker`]. Default empty.
+    fn feature_makers(&self) -> &[FeatureMaker] {
         &[]
     }
 
@@ -1646,6 +1666,11 @@ impl PluginRegistry {
         self.plugins
             .iter()
             .flat_map(|p| p.framework_mode_makers().iter())
+    }
+
+    /// Union of feature makers across the registry.
+    pub fn feature_makers<'a>(&'a self) -> impl Iterator<Item = &'a FeatureMaker> + 'a {
+        self.plugins.iter().flat_map(|p| p.feature_makers().iter())
     }
 
     /// Union of column-keyed call verbs across the registry — the verbs whose

@@ -76,17 +76,26 @@ pub struct PackFacts {
     #[serde(default)]
     pub macro_defs: Vec<MacroDef>,
 
-    /// `#include "x.h"` / `<x.h>` directives: (path-token span, raw path text).
-    /// Goto-def on the path token resolves the header like `use` resolves a
-    /// module.
+    /// `#include "x.h"` / `<x.h>` directives and import paths as written:
+    /// (path-token span, raw path text). Goto-def on the path token
+    /// resolves the header like `use` resolves a module. A use-map
+    /// language's `use` rows are `use_rows` instead.
     #[serde(default)]
     pub include_directives: Vec<(Span, String)>,
 
-    /// `use A\B as C` rows: (alias, namespace, real leaf). The use-map
-    /// pins the ALIAS spelling to the namespace and leaves the real leaf
+    /// A use-map language's `use` rows, as the (namespace, leaf, alias)
+    /// parts the extractor read them in — the table `UseMap` resolves
+    /// through. An aliased row binds its ALIAS and leaves the real leaf
     /// free for the file's own or same-namespace class.
     #[serde(default)]
-    pub use_aliases: Vec<(String, String, String)>,
+    pub use_rows: Vec<UseRow>,
+
+    /// A use-map language's namespace sections — `namespace A;` running to
+    /// the next one, `namespace A { … }` its body — the namespace a bare
+    /// spelling resolves into at a site (`namespace_at`). A region map
+    /// like `control_regions`, not a per-site fact to join.
+    #[serde(default)]
+    pub namespace_sections: Vec<PackageRange>,
 
     /// Class spellings written with a qualifier: (leaf, written prefix —
     /// absolute when it starts with `\`, else relative to the file's
@@ -157,15 +166,23 @@ pub struct PackFacts {
 }
 
 impl PackFacts {
-    /// The import row (`use` / `#include` path token) whose span covers
-    /// `span`, if any. The one speller for "is this token inside an import
-    /// row": the row's leaf carries its own ref; every other segment is a
-    /// namespace no by-name lookup should answer for.
-    pub fn import_row_covering(&self, span: &Span) -> Option<&(Span, String)> {
-        self.include_directives.iter().find(|(row, _)| {
-            (row.start.row, row.start.column) <= (span.start.row, span.start.column)
-                && (span.end.row, span.end.column) <= (row.end.row, row.end.column)
-        })
+    /// Is `span` inside an import row (a `use` row's name or an
+    /// `#include` path token)? The one speller for that question: the
+    /// row's leaf carries its own ref; every other segment is a namespace
+    /// no by-name lookup should answer for.
+    pub fn in_import_row(&self, span: &Span) -> bool {
+        self.use_row_covering(span).is_some()
+            || self.include_directives.iter().any(|(row, _)| span_within(span, row))
+    }
+
+    /// The namespace in force at `site` (`None` = the global namespace).
+    pub fn namespace_at(&self, site: tree_sitter::Point) -> Option<&str> {
+        super::use_map::section_at(&self.namespace_sections, site).map(|s| s.package.as_str())
+    }
+
+    /// The `use` row whose name token covers `span`, if any.
+    pub fn use_row_covering(&self, span: &Span) -> Option<&UseRow> {
+        self.use_rows.iter().find(|row| span_within(span, &row.span))
     }
 
     /// The line an import quick-fix inserts at: right after the last import
@@ -193,7 +210,8 @@ impl PackFacts {
                 .sum::<usize>();
 
         h.cpp_extras += vcap(&self.macro_defs)
-            + vcap(&self.use_aliases)
+            + vcap(&self.use_rows)
+            + vcap(&self.namespace_sections)
             + vcap(&self.qualified_spellings)
             + vcap(&self.domain_sites)
             + vcap(&self.moved_from)
@@ -210,4 +228,9 @@ impl PackFacts {
             + vcap(&self.doc_mentions)
             + vcap(&self.type_display);
     }
+}
+
+fn span_within(inner: &Span, outer: &Span) -> bool {
+    (outer.start.row, outer.start.column) <= (inner.start.row, inner.start.column)
+        && (inner.end.row, inner.end.column) <= (outer.end.row, outer.end.column)
 }

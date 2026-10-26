@@ -242,6 +242,10 @@ impl<'a> Builder<'a> {
             self.queue_children(node);
             return;
         }
+        if let Some(io) = self.indirect_method_call(node) {
+            self.visit_indirect_method_call(node, io);
+            return;
+        }
         // Symbolic-code-deref call: `&{ EXPR }(...)`. The `function` field is
         // a `function` wrapping a `code_deref_expression`, NOT a sub name —
         // its text is `&{$z}`, not a callable identifier. Emitting a
@@ -270,6 +274,9 @@ impl<'a> Builder<'a> {
                     .filter(|n| n.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ':'))
                     .unwrap_or(raw);
                 let resolved_package = self.resolve_call_package(name);
+                if let Some(pkg) = resolved_package.clone().or_else(|| self.current_package.clone()) {
+                    self.plain_called_subs.insert((pkg, bare_name(name).to_string()));
+                }
                 // Narrowest span (rule #7): for a qualified call
                 // (`Foo::Bar::baz()`) the renamable/highlightable token is
                 // the bare tail, not the whole `::` path — so rename rewrites
@@ -1067,7 +1074,7 @@ impl<'a> Builder<'a> {
                 scope,
                 target_name: name,
                 access: AccessKind::Read,
-                binding: pkg.map(|package| RefBinding::Function { package }),
+                binding: crate::model::file_analysis::Binding::from(pkg.map(|package| RefBinding::Function { package })),
                 folded_from: None,
                 arg_count: None,
             });
@@ -1099,7 +1106,7 @@ impl<'a> Builder<'a> {
         }
         let mut pins: Vec<(usize, String)> = Vec::new();
         for (i, r) in self.refs.iter().enumerate() {
-            if !matches!(r.kind, RefKind::FunctionCall) || r.binding.is_some() {
+            if !matches!(r.kind, RefKind::FunctionCall) || r.settled_binding().is_some() {
                 continue;
             }
             if crate::model::file_analysis::split_qualified(&r.target_name, &crate::model::conventions::PERL_SPELLINGS).0.is_some() {
@@ -1189,8 +1196,8 @@ impl<'a> Builder<'a> {
                                 scope,
                                 target_name: name,
                                 access: AccessKind::Read,
-                                binding: resolved_package
-                                    .map(|package| RefBinding::Function { package }),
+                                binding: crate::model::file_analysis::Binding::from(resolved_package
+                                    .map(|package| RefBinding::Function { package })),
                                 folded_from: None,
                                 arg_count: None,
                             });
@@ -1228,7 +1235,7 @@ impl<'a> Builder<'a> {
                                     scope,
                                     target_name: name.to_string(),
                                     access: AccessKind::Read,
-                                    binding: None,
+                                    binding: crate::model::file_analysis::Binding::NONE,
                                     folded_from: None,
                                     arg_count: None,
                                 });
@@ -1246,7 +1253,7 @@ impl<'a> Builder<'a> {
                                 scope,
                                 target_name: t.to_string(),
                                 access: AccessKind::Read,
-                                binding: None,
+                                binding: crate::model::file_analysis::Binding::NONE,
                                 folded_from: None,
                                 arg_count: None,
                             });
@@ -1503,60 +1510,6 @@ impl<'a> Builder<'a> {
                 source: WitnessSource::Builder("array_push".into()),
                 payload: WitnessPayload::InferredType(InferredType::Sequence(resolved)),
                 span: zero,
-            });
-        }
-    }
-
-    /// Record each method-call invocant's resolved type on
-    /// `Expr(invocant_span)`. The query-time mirror
-    /// (`FileAnalysis::expr_type_at_span`) reads these to type an
-    /// expression without re-walking the CST. Materializes the answer
-    /// from `invocant_type_at_node` (the single build-time symbolic
-    /// executor) rather than an edge: the invocant's span is its own
-    /// attachment, no edge mirrors it, so this is a source value the
-    /// walker uniquely computes — not a parallel cache of an
-    /// edge-reachable result. Chain receivers whose class is only
-    /// knowable cross-file resolve to `None` here and stay unrecorded;
-    /// the query side's chain recursion fills them at enrichment.
-    pub(super) fn emit_invocant_expr_witnesses(&mut self, idx: &ChainTypingIndex<'a>) {
-        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        let mut pending: Vec<(Span, Node<'a>)> = Vec::new();
-        for r in &self.refs {
-            if let RefKind::MethodCall {
-                invocant_span: Some(sp),
-                ..
-            } = &r.kind
-            {
-                if let Some(n) = idx.invocant_nodes.get(&(sp.start, sp.end)).copied() {
-                    pending.push((*sp, n));
-                }
-            }
-        }
-        // An invocant whose value is already an edge answers through it,
-        // at query time, with the index in hand. A type materialized here
-        // would be the build-time answer, blind to everything another file
-        // says, and would shadow the edge's.
-        //
-        // Type every invocant before recording any: a push moves the bag's
-        // generation and empties the invocant memo, so interleaving them
-        // would re-type each chain's prefix once per call in it.
-        let typed: Vec<(Span, InferredType)> = pending
-            .into_iter()
-            .filter(|(span, _)| {
-                !self
-                    .bag
-                    .for_attachment(&WitnessAttachment::Expr(*span))
-                    .iter()
-                    .any(|w| matches!(w.payload, WitnessPayload::Edge(_)))
-            })
-            .filter_map(|(span, node)| Some((span, self.invocant_type_at_node(node)?)))
-            .collect();
-        for (span, ty) in typed {
-            self.bag.push(Witness {
-                attachment: WitnessAttachment::Expr(span),
-                source: WitnessSource::Builder("invocant_expr".into()),
-                payload: WitnessPayload::InferredType(ty),
-                span,
             });
         }
     }

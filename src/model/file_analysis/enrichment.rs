@@ -37,8 +37,8 @@ impl FileAnalysis {
         Some(copy)
     }
 
-    /// Test seam for an origin built outside a `FileStore`: apply the gates
-    /// that hold, as `FileStore::condition_open` does for an open doc.
+    /// Test seam for an origin built outside an `OpenDocs`: apply the gates
+    /// that hold, as `OpenDocs::condition_open` does for an open doc.
     #[cfg(test)]
     pub fn condition_with(&mut self, module_index: &dyn CrossFileLookup) {
         if let Some(applied) = self.with_holding_gates(module_index) {
@@ -135,7 +135,7 @@ impl FileAnalysis {
                     scope,
                     target_name: gr.target_name.clone(),
                     access: gr.access,
-                    binding: gr.binding.clone(),
+                    binding: crate::model::file_analysis::Binding::from(gr.binding.clone()),
                     folded_from: None,
                     arg_count: None,
                 });
@@ -167,47 +167,6 @@ impl FileAnalysis {
         });
     }
 
-    /// Resolve one gated dispatch candidate against its receiver, AT QUERY
-    /// TIME. Receiver resolution is two-tier: the build-time `receiver_class`
-    /// hint (a locally-constructed `My::Minion->new`, a typed `has`-attribute)
-    /// when present, else cross-file resolution of the call's invocant via
-    /// `method_call_invocant_class` with the module index — which lights up
-    /// helper-/attribute-returned receivers (`$c->minion->enqueue`,
-    /// `$self->_minion->enqueue`) that only type once other modules are in
-    /// scope. The gate (`isa target_class`) is applied by `resolve_for`; the
-    /// caller never reads the inner candidate without it.
-    fn resolve_dispatch_candidate<'a>(
-        &'a self,
-        gated: &'a ProvisionalDispatch,
-        module_index: Option<&dyn CrossFileLookup>,
-    ) -> GateResult<&'a DispatchCandidate> {
-        let recv = self.dispatch_receiver_class(gated, module_index);
-        gated.resolve_for(recv.as_deref(), &self.packages, module_index)
-    }
-
-    /// Resolve the receiver class for a gated dispatch candidate: the
-    /// build-time hint, else the call's invocant via the MethodCall ref at
-    /// `call_span` (cross-file aware through the bag). Uses only the gate-input
-    /// accessors, never the gated handler payload.
-    fn dispatch_receiver_class(
-        &self,
-        gated: &ProvisionalDispatch,
-        module_index: Option<&dyn CrossFileLookup>,
-    ) -> Option<String> {
-        gated.receiver_hint().cloned().or_else(|| {
-            let call_span = gated.call_span();
-            let dispatcher = gated.dispatcher();
-            self.refs
-                .iter()
-                .find(|r| {
-                    r.span == call_span
-                        && r.target_name == dispatcher
-                        && matches!(r.kind, RefKind::MethodCall { .. })
-                })
-                .and_then(|r| self.method_call_invocant_class(r, module_index))
-        })
-    }
-
     /// Query-time handler call-sites in THIS file: every gated dispatch
     /// candidate whose receiver isa-resolves the gate, projected to the data
     /// `refs_to` and goto-def need. The single seam for both — `resolve.rs`
@@ -233,7 +192,7 @@ impl FileAnalysis {
             .collect();
         let mut out = Vec::new();
         for gated in &self.provisional_dispatches {
-            if let GateResult::Applies(c) = self.resolve_dispatch_candidate(gated, module_index) {
+            if let Some(c) = gated.pick(self, module_index).reading {
                 if materialized.contains(&(c.span.start, c.span.end, c.dispatcher.clone())) {
                     continue;
                 }
@@ -266,7 +225,7 @@ impl FileAnalysis {
             if !contains_point(&gated.call_span(), point) {
                 continue;
             }
-            if let GateResult::Applies(c) = self.resolve_dispatch_candidate(gated, module_index) {
+            if let Some(c) = gated.pick(self, module_index).reading {
                 return Some(AppliedDispatch {
                     name: c.name.clone(),
                     span: c.span,
@@ -477,9 +436,7 @@ impl FileAnalysis {
     ) -> Vec<UntypedDispatch> {
         let mut out = Vec::new();
         for gated in &self.provisional_dispatches {
-            if let GateResult::ReceiverUntyped =
-                self.resolve_dispatch_candidate(gated, module_index)
-            {
+            if gated.pick(self, module_index).verdict == Verdict::Unknown {
                 out.push(UntypedDispatch {
                     call_span: gated.call_span(),
                     dispatcher: gated.dispatcher().to_string(),

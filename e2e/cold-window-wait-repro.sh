@@ -32,7 +32,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 BIN="${PERL_LSP_BIN:-$PWD/target/release/perl-lsp}"
 if [[ ! -x "$BIN" ]]; then
-  echo "missing binary $BIN — run: cargo build --release --features all-langs" >&2
+  echo "missing binary $BIN — run: cargo build --release --features cpp" >&2
   exit 2
 fi
 export PERL_LSP_BIN="$BIN"

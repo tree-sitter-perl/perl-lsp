@@ -69,7 +69,7 @@ specialization **replaces wholesale** — a spec inherits nothing from the prima
 a `PackageFacts::parents` edge would corrupt member resolution. Specs share only the name and
 the parameter contract, which is a selection relationship, not a composition
 one. It is the third instance of the selection seam: `UnionOnArgs` selects by
-arity, `ReceiverGated` by receiver, specialization by type-arg pattern.
+arity, `Deferred` by receiver, specialization by type-arg pattern.
 
 Consequences, by construction:
 

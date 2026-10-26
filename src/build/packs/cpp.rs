@@ -8,7 +8,10 @@ pub fn cpp_pack() -> LangPack {
         query_source: include_str!("../../../queries/cpp/skeleton.scm"),
         // One member namespace: the nearest declaration of a name wins,
         // whether it is a data member or a member function.
-        names: NameSpellings { member_namespace: MemberNamespace::Shared, ..NameSpellings::with_separator("::") },
+        names: NameSpellings {
+            member_namespace: MemberNamespace::Shared,
+            ..NameSpellings::with_separator("::")
+        },
         // Template spellings get ONE canonical whitespace form so a
         // specialization's identity (`formatter<int, char>`) matches
         // however the source wrapped it. Identity for every non-template

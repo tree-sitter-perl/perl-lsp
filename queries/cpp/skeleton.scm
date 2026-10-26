@@ -676,10 +676,13 @@
 ; carries its arguments and the callee ref its written arg count — overload
 ; arity ranking fuel (structural counts only; "which overload fits" is
 ; downstream interpretation, `ParamArity::fit`). A def's parameter list is
-; joined to the def by span containment. ----
-(call_expression
+; joined to the def by span containment. Calling a class constructs it (a
+; functional cast, `Foo(x)`), so a callee that names a class is a reference to
+; it (#names-class?). ----
+((call_expression
   function: (identifier) @ref.call
   arguments: (argument_list ((_) @arity.arg ","?)*) @arity.args) @expr.call
+ (#names-class? @ref.call))
 
 ; qualified calls (`fmt::format_to(...)`, `detail::vformat_to(...)`,
 ; `Widget::create(...)`): the whole path is captured; extraction narrows the

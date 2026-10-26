@@ -34,7 +34,7 @@ impl<'a> Builder<'a> {
                     lexical: false,
                 },
             );
-            self.contract_symbols.insert(sid);
+            self.symbols[sid.0 as usize].flags |= crate::model::file_analysis::SymbolFlags::CONTRACT;
         }
         self.role_requires
             .entry(pkg.to_string())

@@ -510,12 +510,12 @@ fn test_hover_on_builtin_uses_module_index() {
     let _tree = crate::index::document::Document::new(source.to_string())
         .unwrap()
         .tree;
-    let files = crate::index::file_store::FileStore::new();
+    let files = crate::index::open_docs::OpenDocs::new();
     let idx: &dyn crate::model::file_analysis::CrossFileLookup = &module_index;
     let cs = crate::index::resolve::resolve(
         &files,
         &analysis,
-        crate::index::file_store::FileKey::Url(Url::parse("file:///test.pl").unwrap()),
+        crate::index::open_docs::FileKey::Url(Url::parse("file:///test.pl").unwrap()),
         Point::new(0, 0),
         Some(idx),
         crate::index::resolve::OverrideScope::default(),

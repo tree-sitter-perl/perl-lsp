@@ -114,7 +114,7 @@ Deliberately NOT on the set (the seam's edge, kept honest):
   handler names, keyval/`:param` keys, the `use Foo qw(|)` import-list
   slot (one named module's export surface). These enumerate the content OF
   an already-identified entity and ride the method/dispatch resolution
-  seams (`PackageSymbol`, `ReceiverGated`) — a different question than
+  seams (`PackageSymbol`, `Deferred`) — a different question than
   "what names are visible from here." Folding them in would re-derive
   those seams, not unify them.
 - **Presentation**: labels, kinds, details, sort priorities, snippet
@@ -143,7 +143,7 @@ Deliberately NOT on the set (the seam's edge, kept honest):
   Completion has no resolved target for `references_mask_for` to judge, so
   its default visibility is the full VISIBLE universe; the construction
   override narrows it like every other projection.
-- Projections only READ the stores (`FileStore::for_each_open`), so an LSP
+- Projections only READ the stores (`OpenDocs::for_each_open`), so an LSP
   handler may hold its open-doc guard across a projection — the old
   `drop(doc)`-before-walking discipline (a deadlock trap) is gone.
 - Each projection reproduces the exact composition of the verb it serves.
@@ -165,12 +165,17 @@ The spike's axes live in CandidateSet construction:
   projection that walks inherits the gate.
 - **pack routing** — a construction fact: `resolve()` derives it from the
   origin's stamped `FileAnalysis.language` (`is_pack_language`), so no
-  handler declares or can forget it; store selection has its own single
-  speller (`ModuleIndex::lookup_for`, tripwired out of the LSP layer).
-  The set owns the consequences: visibility widens to VISIBLE (pack
-  workspace files ride the DEPENDENCY role), and `rename_edits` →
-  `Result` REFUSES on alias-spelled sites (full-or-refuse) instead of
-  silently skipping.
+  handler declares or can forget it; there is no store selection, since a
+  process serves one language through one index.
+  The set owns the consequences: the name-supply model (closure-keyed
+  identity and completion), and `rename_edits` → `Result` REFUSES on
+  alias-spelled sites (full-or-refuse) instead of silently skipping.
+- **file roles** — one rule for every language: an open document is OPEN,
+  a front-door index registration
+  (`CrossFileLookup::is_dependency_path` false) is WORKSPACE, the rest
+  (@INC) is DEPENDENCY. Each index-held file is admitted by its own tier,
+  so EDITABLE rename and VISIBLE references mean the same thing for a pack
+  workspace as for a Perl one.
 - **delegation / `Specializes` / domain edges** — consumers declare
   traversal: references walks delegation aliases (never the domain
   bridge); `implementations()` walks `Specializes` families and the

@@ -81,6 +81,126 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// `meth Class(ARGS)` when its refs read as `Class->meth(ARGS)`: a site
+    /// the file settles as a method call, or a deferred one whose undecided
+    /// reading is (`indirect_reading`).
+    pub(super) fn indirect_method_call(&self, node: Node<'a>) -> Option<crate::cst::IndirectObjectCall<'a>> {
+        match self.indirect_reading(node)? {
+            (io, IndirectReading::Method) => Some(io),
+            (io, IndirectReading::Deferred(site)) if site.undecided_method() => Some(io),
+            (_, IndirectReading::Function | IndirectReading::Deferred(_)) => None,
+        }
+    }
+
+    /// The deferred question at a `meth Class(ARGS)` site the file alone
+    /// can't settle.
+    pub(super) fn indirect_deferred(
+        &self,
+        node: Node<'a>,
+    ) -> Option<(crate::cst::IndirectObjectCall<'a>, crate::model::file_analysis::IndirectSite)> {
+        match self.indirect_reading(node)? {
+            (io, IndirectReading::Deferred(site)) => Some((io, site)),
+            (_, IndirectReading::Method | IndirectReading::Function) => None,
+        }
+    }
+
+    /// How Perl reads `meth Class(ARGS)`, from what this file shows before
+    /// the site (`toke.c` `intuit_method`, which decides at the token from
+    /// what is compiled so far): with the indirect feature off, or a sub
+    /// named `Class`, it is a function call; a sub named `meth` makes it a
+    /// method call only on a package the file named. Anything else turns on
+    /// what other files declare or export, so it is deferred
+    /// (`IndirectSite`).
+    fn indirect_reading(&self, node: Node<'a>) -> Option<(crate::cst::IndirectObjectCall<'a>, IndirectReading)> {
+        let io = crate::cst::indirect_object_call(node, self.source)?;
+        if self.is_indirect_object_filehandle_call(node) {
+            return None;
+        }
+        let at = node.start_position();
+        let method = io.method.utf8_text(self.source).ok()?;
+        let class = io.class.utf8_text(self.source).ok()?;
+        if crate::model::builtins::is_builtin(method) || crate::model::builtins::is_builtin(class) {
+            return None;
+        }
+        if self.feature_off_at(crate::model::conventions::INDIRECT_FEATURE, at)
+            || self.sub_declared_before(class, at)
+        {
+            return Some((io, IndirectReading::Function));
+        }
+        let class_named = self.imports.iter().any(|i| i.span.start < at && i.module_name == class)
+            || self.symbols.iter().any(|s| {
+                s.span.start < at && s.name == class && matches!(s.kind, SymKind::Package | SymKind::Class)
+            });
+        // TODO(indirect-glob-prototype): a `meth` prototyped `(*)` takes a
+        // filehandle, which makes it a function call whatever `Class` is.
+        if self.sub_declared_before(method, at) {
+            let reading = if class_named { IndirectReading::Method } else { IndirectReading::Function };
+            return Some((io, reading));
+        }
+        let here = self.package_at_pos(at);
+        let exporters = self
+            .imports
+            .iter()
+            .filter(|i| i.span.start < at && !i.empty_import && self.package_at_pos(i.span.start) == here)
+            .filter_map(|i| {
+                let tags: Vec<String> = i
+                    .imported_symbols
+                    .iter()
+                    .filter_map(|s| s.local_name.strip_prefix([':', '-']).map(str::to_string))
+                    .collect();
+                (i.imported_symbols.is_empty() || !tags.is_empty())
+                    .then(|| crate::model::file_analysis::Exporter { module: i.module_name.clone(), tags })
+            })
+            .collect();
+        let site = crate::model::file_analysis::IndirectSite::unsettled(
+            here.unwrap_or("main").to_string(),
+            method.to_string(),
+            class.to_string(),
+            exporters,
+            class_named,
+        );
+        Some((io, IndirectReading::Deferred(site)))
+    }
+
+    /// An indirect-object call is a method call on its class: the same
+    /// `MethodCall` ref, receiver and arguments `Class->meth(ARGS)` mints, so
+    /// typing, navigation and diagnostics read one shape.
+    pub(super) fn visit_indirect_method_call(&mut self, node: Node<'a>, io: crate::cst::IndirectObjectCall<'a>) {
+        let (Ok(method), Ok(class)) = (io.method.utf8_text(self.source), io.class.utf8_text(self.source)) else {
+            return;
+        };
+        let (method, class) = (method.to_string(), class.to_string());
+        let class_span = node_to_span(io.class);
+        let args: Vec<Node<'a>> = match io.arguments {
+            Some(a) if crate::cst::is_list_literal(a) => crate::cst::NodeExt::elements(&a).collect(),
+            Some(a) => vec![a],
+            None => Vec::new(),
+        };
+        self.push_invocant_class(class_span, class.clone());
+        let operands = self.call_operands(&args);
+        let idx = self.refs.len();
+        self.add_ref(
+            RefKind::MethodCall {
+                invocant: crate::model::conventions::Invocant::assume_canonical(class.clone()),
+                invocant_span: Some(class_span),
+                method_name_span: node_to_span(io.method),
+                member_op: None,
+                named_by_string: false,
+            },
+            node_to_span(node),
+            method.clone(),
+            AccessKind::Read,
+        );
+        self.method_call_invocant.insert(idx, class.clone());
+        self.method_call_args.insert(idx, operands);
+        self.method_call_refs.entry(node.id()).or_default().push(idx);
+        self.add_ref(RefKind::PackageRef, class_span, class.clone(), AccessKind::Read);
+        self.indirect_method_calls.push((node, io.class, io.arguments));
+        if let Some(a) = io.arguments {
+            self.queue_node(a);
+        }
+    }
+
     pub(super) fn visit_method_call(&mut self, node: Node<'a>) {
         use crate::cst::NodeExt;
         let call = crate::cst::MethodCall::cast(node)
@@ -488,7 +608,12 @@ impl<'a> Builder<'a> {
         // element node itself — `$self->{k} = ...` has this element as
         // the LHS of an assignment, so the grandparent check returns
         // Write. Needed for invocant mutations.
-        let element_access = self.determine_access(node);
+        let in_place = self.element_written_in_place(node);
+        let element_access =
+            if in_place { AccessKind::Write } else { self.determine_access(node) };
+        if in_place {
+            self.record_in_place_write(node);
+        }
 
         // READ drills get their Projected witness here, not only when
         // an enclosing assignment/invocant emitter happens to reach
@@ -751,3 +876,11 @@ impl<'a> Builder<'a> {
         None
     }
 }
+
+/// How the builder reads a `meth Class(ARGS)` site.
+pub(super) enum IndirectReading {
+    Method,
+    Function,
+    Deferred(crate::model::file_analysis::IndirectSite),
+}
+

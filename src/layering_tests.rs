@@ -384,38 +384,6 @@ fn whole_copy_registration_sites_are_allowlisted() {
     assert!(violations.is_empty(), "whole-copy registration drift:\n{}", violations.join("\n"));
 }
 
-/// Verb-routing store selection has ONE speller: `ModuleIndex::lookup_for`.
-/// An LSP-layer call to `pack_index()` re-derives "which store serves this
-/// origin" per handler — the C1 disease: a verb that picks the store itself
-/// can pick it wrong (or forget), and the CandidateSet's construction-derived
-/// pack policy silently pairs with the wrong store. Whole-sub-index SWEEPS
-/// (`for_each_pack_index`) are a different question and stay allowed.
-#[test]
-fn pack_store_selection_stays_in_lookup_for() {
-    let mut violations = Vec::new();
-    for (path, layer, _stem) in source_files() {
-        if layer != Layer::Lsp {
-            continue;
-        }
-        let text = fs::read_to_string(&path).unwrap();
-        for (i, line) in text.lines().enumerate() {
-            let t = line.trim_start();
-            if t.starts_with("//") {
-                continue;
-            }
-            if t.contains(".pack_index(") {
-                violations.push(format!("{}:{}: {}", path.display(), i + 1, t));
-            }
-        }
-    }
-    assert!(
-        violations.is_empty(),
-        "LSP-layer store selection must route through ModuleIndex::lookup_for \
-         (the one speller), never pick a pack sub-index per handler:\n{}",
-        violations.join("\n")
-    );
-}
-
 /// `FileAnalysis::inferred_type` is raw-seed-state introspection for tests
 /// only. Its last production caller (the MCB early-out) is gone — the
 /// MCB→bag bridge publishes `Edge(PackageSymbol)` witnesses and lets the
@@ -559,8 +527,8 @@ fn slot_detection_dispatches_on_driver_caps_not_language_names() {
         .join("src/lsp/cursor_slot.rs");
     let text = fs::read_to_string(&path).unwrap();
     // Every id the registry can hand this file, whatever features are on.
-    let ids = crate::build::language_driver::LanguageRegistry::with_enabled()
-        .ids()
+    let ids = crate::build::language_driver::LanguageRegistry::compiled()
+        .languages()
         .into_iter()
         .collect::<Vec<_>>();
     let mut violations = Vec::new();
@@ -599,9 +567,8 @@ fn query_verbs_route_through_run_query() {
     let text = fs::read_to_string(&path).unwrap();
     let forbidden = [
         "index::resolve::resolve(", // set construction → QueryCx::set
-        "sym_row_search",           // relational rows → QueryCx::sym_rows
+        ".sym_search(",             // relational rows → QueryCx::sym_rows
         ".whole_present(",          // rehydration reader → QueryCx lanes
-        ".lookup_for(",             // routing binds inside the hop → QueryCx::routed
     ];
     let mut violations = Vec::new();
     for (i, line) in text.lines().enumerate() {
@@ -947,7 +914,7 @@ fn kind_comparisons_name_real_grammar_kinds() {
 /// because parking is only safe while holding no lock the writer needs.
 ///
 /// `run_persist_writer`'s committed and fallback lanes take `ModuleIndex`,
-/// `FileStore` and bag-cache guards. A producer that blocked on a full queue
+/// `OpenDocs` and bag-cache guards. A producer that blocked on a full queue
 /// while holding one of those could never be woken — the writer cannot drain
 /// to free a slot. Today every site hands over fully-owned values
 /// (`prepare_*_parts` tokens, encoded blobs) with no guard live, which is the
@@ -963,7 +930,7 @@ fn persist_queue_producers_are_allowlisted() {
     let allow: Vec<(&str, usize, &str)> = vec![(
         "module_resolver",
         4,
-        "index_perl's deferred + whole lanes (parts/blob owned; the FileStore write \
+        "index_perl's deferred + whole lanes (parts/blob owned; the OpenDocs write \
          happens AFTER the send) and index_pack's two (register_symbols completes \
          BEFORE the send)",
     )];
@@ -1433,9 +1400,9 @@ fn language_spellings_have_one_home() {
         ("build/language_driver.rs", 2, "the driver mints two pack attributes (`include_guard`, `non_public`): the minting side"),
         ("build/plugin/rhai_host.rs", 3, "a manifest signal name in an inline test fixture"),
         ("build/query_extract/extract/defs.rs", 2, "the extractor mints `anonymous` and `inline`: the minting side"),
-        ("build/query_extract/vocab.rs", 10, "the closed capture vocabulary: capture suffixes, and the attribute each def kind marks"),
+        ("build/query_extract/vocab.rs", 13, "the closed capture vocabulary: capture suffixes, the attribute each def kind marks, and the `@mark` suffixes spelled as the attribute they mint"),
         ("model/conventions.rs", 3, "Perl's own attribute spellings (`field_attribute_flag`): Perl's home"),
-        ("model/file_analysis/core_types.rs", 15, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`): the one table every language maps its spellings onto"),
+        ("model/file_analysis/core_types.rs", 16, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`): the one table every language maps its spellings onto"),
         ("model/file_analysis/completion.rs", 1, "a `DeclKind` rendered as completion detail text, not an attribute read"),
         ("model/file_analysis/outline.rs", 2, "outline detail text for a union container and a param decl kind"),
         ("model/witnesses/registry.rs", 1, "the `param` owner-keyed fallback key: a witness attachment name"),
@@ -1550,11 +1517,10 @@ fn rendered_strings_are_not_reparsed() {
     let fns = [".split(", ".rsplit(", ".split_once(", ".rsplit_once(", ".splitn(", ".rsplitn("];
     let seen = count_lines(&files, &|l| fns.iter().any(|f| l.contains(f)));
     let allow: &[(&str, usize, &str)] = &[
-        ("model/conventions.rs", 3, "source text: a name split on its language's declared separator, class-token segments, and Perl method tokens"),
-        ("model/file_analysis/class_queries.rs", 1, "`use` rows as written, split on the pack's declared separator"),
+        ("model/conventions.rs", 6, "source text: a name split on its language's declared separator, class-token segments, Perl method tokens, and `use VERSION` literals"),
         ("model/file_analysis/invocants.rs", 2, "Perl `::` on source-spelled class and sub names"),
         ("model/file_analysis/types.rs", 1, "canonical_template_spelling — a C++ instance as written in source"),
-        ("model/file_analysis/use_map.rs", 3, "resolving WRITTEN spellings"),
+        ("model/file_analysis/use_map.rs", 2, "a WRITTEN spelling's leaf and its qualifier's head segment"),
         ("lsp/cli/positions.rs", 1, "a `file:line:col` CLI argument: what the user typed, not what we rendered"),
         ("lsp/cursor_context.rs", 1, "Perl source text at the cursor, split on Perl's own separator"),
         ("lsp/symbols/links.rs", 2, "POD link text and a module path as the source wrote them"),
@@ -1644,7 +1610,7 @@ fn positional_reads_skip_grammar_extras() {
         ("build/builder/arity.rs", 9, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/chain.rs", 4, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/emit.rs", 13, "legacy: inside nodes that hold no extra, or kind-gated"),
-        ("build/builder/extract.rs", 7, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/extract.rs", 6, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/fold.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/frameworks.rs", 5, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/narrowing.rs", 4, "legacy: inside nodes that hold no extra, or kind-gated"),
@@ -1694,7 +1660,7 @@ fn packs_with_grammars() -> Vec<(&'static str, crate::build::query_extract::Lang
         crate::build::packs::perl_pack(),
         (*perl_parser.language().expect("the perl grammar")).clone(),
     )];
-    let registry = LanguageRegistry::with_enabled();
+    let registry = LanguageRegistry::compiled();
     for id in registry.languages() {
         let Some(driver) = registry.for_id(id) else { continue };
         let Some(pack) = driver.lang_pack() else { continue };
@@ -1761,7 +1727,7 @@ fn pack_facts_fields_are_ratcheted() {
     let body = &text[start..];
     let end = body.find("\n}\n").expect("struct end");
     let fields = body[..end].lines().filter(|l| l.starts_with("    pub ")).count();
-    const RATCHET: usize = 21;
+    const RATCHET: usize = 22;
     assert!(
         fields <= RATCHET,
         "PackFacts grew to {fields} fields (ratchet {RATCHET}). A per-language constant goes on \

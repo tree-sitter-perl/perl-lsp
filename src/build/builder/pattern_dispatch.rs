@@ -18,7 +18,7 @@ use tree_sitter::{
     CaptureQuantifier, Node, Query, QueryCursor, QueryPredicateArg, StreamingIterator,
 };
 
-use crate::model::file_analysis::{DispatchCandidate, HandlerOwner, InferredType, ReceiverGated, RefBinding, Span};
+use crate::model::file_analysis::{Deferred, DispatchCandidate, HandlerOwner, Question, RefBinding, Span};
 use crate::build::plugin::{self, CaptureData, CaptureValue, MatchContext, PatternSpec};
 
 use super::{node_to_span, Builder};
@@ -27,7 +27,7 @@ use crate::build::query_predicates::admits;
 /// A `#receiver-isa?` deferred predicate on a pattern: NOT a match-time
 /// filter (receiver isa is a cross-file, query-time question — see
 /// `docs/adr/receiver-gated-dispatch.md`). It tags the match so its
-/// `DispatchCall` emissions are recorded as `ReceiverGated` candidates
+/// `DispatchCall` emissions are recorded as `ReceiverIsa` deferrals
 /// instead of applied directly; `FileAnalysis::applicable_dispatches`
 /// resolves them against the receiver's actual class at query time,
 /// exactly like the `dispatch_verbs()` manifest path.
@@ -36,8 +36,9 @@ struct ReceiverGate {
     target_class: String,
 }
 
-/// The one predicate a pattern may carry that is not evaluated at match time.
-const RECEIVER_ISA: &str = "receiver-isa?";
+/// The one predicate a plugin pattern may carry that is not evaluated at
+/// match time.
+const RECEIVER_ISA: &str = crate::build::query_predicates::Deferral::ReceiverIsa.spelling();
 
 /// Extract a pattern's `#receiver-isa? @cap "Class"` predicate, if any.
 /// Unknown predicate names land in `general_predicates` unevaluated —
@@ -739,15 +740,8 @@ impl<'a> Builder<'a> {
                     // (same role as record_provisional_dispatch's),
                     // never the verdict.
                     let gate = receiver_gate_for(query, pattern_index);
-                    let receiver_hint = gate.as_ref().and_then(|g| {
-                        let node = caps
-                            .iter()
-                            .find(|(ix, _)| *ix == g.capture_index)
-                            .map(|(_, n)| *n)?;
-                        match self.invocant_type_at_node(node) {
-                            Some(InferredType::ClassName(c)) => Some(c),
-                            _ => None,
-                        }
+                    let receiver_node = gate.as_ref().and_then(|g| {
+                        caps.iter().find(|(ix, _)| *ix == g.capture_index).map(|(_, n)| *n)
                     });
                     // Emissions attach to the scope AND package open
                     // at the match site — the same context a
@@ -792,17 +786,23 @@ impl<'a> Builder<'a> {
                             // definition; a Global handler has no receiver
                             // gate, so it takes the ungated emit path below.
                             if let HandlerOwner::Class(owner_class) = owner {
-                                self.provisional_dispatches.push(ReceiverGated::new(
-                                    g.target_class.clone(),
-                                    DispatchCandidate {
-                                        name: name.clone(),
-                                        span: *span,
-                                        dispatcher: dispatcher.clone(),
-                                        owner_class: owner_class.clone(),
-                                        receiver_class: receiver_hint.clone(),
-                                        call_span: mspan,
-                                    },
-                                ));
+                                let receiver = receiver_node.and_then(|n| {
+                                    self.dispatch_receiver(n.parent()?, Some(n), dispatcher)
+                                });
+                                if let Some(receiver) = receiver {
+                                    self.provisional_dispatches.push(Deferred::new(
+                                        Question::ReceiverIsa { receiver, class: g.target_class.clone() },
+                                        DispatchCandidate {
+                                            name: name.clone(),
+                                            span: *span,
+                                            dispatcher: dispatcher.clone(),
+                                            owner_class: owner_class.clone(),
+                                            call_span: mspan,
+                                        },
+                                    ));
+                                } else {
+                                    log::warn!("#receiver-isa? capture is not a `{dispatcher}` call's invocant; dispatch dropped");
+                                }
                                 continue;
                             }
                         }
@@ -980,15 +980,8 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let gate = receiver_gate_for(query, pattern_index);
-            let receiver_hint = gate.as_ref().and_then(|g| {
-                let node = caps
-                    .iter()
-                    .find(|(ix, _)| *ix == g.capture_index)
-                    .map(|(_, n)| *n)?;
-                match self.invocant_type_at_node(node) {
-                    Some(InferredType::ClassName(c)) => Some(c),
-                    _ => None,
-                }
+            let receiver_node = gate.as_ref().and_then(|g| {
+                caps.iter().find(|(ix, _)| *ix == g.capture_index).map(|(_, n)| *n)
             });
             let match_scope = self.scope_at_point(mspan.start);
             self.scope_stack.push(match_scope);
@@ -1025,17 +1018,23 @@ impl<'a> Builder<'a> {
                 {
                     // Global handlers carry no receiver gate — ungated path.
                     if let HandlerOwner::Class(owner_class) = owner {
-                        self.provisional_dispatches.push(ReceiverGated::new(
-                            g.target_class.clone(),
-                            DispatchCandidate {
-                                name: name.clone(),
-                                span: *span,
-                                dispatcher: dispatcher.clone(),
-                                owner_class: owner_class.clone(),
-                                receiver_class: receiver_hint.clone(),
-                                call_span: mspan,
-                            },
-                        ));
+                        let receiver = receiver_node.and_then(|n| {
+                            self.dispatch_receiver(n.parent()?, Some(n), dispatcher)
+                        });
+                        if let Some(receiver) = receiver {
+                            self.provisional_dispatches.push(Deferred::new(
+                                Question::ReceiverIsa { receiver, class: g.target_class.clone() },
+                                DispatchCandidate {
+                                    name: name.clone(),
+                                    span: *span,
+                                    dispatcher: dispatcher.clone(),
+                                    owner_class: owner_class.clone(),
+                                    call_span: mspan,
+                                },
+                            ));
+                        } else {
+                            log::warn!("#receiver-isa? capture is not a `{dispatcher}` call's invocant; dispatch dropped");
+                        }
                         continue;
                     }
                 }

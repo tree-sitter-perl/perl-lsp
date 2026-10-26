@@ -200,7 +200,7 @@ const QUEUE_STALL_WARN: std::time::Duration = std::time::Duration::from_secs(30)
 /// holds NO index or store guard at its call to this function — the
 /// registration tokens (`prepare_*_parts`) and surfaces are fully owned
 /// values by then, and the writer's lanes touch only `ModuleIndex` /
-/// `FileStore` / bag-cache maps that no producer holds across a send. That
+/// `OpenDocs` / bag-cache maps that no producer holds across a send. That
 /// property is what makes the bound safe; it is not incidental, and a new
 /// send site has to preserve it — `filestore-guard-discipline`, the family
 /// that has already produced two deadlocks here.

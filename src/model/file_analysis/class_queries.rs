@@ -1020,7 +1020,7 @@ impl FileAnalysis {
                 .inferred_type_via_bag_ctx(text, point, module_index)
                 .and_then(|t| t.class_name().map(str::to_string)),
             InvocantText::NonScalar(_) => None,
-            InvocantText::Bareword(b) => Some(self.class_spelling_identity(b)),
+            InvocantText::Bareword(b) => Some(self.class_spelling_identity(b, point)),
         }
     }
 
@@ -1045,9 +1045,12 @@ impl FileAnalysis {
     /// alias re-qualifies it (`use_map_tests::resolve_is_not_idempotent`).
     /// Symbols, parents and witnesses already carry identities (the
     /// extractor resolves as it mints); only ref text is written.
-    pub fn class_spelling_identity(&self, written: &str) -> String {
-        match self.use_map() {
-            Some(map) => map.resolve(written),
+    ///
+    /// `site` is where the spelling is written: only the rows that reach
+    /// it, and the namespace in force there, take part.
+    pub fn class_spelling_identity(&self, written: &str, site: Point) -> String {
+        match self.use_map_at(site) {
+            Some(map) => map.resolve(written).identity(map.sep),
             None => written.to_string(),
         }
     }
@@ -1059,9 +1062,23 @@ impl FileAnalysis {
     /// resolves through the use-map. The one spelling→identity ladder the
     /// PackageRef lanes (goto-def, hover, references) share.
     pub fn spelled_identity(&self, r: &Ref) -> String {
-        match (self.pack.names.use_map_sep(), self.pack.import_row_covering(&r.span)) {
-            (Some(sep), Some((_, raw))) => raw.strip_prefix(sep).unwrap_or(raw).to_string(),
-            _ => self.class_spelling_identity(&r.target_name),
+        match (self.pack.names.use_map_sep(), self.pack.use_row_covering(&r.span)) {
+            (Some(sep), Some(row)) => row.name.identity(sep),
+            _ => self.class_spelling_identity(&r.target_name, r.span.start),
+        }
+    }
+
+    /// The class a call-shaped token names, where the language's document
+    /// says calling a class constructs it (`#names-class?`): python's `from
+    /// m import User`, `User()`. `None` leaves the token a call.
+    pub fn class_named_by_call(&self, r: &Ref, index: Option<&dyn CrossFileLookup>) -> Option<String> {
+        let reading = match r.deferred_binding() {
+            Some(d) => d.pick(self, index).reading?,
+            None => r.settled_binding()?,
+        };
+        match reading {
+            RefBinding::NamesClass(class) => Some(class.clone()),
+            _ => None,
         }
     }
 
@@ -1095,16 +1112,6 @@ impl FileAnalysis {
         self.use_map_pins().namespace_of(leaf).map(str::to_string)
     }
 
-    /// Is the import of `ns\leaf` bound under an alias in this file? Then
-    /// the file spells that class by the alias, and the real leaf means
-    /// something else here (its own class, or its namespace's).
-    fn import_is_aliased(&self, ns: &str, leaf: &str) -> bool {
-        self.pack
-            .use_aliases
-            .iter()
-            .any(|(_, ans, aleaf)| ans == ns && aleaf == leaf)
-    }
-
     /// Every leaf→namespace pin this file carries — its own class
     /// declarations plus its qualified imports — the table a use-map
     /// visibility axis is built from (`UseMapPins`). A leaf with
@@ -1126,25 +1133,12 @@ impl FileAnalysis {
             .clone()
     }
 
-    /// This file's use-map resolver over its own namespace
-    /// (`own_namespace`); `use_map_with` takes the namespace from a caller
-    /// that already derived it.
-    pub fn use_map(&self) -> Option<UseMap<'_>> {
-        let pins = self
-            .use_map_pins
-            .get_or_init(|| std::sync::Arc::new(self.leaf_namespace_pins()));
-        self.use_map_with(pins.own_namespace.as_deref())
-    }
-
-    /// `None` for a language whose spellings are identities as written
-    /// (`ClassSpelling::Identity`): there is no map to resolve through.
-    fn use_map_with<'a>(&'a self, own_namespace: Option<&'a str>) -> Option<UseMap<'a>> {
-        Some(UseMap {
-            rows: &self.pack.include_directives,
-            aliases: &self.pack.use_aliases,
-            own_namespace,
-            sep: self.pack.names.use_map_sep()?,
-        })
+    /// This file's use-map as seen from `site`: the rows that reach it and
+    /// the namespace in force there. `None` for a language whose spellings
+    /// are identities as written (`ClassSpelling::Identity`): there is no
+    /// map to resolve through.
+    pub fn use_map_at(&self, site: Point) -> Option<UseMap<'_>> {
+        UseMap::at(&self.pack.use_rows, &self.pack.namespace_sections, &self.pack.names, site)
     }
 
     fn leaf_namespace_pins(&self) -> UseMapPins {
@@ -1161,69 +1155,57 @@ impl FileAnalysis {
                 })
                 .or_insert_with(|| Some(ns.to_string()));
         };
-        // Import rows carry a namespace only for a use-map language; C's
-        // `#include` paths ride the same lane and pin nothing.
-        if let Some(sep) = self.pack.names.use_map_sep() {
-            for (_, raw) in &self.pack.include_directives {
-                let t = raw.strip_prefix(sep).unwrap_or(raw);
+        let mut visible: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for row in &self.pack.use_rows {
+            let QualifiedName { namespace: ns, leaf } = &row.name;
+            match &row.alias {
+                // An aliased row pins the alias spelling, never the real
+                // leaf (`use Script\Event as ScriptEvent` in a file whose
+                // bare `Event` is its own namespace's class), and keeps the
+                // real leaf's namespace reachable.
+                Some(alias) => {
+                    pin(&mut pins, alias, ns);
+                    let v = visible.entry(leaf.clone()).or_default();
+                    if !v.contains(ns) {
+                        v.push(ns.clone());
+                    }
+                }
                 // A bare row (`use Exception;`) names the GLOBAL namespace: the
                 // empty pin keeps a same-leaf class of the file's own namespace
                 // from claiming the name.
-                let (ns, leaf) = t.rsplit_once(sep).unwrap_or(("", t));
-                if leaf.is_empty() {
-                    continue;
-                }
-                // An aliased row pins the alias spelling (below), never the
-                // real leaf: `use Script\Event as ScriptEvent` in a file
-                // whose bare `Event` is its own namespace's class.
-                if self.import_is_aliased(ns, leaf) {
-                    continue;
-                }
-                pin(&mut pins, leaf, ns);
+                None => pin(&mut pins, leaf, ns),
             }
         }
-        let mut visible: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
-        for (alias, ns, leaf) in &self.pack.use_aliases {
-            pin(&mut pins, alias, ns);
-            let v = visible.entry(leaf.clone()).or_default();
-            if !v.contains(ns) {
-                v.push(ns.clone());
-            }
-        }
-        let mut own: Option<String> = None;
-        let mut several = false;
         for s in self.symbols().iter() {
-            match s.kind {
-                SymKind::Class => {
-                    // the symbol is filed under its identity (the FQN for a
-                    // namespaced pack); the pin is keyed by the leaf it binds
-                    let ns = s.package.clone().unwrap_or_default();
-                    pin(&mut pins, &name_match_key(&s.name, self.names()), &ns);
-                }
-                SymKind::Package => {
-                    if own.as_deref().is_some_and(|o| o != s.name) {
-                        several = true;
-                    }
-                    own.get_or_insert_with(|| s.name.clone());
-                }
-                _ => {}
+            if s.kind == SymKind::Class {
+                // the symbol is filed under its identity (the FQN for a
+                // namespaced pack); the pin is keyed by the leaf it binds
+                let ns = s.package.clone().unwrap_or_default();
+                pin(&mut pins, &name_match_key(&s.name, self.names()), &ns);
             }
         }
-        let own_ns = if several { None } else { own.clone() };
+        // The pins answer for the whole origin, so its own namespace is
+        // one only when every section names the same; a file of several
+        // makes no own-namespace claim (its sites resolve their own).
+        let mut sections = self.pack.namespace_sections.iter().map(|s| s.package.as_str());
+        let own_ns = sections
+            .next()
+            .filter(|first| sections.all(|s| s == *first))
+            .map(str::to_string);
         // A qualified spelling names its namespace outright — the use-map
-        // resolver's answer for the whole spelling, split back to the pin's
-        // (namespace, leaf) shape.
-        if let Some(map) = self.use_map_with(own_ns.as_deref()) {
+        // resolver's answer for the qualifier it was written under. The
+        // spellings carry no site, so they read the whole-file view.
+        if let Some(sep) = self.pack.names.use_map_sep() {
+            let map = UseMap { rows: &self.pack.use_rows, own_namespace: own_ns.as_deref(), sep, site: None };
             for (leaf, prefix) in &self.pack.qualified_spellings {
-                let (ns, _) = map.resolve_split(&format!("{prefix}{}{leaf}", map.sep));
-                pin(&mut pins, leaf, &ns);
+                pin(&mut pins, leaf, &map.resolve_in(prefix, leaf).namespace);
             }
         }
         let mut spelled: std::collections::HashSet<String> = std::collections::HashSet::new();
         for r in self.refs() {
             // an import row's own leaf is not the file spelling the name
-            if self.pack.import_row_covering(&r.span).is_some() {
+            if self.pack.in_import_row(&r.span) {
                 continue;
             }
             match &r.kind {

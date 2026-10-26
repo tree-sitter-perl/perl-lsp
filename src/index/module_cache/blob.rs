@@ -476,7 +476,7 @@ pub fn load_one_diag(
 }
 
 /// The bag-cache rehydration loader body, shared by every per-lang loader
-/// closure (Perl hub + pack sub-indexes). Tries each candidate path spelling
+/// closure (Perl and pack languages alike). Tries each candidate path spelling
 /// (canonical vs raw walk path — the blob is written canonical but a
 /// resident copy may be keyed raw) and survives the readonly-open CANTOPEN
 /// race via `load_with_wal_fallback`'s read-write recovery. Every failure is

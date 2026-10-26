@@ -61,8 +61,7 @@ pub(super) fn scan_entrypoint_scripts(root: &std::path::Path, extra: &[String]) 
 
 pub fn index_workspace_with_index(
     root: &std::path::Path,
-    files: &crate::index::file_store::FileStore,
-    module_index: Option<&crate::index::module_index::ModuleIndex>,
+    idx: &crate::index::module_index::ModuleIndex,
     // Per-file progress tick (done, total), called from the Rayon workers as
     // files complete. LSP-agnostic: the caller owns any notification / throttle
     // policy. Invoked once per path processed (success OR skip), so `done`
@@ -155,7 +154,7 @@ pub fn index_workspace_with_index(
     // copies are refs/bag-stripped like every other index tier. The cache
     // key is the hub's workspace-root spelling, the SAME one the resolver
     // thread and the hub's readers hash, so all three address one DB.
-    let cache_key = module_index.and_then(|i| i.workspace_root());
+    let cache_key = idx.workspace_root();
     let conn = module_cache::open_cache_db(cache_key.as_deref(), "perl");
     // Validate-and-stamp the plugin fingerprint BEFORE writing: the resolver
     // thread runs the same (atomic) check concurrently on this DB, and an
@@ -209,7 +208,7 @@ pub fn index_workspace_with_index(
         )> = Vec::new();
         let rows_present = module_cache::paths_with_ref_rows(conn);
         let (_n, _stale, gone) =
-            module_cache::warm_cache_streaming(conn, "workspace", &mut |_name, path, mut fa| {
+            module_cache::warm_cache_streaming(conn, "workspace", &mut |_name, path, fa| {
                 if !canon_members.contains(&path) {
                     dead_rows.push(path);
                     return;
@@ -226,26 +225,24 @@ pub fn index_workspace_with_index(
                         fa.sym_row_seeds(),
                     ));
                 }
-                if let Some(idx) = module_index {
-                    // The loader-shape half of these projections reads the
-                    // witness bag (`expr_type_at_span` over the config
-                    // literal's `Expr` witnesses), and the warm scan hands
-                    // out bag-evicted copies. Reading one anyway does not
-                    // fail — it records NO shape, so the closed
-                    // `HashWithKeys` a `plugin 'X', {...}` load contributes
-                    // simply never exists on a warm start and every
-                    // diagnostic downstream of it goes quiet. Rehydrate for
-                    // the files that actually carry loads: entrypoints and
-                    // little else, so this is a handful of point fetches,
-                    // not a re-decode of the workspace.
-                    if !fa.plugin.loads.is_empty() && fa.bag_is_evicted() {
-                        match module_cache::load_one(conn, &path.to_string_lossy()) {
-                            Some(whole) => idx.record_workspace_projections(&path, &whole),
-                            None => idx.record_workspace_projections(&path, &fa),
-                        }
-                    } else {
-                        idx.record_workspace_projections(&path, &fa);
+                // The loader-shape half of these projections reads the
+                // witness bag (`expr_type_at_span` over the config
+                // literal's `Expr` witnesses), and the warm scan hands
+                // out bag-evicted copies. Reading one anyway does not
+                // fail — it records NO shape, so the closed
+                // `HashWithKeys` a `plugin 'X', {...}` load contributes
+                // simply never exists on a warm start and every
+                // diagnostic downstream of it goes quiet. Rehydrate for
+                // the files that actually carry loads: entrypoints and
+                // little else, so this is a handful of point fetches,
+                // not a re-decode of the workspace.
+                if !fa.plugin.loads.is_empty() && fa.bag_is_evicted() {
+                    match module_cache::load_one(conn, &path.to_string_lossy()) {
+                        Some(whole) => idx.record_workspace_projections(&path, &whole),
+                        None => idx.record_workspace_projections(&path, &fa),
                     }
+                } else {
+                    idx.record_workspace_projections(&path, &fa);
                 }
                 // Registration-owned strip: the name/edge feeds read the
                 // WHOLE analysis, then the requested axes evict, then the
@@ -256,26 +253,17 @@ pub fn index_workspace_with_index(
                     eviction_enabled(),
                     rows_ok,
                 );
-                let arc = match module_index {
-                    Some(idx) => idx.register_workspace_stripping(
-                        path.clone(),
-                        fa,
-                        level,
-                        // The cold lane's projection, when the store holds one
-                        // at this projection version. Without it the warm lane
-                        // records a bag-less twin and every cross-boundary
-                        // comparison asks a different question than the cold
-                        // run answered.
-                        module_cache::load_surface(conn, &path_str),
-                    ),
-                    None => {
-                        // No index (CLI-less warm): no feeds to extract —
-                        // strip and store.
-                        fa.evict_to(level);
-                        std::sync::Arc::new(fa)
-                    }
-                };
-                files.insert_workspace_arc(path.clone(), arc);
+                idx.register_workspace_stripping(
+                    path.clone(),
+                    fa,
+                    level,
+                    // The cold lane's projection, when the store holds one
+                    // at this projection version. Without it the warm lane
+                    // records a bag-less twin and every cross-boundary
+                    // comparison asks a different question than the cold
+                    // run answered.
+                    module_cache::load_surface(conn, &path_str),
+                );
                 count.fetch_add(1, Ordering::Relaxed);
                 warmed.insert(path);
             });
@@ -321,16 +309,10 @@ pub fn index_workspace_with_index(
     // before its blob exists rehydrates to nothing and serves wrong-empty.
     struct WsFresh {
         path: PathBuf,
-        /// The copy to mirror into the FileStore on `deferred` entries
-        /// (stripped; the feed half already ran on the whole analysis).
-        arc: std::sync::Arc<crate::model::file_analysis::FileAnalysis>,
-        /// `Some` → register the residency token AFTER the chunk commits
-        /// (only when an index exists; `None` covers packageless / no-index
-        /// deferred entries and every persist-only whole copy).
+        /// `Some` → register the residency token AFTER the chunk commits;
+        /// `None` → the worker already registered a WHOLE copy (NO_EVICT,
+        /// unpersistable); persist only.
         parts: Option<crate::index::module_index::WorkspaceRegistrationParts>,
-        /// Register + mirror in the writer after COMMIT. `false` = the
-        /// worker already registered a WHOLE copy (NO_EVICT); persist only.
-        deferred: bool,
         blob: crate::index::module_cache::EncodedAnalysis,
         seeds: Vec<crate::model::file_analysis::RefRowSeed>,
         sym_seeds: Vec<crate::model::file_analysis::SymRowSeed>,
@@ -379,17 +361,12 @@ pub fn index_workspace_with_index(
                     }
                 },
                 |e: WsFresh| {
-                    if let Some(idx) = module_index {
-                        // Clear any stale LRU pin BEFORE the stripped copy
-                        // becomes reachable, so its first rehydration reads
-                        // the just-committed blob.
-                        idx.invalidate_derived_copies(&e.path);
-                    }
-                    if e.deferred {
-                        files.insert_workspace_arc(e.path.clone(), e.arc.clone());
-                        if let (Some(idx), Some(parts)) = (module_index, e.parts) {
-                            idx.register_workspace_residency(e.path, parts);
-                        }
+                    // Clear any stale LRU pin BEFORE the stripped copy
+                    // becomes reachable, so its first rehydration reads the
+                    // just-committed blob.
+                    idx.invalidate_derived_copies(&e.path);
+                    if let Some(parts) = e.parts {
+                        idx.register_workspace_residency(e.path, parts);
                     }
                 },
                 |e: WsFresh| {
@@ -398,9 +375,7 @@ pub fn index_workspace_with_index(
                     // register full copies instead, so nothing is lost
                     // beyond the persistence itself (disk full / lock storm
                     // stays loud AND self-heals) — up to the budget.
-                    if let Some(idx) = module_index {
-                        idx.invalidate_derived_copies(&e.path);
-                    }
+                    idx.invalidate_derived_copies(&e.path);
                     if let Some(fa) = e.blob.decode_whole() {
                         let bytes = fa.heap_estimate().total();
                         if fallback_bytes.saturating_add(bytes) > FALLBACK_WHOLE_BYTE_CAP {
@@ -416,14 +391,10 @@ pub fn index_workspace_with_index(
                             return;
                         }
                         fallback_bytes += bytes;
-                        let arc = std::sync::Arc::new(fa);
-                        files.insert_workspace_arc(e.path.clone(), arc.clone());
-                        if let Some(idx) = module_index {
-                            let _ = idx.register_workspace_resident(e.path.clone(), arc);
-                            // A deliberate whole pin — account it so the
-                            // tripwire flags only UNEXPLAINED residents.
-                            expected_whole_writer.fetch_add(1, Ordering::Relaxed);
-                        }
+                        let _ = idx.register_workspace_resident(e.path.clone(), std::sync::Arc::new(fa));
+                        // A deliberate whole pin — account it so the
+                        // tripwire flags only UNEXPLAINED residents.
+                        expected_whole_writer.fetch_add(1, Ordering::Relaxed);
                     }
                 },
             );
@@ -481,15 +452,13 @@ pub fn index_workspace_with_index(
                 // `analyze_stamped` returning None covers BOTH a failed
                 // read/parse and a changed-under-us stamp — the watcher (or
                 // next warm) owns the fresher truth either way.
-                Ok(Some((mut analysis, stamp))) => {
+                Ok(Some((analysis, stamp))) => {
                     // Projections that read the bag run on the whole
                     // analysis; the persisted generation is encoded whole;
                     // only then is the resident copy stripped.
-                    if let Some(idx) = module_index {
-                        crate::util::ghost_stats::timed("walk.projections", || {
-                            idx.record_workspace_projections(&canon, &analysis)
-                        });
-                    }
+                    crate::util::ghost_stats::timed("walk.projections", || {
+                        idx.record_workspace_projections(&canon, &analysis)
+                    });
                     let payload = if persist && !analysis.degraded {
                         crate::util::ghost_stats::timed("walk.encode", || module_cache::encode_analysis(&analysis)).map(|blob| {
                             // One tag over both seed shreds so the sample
@@ -530,41 +499,29 @@ pub fn index_workspace_with_index(
                     };
                     if strip && payload.is_some() {
                         // Stripped copy: feed half now (whole analysis),
-                        // residency + FileStore mirror in the writer AFTER
-                        // its chunk commits. Until then the file reads as
-                        // "not yet indexed" — never wrong-empty.
-                        let (arc, parts) = match module_index {
-                            Some(idx) => {
-                                let mut parts = crate::util::ghost_stats::timed("walk.prepare_parts", || {
-                                    idx.prepare_workspace_parts(&canon, analysis, crate::model::file_analysis::Residency::Skeleton)
-                                });
-                                // Takes the surface out rather than cloning it:
-                                // the writer's registration half discards it, so
-                                // it would otherwise ride the queue only to be
-                                // dropped.
-                                let verdict = crate::util::ghost_stats::timed("walk.record_surface", || parts.record_surface(idx, &canon));
-                                // The record half already happened here; what
-                                // was missing is the routing the record exists
-                                // to feed. `Changed` is the only verdict that
-                                // names stale consumers.
-                                if matches!(verdict, crate::model::surface::SurfaceVerdict::Changed) {
-                                    if let Ok(mut q) = surface_changed.lock() {
-                                        q.push(canon.clone());
-                                    }
-                                }
-                                (std::sync::Arc::clone(parts.arc()), Some(parts))
+                        // residency in the writer AFTER its chunk commits.
+                        // Until then the file reads as "not yet indexed" —
+                        // never wrong-empty.
+                        let mut parts = crate::util::ghost_stats::timed("walk.prepare_parts", || {
+                            idx.prepare_workspace_parts(&canon, analysis, crate::model::file_analysis::Residency::Skeleton)
+                        });
+                        // Takes the surface out rather than cloning it: the
+                        // writer's registration half discards it, so it would
+                        // otherwise ride the queue only to be dropped.
+                        let verdict = crate::util::ghost_stats::timed("walk.record_surface", || parts.record_surface(idx, &canon));
+                        // The record half already happened here; what was
+                        // missing is the routing the record exists to feed.
+                        // `Changed` is the only verdict that names stale
+                        // consumers.
+                        if matches!(verdict, crate::model::surface::SurfaceVerdict::Changed) {
+                            if let Ok(mut q) = surface_changed.lock() {
+                                q.push(canon.clone());
                             }
-                            None => {
-                                analysis.evict_to(crate::model::file_analysis::Residency::Skeleton);
-                                (std::sync::Arc::new(analysis), None)
-                            }
-                        };
+                        }
                         let (blob, seeds, sym_seeds, closure, slices) = payload.unwrap();
                         send_to_writer(&fresh_tx, WsFresh {
                             path: canon.clone(),
-                            arc,
-                            parts,
-                            deferred: true,
+                            parts: Some(parts),
                             blob,
                             seeds,
                             sym_seeds,
@@ -576,42 +533,33 @@ pub fn index_workspace_with_index(
                         // Whole copy (no persistence, degraded, or NO_EVICT):
                         // register immediately (no strip — the whole-copy door);
                         // still persist when a blob exists.
-                        let arc = match module_index {
-                            Some(idx) => {
-                                let mut parts =
-                                    idx.prepare_workspace_parts(&canon, analysis, crate::model::file_analysis::Residency::Whole);
-                                let arc = std::sync::Arc::clone(parts.arc());
-                                // Record here too. Whether a file's surface is
-                                // recorded must not depend on which residency
-                                // lane it took — that would make the freshness
-                                // engine's coverage a function of whether the
-                                // cache DB happened to open, so a workspace
-                                // running unpersisted or under NO_EVICT would
-                                // silently have no bulk records and no marks.
-                                // The projection is already in `parts` and is
-                                // otherwise dropped; `Background` writes for an
-                                // open path suppress themselves.
-                                let verdict = parts.record_surface(idx, &canon);
-                                if matches!(verdict, crate::model::surface::SurfaceVerdict::Changed) {
-                                    if let Ok(mut q) = surface_changed.lock() {
-                                        q.push(canon.clone());
-                                    }
-                                }
-                                idx.register_workspace_residency(canon.clone(), parts);
-                                // Deliberate whole pin (unpersistable /
-                                // degraded / NO_EVICT) — accounted for the
-                                // tripwire.
-                                expected_whole.fetch_add(1, Ordering::Relaxed);
-                                arc
+                        let mut parts =
+                            idx.prepare_workspace_parts(&canon, analysis, crate::model::file_analysis::Residency::Whole);
+                        // Record here too. Whether a file's surface is
+                        // recorded must not depend on which residency
+                        // lane it took — that would make the freshness
+                        // engine's coverage a function of whether the
+                        // cache DB happened to open, so a workspace
+                        // running unpersisted or under NO_EVICT would
+                        // silently have no bulk records and no marks.
+                        // The projection is already in `parts` and is
+                        // otherwise dropped; `Background` writes for an
+                        // open path suppress themselves.
+                        let verdict = parts.record_surface(idx, &canon);
+                        if matches!(verdict, crate::model::surface::SurfaceVerdict::Changed) {
+                            if let Ok(mut q) = surface_changed.lock() {
+                                q.push(canon.clone());
                             }
-                            None => std::sync::Arc::new(analysis),
-                        };
+                        }
+                        idx.register_workspace_residency(canon.clone(), parts);
+                        // Deliberate whole pin (unpersistable /
+                        // degraded / NO_EVICT) — accounted for the
+                        // tripwire.
+                        expected_whole.fetch_add(1, Ordering::Relaxed);
                         if let Some((blob, seeds, sym_seeds, closure, slices)) = payload {
                             send_to_writer(&fresh_tx, WsFresh {
                                 path: canon.clone(),
-                                arc: arc.clone(),
                                 parts: None,
-                                deferred: false,
                                 blob,
                                 seeds,
                                 sym_seeds,
@@ -620,7 +568,6 @@ pub fn index_workspace_with_index(
                                 slices,
                             });
                         }
-                        files.insert_workspace_arc(canon.clone(), arc);
                     }
                     count.fetch_add(1, Ordering::Relaxed);
                 }
@@ -661,7 +608,7 @@ pub fn index_workspace_with_index(
     // Timed alongside the drain: it sweeps every registered file, so it is a
     // second O(corpus) term between the walk and the readiness gate, and the
     // window is only the drain's if the other terms are measured too.
-    if let Some(idx) = module_index {
+    {
         if eviction_enabled() {
             crate::util::timings::phase("index.residency_tripwire", || {
                 residency_tripwire(

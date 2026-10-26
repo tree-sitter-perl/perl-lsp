@@ -421,6 +421,121 @@ pub(crate) fn peel_groups(mut node: Node) -> Node {
     node
 }
 
+/// What a `refgen_expression` (`\X`) takes a reference to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefgenOperand {
+    /// `\&name`, `\&$v`, `\&{..}`.
+    Code,
+    Hash,
+    Array,
+    /// `\$x`, `\(...)`, `\"str"`: nothing the lattice models.
+    Other,
+}
+
+/// `\my @z` names the declared variable, not the declaration.
+pub(crate) fn refgen_operand(refgen: Node) -> Option<RefgenOperand> {
+    let operand = refgen.elements().next()?;
+    let operand = if operand.kind() == "variable_declaration" {
+        operand.child_by_field_name("variable")?
+    } else {
+        operand
+    };
+    Some(match operand.kind() {
+        "function" => RefgenOperand::Code,
+        "hash" => RefgenOperand::Hash,
+        "array" => RefgenOperand::Array,
+        _ => RefgenOperand::Other,
+    })
+}
+
+/// The container deref around `elem`: `@{$h->{k}}` / `%{$h->{k}}` (a
+/// container whose varname is a block holding `elem`) and `$h->{k}->@*` /
+/// `$h->{k}->%*`. `None` when `elem` is not the whole deref operand.
+pub(crate) fn deref_container_of(elem: Node) -> Option<Node> {
+    let p = elem.parent()?;
+    if matches!(p.kind(), "array_deref_expression" | "hash_deref_expression") {
+        return Some(p);
+    }
+    if p.kind() != "expression_statement" {
+        return None;
+    }
+    let block = p.parent().filter(|b| b.kind() == "block")?;
+    let varname = block.parent().filter(|v| v.kind() == "varname")?;
+    varname.parent().filter(|c| matches!(c.kind(), "array" | "hash"))
+}
+
+/// The assignment whose target list holds `node` as an element:
+/// `($h->{k}, $x) = …`. A direct target (`$h->{k} = …`) is not in a list.
+pub(crate) fn list_assignment_target_of<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    let mut group = node.parent().filter(|g| is_list_literal(*g))?;
+    while let Some(up) = group.parent().filter(|g| is_list_literal(*g)) {
+        group = up;
+    }
+    let assign = group.parent().filter(|a| a.kind() == "assignment_expression")?;
+    (assign.child_by_field_name("left")? == group).then_some(assign)
+}
+
+/// `meth Class(ARGS)` / `meth Class ARGS` / `meth Class` — the spelling Perl
+/// may read as the indirect-object method call `Class->meth(ARGS)`. The
+/// grammar parses it as a call to `meth` whose argument is a call to (or a
+/// bareword naming) `Class`. Shape only: whether Perl reads it as a method
+/// call depends on which names are subs and packages at that point, which
+/// the caller decides.
+#[derive(Clone, Copy)]
+pub(crate) struct IndirectObjectCall<'a> {
+    pub method: Node<'a>,
+    pub class: Node<'a>,
+    /// The call's arguments, when it has any.
+    pub arguments: Option<Node<'a>>,
+}
+
+/// `no MODULE ...`: the grammar has no `no_statement`, so a `no` is a
+/// `use_statement` whose leading keyword token reads `no`.
+pub(crate) fn is_no_statement(node: Node) -> bool {
+    node.kind() == "use_statement" && node.child(0).is_some_and(|k| k.kind() == "no")
+}
+
+/// Where the lexical scope a statement is written in ends: a pragma's
+/// effect (`use v5.36`, `no feature ...`) runs from the statement to here.
+pub(crate) fn lexical_scope_end(node: Node) -> tree_sitter::Point {
+    let mut cur = node.parent();
+    while let Some(n) = cur {
+        if matches!(n.kind(), "block" | "block_statement" | "source_file") {
+            return n.end_position();
+        }
+        cur = n.parent();
+    }
+    node.end_position()
+}
+
+pub(crate) fn indirect_object_call<'a>(node: Node<'a>, src: &[u8]) -> Option<IndirectObjectCall<'a>> {
+    use crate::model::conventions::{is_bareword_class_name, PERL_SPELLINGS};
+    if node.kind() != "ambiguous_function_call_expression" {
+        return None;
+    }
+    let method = node.child_by_field_name("function")?;
+    let inner = node.child_by_field_name("arguments")?;
+    let (class, arguments) = match inner.kind() {
+        "bareword" => (inner, None),
+        "function_call_expression" | "ambiguous_function_call_expression" => {
+            (inner.child_by_field_name("function")?, inner.child_by_field_name("arguments"))
+        }
+        _ => return None,
+    };
+    // The method token is one plain identifier; a `&name`, a deref or a
+    // qualified name is not.
+    let method_text = method.utf8_text(src).ok()?;
+    if !is_bareword_class_name(method_text, &PERL_SPELLINGS)
+        || crate::model::file_analysis::split_qualified(method_text, &PERL_SPELLINGS).0.is_some()
+    {
+        return None;
+    }
+    if !is_bareword_class_name(class.utf8_text(src).ok()?, &PERL_SPELLINGS) {
+        return None;
+    }
+    Some(IndirectObjectCall { method, class, arguments })
+}
+
 /// First named child of `node` (each group-peeled) whose kind satisfies
 /// `pred` — the "pull the single typed operand out of a call" primitive.
 /// The kind-filter callback keeps it reusable across callers.

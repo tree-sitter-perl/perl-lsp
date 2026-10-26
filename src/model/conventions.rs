@@ -25,6 +25,7 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     root_package: Some(std::borrow::Cow::Borrowed("main")),
     // A call reaches a sub, never a `field` of the same name.
     member_namespace: MemberNamespace::PerFamily,
+    imports: NameSpellings::NONE.imports,
 };
 
 /// Split a possibly-qualified name into `(Option<package>, basename)`.
@@ -50,6 +51,18 @@ pub fn split_qualified<'a>(name: &'a str, names: &NameSpellings) -> (Option<&'a 
     match names.sep().and_then(|sep| name.rsplit_once(sep)) {
         Some((pkg, base)) => (Some(pkg), base),
         None => (None, name),
+    }
+}
+
+/// `split_qualified`'s inverse: a namespace and a leaf as one qualified
+/// name. The global namespace (an empty `namespace`) yields the bare leaf,
+/// never a dangling separator, so a caller need not ask first whether the
+/// name has a namespace.
+pub fn join_qualified(namespace: &str, leaf: &str, sep: &str) -> String {
+    if namespace.is_empty() {
+        leaf.to_string()
+    } else {
+        format!("{namespace}{sep}{leaf}")
     }
 }
 
@@ -463,6 +476,7 @@ mod tests {
             class_spelling: ClassSpelling::UseMap,
             root_package: None,
             member_namespace: crate::model::file_analysis::MemberNamespace::PerFamily,
+            imports: NameSpellings::NONE.imports,
         };
         assert_eq!(super::split_qualified("App\\Models\\User", &php), (Some("App\\Models"), "User"));
         assert_eq!(super::name_match_key("App\\Models\\User", &php), "User");
@@ -548,3 +562,41 @@ mod tests {
         assert_eq!(MethodToken::parse("m").literal_package(), None);
     }
 }
+
+/// The `feature` pragma, and the feature that reads `meth Class(ARGS)` as
+/// a method call. `indirect` is also a CPAN pragma: `no indirect` makes the
+/// syntax a compile error, which leaves code that never uses it.
+pub const FEATURE_PRAGMA: &str = "feature";
+pub const INDIRECT_FEATURE: &str = "indirect";
+
+/// The features a `use VERSION` bundle turns OFF relative to the default
+/// set (`perldoc feature`, "FEATURE BUNDLES"): from `:5.36` the bundle
+/// drops `indirect`. `text` is the version as written (`v5.36`, `5.036`,
+/// `5.36.1`); a version that doesn't parse turns nothing off.
+pub fn bundle_disables(text: &str) -> &'static [&'static str] {
+    match perl_version_minor(text) {
+        Some(minor) if minor >= 35 => &["indirect"],
+        _ => &[],
+    }
+}
+
+/// The minor version of a Perl 5 version literal: `v5.36` / `5.36.0` are
+/// dotted, `5.036` is decimal (three digits per part, so `5.36` is 5.360).
+fn perl_version_minor(text: &str) -> Option<u32> {
+    let t = text.trim();
+    if let Some(dotted) = t.strip_prefix('v') {
+        let mut parts = dotted.split('.');
+        return (parts.next()? == "5").then(|| parts.next()?.parse().ok()).flatten();
+    }
+    let (major, frac) = t.split_once('.')?;
+    if major != "5" {
+        return None;
+    }
+    if frac.matches('.').count() >= 1 {
+        return frac.split('.').next()?.parse().ok();
+    }
+    let digits: String = frac.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let padded = format!("{digits:0<3}");
+    padded.get(..3)?.parse().ok()
+}
+

@@ -75,7 +75,8 @@ impl FileAnalysis {
                     doc_mentions: _doc_mentions, // a file-local lint fact
                     type_display: _type_display,     // LangPack-wide display vocabulary, same reasoning
                     specializes: _specializes,       // family edges; the file re-registers on its own rebuild even when Unchanged
-                    use_aliases: _use_aliases,             // this file's OWN spelling table; a consumer never sees an alias
+                    use_rows: _use_rows,                   // this file's OWN spelling table: what its spellings mean, never what another file sees
+                    namespace_sections: _namespace_sections, // same: where this file's spellings resolve; its classes' identities already carry the namespace
                     qualified_spellings: _qualified_spellings, // same: how THIS file spells classes
                     names: _names,                   // language-wide convention, identical across the language's files
                     template_params: _template_params, // instantiation substitution reads the provider live
@@ -129,7 +130,6 @@ impl FileAnalysis {
             loader_config_params: _loader_config_params, // callee markers joined by this file's OWN enrichment
             framework_imports: _framework_imports, // local diagnostic suppression set
             type_provenance: _type_provenance,   // read-only debugging aid (`--dump-package`)
-            contract_symbols: _contract_symbols, // SymbolIds (banned from the Surface); the markers they tag project as methods
             column_keyed_verbs: _column_keyed_verbs, // baked from the plugin registry, not this file's source; the plugin fingerprint owns invalidation
             language: _language,                 // the origin's serving-language identity; `resolve()` reads it live per query, never baked into a consumer's cached state
             lib_roots: _lib_roots,               // `use lib` changes what THIS file sees of @INC, never what a consumer sees of this file

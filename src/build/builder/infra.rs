@@ -185,6 +185,15 @@ impl<'a> Builder<'a> {
         if matches!(kind, SymKind::Variable | SymKind::Field) {
             self.var_decls.entry((self.current_scope(), name.clone())).or_default().push(id);
         }
+        // Perl says "this constructs" with a name and nothing else, so the
+        // convention is read here, at the mint, and consumers ask the flag.
+        let flags = if matches!(kind, SymKind::Sub | SymKind::Method)
+            && crate::model::conventions::is_constructor_name(&name)
+        {
+            crate::model::file_analysis::SymbolFlags::CONSTRUCTOR
+        } else {
+            Default::default()
+        };
         // Every symbol attaches to the current lexical scope. Package
         // context lives separately in `package_ranges`; the variable
         // resolver gates `our` decls by package match at lookup time
@@ -202,7 +211,7 @@ impl<'a> Builder<'a> {
             namespace,
             presentation: Default::default(),
             attributes: Vec::new(),
-            flags: Default::default(),
+            flags,
             declared_with: None,
             deref_stack: Vec::new(),
             // Perl carries params in `SymbolDetail::Sub`; `param_arity()`
@@ -314,7 +323,7 @@ impl<'a> Builder<'a> {
             scope: self.current_scope(),
             target_name,
             access,
-            binding,
+            binding: binding.into(),
             folded_from: None,
             arg_count: None,
         });

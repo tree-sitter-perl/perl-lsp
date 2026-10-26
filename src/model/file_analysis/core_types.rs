@@ -249,6 +249,41 @@ pub struct NameSpellings {
     /// How the language's classes hold their members: the rule a member
     /// ask is answered by (`docs/adr/member-kinds.md`).
     pub member_namespace: MemberNamespace,
+    /// How a use-map language's import rows bind — read by the extractor
+    /// as it mints each row, never by a consumer.
+    pub imports: ImportRule,
+}
+
+/// A use-map language's import semantics, as data the extractor mints a
+/// row by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ImportRule {
+    pub reach: ImportReach,
+    pub prefix: ImportPrefix,
+}
+
+/// Where in its scope a row binds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ImportReach {
+    /// Its whole scope and namespace section, wherever it is written
+    /// (PHP's `use`, resolved at compile time).
+    #[default]
+    Section,
+    /// From the import statement onward (Python's `import`, a statement
+    /// that runs): a site above it never sees the row.
+    FromImport,
+}
+
+/// What a relative import's level (the separators an `@import.relative`
+/// capture holds) climbs from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ImportPrefix {
+    /// Nothing: every module path is absolute (PHP's `use \A\B` is `A\B`).
+    #[default]
+    Absolute,
+    /// The file's own package, one level up per separator past the first:
+    /// Python's `from .x import C` / `from .. import y`.
+    PackageRelative,
 }
 
 /// What a class spelling written in a file denotes — the capability the
@@ -274,6 +309,7 @@ impl NameSpellings {
         class_spelling: ClassSpelling::Identity,
         root_package: None,
         member_namespace: MemberNamespace::PerFamily,
+        imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
     };
 
     /// A language with a namespace separator, no sigils, and spellings
@@ -286,6 +322,7 @@ impl NameSpellings {
             class_spelling: ClassSpelling::Identity,
             root_package: None,
             member_namespace: MemberNamespace::PerFamily,
+            imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
         }
     }
 
@@ -368,6 +405,22 @@ bitflags::bitflags! {
         /// not a member, though it sits inside the class body. Minted from
         /// a capture, never spelled as an attribute.
         const RECEIVER = 1 << 15;
+        /// A `Class` symbol that is a trait (php): its members are composed
+        /// into the class that uses it, which never makes the trait an
+        /// instance's class.
+        const TRAIT = 1 << 16;
+        /// The method a construction invokes (Perl's `new`, php
+        /// `__construct`). A construction can reach it without naming it, so
+        /// no reference to it is not evidence that it is dead.
+        const CONSTRUCTOR = 1 << 17;
+        /// A callable declared for a composer to provide (a Perl role's
+        /// `requires`, an interface's method, an abstract method): a require
+        /// of the role its container is, never a provision of it.
+        const CONTRACT = 1 << 18;
+        /// A `Class` symbol that answers ANY member name at runtime (php's
+        /// `__call` / `__get`): it has no closed member surface to check a
+        /// name against.
+        const DYNAMIC_MEMBERS = 1 << 19;
     }
 }
 
@@ -418,6 +471,7 @@ impl TryFrom<&str> for SymbolFlags {
             "param" => SymbolFlags::PARAM,
             "reader" => SymbolFlags::READER,
             "writer" => SymbolFlags::WRITER,
+            "trait" => SymbolFlags::TRAIT,
             other => return Err(UnknownAttribute(other.to_string())),
         })
     }
@@ -811,6 +865,12 @@ impl Symbol {
         self.flags.contains(SymbolFlags::REEXPORT)
     }
 
+    /// The method a construction invokes, whichever language's convention
+    /// named it.
+    pub fn is_constructor(&self) -> bool {
+        self.flags.contains(SymbolFlags::CONSTRUCTOR)
+    }
+
     /// Bare variable/field name without the sigil. Uses the sigil stored
     /// in `detail` so we never re-derive it by text-stripping (which would
     /// mis-handle forms like `$$ref` if the name ever carried that shape).
@@ -1113,9 +1173,11 @@ pub struct Ref {
     /// `bind_*`/`link_*` mutators; read via the projection accessors
     /// (`resolved_symbol`, `method_target`, `resolved_package`,
     /// `hash_key_owner`, `handler_owner`) so consumers never match the
-    /// binding shape against the kind themselves.
+    /// binding shape against the kind themselves. The field is
+    /// [`Binding`], whose inside only this module reads, so a deferred
+    /// binding is never read raw.
     #[serde(default)]
-    pub binding: Option<RefBinding>,
+    pub binding: Binding,
     /// Provenance for a call whose name was constant-folded from a variable
     /// (`my $m = 'process'; $self->$m()`): the source string literal's
     /// content span. The call-site token (`$m`) is a non-rewritable variable
@@ -1193,26 +1255,73 @@ impl Ref {
     }
 }
 
+/// A ref's resolution outcome as a producer writes it. Readable only
+/// through the `Ref` accessors, which read a deferred binding as its
+/// undecided reading.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Binding(Option<RefBinding>);
+
+impl Binding {
+    pub const NONE: Binding = Binding(None);
+}
+
+impl From<Option<RefBinding>> for Binding {
+    fn from(b: Option<RefBinding>) -> Self {
+        Binding(b)
+    }
+}
+
+impl From<RefBinding> for Binding {
+    fn from(b: RefBinding) -> Self {
+        Binding(Some(b))
+    }
+}
+
 /// Projection accessors + binding mutators — the only vocabulary consumers
 /// use to read/write a ref's resolution outcome. Each accessor answers one
 /// question and returns `None` for kinds that don't carry that flavor, so
 /// call sites never match `RefBinding` against `RefKind` themselves.
 impl Ref {
+    /// The binding as it reads with no index in hand: a deferred reading
+    /// reads as its question's fallback (`Question::when_unknown`), so the
+    /// accessors below answer as they would for the undecided site. A
+    /// reader that wants the decided reading asks for it with the index
+    /// (`FileAnalysis::class_named_by_call`).
+    pub fn settled_binding(&self) -> Option<&RefBinding> {
+        match self.binding.0.as_ref()? {
+            RefBinding::Deferred(d) => d.undecided(),
+            b => Some(b),
+        }
+    }
+
     /// The declaring symbol this ref resolved to, whatever flavor carried
     /// it (lexical `Symbol`, a linked `HashKeyDef`, a linked `Handler`).
     /// Method dispatch is NOT projected here — its symbol rides
     /// `method_target()` with the frozen invocant class.
     pub fn resolved_symbol(&self) -> Option<SymbolId> {
-        match self.binding.as_ref()? {
+        match self.settled_binding()? {
             RefBinding::Symbol(sym) => Some(*sym),
             RefBinding::HashKey { sym, .. } | RefBinding::Handler { sym, .. } => *sym,
-            RefBinding::Function { .. } | RefBinding::Method(_) => None,
+            RefBinding::Function { .. }
+            | RefBinding::Method(_)
+            | RefBinding::CallArgKey { .. }
+            | RefBinding::NamesClass(_)
+            | RefBinding::Deferred(_) => None,
+        }
+    }
+
+    /// The call whose arguments a deferred-owner `HashKeyAccess` sits in.
+    pub fn arg_key_call(&self) -> Option<crate::model::witnesses::RefIdx> {
+        match self.settled_binding()? {
+            RefBinding::CallArgKey { call } => Some(*call),
+            _ => None,
         }
     }
 
     /// The frozen dispatch target of a `MethodCall` ref.
     pub fn method_target(&self) -> Option<&MethodTarget> {
-        match self.binding.as_ref()? {
+        match self.settled_binding()? {
             RefBinding::Method(t) => Some(t),
             _ => None,
         }
@@ -1220,7 +1329,7 @@ impl Ref {
 
     /// The package pin of a `FunctionCall` ref.
     pub fn resolved_package(&self) -> Option<&str> {
-        match self.binding.as_ref()? {
+        match self.settled_binding()? {
             RefBinding::Function { package } => Some(package),
             _ => None,
         }
@@ -1228,7 +1337,7 @@ impl Ref {
 
     /// The resolved owner of a `HashKeyAccess` ref.
     pub fn hash_key_owner(&self) -> Option<&HashKeyOwner> {
-        match self.binding.as_ref()? {
+        match self.settled_binding()? {
             RefBinding::HashKey { owner, .. } => Some(owner),
             _ => None,
         }
@@ -1236,7 +1345,7 @@ impl Ref {
 
     /// The resolved owner of a `DispatchCall` ref.
     pub fn handler_owner(&self) -> Option<&HandlerOwner> {
-        match self.binding.as_ref()? {
+        match self.settled_binding()? {
             RefBinding::Handler { owner, .. } => Some(owner),
             _ => None,
         }
@@ -1272,23 +1381,37 @@ impl Ref {
         }
     }
 
+    /// The binding as written, deferred or not, for a producer that
+    /// rewraps it (a deferral keeps the call's own binding as a reading).
+    pub fn take_binding(&mut self) -> Option<RefBinding> {
+        self.binding.0.take()
+    }
+
+    /// The raw binding, for a reader that decides it with the index.
+    pub fn deferred_binding(&self) -> Option<&Deferred<RefBinding>> {
+        match self.binding.0.as_ref()? {
+            RefBinding::Deferred(d) => Some(d),
+            _ => None,
+        }
+    }
+
     pub fn bind_symbol(&mut self, sym: SymbolId) {
-        self.binding = Some(RefBinding::Symbol(sym));
+        self.binding.0 = Some(RefBinding::Symbol(sym));
     }
 
     pub fn bind_method(&mut self, target: MethodTarget) {
-        self.binding = Some(RefBinding::Method(target));
+        self.binding.0 = Some(RefBinding::Method(target));
     }
 
     pub fn bind_function_package(&mut self, package: String) {
-        self.binding = Some(RefBinding::Function { package });
+        self.binding.0 = Some(RefBinding::Function { package });
     }
 
     /// Stamp (or re-stamp) a `HashKeyAccess` owner. Drops any previously
     /// linked `HashKeyDef` — a new owner invalidates the old link; the
     /// linker (`build_indices` / enrichment) re-fills `sym` against it.
     pub fn bind_hash_key_owner(&mut self, owner: HashKeyOwner) {
-        self.binding = Some(RefBinding::HashKey { owner, sym: None });
+        self.binding.0 = Some(RefBinding::HashKey { owner, sym: None });
     }
 
     /// Fill the linked symbol on an owner-resolved `HashKey`/`Handler`
@@ -1296,7 +1419,7 @@ impl Ref {
     /// defs through one, so there is nothing to attach it to.
     pub fn link_owned_symbol(&mut self, sym_id: SymbolId) {
         if let Some(RefBinding::HashKey { sym, .. } | RefBinding::Handler { sym, .. }) =
-            self.binding.as_mut()
+            self.binding.0.as_mut()
         {
             *sym = Some(sym_id);
         }
@@ -1501,6 +1624,20 @@ pub enum RefBinding {
     /// against, plus the linked `Handler` symbol (first stacked def —
     /// `refs_to_symbol` walks all stacked defs separately).
     Handler { owner: HandlerOwner, sym: Option<SymbolId> },
+    /// `HashKeyAccess` among the arguments of the `MethodCall` at `call`,
+    /// whose owner needs other files (the receiver's class lives elsewhere,
+    /// or didn't type at build). The owner is decided from that call at
+    /// query time (`FileAnalysis::deferred_hash_key_owner`); the projection
+    /// accessors read it as unowned. Kept at the END for bincode
+    /// variant-index stability (bump `EXTRACT_VERSION`).
+    CallArgKey { call: crate::model::witnesses::RefIdx },
+    /// A call-shaped token that names a class (python's `User()`): a
+    /// reference to the class identity, not to a callable.
+    NamesClass(String),
+    /// A reading decided at query time (`docs/adr/query-delayed-facts.md`);
+    /// the projection accessors read it as unresolved. Kept at the END for
+    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
+    Deferred(Box<Deferred<RefBinding>>),
 }
 
 /// What kind of entity is being renamed — determines single-file vs cross-file scope.

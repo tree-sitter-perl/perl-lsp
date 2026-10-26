@@ -51,7 +51,7 @@ enum Slot {
   rewritten internals). Consumers switch on `Slot`, never on language.
 - **Each Slot variant declares its candidate question**: Identifier/
   ModulePath → CandidateSet projections; Member/Key → the entity-content
-  seams (`PackageSymbol`/`ReceiverGated`/keys); Import → the named
+  seams (`PackageSymbol`/`Deferred`/keys); Import → the named
   module's surface + the import affordance (`ImportFact` composition).
   The slot picks the question; the seams answer it. No slot ever
   enumerates names itself.

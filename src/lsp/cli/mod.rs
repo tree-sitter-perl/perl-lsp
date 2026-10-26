@@ -3,9 +3,9 @@
 use crate::index::sealed::Unsealed;
 
 use crate::build::{language_driver, plugin};
-use crate::index::{document, file_store, module_cache, module_index, module_resolver, resolve};
+use crate::index::{document, open_docs, module_cache, module_index, module_resolver, resolve};
 use crate::lsp::{backend, symbols};
-use crate::model::{conventions, file_analysis, witnesses};
+use crate::model::{file_analysis, witnesses};
 use crate::util::timings;
 
 /// Time one CLI query step — `tphase!("completion_items", expr)` prints a
@@ -62,8 +62,46 @@ impl Drop for FlushAnswersOnReturn {
     }
 }
 
+/// Lock the process to `path`'s language unless `--lang` already chose one,
+/// and hand back the served driver. Exits on a refused lock — answering in a
+/// language other than the one the caller asked for is never a fallback.
+pub(crate) fn lock_for_file(path: &std::path::Path) -> &'static dyn language_driver::LanguageDriver {
+    language_driver::LanguageRegistry::lock_process_language_for(path)
+        .and_then(|d| language_driver::LanguageRegistry::admits(d, path).map(|()| d))
+        .unwrap_or_else(|e| {
+            eprintln!("perl-lsp: {e}");
+            exit_with(2, "exit");
+        })
+}
+
+/// Remove `--lang <id>` / `--lang=<id>` from `args`, locking the process to
+/// `<id>`. Exits on an id this build was not compiled with, or a missing
+/// value.
+pub(crate) fn take_lang_flag(args: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        let id = if a == "--lang" {
+            it.next().unwrap_or_else(|| {
+                eprintln!("perl-lsp: `--lang` needs a language id");
+                exit_with(2, "exit");
+            })
+        } else if let Some(id) = a.strip_prefix("--lang=") {
+            id.to_string()
+        } else {
+            out.push(a);
+            continue;
+        };
+        if let Err(e) = language_driver::LanguageRegistry::lock_process_language(&id) {
+            eprintln!("perl-lsp: {e}");
+            exit_with(2, "exit");
+        }
+    }
+    out
+}
+
 pub(crate) fn cli_languages() {
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
+    let reg = crate::build::language_driver::LanguageRegistry::compiled();
     // `id` first, maturity as a trailing parenthetical: consumers that parse
     // this line split on `, ` and read the id up to ` (`. `gold-corpus/run.pl`
     // is one — it decides which fixture rows to run from this output, so a
@@ -84,21 +122,16 @@ pub(crate) fn cli_languages() {
     );
 }
 
-/// Analyze one file through its `LanguageDriver` and dump the outline —
-/// the multi-language seam at the CLI. Routes by extension; a `.cpp`
-/// file goes through the C++ driver (macro reparse → extract) when this
-/// binary was built `--features cpp`.
+/// Analyze one file through the served `LanguageDriver` and dump the
+/// outline. A `.cpp` file goes through the C++ driver (macro reparse →
+/// extract) when the process serves C++.
 pub(crate) fn cli_lang_analyze(file: &str) {
-    let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
     let path = std::path::Path::new(file);
     let Ok(src) = std::fs::read_to_string(path) else {
         eprintln!("cannot read {file}");
         exit_with(1, "exit");
     };
-    let Some(driver) = reg.for_path_sniffed(path, &src) else {
-        eprintln!("no driver for {file} (this build serves: {})", reg.languages().join(", "));
-        exit_with(1, "exit");
-    };
+    let driver = lock_for_file(path);
     // Persist the transitive macro table across invocations — keyed on the
     // file's directory (the CLI has no workspace root). Without this the LSP-only
     // `set_macro_persist_dir` never fires here, so every `--lang-analyze` run
@@ -204,15 +237,18 @@ pub(crate) fn print_usage() {
     eprintln!("  perl-lsp --clear-cache [<root>]                        Wipe the module cache for");
     eprintln!("                                                         <root>, or every project if");
     eprintln!("                                                         <root> is omitted");
-    eprintln!("  perl-lsp --parse <file|--> [<lang>]                    Print tree-sitter parse tree");
-    eprintln!("                                                         (`-` reads from stdin; <lang>");
-    eprintln!("                                                         picks a grammar by id, e.g. cpp)");
+    eprintln!("  perl-lsp --parse <file|->                              Print the served language's");
+    eprintln!("                                                         tree-sitter parse tree (`-` reads");
+    eprintln!("                                                         stdin; `--lang cpp` for C++)");
     eprintln!();
-    eprintln!("MULTI-LANGUAGE (pack drivers, opt-in at build time):");
-    eprintln!("  perl-lsp --languages                                   Languages this build serves");
-    eprintln!("  perl-lsp --lang-analyze <file>...                      Analyze file(s) via their driver (shared caches)");
-    eprintln!("                                                         (route by extension; dump outline)");
-    eprintln!("    Build a cpp-lsp:  cargo build --features cpp   (or --features all-langs)");
+    eprintln!("LANGUAGES (pack drivers, opt-in at build time; one language per process):");
+    eprintln!("  perl-lsp --lang <id> [...]                             Serve <id> instead of Perl. Any mode;");
+    eprintln!("                                                         a file-target verb without it serves");
+    eprintln!("                                                         its file's language");
+    eprintln!("  perl-lsp --languages                                   Languages this build can serve");
+    eprintln!("  perl-lsp --lang-analyze <file>...                      Analyze file(s) via the served driver");
+    eprintln!("                                                         (shared caches; dump outline)");
+    eprintln!("    Build a cpp-lsp:  cargo build --features cpp; run `perl-lsp --lang cpp`");
     eprintln!();
     eprintln!("  perl-lsp --version                                     Print version");
 }
@@ -224,14 +260,10 @@ fn parse_file(path: &str) -> (String, tree_sitter::Tree, file_analysis::FileAnal
         eprintln!("Cannot read {}: {}", path, e);
         exit_with(1, "exit");
     });
-    // Route by driver so the CLI capabilities (--outline, --hover,
-    // --batch/gold) match the LSP server; an extension no driver claims
-    // falls back to a content sniff (`commands.def` is C, not Perl, despite
-    // its unowned extension), then to the fallback driver. A driver that
+    // The served driver, as the LSP server would analyze it. A driver that
     // builds from the caller's tree (no pre-parse transform) analyzes the
     // one parse we already hold; the rest analyze independently.
-    let reg = language_driver::LanguageRegistry::with_enabled();
-    let driver = reg.driver_or_fallback(std::path::Path::new(path), &source);
+    let driver = lock_for_file(std::path::Path::new(path));
     let mut parser = driver.make_parser();
     let tree = parser.parse(&source, None).unwrap_or_else(|| {
         eprintln!("Parse failed: {}", path);
@@ -277,10 +309,7 @@ fn canonical_root_and_uri(root: &str) -> (std::path::PathBuf, String) {
 /// minus the resolver thread (one-shot, synchronous). Used by every
 /// CLI command that needs cross-file resolution to behave like the
 /// running server.
-fn cli_full_startup(
-    root: &str,
-    scope: language_driver::LanguageScope,
-) -> (file_store::FileStore, module_index::ModuleIndex) {
+fn cli_full_startup(root: &str) -> (open_docs::OpenDocs, module_index::ModuleIndex) {
     // `--check --timings` already flipped this on; the env var lets any
     // startup-driven CLI mode (dump-package, etc.) opt in too.
     timings::enable_from_env();
@@ -289,7 +318,7 @@ fn cli_full_startup(
     // cache keys on, before the first build() (workspace indexing) fires.
     plugin::rhai_host::set_workspace_root(Some(&root_uri));
 
-    // Register workspace files INTO the module index (not just a FileStore)
+    // Register workspace files INTO the module index (not just a OpenDocs)
     // so their plugin bridges + package names participate in cross-file
     // lookups — the whole point of "act like the server just started".
     // Indexing without the index (bridge-less) is what forced callers to
@@ -302,45 +331,37 @@ fn cli_full_startup(
     if let Ok(mut g) = ANSWER_FLUSH.lock() {
         *g = Some(Box::new(module_index.answer_flusher()));
     }
-    let ws = file_store::FileStore::new();
-    // The reference language's tree is walked only when the scope wants it
-    // — a `.cc` query indexes the pack family alone, which is what the
-    // server's per-family `didOpen` latch already does.
-    let reference_lang = language_driver::LanguageRegistry::with_enabled().reference_language();
-    let indexed = if scope.wants(reference_lang) {
+    let ws = open_docs::OpenDocs::new();
+    // Only the served language's tree is walked — the same choice the
+    // server's `didOpen` latch makes.
+    let served = language_driver::LanguageRegistry::served();
+    let indexed = if served.caps().hub_enrichment {
         timings::phase("cli::index_workspace", || {
-            module_resolver::index_workspace_with_index(&root_path, &ws, Some(&module_index), None, None)
+            module_resolver::index_workspace_with_index(&root_path, &module_index, None, None)
         })
     } else {
-        0
+        timings::phase("cli::index_pack", || {
+            module_resolver::index_pack_language(
+                served,
+                &root_path,
+                Some(&root_uri),
+                &module_index,
+                None,
+                crate::lsp::backend::max_cache_mb_default() as usize * 1024 * 1024,
+            )
+        })
     };
-    // Label the tier: a pack-only workspace printing a bare "Indexed 0 files"
-    // reads as "indexing failed" when the pack line below says otherwise.
     if indexed > 0 {
-        eprintln!("Indexed {} Perl files", indexed);
+        eprintln!(
+            "Indexed {} {} files",
+            indexed,
+            language_driver::LanguageRegistry::display_name(served.id())
+        );
     }
-    // Pack languages (C++/Python/…) → per-language sub-indexes (separate
-    // caches, no cross-language overlap), attached to the hub for routing.
-    let pack_indexed = timings::phase("cli::index_pack", || {
-        module_resolver::index_pack_languages(
-            &root_path,
-            Some(&root_uri),
-            &module_index,
-            None,
-            crate::lsp::backend::max_cache_mb_default() as usize * 1024 * 1024,
-            &scope,
-        )
-    });
-    if pack_indexed > 0 {
-        // Name the languages actually served rather than the
-        // generic "pack-language" — a pure-C++ workspace should read "C/C++",
-        // not a term that only makes sense from inside this codebase.
-        let reg = language_driver::LanguageRegistry::with_enabled();
-        let langs: Vec<&'static str> = reg
-            .pack_drivers()
-            .map(|d| language_driver::LanguageRegistry::display_name(d.id()))
-            .collect();
-        eprintln!("Indexed {} {} files", pack_indexed, langs.join("/"));
+
+    // @INC is the Perl hub's dependency tier; a pack process has none.
+    if !served.caps().hub_enrichment {
+        return (ws, module_index);
     }
 
     let mut inc_paths = timings::phase("cli::discover_inc", module_resolver::discover_inc_paths);
@@ -381,16 +402,16 @@ fn cli_full_startup(
     }
 
     let mut needed = std::collections::HashSet::new();
-    for entry in ws.workspace_raw().iter() {
-        for imp in &entry.value().imports {
+    module_index.for_each_registered_file(&mut |cached| {
+        for imp in &cached.analysis().imports {
             needed.insert(imp.module_name.clone());
         }
-        for (_pkg, parents) in entry.value().package_parent_edges() {
+        for (_pkg, parents) in cached.analysis().package_parent_edges() {
             for p in parents {
                 needed.insert(p.clone());
             }
         }
-    }
+    });
 
     let mut parser = module_resolver::create_parser();
     let mut parse_memo: module_resolver::ParseMemo = std::collections::HashMap::new();
@@ -579,7 +600,7 @@ pub(crate) fn cli_clear_cache(root: Option<&str>) {
 /// `<file>` may be `-` to read from stdin. Mirrors `tree-sitter parse`
 /// output shape — `(node_kind [row, col] - [row, col]` per line,
 /// 2-space indent per depth, field names prefixed (`field: kind`).
-pub(crate) fn cli_parse(path: &str, lang: Option<&str>) {
+pub(crate) fn cli_parse(path: &str) {
     use std::io::Read;
     let source = if path == "-" {
         let mut s = String::new();
@@ -597,32 +618,14 @@ pub(crate) fn cli_parse(path: &str, lang: Option<&str>) {
             }
         }
     };
-    // Route to a grammar: an explicit `lang` id (stdin can't route by
-    // extension) wins, else the file's extension (cpp/python/r/cmake), else
-    // a content sniff for an extension no driver claims, so
-    // --parse shows the SAME tree the pack extractor sees. stdin +
-    // truly-unrecognized files take the fallback driver's grammar.
-    let mut parser = if let Some(id) = lang {
-        let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
-        match reg.for_id(id) {
-            Some(d) => d.make_parser(),
-            None => {
-                eprintln!(
-                    "unknown language `{}`; served: {}",
-                    id,
-                    reg.languages().join(", ")
-                );
-                exit_with(1, "exit");
-            }
-        }
-    } else if path != "-" {
-        let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
-        reg.driver_or_fallback(std::path::Path::new(path), &source).make_parser()
+    // The served grammar — the SAME tree the extractor sees. stdin has no
+    // path, so it parses as the `--lang` language (Perl without one).
+    let driver = if path == "-" {
+        language_driver::LanguageRegistry::served()
     } else {
-        // stdin has no path to route on — the fallback driver's grammar.
-        let reg = crate::build::language_driver::LanguageRegistry::with_enabled();
-        reg.fallback().make_parser()
+        lock_for_file(std::path::Path::new(path))
     };
+    let mut parser = driver.make_parser();
     let Some(tree) = parser.parse(&source, None) else {
         eprintln!("parse failed");
         exit_with(1, "exit");

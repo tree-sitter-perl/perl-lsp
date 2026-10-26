@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use super::{CallArg, Callee, Witness, WitnessAttachment, WitnessBag, WitnessPayload};
+use super::{CallArg, Callee, WitnessAttachment, WitnessBag, WitnessPayload};
 use crate::model::file_analysis::{FileAnalysis, PackageFacts, RefKind, Scope};
 
 /// The per-file context every slice of a file shares.
@@ -202,15 +202,21 @@ fn reachable(bag: &WitnessBag, scopes: &[Scope], roots: Vec<WitnessAttachment>) 
             }
         }
         for w in bag.iter_attachment(&att) {
-            payload_targets(w, &mut work);
+            payload_targets(&w.payload, &mut work);
             out.push(w.clone());
         }
     }
     out
 }
 
-fn payload_targets(w: &Witness, out: &mut Vec<WitnessAttachment>) {
-    match &w.payload {
+fn payload_targets(payload: &WitnessPayload, out: &mut Vec<WitnessAttachment>) {
+    match payload {
+        // Kept whole: the slice cannot know which reading the index picks.
+        WitnessPayload::Choose(d) => {
+            for reading in d.readings() {
+                payload_targets(reading, out);
+            }
+        }
         WitnessPayload::Edge(a) => out.push(a.clone()),
         WitnessPayload::Projected { base, .. } => out.push(base.clone()),
         WitnessPayload::Tuple(v) => out.extend(v.iter().cloned()),
