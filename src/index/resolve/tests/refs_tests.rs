@@ -2138,7 +2138,7 @@ sub fire ($minion) {\n  $minion->enqueue('send_email' => ['a@b']);\n}\n1;\n",
     );
 }
 
-/// The query-time `ReceiverGated` gap closer: a Handler `refs_to` must
+/// The query-time `ReceiverIsa` gap closer: a Handler `refs_to` must
 /// include a dispatch call-site in a NON-OPEN workspace file whose receiver
 /// `isa Minion` only CROSS-FILE and which does NOT `use Minion` itself. The
 /// emit-hook path can't fire (no `use Minion` trigger) and the file is never

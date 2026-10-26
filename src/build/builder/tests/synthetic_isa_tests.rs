@@ -1040,7 +1040,7 @@ mod param_types_manifest {
     /// NOT `use Minion` itself. The minion plugin's emit-hook path
     /// (`UsesModule`/`ClassIsa` trigger) doesn't fire — only the
     /// trigger-independent `dispatch_verbs()` manifest captures a gated
-    /// candidate. Under the query-time `ReceiverGated` seam the file is built
+    /// candidate. Under the query-time `Deferred` seam the file is built
     /// WITHOUT enrichment (as the workspace indexer does) yet
     /// `applicable_dispatches` resolves the receiver cross-file and surfaces
     /// the call site. See `docs/adr/receiver-gated-dispatch.md`.

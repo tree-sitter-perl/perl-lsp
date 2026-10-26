@@ -218,86 +218,6 @@ pub fn scope_chain_of(scopes: &[Scope], start: ScopeId) -> Vec<ScopeId> {
     chain
 }
 
-/// Three-way outcome of resolving a [`ReceiverGated`] value against a
-/// concrete receiver class. Splitting "doesn't apply" from "can't tell"
-/// is load-bearing: `DoesNotApply` is a settled negative (the receiver
-/// typed, it just isn't a descendant of the gate), while `ReceiverUntyped`
-/// is a *typing gap* — the receiver couldn't be pinned to any class, so
-/// applicability is unknown. The opt-in `unresolved-dispatch` diagnostic
-/// fires only on the latter; treating the two alike would either bury real
-/// gaps or spew noise on every unrelated receiver.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GateResult<U> {
-    /// Receiver `isa` the gate class — here is the inner value.
-    Applies(U),
-    /// Receiver typed to a concrete class that is NOT a descendant of the
-    /// gate. Settled negative; never diagnosed.
-    DoesNotApply,
-    /// Receiver class is unknown (`None` / unresolved). A genuine typing
-    /// gap — the only state the diagnostic surfaces.
-    ReceiverUntyped,
-}
-
-/// A value whose inner payload can be read ONLY through a cross-file isa
-/// check against a receiver class. The enforcement is structural, not a
-/// convention: `inner` is private with no `pub` field, no `Deref`, no
-/// `into_inner` — the sole reader is [`resolve_for`](Self::resolve_for),
-/// which gates on the receiver. A consumer therefore *cannot* observe
-/// gated content without first asking "does this receiver qualify?", so a
-/// future caller that forgets the isa filter is a compile error, not a
-/// silent drift (rule #10: the type carries the rule, the consumer can't
-/// re-decide it).
-///
-/// `gate` is a single `ClassName` today; widening it to a set later is a
-/// change to `resolve_for`'s internals, not to call sites — they already
-/// only ever see `Applies`/`DoesNotApply`/`ReceiverUntyped`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReceiverGated<T> {
-    /// The receiver must `isa` this class for `inner` to be readable.
-    gate: String,
-    /// Gated payload. PRIVATE by design — see the type's doc.
-    inner: T,
-}
-
-impl<T> ReceiverGated<T> {
-    /// Mint a gated value. The only constructor — pairs the payload with
-    /// the class the receiver must descend from to read it.
-    pub fn new(gate: impl Into<String>, inner: T) -> Self {
-        Self { gate: gate.into(), inner }
-    }
-
-    /// The gate class, exposed for diagnostics/observability. Reading the
-    /// gate is harmless — it's the *inner payload* that's protected.
-    pub fn gate(&self) -> &str {
-        &self.gate
-    }
-
-    /// The one reader. `receiver_class` is the concrete class of the
-    /// dispatch receiver as the bag resolved it (cross-file aware); `None`
-    /// or an unresolved name yields `ReceiverUntyped`. Otherwise the inner
-    /// value is handed back iff the receiver `isa` the gate, walking the
-    /// single `class_isa` seam (local `PackageFacts::parents` ∪ cross-file
-    /// `parents_cached`).
-    pub fn resolve_for(
-        &self,
-        receiver_class: Option<&str>,
-        local: &dyn LocalParents,
-        module_index: Option<&dyn CrossFileLookup>,
-    ) -> GateResult<&T> {
-        match receiver_class {
-            None => GateResult::ReceiverUntyped,
-            Some(recv) if recv.is_empty() => GateResult::ReceiverUntyped,
-            Some(recv) => {
-                if class_isa(recv, &self.gate, local, module_index) {
-                    GateResult::Applies(&self.inner)
-                } else {
-                    GateResult::DoesNotApply
-                }
-            }
-        }
-    }
-}
-
 // ---- Hash key owner (for scope graph) ----
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -419,10 +339,9 @@ pub struct MethodCallBinding {
 
 /// The readable half of a dispatch candidate — everything needed to
 /// synthesize a `DispatchCall` ref / handler link ONCE the receiver passes
-/// the gate. Carried as the inner payload of a [`ReceiverGated`], so the
-/// only way to reach these fields is `resolve_for(receiver_class, …)`:
-/// no consumer can mistake an unfiltered candidate for a confirmed
-/// dispatch. The gate class (`target_class`) lives on the wrapper.
+/// the gate. Carried as the reading of a [`ProvisionalDispatch`], so no
+/// consumer can mistake an unfiltered candidate for a confirmed dispatch;
+/// the receiver and gate class live on its `Question`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DispatchCandidate {
     /// The handler name (task / event) — the dispatch's first meaningful arg.
@@ -433,45 +352,9 @@ pub struct DispatchCandidate {
     pub dispatcher: String,
     /// Handler owner the synthesized ref pairs against (e.g. `Minion`).
     pub owner_class: String,
-    /// Receiver's class as resolved at build time, if any. `None` when the
-    /// receiver type wasn't known locally (e.g. a helper-returned value);
-    /// query-time resolution then re-resolves it cross-file via `call_span`'s
-    /// MethodCall ref + the module index.
-    #[serde(default)]
-    pub receiver_class: Option<String>,
     /// Whole-call span of the dispatch call (`node_to_span` of the
-    /// `method_call_expression`). Matches the native MethodCall ref's `span`,
-    /// so the resolver can find that ref and resolve the receiver class with
-    /// the index when `receiver_class` is `None`.
+    /// `method_call_expression`): the cursor pre-filter for dispatch goto-def.
     pub call_span: Span,
-}
-
-/// A build-time dispatch candidate gated on its receiver type: a call to a
-/// plugin-declared dispatch verb (`$x->enqueue('T')`), recorded before we
-/// know whether the receiver actually `isa` the verb's target class. The
-/// gate (`target_class`) lives on the `ReceiverGated` wrapper; resolution
-/// is cross-file and happens at QUERY time in `resolve.rs`
-/// (`refs_to`) and dispatch goto-def — never eagerly materialized, so
-/// candidates in non-open workspace/dependency files surface the same as
-/// open ones. See `docs/adr/receiver-gated-dispatch.md`.
-pub type ProvisionalDispatch = ReceiverGated<DispatchCandidate>;
-
-impl ProvisionalDispatch {
-    /// Receiver-locator accessors. These three fields are gate *input*, not
-    /// gated *content*: the host needs the call site to resolve the receiver
-    /// class that the gate then checks (chicken-and-egg otherwise). Only the
-    /// handler-link payload (`name`, `owner_class`) stays behind
-    /// `resolve_for`. Defined ON the type so the type author — not an outside
-    /// consumer — draws the input/content line.
-    pub(super) fn receiver_hint(&self) -> Option<&String> {
-        self.inner.receiver_class.as_ref()
-    }
-    pub(super) fn call_span(&self) -> Span {
-        self.inner.call_span
-    }
-    pub(super) fn dispatcher(&self) -> &str {
-        &self.inner.dispatcher
-    }
 }
 
 /// A plugin PATTERN emission (`on_match` output) deferred at build because
@@ -492,7 +375,7 @@ impl ProvisionalDispatch {
 /// re-fired symbols/refs land ABOVE the symbol/ref tables' baselines
 /// and are truncated + re-derived every enrichment cycle, so a file whose
 /// ancestry resolves late converges to the same analysis as one built with
-/// it known — the same discipline as `ReceiverGated` dispatch, but for
+/// it known — the same discipline as `ProvisionalDispatch`, but for
 /// symbol emission (which feeds every symbol-table consumer, so it can't be
 /// gated at one query seam — it must materialize into the analysis).
 /// See `docs/adr/receiver-gated-dispatch.md` (Phase 2) and

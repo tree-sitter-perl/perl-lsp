@@ -1206,7 +1206,7 @@ impl<'a> Builder<'a> {
 
     /// Apply plugin `param_types()` rules to a sub declaration: for every rule
     /// whose `method` matches (or is `None` = any method) and whose named param
-    /// is present, emit a `ReceiverGated` typed TC gated on the enclosing
+    /// is present, emit a typed TC deferred on the enclosing
     /// package's `isa` the rule's `in_role`. The gate is NOT checked here — the
     /// builder is index-free (rule #1), so a class whose `in_role` ancestor is
     /// reachable only cross-file can't be confirmed at parse time. Resolution
@@ -1265,8 +1265,11 @@ impl<'a> Builder<'a> {
                     in_role: in_role.clone(),
                 });
             }
-            self.gated_param_types.push(crate::model::file_analysis::ReceiverGated::new(
-                in_role,
+            self.gated_param_types.push(crate::model::file_analysis::Deferred::new(
+                crate::model::file_analysis::Question::PackageIsa {
+                    package: self.current_package.clone(),
+                    class: in_role,
+                },
                 TypeConstraint {
                     variable,
                     scope,

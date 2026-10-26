@@ -694,15 +694,15 @@ impl<'a> Builder<'a> {
             // Strict checks the local symbol table for a matching
             // HashKeyDef (prevents `Foo::bar(name=>1)` from latching
             // onto unrelated `Sub{Foo,new}` keys). Open trusts the
-            // caller (the receiver's flavor pinned the owner).
-            // Deferred emits with `owner: None`; the post-walk
-            // fixup in `fix_chain_receiver_hash_key_owners` fills
-            // the owner once the receiver type resolves
-            // (in-file or cross-file).
-            let owner_to_emit: Option<HashKeyOwner> = match &gate {
+            // caller (the receiver's flavor pinned the owner). A key
+            // whose owner needs other files binds to its call instead
+            // (`RefBinding::CallArgKey`).
+            use crate::model::file_analysis::RefBinding;
+            let owned = |owner: HashKeyOwner| RefBinding::HashKey { owner, sym: None };
+            let binding: RefBinding = match &gate {
                 Gate::Strict(owner) => {
                     if !self.has_hash_key_def(&key, owner) { continue; }
-                    Some(owner.clone())
+                    owned(owner.clone())
                 }
                 Gate::ColumnKeyed(sub_owner) => {
                     // First-hashref narrowing already happened in `effective`.
@@ -716,22 +716,22 @@ impl<'a> Builder<'a> {
                     };
                     let col = HashKeyOwner::Bridged { class };
                     if self.has_hash_key_def(&key, &col) {
-                        Some(col)
+                        owned(col)
                     } else if self.has_hash_key_def(&key, sub_owner) {
-                        Some(sub_owner.clone())
+                        owned(sub_owner.clone())
                     } else {
                         continue;
                     }
                 }
-                Gate::StrictOrDefer(owner) => {
+                Gate::StrictOrDefer(owner, call) => {
                     if self.has_hash_key_def(&key, owner) {
-                        Some(owner.clone())
+                        owned(owner.clone())
                     } else {
-                        None
+                        RefBinding::CallArgKey { call: *call }
                     }
                 }
-                Gate::Open(owner) => Some(owner.clone()),
-                Gate::Deferred => None,
+                Gate::Open(owner) => owned(owner.clone()),
+                Gate::Deferred(call) => RefBinding::CallArgKey { call: *call },
             };
             let access = self.determine_access(child);
             // `scope_at_point` instead of `current_scope` so this
@@ -760,8 +760,7 @@ impl<'a> Builder<'a> {
                 scope: self.scope_at_point(span.start),
                 target_name: key,
                 access,
-                binding: owner_to_emit
-                    .map(|owner| crate::model::file_analysis::RefBinding::HashKey { owner, sym: None }),
+                binding: Some(binding),
                 folded_from: None,
                 arg_count: None,
             });

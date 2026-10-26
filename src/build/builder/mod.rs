@@ -9,7 +9,7 @@ use tree_sitter::{Node, Point, Tree};
 
 use crate::cst::{fq_tail_span, node_to_span};
 use crate::model::file_analysis::*;
-use crate::model::witnesses::TypeObservation;
+use crate::model::witnesses::{RefIdx, TypeObservation};
 
 /// A ready-to-parse tree-sitter Parser for the Perl grammar — the one
 /// constructor every parse site (resolver, document, CLI, the s///e
@@ -513,7 +513,7 @@ struct Builder<'a> {
     /// `param_types()` role-contract TCs, emitted ungated at the sub walk and
     /// gated on the enclosing package's `isa in_role` (checked cross-file at
     /// query time). See `FileAnalysis::gated_param_types`.
-    gated_param_types: Vec<crate::model::file_analysis::ReceiverGated<crate::model::file_analysis::TypeConstraint>>,
+    gated_param_types: Vec<crate::model::file_analysis::Deferred<crate::model::file_analysis::TypeConstraint>>,
 
     /// Build-time chain-typing cache for MethodCall ref invocants.
     /// Keyed by `refs[idx]`. Walk-time fills it for syntactic cases
@@ -710,13 +710,13 @@ enum Gate {
     Strict(HashKeyOwner),
     /// Strict, but the owner's class is not defined in this file, so a
     /// local def miss is NOT authoritative (the def may live with the
-    /// class, cross-file). Emits `owner: None` on miss; the query-time
-    /// class check in `refs_to`'s key arm decides — same discipline as
-    /// receiver-gated dispatch (the type is the gate, resolved with the
-    /// index in hand).
-    StrictOrDefer(HashKeyOwner),
+    /// class, cross-file). A miss binds the key to its call (`CallArgKey`),
+    /// whose owner is decided at query time with the index in hand.
+    StrictOrDefer(HashKeyOwner, RefIdx),
     Open(HashKeyOwner),
-    Deferred,
+    /// The call's receiver didn't type at build: every key binds to the
+    /// call (`CallArgKey`).
+    Deferred(RefIdx),
     /// A plugin-declared column-keyed verb (DBIC `search`/`create`/…): walk only
     /// the FIRST hashref arg (the `\%cond`/`\%cols`; the trailing `\%attrs` hash
     /// is not column-keyed). A key that is a `Class` column of the receiver gets

@@ -99,15 +99,15 @@ Three paths in the emitter:
   the type is the gate.
 - **Locally-typed non-Parametric receiver.** Strict-eq
   `has_hash_key_def` gate. Constructor keys via Mojo `has`, etc.
-- **Chain receiver, type unresolvable at build.** Emit
-  `HashKeyAccess { owner: None }` eagerly. `FileAnalysis::
+- **Chain receiver, type unresolvable at build.** Emit each key
+  bound to its call (`RefBinding::CallArgKey`). `FileAnalysis::
   fix_chain_receiver_hash_key_owners` runs from
   `finalize_post_walk` (no module_index — fills in-file chain
   receivers via the `RefTable` start-anchored call index recursion) and from
   `enrich_imported_types_with_keys` (with module_index —
   fills cross-file). Both routes share the same routine; the
   `module_index` argument is the only difference. Idempotent —
-  only None-owner refs are touched, so a second run is a no-op.
+  only call-bound refs are touched, so a second run is a no-op.
 
 Same precedent as the cross-file invocant refresh: build emits
 what it can, enrichment fills cross-file gaps. The base-count

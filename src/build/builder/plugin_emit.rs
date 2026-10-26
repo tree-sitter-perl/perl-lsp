@@ -29,10 +29,9 @@ impl<'a> Builder<'a> {
     }
 
     /// Record a provisional dispatch when a method call matches a plugin
-    /// `dispatch_verbs()` declaration. The receiver isa check happens later,
-    /// at enrichment, against the cross-file-resolved receiver class — here
-    /// we just capture the candidate (name + span + the build-time receiver
-    /// class hint, if any). Trigger-independent: keyed off the global verb
+    /// `dispatch_verbs()` declaration. The receiver isa check happens at
+    /// query time, against the cross-file-resolved receiver class — here
+    /// we just capture the candidate and name its receiver. Trigger-independent: keyed off the global verb
     /// manifest, not the file's `use`s, so a `$minion->enqueue('T')` in a
     /// plain class is captured the same as one in a Mojo app.
     pub(super) fn record_provisional_dispatch(
@@ -50,24 +49,41 @@ impl<'a> Builder<'a> {
             return;
         }
         let span = info.span;
-        let receiver_class = match invocant_node.and_then(|n| self.invocant_type_at_node(n)) {
-            Some(InferredType::ClassName(c)) => Some(c),
-            _ => None,
-        };
+        let Some(receiver) = self.dispatch_receiver(node, invocant_node, method) else { return };
         let call_span = node_to_span(node);
-        // Gate the candidate on the verb's `target_class`: the inner
-        // payload is unreadable until a receiver isa-resolves at query time.
-        self.provisional_dispatches.push(crate::model::file_analysis::ReceiverGated::new(
-            spec.target_class.clone(),
+        self.provisional_dispatches.push(crate::model::file_analysis::Deferred::new(
+            crate::model::file_analysis::Question::ReceiverIsa { receiver, class: spec.target_class.clone() },
             crate::model::file_analysis::DispatchCandidate {
                 name,
                 span,
                 dispatcher: method.to_string(),
                 owner_class: spec.owner_class.clone(),
-                receiver_class,
                 call_span,
             },
         ));
+    }
+
+    /// The receiver a dispatch-verb call's gate asks about: the class the
+    /// walk typed it to, else the call's own `MethodCall` ref for the
+    /// decider to type with the index. `None` when `call` carries no ref
+    /// for `dispatcher` (a pattern whose receiver capture is no invocant).
+    pub(super) fn dispatch_receiver(
+        &self,
+        call: Node<'a>,
+        invocant: Option<Node<'a>>,
+        dispatcher: &str,
+    ) -> Option<crate::model::file_analysis::Receiver> {
+        use crate::model::file_analysis::Receiver;
+        if let Some(InferredType::ClassName(c)) = invocant.and_then(|n| self.invocant_type_at_node(n)) {
+            return Some(Receiver::Class(c));
+        }
+        let idx = self
+            .method_call_refs
+            .get(&call.id())?
+            .iter()
+            .copied()
+            .find(|&i| self.refs[i].target_name == dispatcher)?;
+        Some(Receiver::CallInvocant(crate::model::witnesses::RefIdx(idx as u32)))
     }
 
     /// Record `PluginLoadFact`s for a method-form load verb

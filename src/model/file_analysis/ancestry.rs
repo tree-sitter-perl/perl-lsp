@@ -141,7 +141,7 @@ fn isa_parents(
 }
 
 /// Does `class` equal `target` or descend from it? The single isa-walk seam
-/// — both the `ReceiverGated` gate and `FileAnalysis::class_isa` route
+/// — both the `ReceiverIsa` deferral and `FileAnalysis::class_isa` route
 /// through the shared [`walk_ancestry`] over the local+cross-file parent
 /// graph, so the MRO is enumerated in exactly one place.
 pub fn class_isa(

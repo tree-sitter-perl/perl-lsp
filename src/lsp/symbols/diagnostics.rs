@@ -37,7 +37,7 @@ pub mod codes {
 #[serde(rename_all = "camelCase", default)]
 pub struct DiagnosticOptions {
     /// Fire `unresolved-dispatch` when a known dispatch verb's receiver can't
-    /// be typed (`GateResult::ReceiverUntyped`) — never on a settled
+    /// be typed (`Verdict::Unknown`) — never on a settled
     /// `DoesNotApply`. Off by default.
     pub unresolved_dispatch: bool,
     /// Fire `use-after-move` on the decidable subset (straight-line, in-function,
@@ -648,7 +648,7 @@ pub fn collect_diagnostics(
     // Opt-in `unresolved-dispatch`: a known dispatch verb whose receiver
     // couldn't be typed, so we can't tell if the dispatch applies. Fires ONLY
     // on `ReceiverUntyped` (a real typing gap), never on `DoesNotApply` — the
-    // 3-way `GateResult` keeps the two apart so the diagnostic can't spew on
+    // 3-way `Verdict` keeps the two apart so the diagnostic can't spew on
     // every unrelated receiver. QA/plugin-author tool, hence default-off.
     if options.unresolved_dispatch {
         let _g_dispatch =

@@ -678,8 +678,8 @@ impl<'a> CandidateSet<'a> {
         };
 
         // Cross-file hash-key defs. Two shapes share the lookup:
-        //   * deferred ctor key (`owner: None`) — the build-time gate
-        //     couldn't see the class; derive the owner now (enclosing call's
+        //   * deferred ctor key (bound to its call) — the build-time gate
+        //     couldn't see the class; derive the owner now (the call's
         //     invocant class, index in hand);
         //   * resolved Class owner (`$row->{name}` upgraded post-fold to
         //     `Class(NestedRow)`) whose class — and therefore its

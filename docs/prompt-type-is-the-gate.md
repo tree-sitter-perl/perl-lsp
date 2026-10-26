@@ -30,7 +30,7 @@ the flavor-pinned owner.
 
 The cross-file deferred owner fix was the second instance:
 chain receivers whose type only resolves cross-file get
-`HashKeyAccess { owner: None }` emitted at build, with
+`HashKeyAccess` refs bound to their call (`CallArgKey`) at build, with
 post-walk + post-enrichment fixup filling the owner once the
 receiver's flavor is resolvable. Same pattern: build emits
 what it can, the type's eventual answer fills the gap.
