@@ -58,6 +58,11 @@ pub(super) fn home_of<'s>(st: &'s ExtractState, from: ScopeId, at: Point) -> Opt
         .or_else(|| st.namespace_at(at))
 }
 
+/// The scope a class declared in this file opened as its own.
+pub(super) fn scope_of_class(st: &ExtractState, class: &str) -> Option<ScopeId> {
+    st.scopes.class_scopes.iter().filter(|(_, c)| c.as_str() == class).map(|(&id, _)| id).min()
+}
+
 pub(super) fn collect(st: &mut ExtractState, e: &Event) {
     if let Capture::Scope(_) = e.cap {
         st.scopes.scope_start_by_match.entry(e.match_id).or_insert(e.start_byte);

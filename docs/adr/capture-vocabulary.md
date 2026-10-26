@@ -150,11 +150,16 @@ captures two shapes. A name its class body binds (`count = 0`, `a: int`,
 `b: int = 5`) is a field of the class. The same token stays a name in the
 class scope, so code written directly in the body reads it bare, through
 `lookup_chain`. A write through a method's receiver (`self.n = …`) also
-captures the receiver token as `@def.field.receiver`. The extractor
-declares the member only when that token binds the enclosing method's
-`@param.receiver`, files it on that parameter's class, and declares it
-once: the first such write for a (class, name). A later write, augmented
-or not, is a member reference that resolves to it.
+captures the receiver token as `@def.field.receiver`. The member's owner
+is the class the receiver is TYPED as at the write, as Perl's
+`HashKeyOwner::Class` comes from a variable's type: the receiver
+parameter's class, or an annotated parameter's or local's annotation, read
+through the witness registry once extraction has lowered them
+(`defs::declare_through_receivers`). The first such write for a (class,
+name) declares it, unless the class body binds the name. A later write,
+augmented or not, and any write through an untyped receiver, is a member
+reference. A local typed only by its value (`o = Counter()`) is untyped
+there: call witnesses are minted at assembly.
 
 Membership and bare visibility are separate facts. A member's `package`
 is its class, and its `scope` is the class body (`member_scope`) for both

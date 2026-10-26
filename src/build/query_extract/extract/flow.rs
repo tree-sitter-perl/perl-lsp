@@ -54,6 +54,7 @@ fn skeleton_witness(attachment: WitnessAttachment, source: &str, payload: Witnes
 pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
     let pack = st.pack;
     let cur_scope = st.cur_scope;
+    let bind_scope = st.bind_scope();
     let f = &mut st.flow;
     let out = &mut st.out;
     match e.cap {
@@ -94,13 +95,15 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
             out.return_sites.push((cur_scope, e.span()));
         }
         Capture::Flow(FlowCap::Target) => {
-            f.flow_targets.insert(e.match_id, ((pack.shape_name)(&e.text), cur_scope, e.start));
+            // a target a def's header declares (an annotated parameter)
+            // binds in the def's own scope
+            f.flow_targets.insert(e.match_id, ((pack.shape_name)(&e.text), bind_scope, e.start));
             // Record the declared-type text keyed by (var, DECLARING scope)
             // for the token-less optional-engagement narrowing. cur_scope is
             // only known here (scopes mint during this walk); the type-annot
             // half was pre-collected (it precedes the declarator in source).
             if let Some(annot) = f.annots.get(&e.match_id) {
-                st.narrowing.annot_text_by_var.insert(((pack.shape_name)(&e.text), cur_scope), annot.clone());
+                st.narrowing.annot_text_by_var.insert(((pack.shape_name)(&e.text), bind_scope), annot.clone());
             }
         }
         Capture::Flow(FlowCap::Rebind) => {
