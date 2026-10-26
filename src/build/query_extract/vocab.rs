@@ -307,11 +307,16 @@ spelled! {
     }
 }
 
-/// Whether a `@def.<kind>` capture is the def node or its name token.
+/// Whether a `@def.<kind>` capture is the def node, its name token, or
+/// the receiver a member def is written through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DefPart {
     Node,
     Name,
+    /// The receiver a member def is written through (python's `self` in
+    /// `self.x = …`): the def declares a member of the receiver's class,
+    /// and only where that token names the enclosing method's receiver.
+    Receiver,
 }
 
 /// One capture of a pack query document.
@@ -399,6 +404,7 @@ impl Capture {
         Some(match segs.as_slice() {
             ["def", k] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Node },
             ["def", k, "name"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Name },
+            ["def", k, "receiver"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Receiver },
             ["ref", "spelled"] => C::RefSpelled,
             ["ref", rest @ ..] => C::Ref(RefCap::parse(&rest.join("."))?),
             ["scope"] => C::Scope(ScopeCap::Block),
@@ -464,6 +470,7 @@ impl fmt::Display for Capture {
         match *self {
             C::Def { kind, part: DefPart::Node } => write!(f, "def.{kind}"),
             C::Def { kind, part: DefPart::Name } => write!(f, "def.{kind}.name"),
+            C::Def { kind, part: DefPart::Receiver } => write!(f, "def.{kind}.receiver"),
             C::Ref(k) => write!(f, "ref.{k}"),
             C::RefSpelled => f.write_str("ref.spelled"),
             C::Scope(k) => family(f, "scope", k.spelling()),

@@ -29,6 +29,12 @@ of comparing its name against a per-language list. `CONSTRUCTOR`,
 body declares a catch-all. Perl mints the first two where it mints the
 symbol, from its `new` convention and from a role's `requires`.
 
+`THROUGH_RECEIVER` is minted the same way, from `@def.<kind>.receiver`:
+a member declared by a write through its class's receiver (python's
+`self.n = …`). It is a member and never a bare name, so
+`Symbol::is_bare_name` — the predicate every bare-name lookup asks —
+refuses it, while the class-member lane admits it as any field.
+
 A `@mark` also states a declared attribute whose token is not the
 canonical spelling (`private` and `protected` both mean `non_public`) or
 whose modifiers come in any order, which one def pattern cannot list. A

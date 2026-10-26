@@ -144,6 +144,17 @@ impl ExtractState<'_> {
             .filter(|ns| !ns.is_empty())
     }
 
+    /// The scope a class member declared at the current event belongs to:
+    /// the innermost scope that is not a callable's body.
+    fn member_scope(&self) -> ScopeId {
+        self.scope_stack
+            .iter()
+            .rev()
+            .map(|&(_, id)| id)
+            .find(|id| !matches!(self.out.scopes[id.0 as usize].kind, ScopeKind::Sub { .. }))
+            .unwrap_or(self.cur_scope)
+    }
+
     /// The identity a class named `leaf`, declared in `from` at `at`, is
     /// filed under. Under a use-map it is the leaf joined to its home
     /// (`scopes::home_of`) — the class it is written in, else the
@@ -373,6 +384,7 @@ pub fn extract_in(
     // resolves once every row is in.
     scopes::resolve_parents(&mut st);
     defs::dedup(&mut st);
+    defs::emit_receiver_types(&mut st);
     commands::finish(&mut st);
     defs::emit_type_aliases(&mut st);
     // Reads the symbol table after dedup and the command defs.

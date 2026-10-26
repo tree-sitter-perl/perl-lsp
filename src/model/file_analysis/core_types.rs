@@ -549,6 +549,11 @@ bitflags::bitflags! {
         /// `__call` / `__get`): it has no closed member surface to check a
         /// name against.
         const DYNAMIC_MEMBERS = 1 << 19;
+        /// A member declared by a write through its class's receiver
+        /// (python `self.x = …`): reached through an instance, never a bare
+        /// name — not in the class body, not in the method that wrote it.
+        /// Minted from a capture, never spelled as an attribute.
+        const THROUGH_RECEIVER = 1 << 20;
     }
 }
 
@@ -986,6 +991,13 @@ pub fn earliest_rebind_in(flow_edges: &[FlowEdge], var: &str, region: Span) -> O
 }
 
 impl Symbol {
+    /// Whether a bare use of this symbol's name binds it: a variable, or
+    /// a field its scope declares by name. A member written through a
+    /// receiver is reached through an instance only.
+    pub fn is_bare_name(&self) -> bool {
+        matches!(self.kind, SymKind::Variable | SymKind::Field) && !self.flags.contains(SymbolFlags::THROUGH_RECEIVER)
+    }
+
     /// A member RE-EXPORT (`using Base::insert;` in a class body): part of
     /// the class's API surface (outline/completion) but not a definition —
     /// member resolution sees through it to the origin ancestor.

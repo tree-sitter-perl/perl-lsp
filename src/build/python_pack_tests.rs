@@ -764,3 +764,102 @@ fn a_dotted_spelling_reaches_a_nested_class_across_modules() {
     assert_eq!(hover.as_deref(), Some("models.py"));
     assert_eq!(labels, [None]);
 }
+
+
+const MEMBERS: &str = "\
+class Counter:
+    count = 0
+    a: int
+    b: int = 5
+    total = count + 1
+    def __init__(self, other):
+        self.n = 1
+        other.z = 1
+        self.count += 1
+    def bump(self):
+        self.n = 2
+        return self.n + count
+
+c = Counter()
+x = c.a
+";
+
+fn members_fa() -> FileAnalysis {
+    py_in(MEMBERS, Some(&module(&["pkg", "mod"], false)))
+}
+
+fn fields_of(fa: &FileAnalysis) -> Vec<(&str, usize, bool)> {
+    use crate::model::file_analysis::SymbolFlags;
+    fa.symbols()
+        .iter()
+        .filter(|s| s.kind == SymKind::Field && s.package.as_deref() == Some("pkg.mod.Counter"))
+        .map(|s| (s.name.as_str(), s.span.start.row, s.flags.contains(SymbolFlags::THROUGH_RECEIVER)))
+        .collect()
+}
+
+/// A name a class body binds, annotated or assigned, is a field of the
+/// class, and its hover shows the annotated type.
+#[test]
+fn a_class_body_binding_is_a_field_of_the_class() {
+    let fa = members_fa();
+    let fields = fields_of(&fa);
+    for name in ["count", "a", "b", "total"] {
+        assert!(fields.iter().any(|&(n, _, through)| n == name && !through), "{name} in {fields:?}");
+    }
+    for (at, line) in [(Point::new(2, 4), "a: int"), (Point::new(3, 4), "b: int = 5"), (Point::new(14, 6), "a: int")] {
+        let hover = fa.hover_info(at, MEMBERS, None).unwrap_or_default();
+        assert!(hover.contains(line) && hover.contains("*type: Numeric*"), "{at:?}: {hover}");
+    }
+}
+
+/// A class-body field is a bare name for the code written directly in the
+/// body, and for nothing nested in it.
+#[test]
+fn a_class_body_field_is_a_bare_name_in_the_body_only() {
+    let fa = members_fa();
+    let read = Point::new(4, 12);
+    assert_eq!(fa.resolve_variable("count", read).map(|s| (s.kind, s.span.start.row)), Some((SymKind::Field, 1)));
+    let r = fa.refs().iter().find(|r| r.span.start == read).expect("the read is a reference");
+    assert_eq!(r.resolved_symbol().map(|sid| fa.symbol(sid).span.start.row), Some(1));
+    // the method reads past the class body
+    assert!(fa.resolve_variable("count", Point::new(11, 24)).is_none());
+}
+
+/// The first write through a method's receiver declares an instance field
+/// on the receiver's class; later writes declare nothing, a write through
+/// any other name declares nothing, and the field is no bare name.
+#[test]
+fn the_first_write_through_self_declares_an_instance_field() {
+    let fa = members_fa();
+    let ns: Vec<_> = fields_of(&fa).into_iter().filter(|&(n, ..)| n == "n").collect();
+    assert_eq!(ns, [("n", 6, true)]);
+    assert!(!fa.symbols().iter().any(|s| s.name == "z"), "a write through a plain parameter declares nothing");
+    assert!(!fa.symbols().iter().any(|s| s.kind == SymKind::Field && s.name == "count" && s.span.start.row != 1));
+    assert!(fa.resolve_variable("n", Point::new(11, 20)).is_none());
+    assert!(fa.resolve_variable("n", Point::new(12, 0)).is_none());
+}
+
+/// Member completion on an instance offers the class-body fields, the
+/// instance fields and the methods.
+#[test]
+fn instance_completion_offers_every_member() {
+    let fa = members_fa();
+    let labels: std::collections::HashSet<String> =
+        fa.complete_members_for_class("pkg.mod.Counter", None, None).into_iter().map(|c| c.label).collect();
+    for name in ["a", "b", "count", "total", "n", "bump", "__init__"] {
+        assert!(labels.contains(name), "{name} in {labels:?}");
+    }
+}
+
+/// goto-def on a member written or read through `self` lands on the field
+/// that declares it.
+#[cfg(feature = "python")]
+#[test]
+fn a_member_through_self_lands_on_its_field() {
+    let (t, idx) = indexed("pymembers", &[("pkg/__init__.py", ""), ("pkg/mod.py", MEMBERS)]);
+    let path = t.0.join("pkg/mod.py");
+    for (at, row) in [(Point::new(8, 14), 1), (Point::new(10, 13), 6), (Point::new(11, 20), 6), (Point::new(14, 6), 2)] {
+        let (defs, _, _) = landing(&idx, &path, at);
+        assert_eq!(defs, [("mod.py".to_string(), row)], "goto-def from {at:?}");
+    }
+}

@@ -72,6 +72,9 @@ impl FileAnalysis {
             for sid in self.symbols.in_scope(*scope_id) {
                 let sym = &self.symbols[sid.0 as usize];
                 // Symbol must be declared before the point (or be a sub/package/class)
+                if sym.flags.contains(SymbolFlags::THROUGH_RECEIVER) {
+                    continue;
+                }
                 if sym.span.start <= point || matches!(sym.kind, SymKind::Sub | SymKind::Method | SymKind::Package | SymKind::Class) {
                     result.push(sym);
                 }
@@ -89,7 +92,7 @@ impl FileAnalysis {
             for sid in self.symbols.in_scope(*scope_id) {
                 let sym = &self.symbols[sid.0 as usize];
                 if sym.name == name
-                    && matches!(sym.kind, SymKind::Variable | SymKind::Field)
+                    && sym.is_bare_name()
                     && sym.span.start <= point
                 {
                     return Some(sym);

@@ -132,6 +132,31 @@ the language calls that scope. A generic capture may never carry one
 language's rule — `@scope.sub` once minted a Python-only section kind,
 which is why the rule moved here.
 
+## Decision: a member is declared where the document says, once
+
+A data member is a `@def.field`, whatever writes it. Python's document
+captures two shapes. A name its class body binds (`count = 0`, `a: int`,
+`b: int = 5`) is a field of the class. The same token stays a name in the
+class scope, so code written directly in the body reads it bare, through
+`lookup_chain`. A write through a method's receiver (`self.n = …`) also
+captures the receiver token as `@def.field.receiver`. The extractor
+declares the member only when that token binds the enclosing method's
+`@param.receiver`, files it on that parameter's class, and declares it
+once: the first such write for a (class, name). A later write, augmented
+or not, is a member reference that resolves to it.
+
+Membership and bare visibility are separate facts. A member's `package`
+is its class, and its `scope` is the class body (`member_scope`) for both
+shapes. Whether a bare name binds it is the symbol's own answer,
+`Symbol::is_bare_name`: a receiver-declared member (`THROUGH_RECEIVER`) is
+no bare name anywhere. A body that elides its receiver
+(`@scope.sub.implicit_receiver`, C++) reaches a field as a member of that
+receiver, so the lexical walk leaves fields to it there.
+
+A receiver parameter holds an instance of its method's class. The
+extractor states that as the parameter's value at its binding site, so a
+member written or read through `self` dispatches on the class.
+
 ## Decision: a fact the grammar parses is a capture, not a text probe
 
 When the grammar already gives a fact its own node, the document captures
