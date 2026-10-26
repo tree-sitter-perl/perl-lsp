@@ -457,7 +457,8 @@ pub(super) fn class_member_bare_constant(
 }
 
 /// A class member and a local declared by ONE token (php's promoted
-/// constructor parameter, `Symbol::declared_with`) are one name: from the
+/// constructor parameter, python's class-body binding,
+/// `Symbol::declared_with`) are one name: from the
 /// token or a use of either, the group is the local's spellings in this
 /// file plus the member's target, so a rename rewrites both.
 fn codeclared_member_group(
