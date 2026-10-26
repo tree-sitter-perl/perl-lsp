@@ -139,7 +139,9 @@ impl ExtractState<'_> {
     /// in by then — a section opens at or before the code it covers, and
     /// a statement form is cut short only where its successor starts.
     fn namespace_at(&self, at: Point) -> Option<&str> {
-        crate::model::file_analysis::namespace_range_at(&self.out.namespace_ranges, at)
+        // The live scope, not a span lookup: the walk is mid-file, and
+        // the scope a site is written in is what the stack holds.
+        crate::model::file_analysis::namespace_range_in(&self.out.namespace_ranges, &self.out.scopes, self.cur_scope, at)
             .map(|r| r.namespace.as_str())
             .filter(|ns| !ns.is_empty())
     }
@@ -158,7 +160,7 @@ impl ExtractState<'_> {
     /// The identity a class named `leaf` and declared at `at` is filed
     /// under. Under a use-map it is the leaf joined to the namespace in
     /// force there — a namespace section, or the class body it is written
-    /// directly in (`Outer.Inner`) — so every spelling of the class
+    /// in (`Outer.Inner`) — so every spelling of the class
     /// resolves to the key it is filed under. Otherwise the spelling is
     /// the identity.
     fn class_identity(&self, leaf: &str, at: Point) -> String {
@@ -174,7 +176,7 @@ impl ExtractState<'_> {
 /// the site and the namespace in force there. Runs once every row,
 /// section and class is in.
 fn written_type_at(out: &SkeletonAnalysis, names: &crate::model::file_analysis::NameSpellings, t: InferredType, site: Point) -> InferredType {
-    match crate::model::file_analysis::UseMap::at(&out.use_rows, &out.namespace_ranges, names, site, &out.symbols) {
+    match crate::model::file_analysis::UseMap::at(&out.use_rows, &out.namespace_ranges, &out.scopes, names, site, &out.symbols) {
         Some(map) => t.map_class_names(&mut |c| map.resolve(c).identity(map.sep)),
         None => t,
     }
@@ -271,6 +273,7 @@ pub fn extract_in(
         package: None,
         owner: None,
         implicit_receiver: false,
+        direct: false,
     });
     let mut st = ExtractState {
         pack,

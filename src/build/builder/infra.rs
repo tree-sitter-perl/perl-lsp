@@ -23,6 +23,7 @@ impl<'a> Builder<'a> {
             span,
             owner: None,
             implicit_receiver: false,
+            direct: false,
             package: pkg,
         });
         self.scope_stack.push(id);
@@ -65,17 +66,45 @@ impl<'a> Builder<'a> {
     /// tier.md`); any other opens it, so later reads answer unknown.
     pub(super) fn consume_arg_head(&mut self, node: Node<'a>) {
         let Some(scope) = self.enclosing_sub_scope() else { return };
+        let conditional = crate::cst::is_conditionally_executed(node);
         let tail = match self.arg_window_at(node) {
-            Some(InferredType::Sequence(v)) if !crate::cst::is_conditionally_executed(node) => {
-                v.into_iter().skip(1).collect()
-            }
+            Some(InferredType::Sequence(v)) if !conditional => v.into_iter().skip(1).collect(),
             _ => Vec::new(),
         };
+        let at = node.end_position();
+        self.arg_head_consumes.push((scope, at, conditional));
+        self.push_arg_window(scope, Span { start: at, end: at }, tail);
+    }
+
+    /// Seed `scope`'s argument window at `span` with `window`. A seed laid
+    /// after the walk follows the walk's shifts in the bag, and the
+    /// variable fold is latest-wins in bag order, so the scope's shifts
+    /// are replayed after it: each consumes the head of the window it
+    /// follows, as `consume_arg_head` did at its own point.
+    // TODO(source-order-fold): evaluate making the variable fold latest-wins
+    // by source position (on the whole-program branch, design/whole-program-residuals.md);
+    // a late seed would then lose to the shifts below it and this replay goes.
+    pub(super) fn seed_arg_window(&mut self, scope: ScopeId, span: Span, window: Vec<InferredType>) {
+        self.push_arg_window(scope, span, window.clone());
+        let consumes: Vec<(Point, bool)> = self
+            .arg_head_consumes
+            .iter()
+            .filter(|(s, ..)| *s == scope)
+            .map(|(_, at, conditional)| (*at, *conditional))
+            .collect();
+        let mut window = window;
+        for (at, conditional) in consumes {
+            window = if conditional { Vec::new() } else { window.into_iter().skip(1).collect() };
+            self.push_arg_window(scope, Span { start: at, end: at }, window.clone());
+        }
+    }
+
+    fn push_arg_window(&mut self, scope: ScopeId, span: Span, window: Vec<InferredType>) {
         self.push_type_constraint(TypeConstraint {
             variable: "@_".into(),
             scope,
-            constraint_span: Span { start: node.end_position(), end: node.end_position() },
-            inferred_type: InferredType::Sequence(tail),
+            constraint_span: span,
+            inferred_type: InferredType::Sequence(window),
         });
     }
 
