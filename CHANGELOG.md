@@ -21,6 +21,36 @@ crate / VS Code extension versions.
 - The `all-langs` build feature is gone; enable the languages you want
   (`--features cpp,python`).
 
+### Undeclared variables (#116)
+
+- **An undeclared variable is tracked as the package global it is.**
+  `$x = 1` with no `my`/`our` now shows in the outline (detail `global`),
+  and references, rename and highlight find every use, including
+  `$main::x` and `${x}`. `use vars qw($x @y)` now declares like `our`.
+- **`${name}` is the same variable as `$name`** for every feature, and
+  renaming a variable rewrites inside the braces (`"${x}s"` used to be
+  left behind).
+- **New default-on `missing-declaration` warning** on each use of a variable
+  nothing declares, mirroring `use strict 'vars'`. `$a`/`$b`, Perl's
+  special variables and qualified names are exempt; a variable an import
+  brings in (`use FindBin qw($Bin)`, an exported `*glob`) counts as
+  declared. A file with a bare `use` whose module isn't resolved yet stays
+  silent until it is. Opt out with `diagnostics.disableMissingDeclaration`
+  (CLI `--disable-missing-declaration`).
+- **`use English` variables are declared.** English builds its export list
+  at runtime; a bundled `english` plugin states it, so `$ERRNO` and friends
+  count as declared (match variables only without `-no_match_vars`).
+- **Symbolic references to a constant name are the variable they name.**
+  `${"abel"}`, `@{"Foo::q"}`, and `${$n}` where `$n` holds one string
+  literal reach the package variable — never a lexical of the same name —
+  so references and rename include them (rename rewrites the literal).
+  A qualified name likewise never binds a `my` that shares it.
+- **Plugins can declare package variables.** The new `PackageVariable`
+  action declares a global the way `our` does, and `on_use` sees each
+  use-list word with its span (`ctx.import_words`). `use vars` is now a
+  bundled plugin built on it, so an in-house module that declares globals
+  can get the same treatment from `PERL_LSP_PLUGIN_DIR`.
+
 ## v0.8.0 — 2026-10-19
 
 ### Heatmap
