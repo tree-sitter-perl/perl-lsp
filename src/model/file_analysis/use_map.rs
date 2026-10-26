@@ -140,9 +140,8 @@ impl<'a> UseMap<'a> {
         Self::seen_from(rows, sections, scopes, names, site, innermost_scope_at(scopes, site), classes)
     }
 
-    /// `at`, for a spelling whose scope is a fact of its own rather than
-    /// the innermost one around it — a base class, written in the scope
-    /// its class is declared in.
+    /// `at`, for a spelling whose scope is in hand — a reference's, which
+    /// extraction minted with it.
     pub fn in_scope(
         rows: &'a [UseRow],
         sections: &'a [NamespaceRange],

@@ -130,10 +130,18 @@ Lookup is not ownership. Whose member a declaration is comes from the
 scope a class's own match opened (`@context.class` with its `@scope`),
 and stops at a callable whatever the document marks; how a name resolves
 comes from `lookup_chain`. Neither is a namespace section: the lane holds
-namespaces only. A fact the match states about where a token is written
-is minted with the token — a base in a `@parent` match is written in the
-scope its class is declared in, though the class's `@scope` covers the
-header — so no consumer compares its position against the class body.
+namespaces only.
+
+Where code runs is a scope fact too. A def's header — Python's base
+list, parameter annotations and defaults, `-> T` — is evaluated in the
+scope the def is written in, though the def's own `@scope` covers it.
+The document marks each header region `@scope.header`, and the extractor
+mints it as a scope whose parent is the def's declaring scope: a use
+written there, and a lookup at any point in it, starts outside the def
+by the ordinary walk, with no consumer comparing a position against a
+body. A name the header DECLARES (a parameter) still binds in the def's
+own scope (`ExtractState::bind_scope`). One fact for every header
+expression, not an arm per construct: the base list is one more region.
 
 The spelling names the behaviour, not the construct: `direct` is a scope
 whose names are in force only for code written directly in it, whatever

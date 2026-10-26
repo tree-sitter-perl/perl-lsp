@@ -160,6 +160,13 @@ impl ExtractState<'_> {
     /// (`scopes::home_of`) — the class it is written in, else the
     /// namespace in force — so every spelling of the class resolves to the
     /// key it is filed under. Otherwise the spelling is the identity.
+    /// The scope a def at the current event binds in: the innermost one,
+    /// or for a def written in a header (a parameter), the def scope the
+    /// header belongs to.
+    fn bind_scope(&self) -> ScopeId {
+        self.scopes.headed.get(&self.cur_scope).copied().unwrap_or(self.cur_scope)
+    }
+
     fn class_identity(&self, leaf: &str, from: ScopeId, at: Point) -> String {
         match self.pack.names.use_map_sep() {
             Some(sep) => crate::model::conventions::join_qualified(scopes::home_of(self, from, at).unwrap_or(""), leaf, sep),
@@ -325,13 +332,18 @@ pub fn extract_in(
     // contents. A `@scope` on the SAME node as a `@def` (a function_definition
     // carries its own body scope) must open AFTER the def is recorded, so the
     // symbol attributes to its ENCLOSING scope, not its own body — hence scope
-    // sorts last among identical-span ties.
-    let is_scope = |e: &Event| matches!(e.cap, Capture::Scope(_));
+    // sorts last among identical-span ties. A header holds no def of its own
+    // node, and a token can be the whole of one (`-> T`), so it opens first.
+    let tie_rank = |e: &Event| match e.cap {
+        Capture::Scope(ScopeCap::Header) => 0,
+        Capture::Scope(_) => 2,
+        _ => 1,
+    };
     events.sort_by(|a, b| {
         a.start_byte
             .cmp(&b.start_byte)
             .then(b.end_byte.cmp(&a.end_byte))
-            .then(is_scope(a).cmp(&is_scope(b)))
+            .then(tie_rank(a).cmp(&tie_rank(b)))
     });
 
     // ---- pre-collect the per-match joins a handler reads before the
