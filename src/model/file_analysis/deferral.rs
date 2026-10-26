@@ -93,7 +93,16 @@ impl Question {
     /// The one decider. A facts source without an index answers from its
     /// own file alone.
     pub fn decide(&self, facts: &dyn DecideFacts) -> Verdict {
-        crate::util::ghost_stats::count("deferral.decide");
+        let tag = match self {
+            Question::ReceiverIsa { .. } => "deferral.decide.receiver_isa",
+            Question::PackageIsa { .. } => "deferral.decide.package_isa",
+            Question::NamesClass(_) => "deferral.decide.names_class",
+        };
+        crate::util::ghost_stats::count(tag);
+        crate::util::ghost_stats::timed(tag, || self.decide_untimed(facts))
+    }
+
+    fn decide_untimed(&self, facts: &dyn DecideFacts) -> Verdict {
         match self {
             Question::ReceiverIsa { receiver, class } => {
                 let recv = match receiver {
