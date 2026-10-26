@@ -1134,7 +1134,7 @@ impl SkeletonAnalysis {
                     // Under a use-map a call is pinned to its function's
                     // namespace (`\Lib\f()` → `Lib`).
                     RefCap::Call => {
-                        let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &names, r.start, &symbols);
+                        let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &names, r.start, &symbols);
                         if let Some(map) = map {
                             let namespace = function_identity(&map, &r.name, &free_functions).namespace;
                             binding = (!namespace.is_empty()).then_some(RefBinding::Function { package: namespace });
