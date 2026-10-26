@@ -43,12 +43,12 @@ pub(crate) fn emit_mutation_extension_witnesses(
         // Attach where the variable's existing witnesses live; note
         // whether getting there crosses a scope boundary (nested block
         // or closure — the write may not have executed by read time).
-        // First scope up the shared chain whose Variable attachment has
+        // First scope on the write's lookup chain whose Variable attachment has
         // witnesses; `crossed` = we climbed past the start scope (index
         // > 0) to find it.
         let mut attach: Option<(ScopeId, bool)> = None;
-        for (i, &sid) in crate::model::file_analysis::scope_chain_of(ctx.scopes, w.scope)
-            .iter()
+        for (i, sid) in crate::model::file_analysis::lookup_chain(ctx.scopes, w.scope)
+            .scopes()
             .enumerate()
         {
             let att = WitnessAttachment::Variable { name: w.var_text.clone(), scope: sid };

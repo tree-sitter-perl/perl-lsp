@@ -200,14 +200,15 @@ pub enum Bridge {
 /// the walk beyond contributing its bridge.
 pub const APP_SURFACE_CLASS: &str = "Mojolicious::_AppSurface";
 
-/// The lexical scope chain `[start, parent, …, file]` over a bare
-/// `&[Scope]` slice — the single source of the parent-climb. A free
-/// function (not a `FileAnalysis` method) so the witness-bag query path,
-/// which holds `BagContext.scopes: &[Scope]` and never a
-/// `&FileAnalysis`, shares it. `FileAnalysis::scope_chain` is the thin
-/// wrapper. A scope has one parent and no cycles, so this is a linked-
-/// list climb, not a graph walk — the graph deliberately does not model
-/// it (`docs/adr/graph-walking.md`).
+/// The containment chain `[start, parent, …, file]` over a bare
+/// `&[Scope]` slice: what a scope is INSIDE (its class, its callable, its
+/// package), never what it can see. It is plain ids and lists no names;
+/// a name lookup takes `lookup_chain`, which states the scoping rules.
+/// Every caller outside this file is allowlisted with its reason
+/// (`layering_tests::raw_scope_climbs_are_containment_only`). A scope has
+/// one parent and no cycles, so this is a linked-list climb, not a graph
+/// walk — the graph deliberately does not model it
+/// (`docs/adr/graph-walking.md`).
 pub fn scope_chain_of(scopes: &[Scope], start: ScopeId) -> Vec<ScopeId> {
     let mut chain = Vec::new();
     let mut current = Some(start);
@@ -218,13 +219,40 @@ pub fn scope_chain_of(scopes: &[Scope], start: ScopeId) -> Vec<ScopeId> {
     chain
 }
 
-/// Where a name used in `from` is looked up, innermost first: the scope
-/// chain minus the scopes whose own rule says a use written here cannot
-/// see their names. THE walk for every name lookup — a variable read, a
-/// bare class spelling (`UseMap`'s scope step) — so a language's
-/// scoping rule is stated once, as an arm here, and inherited by all of
-/// them. `scope_chain_of` stays the raw lexical climb (containment,
-/// packages, outline nesting); only name lookups take this one.
+/// Where a name used in a scope is looked up, innermost first: the scope
+/// chain minus the scopes whose own rule says a use written there cannot
+/// see their names. THE value every name lookup walks — a variable read,
+/// a bare class spelling (`UseMap`'s scope step), in-scope completion,
+/// Perl's binders — so a language's scoping rule is stated once, as an
+/// arm of `lookup_chain`, and inherited by all of them. It is the only
+/// way to list the names a scope binds for lookup (`bindings`);
+/// `scope_chain_of` is the containment climb and lists none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupChain(Vec<ScopeId>);
+
+impl LookupChain {
+    /// The scopes a name is looked up in, innermost first.
+    pub fn scopes(&self) -> impl Iterator<Item = ScopeId> + '_ {
+        self.0.iter().copied()
+    }
+
+    /// Whether a declaration made in `scope` is in view.
+    pub fn contains(&self, scope: ScopeId) -> bool {
+        self.0.contains(&scope)
+    }
+
+    /// Every symbol a scope on the chain binds, innermost scope first and
+    /// in declaration order within one. A member declared through a
+    /// receiver (`self.x = …`) binds no name.
+    pub fn bindings(self, symbols: &SymbolTable) -> impl Iterator<Item = &Symbol> {
+        self.0
+            .into_iter()
+            .flat_map(move |scope| symbols.declared_directly_in(scope).iter().map(move |sid| &symbols[sid.0 as usize]))
+            .filter(|s| !s.flags.contains(SymbolFlags::THROUGH_RECEIVER))
+    }
+}
+
+/// The `LookupChain` from `from`.
 ///
 /// Arms:
 /// - `Scope::direct` (`@scope.direct`): in force only for code written
@@ -234,7 +262,7 @@ pub fn scope_chain_of(scopes: &[Scope], start: ScopeId) -> Vec<ScopeId> {
 /// - a closed body (`@scope.sub.closed`): the walk ENDS at a body that
 ///   sees no variable around it but the ones it captures, unless it
 ///   captures the name. Only `lookup_chain_through` takes this arm.
-pub fn lookup_chain(scopes: &[Scope], from: ScopeId) -> Vec<ScopeId> {
+pub fn lookup_chain(scopes: &[Scope], from: ScopeId) -> LookupChain {
     lookup_chain_through(scopes, from, |_| false)
 }
 
@@ -243,7 +271,7 @@ pub fn lookup_chain(scopes: &[Scope], from: ScopeId) -> Vec<ScopeId> {
 /// The extractor holds those facts (php's closures), so its binding pass
 /// is the one caller; the model's queries walk past closed bodies, which
 /// over-approximates a type and never binds a name wrongly.
-pub fn lookup_chain_through(scopes: &[Scope], from: ScopeId, shut: impl Fn(ScopeId) -> bool) -> Vec<ScopeId> {
+pub fn lookup_chain_through(scopes: &[Scope], from: ScopeId, shut: impl Fn(ScopeId) -> bool) -> LookupChain {
     let mut chain = Vec::new();
     let mut left_boundary = false;
     let mut current = Some(from);
@@ -258,7 +286,7 @@ pub fn lookup_chain_through(scopes: &[Scope], from: ScopeId, shut: impl Fn(Scope
         left_boundary |= scope.direct || matches!(scope.kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. });
         current = scope.parent;
     }
-    chain
+    LookupChain(chain)
 }
 
 /// Three-way outcome of resolving a [`ReceiverGated`] value against a
