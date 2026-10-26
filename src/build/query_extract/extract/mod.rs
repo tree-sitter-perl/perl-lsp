@@ -135,27 +135,7 @@ struct ExtractState<'p> {
     file_module: Option<&'p FileModule>,
 }
 
-/// The module a file is, for a language whose module names come from the
-/// file's place on disk (python's `pkg/models.py` is `pkg.models`): its
-/// path segments, and whether the file is its package's own module
-/// (`pkg/__init__.py` is `pkg`, and relative imports start from `pkg`
-/// itself rather than its parent). Derived by the driver, which has the
-/// path; the extractor only reads it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileModule {
-    pub segments: Vec<String>,
-    pub is_package: bool,
-}
-
-impl FileModule {
-    /// The package relative imports resolve from.
-    pub fn package(&self) -> &[String] {
-        match self.is_package {
-            true => &self.segments,
-            false => &self.segments[..self.segments.len().saturating_sub(1)],
-        }
-    }
-}
+pub use crate::model::file_analysis::FileModule;
 
 impl ExtractState<'_> {
     /// The namespace a declaration at `at` joins: the section of the lane
