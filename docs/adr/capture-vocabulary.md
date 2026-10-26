@@ -169,8 +169,11 @@ scope `direct`, so its answers are unchanged.
 Lookup is not ownership. Whose member a declaration is comes from the
 scope a class's own match opened (`@context.class` with its `@scope`),
 and stops at a callable whatever the document marks; how a name resolves
-comes from `lookup_chain`. Neither is a namespace section: the lane holds
-namespaces only.
+comes from `lookup_chain`. The two share one fact, the callable boundary
+(`callable_reach`: a site's scope out to the nearest callable). A
+declaration joins the class whose body is on its reach, and a direct
+scope is in force for a use only as the innermost direct scope on its
+reach. Neither is a namespace section: the lane holds namespaces only.
 
 Where code runs is a scope fact too. A def's header — Python's base
 list, parameter annotations and defaults, `-> T` — is evaluated in the
