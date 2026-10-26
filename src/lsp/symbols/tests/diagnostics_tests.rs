@@ -979,11 +979,11 @@ fn missing_declarations(diags: &[Diagnostic]) -> Vec<(u32, String)> {
 }
 
 /// #116: an undeclared variable is what `use strict 'vars'` rejects — every
-/// use is flagged (WARNING); `$a`/`$b`, special variables and qualified
-/// spellings are not.
+/// use is flagged (WARNING); `$a`/`$b`, special variables, qualified
+/// spellings and the `scalar` keyword are not.
 #[test]
 fn missing_declaration_flags_each_undeclared_use() {
-    let source = "$a = 1;\n$abel = 3;\nprint \"$a $abel $_ $0 $ENV{X} @ARGV $main::abel\";\nmy @s = sort { $a <=> $b } @ARGV;\nmy $ok = 1; print $ok;\n";
+    let source = "$a = 1;\n$abel = 3;\nprint \"$a $abel $_ $0 $ENV{X} @ARGV $main::abel\";\nmy @s = sort { $a <=> $b } @ARGV;\nmy $ok = scalar @s; print $ok;\n";
     let analysis = parse_analysis(source);
     let module_index = crate::index::module_index::ModuleIndex::new_for_test();
     let diags = collect_diagnostics(&analysis, &module_index, Default::default());
