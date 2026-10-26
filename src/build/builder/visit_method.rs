@@ -81,38 +81,41 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// `meth Class(ARGS)` when its refs read as `Class->meth(ARGS)`: a site
-    /// the file settles as a method call, or a deferred one whose undecided
-    /// reading is (`indirect_reading`).
+    /// `meth Class(ARGS)` when its refs read as `Class->meth(ARGS)`: its
+    /// undecided reading (`IndirectSite`).
     pub(super) fn indirect_method_call(&self, node: Node<'a>) -> Option<crate::cst::IndirectObjectCall<'a>> {
         match self.indirect_reading(node)? {
-            (io, IndirectReading::Method) => Some(io),
-            (io, IndirectReading::Deferred(site)) if site.undecided_method() => Some(io),
-            (_, IndirectReading::Function | IndirectReading::Deferred(_)) => None,
+            (io, IndirectReading::Site(site)) if site.undecided_method() => Some(io),
+            (_, IndirectReading::Site(_) | IndirectReading::Function) => None,
         }
     }
 
-    /// The deferred question at a `meth Class(ARGS)` site the file alone
-    /// can't settle.
-    pub(super) fn indirect_deferred(
+    /// The question at a `meth Class(ARGS)` site with the indirect feature on.
+    pub(super) fn indirect_site(
         &self,
         node: Node<'a>,
     ) -> Option<(crate::cst::IndirectObjectCall<'a>, crate::model::file_analysis::IndirectSite)> {
         match self.indirect_reading(node)? {
-            (io, IndirectReading::Deferred(site)) => Some((io, site)),
-            (_, IndirectReading::Method | IndirectReading::Function) => None,
+            (io, IndirectReading::Site(site)) => Some((io, (*site).clone())),
+            (_, IndirectReading::Function) => None,
         }
     }
 
-    /// How Perl reads `meth Class(ARGS)`, from what this file shows before
-    /// the site (`toke.c` `intuit_method`, which decides at the token from
-    /// what is compiled so far): with the indirect feature off, or a sub
-    /// named `Class`, it is a function call; a sub named `meth` makes it a
-    /// method call only on a package the file named. Anything else turns on
-    /// what other files declare or export, so it is deferred
-    /// (`IndirectSite`).
+    /// `meth Class(ARGS)`: a function call where the indirect feature is
+    /// off, else a site carrying what the file states before it. Memoized
+    /// per node: refs, chains and the bag all ask, and the site clones the
+    /// `use` rows in force.
     fn indirect_reading(&self, node: Node<'a>) -> Option<(crate::cst::IndirectObjectCall<'a>, IndirectReading)> {
         let io = crate::cst::indirect_object_call(node, self.source)?;
+        if let Some(memo) = self.indirect_memo.borrow().get(&node.id()) {
+            return memo.clone().map(|r| (io, r));
+        }
+        let reading = self.indirect_reading_uncached(node, io);
+        self.indirect_memo.borrow_mut().insert(node.id(), reading.clone());
+        reading.map(|r| (io, r))
+    }
+
+    fn indirect_reading_uncached(&self, node: Node<'a>, io: crate::cst::IndirectObjectCall<'a>) -> Option<IndirectReading> {
         if self.is_indirect_object_filehandle_call(node) {
             return None;
         }
@@ -122,44 +125,31 @@ impl<'a> Builder<'a> {
         if crate::model::builtins::is_builtin(method) || crate::model::builtins::is_builtin(class) {
             return None;
         }
-        if self.feature_off_at(crate::model::conventions::INDIRECT_FEATURE, at)
-            || self.sub_declared_before(class, at)
-        {
-            return Some((io, IndirectReading::Function));
+        if self.feature_off_at(crate::model::conventions::INDIRECT_FEATURE, at) {
+            return Some(IndirectReading::Function);
         }
         let class_named = self.imports.iter().any(|i| i.span.start < at && i.module_name == class)
             || self.symbols.iter().any(|s| {
                 s.span.start < at && s.name == class && matches!(s.kind, SymKind::Package | SymKind::Class)
             });
-        // TODO(indirect-glob-prototype): a `meth` prototyped `(*)` takes a
-        // filehandle, which makes it a function call whatever `Class` is.
-        if self.sub_declared_before(method, at) {
-            let reading = if class_named { IndirectReading::Method } else { IndirectReading::Function };
-            return Some((io, reading));
-        }
         let here = self.package_at_pos(at);
-        let exporters = self
+        let imports = self
             .imports
             .iter()
-            .filter(|i| i.span.start < at && !i.empty_import && self.package_at_pos(i.span.start) == here)
-            .filter_map(|i| {
-                let tags: Vec<String> = i
-                    .imported_symbols
-                    .iter()
-                    .filter_map(|s| s.local_name.strip_prefix([':', '-']).map(str::to_string))
-                    .collect();
-                (i.imported_symbols.is_empty() || !tags.is_empty())
-                    .then(|| crate::model::file_analysis::Exporter { module: i.module_name.clone(), tags })
-            })
+            .filter(|i| i.span.start < at && self.package_at_pos(i.span.start) == here)
+            .cloned()
             .collect();
-        let site = crate::model::file_analysis::IndirectSite::unsettled(
+        // TODO(indirect-glob-prototype): a `meth` prototyped `(*)` takes a
+        // filehandle, which makes it a function call whatever `Class` is.
+        let site = crate::model::file_analysis::IndirectSite::new(
             here.unwrap_or("main").to_string(),
             method.to_string(),
             class.to_string(),
-            exporters,
+            imports,
+            (self.sub_declared_before(class, at), self.sub_declared_before(method, at)),
             class_named,
         );
-        Some((io, IndirectReading::Deferred(site)))
+        Some(IndirectReading::Site(std::sync::Arc::new(site)))
     }
 
     /// An indirect-object call is a method call on its class: the same
@@ -877,9 +867,8 @@ impl<'a> Builder<'a> {
 }
 
 /// How the builder reads a `meth Class(ARGS)` site.
+#[derive(Clone)]
 pub(super) enum IndirectReading {
-    Method,
     Function,
-    Deferred(crate::model::file_analysis::IndirectSite),
+    Site(std::sync::Arc<crate::model::file_analysis::IndirectSite>),
 }
-

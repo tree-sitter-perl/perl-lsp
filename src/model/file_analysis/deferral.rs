@@ -134,10 +134,7 @@ impl Question {
                     None => Verdict::Unknown,
                 }
             }
-            Question::IndirectCall(site) => match facts.index() {
-                Some(ix) => site.decide(ix),
-                None => Verdict::Unknown,
-            },
+            Question::IndirectCall(site) => site.verdict(facts.index()),
         }
     }
 
@@ -151,45 +148,48 @@ impl Question {
     }
 }
 
-/// What Perl had not seen yet when it read `meth Class(ARGS)`: the builder
-/// settles the site from the file alone wherever it can (the indirect
-/// feature, a sub named by either word before the site, a package this file
-/// named), and asks this only about what other files decide — a sub in the
-/// package another file declares, a default export of a bare `use`, a
-/// package declared elsewhere. Perl's order (`toke.c` `intuit_method`): a
-/// class word that is a sub makes a function call; a verb that is not a sub
-/// makes a method call; a verb that is one makes a method call only on a
-/// known package (`docs/adr/query-delayed-facts.md`).
+/// `meth Class(ARGS)` with the indirect feature on: whether Perl reads it
+/// as `Class->meth(ARGS)`. Perl decides at the token from what is compiled
+/// so far (`toke.c` `intuit_method`): a class word that is a sub makes a
+/// function call; a verb that is not a sub makes a method call; a verb that
+/// is one makes a method call only on a known package. The site carries
+/// what its file states before it, and one decider reads that alone or
+/// with the index (`docs/adr/query-delayed-facts.md`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndirectSite {
     package: String,
     verb: String,
     class: String,
-    /// The imports before the site that bind names the file can't list: a
-    /// bare `use` (the default set) or a tag (`:all`). Either may export
-    /// either word.
-    exporters: Vec<Exporter>,
-    /// This file named `class` as a package before the site.
+    /// The `use` rows of `package` before the site, as written.
+    imports: Vec<Import>,
+    /// The file declares a sub named `class` / `verb` before the site.
+    class_sub_here: bool,
+    verb_sub_here: bool,
+    /// The file named `class` as a package before the site.
     class_named: bool,
-    /// The site's reading while undecided: the file's own answer.
+    /// The reading while undecided: the file's own verdict, and where it
+    /// has none, a method call only on a package it named.
     undecided: Fallback,
 }
 
-/// One import an `IndirectSite` can't see through: its module, and the tags
-/// it names (none = a bare `use`, which binds the default set).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Exporter {
-    pub module: String,
-    pub tags: Vec<String>,
-}
-
 impl IndirectSite {
-    /// The builder's handoff, after it found nothing local that settles the
-    /// site. The undecided reading is the one the file alone supports: a
-    /// method call on a package it named, a function call otherwise.
-    pub fn unsettled(package: String, verb: String, class: String, exporters: Vec<Exporter>, class_named: bool) -> Self {
-        let undecided = if class_named { Fallback::Then } else { Fallback::Otherwise };
-        Self { package, verb, class, exporters, class_named, undecided }
+    pub fn new(
+        package: String,
+        verb: String,
+        class: String,
+        imports: Vec<Import>,
+        (class_sub_here, verb_sub_here): (bool, bool),
+        class_named: bool,
+    ) -> Self {
+        let mut site =
+            Self { package, verb, class, imports, class_sub_here, verb_sub_here, class_named, undecided: Fallback::Then };
+        site.undecided = match site.verdict(None) {
+            Verdict::Yes => Fallback::Then,
+            Verdict::No => Fallback::Otherwise,
+            Verdict::Unknown if class_named => Fallback::Then,
+            Verdict::Unknown => Fallback::Otherwise,
+        };
+        site
     }
 
     pub fn class(&self) -> &str {
@@ -201,48 +201,65 @@ impl IndirectSite {
         self.undecided == Fallback::Then
     }
 
-    fn decide(&self, ix: &dyn CrossFileLookup) -> Verdict {
-        // `None`: an exporter the index can't see, or a tag it doesn't
-        // declare — what it binds is unknown.
-        let exported = |name: &str| -> Option<bool> {
-            let mut any = false;
-            for e in &self.exporters {
-                let cands = ix.visible_def_candidates(&e.module);
-                if cands.is_empty() {
-                    return None;
-                }
-                for c in &cands {
-                    let surface = c.analysis.export_surface_with_index(ix);
-                    if e.tags.is_empty() {
-                        any |= surface.default_set().iter().any(|n| n == name);
+    fn verdict(&self, ix: Option<&dyn CrossFileLookup>) -> Verdict {
+        match self.known_sub(&self.class, self.class_sub_here, ix) {
+            Some(true) => Verdict::No,
+            None => Verdict::Unknown,
+            Some(false) => match self.known_sub(&self.verb, self.verb_sub_here, ix) {
+                Some(false) => Verdict::Yes,
+                None => Verdict::Unknown,
+                Some(true) => match self.class_known(ix) {
+                    Some(true) => Verdict::Yes,
+                    Some(false) => Verdict::No,
+                    None => Verdict::Unknown,
+                },
+            },
+        }
+    }
+
+    /// Whether `name` is a sub of the site's package by the site. `None`:
+    /// only files the index can't show (or no index) would say.
+    fn known_sub(&self, name: &str, here: bool, ix: Option<&dyn CrossFileLookup>) -> Option<bool> {
+        if here {
+            return Some(true);
+        }
+        let (qualifier, bare) = crate::model::conventions::split_qualified(name, &crate::model::conventions::PERL_SPELLINGS);
+        let mut unseen = false;
+        if qualifier.is_none() {
+            for import in &self.imports {
+                let producers = ix.map(|ix| (ix, ix.visible_def_candidates(&import.module_name)));
+                match producers {
+                    Some((ix, producers)) if !producers.is_empty() => {
+                        let binds = producers.iter().any(|p| {
+                            let surface = p.analysis.export_surface_with_index(ix);
+                            imported_names(import, &surface).iter().any(|(local, _)| local == bare)
+                        });
+                        if binds {
+                            return Some(true);
+                        }
                     }
-                    for tag in &e.tags {
-                        any |= surface.tag_members(tag)?.contains(&name);
-                    }
+                    _ if listed_names(import).any(|n| n == bare) => return Some(true),
+                    _ => unseen |= binds_from_surface(import),
                 }
             }
-            Some(any)
-        };
-        let sub_elsewhere = |name: &str| ix.candidate_defining_sub(&self.package, name).is_some();
-        let (Some(class_exported), Some(verb_exported)) = (exported(&self.class), exported(&self.verb)) else {
-            return Verdict::Unknown;
-        };
-        if class_exported || sub_elsewhere(&self.class) {
-            return Verdict::No;
         }
-        if !(verb_exported || sub_elsewhere(&self.verb)) {
-            return Verdict::Yes;
+        let ix = ix?;
+        if ix.candidate_defining_sub(qualifier.unwrap_or(&self.package), bare).is_some() {
+            return Some(true);
         }
-        let declared_elsewhere = || {
+        (!unseen).then_some(false)
+    }
+
+    fn class_known(&self, ix: Option<&dyn CrossFileLookup>) -> Option<bool> {
+        if self.class_named {
+            return Some(true);
+        }
+        let ix = ix?;
+        Some(
             ix.def_candidates(&self.class)
                 .iter()
-                .any(|c| declares_class(ix.symbols_present(c).symbols(), &self.class))
-        };
-        if self.class_named || declared_elsewhere() {
-            Verdict::Yes
-        } else {
-            Verdict::No
-        }
+                .any(|c| declares_class(ix.symbols_present(c).symbols(), &self.class)),
+        )
     }
 }
 
