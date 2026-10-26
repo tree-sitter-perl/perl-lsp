@@ -200,14 +200,22 @@ A write through a receiver (`self.n = …`, `@def.slot`, receiver token
 `@def.slot.receiver`) declares an instance slot: a `HashKeyDef` owned by
 `HashKeyOwner::Class`, Perl's own model for `$self->{n}`. The owner is the
 class the receiver is TYPED as at the write — the receiver parameter's
-class, or an annotated parameter's or local's annotation — read through
-the witness registry once extraction has lowered them
-(`defs::declare_slots`). A write declares only when neither its class nor
-an ancestor already declares the name (a class-body binding, a member, an
-earlier slot); every other write, augmented or not, and any write through
-an untyped receiver, stays a member reference. Ancestors are the file's
-own parents at extraction, and a local typed only by its value
-(`o = Counter()`) is untyped there: call witnesses are minted at assembly.
+class, an annotated parameter's or local's annotation, a local's value
+(`o = Counter()`) — asked of the assembled analysis's own registry
+(`skeleton::declare_slots`, the last step of `into_file_analysis`, the
+slots adopted into the sealed baseline). A write declares only when
+neither its class nor an ancestor already declares the name (a class-body
+binding, a member, an earlier slot); every other write, augmented or not,
+and any write through an untyped receiver, stays a member reference. The
+write's own token stays a member reference too.
+
+`TODO(slot-owner-deferred)`: an owner only the index can name (a receiver
+typed by another file, a parent declared in another file) is still decided
+without it. The target is Perl's shape — the write is a ref whose owner is
+a late binding (`resolve_hash_key_owners`,
+`fixup_call_bound_hash_key_owners`, `deferred_hash_key_owner`), and
+"declared" is the first write whose decided owner is the class — landing
+with the php variables stack (`unify_assigned`, `TODO(assigned-unify)`).
 
 A slot is reached only through a receiver: it is no bare name anywhere,
 because the lexical walk binds Variables alone. Member lookup reads it
