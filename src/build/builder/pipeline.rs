@@ -307,6 +307,7 @@ fn build_once(
         deferred_var_types: Vec::new(),
         deferred_named_sub_param_types: Vec::new(),
         method_or_helper_subs: Vec::new(),
+        arg_head_consumes: Vec::new(),
         plain_called_subs: std::collections::HashSet::new(),
         fold_ranges: Vec::new(),
         imports: Vec::new(),
@@ -820,12 +821,7 @@ impl<'a> Builder<'a> {
             heads.push((scope.id, scope.span, (is_method || (class_pkg && convention)).then(|| InferredType::FirstParam { package: pkg })));
         }
         for (id, span, head) in heads {
-            self.push_type_constraint(TypeConstraint {
-                variable: "@_".into(),
-                scope: id,
-                constraint_span: span,
-                inferred_type: InferredType::Sequence(head.into_iter().collect()),
-            });
+            self.seed_arg_window(id, span, head.into_iter().collect());
         }
     }
 
