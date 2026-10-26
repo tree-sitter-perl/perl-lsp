@@ -5,8 +5,7 @@
 ; A class is filed under the namespace in force where it is written — its
 ; module's, or the class body it sits directly in (`pkg.mod.Outer.Inner`);
 ; its body's members file under the class's identity. The body is a
-; namespace of its own for the code written directly in it: a name the
-; class declares resolves there first, and a method sees past it.
+; namespace of its own: a name the class declares resolves there first.
 (class_definition
   name: (identifier) @def.class.name @context.class
   body: (block) @section.class) @def.class @scope

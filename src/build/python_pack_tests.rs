@@ -451,10 +451,10 @@ fn an_unindexed_identity_widens_to_its_leaf_out_loud() {
     assert!(widening_codes(&idx, &vendored).is_empty());
 }
 
-/// A class body is a namespace for the code written directly in it: a
-/// nested class is filed under its enclosing class, a bare name there
-/// that the class declares names the nested class first, and a method —
-/// or a class nested one level further — sees past it to the module.
+/// A class body is a namespace: a nested class is filed under its
+/// enclosing class, a bare name there that the class declares names the
+/// nested class first, and a class nested one level further sees past it
+/// to the module.
 #[test]
 fn a_class_body_is_a_namespace_for_its_own_code() {
     let m = module(&["pkg", "mod"], false);
@@ -467,11 +467,6 @@ class Outer:
     child: Inner = make()
     class Sub(Inner):
         peer: Inner = make()
-    def build(self):
-        x: Inner = make()
-        class Local(Inner):
-            pass
-        return x
 class Other(Outer.Inner):
     pass
 ";
@@ -489,8 +484,6 @@ class Other(Outer.Inner):
             ("pkg.mod.Outer", Some("pkg.mod")),
             ("pkg.mod.Outer.Inner", Some("pkg.mod.Outer")),
             ("pkg.mod.Outer.Sub", Some("pkg.mod.Outer")),
-            // a class in a method joins the namespace the method sees
-            ("pkg.mod.Local", Some("pkg.mod")),
             ("pkg.mod.Other", Some("pkg.mod")),
         ]
     );
@@ -498,37 +491,14 @@ class Other(Outer.Inner):
     // parent clause alike
     assert_eq!(fa.inferred_type_via_bag("child", Point::new(5, 4)), Some(InferredType::ClassName("pkg.mod.Outer.Inner".into())));
     assert_eq!(fa.declared_parents("pkg.mod.Outer.Sub"), ["pkg.mod.Outer.Inner"]);
-    // Sub's body and build's body see past Outer to the module's class
+    // Sub's body sees past Outer to the module's class
     assert_eq!(fa.inferred_type_via_bag("peer", Point::new(7, 8)), Some(InferredType::ClassName("pkg.mod.Inner".into())));
-    assert_eq!(fa.inferred_type_via_bag("x", Point::new(9, 8)), Some(InferredType::ClassName("pkg.mod.Inner".into())));
-    assert_eq!(fa.declared_parents("pkg.mod.Local"), ["pkg.mod.Inner"]);
     // a dotted spelling hangs its leaf off the class its head names
     assert_eq!(fa.declared_parents("pkg.mod.Other"), ["pkg.mod.Outer.Inner"]);
-    // the namespace in force: the class body, the module inside a method
+    // the namespace in force: the class body
     assert_eq!(fa.namespace_at(Point::new(5, 4)), Some("pkg.mod.Outer"));
-    assert_eq!(fa.namespace_at(Point::new(9, 8)), Some("pkg.mod"));
     // a class header is written in the namespace around the class
     assert_eq!(fa.namespace_at(Point::new(6, 14)), Some("pkg.mod.Outer"));
-}
-
-/// Without a module-level class of that leaf, a bare name in a method
-/// names the module's (undeclared) class, never the nested one: the class
-/// reference widens to it, out loud, as any undeclared identity does.
-#[cfg(feature = "python")]
-#[test]
-fn a_method_never_reaches_its_class_body_by_a_bare_name() {
-    let (t, idx) = indexed("nestedmethod", &[
-        ("pkg/__init__.py", ""),
-        ("pkg/mod.py", "class Outer:\n    class Inner:\n        pass\n    def build(self):\n        class Local(Inner):\n            pass\n"),
-    ]);
-    let path = t.0.join("pkg/mod.py");
-    let fa = idx.workspace_file_for_test(&path).unwrap();
-    assert_eq!(fa.declared_parents("pkg.mod.Local"), ["pkg.mod.Inner"]);
-    let (defs, _, labels) = landing(&idx, &path, Point::new(4, 20));
-    assert_eq!(defs, [("mod.py".to_string(), 1)]);
-    assert_eq!(labels, [Some("widened: `pkg.mod.Outer.Inner` stands in for `pkg.mod.Inner`".to_string())]);
-    let msg = "nothing indexed declares `pkg.mod.Inner`; resolved by its leaf to `pkg.mod.Outer.Inner`".to_string();
-    assert_eq!(widening_codes(&idx, &path), [(4, 20, msg)]);
 }
 
 /// Django's per-model `class Meta:` — one leaf, one class per model. Each

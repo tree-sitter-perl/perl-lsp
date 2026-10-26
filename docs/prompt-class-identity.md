@@ -154,16 +154,12 @@ body as `@section.class` (Python's) makes it a section of the lane,
 class Inner:` in `pkg/mod.py` files `Inner` as `pkg.mod.Outer.Inner`, so
 Django's per-model `class Meta:` is one class per model. The section
 covers the body, not the header, so a parent clause and the class's own
-name are written in the namespace around it. Its names are in force only
-for code written directly in it, as in Python's class scope: a bare head
-written there resolves to the nested class the body declares
-(`UseMap::class_body`, asked through `DeclaredClasses` — the symbol table,
-never a second list) before the ladder above, and otherwise falls through
-to the section around it (`namespace_range_around`). A callable written in
-the body opens a `SectionKind::Callable` section naming the namespace
-around the class, so a method never reaches its class's names bare, and
-a class nested one level further sees past its enclosing class to the
-module. A dotted spelling hangs off its head as any qualified spelling
+name are written in the namespace around it. A bare head written in it
+resolves to the nested class the body declares (`UseMap::class_body`,
+asked through `DeclaredClasses` — the symbol table, never a second list)
+before the ladder above, and otherwise falls through to the section around
+it (`namespace_range_around`); a class nested one level further sees past
+its enclosing class to the module. A dotted spelling hangs off its head as any qualified spelling
 does: `Outer.Inner`, in the file or after `from pkg.mod import Outer`, is
 `pkg.mod.Outer.Inner`. PHP and C++ capture no class section; their lanes
 are unchanged.
@@ -197,13 +193,15 @@ leaf-space FQ family validation in `implementations_of`.
   An open document's debounced rebuild that named its module before a
   marker flip and lands after the invalidator's refresh keeps the old
   name until its next edit.
-- **A Python class body is a section over its whole span after the
-  header.** A method's parameter annotations and defaults are evaluated in
-  the class scope, but the method's `Callable` section covers its whole
-  definition, so they resolve past the class; an import written directly
-  in a class body reaches its methods too. A class inside a method is
-  filed under the module (`pkg.mod.Local`), not Python's
-  `Outer.build.<locals>.Local`.
+- **A method sees its class body's names.** Python's class scope is in
+  force only for code written directly in it, but the `ClassBody` section
+  covers every line of the body after the header, methods included: a
+  bare `Inner` in `Outer.build` resolves to `pkg.mod.Outer.Inner` where
+  Python means the module's `Inner`, a class declared in a method is
+  filed under the class (`pkg.mod.Outer.Local`, not Python's
+  `Outer.build.<locals>.Local`), and an import written directly in a
+  class body reaches its methods too. No capture yet says a scope's names
+  stop at a nested callable.
 - **`Outer.Inner()` is a member call.** A call through an attribute is a
   `MethodCall` on the receiver `Outer`, and a nested class is no member
   of its enclosing class there, so the call is untyped and goto-def finds

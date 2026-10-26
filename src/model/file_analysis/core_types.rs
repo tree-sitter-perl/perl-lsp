@@ -176,20 +176,14 @@ pub enum SectionKind {
     /// `package Foo { … }` / `namespace A { … }` — span equals the block.
     Block,
     /// A class body a language makes a namespace (`@section.class`, Python's
-    /// class scope): its class's identity, over the body. Its names are in
-    /// force only for code written directly in it — a name the class does
-    /// not declare resolves in the section around it, and a callable inside
-    /// is a `Callable` section of its own.
+    /// class scope): its class's identity, over the body. A name the class
+    /// does not declare resolves in the section around it.
     ClassBody,
-    /// A callable written in a `ClassBody`: in force is the namespace around
-    /// that class (`""` for the global one), never the class's own names.
-    Callable,
 }
 
 /// The section in force at `point`: the innermost containing one — the
-/// latest-starting, on a tie the narrower, and on an equal span the one
-/// written last (a callable that is its class body's only statement).
-/// `None` outside every section. The one lookup over a namespace lane, for
+/// latest-starting, and on a tie the narrower. `None` outside every
+/// section. The one lookup over a namespace lane, for
 /// the model and both builders alike.
 pub fn namespace_range_at(ranges: &[NamespaceRange], point: Point) -> Option<&NamespaceRange> {
     innermost_range(ranges, point, |_| true)
@@ -245,8 +239,8 @@ impl OpenSections {
         Self::push_section(lane, namespace, span, SectionKind::Block);
     }
 
-    /// A section that is exactly its span — a braced form, a class body,
-    /// a callable in one — and ends nothing.
+    /// A section that is exactly its span — a braced form, a class body —
+    /// and ends nothing.
     pub fn push_section(lane: &mut Vec<NamespaceRange>, namespace: String, span: Span, kind: SectionKind) {
         debug_assert!(kind != SectionKind::Statement, "a statement form opens through open_statement");
         lane.push(NamespaceRange { namespace, span, kind });

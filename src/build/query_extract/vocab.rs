@@ -319,10 +319,8 @@ pub enum Capture {
     Context(ContextKind),
     /// A class body the language makes a namespace (`@section.class`,
     /// Python's class scope), paired with the match's `@context.class`: the
-    /// class's identity is in force over it for code written directly in
-    /// it. A name the class does not declare resolves past it, and a
-    /// callable inside sees past it altogether
-    /// (`SectionKind::ClassBody`).
+    /// class's identity is in force over it. A name the class does not
+    /// declare resolves past it (`SectionKind::ClassBody`).
     ClassSection,
     /// A base class, paired with the match's `@def.class.name`.
     Parent,

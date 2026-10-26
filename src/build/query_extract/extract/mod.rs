@@ -147,7 +147,7 @@ impl ExtractState<'_> {
     /// The identity a class named `leaf` and declared at `at` is filed
     /// under. Under a use-map it is the leaf joined to the namespace in
     /// force there — a namespace section, or the class body it is written
-    /// directly in (`Outer.Inner`) — so every spelling of the class
+    /// in (`Outer.Inner`) — so every spelling of the class
     /// resolves to the key it is filed under. Otherwise the spelling is
     /// the identity.
     fn class_identity(&self, leaf: &str, at: Point) -> String {

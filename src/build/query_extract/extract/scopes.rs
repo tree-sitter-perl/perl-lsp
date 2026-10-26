@@ -27,9 +27,8 @@ pub(super) struct State {
 }
 
 /// Record a namespace section under a use-map: a braced one (and a class
-/// body or a callable in one) is its body, a statement-form one runs to the
-/// end of the enclosing scope until the next one at its depth cuts it
-/// short.
+/// body) is its body, a statement-form one runs to the end of the
+/// enclosing scope until the next one at its depth cuts it short.
 fn open_section(st: &mut ExtractState, namespace: &str, span: Span, kind: SectionKind) {
     if st.pack.names.use_map_sep().is_none() {
         return;
@@ -40,7 +39,7 @@ fn open_section(st: &mut ExtractState, namespace: &str, span: Span, kind: Sectio
             let depth = st.scope_stack.len();
             st.scopes.open_sections.open_statement(lane, namespace.to_string(), span.start, span.end, depth);
         }
-        SectionKind::Block | SectionKind::ClassBody | SectionKind::Callable => {
+        SectionKind::Block | SectionKind::ClassBody => {
             OpenSections::push_section(lane, namespace.to_string(), span, kind)
         }
     }
@@ -78,18 +77,6 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             });
             st.scope_stack.push((e.end_byte, id));
             st.out.scope_count += 1;
-            // A callable written in a class body sees past the class: the
-            // namespace around it is in force over the callable.
-            if scope_cap != ScopeCap::Block {
-                let lane = &st.out.namespace_ranges;
-                let in_class_body = crate::model::file_analysis::namespace_range_at(lane, e.start)
-                    .is_some_and(|r| r.kind == SectionKind::ClassBody);
-                if in_class_body {
-                    let around = crate::model::file_analysis::namespace_range_around(lane, e.start)
-                        .map_or(String::new(), |r| r.namespace.clone());
-                    open_section(st, &around, e.span(), SectionKind::Callable);
-                }
-            }
             // a context deferred to THIS scope (C++ namespace) →
             // register at the body depth so it pops with the block.
             if let Some((kind, text)) = st.scopes.pending_context.remove(&e.match_id) {
