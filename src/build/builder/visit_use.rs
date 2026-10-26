@@ -17,6 +17,7 @@ impl<'a> Builder<'a> {
         let Ok(module_name) = module_node.utf8_text(self.source) else { return };
         let raw_args = self.extract_mojo_base_args(node);
         let (words, _qw_close) = self.extract_use_import_list(node);
+        let negated = crate::cst::is_negated_use(node);
         let imports: Vec<String> = words.iter().map(|(text, _)| text.clone()).collect();
         let import_words: Vec<plugin::ImportWord> = words
             .into_iter()
@@ -51,6 +52,7 @@ impl<'a> Builder<'a> {
                         raw_args,
                         names.to_vec(),
                         import_words[1..].to_vec(),
+                        negated,
                         node_to_span(node),
                         node_to_span(module_node),
                         Some(node),
@@ -66,6 +68,7 @@ impl<'a> Builder<'a> {
             raw_args,
             imports,
             import_words,
+            negated,
             node_to_span(node),
             node_to_span(module_node),
             Some(node),
@@ -251,6 +254,7 @@ impl<'a> Builder<'a> {
         raw_args: Vec<String>,
         imports: Vec<String>,
         import_words: Vec<plugin::ImportWord>,
+        negated: bool,
         span: Span,
         module_name_span: Span,
         node: Option<Node<'a>>,
@@ -492,6 +496,7 @@ impl<'a> Builder<'a> {
                 imports,
                 raw_args,
                 import_words,
+                negated,
                 current_package: self.current_package.clone(),
                 span,
             };
