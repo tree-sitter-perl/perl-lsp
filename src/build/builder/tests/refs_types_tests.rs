@@ -1584,7 +1584,7 @@ fn test_subclass_sub_called_as_a_function_takes_no_invocant() {
     let fa = build_fa(
         "package Base;\nsub new { bless {}, shift }\npackage R;\nuse base qw(Base);\nsub hook {\n    my ($self, $args) = @_;\n    _check($args);\n    return $self->_helper;\n}\nsub _check {\n    my ($flag) = @_;\n    return $flag;\n}\nsub _helper { my ($s) = @_; return $s; }\nsub _later { my ($t) = @_; return $t; }\n_later(1);\n1;\n",
     );
-    assert_eq!(fa.inferred_type_via_bag("$flag", Point::new(11, 4)), None);
+    assert_eq!(fa.inferred_type_via_bag("$flag", Point::new(10, 4)), None);
     assert_eq!(fa.inferred_type_via_bag("$t", Point::new(14, 30)), None);
     let s = fa.inferred_type_via_bag("$s", Point::new(13, 30));
     assert_eq!(s.as_ref().and_then(|t| t.class_name()), Some("R"), "{:?}", s);
@@ -1607,6 +1607,26 @@ fn test_class_sub_first_param_is_the_invocant_in_any_class() {
     assert!(first_is_invocant("name"));
     assert!(!first_is_invocant("_fmt"));
     assert!(!first_is_invocant("trim"));
+}
+
+#[test]
+fn test_only_the_first_shift_of_a_class_sub_is_its_invocant() {
+    // The class convention decides a sub's invocant after the walk; the
+    // shifts the walk saw still consume it, so only the first shift (or
+    // the head of `@_`) is the invocant, in a subclass and in a class that
+    // only blesses.
+    for pkg_head in ["use base 'Exporter';", "sub new { bless {}, shift }"] {
+        let src = format!(
+            "package Foo;\n{pkg_head}\nsub two {{\n    my $first = shift;\n    my $second = shift;\n    return $second;\n}}\nsub three {{\n    my $S = shift;\n    my ($x, $y) = @_;\n    return $x;\n}}\n1;\n"
+        );
+        let fa = build_fa(&src);
+        let a = fa.inferred_type_via_bag("$first", Point::new(5, 4));
+        assert_eq!(a.as_ref().and_then(|t| t.class_name()), Some("Foo"), "{pkg_head}: {:?}", a);
+        assert_eq!(fa.inferred_type_via_bag("$second", Point::new(5, 4)), None, "{pkg_head}");
+        let s = fa.inferred_type_via_bag("$S", Point::new(10, 4));
+        assert_eq!(s.as_ref().and_then(|t| t.class_name()), Some("Foo"), "{pkg_head}: {:?}", s);
+        assert_eq!(fa.inferred_type_via_bag("$x", Point::new(10, 4)), None, "{pkg_head}");
+    }
 }
 
 #[test]
