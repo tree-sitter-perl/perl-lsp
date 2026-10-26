@@ -242,13 +242,14 @@ impl LookupChain {
     }
 
     /// Every symbol a scope on the chain binds, innermost scope first and
-    /// in declaration order within one. A member declared through a
-    /// receiver (`self.x = …`) binds no name.
+    /// in declaration order within one. A key — of a hash, or an
+    /// instance's slot (`self.x = …`) — is reached through its container
+    /// and binds no name.
     pub fn bindings(self, symbols: &SymbolTable) -> impl Iterator<Item = &Symbol> {
         self.0
             .into_iter()
             .flat_map(move |scope| symbols.declared_directly_in(scope).iter().map(move |sid| &symbols[sid.0 as usize]))
-            .filter(|s| !s.flags.contains(SymbolFlags::THROUGH_RECEIVER))
+            .filter(|s| s.kind != SymKind::HashKeyDef)
     }
 }
 
