@@ -16,7 +16,12 @@ impl<'a> Builder<'a> {
         let Some(module_node) = node.child_by_field_name("module") else { return };
         let Ok(module_name) = module_node.utf8_text(self.source) else { return };
         let raw_args = self.extract_mojo_base_args(node);
-        let (imports, _qw_close) = self.extract_use_import_list(node);
+        let (words, _qw_close) = self.extract_use_import_list(node);
+        let imports: Vec<String> = words.iter().map(|(text, _)| text.clone()).collect();
+        let import_words: Vec<plugin::ImportWord> = words
+            .into_iter()
+            .map(|(text, span)| plugin::ImportWord { text, span })
+            .collect();
 
         // `use lib` is not an import — it prepends search-path roots to the
         // asker's @INC, which is what decides WHICH file a module name means
@@ -45,6 +50,7 @@ impl<'a> Builder<'a> {
                         source_module.clone(),
                         raw_args,
                         names.to_vec(),
+                        import_words[1..].to_vec(),
                         node_to_span(node),
                         node_to_span(module_node),
                         Some(node),
@@ -59,6 +65,7 @@ impl<'a> Builder<'a> {
             module_name.to_string(),
             raw_args,
             imports,
+            import_words,
             node_to_span(node),
             node_to_span(module_node),
             Some(node),
@@ -237,11 +244,13 @@ impl<'a> Builder<'a> {
     /// span still re-runs (distinct source statements are distinct work);
     /// a SyntheticUse cycle (kit plugin reacting to its own emission,
     /// re-firing with the SAME propagated span) short-circuits here.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn process_use(
         &mut self,
         module_name: String,
         raw_args: Vec<String>,
         imports: Vec<String>,
+        import_words: Vec<plugin::ImportWord>,
         span: Span,
         module_name_span: Span,
         node: Option<Node<'a>>,
@@ -478,12 +487,6 @@ impl<'a> Builder<'a> {
         // (without distinction) when a plugin emits SyntheticUse;
         // `use_dedup` breaks any cycle.
         if !self.plugins.is_empty() {
-            let import_words = node
-                .map(|n| crate::cst::string_list(n, self.source, &mut |_| Vec::new()))
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(text, span)| plugin::ImportWord { text, span })
-                .collect();
             let ctx = plugin::UseContext {
                 module_name,
                 imports,
@@ -1085,15 +1088,14 @@ impl<'a> Builder<'a> {
         alias
     }
 
-    /// Extract the import list from a use statement.
-    /// Returns (imported_symbols, qw_close_paren_position).
-    pub(super) fn extract_use_import_list(&self, node: Node<'a>) -> (Vec<String>, Option<Point>) {
-        let qw_close = self.find_qw_close_position(node);
-        let names = self.extract_string_names(node);
-        if !names.is_empty() {
-            return (names, qw_close);
+    /// Extract the import list from a use statement: each word with its
+    /// span, and the qw close-paren position.
+    pub(super) fn extract_use_import_list(&self, node: Node<'a>) -> (Vec<(String, Span)>, Option<Point>) {
+        let words = self.extract_string_list(node);
+        if words.is_empty() {
+            return (vec![], None);
         }
-        (vec![], None)
+        (words, self.find_qw_close_position(node))
     }
 
     /// Classify an assignment LHS as an export package-variable, tolerating a
