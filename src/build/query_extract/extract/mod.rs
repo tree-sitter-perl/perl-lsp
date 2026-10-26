@@ -69,7 +69,7 @@ enum Family {
 fn family(cap: Capture) -> Family {
     use Capture as C;
     match cap {
-        C::Scope(_) | C::Context(_) | C::ClassSection | C::Parent => Family::Scopes,
+        C::Scope(_) | C::Context(_) | C::Parent => Family::Scopes,
         C::Def { .. }
         | C::Qualifier
         | C::OolDef
@@ -134,14 +134,12 @@ struct ExtractState<'p> {
 pub use crate::model::file_analysis::FileModule;
 
 impl ExtractState<'_> {
-    /// The namespace a declaration at `at` joins: the section of the lane
-    /// in force there, as written so far. Every section that holds `at` is
-    /// in by then — a section opens at or before the code it covers, and
-    /// a statement form is cut short only where its successor starts.
+    /// The section of the namespace lane in force at `at`, as written so
+    /// far. Every section that holds `at` is in by then — a section opens
+    /// at or before the code it covers, and a statement form is cut short
+    /// only where its successor starts.
     fn namespace_at(&self, at: Point) -> Option<&str> {
-        // The live scope, not a span lookup: the walk is mid-file, and
-        // the scope a site is written in is what the stack holds.
-        crate::model::file_analysis::namespace_range_in(&self.out.namespace_ranges, &self.out.scopes, self.cur_scope, at)
+        crate::model::file_analysis::namespace_range_at(&self.out.namespace_ranges, at)
             .map(|r| r.namespace.as_str())
             .filter(|ns| !ns.is_empty())
     }
@@ -157,15 +155,14 @@ impl ExtractState<'_> {
             .unwrap_or(self.cur_scope)
     }
 
-    /// The identity a class named `leaf` and declared at `at` is filed
-    /// under. Under a use-map it is the leaf joined to the namespace in
-    /// force there — a namespace section, or the class body it is written
-    /// in (`Outer.Inner`) — so every spelling of the class
-    /// resolves to the key it is filed under. Otherwise the spelling is
-    /// the identity.
-    fn class_identity(&self, leaf: &str, at: Point) -> String {
+    /// The identity a class named `leaf`, declared in `from` at `at`, is
+    /// filed under. Under a use-map it is the leaf joined to its home
+    /// (`scopes::home_of`) — the class it is written in, else the
+    /// namespace in force — so every spelling of the class resolves to the
+    /// key it is filed under. Otherwise the spelling is the identity.
+    fn class_identity(&self, leaf: &str, from: ScopeId, at: Point) -> String {
         match self.pack.names.use_map_sep() {
-            Some(sep) => crate::model::conventions::join_qualified(self.namespace_at(at).unwrap_or(""), leaf, sep),
+            Some(sep) => crate::model::conventions::join_qualified(scopes::home_of(self, from, at).unwrap_or(""), leaf, sep),
             None => leaf.to_string(),
         }
     }
@@ -387,6 +384,7 @@ pub fn extract_in(
     // resolves once every row is in.
     scopes::resolve_parents(&mut st);
     defs::dedup(&mut st);
+    defs::emit_receiver_types(&mut st);
     commands::finish(&mut st);
     defs::emit_type_aliases(&mut st);
     // Reads the symbol table after dedup and the command defs.

@@ -46,9 +46,9 @@ pub struct SkelSymbol {
     pub flags: SymbolFlags,
 }
 
-impl crate::model::file_analysis::DeclaredClasses for Vec<SkelSymbol> {
-    fn declares_class(&self, identity: &str) -> bool {
-        self.iter().any(|s| matches!(s.kind, DefCap::Class | DefCap::Package) && s.name == identity)
+impl crate::model::file_analysis::ScopeClasses for Vec<SkelSymbol> {
+    fn declares_in(&self, scope: crate::model::file_analysis::ScopeId, identity: &str) -> bool {
+        self.iter().any(|s| s.scope == scope && matches!(s.kind, DefCap::Class | DefCap::Package) && s.name == identity)
     }
 }
 
@@ -922,20 +922,23 @@ impl SkeletonAnalysis {
             }
         }
         // ---- Local/param vars: a variable READ resolves to the nearest
-        // visible Variable declaration by lexical scope walk → local
-        // goto-def + hover. Declarations are already Variable symbols
-        // (`@def.local`/`@def.var`); fields are excluded naturally (their
-        // class scope isn't on a local read's scope chain).
+        // visible declaration of a bare name by the lookup walk → local
+        // goto-def + hover. A name is a Variable (`@def.local`/`@def.var`)
+        // or a Field its scope declares by name (python's class body); a
+        // member written through a receiver is no bare name anywhere. Where
+        // a body elides its receiver, a field is reached as a member of the
+        // elided receiver (the implicit-receiver pass below), not by the
+        // lexical walk.
         let mut defs_by_name: std::collections::HashMap<
             String,
-            Vec<(crate::model::file_analysis::ScopeId, Span, SymbolId)>,
+            Vec<(crate::model::file_analysis::ScopeId, Span, SymbolId, bool)>,
         > = std::collections::HashMap::new();
         for s in &symbols {
-            if matches!(s.kind, SymKind::Variable) {
+            if s.is_bare_name() {
                 defs_by_name
                     .entry(s.name.clone())
                     .or_default()
-                    .push((s.scope, s.selection_span, s.id));
+                    .push((s.scope, s.selection_span, s.id, s.kind == SymKind::Field));
             }
         }
         let scope_parent: std::collections::HashMap<
@@ -952,6 +955,7 @@ impl SkeletonAnalysis {
         let mut unresolved_reads: Vec<(String, crate::model::file_analysis::ScopeId, Span)> = Vec::new();
         for (name, read_scope, read_span) in &self.var_reads {
             let rp = (read_span.start.row, read_span.start.column);
+            let elides = elided_class.get(read_scope.0 as usize).is_some_and(Option::is_some);
             let resolved = defs_by_name.get(name).and_then(|cands| {
                 // `lookup_chain`, not the raw climb: a scope whose names
                 // are in force only for code written directly in it is
@@ -960,9 +964,9 @@ impl SkeletonAnalysis {
                     // nearest decl of this name in THIS scope level, declared at
                     // or before the read (latest-wins for redeclaration).
                     let mut best: Option<((usize, usize), SymbolId)> = None;
-                    for (dscope, dspan, did) in cands {
+                    for (dscope, dspan, did, field) in cands {
                         let dp = (dspan.start.row, dspan.start.column);
-                        if *dscope == sc && dp <= rp && best.is_none_or(|(bp, _)| dp > bp) {
+                        if *dscope == sc && !(elides && *field) && dp <= rp && best.is_none_or(|(bp, _)| dp > bp) {
                             best = Some((dp, *did));
                         }
                     }
@@ -994,7 +998,7 @@ impl SkeletonAnalysis {
             let mut cur = Some(*ref_scope);
             let mut resolved: Option<SymbolId> = None;
             while let Some(sc) = cur {
-                if let Some((_, _, did)) = cands.iter().find(|(dscope, _, _)| *dscope == sc) {
+                if let Some((_, _, did, _)) = cands.iter().find(|(dscope, ..)| *dscope == sc) {
                     resolved = Some(*did);
                     break;
                 }

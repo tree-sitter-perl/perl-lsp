@@ -117,20 +117,54 @@ handler in the same shape rather than a string-keyed hook on the pack.
 A scope's name-lookup rule is the document's to state, never something a
 consumer reads off the shape of the scope or the language serving it.
 Python's class body is in force for the code written directly in it and
-not for a method of the class; PHP's function body sees no variable of
-the scopes around it but the ones it captures. Both are rules ABOUT a
-scope, so each is a `ScopeCap` spelling the document opts into
-(`@scope.direct`), minted as a field on the model's `Scope`
-(`Scope::direct`) — rule #11, at the producer — and read by ONE walk,
-`lookup_chain`, which every name lookup takes: a variable read, a bare
-class spelling, the namespace section in force at a site. A pack that
-says nothing keeps the plain lexical chain.
+not for a method of the class or a class nested in it; PHP's function
+body sees no variable of the scopes around it but the ones it captures.
+Both are rules ABOUT a scope, so each is a `ScopeCap` spelling the
+document opts into (`@scope.direct`), minted as a field on the model's
+`Scope` (`Scope::direct`) — rule #11, at the producer — and read by ONE
+walk, `lookup_chain`, which every name lookup takes: a variable read, a
+bare class spelling. A pack that says nothing keeps the plain lexical
+chain.
+
+Lookup is not ownership. Whose member a declaration is comes from the
+scope a class's own match opened (`@context.class` with its `@scope`),
+and stops at a callable whatever the document marks; how a name resolves
+comes from `lookup_chain`. Neither is a namespace section: the lane holds
+namespaces only. A fact the match states about where a token is written
+is minted with the token — a base in a `@parent` match is written in the
+scope its class is declared in, though the class's `@scope` covers the
+header — so no consumer compares its position against the class body.
 
 The spelling names the behaviour, not the construct: `direct` is a scope
 whose names are in force only for code written directly in it, whatever
 the language calls that scope. A generic capture may never carry one
 language's rule — `@scope.sub` once minted a Python-only section kind,
 which is why the rule moved here.
+
+## Decision: a member is declared where the document says, once
+
+A data member is a `@def.field`, whatever writes it. Python's document
+captures two shapes. A name its class body binds (`count = 0`, `a: int`,
+`b: int = 5`) is a field of the class. The same token stays a name in the
+class scope, so code written directly in the body reads it bare, through
+`lookup_chain`. A write through a method's receiver (`self.n = …`) also
+captures the receiver token as `@def.field.receiver`. The extractor
+declares the member only when that token binds the enclosing method's
+`@param.receiver`, files it on that parameter's class, and declares it
+once: the first such write for a (class, name). A later write, augmented
+or not, is a member reference that resolves to it.
+
+Membership and bare visibility are separate facts. A member's `package`
+is its class, and its `scope` is the class body (`member_scope`) for both
+shapes. Whether a bare name binds it is the symbol's own answer,
+`Symbol::is_bare_name`: a receiver-declared member (`THROUGH_RECEIVER`) is
+no bare name anywhere. A body that elides its receiver
+(`@scope.sub.implicit_receiver`, C++) reaches a field as a member of that
+receiver, so the lexical walk leaves fields to it there.
+
+A receiver parameter holds an instance of its method's class. The
+extractor states that as the parameter's value at its binding site, so a
+member written or read through `self` dispatches on the class.
 
 ## Decision: a fact the grammar parses is a capture, not a text probe
 
