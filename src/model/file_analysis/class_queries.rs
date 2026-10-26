@@ -931,11 +931,9 @@ impl FileAnalysis {
 
     /// The namespace in force at `point`, for every language (`None` =
     /// outside every section: the global namespace, or Perl before its
-    /// first `package`). A section the point's lookup chain does not
-    /// reach is not in force there, so a method of a `direct` class body
-    /// reads the namespace around the class.
+    /// first `package`).
     pub fn namespace_at(&self, point: Point) -> Option<&str> {
-        namespace_range_for(&self.namespace_ranges, &self.scopes, point).map(|r| r.namespace.as_str())
+        namespace_range_at(&self.namespace_ranges, point).map(|r| r.namespace.as_str())
     }
 
     /// Iterate Handler symbols whose owner class is `owner_class` and
@@ -1069,7 +1067,12 @@ impl FileAnalysis {
     pub fn spelled_identity(&self, r: &Ref) -> String {
         match (self.pack.names.use_map_sep(), self.pack.use_row_covering(&r.span)) {
             (Some(sep), Some(row)) => row.name.identity(sep),
-            _ => self.class_spelling_identity(&r.target_name, r.span.start),
+            // the ref's own scope, not the innermost one around its site:
+            // extraction minted where the spelling is looked up
+            _ => match self.use_map_in(r.span.start, r.scope) {
+                Some(map) => map.resolve(&r.target_name).identity(map.sep),
+                None => r.target_name.clone(),
+            },
         }
     }
 
@@ -1183,6 +1186,13 @@ impl FileAnalysis {
         UseMap::at(&self.pack.use_rows, &self.namespace_ranges, &self.scopes, &self.pack.names, site, self)
     }
 
+    /// `use_map_at` for a spelling whose scope is in hand — a ref's, which
+    /// extraction minted (a base class's is the scope its class is
+    /// declared in, not the class's own).
+    fn use_map_in(&self, site: Point, scope: ScopeId) -> Option<UseMap<'_>> {
+        UseMap::in_scope(&self.pack.use_rows, &self.namespace_ranges, &self.scopes, &self.pack.names, site, scope, self)
+    }
+
     fn leaf_namespace_pins(&self) -> UseMapPins {
         let mut pins: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
@@ -1229,13 +1239,8 @@ impl FileAnalysis {
         }
         // The pins answer for the whole origin, so its own namespace is
         // one only when every section names the same; a file of several
-        // makes no own-namespace claim (its sites resolve their own). A
-        // class body is no namespace of the file's.
-        let mut sections = self
-            .namespace_ranges
-            .iter()
-            .filter(|s| matches!(s.kind, SectionKind::Statement | SectionKind::Block))
-            .map(|s| s.namespace.as_str());
+        // makes no own-namespace claim (its sites resolve their own).
+        let mut sections = self.namespace_ranges.iter().map(|s| s.namespace.as_str());
         let own_ns = sections
             .next()
             .filter(|first| sections.all(|s| s == *first))
@@ -1244,7 +1249,7 @@ impl FileAnalysis {
         // resolver's answer for the qualifier it was written under. The
         // spellings carry no site, so they read the whole-file view.
         if let Some(sep) = self.pack.names.use_map_sep() {
-            let map = UseMap { rows: &self.pack.use_rows, class_body: None, own_namespace: own_ns.as_deref(), sep, site: None };
+            let map = UseMap { rows: &self.pack.use_rows, scope_step: None, own_namespace: own_ns.as_deref(), sep, site: None };
             for (leaf, prefix) in &self.pack.qualified_spellings {
                 pin(&mut pins, leaf, &map.resolve_in(prefix, leaf).namespace);
             }
@@ -1280,8 +1285,11 @@ impl FileAnalysis {
     }
 }
 
-impl DeclaredClasses for FileAnalysis {
-    fn declares_class(&self, identity: &str) -> bool {
-        self.find_type_decl(identity).is_some()
+impl ScopeClasses for FileAnalysis {
+    fn declares_in(&self, scope: ScopeId, identity: &str) -> bool {
+        self.symbols.in_scope(scope).iter().any(|sid| {
+            let s = &self.symbols[sid.0 as usize];
+            matches!(s.kind, SymKind::Package | SymKind::Class) && s.name == identity
+        })
     }
 }

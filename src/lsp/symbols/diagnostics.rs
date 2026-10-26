@@ -16,6 +16,7 @@ pub mod codes {
     pub const HELPER_NOT_LOADED: &str = "helper-not-loaded";
     pub const UNRESOLVED_DISPATCH: &str = "unresolved-dispatch";
     pub const UNKNOWN_HASH_KEY: &str = "unknown-hash-key";
+    pub const MISSING_DECLARATION: &str = "missing-declaration";
     pub const RESOLVED_BY_WIDENING: &str = "resolved-by-widening";
 }
 
@@ -53,9 +54,10 @@ pub fn widening_diagnostics(analysis: &FileAnalysis, module_index: &ModuleIndex)
 
 // ---- Diagnostics ----
 
-/// Opt-in diagnostic toggles. Defaults are all-off for the QA/plugin-author
-/// channels (noise for end users); the always-on hints (`unresolved-function`
-/// / `unresolved-method`) ignore this.
+/// Diagnostic toggles. Defaults are all-off: the opt-in QA/plugin-author
+/// channels (noise for end users) and the opt-out of the default-on
+/// `missing-declaration`; the always-on hints (`unresolved-function` /
+/// `unresolved-method`) ignore this.
 ///
 /// **The struct is the schema.** `rename_all = "camelCase"` makes each field
 /// its own LSP key under `initializationOptions.diagnostics`, so `backend.rs`
@@ -106,6 +108,10 @@ pub struct DiagnosticOptions {
     /// guaranteed runtime die. Guard-narrowed reps only; objects are never a
     /// mismatch. Off by default.
     pub deref_shape: bool,
+    /// Turn OFF `missing-declaration` (an undeclared variable, what `use
+    /// strict 'vars'` rejects), which is on by default. Spelled as an
+    /// opt-out so every field keeps the all-off default.
+    pub disable_missing_declaration: bool,
 }
 
 impl DiagnosticOptions {
@@ -122,6 +128,7 @@ impl DiagnosticOptions {
             optional_deref: has("--optional-deref"),
             redundant_guard: has("--redundant-guard"),
             deref_shape: has("--deref-shape"),
+            disable_missing_declaration: has("--disable-missing-declaration"),
         }
     }
 }
@@ -348,6 +355,37 @@ pub fn collect_diagnostics(
     }
 
     drop(_g_fn);
+
+    // Undeclared variables — what `use strict 'vars'` rejects. On by default:
+    // a global nobody declared is the typo-shaped bug strict exists to catch.
+    // A name an import binds is declared by its exporter. A bare or `:tag`
+    // import whose producer isn't cached yet may bind any variable, so the
+    // file stays silent until it resolves (resolution re-publishes).
+    let surface_unknown = import_bindings.iter().any(|b| {
+        b.exported.is_none()
+            && !b.import.empty_import
+            && (b.import.imported_symbols.is_empty()
+                || b.import.imported_symbols.iter().any(|s| {
+                    s.local_name.starts_with(':') || s.local_name.starts_with('-')
+                }))
+    });
+    if !surface_unknown && !options.disable_missing_declaration {
+        for r in analysis.undeclared_variable_uses() {
+            let glob = crate::model::conventions::glob_of_variable(&r.target_name);
+            let brought = |n: &str| matches!(resolve_name(n), Some((_, ImportResolution::Brought)));
+            if brought(&r.target_name) || brought(&glob) {
+                continue;
+            }
+            diagnostics.push(Diagnostic {
+                range: span_to_range(r.span),
+                severity: Some(DiagnosticSeverity::WARNING),
+                code: Some(NumberOrString::String(codes::MISSING_DECLARATION.into())),
+                source: Some("perl-lsp".into()),
+                message: format!("'{}' is not declared (add `my` or `our`)", r.target_name),
+                ..Default::default()
+            });
+        }
+    }
     // 5e: Unresolved method diagnostics for locally-defined classes.
     //
     // Core owns ONLY the true `UNIVERSAL::` surface — the methods every Perl

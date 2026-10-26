@@ -315,12 +315,17 @@ spelled! {
 
 /// Whether a `@def.<kind>` capture is the def node, its name token, or
 /// the whole written spelling around a name token that is only part of it
-/// (php's `$x` around `x`): the label the declaration is listed by.
+/// (php's `$x` around `x`): the label the declaration is listed by, or
+/// the receiver a member def is written through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DefPart {
     Node,
     Name,
     Spelled,
+    /// The receiver a member def is written through (python's `self` in
+    /// `self.x = …`): the def declares a member of the receiver's class,
+    /// and only where that token names the enclosing method's receiver.
+    Receiver,
 }
 
 /// One capture of a pack query document.
@@ -338,11 +343,6 @@ pub enum Capture {
     RefSpelled,
     Scope(ScopeCap),
     Context(ContextKind),
-    /// A class body the language makes a namespace (`@section.class`,
-    /// Python's class scope), paired with the match's `@context.class`: the
-    /// class's identity is in force over it. A name the class does not
-    /// declare resolves past it (`SectionKind::ClassBody`).
-    ClassSection,
     /// A base class, paired with the match's `@def.class.name`.
     Parent,
     Import(ImportCap),
@@ -419,13 +419,13 @@ impl Capture {
             ["def", k] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Node },
             ["def", k, "name"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Name },
             ["def", k, "spelled"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Spelled },
+            ["def", k, "receiver"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Receiver },
             ["ref", "spelled"] => C::RefSpelled,
             ["ref", rest @ ..] => C::Ref(RefCap::parse(&rest.join("."))?),
             ["scope"] => C::Scope(ScopeCap::Block),
             ["scope", "sub", "implicit_receiver"] => C::Scope(ScopeCap::SubImplicitReceiver),
             ["scope", k] if !k.is_empty() => C::Scope(ScopeCap::parse(k)?),
             ["context", k] => C::Context(ContextKind::parse(k)?),
-            ["section", "class"] => C::ClassSection,
             ["parent"] => C::Parent,
             ["import"] => C::Import(ImportCap::Statement),
             ["import", k] if !k.is_empty() => C::Import(ImportCap::parse(k)?),
@@ -488,11 +488,11 @@ impl fmt::Display for Capture {
             C::Def { kind, part: DefPart::Name } => write!(f, "def.{kind}.name"),
             C::Def { kind, part: DefPart::Spelled } => write!(f, "def.{kind}.spelled"),
             C::DefPair => f.write_str("def.pair"),
+            C::Def { kind, part: DefPart::Receiver } => write!(f, "def.{kind}.receiver"),
             C::Ref(k) => write!(f, "ref.{k}"),
             C::RefSpelled => f.write_str("ref.spelled"),
             C::Scope(k) => family(f, "scope", k.spelling()),
             C::Context(k) => write!(f, "context.{k}"),
-            C::ClassSection => f.write_str("section.class"),
             C::Parent => f.write_str("parent"),
             C::Import(k) => family(f, "import", k.spelling()),
             C::Alias(k) => write!(f, "alias.{k}"),
