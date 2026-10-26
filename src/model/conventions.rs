@@ -155,6 +155,25 @@ pub fn is_special_variable(name: &str) -> bool {
     }
 }
 
+/// Whether `use VERSION` turns `strict` on: every version from 5.11 does.
+/// Reads both spellings, the v-string (`v5.36`, `5.36.0`) and the decimal
+/// (`5.012`, `5.010_001`, whose minor is the first three fraction digits).
+pub fn version_enables_strict(version: &str) -> bool {
+    let text = version.replace('_', "");
+    let (vstring, text) = match text.strip_prefix('v') {
+        Some(rest) => (true, rest.to_string()),
+        None => (text.matches('.').count() > 1, text.clone()),
+    };
+    let mut parts = text.split('.');
+    let Some(Ok(major)) = parts.next().map(str::parse::<u32>) else { return false };
+    let minor = match parts.next() {
+        None => 0,
+        Some(m) if vstring => m.parse::<u32>().unwrap_or(0),
+        Some(m) => format!("{m:0<3}").get(..3).and_then(|d| d.parse::<u32>().ok()).unwrap_or(0),
+    };
+    (major, minor) >= (5, 11)
+}
+
 /// `use strict 'vars'` exempts these from declaration on top of the special
 /// variables: `$a`/`$b` are `sort`'s comparator globals.
 pub fn is_strict_vars_exempt(name: &str) -> bool {
