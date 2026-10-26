@@ -1679,7 +1679,6 @@ fn raw_scope_climbs_are_containment_only() {
     let allow: &[(&str, usize, &str)] = &[
         ("build/builder/infra.rs", 1, "package_for_node: the package of the innermost scope that names one"),
         ("build/builder/visit_use.rs", 2, "find_sub_symbol_for[_scope]: the Sub/Method body a scope sits in"),
-        ("build/query_extract/extract/scopes.rs", 1, "home_of: the class whose own scope a declaration is written in (ownership, stops at a callable)"),
         ("build/query_extract/skeleton.rs", 1, "the callable a return site is an arm of"),
         ("model/file_analysis/class_queries.rs", 2, "a member's declaring scope inside its class body; package_at's innermost scope that names a package"),
         ("model/file_analysis/cursor_queries.rs", 1, "enclosing_callable_at: the first body up the tree that names its callable"),
