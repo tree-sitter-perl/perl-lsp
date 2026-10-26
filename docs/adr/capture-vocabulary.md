@@ -171,24 +171,42 @@ which is why the rule moved here.
 
 ## Decision: a member is declared where the document says, once
 
-A data member is a `@def.field`, whatever writes it. Python's document
-captures two shapes. A name its class body binds (`count = 0`, `a: int`,
-`b: int = 5`) is a field of the class. The same token stays a name in the
-class scope, so code written directly in the body reads it bare, through
-`lookup_chain`. A write through a method's receiver (`self.n = …`) also
-captures the receiver token as `@def.field.receiver`. The extractor
-declares the member only when that token binds the enclosing method's
-`@param.receiver`, files it on that parameter's class, and declares it
-once: the first such write for a (class, name). A later write, augmented
-or not, is a member reference that resolves to it.
+Python's document captures two member shapes, and each reuses a model
+the rest of the server already reads.
 
-Membership and bare visibility are separate facts. A member's `package`
-is its class, and its `scope` is the class body (`member_scope`) for both
-shapes. Whether a bare name binds it is the symbol's own answer,
-`Symbol::is_bare_name`: a receiver-declared member (`THROUGH_RECEIVER`) is
-no bare name anywhere. A body that elides its receiver
-(`@scope.sub.implicit_receiver`, C++) reaches a field as a member of that
-receiver, so the lexical walk leaves fields to it there.
+A name a class body binds (`count = 0`, `a: int`, `b: int = 5`) is two
+names from one token: the class's data member (`@def.field`,
+`Counter.count`) and a name in the class scope (`@def.var`), which code
+written directly in the body reads bare through `lookup_chain`. The match
+says so with `@def.pair`: the two defs carrying one match id are linked
+each way as `Symbol::declared_with`, the relation Perl's `has` already
+mints. The twin is no class content of its own; a rename from either
+spelling rewrites both (`codeclared_member_group` from the twin's side,
+the references matcher folding the twin's uses in from the member's). A
+binding with a value is `@mark.static`; a bare annotation declares an
+instance's attribute and stays unmarked.
+
+A write through a receiver (`self.n = …`, `@def.slot`, receiver token
+`@def.slot.receiver`) declares an instance slot: a `HashKeyDef` owned by
+`HashKeyOwner::Class`, Perl's own model for `$self->{n}`. The owner is the
+class the receiver is TYPED as at the write — the receiver parameter's
+class, or an annotated parameter's or local's annotation — read through
+the witness registry once extraction has lowered them
+(`defs::declare_slots`). A write declares only when neither its class nor
+an ancestor already declares the name (a class-body binding, a member, an
+earlier slot); every other write, augmented or not, and any write through
+an untyped receiver, stays a member reference. Ancestors are the file's
+own parents at extraction, and a local typed only by its value
+(`o = Counter()`) is untyped there: call witnesses are minted at assembly.
+
+A slot is reached only through a receiver: it is no bare name anywhere,
+because the lexical walk binds Variables alone. Member lookup reads it
+first — `NameSpellings::instance_slots` is the language's data saying its
+instance slots shadow the class's members (`BeforeClass`), so
+`resolve_member_in_ancestors` walks the ancestry for a class-owned slot
+before it walks it for members, and `slot_class_of` makes a slot class
+content for goto-def, references, rename, hover and completion. Perl
+keeps its keys apart from its methods (`Apart`), so nothing changes there.
 
 A receiver parameter holds an instance of its method's class. The
 extractor states that as the parameter's value at its binding site, so a

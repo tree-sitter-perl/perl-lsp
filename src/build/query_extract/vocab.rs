@@ -46,6 +46,10 @@ spelled! {
         Local = "local",
         /// A struct/class data member.
         Field = "field",
+        /// An instance slot: a key of the per-instance store a write through
+        /// a receiver creates (python's `self.x = …`). A class-owned
+        /// `HashKeyDef`, Perl's `$self->{x}` slot.
+        Slot = "slot",
         Constant = "constant",
         Enumerator = "enumerator",
         Label = "label",
@@ -328,9 +332,9 @@ pub enum DefPart {
     Node,
     Name,
     Spelled,
-    /// The receiver a member def is written through (python's `self` in
-    /// `self.x = …`): the def declares a member of the receiver's class,
-    /// and only where that token names the enclosing method's receiver.
+    /// The receiver a slot def is written through (python's `self` in
+    /// `self.x = …`): the slot belongs to the class the receiver is typed
+    /// as at the write.
     Receiver,
 }
 
@@ -338,6 +342,10 @@ pub enum DefPart {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Capture {
     Def { kind: DefCap, part: DefPart },
+    /// The one name token two defs of this match declare together (python's
+    /// class-body binding: the class's member and the name the body reads).
+    /// They are one declaration, linked each way as `Symbol::declared_with`.
+    DefPair,
     Ref(RefCap),
     /// The whole written spelling of the match's reference when its token
     /// is only the leaf (`Base\Model` around `Model`): the reference
@@ -417,6 +425,7 @@ impl Capture {
         use Capture as C;
         let segs: Vec<&str> = name.split('.').collect();
         Some(match segs.as_slice() {
+            ["def", "pair"] => C::DefPair,
             ["def", k] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Node },
             ["def", k, "name"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Name },
             ["def", k, "spelled"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Spelled },
@@ -485,6 +494,7 @@ impl fmt::Display for Capture {
         };
         match *self {
             C::Def { kind, part: DefPart::Node } => write!(f, "def.{kind}"),
+            C::DefPair => f.write_str("def.pair"),
             C::Def { kind, part: DefPart::Name } => write!(f, "def.{kind}.name"),
             C::Def { kind, part: DefPart::Spelled } => write!(f, "def.{kind}.spelled"),
             C::Def { kind, part: DefPart::Receiver } => write!(f, "def.{kind}.receiver"),
@@ -601,6 +611,7 @@ impl DefCap {
             // `reexport` marker makes resolution see through it.
             DefCap::Method | DefCap::Reexport => SymKind::Method,
             DefCap::Field => SymKind::Field,
+            DefCap::Slot => SymKind::HashKeyDef,
             DefCap::Enumerator => SymKind::Enumerator,
             DefCap::Var | DefCap::Local | DefCap::Label | DefCap::UnionField => SymKind::Variable,
         }

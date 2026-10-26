@@ -19,6 +19,10 @@ pub struct SkelSymbol {
     /// The declaration as written around its name token (`@def.<kind>.spelled`:
     /// php's `$x` around the member name `x`), listed in place of the name.
     pub spelled: Option<String>,
+    /// The `@def.pair` match this def shares its name token with: the two
+    /// defs carrying one id are one declaration (`Symbol::declared_with`).
+    /// A match id, not a position in `symbols`, so it survives every dedup.
+    pub pair: Option<usize>,
     /// Declared return type (`@rettype`), for methods/functions — drives
     /// method-return resolution + chaining through PackageSymbol.
     pub return_type: Option<InferredType>,
@@ -521,7 +525,14 @@ impl SkeletonAnalysis {
                 selection_span: Span { start: s.name_start, end: s.name_end },
                 scope: s.scope,
                 package: s.package.clone(),
-                detail: SymbolDetail::None,
+                // A slot is its class's instance key, as Perl's `$self->{k}`.
+                detail: match (s.kind, &s.package) {
+                    (DefCap::Slot, Some(class)) => SymbolDetail::HashKeyDef {
+                        owner: crate::model::file_analysis::HashKeyOwner::Class(class.clone()),
+                        is_dynamic: false,
+                    },
+                    _ => SymbolDetail::None,
+                },
                 namespace: crate::model::file_analysis::Namespace::Language,
                 presentation: crate::model::file_analysis::Presentation {
                     // An include-guard `#define` is compilation plumbing,
@@ -549,6 +560,19 @@ impl SkeletonAnalysis {
                 arity: s.arity,
             })
             .collect();
+        {
+            let mut pairs: std::collections::HashMap<usize, Vec<usize>> = Default::default();
+            for (i, s) in self.symbols.iter().enumerate() {
+                if let Some(id) = s.pair {
+                    pairs.entry(id).or_default().push(i);
+                }
+            }
+            for at in pairs.values() {
+                let [a, b] = at[..] else { continue };
+                symbols[a].declared_with = Some(SymbolId(b as u32));
+                symbols[b].declared_with = Some(SymbolId(a as u32));
+            }
+        }
         // Tag a typedef-struct's members with its name. `typedef struct
         // {...} T;` names the type AFTER its body, so @context.class can't
         // reach the members (already walked). For each class, members
@@ -922,23 +946,20 @@ impl SkeletonAnalysis {
             }
         }
         // ---- Local/param vars: a variable READ resolves to the nearest
-        // visible declaration of a bare name by the lookup walk → local
-        // goto-def + hover. A name is a Variable (`@def.local`/`@def.var`)
-        // or a Field its scope declares by name (python's class body); a
-        // member written through a receiver is no bare name anywhere. Where
-        // a body elides its receiver, a field is reached as a member of the
-        // elided receiver (the implicit-receiver pass below), not by the
-        // lexical walk.
+        // visible Variable declaration by the lookup walk → local
+        // goto-def + hover. Declarations are already Variable symbols
+        // (`@def.local`/`@def.var`; a python class-body binding's Variable
+        // twin); fields are members, reached through a receiver.
         let mut defs_by_name: std::collections::HashMap<
             String,
-            Vec<(crate::model::file_analysis::ScopeId, Span, SymbolId, bool)>,
+            Vec<(crate::model::file_analysis::ScopeId, Span, SymbolId)>,
         > = std::collections::HashMap::new();
         for s in &symbols {
-            if s.is_bare_name() {
+            if matches!(s.kind, SymKind::Variable) {
                 defs_by_name
                     .entry(s.name.clone())
                     .or_default()
-                    .push((s.scope, s.selection_span, s.id, s.kind == SymKind::Field));
+                    .push((s.scope, s.selection_span, s.id));
             }
         }
         let mut local_refs: Vec<crate::model::file_analysis::Ref> = Vec::new();
@@ -951,7 +972,6 @@ impl SkeletonAnalysis {
         let mut unresolved_reads: Vec<(String, crate::model::file_analysis::ScopeId, Span)> = Vec::new();
         for (name, read_scope, read_span) in &self.var_reads {
             let rp = (read_span.start.row, read_span.start.column);
-            let elides = elided_class.get(read_scope.0 as usize).is_some_and(Option::is_some);
             let resolved = defs_by_name.get(name).and_then(|cands| {
                 // a scope whose names are in force only for code written
                 // directly in it is not on a nested callable's chain
@@ -959,9 +979,9 @@ impl SkeletonAnalysis {
                     // nearest decl of this name in THIS scope level, declared at
                     // or before the read (latest-wins for redeclaration).
                     let mut best: Option<((usize, usize), SymbolId)> = None;
-                    for (dscope, dspan, did, field) in cands {
+                    for (dscope, dspan, did) in cands {
                         let dp = (dspan.start.row, dspan.start.column);
-                        if *dscope == sc && !(elides && *field) && dp <= rp && best.is_none_or(|(bp, _)| dp > bp) {
+                        if *dscope == sc && dp <= rp && best.is_none_or(|(bp, _)| dp > bp) {
                             best = Some((dp, *did));
                         }
                     }
@@ -992,7 +1012,7 @@ impl SkeletonAnalysis {
             let Some(cands) = defs_by_name.get(name) else { continue };
             let resolved: Option<SymbolId> = crate::model::file_analysis::lookup_chain(&self.scopes, *ref_scope)
                 .scopes()
-                .find_map(|sc| cands.iter().find(|(dscope, ..)| *dscope == sc).map(|(_, _, did, _)| *did));
+                .find_map(|sc| cands.iter().find(|(dscope, ..)| *dscope == sc).map(|(_, _, did)| *did));
             if let Some(did) = resolved {
                 local_refs.push(crate::model::file_analysis::Ref {
                     kind: crate::model::file_analysis::RefKind::Variable,
