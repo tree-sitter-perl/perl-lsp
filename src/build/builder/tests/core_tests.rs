@@ -1349,6 +1349,25 @@ fn undeclared_variable_mints_one_implicit_global_per_package() {
     assert_eq!(a_uses, 3);
 }
 
+/// `${name}` is `$name` — in code and in a string — so it binds the same
+/// global, and rename rewrites inside the braces (a lexical's too).
+#[test]
+fn braced_spelling_is_the_same_variable() {
+    let src = "$abel = 1;\nprint \"${abel}s\", ${abel};\nmy $x = 2;\nprint \"${x}y\";\n";
+    let fa = build_fa(src);
+    assert_eq!(implicit_globals(&fa), vec![("$abel".to_string(), Some("main".to_string()), 0)]);
+    let abel = fa.symbols().iter().find(|s| s.name == "$abel").unwrap().id;
+    let bound = fa.refs().iter().filter(|r| r.resolved_symbol() == Some(abel)).count();
+    assert_eq!(bound, 3, "the bare use and both braced spellings");
+
+    let edits = fa.rename_at(Point::new(2, 4), "$why").unwrap();
+    let mut cols: Vec<(usize, usize, usize)> =
+        edits.iter().map(|(s, _)| (s.start.row, s.start.column, s.end.column)).collect();
+    cols.sort();
+    assert_eq!(cols, vec![(2, 4, 5), (3, 9, 10)], "only the name token; braces survive");
+    assert!(edits.iter().all(|(_, t)| t == "why"));
+}
+
 /// A declared variable never mints a global, and `use vars` declares.
 #[test]
 fn declared_variables_mint_no_implicit_global() {

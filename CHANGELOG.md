@@ -26,7 +26,10 @@ crate / VS Code extension versions.
 - **An undeclared variable is tracked as the package global it is.**
   `$x = 1` with no `my`/`our` now shows in the outline (detail `global`),
   and references, rename and highlight find every use, including
-  `$main::x`. `use vars qw($x @y)` now declares like `our`.
+  `$main::x` and `${x}`. `use vars qw($x @y)` now declares like `our`.
+- **`${name}` is the same variable as `$name`** for every feature, and
+  renaming a variable rewrites inside the braces (`"${x}s"` used to be
+  left behind).
 - **New default-on `missing-declaration` warning** on each use of a variable
   nothing declares, mirroring `use strict 'vars'`. `$a`/`$b`, Perl's
   special variables and qualified names are exempt; a variable an import
