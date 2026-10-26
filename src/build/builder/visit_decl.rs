@@ -238,10 +238,21 @@ impl<'a> Builder<'a> {
                         .filter_map(|i| node.named_child(i))
                         .find(|c| c.kind() == "replacement")
                 }).flatten();
-                if let Some(repl) = repl {
-                    self.emit_refs_in_eval_replacement(repl);
+                // The grammar reads an `/e` replacement as an interpolated
+                // string, so its own children are the string view (`$h{k}`
+                // as a `$h` scalar): walking them too mints refs to
+                // variables the code never names.
+                match repl {
+                    Some(repl) => {
+                        self.emit_refs_in_eval_replacement(repl);
+                        // Reversed: the driver pops from the end.
+                        let rest: Vec<_> = crate::cst::NodeExt::elements(&node).filter(|c| *c != repl).collect();
+                        for c in rest.into_iter().rev() {
+                            self.queue_node(c);
+                        }
+                    }
+                    None => self.queue_children(node),
                 }
-                self.queue_children(node);
             }
 
             // ERROR nodes: recover structural declarations (the file's skeleton)

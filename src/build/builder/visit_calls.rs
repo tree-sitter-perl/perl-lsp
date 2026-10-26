@@ -1074,7 +1074,9 @@ impl<'a> Builder<'a> {
         let bytes = snippet.into_bytes();
         let mut parser = create_parser();
         let Some(tree) = parser.parse(&bytes, None) else { return };
-        let scope = self.current_scope();
+        // The replacement is a block of its own: a `my` inside it is scoped
+        // to it, and reads of the enclosing sub's lexicals resolve outward.
+        let scope = self.push_scope(ScopeKind::Block, node_to_span(repl), None);
 
         // A `scalar`/`array`/`hash` node is a plain variable only when its text
         // is sigil + identifier path: `$x`, `@a`, `%h`, `$Foo::bar`. Deref
@@ -1148,6 +1150,47 @@ impl<'a> Builder<'a> {
                         }
                     }
                 }
+                // Declarations can't take the main walk's path: that reads
+                // the file's bytes, and these nodes index the snippet's.
+                "variable_declaration" => {
+                    let decl_kind = match n.child(0).map(|k| k.kind()) {
+                        Some("our") => DeclKind::Our,
+                        Some("state") => DeclKind::State,
+                        _ => DeclKind::My,
+                    };
+                    let mut cursor = n.walk();
+                    let vars: Vec<_> = n
+                        .children_by_field_name("variable", &mut cursor)
+                        .chain(n.children_by_field_name("variables", &mut n.walk()).collect::<Vec<_>>())
+                        .filter_map(|v| Some((crate::cst::canonical_var_name(v, &bytes)?, node_to_span(v))))
+                        .collect();
+                    for (name, var_span) in vars {
+                        let sigil = name.chars().next().unwrap_or('$');
+                        self.add_symbol(
+                            name.clone(),
+                            SymKind::Variable,
+                            node_to_span(n),
+                            var_span,
+                            SymbolDetail::Variable { sigil, decl_kind },
+                        );
+                        self.add_ref(RefKind::Variable, var_span, name, AccessKind::Declaration);
+                    }
+                    continue;
+                }
+                "container_variable" => {
+                    if let Some(name) = crate::cst::canonical_container_name(n, &bytes) {
+                        self.refs.push(Ref {
+                            kind: RefKind::Variable,
+                            span: node_to_span(n),
+                            scope,
+                            target_name: name,
+                            access: AccessKind::Read,
+                            binding: None,
+                            folded_from: None,
+                            arg_count: None,
+                        });
+                    }
+                }
                 "scalar" | "array" | "hash" => {
                     if let Ok(t) = n.utf8_text(&bytes) {
                         if plain_var(t) {
@@ -1173,6 +1216,7 @@ impl<'a> Builder<'a> {
                 }
             }
         }
+        self.pop_scope();
     }
 
     /// Keep only entries that name a sub: a plain bareword. Sigil'd vars

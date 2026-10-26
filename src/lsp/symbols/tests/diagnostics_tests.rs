@@ -1122,3 +1122,14 @@ fn missing_declaration_only_under_strict_vars() {
     assert_eq!(count("package P;\nuse Moo;\n$x = 1;\n"), 1);
     assert_eq!(count("sub f { use strict; $x = 1 }\n$y = 1;\n"), 1, "strict ends with its block");
 }
+
+/// An `s{}{}e` replacement is code: it reads the enclosing sub's lexicals
+/// (`$Param{k}` is `%Param`) and its own `my` is a declaration, not a use.
+#[test]
+fn missing_declaration_reads_eval_replacement_as_code() {
+    let source = "use strict;\nsub f {\n    my (%Param) = @_;\n    my $s = '';\n    $s =~ s{(a)}{\n        my $Start = $1;\n        $Start .= $Param{x};\n        $Start . $typo;\n    }e;\n}\n";
+    let module_index = pragma_index();
+    let found = missing_declarations(&collect_diagnostics(&parse_analysis(source), &module_index, Default::default()));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].1.contains("'$typo'"), "{found:?}");
+}
