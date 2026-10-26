@@ -235,6 +235,11 @@ The most common emissions:
   package at a span, as `our` would (`frameworks/vars.rhai`). Anchor it
   on the word that names it: `ctx.import_words` carries each use-list
   word's `text` and `span`.
+- **`RequireDeclaration`** — `#{ required, span }`: from the end of
+  `span` to the end of its enclosing block, undeclared variables are
+  (or, with `required: false`, are no longer) an error — what
+  `strict 'vars'` does (`frameworks/strict.rhai`). `ctx.negated` is true
+  on `no Module LIST`, so a plugin can tell `no strict` from `use strict`.
 
 ### Query hooks (cursor time)
 
