@@ -47,10 +47,11 @@
     (expression_statement
       (assignment left: (identifier) @def.field.name) @def.field)))
 
-; `self.attr = ...` → an instance attribute: a member of the receiver's
-; class, declared by the first such write in the file. THE dominant Python
-; member idiom — without it `obj.` offers no data attributes. It is no
-; bare name anywhere; a later write through the receiver is a use of it.
+; `self.attr = ...` → an instance attribute: a member of the class the
+; receiver is typed as (`self`, or an annotated `other: Counter`), declared
+; by the first such write in the file. THE dominant Python member idiom —
+; without it `obj.` offers no data attributes. It is no bare name anywhere;
+; a later write, or one through an untyped receiver, is a use of it.
 (assignment
   left: (attribute
     object: (identifier) @def.field.receiver
@@ -61,6 +62,11 @@
 (typed_parameter . (identifier) @def.var.name @def.var)
 (default_parameter name: (identifier) @def.var.name @def.var)
 (typed_default_parameter name: (identifier) @def.var.name @def.var)
+
+; An annotated parameter holds a value of its annotation, as an annotated
+; assignment's target does.
+(typed_parameter . (identifier) @flow.target type: (type) @type.annot)
+(typed_default_parameter name: (identifier) @flow.target type: (type) @type.annot)
 
 ; An annotation names a class: a dotted one by its whole spelling,
 ; rewriting only its last name.

@@ -58,6 +58,11 @@ pub(super) struct State {
     /// `@context.class`, a `@parent` match) reads the class from here
     /// rather than minting it a second time.
     classes_by_name: HashMap<Point, String>,
+    /// Members written through a receiver (`obj.x = …`), by name token
+    /// start: the receiver's text, the scope the write is in, and the
+    /// member scope there. Their owner is the receiver's type, read once
+    /// the type witnesses are in (`declare_through_receivers`).
+    through_writes: HashMap<Point, (String, ScopeId, ScopeId)>,
 }
 
 impl State {
@@ -183,21 +188,25 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         .map(|(n, s, en)| (n, s, en, false))
         .or_else(|| (pack.default_name)(kind).map(|n| (n.to_string(), e.start, e.start, true)))
         .unwrap_or((e.text.clone(), e.start, e.end, false));
-    // A member written through a receiver joins the receiver's class, and
-    // only its first write declares it: a later one is a use of it, as is
-    // any write through a token that names no method's receiver.
-    let through = match d.receivers_by_match.get(&(e.match_id, kind)) {
-        Some(recv) => match receiver_class(st, recv, e.start) {
-            Some(class) if !declares_member(st, &class, &name) => Some(class),
-            _ => return,
-        },
-        None => None,
-    };
-    st.defs.def_name_spans.push((e.start_byte, e.end_byte));
+    // A member written through a receiver is a candidate: its owner is the
+    // receiver's type, which `declare_through_receivers` reads once the type
+    // witnesses are in, and which decides whether the write declares. Until
+    // then its name token stays the member reference it is if it does not.
+    let through = d.receivers_by_match.get(&(e.match_id, kind)).cloned();
+    match &through {
+        Some(recv) => {
+            let at = (recv.clone(), st.cur_scope, st.member_scope());
+            st.defs.through_writes.insert(name_start, at);
+        }
+        None => st.defs.def_name_spans.push((e.start_byte, e.end_byte)),
+    }
     let d = &st.defs;
     // An out-of-line def's qualifier names its owning class (the innermost
     // scope), overriding the enclosing-namespace context.
-    let pkg = through.clone().or_else(|| d.qualifier_by_match.get(&e.match_id).cloned()).or_else(|| st.package.clone());
+    let pkg = match through {
+        Some(_) => None,
+        None => d.qualifier_by_match.get(&e.match_id).cloned().or_else(|| st.package.clone()),
+    };
     let shaped = (pack.shape_name)(&name);
     // Under a use-map a class is filed under its identity, and its package
     // is the home that identity joins (`scopes::home_of`).
@@ -248,17 +257,6 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     });
 }
 
-/// The class a member written through `recv` at `at` joins: the class of
-/// the receiver parameter that name binds there (`@param.receiver`), the
-/// nearest declaration of it on the lookup chain. `None` when the name
-/// binds anything else, or nothing.
-fn receiver_class(st: &ExtractState, recv: &str, at: Point) -> Option<String> {
-    let param = crate::model::file_analysis::lookup_chain(&st.out.scopes, st.cur_scope).scopes().find_map(|sc| {
-        st.out.symbols.iter().rev().find(|s| s.scope == sc && s.name == recv && s.kind != DefCap::Field && s.start <= at)
-    })?;
-    param.flags.contains(crate::model::file_analysis::SymbolFlags::RECEIVER).then(|| param.package.clone()).flatten()
-}
-
 /// A method's receiver parameter (`@param.receiver`) holds an instance of
 /// the class the method is declared in: its value, stated at its binding
 /// site, so a member written or read through it dispatches on that class.
@@ -284,9 +282,65 @@ pub(super) fn emit_receiver_types(st: &mut ExtractState) {
     st.out.witnesses.extend(typed);
 }
 
+/// Settle each member written through a receiver. Its owner is the class
+/// the receiver is typed as at the write, through the witness registry: the
+/// receiver parameter's class (`emit_receiver_types`), an annotated
+/// parameter's or local's annotation. A write through an untyped receiver
+/// declares nothing. Of the writes that name one member of one class, the
+/// first in source declares it unless the class body binds it; every other
+/// write stays a reference to the member.
+///
+/// Runs after `flow::finish`, so the annotation witnesses are in. A local
+/// typed only by its value (`o = Counter()`) has no type here yet: the call
+/// witnesses are minted at assembly.
+pub(super) fn declare_through_receivers(st: &mut ExtractState) {
+    use crate::model::witnesses::{BagContext, FrameworkFact, WitnessBag};
+    let pending = std::mem::take(&mut st.defs.through_writes);
+    if pending.is_empty() {
+        return;
+    }
+    let mut bag = WitnessBag::default();
+    for w in &st.out.witnesses {
+        bag.push(w.clone());
+    }
+    let frameworks: HashMap<String, FrameworkFact> = HashMap::new();
+    let parents: HashMap<String, Vec<String>> = HashMap::new();
+    let ctx = BagContext {
+        scopes: &st.out.scopes,
+        package_framework: &frameworks,
+        module_index: None,
+        package_parents: &parents,
+        app_surface_consumers: &[],
+    };
+    let mut order: Vec<usize> =
+        (0..st.out.symbols.len()).filter(|&i| pending.contains_key(&st.out.symbols[i].name_start)).collect();
+    order.sort_by_key(|&i| st.out.symbols[i].name_start);
+    let mut keep = vec![true; st.out.symbols.len()];
+    let mut declared: Vec<(Point, Point)> = Vec::new();
+    for i in order {
+        let s = &st.out.symbols[i];
+        let (recv, write_scope, member_scope) = &pending[&s.name_start];
+        let owner = crate::model::witnesses::query_variable_type(&bag, &ctx, recv, *write_scope, s.start)
+            .and_then(|t| t.class_name().map(str::to_string));
+        let Some(class) = owner.filter(|c| !declares_member(&st.out.symbols, c, &s.name)) else {
+            keep[i] = false;
+            continue;
+        };
+        declared.push((s.name_start, s.name_end));
+        let scope = super::scopes::scope_of_class(st, &class).unwrap_or(*member_scope);
+        let s = &mut st.out.symbols[i];
+        s.package = Some(class);
+        s.scope = scope;
+    }
+    let mut it = keep.iter();
+    st.out.symbols.retain(|_| *it.next().unwrap());
+    // a write that declares is the declaration, not a use of the member
+    st.out.refs.retain(|r| !(r.kind == RefCap::MemberValue && declared.contains(&(r.start, r.end))));
+}
+
 /// Whether `class` already has a member `name` this file declared.
-fn declares_member(st: &ExtractState, class: &str, name: &str) -> bool {
-    st.out.symbols.iter().any(|s| s.kind == DefCap::Field && s.name == name && s.package.as_deref() == Some(class))
+fn declares_member(symbols: &[SkelSymbol], class: &str, name: &str) -> bool {
+    symbols.iter().any(|s| s.kind == DefCap::Field && s.name == name && s.package.as_deref() == Some(class))
 }
 
 /// Template params joined to their owner class — the owner shaped like a

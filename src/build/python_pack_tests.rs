@@ -873,13 +873,13 @@ fn a_class_body_field_is_a_bare_name_in_the_body_only() {
 
 /// The first write through a method's receiver declares an instance field
 /// on the receiver's class; later writes declare nothing, a write through
-/// any other name declares nothing, and the field is no bare name.
+/// an untyped name declares nothing, and the field is no bare name.
 #[test]
 fn the_first_write_through_self_declares_an_instance_field() {
     let fa = members_fa();
     let ns: Vec<_> = fields_of(&fa).into_iter().filter(|&(n, ..)| n == "n").collect();
     assert_eq!(ns, [("n", 6, true)]);
-    assert!(!fa.symbols().iter().any(|s| s.name == "z"), "a write through a plain parameter declares nothing");
+    assert!(!fa.symbols().iter().any(|s| s.name == "z"), "a write through an untyped parameter declares nothing");
     assert!(!fa.symbols().iter().any(|s| s.kind == SymKind::Field && s.name == "count" && s.span.start.row != 1));
     assert!(fa.resolve_variable("n", Point::new(11, 20)).is_none());
     assert!(fa.resolve_variable("n", Point::new(12, 0)).is_none());
@@ -904,6 +904,31 @@ fn in_scope_completion_follows_the_lookup_chain() {
     for name in ["count", "a", "b", "total", "n"] {
         assert!(!method.contains(name), "{name} is the class body's, not the method's: {method:?}");
     }
+}
+
+/// A write through any receiver declares on the class the receiver is
+/// typed as: an annotated parameter or local names the owner as `self`
+/// does, and an untyped receiver declares nothing.
+#[test]
+fn a_write_through_a_typed_receiver_declares_on_its_type() {
+    let src = "\
+class Counter:
+    pass
+
+def reset(other: Counter, o):
+    other.z = 1
+    o.w = 1
+    local: Counter = make()
+    local.y = 1
+    other.z = 2
+";
+    let fa = py_in(src, Some(&module(&["pkg", "mod"], false)));
+    let mut fields = fields_of(&fa);
+    fields.sort();
+    assert_eq!(fields, [("y", 7, true), ("z", 4, true)]);
+    assert!(!fa.symbols().iter().any(|s| s.name == "w"), "an untyped receiver declares nothing");
+    let later = fa.refs().iter().find(|r| r.span.start == Point::new(8, 10)).expect("the later write is a reference");
+    assert_eq!(later.target_name, "z");
 }
 
 /// Member completion on an instance offers the class-body fields, the

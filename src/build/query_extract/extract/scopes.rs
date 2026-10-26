@@ -48,24 +48,19 @@ fn open_section(st: &mut ExtractState, namespace: &str, span: Span, kind: Sectio
 }
 
 /// The home a declaration in `from` at `at` joins: the class whose own
-/// scope it is written in, through any plain block — never across a
-/// callable, whose declarations are its locals, not the class's members —
-/// else the namespace in force there. A class declared in `class Outer:`'s
-/// body is `Outer.Inner`; one declared in a method of `Outer` joins the
-/// namespace.
+/// scope is on its `callable_reach`, else the namespace in force there. A
+/// class declared in `class Outer:`'s body is `Outer.Inner`; one declared
+/// in a method of `Outer` joins the namespace.
 pub(super) fn home_of<'s>(st: &'s ExtractState, from: ScopeId, at: Point) -> Option<&'s str> {
-    let mut cur = Some(from);
-    while let Some(id) = cur {
-        if let Some(class) = st.scopes.class_scopes.get(&id) {
-            return Some(class);
-        }
-        let scope = &st.out.scopes[id.0 as usize];
-        if matches!(scope.kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. }) {
-            break;
-        }
-        cur = scope.parent;
-    }
-    st.namespace_at(at)
+    crate::model::file_analysis::callable_reach(&st.out.scopes, from)
+        .find_map(|id| st.scopes.class_scopes.get(&id))
+        .map(String::as_str)
+        .or_else(|| st.namespace_at(at))
+}
+
+/// The scope a class declared in this file opened as its own.
+pub(super) fn scope_of_class(st: &ExtractState, class: &str) -> Option<ScopeId> {
+    st.scopes.class_scopes.iter().filter(|(_, c)| c.as_str() == class).map(|(&id, _)| id).min()
 }
 
 pub(super) fn collect(st: &mut ExtractState, e: &Event) {
