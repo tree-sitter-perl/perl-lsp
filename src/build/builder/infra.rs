@@ -204,10 +204,28 @@ impl<'a> Builder<'a> {
         namespace: Namespace,
         package: Option<String>,
     ) -> SymbolId {
+        let scope = self.current_scope();
+        self.add_symbol_in_scope(scope, name, kind, span, selection_span, detail, namespace, package)
+    }
+
+    /// `add_symbol_in_package` into an explicit scope — for post-walk
+    /// minting, after the scope stack has unwound.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn add_symbol_in_scope(
+        &mut self,
+        scope: ScopeId,
+        name: String,
+        kind: SymKind,
+        span: Span,
+        selection_span: Span,
+        detail: SymbolDetail,
+        namespace: Namespace,
+        package: Option<String>,
+    ) -> SymbolId {
         let id = SymbolId(self.next_symbol_id);
         self.next_symbol_id += 1;
         if matches!(kind, SymKind::Variable | SymKind::Field) {
-            self.var_decls.entry((self.current_scope(), name.clone())).or_default().push(id);
+            self.var_decls.entry((scope, name.clone())).or_default().push(id);
         }
         // Perl says "this constructs" with a name and nothing else, so the
         // convention is read here, at the mint, and consumers ask the flag.
@@ -229,7 +247,7 @@ impl<'a> Builder<'a> {
             kind,
             span,
             selection_span,
-            scope: self.current_scope(),
+            scope,
             package,
             detail,
             namespace,
