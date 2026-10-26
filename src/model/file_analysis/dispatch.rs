@@ -252,13 +252,32 @@ impl LookupChain {
     }
 }
 
-/// The `LookupChain` from `from`.
+/// `from` and the scopes around it, out to and including the nearest
+/// callable: where code written in `from` can stand without leaving the
+/// callable it runs in. THE callable boundary. Ownership reads it (a
+/// declaration joins the class whose own scope is on it — a method's
+/// declarations are its locals) and so does `lookup_chain`'s direct arm.
+pub fn callable_reach(scopes: &[Scope], from: ScopeId) -> impl Iterator<Item = ScopeId> + '_ {
+    let mut next = Some(from);
+    std::iter::from_fn(move || {
+        let id = next?;
+        let scope = &scopes[id.0 as usize];
+        next = match scope.kind {
+            ScopeKind::Sub { .. } | ScopeKind::Method { .. } => None,
+            _ => scope.parent,
+        };
+        Some(id)
+    })
+}
+
+/// The `LookupChain` from `from`. Every block stays on it: a Perl or C++
+/// block binds its own locals.
 ///
 /// Arms:
 /// - `Scope::direct` (`@scope.direct`): in force only for code written
-///   directly in the scope, so it drops out once the walk has come up
-///   out of a callable or out of another direct scope (Python's class
-///   body, seen from its method or from a class nested in it).
+///   directly in the scope, so only the innermost direct scope within
+///   `from`'s `callable_reach` is on the chain. From a method of a Python
+///   class, or a class nested in it, the class body is not.
 /// - a closed body (`@scope.sub.closed`): the walk ENDS at a body that
 ///   sees no variable around it but the ones it captures, unless it
 ///   captures the name. Only `lookup_chain_through` takes this arm.
@@ -272,20 +291,12 @@ pub fn lookup_chain(scopes: &[Scope], from: ScopeId) -> LookupChain {
 /// is the one caller; the model's queries walk past closed bodies, which
 /// over-approximates a type and never binds a name wrongly.
 pub fn lookup_chain_through(scopes: &[Scope], from: ScopeId, shut: impl Fn(ScopeId) -> bool) -> LookupChain {
-    let mut chain = Vec::new();
-    let mut left_boundary = false;
-    let mut current = Some(from);
-    while let Some(id) = current {
-        let scope = &scopes[id.0 as usize];
-        if !(scope.direct && left_boundary) {
-            chain.push(id);
-        }
-        if shut(id) {
-            break;
-        }
-        left_boundary |= scope.direct || matches!(scope.kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. });
-        current = scope.parent;
+    let direct = callable_reach(scopes, from).find(|&id| scopes[id.0 as usize].direct);
+    let mut chain = scope_chain_of(scopes, from);
+    if let Some(end) = chain.iter().position(|&id| shut(id)) {
+        chain.truncate(end + 1);
     }
+    chain.retain(|&id| !scopes[id.0 as usize].direct || Some(id) == direct);
     LookupChain(chain)
 }
 
