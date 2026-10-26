@@ -917,7 +917,29 @@ impl SkeletonAnalysis {
                         None,
                     ),
                 };
-                bag.push(mk(WA::Expr(*span), WP::Invoke { callee, receiver, args }, *span));
+                let invoke = WP::Invoke { callee, receiver, args };
+                // A call that may construct a class another file declares is
+                // that class's instance once the index says the class exists,
+                // and stays a call otherwise.
+                let unsettled = match &invoke {
+                    WP::Invoke { callee: crate::model::witnesses::Callee::Function { local: None, .. }, receiver: None, .. }
+                        if site.names_class =>
+                    {
+                        let identity = class_identity_at(name, span.start).unwrap_or_else(|| name.clone());
+                        crate::model::file_analysis::ElsewhereClass::unless_local(&symbols, identity.clone())
+                            .map(|class| (class, identity))
+                    }
+                    _ => None,
+                };
+                let payload = match unsettled {
+                    Some((class, identity)) => WP::Choose(Box::new(crate::model::file_analysis::Deferred::fork(
+                        crate::model::file_analysis::Question::NamesClass(class),
+                        WP::InferredType(InferredType::ClassName(identity)),
+                        Some(invoke),
+                    ))),
+                    None => invoke,
+                };
+                bag.push(mk(WA::Expr(*span), payload, *span));
             }
         }
         // ---- Local/param vars: a variable READ resolves to the nearest

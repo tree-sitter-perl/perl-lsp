@@ -2231,6 +2231,23 @@ impl ReducerRegistry {
         let window = super::reducers::LiveWindow::at(&raw, q);
         let mut out: Vec<Witness> = Vec::with_capacity(raw.len());
         for &w in raw.iter() {
+            let chosen;
+            let w = match &w.payload {
+                WitnessPayload::Choose(d) => {
+                    let picked = match q.context {
+                        Some(ctx) => d.pick_in(ctx).reading,
+                        None => d.undecided(),
+                    };
+                    match picked {
+                        Some(p) => {
+                            chosen = Witness { payload: p.clone(), ..w.clone() };
+                            &chosen
+                        }
+                        None => continue,
+                    }
+                }
+                _ => w,
+            };
             if window.edge_is_dead(&raw, w) {
                 continue;
             }

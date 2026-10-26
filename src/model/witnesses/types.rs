@@ -245,6 +245,7 @@ impl WitnessPayload {
             }
             WitnessPayload::InferredType(t) => t.for_each_attachment_mut(f),
             WitnessPayload::ReturnExpr(r) => r.for_each_attachment_mut(f),
+            WitnessPayload::Choose(d) => d.readings_mut().for_each(|p| p.for_each_attachment_mut(f)),
             WitnessPayload::Observation(_)
             | WitnessPayload::Fact { .. }
             | WitnessPayload::Derivation
@@ -414,6 +415,12 @@ pub enum WitnessPayload {
     /// (`docs/adr/brands.md`). Kept at the END for bincode variant-index
     /// stability (bump `EXTRACT_VERSION`).
     BrandOverlay { ns: String, on_class: String, set: Vec<(String, String)>, drop: Vec<String> },
+    /// One of two payloads, picked by a question decided under the query's
+    /// context (`docs/adr/query-delayed-facts.md`): the chase reads the
+    /// picked payload as if it were the witness's own, and a pick of
+    /// neither drops the witness. Kept at the END for bincode variant-index
+    /// stability (bump `EXTRACT_VERSION`).
+    Choose(Box<crate::model::file_analysis::Deferred<WitnessPayload>>),
 }
 
 /// What an `Invoke` calls.

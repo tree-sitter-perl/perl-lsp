@@ -2258,13 +2258,18 @@ fn cpp_member_read_is_a_field_access_and_a_member_call_is_a_method_call() {
 }
 
 /// Each call's `Invoke`: (callee, defined in this file, which arguments
-/// spread), in source order; `None` args when the call captured no list.
+/// spread), in source order; `None` args when the call captured no list. A
+/// call that may construct a class elsewhere reads as its undecided call.
 fn call_invokes(fa: &crate::model::file_analysis::FileAnalysis) -> Vec<(String, bool, Option<Vec<bool>>)> {
     use crate::model::witnesses::{CallArg, Callee, WitnessPayload};
     fa.witnesses
         .all()
         .iter()
         .filter_map(|w| match &w.payload {
+            WitnessPayload::Choose(d) => d.undecided(),
+            p => Some(p),
+        })
+        .filter_map(|p| match p {
             WitnessPayload::Invoke { callee: Callee::Function { name, local, .. }, args, .. } => Some((
                 name.clone(),
                 local.is_some(),

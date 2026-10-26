@@ -175,6 +175,12 @@ fn a_class_resolves_across_modules_by_identity() {
         .expect("the constructing call");
     assert_eq!(fa.class_named_by_call(call, None), None);
     assert_eq!(fa.class_named_by_call(call, Some(&idx)).as_deref(), Some("pkg.models.User"));
+    // and its value is the class's instance once the index decides it
+    let call_span = crate::model::file_analysis::Span { start: Point::new(5, 4), end: Point::new(5, 10) };
+    assert_eq!(
+        fa.expr_type_at_span(call_span, Some(&idx)),
+        Some(InferredType::ClassName("pkg.models.User".to_string()))
+    );
     let store = OpenDocs::new();
     let name_of = |k: &FileKey| match k {
         FileKey::Path(p) => p.file_name().unwrap().to_string_lossy().to_string(),
@@ -207,6 +213,34 @@ fn a_class_resolves_across_modules_by_identity() {
     let vendored = idx.workspace_file_for_test(&p_vendored).unwrap();
     assert_eq!(vendored.declared_parents("pkg.vendored.Sub"), ["vendor.lib.User"]);
     assert!(vendored.resolve_method_in_ancestors("pkg.vendored.Sub", "name", Some(&idx)).is_none());
+}
+
+/// A call of a name no indexed file declares as a class stays a call: the
+/// call's own reading, never an instance of the name.
+#[cfg(feature = "python")]
+#[test]
+fn a_call_of_an_unindexed_name_stays_a_call() {
+    use crate::build::language_driver::LanguageRegistry;
+    let t = Tree::new("xcall", &[
+        ("pkg/__init__.py", ""),
+        ("pkg/util.py", "def make():\n    return 1\n"),
+        ("pkg/main.py", "from pkg.util import make\nfrom vendor import Thing\nx = make()\ny = Thing()\n"),
+    ]);
+    let driver = LanguageRegistry::compiled().for_path(std::path::Path::new("x.py")).unwrap();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    for rel in ["pkg/util.py", "pkg/main.py"] {
+        let p = t.0.join(rel);
+        let src = std::fs::read_to_string(&p).unwrap();
+        idx.insert_workspace_for_test(p.clone(), driver.analyze_with_path(&src, Some(&p)));
+    }
+    let fa = idx.workspace_file_for_test(&t.0.join("pkg/main.py")).unwrap();
+    let at = |row, end| crate::model::file_analysis::Span { start: Point::new(row, 4), end: Point::new(row, end) };
+    for (row, end) in [(2, 10), (3, 11)] {
+        assert!(
+            !matches!(fa.expr_type_at_span(at(row, end), Some(&idx)), Some(InferredType::ClassName(_))),
+            "row {row}"
+        );
+    }
 }
 
 /// A call of a class this module declares constructs it, whatever

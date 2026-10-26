@@ -19,8 +19,12 @@ kind of wait. Every input is a typed fact the producer minted (a receiver
 it typed or the call ref that holds it, a package), so the decider never
 searches the analysis for the site.
 
-`Question::decide(fa, index)` is the only decider; it answers `Verdict::
-{Yes, No, Unknown}`. `Unknown` is a typing gap, not a negative: the opt-in
+`Question::decide(facts)` is the only decider; it answers `Verdict::
+{Yes, No, Unknown}`. It reads through `DecideFacts` (parents, index, a
+call ref's invocant class), which both homes of a deferred fact answer:
+the analysis with its index (`InFile`) and the bag's `BagContext`. The bag
+has no ref table, so a `ReceiverIsa` on a call ref's invocant decides
+`Unknown` there. `Unknown` is a typing gap, not a negative: the opt-in
 `unresolved-dispatch` diagnostic reports exactly those.
 `Question::when_unknown` says which reading an `Unknown` stands for; it is
 an exhaustive match, so a new question doesn't compile until it says.
@@ -40,6 +44,11 @@ Today's carriers:
 | `provisional_dispatches: Vec<Deferred<DispatchCandidate>>` | `ReceiverIsa` | `applicable_dispatches`, `dispatch_at`, `untyped_dispatches` |
 | `gated_param_types: Vec<Deferred<TypeConstraint>>` | `PackageIsa` | `gated_param_type_for` |
 | `RefBinding::Deferred(Box<Deferred<RefBinding>>)` | `NamesClass` | `class_named_by_call` |
+| `WitnessPayload::Choose(Box<Deferred<WitnessPayload>>)` | `NamesClass` | the registry's `materialize` |
+
+A `Choose` witness reads as the payload its question picks under the
+query's context, and drops out when it picks neither; a query without a
+context reads the undecided payload.
 
 The dispatch half is `docs/adr/receiver-gated-dispatch.md`.
 
@@ -55,10 +64,14 @@ Each query runner accepts the ones it knows how to mint.
   names that ref as the receiver.
 - Pack documents: `#names-class? @ref.call` says the call constructs the
   class its name spells (python's `User()`, C++'s functional cast `Foo(x)`).
-  The extractor settles it when the file declares the class
-  (`declares_class`, the same local proof `decide` runs), else binds the
-  ref `RefBinding::Deferred(NamesClass { identity })` with the call's own
-  binding as the other reading. A language whose construction is syntax of
+  The extractor settles it when the file declares the class, else binds
+  the ref `RefBinding::Deferred(NamesClass(..))` with the call's own
+  binding as the other reading, and the call's value is a `Choose` between
+  the class's instance and the call's `Invoke`. The question's payload is
+  an `ElsewhereClass`, built only through its local proof
+  (`ElsewhereClass::unless_local`), so it is never asked about a class the
+  file itself declares and the bag, which has no symbols, decides it
+  whole. A language whose construction is syntax of
   its own (PHP's `new`) carries no such pattern, so its `Foo()` is a call.
   A call's local callee prefers a like-named class only in such a match.
 
