@@ -72,8 +72,9 @@ impl<'a> Builder<'a> {
                 self.queue_children(node);
             }
 
-            // Variable references
-            "scalar" | "array" | "hash" => self.visit_var_ref(node),
+            // Variable references. The `scalar` keyword token of
+            // `scalar @items` shares the kind but is anonymous.
+            "scalar" | "array" | "hash" if node.is_named() => self.visit_var_ref(node),
             "container_variable" | "slice_container_variable" | "keyval_container_variable" => {
                 self.visit_container_ref(node);
             }
