@@ -248,12 +248,6 @@ leaf-space FQ family validation in `implementations_of`.
 - **The namespace in force inside a class body is the module.**
   `namespace_at` reads the lane, which holds no class; the class a site's
   code belongs to is `package_at`'s answer.
-- **Completion's in-scope lane still walks the raw chain.** The names
-  `lsp/symbols/completion.rs` offers at a point come from
-  `scope_chain`, so a method is offered its class body's variables
-  although no resolution lane binds a bare use of one. Over-offering, not
-  a wrong answer; moving that lane to `lookup_chain` is a change of its
-  own.
 - **`Outer.Inner()` is a member call.** A call through an attribute is a
   `MethodCall` on the receiver `Outer`, and a nested class is no member
   of its enclosing class there, so the call is untyped and goto-def finds

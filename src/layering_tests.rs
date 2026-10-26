@@ -1667,6 +1667,43 @@ fn positional_reads_skip_grammar_extras() {
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 
+/// A name lookup walks `lookup_chain` — the `LookupChain` a scope's
+/// bindings are listed through, which carries every language's scoping
+/// rule (`Scope::direct`, …). A raw climb up `Scope::parent` sees every
+/// enclosing scope's names, so a lookup written as one silently ignores
+/// those rules (a Python method offered its class body's names). The raw
+/// climbs that remain answer CONTAINMENT — what a scope is inside — and
+/// each is listed with that reason; a new one fails until it is either
+/// moved onto the lookup chain or justified here. The walkers themselves
+/// live in `model/file_analysis/dispatch.rs`.
+#[test]
+fn raw_scope_climbs_are_containment_only() {
+    let files: Vec<(String, String)> =
+        layer_files(&[Layer::Util, Layer::Model, Layer::Cst, Layer::Build, Layer::Index, Layer::Lsp])
+            .into_iter()
+            .filter(|(rel, _)| rel != "model/file_analysis/dispatch.rs")
+            .collect();
+    let seen = count_lines(&files, &|l| {
+        let t = l.trim();
+        let chain_call = (t.contains("scope_chain(") || t.contains("scope_chain_of(")) && !t.contains("fn scope_chain");
+        let parent_step = t.ends_with(".parent;") && t.contains(" = ");
+        chain_call || parent_step || t.contains("scope_parent") || (t.contains("successors(") && t.contains(".parent"))
+    });
+    let allow: &[(&str, usize, &str)] = &[
+        ("build/builder/infra.rs", 1, "package_for_node: the package of the innermost scope that names one"),
+        ("build/builder/visit_use.rs", 2, "find_sub_symbol_for[_scope]: the Sub/Method body a scope sits in"),
+        ("build/query_extract/extract/scopes.rs", 1, "home_of: the class whose own scope a declaration is written in (ownership, stops at a callable)"),
+        ("build/query_extract/skeleton.rs", 1, "the callable a return site is an arm of"),
+        ("model/file_analysis/class_queries.rs", 2, "a member's declaring scope inside its class body; package_at's innermost scope that names a package"),
+        ("model/file_analysis/cursor_queries.rs", 1, "enclosing_callable_at: the first body up the tree that names its callable"),
+        ("model/file_analysis/invocants.rs", 5, "the enclosing class or package of a scope (x3), the body that elides its receiver, a symbol's class-span containment"),
+        ("model/file_analysis/outline.rs", 1, "scope_within_sub_body: whether a scope sits inside a callable"),
+        ("model/file_analysis/queries.rs", 3, "the `scope_chain` wrapper itself; move-after-use: is the move inside a callable, is the read in the move's subtree"),
+    ];
+    let drift = allowlist_drift("raw scope climbs (a lookup takes LookupChain)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
 #[test]
 fn pack_string_tables_are_ratcheted() {
     let seen = pack_string_sites(&|value, kinds, fields| {

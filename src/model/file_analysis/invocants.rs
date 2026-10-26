@@ -938,10 +938,9 @@ impl FileAnalysis {
     /// reassignment leaves behind.
     pub(crate) fn has_local_variable_at(&self, name: &str, point: Point) -> bool {
         let Some(scope) = self.scope_at(point) else { return false };
-        let chain = self.scope_chain(scope);
-        self.symbols.iter().any(|s| {
-            matches!(s.kind, SymKind::Variable) && s.name == name && chain.contains(&s.scope)
-        })
+        self.lookup_chain(scope)
+            .bindings(&self.symbols)
+            .any(|s| matches!(s.kind, SymKind::Variable) && s.name == name)
     }
 
     /// Test-only wrapper over the private `resolve_invocant_class`.
