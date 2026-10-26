@@ -58,9 +58,17 @@ pub(super) fn home_of<'s>(st: &'s ExtractState, from: ScopeId, at: Point) -> Opt
         .or_else(|| st.namespace_at(at))
 }
 
-/// The scope a class declared in this file opened as its own.
-pub(super) fn scope_of_class(st: &ExtractState, class: &str) -> Option<ScopeId> {
-    st.scopes.class_scopes.iter().filter(|(_, c)| c.as_str() == class).map(|(&id, _)| id).min()
+/// The scope each class declared in this file opened as its own (its
+/// first, where a class reopens), by the class's identity.
+pub(super) fn class_scope_rows(st: &ExtractState) -> Vec<(String, ScopeId)> {
+    let mut first: HashMap<&str, ScopeId> = HashMap::new();
+    for (&id, class) in &st.scopes.class_scopes {
+        let at = first.entry(class.as_str()).or_insert(id);
+        *at = (*at).min(id);
+    }
+    let mut rows: Vec<(String, ScopeId)> = first.into_iter().map(|(c, id)| (c.to_string(), id)).collect();
+    rows.sort_by_key(|&(_, id)| id);
+    rows
 }
 
 pub(super) fn collect(st: &mut ExtractState, e: &Event) {

@@ -58,11 +58,6 @@ pub(super) struct State {
     /// `@context.class`, a `@parent` match) reads the class from here
     /// rather than minting it a second time.
     classes_by_name: HashMap<Point, String>,
-    /// Slots written through a receiver (`obj.x = …`), by name token
-    /// start: the receiver's text, the scope the write is in, and the
-    /// member scope there. Their owner is the receiver's type, read once
-    /// the type witnesses are in (`declare_slots`).
-    slot_writes: HashMap<Point, (String, ScopeId, ScopeId)>,
     /// Matches whose defs share one name token as one declaration (`@def.pair`).
     paired_matches: std::collections::HashSet<usize>,
 }
@@ -194,16 +189,12 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         .or_else(|| (pack.default_name)(kind).map(|n| (n.to_string(), e.start, e.start, true)))
         .unwrap_or((e.text.clone(), e.start, e.end, false));
     // A slot written through a receiver is a candidate: its owner is the
-    // receiver's type, which `declare_slots` reads once the type witnesses
-    // are in, and which decides whether the write declares. Until then its
-    // name token stays the member reference it is if it does not.
+    // receiver's type, which the assembled analysis answers
+    // (`skeleton::declare_slots`), and which decides whether the write
+    // declares. Its name token stays the member reference it is.
     let through = d.receivers_by_match.get(&(e.match_id, kind)).cloned();
-    match &through {
-        Some(recv) => {
-            let at = (recv.clone(), st.cur_scope, st.member_scope());
-            st.defs.slot_writes.insert(name_start, at);
-        }
-        None => st.defs.def_name_spans.push((e.start_byte, e.end_byte)),
+    if through.is_none() {
+        st.defs.def_name_spans.push((e.start_byte, e.end_byte));
     }
     let d = &st.defs;
     // An out-of-line def's qualifier names its owning class (the innermost
@@ -231,7 +222,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     if let Some(primary) = d.spec_primary_by_match.get(&e.match_id) {
         st.out.specializations.push((shaped.clone(), (pack.shape_name)(primary)));
     }
-    st.out.symbols.push(SkelSymbol {
+    let symbol = SkelSymbol {
         name: shaped,
         kind,
         start: e.start,
@@ -259,7 +250,11 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         arity: None,
         qualifier_owned: d.qualifier_by_match.contains_key(&e.match_id),
         flags: d.marks.get(&(name_start, name_end)).copied().unwrap_or_default(),
-    });
+    };
+    match through {
+        Some(receiver) => st.out.slot_writes.push(SlotWrite { symbol, receiver }),
+        None => st.out.symbols.push(symbol),
+    }
 }
 
 /// A method's receiver parameter (`@param.receiver`) holds an instance of
@@ -285,97 +280,6 @@ pub(super) fn emit_receiver_types(st: &mut ExtractState) {
         })
         .collect();
     st.out.witnesses.extend(typed);
-}
-
-/// Settle each slot written through a receiver. Its owner is the class the
-/// receiver is typed as at the write, through the witness registry: the
-/// receiver parameter's class (`emit_receiver_types`), an annotated
-/// parameter's or local's annotation. A write through an untyped receiver
-/// declares nothing. A write declares the slot only when neither its class
-/// nor an ancestor already declares the name — a class-body binding, a
-/// member, an earlier slot of the class, or any slot write of an
-/// ancestor's — and every other write stays a reference to that member.
-///
-/// Runs after `flow::finish`, so the annotation witnesses are in. A local
-/// typed only by its value (`o = Counter()`) has no type here yet: the call
-/// witnesses are minted at assembly. Ancestors are the file's own parents;
-/// a base class in another file is not seen.
-///
-/// TODO(assigned-unify): php's `unify_assigned` (held php-5) is this rule
-/// for variables over the lookup chain; the two passes become one there.
-pub(super) fn declare_slots(st: &mut ExtractState) {
-    use crate::model::witnesses::{BagContext, FrameworkFact, WitnessBag};
-    let pending = std::mem::take(&mut st.defs.slot_writes);
-    if pending.is_empty() {
-        return;
-    }
-    let mut bag = WitnessBag::default();
-    for w in &st.out.witnesses {
-        bag.push(w.clone());
-    }
-    let frameworks: HashMap<String, FrameworkFact> = HashMap::new();
-    let mut parents: HashMap<String, Vec<String>> = HashMap::new();
-    for (child, parent) in &st.out.parents {
-        parents.entry(child.clone()).or_default().push(parent.clone());
-    }
-    let ctx = BagContext {
-        scopes: &st.out.scopes,
-        package_framework: &frameworks,
-        module_index: None,
-        package_parents: &parents,
-        app_surface_consumers: &[],
-    };
-    let mut order: Vec<usize> =
-        (0..st.out.symbols.len()).filter(|&i| pending.contains_key(&st.out.symbols[i].name_start)).collect();
-    order.sort_by_key(|&i| st.out.symbols[i].name_start);
-    // Each write's owner, by the receiver's type at the write.
-    let owners: Vec<(usize, Option<String>)> = order
-        .iter()
-        .map(|&i| {
-            let s = &st.out.symbols[i];
-            let (recv, write_scope, _) = &pending[&s.name_start];
-            let owner = crate::model::witnesses::query_variable_type(&bag, &ctx, recv, *write_scope, s.start)
-                .and_then(|t| t.class_name().map(str::to_string));
-            (i, owner)
-        })
-        .collect();
-    let written: std::collections::HashSet<(String, String)> = owners
-        .iter()
-        .filter_map(|(i, o)| Some((o.clone()?, st.out.symbols[*i].name.clone())))
-        .collect();
-    let mut keep = vec![true; st.out.symbols.len()];
-    let mut accepted: Vec<(usize, String)> = Vec::new();
-    for (i, owner) in &owners {
-        let name = st.out.symbols[*i].name.clone();
-        // A slot write is filed under its class only once accepted, so a
-        // slot here is an earlier write that declared.
-        let symbols = &st.out.symbols;
-        let declares = |class: &str| {
-            symbols.iter().any(|m| {
-                m.name == name
-                    && m.package.as_deref() == Some(class)
-                    && matches!(m.kind, DefCap::Field | DefCap::Sub | DefCap::Method | DefCap::Slot)
-            }) || (Some(class) != owner.as_deref() && written.contains(&(class.to_string(), name.clone())))
-        };
-        match owner {
-            Some(class) if !crate::model::file_analysis::class_or_ancestor(class, &parents, declares) => {
-                accepted.push((*i, class.clone()));
-                st.out.symbols[*i].package = Some(class.clone());
-            }
-            _ => keep[*i] = false,
-        }
-    }
-    let mut declared: Vec<(Point, Point)> = Vec::new();
-    for (i, class) in &accepted {
-        let scope = super::scopes::scope_of_class(st, class).unwrap_or(pending[&st.out.symbols[*i].name_start].2);
-        let s = &mut st.out.symbols[*i];
-        s.scope = scope;
-        declared.push((s.name_start, s.name_end));
-    }
-    let mut it = keep.iter();
-    st.out.symbols.retain(|_| *it.next().unwrap());
-    // a write that declares is the declaration, not a use of the member
-    st.out.refs.retain(|r| !(r.kind == RefCap::MemberValue && declared.contains(&(r.start, r.end))));
 }
 
 /// Template params joined to their owner class — the owner shaped like a
