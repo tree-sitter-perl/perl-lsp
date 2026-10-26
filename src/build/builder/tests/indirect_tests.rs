@@ -155,3 +155,29 @@ fn every_spelling_of_a_536_bundle_turns_indirect_off() {
         assert_eq!(!method_call_rows(&fa, "new").is_empty(), method, "use {version}");
     }
 }
+
+#[test]
+fn a_decided_site_navigates_through_its_reading_at_the_same_ids() {
+    // `new Thing(1)` reads as `new(Thing(1))` undecided (nothing names
+    // `Thing`); an index declaring `Thing` decides it a method call. The
+    // view swaps the head refs in place: same table lengths, the
+    // function-call slots dormant, the method-call slots live.
+    let thing = "package Thing;\nsub new { bless {}, shift }\n1;\n";
+    let fa = build_fa("package main;\nmy $a = new Thing(1);\n");
+    let idx = ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(std::path::PathBuf::from("/tmp/qa_ind/Thing.pm"), build_fa(thing));
+    let verb = Point::new(1, 9);
+    assert!(matches!(fa.ref_at(verb).map(|r| &r.kind), Some(RefKind::FunctionCall)));
+    assert!(method_call_rows(&fa, "new").is_empty());
+
+    let view = fa.decided_with(&idx).expect("the index moves the site off its fallback");
+    assert_eq!(view.refs().len(), fa.refs().len(), "ids are stable across views");
+    assert_eq!(view.symbols().len(), fa.symbols().len());
+    assert!(matches!(view.ref_at(verb).map(|r| &r.kind), Some(RefKind::MethodCall { .. })));
+    assert_eq!(method_call_rows(&view, "new"), vec![1]);
+    assert!(
+        view.refs().iter().all(|r| !(r.target_name == "Thing" && matches!(r.kind, RefKind::FunctionCall))),
+        "the class word is no call in the method reading"
+    );
+    assert!(fa.decided(&fa.readings.fallbacks()).is_none(), "the fallbacks are the base");
+}

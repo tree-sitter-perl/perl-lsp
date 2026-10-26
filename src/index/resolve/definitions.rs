@@ -946,10 +946,8 @@ impl<'a> CandidateSet<'a> {
                             .candidate_defining_sub_in_package(module, class, method)
                             .read().or_else(|| idx.get_cached(module).read());
                         if let Some(cached) = chosen {
-                            // A cross-file DBIC accessor is a deferred emission
-                            // MATERIALIZED into the whole cached copy at index
-                            // completion (`materialize_gated_emissions`), so the
-                            // whole view carries it — no per-query enrichment.
+                            // A cross-file DBIC accessor is a held reading the
+                            // whole view installs when its gate holds.
                             let whole = idx.whole_present(&cached);
                             // A stored member of the class: a data field or
                             // an enum constant, not a sub.

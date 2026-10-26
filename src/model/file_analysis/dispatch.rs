@@ -368,18 +368,11 @@ pub struct DispatchCandidate {
 ///
 /// The build records the already-computed emission (tree-free,
 /// file-analysis-native — the `on_match` result translated in
-/// `pattern_dispatch`, which speaks `EmitAction`) plus the gate prefixes.
-/// `enrich_imported_types_with_keys` re-fires it when the package's ancestry
-/// resolves ANY gate prefix CROSS-FILE (`class_isa_prefix`, the same MRO
-/// seam as every other ancestry walk). Idempotent by construction: the
-/// re-fired symbols/refs land ABOVE the symbol/ref tables' baselines
-/// and are truncated + re-derived every enrichment cycle, so a file whose
-/// ancestry resolves late converges to the same analysis as one built with
-/// it known — the same discipline as `ProvisionalDispatch`, but for
-/// symbol emission (which feeds every symbol-table consumer, so it can't be
-/// gated at one query seam — it must materialize into the analysis).
-/// See `docs/adr/receiver-gated-dispatch.md` (Phase 2) and
-/// `docs/prompt-enrichment-inheritance-residual.md`.
+/// `pattern_dispatch`, which speaks `EmitAction`) plus the gate prefixes,
+/// and the assembled analysis holds it as a reading of one
+/// `ClassIsaPrefix` question (`FileAnalysis::hold_gated_emission`): a view
+/// whose index resolves ANY gate prefix cross-file installs its symbols
+/// and refs at the ids the build gave them (`readings.rs`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatedEmission {
     /// Any of these `ClassIsa` prefixes holding cross-file re-fires the

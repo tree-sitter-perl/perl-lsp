@@ -39,7 +39,7 @@ pub struct Document {
     pub language: &'static str,
     /// The freshness record's source: this doc's Surface, projected at BUILD
     /// time from the pristine analysis — before `OpenDocs::condition_open`
-    /// swaps a gate-applied copy into `analysis`. `Surface::project`'s
+    /// swaps a decided view into `analysis`. `Surface::project`'s
     /// contract is the file's OWN facts. Retained per open doc (bounded by
     /// editor tabs) so the record never depends on when the swap ran. Perl-only; pack freshness is the
     /// invalidator's disk-side gate.

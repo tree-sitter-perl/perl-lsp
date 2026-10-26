@@ -1157,7 +1157,7 @@ fn sweep_one_file(
     let _sweep = crate::util::ghost_stats::SweepScope::start();
     let _memo = module_index::SweepMemoGuard::open();
     // Index copies may be refs/bag-evicted; diagnostics read refs AND the
-    // bag, so take the whole-on-both-axes view (gate-applied by the index).
+    // bag, so take the whole-on-both-axes view (decided by the index).
     // The guard lives in ITS OWN block: it must drop while `CURRENT_FILE` is
     // still set, or the per-file lane never sees the region.
     let diags = {
