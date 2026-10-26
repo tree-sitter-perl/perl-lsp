@@ -479,13 +479,23 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn world_digest(&self) -> Option<u64> {
+        if self.core.pack_inputs.get().is_none() && !self.core.inc_known.load(std::sync::atomic::Ordering::Acquire) {
+            crate::util::ghost_stats::count("engine.world_unknown");
+            return None;
+        }
         Some(self.world_digest_now().digest)
     }
 
     fn source_stamp(&self, path: &std::path::Path) -> Option<u64> {
-        // An unsaved buffer has no stamp another process could check.
-        if self.core.open_callers.contains_key(path) {
-            return None;
+        // A buffer whose analysis is a function of its text alone carries
+        // the stamp a disk build of that text would: an answer that read it
+        // adopts later exactly when the saved file holds the same text. Any
+        // other buffer has no stamp another process could check.
+        if let Some(open) = self.core.open_callers.get(path) {
+            let (version, cached) = open.value();
+            let of_text_alone = version & super::OPEN_COUNTED_BIT == 0;
+            let stamp = cached.analysis().source_stamp;
+            return (of_text_alone && stamp != 0).then_some(stamp);
         }
         self.world_digest_now().stamps.get(path).copied()
     }

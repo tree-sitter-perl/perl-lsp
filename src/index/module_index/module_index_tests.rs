@@ -2829,3 +2829,43 @@ fn sweep_probe_memo_is_stamp_keyed_and_keeps_only_proven_verdicts() {
     assert_eq!(probe(&idx, sym(), None), None);
     assert_eq!(runs.get(), 5);
 }
+
+/// A warm server can answer before the resolver publishes `@INC`. An answer
+/// computed then names a world no later process has, so it neither adopts
+/// nor persists; once the search path is known it does both.
+#[test]
+fn no_answer_persists_before_the_search_path_is_known() {
+    let greeter = parse_source_to_cached(GREETER_METHOD, "Greeter");
+    let app = parse_source_to_cached(
+        "package App;\nsub run { Greeter->greet(bless({}, 'User')) }\n1;\n",
+        "App",
+    );
+    let pending = |inc_known: bool| {
+        let idx = ModuleIndex::from_core(Arc::new(IndexCore::new()));
+        if inc_known {
+            idx.core.set_inc_roots(&[]);
+        }
+        for f in [&greeter, &app] {
+            idx.register_workspace_module(f.path.to_path_buf(), Arc::clone(&f.analysis()));
+        }
+        assert!(greet_param_type(&greeter, &idx).is_some());
+        crate::model::file_analysis::CrossFileLookup::answer_store(&idx).unwrap().take_pending().len()
+    };
+    assert_eq!(pending(false), 0, "nothing persists under an unknown search path");
+    assert!(pending(true) > 0, "a known search path persists the answer");
+}
+
+/// An open buffer built from its text alone stamps like the disk build of
+/// that text, so an answer that read it persists; a buffer a plugin gate
+/// shaped has no stamp a later process could check.
+#[test]
+fn an_open_buffer_of_its_text_alone_stamps_like_its_disk_build() {
+    use crate::model::file_analysis::CrossFileLookup;
+    let app = parse_source_to_cached("package App;\nsub run { 1 }\n1;\n", "App");
+    let idx = index_of(&[&app]);
+    let disk = idx.source_stamp(&app.path).expect("the disk copy is stamped");
+    idx.set_open_caller(&app.path, Arc::clone(&app.analysis()), true);
+    assert_eq!(idx.source_stamp(&app.path), Some(disk));
+    idx.set_open_caller(&app.path, Arc::clone(&app.analysis()), false);
+    assert_eq!(idx.source_stamp(&app.path), None);
+}

@@ -112,6 +112,11 @@ pub(crate) struct IndexCore {
     /// fingerprint). Set, it stands in the world digest for the @INC roots,
     /// which no pack analysis reads and which a warm start learns late.
     pub(crate) pack_inputs: std::sync::OnceLock<u64>,
+    /// Set once `set_inc_roots` has published the search path. Until then
+    /// the hub has no world digest: an answer computed against the empty
+    /// roots a warm start begins with must neither adopt nor persist under
+    /// a digest that names them.
+    pub(crate) inc_known: std::sync::atomic::AtomicBool,
     /// Process-unique identity, for sweep stores that key per index: an
     /// `Arc` address can be reused by a later core and inherit its entries.
     pub(crate) core_id: u64,
@@ -215,6 +220,7 @@ impl IndexCore {
             open_bumps: std::sync::atomic::AtomicU64::new(0),
             world_digest: Mutex::new(None),
             pack_inputs: std::sync::OnceLock::new(),
+            inc_known: std::sync::atomic::AtomicBool::new(false),
             world_bumps: std::sync::atomic::AtomicU64::new(0),
             caller_slices: CallerSliceCache::default(),
             core_id: {
@@ -240,6 +246,7 @@ impl IndexCore {
         if let Ok(mut g) = self.inc_roots.write() {
             *g = Arc::new(canon);
         }
+        self.inc_known.store(true, std::sync::atomic::Ordering::Release);
         self.world_bumps.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 

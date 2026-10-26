@@ -6,7 +6,7 @@ use super::*;
 impl ModuleIndex {
     /// Wrap a shared core. Everything OUTSIDE the core is per-`ModuleIndex`
     /// serving state the resolver thread never touches.
-    fn from_core(core: Arc<IndexCore>) -> Self {
+    pub(crate) fn from_core(core: Arc<IndexCore>) -> Self {
         ModuleIndex {
             core,
             loaded_modules: Arc::new(DashMap::new()),
@@ -528,6 +528,8 @@ impl ModuleIndex {
         // Unit nets exercise the seams' retries; production defaults OFF
         // (the server enables at initialize).
         idx.mark_long_lived();
+        // No resolver publishes a search path here; the empty one is the world.
+        idx.core.set_inc_roots(&[]);
         idx
     }
 
