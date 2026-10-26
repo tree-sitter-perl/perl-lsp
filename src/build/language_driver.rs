@@ -855,6 +855,7 @@ fn inject_member_blocks(
             package: Some(base.macro_name.clone()),
             owner: None,
             implicit_receiver: false,
+            declaration_rules: Vec::new(),
         });
         skel.scope_count = skel.scopes.len();
         for m in &base.members {

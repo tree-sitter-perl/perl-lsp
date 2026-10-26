@@ -69,6 +69,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 package: st.package.clone(),
                 owner: None,
                 implicit_receiver: scope_cap == ScopeCap::SubImplicitReceiver,
+                declaration_rules: Vec::new(),
             });
             st.scope_stack.push((e.end_byte, id));
             st.out.scope_count += 1;

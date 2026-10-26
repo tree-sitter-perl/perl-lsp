@@ -283,6 +283,7 @@ pub fn extract_in(
         package: None,
         owner: None,
         implicit_receiver: false,
+        declaration_rules: Vec::new(),
     });
     let mut st = ExtractState {
         pack,
