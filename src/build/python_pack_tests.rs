@@ -935,6 +935,31 @@ def reset(other: Counter, o):
     assert_eq!(later.target_name, "z");
 }
 
+/// A local typed only by its value is typed by the time slots are
+/// settled: `o = Counter()` makes `o.z = 1` a write of `Counter.z`, and a
+/// read through it lands there.
+#[test]
+fn a_write_through_a_constructed_local_declares_on_its_class() {
+    let src = "\
+class Counter:
+    pass
+
+o = Counter()
+o.z = 1
+x = o.z
+";
+    let fa = py_in(src, Some(&module(&["pkg", "mod"], false)));
+    assert_eq!(fields_of(&fa), [("z", 4, true)]);
+    let read = fa.refs().iter().find(|r| r.span.start == Point::new(5, 6)).expect("the read is a reference");
+    assert_eq!(read.target_name, "z");
+    #[cfg(feature = "python")]
+    {
+        let (t, idx) = indexed("pyvaluetyped", &[("pkg/__init__.py", ""), ("pkg/mod.py", src)]);
+        let (defs, _, _) = landing(&idx, &t.0.join("pkg/mod.py"), Point::new(5, 6));
+        assert_eq!(defs, [("mod.py".to_string(), 4)]);
+    }
+}
+
 /// Member completion on an instance offers the class-body fields, the
 /// instance fields and the methods.
 #[test]
