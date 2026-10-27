@@ -11,7 +11,10 @@
 # Needs: git, perl >= 5.20 with Module::CoreList (core), cpm
 #   curl -sSL https://raw.githubusercontent.com/skaji/cpm/main/cpm -o /tmp/cpm && chmod +x /tmp/cpm
 #
-# Idempotent: existing clones are left alone, existing local/ trees are topped up.
+# Each repo is pinned to the commit the recorded measurements used, fetched
+# shallow. Idempotent: an existing clone is left alone (a warning names it if it
+# sits off its pin), existing local/ trees are topped up, and house plugins are
+# re-copied every run.
 set -u
 DEST="${1:-${PERL_CORPORA:-$HOME/perl-corpora}/bulk}"
 DEPS="$(dirname "$DEST")/deps"
@@ -20,28 +23,53 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CPM="$(command -v cpm || echo /tmp/cpm)"
 
 # The eight keepers. Each earned its slot; see README.md for the measurement.
-#   name|url|why
+# A pin moves only with a re-measure: every recorded number is against it, and
+# the house plugins (house/<name>/) are copied out of the source at it.
+#   name|url|commit|why
 REPOS=(
-"FHEM|https://github.com/fhem/fhem-mirror|main-monoculture: 534 providers of one package name"
-"Foswiki|https://github.com/foswiki/distro|high fan-out, 'other'-driven — a second mechanism"
-"Evergreen|https://github.com/evergreen-library-system/Evergreen|high fan-out, 262/262 properly packaged"
-"WeBWorK|https://github.com/openwebwork/webwork2|worst per-file cost, not fan-out"
-"Znuny|https://github.com/Znuny/Znuny|largest corpus, LOWEST fan-out — size/fan-out are independent"
-"Webmin|https://github.com/webmin/webmin|path-based require, 101 package decls, lowest hit rate"
-"BMO|https://github.com/mozilla-bteam/bmo|healthy reference: 206 att/file at 99.90% hit"
-"openfoodfacts|https://github.com/openfoodfacts/openfoodfacts-server|densest static graph, near-zero fan-out"
+"FHEM|https://github.com/fhem/fhem-mirror|f0ad3f52c0a21788b62257bf9ee0c083c5464f0d|main-monoculture: 534 providers of one package name"
+"Foswiki|https://github.com/foswiki/distro|c6491a777541fb5288d9487fac0a9a6dceb3791a|high fan-out, 'other'-driven — a second mechanism"
+"Evergreen|https://github.com/evergreen-library-system/Evergreen|96e49f91ed05cd4dc4218be578ff30a13996be13|high fan-out, 262/262 properly packaged"
+"WeBWorK|https://github.com/openwebwork/webwork2|e692d816b87e202f77a8897fc9bde791d03bfa3c|worst per-file cost, not fan-out"
+"Znuny|https://github.com/Znuny/Znuny|234947443653d709a2e916f8bfe10d4c784b8db1|largest corpus, LOWEST fan-out — size/fan-out are independent"
+"Webmin|https://github.com/webmin/webmin|60f980d83245191e26a67e63cfb86c7652cb613b|path-based require, 101 package decls, lowest hit rate"
+"BMO|https://github.com/mozilla-bteam/bmo|635a95c106cfe0cbf71809ffc244ae431100a4d1|healthy reference: 206 att/file at 99.90% hit"
+"openfoodfacts|https://github.com/openfoodfacts/openfoodfacts-server|978319802a53816791de579d6c967c44ed67bc0a|densest static graph, near-zero fan-out"
 )
 
 mkdir -p "$DEST" || exit 1
 for ENTRY in "${REPOS[@]}"; do
-  IFS='|' read -r NAME URL WHY <<< "$ENTRY"
+  IFS='|' read -r NAME URL PIN WHY <<< "$ENTRY"
   [ -n "$ONLY" ] && [ "$ONLY" != "$NAME" ] && continue
   echo "══ $NAME — $WHY"
   if [ -d "$DEST/$NAME/.git" ]; then
-    echo "   clone: present"
+    AT="$(git -C "$DEST/$NAME" rev-parse HEAD 2>/dev/null)"
+    if [ "$AT" = "$PIN" ]; then
+      echo "   clone: present at pin"
+    else
+      echo "   clone: present but at ${AT:-?}, NOT the pin ${PIN:0:12} — numbers won't compare"
+      echo "          git -C $DEST/$NAME fetch --depth 1 origin $PIN && git -C $DEST/$NAME checkout FETCH_HEAD"
+    fi
   else
-    git clone --depth 1 -q "$URL" "$DEST/$NAME" || { echo "   CLONE FAILED"; continue; }
-    echo "   clone: ok"
+    # GitHub serves a commit by id, so a pinned clone stays shallow.
+    { git init -q "$DEST/$NAME" &&
+      git -C "$DEST/$NAME" remote add origin "$URL" &&
+      git -C "$DEST/$NAME" fetch -q --depth 1 origin "$PIN" &&
+      git -C "$DEST/$NAME" checkout -q FETCH_HEAD; } ||
+      { echo "   CLONE FAILED"; rm -rf "$DEST/$NAME"; continue; }
+    echo "   clone: ok at ${PIN:0:12}"
+  fi
+
+  # House plugins: what a team would ship for its own runtime magic (exports
+  # built at runtime, globals another file declares). The server loads
+  # <root>/.perl-lsp/*.rhai, so they reach every run on this root with no env.
+  if [ -d "$HERE/house/$NAME" ]; then
+    mkdir -p "$DEST/$NAME/.perl-lsp"
+    rm -f "$DEST/$NAME/.perl-lsp"/house-*.rhai
+    for f in "$HERE/house/$NAME"/*.rhai; do cp "$f" "$DEST/$NAME/.perl-lsp/house-$(basename "$f")"; done
+    grep -qx '/.perl-lsp/' "$DEST/$NAME/.git/info/exclude" 2>/dev/null ||
+      echo '/.perl-lsp/' >> "$DEST/$NAME/.git/info/exclude"
+    echo "   house plugins: $(ls "$HERE/house/$NAME" | tr '\n' ' ')"
   fi
 
   # Dependency manifest: use the repo's own if it has one, else derive.
