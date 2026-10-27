@@ -1711,6 +1711,19 @@ fn test_ref_eq_current_package_narrows_to_the_enclosing_class() {
     assert_eq!(ret.as_ref().and_then(|t| t.class_name()), Some("P"), "{:?}", ret);
 }
 
+/// `STMT if G` / `STMT unless G` narrow STMT by G's polarity, exit or not;
+/// an exit's fall-through keeps the opposite polarity.
+#[test]
+fn postfix_guard_narrows_the_statement_it_guards() {
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($h, $e) = @_;\n    print $h if ref($h) eq 'HASH';\n    print $h unless ref($h) eq 'HASH';\n    return $e if ref($e) eq 'ARRAY';\n    print $e;\n}\n",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$h", Point::new(3, 10)), Some(InferredType::HashRef));
+    assert_eq!(fa.inferred_type_via_bag("$h", Point::new(4, 10)), None, "`unless` asserts the negation, which `ref-eq` lacks");
+    assert_eq!(fa.inferred_type_via_bag("$e", Point::new(5, 11)), Some(InferredType::ArrayRef), "the exit itself");
+    assert_eq!(fa.inferred_type_via_bag("$e", Point::new(6, 10)), None, "`ref-eq` has no negation");
+}
+
 #[test]
 fn test_indirect_object_call_reads_subs_of_the_current_package() {
     // Perl looks the class name up as a sub in the package in force at the

@@ -181,6 +181,12 @@ too — non-representable negations (`isa`) contribute nothing, making the
 cross-condition intersection automatic. General negation stays parked
 (see `optional-types.md`).
 
+A statement modifier is a one-arm region: `STMT if G` narrows STMT by G
+TRUE, `STMT unless G` by G FALSE, exit or not. When STMT is an exit, the
+rest of the block is the fall-through and takes the opposite polarity.
+Only the fall-through records a `GuardSite`, so the D3/D4 redundancy
+diagnostics see each statement-level guard once, as before.
+
 ## `defined`/`blessed` strip via a re-emittable fold pass
 
 `StripOptional` can't resolve at walk time: the subject's `Optional`

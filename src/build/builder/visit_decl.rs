@@ -71,7 +71,7 @@ impl<'a> Builder<'a> {
                 self.queue_children(node);
             }
             "postfix_conditional_expression" => {
-                self.narrow_postfix_exit(node);
+                self.narrow_postfix(node);
                 self.queue_children(node);
             }
             "lowprec_logical_expression" => {

@@ -416,22 +416,27 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// `STMT if/unless G;` where STMT is a control-flow exit — narrow the
-    /// rest of the enclosing block (the guard holds for the fall-through).
-    pub(super) fn narrow_postfix_exit(&mut self, postfix: Node<'a>) {
+    /// `STMT if/unless G;` — STMT runs only where G says, so it is a one-arm
+    /// region the guard narrows; when STMT is a control-flow exit, the rest
+    /// of the enclosing block is the fall-through, which holds the opposite.
+    pub(super) fn narrow_postfix(&mut self, postfix: Node<'a>) {
         let Some(condition) = postfix.child_by_field_name("condition") else { return };
         let Some(modified) = postfix.named_child(0) else { return };
-        if !is_exit_expression(modified, self.source) {
-            return;
-        }
         let Some(kw) = connector_keyword_between(modified, condition, self.source) else { return };
-        // `return unless G` → fall-through holds when G TRUE; `if G` → FALSE.
-        let holds_when_true = match kw.as_str() {
-            "unless" => true,
-            "if" => false,
+        let runs_when_true = match kw.as_str() {
+            "if" => true,
+            "unless" => false,
             _ => return,
         };
-        self.narrow_block_remainder(postfix, condition, holds_when_true);
+        let region = node_to_span(modified);
+        for fact in recognize_guards(self, condition, self.source) {
+            if let Some(op) = fact.op_for_region(runs_when_true) {
+                self.emit_narrowing_fact(&fact.subject, op, region, modified);
+            }
+        }
+        if is_exit_expression(modified, self.source) {
+            self.narrow_block_remainder(postfix, condition, !runs_when_true);
+        }
     }
 
     /// `G or EXIT;` / `G and EXIT;` — the bare-logical early-exit idiom.
