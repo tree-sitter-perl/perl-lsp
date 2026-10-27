@@ -219,7 +219,7 @@ fn recognize_guards<'a>(builder: &Builder<'a>, cond: Node<'a>, source: &[u8]) ->
         "equality_expression" => recognize_ref_eq_guard(builder, cond, source).into_iter().collect(),
         "func1op_call_expression" => recognize_defined_guard(cond, source).into_iter().collect(),
         "ambiguous_function_call_expression" | "function_call_expression" => {
-            recognize_blessed_guard(cond, source).into_iter().collect()
+            recognize_blessed_guard(builder, cond, source).into_iter().collect()
         }
         _ => Vec::new(),
     }
@@ -241,15 +241,9 @@ fn recognize_defined_guard(call: Node, source: &[u8]) -> Option<GuardFact> {
 /// `blessed $x` / `blessed($x)` → strip `Optional` off the subject (v1
 /// treats `blessed` as `defined`'s strip; the extra "is an object"
 /// precision has no lattice target yet).
-fn recognize_blessed_guard(call: Node, source: &[u8]) -> Option<GuardFact> {
-    let name = call.child_by_field_name("function")?.utf8_text(source).ok()?;
-    if name != "blessed" {
-        return None;
-    }
-    // The `arguments` field is the lone operand; peel grouping and accept
-    // it only if it's a scalar/place — never descend into a call/deref.
-    let arg = crate::cst::peel_groups(call.child_by_field_name("arguments")?);
-    if !is_subject_node_kind(arg.kind()) {
+fn recognize_blessed_guard<'a>(builder: &Builder<'a>, call: Node<'a>, source: &[u8]) -> Option<GuardFact> {
+    let (via, arg) = builder.ref_tag_call(call)?;
+    if via != crate::model::file_analysis::RefTagFn::Blessed {
         return None;
     }
     Some(GuardFact {
@@ -291,7 +285,7 @@ fn recognize_ref_eq_guard<'a>(builder: &Builder<'a>, eq: Node<'a>, source: &[u8]
     }
     let left = eq.child_by_field_name("left")?;
     let right = eq.child_by_field_name("right")?;
-    let call = |n: Node<'a>| crate::cst::ref_tag_call(crate::cst::peel_groups(n), source);
+    let call = |n: Node<'a>| builder.ref_tag_call(crate::cst::peel_groups(n));
     if let Some(((via, operand), lit)) = call(left).map(|c| (c, right)).or_else(|| call(right).map(|c| (c, left))) {
         let ty = match crate::cst::plain_string_literal_text(lit, source) {
             Some(s) => tag_string_to_type(via, &s)?,

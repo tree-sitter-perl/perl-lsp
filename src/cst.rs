@@ -1056,12 +1056,13 @@ pub(crate) fn is_conditionally_executed_in_block(node: Node) -> bool {
     conditional_before_boundary(node, true)
 }
 
-/// A `ref` / `reftype` / `blessed` call on a variable or place: which
-/// function, and the operand. A call or deref operand (`ref(f($x))`) names
-/// nothing a guard could narrow.
+/// A call on a variable or place whose callee `tag_of` names as reporting
+/// what a reference is: which function, and the operand. A call or deref
+/// operand (`ref(f($x))`) names nothing a guard could narrow.
 pub(crate) fn ref_tag_call<'a>(
     node: Node<'a>,
     src: &[u8],
+    tag_of: impl Fn(&str) -> Option<crate::model::file_analysis::RefTagFn>,
 ) -> Option<(crate::model::file_analysis::RefTagFn, Node<'a>)> {
     let (name, operand) = match node.kind() {
         "func1op_call_expression" => {
@@ -1072,7 +1073,7 @@ pub(crate) fn ref_tag_call<'a>(
         }
         _ => return None,
     };
-    let via = crate::model::conventions::ref_tag_fn(name)?;
+    let via = tag_of(name)?;
     let operand = peel_groups(operand);
     matches!(operand.kind(), "scalar" | "hash_element_expression" | "array_element_expression")
         .then_some((via, operand))

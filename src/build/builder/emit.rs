@@ -127,11 +127,44 @@ impl<'a> Builder<'a> {
             .any(|i| i.imported_symbols.iter().any(|sym| sym.local_name == name))
     }
 
+    /// What a call to `name` reports about a reference: the `ref` builtin,
+    /// or a plugin-declared `ref_tag_functions()` entry this file imported
+    /// (by its local name) or names fully qualified.
+    pub(super) fn ref_tag_fn(&self, name: &str) -> Option<crate::model::file_analysis::RefTagFn> {
+        use crate::model::conventions::{is_ref_builtin, split_qualified, PERL_SPELLINGS};
+        use crate::model::file_analysis::RefTagFn;
+        if is_ref_builtin(name) {
+            return Some(RefTagFn::Ref);
+        }
+        let (module, leaf) = split_qualified(name, &PERL_SPELLINGS);
+        self.ref_tag_functions.iter().find_map(|f| {
+            let hit = match module {
+                Some(m) => m == f.module && leaf == f.name,
+                None => self.imports.iter().any(|i| {
+                    i.module_name == f.module
+                        && i.imported_symbols.iter().any(|sym| {
+                            sym.local_name == name
+                                && sym.remote_name.as_deref().unwrap_or(&sym.local_name) == f.name
+                        })
+                }),
+            };
+            hit.then_some(f.tag)
+        })
+    }
+
+    /// [`crate::cst::ref_tag_call`] with this file's ref-tag functions.
+    pub(super) fn ref_tag_call(
+        &self,
+        node: Node<'a>,
+    ) -> Option<(crate::model::file_analysis::RefTagFn, Node<'a>)> {
+        crate::cst::ref_tag_call(node, self.source, |n| self.ref_tag_fn(n))
+    }
+
     pub(super) fn expr_payload(&mut self, node: Node<'a>) -> Option<crate::model::witnesses::WitnessPayload> {
         use crate::model::witnesses::{RefIdx, WitnessAttachment, WitnessPayload};
         // What a reference is, named for the variable it was asked of: a
         // comparison of it to a literal guards that variable.
-        if let Some((via, subject)) = crate::cst::ref_tag_call(node, self.source)
+        if let Some((via, subject)) = self.ref_tag_call(node)
             .and_then(|(via, operand)| Some((via, crate::cst::canonical_var_name(operand, self.source)?)))
         {
             return Some(WitnessPayload::InferredType(InferredType::RefTagOf {

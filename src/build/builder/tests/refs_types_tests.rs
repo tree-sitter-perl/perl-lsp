@@ -1730,7 +1730,7 @@ fn postfix_guard_narrows_the_statement_it_guards() {
 #[test]
 fn a_kept_ref_tag_guards_the_variable_it_names() {
     let fa = build_fa(
-        "package P;\nsub f {\n    my ($p, $q, $c, $d) = @_;\n    my $rp = ref $p;\n    if ($rp eq 'ARRAY') { print $p; }\n    my $kq = blessed $q;\n    print $q if $kq eq 'Foo';\n    print $c if blessed($c) eq 'Bar';\n    my $rd = Scalar::Util::reftype($d);\n    print $d if $rd eq 'Foo';\n    return;\n}\n",
+        "package P; use Scalar::Util qw(blessed);\nsub f {\n    my ($p, $q, $c, $d) = @_;\n    my $rp = ref $p;\n    if ($rp eq 'ARRAY') { print $p; }\n    my $kq = blessed $q;\n    print $q if $kq eq 'Foo';\n    print $c if blessed($c) eq 'Bar';\n    my $rd = Scalar::Util::reftype($d);\n    print $d if $rd eq 'Foo';\n    return;\n}\n",
     );
     let at = |v: &str, row: usize, col: usize| fa.inferred_type_via_bag(v, Point::new(row, col));
     assert_eq!(at("$p", 4, 33), Some(InferredType::ArrayRef));
@@ -1742,6 +1742,16 @@ fn a_kept_ref_tag_guards_the_variable_it_names() {
         site: Span { start: Point::new(3, 13), end: Point::new(3, 19) },
         via: crate::model::file_analysis::RefTagFn::Ref,
     }));
+}
+
+/// `blessed`/`reftype` are Scalar::Util's: a file's own `sub blessed`
+/// reports nothing.
+#[test]
+fn a_ref_tag_function_is_the_one_its_library_exports() {
+    let fa = build_fa(
+        "package P;\nsub blessed { 1 }\nsub f {\n    my ($p) = @_;\n    print $p if blessed($p) eq 'Foo';\n    return;\n}\n",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$p", Point::new(4, 10)), None);
 }
 
 /// A tag says what its subject held when the tag was computed: a rebind

@@ -222,7 +222,7 @@ fn optional_defined_narrows_to_inner() {
 #[test]
 fn optional_blessed_narrows_to_inner() {
     let fa = build_fa(
-        "package P;\nsub maybe { return undef unless 1; return Foo->new; }\nsub use_it {\n    my $r = maybe();\n    return unless blessed $r;\n    $r->go;\n}",
+        "package P; use Scalar::Util qw(blessed);\nsub maybe { return undef unless 1; return Foo->new; }\nsub use_it {\n    my $r = maybe();\n    return unless blessed $r;\n    $r->go;\n}",
     );
     assert_eq!(invocant_class_of(&fa, "go").as_deref(), Some("Foo"));
 }

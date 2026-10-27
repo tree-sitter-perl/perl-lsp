@@ -919,6 +919,18 @@ pub struct FrameworkModeMaker {
     pub imports: Vec<String>,
 }
 
+/// A library function that reports what a reference is (Scalar::Util's
+/// `reftype` / `blessed`): its result is a `RefTagOf` tag, so comparing it
+/// to a literal guards the operand. Fires only where the file imported the
+/// name from `module` or called it fully qualified — a `sub blessed` of
+/// one's own is just a sub.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RefTagFunction {
+    pub module: String,
+    pub name: String,
+    pub tag: crate::model::file_analysis::RefTagFn,
+}
+
 /// A plugin-asserted return type for a known sub/method. Plugins ship
 /// these as a static manifest (`overrides()` on the trait, `fn
 /// overrides()` at the top of a `.rhai` script) for cases where
@@ -1191,6 +1203,12 @@ pub trait FrameworkPlugin: Send + Sync {
     /// `frameworks/moo.rhai`; any plugin can declare another re-exporter.
     /// Default empty.
     fn framework_mode_makers(&self) -> &[FrameworkModeMaker] {
+        &[]
+    }
+
+    /// Library functions whose result names what a reference is — see
+    /// [`RefTagFunction`]. Default empty.
+    fn ref_tag_functions(&self) -> &[RefTagFunction] {
         &[]
     }
 
@@ -1671,6 +1689,11 @@ impl PluginRegistry {
         self.plugins
             .iter()
             .flat_map(|p| p.framework_mode_makers().iter())
+    }
+
+    /// Union of ref-tag functions across the registry.
+    pub fn ref_tag_functions<'a>(&'a self) -> impl Iterator<Item = &'a RefTagFunction> + 'a {
+        self.plugins.iter().flat_map(|p| p.ref_tag_functions().iter())
     }
 
     /// Union of column-keyed call verbs across the registry — the verbs whose

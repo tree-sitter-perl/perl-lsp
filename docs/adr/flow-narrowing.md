@@ -196,6 +196,13 @@ on the wire) that also names the variable it was asked of. It flows like
 any value: `my $ref = ref $x` reaches `$ref` by its ordinary flow edge,
 with no fold table and no name lookup.
 
+`ref` is a builtin and core knows it; `reftype` and `blessed` are
+Scalar::Util's, declared by `frameworks/scalar-util.rhai`'s
+`ref_tag_functions()` and recognised only where the file imported the
+name from that module or called it fully qualified. A file's own
+`sub blessed` is just a sub. The same gate decides the `blessed $x`
+strip below.
+
 So `ref($x) eq 'HASH'` and `$ref eq 'HASH'` are one guard, read two ways:
 an inline call is its own tag; a variable is whatever tag its value is.
 The variable form resolves in the fold (`emit_tag_narrowing_witnesses`,

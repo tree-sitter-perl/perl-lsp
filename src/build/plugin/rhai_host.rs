@@ -21,7 +21,7 @@ use tree_sitter::Point;
 
 use super::{
     AttributeMacro, CompletionQueryContext, ConstraintParam, DispatchVerb, EmitAction,
-    FrameworkModeMaker, FrameworkPlugin, ParamType, PluginCompletionAnswer, PluginSigHelpAnswer,
+    FrameworkModeMaker, FrameworkPlugin, RefTagFunction, ParamType, PluginCompletionAnswer, PluginSigHelpAnswer,
     SigHelpQueryContext, Trigger, TypeOverride, UseContext,
 };
 
@@ -285,6 +285,7 @@ pub struct RhaiPlugin {
     app_surface_consumers: Vec<String>,
     role_makers: Vec<String>,
     framework_mode_makers: Vec<FrameworkModeMaker>,
+    ref_tag_functions: Vec<RefTagFunction>,
     column_keyed_verbs: Vec<String>,
     fluent_verbs: Vec<String>,
     meta_methods: Vec<String>,
@@ -351,6 +352,8 @@ impl RhaiPlugin {
             read_manifest_list(&engine, &ast, &signatures, &id, "role_makers");
         let framework_mode_makers: Vec<FrameworkModeMaker> =
             read_manifest_list(&engine, &ast, &signatures, &id, "framework_mode_makers");
+        let ref_tag_functions: Vec<RefTagFunction> =
+            read_manifest_list(&engine, &ast, &signatures, &id, "ref_tag_functions");
         let column_keyed_verbs: Vec<String> =
             read_manifest_list(&engine, &ast, &signatures, &id, "column_keyed_verbs");
         let fluent_verbs: Vec<String> =
@@ -390,6 +393,7 @@ impl RhaiPlugin {
             app_surface_consumers,
             role_makers,
             framework_mode_makers,
+            ref_tag_functions,
             column_keyed_verbs,
             fluent_verbs,
             meta_methods,
@@ -507,6 +511,10 @@ impl FrameworkPlugin for RhaiPlugin {
         &self.framework_mode_makers
     }
 
+    fn ref_tag_functions(&self) -> &[RefTagFunction] {
+        &self.ref_tag_functions
+    }
+
     fn column_keyed_verbs(&self) -> &[String] {
         &self.column_keyed_verbs
     }
@@ -621,6 +629,7 @@ const BUNDLED: &[(&str, &str)] = &[
     ("dbic-resultddl", include_str!("../../../frameworks/dbic-resultddl.rhai")),
     ("dbic", include_str!("../../../frameworks/dbic.rhai")),
     ("type-tiny", include_str!("../../../frameworks/type-tiny.rhai")),
+    ("scalar-util", include_str!("../../../frameworks/scalar-util.rhai")),
     ("dancer", include_str!("../../../frameworks/dancer.rhai")),
     ("moo", include_str!("../../../frameworks/moo.rhai")),
     ("monkey-patch", include_str!("../../../frameworks/monkey-patch.rhai")),
@@ -995,6 +1004,7 @@ mod tests {
             ("dbic-resultddl", include_str!("../../../frameworks/dbic-resultddl.rhai")),
             ("dbic", include_str!("../../../frameworks/dbic.rhai")),
             ("type-tiny", include_str!("../../../frameworks/type-tiny.rhai")),
+            ("scalar-util", include_str!("../../../frameworks/scalar-util.rhai")),
             ("dancer", include_str!("../../../frameworks/dancer.rhai")),
             ("moo", include_str!("../../../frameworks/moo.rhai")),
             ("catalyst", include_str!("../../../frameworks/catalyst.rhai")),

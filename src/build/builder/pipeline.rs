@@ -402,6 +402,7 @@ fn build_once(
         dispatch_manifest: std::collections::HashMap::new(),
         load_manifest: std::collections::HashMap::new(),
         type_constraint_names: std::collections::HashSet::new(),
+        ref_tag_functions: Vec::new(),
         app_surface_consumers: Vec::new(),
         meta_methods: Vec::new(),
         param_type_manifest: std::collections::HashMap::new(),
@@ -467,6 +468,7 @@ fn build_once(
         .map(|s| s.to_string())
         .collect();
     b.meta_methods = b.plugins.meta_methods().map(|s| s.to_string()).collect();
+    b.ref_tag_functions = b.plugins.ref_tag_functions().cloned().collect();
     b.role_maker_modules
         .extend(b.plugins.role_makers().map(|s| s.to_string()));
     b.framework_mode_modules = b

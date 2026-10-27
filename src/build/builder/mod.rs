@@ -478,6 +478,8 @@ struct Builder<'a> {
     /// (`InstanceOf`, …), flattened once. A call to one of these is typed as
     /// `TypeConstraintOf` via the plugin's fold rather than its callee return.
     type_constraint_names: std::collections::HashSet<String>,
+    /// Plugin `ref_tag_functions()` manifest union, flattened once.
+    ref_tag_functions: Vec<plugin::RefTagFunction>,
     /// Plugin `meta_methods()` manifest union, flattened once at build.
     meta_methods: Vec<String>,
 
