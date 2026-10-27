@@ -167,7 +167,11 @@
     object: (_) @member.recv
     attribute: (identifier) @ref.member.call)
   arguments: [(argument_list ((_) @arity.arg ","?)*) @arity.args (generator_expression)]) @expr.call
-(identifier) @expr.read.var
+; A bare name read. An attribute's name (`count` in `o.count`) is the member
+; read above, never a bare name; its receiver is.
+((identifier) @expr.read.var
+ (#not-has-parent? @expr.read.var attribute))
+(attribute object: (identifier) @expr.read.var)
 
 (string) @expr.lit.string
 (integer) @expr.lit.number
