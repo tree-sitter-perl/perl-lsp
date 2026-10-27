@@ -124,6 +124,24 @@ assertion is "no diagnostic at this site."
   already knows its kind (FunctionCall vs MethodCall) — signature-help should ask.
 - **Difficulty:** low. A shape the producer already has; just consult it.
 
+### `sig-gld-norm-imply-function` — a guarded deref types the parameter
+- **Cursor:** `Getopt/Long/Descriptive.pm:656:25` (inside `_norm_imply( ... )`)
+- **Expect:** `_norm_imply($what)` — the parameter is untyped.
+- **Actual:** `_norm_imply($what: ArrayRef)`.
+- **Construct:** `return { map { $_ => 1 } @$what } if $ref eq 'ARRAY';` —
+  `$what` is a plain scalar, a hashref or an arrayref, and the deref runs
+  only under the ref-type guard.
+- **Root cause:** a deref (`@$x`, `@{$x}`, `$$x[0]`) types its scalar operand
+  with a walk-time constraint at the deref site; the parameter's type is
+  read from the sub's constraints without asking whether the site is
+  reachable on every path. The block spelling `@{$what}` already answered
+  ArrayRef here; the sigil spelling joined it when derefs were unified.
+- **Fix sketch:** a deref inside a branch narrowed by a `ref`-type test is
+  evidence for that branch only — the narrowing lane (`narrowing.rs`)
+  already scopes facts to guarded regions; the deref constraint should
+  land as a narrowed fact there instead of a sub-wide one.
+- **Difficulty:** medium. Needs the deref constraint routed through narrowing.
+
 ---
 
 ## 5. `--type-at` single-file CLI boundary
@@ -157,6 +175,7 @@ assertion is "no diagnostic at this site."
 | gap | subsystem | difficulty |
 |---|---|---|
 | sig-uri-check-path-function-noinvocant | signature-help invocant | **low** |
+| sig-gld-norm-imply-function | deref typing under a guard | medium |
 | completion-typetiny-imported-blessed | completion candidates | **low** |
 | diag-09 / diag-10 | typeglob-codegen synthesis | medium |
 | def-16-codegen-type-function | Type::Library synthesis | medium |

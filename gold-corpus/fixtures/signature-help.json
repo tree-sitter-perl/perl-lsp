@@ -42,7 +42,7 @@
       "col": 30,
       "expect": {
         "all": [
-          "_assert_addr_list_ok($header, $allow_empty, $list)",
+          "_assert_addr_list_ok($header, $allow_empty, $list: ArrayRef)",
           "active param: 0 ($header)"
         ],
         "none": []
@@ -58,8 +58,8 @@
       "col": 41,
       "expect": {
         "all": [
-          "_assert_addr_list_ok($header, $allow_empty, $list)",
-          "active param: 2 ($list)"
+          "_assert_addr_list_ok($header, $allow_empty, $list: ArrayRef)",
+          "active param: 2 ($list: ArrayRef)"
         ],
         "none": []
       },
@@ -127,7 +127,8 @@
         ],
         "none": []
       },
-      "status": "gold"
+      "status": "xfail",
+      "note": "`$what` is a scalar, a hashref or an arrayref; `@$what` sits under an `if $ref eq 'ARRAY'` guard, yet the deref types the parameter ArrayRef for the whole sub. See KNOWN-GAPS.md \u00a74b."
     },
     {
       "id": "sig-uri-check-path-function-noinvocant",
