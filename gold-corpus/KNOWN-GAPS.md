@@ -132,15 +132,17 @@ assertion is "no diagnostic at this site."
   `$what` is a plain scalar, a hashref or an arrayref, and the deref runs
   only under the ref-type guard.
 - **Root cause:** a deref (`@$x`, `@{$x}`, `$$x[0]`) types its scalar operand
-  with a walk-time constraint at the deref site; the parameter's type is
-  read from the sub's constraints without asking whether the site is
-  reachable on every path. The block spelling `@{$what}` already answered
-  ArrayRef here; the sigil spelling joined it when derefs were unified.
-- **Fix sketch:** a deref inside a branch narrowed by a `ref`-type test is
-  evidence for that branch only — the narrowing lane (`narrowing.rs`)
-  already scopes facts to guarded regions; the deref constraint should
-  land as a narrowed fact there instead of a sub-wide one.
-- **Difficulty:** medium. Needs the deref constraint routed through narrowing.
+  with a walk-time constraint in the scope it sits in, and signature-help
+  reads the parameter at the sub's end. Inside a `{ }` block the constraint
+  stays in that block's scope and the parameter reads untyped; a postfix
+  `if` opens no scope, so the constraint reaches the sub's end. Narrowing
+  plays no part today: it narrows only the fall-through after a postfix
+  exit, never the guarded statement, and `recognize_ref_eq_guard` matches a
+  literal `ref(...)` call, not `$ref` holding one.
+- **Fix sketch:** narrow the statement a postfix `if`/`unless` guards; see a
+  `ref`-test through a variable bound to `ref $x`; and skip the deref
+  constraint where its site lies in a region already narrowing the subject.
+- **Difficulty:** medium. Three pieces, each in `narrowing.rs` / the deref visitor.
 
 ---
 
@@ -175,7 +177,7 @@ assertion is "no diagnostic at this site."
 | gap | subsystem | difficulty |
 |---|---|---|
 | sig-uri-check-path-function-noinvocant | signature-help invocant | **low** |
-| sig-gld-norm-imply-function | deref typing under a guard | medium |
+| sig-gld-norm-imply-function | postfix guard narrowing + deref typing | medium |
 | completion-typetiny-imported-blessed | completion candidates | **low** |
 | diag-09 / diag-10 | typeglob-codegen synthesis | medium |
 | def-16-codegen-type-function | Type::Library synthesis | medium |

@@ -128,7 +128,7 @@
         "none": []
       },
       "status": "xfail",
-      "note": "`$what` is a scalar, a hashref or an arrayref; `@$what` sits under an `if $ref eq 'ARRAY'` guard, yet the deref types the parameter ArrayRef for the whole sub. See KNOWN-GAPS.md \u00a74b."
+      "note": "`$what` is a scalar, a hashref or an arrayref; `@$what` sits under an `if $ref eq 'ARRAY'` guard, yet the deref types the parameter ArrayRef at the sub's end (a postfix guard opens no scope and is not narrowed). See KNOWN-GAPS.md \u00a74."
     },
     {
       "id": "sig-uri-check-path-function-noinvocant",
