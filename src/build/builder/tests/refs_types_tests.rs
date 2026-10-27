@@ -457,6 +457,22 @@ fn test_extract_coderef_literal() {
     );
 }
 
+/// A scalar dereferenced as an aggregate holds a ref to one, in every
+/// spelling: block or sigil, whole, element, slice or `$#`.
+#[test]
+fn deref_spellings_type_the_operand() {
+    let fa = build_fa(
+        "sub f {\nmy ($a1, $a2, $a3, $a4, $h1, $h2, $h3, $h4) = @_;\nprint $$a1[0], ${$a2}[0], @$a3[1], $#{$a4};\nprint $$h1{k}, ${$h2}{k}, @{$h3}{qw(a)}, %$h4{a};\nreturn;\n}\n",
+    );
+    let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(4, 0));
+    for v in ["$a1", "$a2", "$a3", "$a4"] {
+        assert_eq!(at(v), Some(InferredType::ArrayRef), "{v}");
+    }
+    for v in ["$h1", "$h2", "$h3", "$h4"] {
+        assert_eq!(at(v), Some(InferredType::HashRef), "{v}");
+    }
+}
+
 #[test]
 fn test_refgen_types_by_what_it_references() {
     // Only `\&name` is code: `\%h` and `\@a` are container refs, and a

@@ -589,23 +589,42 @@ pub(crate) fn canonical_var_name<'a>(node: Node<'a>, src: &'a [u8]) -> Option<St
 /// node + its parent's shape to the *declared* variable's sigil + bare name.
 /// `None` = not a container-element access (caller keeps the raw text).
 pub(crate) fn canonical_container_name<'a>(node: Node<'a>, src: &'a [u8]) -> Option<String> {
-    let parent = node.parent()?;
+    if deref_operand(node).is_some() {
+        return None;
+    }
     let bare = varname_child(node)?.text(src)?;
-    let target_sigil: char = match parent.kind() {
-        "array_element_expression" => '@',
-        "hash_element_expression" => '%',
+    Some(format!("{}{}", container_sigil(node)?, bare))
+}
+
+/// The sigil of the aggregate a container access reads — `@` for `$a[0]`,
+/// `@a[..]`, `%a[..]`, `$#a`; `%` for `$h{k}`, `@h{..}`, `%h{..}`. The
+/// access node's own sigil never says it: a slice is always `@`.
+pub(crate) fn container_sigil(node: Node) -> Option<char> {
+    if node.kind() == "arraylen" {
+        return Some('@');
+    }
+    let parent = node.parent()?;
+    match parent.kind() {
+        "array_element_expression" => Some('@'),
+        "hash_element_expression" => Some('%'),
         "slice_expression" | "keyval_expression" => {
             if parent.child_by_field_name("array").is_some_and(|c| c == node) {
-                '@'
+                Some('@')
             } else if parent.child_by_field_name("hash").is_some_and(|c| c == node) {
-                '%'
+                Some('%')
             } else {
-                return None;
+                None
             }
         }
-        _ => return None,
-    };
-    Some(format!("{}{}", target_sigil, bare))
+        _ => None,
+    }
+}
+
+/// What a deref spelling dereferences: the `block` of `@{EXPR}` /
+/// `${EXPR}[0]` / `$#{EXPR}`, or the inner `scalar` of `@$x` / `$$x[0]` /
+/// `$#$x`. `None` for a named variable — its `varname` is a bare leaf.
+pub(crate) fn deref_operand<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    varname_child(node)?.named().find(|c| matches!(c.kind(), "block" | "scalar"))
 }
 
 /// Canonical access-path key for a place subject — a chain of constant

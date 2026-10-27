@@ -20,7 +20,13 @@ impl<'a> Builder<'a> {
         // lexical — so its ref is spelled qualified. The block is still
         // visited below for the refs inside it.
         let access = self.determine_access(node);
-        for (name, span, folded_from) in self.symbolic_variables(node) {
+        let sigil = match node.kind() {
+            "scalar" => Some('$'),
+            "array" => Some('@'),
+            "hash" => Some('%'),
+            _ => None,
+        };
+        for (name, span, folded_from) in sigil.map(|s| self.symbolic_variables(node, s)).unwrap_or_default() {
             let idx = self.refs.len();
             self.add_ref(RefKind::Variable, span, name, access);
             self.refs[idx].folded_from = folded_from;
@@ -156,16 +162,10 @@ impl<'a> Builder<'a> {
     /// rename skips, and a single-literal fold carries the literal as
     /// `folded_from` for rename to rewrite instead. Unqualified names belong
     /// to the package in force, as Perl resolves them.
-    fn symbolic_variables(&self, node: Node<'a>) -> Vec<(String, Span, Option<Span>)> {
+    fn symbolic_variables(&self, node: Node<'a>, sigil: char) -> Vec<(String, Span, Option<Span>)> {
         use crate::cst::NodeExt;
         use crate::model::conventions::{
             is_special_variable, qualify_var, split_qualified, PERL_SPELLINGS,
-        };
-        let sigil = match node.kind() {
-            "scalar" => '$',
-            "array" => '@',
-            "hash" => '%',
-            _ => return Vec::new(),
         };
         let Some(expr) = crate::cst::varname_child(node)
             .and_then(|vn| vn.named().find(|c| c.kind() == "block"))
@@ -254,23 +254,31 @@ impl<'a> Builder<'a> {
         false
     }
 
-    /// Walk up from a scalar to detect block-deref context.
-    /// Returns the inferred type and a context node (for constraint span) if inside
-    /// @{$x}, %{$y}, or &{$z}.
+    /// The reference type a scalar must hold when it is the whole operand of
+    /// a deref — `@{$x}` / `@$x` / `${$x}[0]` / `$$x[0]` / `$#{$x}` hold an
+    /// ArrayRef, `%{$x}` / `$$x{k}` / `@{$x}{..}` a HashRef, `&{$x}` a
+    /// CodeRef — with the deref node as the constraint's context.
     ///
-    /// Parent chain: scalar → expression_statement → block → varname → outer_node
-    /// where outer_node.kind() is "array" (@{}), "hash" (%{}), or "function" (&{}).
+    /// Parent chain: scalar → varname → outer (sigil form), or scalar →
+    /// expression_statement → block → varname → outer (block form).
     pub(super) fn block_deref_context(&self, node: Node<'a>) -> Option<(InferredType, Node<'a>)> {
-        let stmt = node.parent()?;
-        if stmt.kind() != "expression_statement" { return None; }
-        let block = stmt.parent()?;
-        if block.kind() != "block" { return None; }
-        let varname = block.parent()?;
+        let mut varname = node.parent()?;
+        if varname.kind() == "expression_statement" {
+            let block = varname.parent()?;
+            if block.kind() != "block" { return None; }
+            varname = block.parent()?;
+        }
         if varname.kind() != "varname" { return None; }
         let outer = varname.parent()?;
         match outer.kind() {
             "array" => Some((InferredType::ArrayRef, outer)),
             "hash" => Some((InferredType::HashRef, outer)),
+            "container_variable" | "slice_container_variable" | "keyval_container_variable" | "arraylen" => {
+                match crate::cst::container_sigil(outer)? {
+                    '@' => Some((InferredType::ArrayRef, outer)),
+                    _ => Some((InferredType::HashRef, outer)),
+                }
+            }
             "function" => {
                 if let Ok(text) = outer.utf8_text(self.source) {
                     if text.starts_with("&{") {
@@ -284,6 +292,9 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn visit_container_ref(&mut self, node: Node<'a>) {
+        if self.visit_deref_container(node) {
+            return;
+        }
         // Container variables: $hash{key}, @arr[0], etc.
         // The container itself is a ref to the underlying variable
         if let Ok(text) = node.utf8_text(self.source) {
@@ -299,11 +310,36 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// An element/slice/`$#` access through a deref (`${EXPR}[0]`,
+    /// `@$x{..}`, `$#{EXPR}`) names no variable of its own: the operand is
+    /// visited for its refs, and a constant name (`${"abel"}[0]`) is the
+    /// package aggregate it names. `false` = a named container, not a deref.
+    fn visit_deref_container(&mut self, node: Node<'a>) -> bool {
+        let Some(operand) = crate::cst::deref_operand(node) else { return false };
+        if let Some(sigil) = crate::cst::container_sigil(node) {
+            let access = self.determine_access(node);
+            for (name, span, folded_from) in self.symbolic_variables(node, sigil) {
+                let idx = self.refs.len();
+                self.add_ref(RefKind::ContainerAccess, span, name, access);
+                self.refs[idx].folded_from = folded_from;
+            }
+        }
+        if operand.kind() == "block" {
+            self.queue_children(operand);
+        } else {
+            self.queue_node(operand);
+        }
+        true
+    }
+
     /// `$#foo` — arraylen. TSP gives us a distinct `arraylen` node
     /// with a `varname` child; the access resolves to `@foo`. We emit
     /// a ContainerAccess ref so goto-def and rename treat it like
     /// any other indirect access into the array.
     pub(super) fn visit_arraylen_ref(&mut self, node: Node<'a>) {
+        if self.visit_deref_container(node) {
+            return;
+        }
         let bare = match find_varname_child(node).and_then(|v| v.utf8_text(self.source).ok()) {
             Some(b) => b,
             None => return,
