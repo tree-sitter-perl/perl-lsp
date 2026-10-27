@@ -1094,6 +1094,54 @@ fn a_class_body_binding_is_a_member_and_a_bare_name_renamed_together() {
     }
 }
 
+/// A subclass reaches its base's class-body binding as the same group,
+/// across files: a rename from the subclass's read moves the member and
+/// the bare name the base's body reads.
+#[cfg(feature = "python")]
+#[test]
+fn an_inherited_class_body_binding_renames_as_one_group_across_files() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let base = "\
+class Base:
+    count = 0
+    double = count * 2
+";
+    let sub = "\
+from pkg.base import Base
+
+class Sub(Base):
+    def go(self):
+        n = self.count
+        return n
+";
+    let (t, idx) = indexed("pyinherit", &[("pkg/__init__.py", ""), ("pkg/base.py", base), ("pkg/sub.py", sub)]);
+    let edits = |file: &str, at: Point| {
+        let path = t.0.join(file);
+        let fa = idx.workspace_file_for_test(&path).unwrap();
+        let store = OpenDocs::new();
+        let cs = resolve(&store, &fa, FileKey::Path(path.clone()), at, Some(&idx), OverrideScope::default());
+        let mut e: Vec<(String, usize, usize)> = cs
+            .rename_edits("total")
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(l, _)| {
+                let name = match &l.key {
+                    FileKey::Path(p) => p.file_name().unwrap().to_string_lossy().to_string(),
+                    FileKey::Url(u) => u.to_string(),
+                };
+                (name, l.span.start.row, l.span.start.column)
+            })
+            .collect();
+        e.sort();
+        e.dedup();
+        e
+    };
+    let all = [("base.py".to_string(), 1, 4), ("base.py".to_string(), 2, 13), ("sub.py".to_string(), 4, 17)];
+    assert_eq!(edits("pkg/sub.py", Point::new(4, 17)), all, "from the subclass's read");
+    assert_eq!(edits("pkg/base.py", Point::new(2, 13)), all, "from the base's body read");
+}
+
 /// A subclass's write of a name its base declares — by a class-body
 /// binding or a slot of its own — is a use of the base's member.
 #[test]

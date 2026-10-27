@@ -171,9 +171,10 @@ names from one token: the class's data member (`@def.field`,
 written directly in the body reads bare through `lookup_chain`. The match
 says so with `@def.pair`: the two defs carrying one match id are linked
 each way as `Symbol::declared_with`, the relation Perl's `has` already
-mints. The twin is no class content of its own; a rename from either
-spelling rewrites both (`codeclared_member_group` from the twin's side,
-the references matcher folding the twin's uses in from the member's). A
+mints. The twin is no class content of its own. The pair is a field group
+(`field-projections.md`): the member is its reader, read rather than
+called, and the twin's uses are its variable spellings, so a rename from
+either spelling, in any file, rewrites both. A
 binding with a value is `@mark.static`; a bare annotation declares an
 instance's attribute and stays unmarked.
 
