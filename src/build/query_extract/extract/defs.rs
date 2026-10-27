@@ -50,9 +50,9 @@ pub(super) struct State {
     /// parameterizes per match; joined into ordered per-class lists.
     tmpl_param_by_match: HashMap<usize, (String, usize)>,
     tmpl_owner_by_match: HashMap<usize, String>,
-    /// Byte ranges of the def nodes seen so far; a ref inside one is the
+    /// The name tokens of the defs seen so far; a ref inside one is the
     /// declaration, not a use (`refs::handle`).
-    pub(super) def_name_spans: Vec<(usize, usize)>,
+    pub(super) def_name_spans: Vec<(Point, Point)>,
     /// Each class minted so far, by its name token's start: the identity
     /// it is filed under. A pattern that names the class again (its
     /// `@context.class`, a `@parent` match) reads the class from here
@@ -194,7 +194,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     // declares. Its name token stays the member reference it is.
     let through = d.receivers_by_match.get(&(e.match_id, kind)).cloned();
     if through.is_none() {
-        st.defs.def_name_spans.push((e.start_byte, e.end_byte));
+        st.defs.def_name_spans.push((name_start, name_end));
     }
     let d = &st.defs;
     // An out-of-line def's qualifier names its owning class (the innermost

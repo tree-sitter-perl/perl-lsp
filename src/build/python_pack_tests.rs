@@ -1151,3 +1151,30 @@ def f(c: Counter):
     }
     assert_eq!(labels.iter().filter(|&&l| l == "count").count(), 1, "one entry per member: {labels:?}");
 }
+
+/// A member read that is the last token of a body is still a member
+/// read: a def's node ends there, its name does not.
+#[test]
+fn a_member_read_ending_a_body_is_a_member_read() {
+    use crate::model::file_analysis::RefKind;
+    let src = "\
+class A:
+    def go(self):
+        return self.count
+    def put(self):
+        y = self.count
+    n = A.count
+
+def f(o):
+    return o.count
+";
+    let fa = py_in(src, Some(&module(&["pkg", "mod"], false)));
+    let mut reads: Vec<(usize, bool)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "count")
+        .map(|r| (r.span.start.row, matches!(r.kind, RefKind::FieldAccess { .. })))
+        .collect();
+    reads.sort();
+    assert_eq!(reads, [(2, true), (4, true), (5, true), (8, true)]);
+}
