@@ -85,7 +85,7 @@ impl<'a> Builder<'a> {
         // Parent chain: scalar → expression_statement → block → varname → outer_node
         if node.kind() == "scalar" {
             if let Some((deref_type, context)) = self.block_deref_context(node) {
-                self.push_var_type_constraint(node, context, deref_type);
+                self.push_deref_observation(node, context, deref_type);
             }
         }
 

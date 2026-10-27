@@ -1103,6 +1103,26 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// A deref observes what its operand holds on the paths that reach it,
+    /// and no others. Run unconditionally, that is the variable's belief from
+    /// here on; inside a conditionally-run arm it holds over the arm only — a
+    /// span-extent witness, excluded past the arm the way a narrowing is. The
+    /// arm is one side of a join: what follows it is that join's to answer.
+    pub(super) fn push_deref_observation(&mut self, var_node: Node<'a>, context_node: Node<'a>, inferred_type: InferredType) {
+        let Some(arm) = crate::cst::conditional_arm_in_block(context_node) else {
+            self.push_var_type_constraint(var_node, context_node, inferred_type);
+            return;
+        };
+        let Ok(text) = var_node.utf8_text(self.source) else { return };
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        self.bag.push(Witness {
+            attachment: WitnessAttachment::Variable { name: text.to_string(), scope: self.current_scope() },
+            source: WitnessSource::Builder("type_constraint".into()),
+            payload: WitnessPayload::InferredType(inferred_type),
+            span: Span { start: context_node.start_position(), end: arm.end_position() },
+        });
+    }
+
     /// Infer the result type of an expression (not its operands — those are handled elsewhere).
     /// e.g. `$a + $b` produces Numeric, `$a . $b` produces String.
     pub(super) fn infer_expression_result_type(&self, node: Node<'a>) -> Option<InferredType> {

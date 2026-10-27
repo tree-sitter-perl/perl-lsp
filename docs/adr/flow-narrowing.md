@@ -119,6 +119,20 @@ both spelled once in `cst.rs` (one climb, two boundaries):
   `JoinFold` lands** (`docs/epics/16-cfg-tier.md`, Phase C); its anchor
   is in that epic's table.
 
+An **observation** — a deref typing its operand (`@$x` → ArrayRef) — is
+the other half of the same question. It is no write, so it mints no marker
+and resets nothing; it says what the variable holds on the paths that
+reach it. Run unconditionally, that is the belief from there on (a
+zero-width witness). In a conditionally-run arm (`cst::conditional_arm_in_block`:
+the statement a postfix modifier guards, a ternary branch, a short-circuit
+RHS) it holds over the arm only — a span-extent witness the arm's end
+excludes, the way a narrowing un-narrows. Past the arm the value is a join
+of this arm and the bypass, which `JoinFold` will answer; until then the
+arm says nothing outside itself. The arm climb is exact rather than
+`is_conditionally_executed_in_block`'s over-claim: for a write
+over-marking is the safe direction, for an observation it throws evidence
+away.
+
 Declarations do not mint a marker, and that is placement rather than
 principle: a declaration's companions may legitimately sit before it (a
 plugin's parameter assertion is minted at the sub's start, ahead of the

@@ -473,6 +473,22 @@ fn deref_spellings_type_the_operand() {
     }
 }
 
+/// A deref in a conditionally-run arm (postfix modifier, ternary branch,
+/// short-circuit RHS) types its operand inside the arm only; one that always
+/// runs — an arithmetic operand included — types it from there on.
+#[test]
+fn conditional_deref_types_its_arm_only() {
+    let fa = build_fa(
+        "sub f {\nmy ($a, $b, $c, $d, $e) = @_;\nmy @x = (@$a, $a) if $e;\nmy $y = $e ? $$b[0] : 0;\n$e && %$c;\nmy $n = @$d + 1;\nreturn;\n}\n",
+    );
+    let at = |v: &str, row: usize, col: usize| fa.inferred_type_via_bag(v, Point::new(row, col));
+    assert_eq!(at("$a", 2, 14), Some(InferredType::ArrayRef), "inside the modified statement");
+    for v in ["$a", "$b", "$c"] {
+        assert_eq!(at(v, 6, 0), None, "{v} past its arm");
+    }
+    assert_eq!(at("$d", 6, 0), Some(InferredType::ArrayRef));
+}
+
 #[test]
 fn test_refgen_types_by_what_it_references() {
     // Only `\&name` is code: `\%h` and `\@a` are container refs, and a

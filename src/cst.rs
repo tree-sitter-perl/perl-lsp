@@ -1056,6 +1056,45 @@ pub(crate) fn is_conditionally_executed_in_block(node: Node) -> bool {
     conditional_before_boundary(node, true)
 }
 
+/// The arm of a conditionally-run construct, between `node` and its block,
+/// that holds `node`: the statement a postfix `if`/`unless`/`for`/`while`
+/// modifies, a ternary branch, the right operand of a short-circuit. A
+/// condition, a loop list and a non-short-circuit operand run whenever
+/// their construct does, so the climb passes through them. `None` = `node`
+/// runs whenever its block does. Exact where `is_conditionally_executed_in_block`
+/// over-claims: an observation made there is lost, not kept safe.
+pub(crate) fn conditional_arm_in_block<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    let mut child = node;
+    let mut cur = node.parent();
+    while let Some(p) = cur {
+        let is_field = |f: &str| p.child_by_field_name(f).is_some_and(|c| c == child);
+        let arm = match p.kind() {
+            "subroutine_declaration_statement"
+            | "method_declaration_statement"
+            | "anonymous_subroutine_expression"
+            | "source_file"
+            | "block" => return None,
+            "postfix_conditional_expression" | "postfix_loop_expression" => !is_field("condition"),
+            "postfix_for_expression" => !is_field("list"),
+            "conditional_expression" => !is_field("condition"),
+            "lowprec_logical_expression" => is_field("right"),
+            "binary_expression" => {
+                is_field("right")
+                    && (0..p.child_count())
+                        .filter_map(|i| p.child(i))
+                        .any(|c| !c.is_named() && matches!(c.kind(), "&&" | "||" | "//"))
+            }
+            _ => false,
+        };
+        if arm {
+            return Some(child);
+        }
+        child = p;
+        cur = p.parent();
+    }
+    None
+}
+
 fn conditional_before_boundary(node: Node, stop_at_block: bool) -> bool {
     let mut cur = node.parent();
     while let Some(p) = cur {
