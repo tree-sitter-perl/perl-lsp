@@ -434,6 +434,7 @@ fn build_once(
         parametric_emitted_refs: std::collections::HashSet::new(),
         method_call_ref_dedup: std::collections::HashSet::new(),
         defined_narrowings: Vec::new(),
+        tag_narrowings: Vec::new(),
         pending_narrowings: Vec::new(),
         guard_sites: Vec::new(),
         arrow_deref_sites: Vec::new(),

@@ -1056,6 +1056,28 @@ pub(crate) fn is_conditionally_executed_in_block(node: Node) -> bool {
     conditional_before_boundary(node, true)
 }
 
+/// A `ref` / `reftype` / `blessed` call on a variable or place: which
+/// function, and the operand. A call or deref operand (`ref(f($x))`) names
+/// nothing a guard could narrow.
+pub(crate) fn ref_tag_call<'a>(
+    node: Node<'a>,
+    src: &[u8],
+) -> Option<(crate::model::file_analysis::RefTagFn, Node<'a>)> {
+    let (name, operand) = match node.kind() {
+        "func1op_call_expression" => {
+            (node.child(0)?.utf8_text(src).ok()?, node.named().find(|c| c.kind() != "comment")?)
+        }
+        "function_call_expression" | "ambiguous_function_call_expression" => {
+            (node.field_text("function", src)?, node.child_by_field_name("arguments")?)
+        }
+        _ => return None,
+    };
+    let via = crate::model::conventions::ref_tag_fn(name)?;
+    let operand = peel_groups(operand);
+    matches!(operand.kind(), "scalar" | "hash_element_expression" | "array_element_expression")
+        .then_some((via, operand))
+}
+
 /// The arm of a conditionally-run construct, between `node` and its block,
 /// that holds `node`: the statement a postfix `if`/`unless`/`for`/`while`
 /// modifies, a ternary branch, the right operand of a short-circuit. A

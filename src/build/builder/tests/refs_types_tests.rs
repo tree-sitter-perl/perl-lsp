@@ -1724,6 +1724,50 @@ fn postfix_guard_narrows_the_statement_it_guards() {
     assert_eq!(fa.inferred_type_via_bag("$e", Point::new(6, 10)), None, "`ref-eq` has no negation");
 }
 
+/// `ref`/`reftype`/`blessed` return a tag naming the variable they were
+/// asked of; comparing the tag to a literal guards that variable, whether
+/// the call is inline or its result was kept (`my $ref = ref $x`).
+#[test]
+fn a_kept_ref_tag_guards_the_variable_it_names() {
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($p, $q, $c, $d) = @_;\n    my $rp = ref $p;\n    if ($rp eq 'ARRAY') { print $p; }\n    my $kq = blessed $q;\n    print $q if $kq eq 'Foo';\n    print $c if blessed($c) eq 'Bar';\n    my $rd = Scalar::Util::reftype($d);\n    print $d if $rd eq 'Foo';\n    return;\n}\n",
+    );
+    let at = |v: &str, row: usize, col: usize| fa.inferred_type_via_bag(v, Point::new(row, col));
+    assert_eq!(at("$p", 4, 33), Some(InferredType::ArrayRef));
+    assert_eq!(at("$q", 6, 10).as_ref().and_then(|t| t.class_name()), Some("Foo"));
+    assert_eq!(at("$c", 7, 10).as_ref().and_then(|t| t.class_name()), Some("Bar"));
+    assert_eq!(at("$d", 9, 10), None, "`reftype` never names a class");
+    assert_eq!(at("$rp", 4, 0), Some(InferredType::RefTagOf {
+        subject: "$p".into(),
+        site: Span { start: Point::new(3, 13), end: Point::new(3, 19) },
+        via: crate::model::file_analysis::RefTagFn::Ref,
+    }));
+}
+
+/// A tag says what its subject held when the tag was computed: a rebind
+/// in between voids it, and a tag returned from another sub names that
+/// sub's variable, never the caller's namesake.
+#[test]
+fn a_ref_tag_guards_nothing_once_its_subject_moves_or_its_sub_ends() {
+    let fa = build_fa(
+        "sub t { my $y = shift; return ref $y }\nsub f {\n    my ($x, $y) = @_;\n    my $r = ref $x;\n    $x = 1;\n    print $x if $r eq 'HASH';\n    my $s = t($x);\n    print $y if $s eq 'HASH';\n    return;\n}\n",
+    );
+    assert_eq!(fa.inferred_type_via_bag("$x", Point::new(5, 10)), Some(InferredType::Numeric), "rebound since the tag");
+    assert_eq!(fa.inferred_type_via_bag("$y", Point::new(7, 10)), None, "another sub's tag");
+    assert!(fa.sub_return_type_at_arity("t", None).is_some_and(|t| t.is_string()));
+}
+
+/// Every return arm of Getopt::Long::Descriptive's `_norm_imply` is a hash
+/// ref once the `$ref eq 'HASH'` arm narrows `$what`.
+#[test]
+fn norm_imply_returns_a_hashref() {
+    let fa = build_fa(
+        "sub _norm_imply {\n  my ($what) = @_;\n  return { $what => 1 } unless my $ref = ref $what;\n  return $what                      if $ref eq 'HASH';\n  return { map { $_ => 1 } @$what } if $ref eq 'ARRAY';\n  die \"can't imply: $what\";\n}\n",
+    );
+    let ret = fa.sub_return_type_at_arity("_norm_imply", None);
+    assert!(ret.as_ref().is_some_and(|t| t.is_hash_shaped()), "{ret:?}");
+}
+
 #[test]
 fn test_indirect_object_call_reads_subs_of_the_current_package() {
     // Perl looks the class name up as a sub in the package in force at the
@@ -1763,3 +1807,4 @@ fn test_indirect_object_constructor_keys_bind_like_arrow_calls() {
     let want = Some(HashKeyOwner::Sub { package: Some("Widget".into()), name: "new".into() });
     assert_eq!(owners, vec![(4, want.clone()), (5, want)]);
 }
+

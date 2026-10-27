@@ -129,6 +129,17 @@ impl<'a> Builder<'a> {
 
     pub(super) fn expr_payload(&mut self, node: Node<'a>) -> Option<crate::model::witnesses::WitnessPayload> {
         use crate::model::witnesses::{RefIdx, WitnessAttachment, WitnessPayload};
+        // What a reference is, named for the variable it was asked of: a
+        // comparison of it to a literal guards that variable.
+        if let Some((via, subject)) = crate::cst::ref_tag_call(node, self.source)
+            .and_then(|(via, operand)| Some((via, crate::cst::canonical_var_name(operand, self.source)?)))
+        {
+            return Some(WitnessPayload::InferredType(InferredType::RefTagOf {
+                subject,
+                site: node_to_span(node),
+                via,
+            }));
+        }
         match node.kind() {
             // Closed-under-syntax — bake.
             "string_literal" | "interpolated_string_literal" => {
@@ -459,7 +470,7 @@ impl<'a> Builder<'a> {
                 crate::cst::AssignOp::Bitwise => {
                     let is_string = |b: &mut Self, n: Node<'a>| {
                         b.emit_expr_witness(n);
-                        b.bag_query_expr_span(node_to_span(n)) == Some(InferredType::String)
+                        b.bag_query_expr_span(node_to_span(n)).is_some_and(|t| t.is_string())
                     };
                     let left = node.child_by_field_name("left")?;
                     let right = node.child_by_field_name("right")?;
@@ -1230,14 +1241,14 @@ impl<'a> Builder<'a> {
             Some("." | "x") => {
                 for i in 0..node.named_child_count() {
                     if let Some(child) = node.named_child(i) {
-                        self.push_var_type_constraint(child, node, InferredType::String);
+                        self.push_string_context(child, node);
                     }
                 }
             }
             // Regex match: LHS is String, RHS is Regexp
             Some("=~" | "!~") => {
                 if let Some(lhs) = crate::cst::nth_element(node, 0) {
-                    self.push_var_type_constraint(lhs, node, InferredType::String);
+                    self.push_string_context(lhs, node);
                 }
                 if let Some(rhs) = crate::cst::nth_element(node, 1) {
                     self.push_var_type_constraint(rhs, node, InferredType::Regexp);
@@ -1260,10 +1271,29 @@ impl<'a> Builder<'a> {
         if let Some(it) = inferred {
             for i in 0..node.named_child_count() {
                 if let Some(child) = node.named_child(i) {
-                    self.push_var_type_constraint(child, node, it.clone());
+                    if it.is_string() {
+                        self.push_string_context(child, node);
+                    } else {
+                        self.push_var_type_constraint(child, node, it.clone());
+                    }
                 }
             }
         }
+    }
+
+    /// A string-context use says the operand is a string — news only when
+    /// its value is not one already. Restating it over a value that is
+    /// (a `RefTagOf`) would retire that value under latest-wins.
+    fn push_string_context(&mut self, operand: Node<'a>, context: Node<'a>) {
+        if operand.kind() == "scalar" {
+            let known = operand.utf8_text(self.source).ok().and_then(|name| {
+                self.bag_query_variable(name, self.current_scope(), operand.start_position())
+            });
+            if known.is_some_and(|t| t.is_string()) {
+                return;
+            }
+        }
+        self.push_var_type_constraint(operand, context, InferredType::String);
     }
 
     /// Get the operator text from a binary/comparison/equality expression.

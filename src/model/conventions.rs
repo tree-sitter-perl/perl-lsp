@@ -250,6 +250,21 @@ pub fn is_current_package_token(text: &str) -> bool {
     text == CURRENT_PACKAGE_TOKEN
 }
 
+/// The function a call names when it reports what a reference is: the
+/// `ref` builtin, or `Scalar::Util`'s `reftype` / `blessed`, bare or
+/// qualified.
+pub fn ref_tag_fn(name: &str) -> Option<crate::model::file_analysis::RefTagFn> {
+    use crate::model::file_analysis::RefTagFn;
+    if name == "ref" {
+        return Some(RefTagFn::Ref);
+    }
+    match name.strip_prefix("Scalar::Util::").unwrap_or(name) {
+        "reftype" => Some(RefTagFn::RefType),
+        "blessed" => Some(RefTagFn::Blessed),
+        _ => None,
+    }
+}
+
 /// A name that can be written as a method / sub call — a syntactically valid
 /// Perl identifier (or `::`-qualified chain of them). Synthetic symbols the
 /// analyzer mints for value-carrying constructs — an anonymous `sub { ... }`

@@ -1353,7 +1353,7 @@ pub fn inferred_type_to_tag(ty: &InferredType) -> String {
         InferredType::CodeRef { .. } => "CodeRef".to_string(),
         InferredType::Regexp => "Regexp".to_string(),
         InferredType::Numeric => "Numeric".to_string(),
-        InferredType::String => "String".to_string(),
+        InferredType::String | InferredType::RefTagOf { .. } => "String".to_string(),
         // Method dispatch on a Parametric uses its `class_name()`
         // (= the flavor's dispatch class), so the tag follows.
         // Type-arg detail lives in the richer
@@ -1428,7 +1428,7 @@ pub(crate) fn format_type_with(ty: &InferredType, vocab: TypeVocab) -> String {
         InferredType::CodeRef { .. } => tag("CodeRef"),
         InferredType::Regexp => tag("Regexp"),
         InferredType::Numeric => tag("Numeric"),
-        InferredType::String => tag("String"),
+        InferredType::String | InferredType::RefTagOf { .. } => tag("String"),
         InferredType::Parametric(p) => format_parametric_with(p, vocab),
         InferredType::Sequence(elems) => {
             // Angle brackets, not `[...]` — markdown renderers treat

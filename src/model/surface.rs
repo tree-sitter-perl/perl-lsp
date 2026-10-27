@@ -440,6 +440,7 @@ fn despan(t: &InferredType) -> InferredType {
                 args: args.iter().map(despan).collect(),
             },
         }),
+        InferredType::RefTagOf { .. } => InferredType::String,
         other => other.clone(),
     }
 }

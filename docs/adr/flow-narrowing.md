@@ -187,6 +187,34 @@ rest of the block is the fall-through and takes the opposite polarity.
 Only the fall-through records a `GuardSite`, so the D3/D4 redundancy
 diagnostics see each statement-level guard once, as before.
 
+## A tag is a value: `ref` names its subject
+
+`ref $x`, `reftype $x` and `blessed $x` return a string that says what
+`$x` held — so their `Expr` witness is `RefTagOf { subject, site, via }`,
+a `String` to every consumer (`is_string()`, `String` on the Surface and
+on the wire) that also names the variable it was asked of. It flows like
+any value: `my $ref = ref $x` reaches `$ref` by its ordinary flow edge,
+with no fold table and no name lookup.
+
+So `ref($x) eq 'HASH'` and `$ref eq 'HASH'` are one guard, read two ways:
+an inline call is its own tag; a variable is whatever tag its value is.
+The variable form resolves in the fold (`emit_tag_narrowing_witnesses`,
+clear-and-emit on `tag_narrowing`), since `$ref`'s value is a fold
+answer. A tag guards its subject only while it is still true:
+
+- **Same sub.** A tag returned from another sub names that sub's
+  variable; the caller's namesake is a different binding.
+- **No rebind since the tag.** A write to the subject between the `ref`
+  and the guard voids it; the region also truncates at the next write,
+  as every narrowing does.
+
+`via` says what the literal can prove: `ref` a reftype token or a class,
+`reftype` only a token, `blessed` only a class. A string-context use of a
+value already a string adds nothing, so it is not restated over the tag
+(it would retire it under latest-wins). Two tags that disagree join to
+plain `String`. Under unions the same rule holds arm-wise: a guard reads
+a subject only when every arm of `$ref`'s value names the same one.
+
 ## `defined`/`blessed` strip via a re-emittable fold pass
 
 `StripOptional` can't resolve at walk time: the subject's `Optional`

@@ -26,6 +26,10 @@ use super::{connector_keyword_between, point_lt, raw_leading_op, raw_mid_op, Bui
 pub(super) enum NarrowSubject {
     Variable(String),
     Place { key: String, root: String, key_vars: Vec<String> },
+    /// A variable holding a `ref`/`reftype`/`blessed` result (`$ref` in
+    /// `$ref eq 'ARRAY'`): the guard is on whatever that tag names, which
+    /// only the bag can say once `$ref`'s value has folded.
+    TagOf(String),
 }
 
 /// Classify a guard's operand into the subject it narrows: a plain
@@ -50,6 +54,8 @@ pub(super) enum NarrowOp {
     /// location IN THE GUARD — before the narrowed region, so the read
     /// sees the un-narrowed `Optional`, not the pass's own output.
     StripOptional { query_point: Point },
+    /// The tag a [`NarrowSubject::TagOf`] holds equals this literal.
+    TagEq(String),
 }
 
 impl NarrowOp {
@@ -60,7 +66,7 @@ impl NarrowOp {
     /// wins). See `docs/adr/flow-narrowing.md` negative-polarity rows.
     fn negated(&self) -> Option<NarrowOp> {
         match self {
-            NarrowOp::To(_) => None,
+            NarrowOp::To(_) | NarrowOp::TagEq(_) => None,
             NarrowOp::StripOptional { .. } => Some(NarrowOp::To(InferredType::Undef)),
         }
     }
@@ -99,6 +105,16 @@ pub(super) struct DefinedNarrowing {
     query_point: Point,
 }
 
+/// A pending tag guard (`$ref eq 'ARRAY'`): re-derived each fold iteration,
+/// since what `var` holds is a fold answer.
+#[derive(Clone)]
+pub(super) struct TagNarrowing {
+    var: String,
+    scope: ScopeId,
+    region: Span,
+    lit: String,
+}
+
 /// A recognized narrowing whose region cutoff is computed AFTER the walk —
 /// once `mint_flow_edges_via_query` has run, so the scalar-rebind truncation
 /// reads FlowEdges (`apply_narrowing_cutoffs`) instead of a CST scan. The
@@ -128,6 +144,17 @@ fn ref_string_to_type(s: &str) -> Option<InferredType> {
         "SCALAR" | "REF" | "GLOB" | "LVALUE" | "FORMAT" | "IO" | "VSTRING" => return None,
         other => InferredType::ClassName(other.to_string()),
     })
+}
+
+/// What a tag from `via` equal to `s` proves: `ref` names a reftype token
+/// or a class, `reftype` only a token, `blessed` only a class.
+fn tag_string_to_type(via: crate::model::file_analysis::RefTagFn, s: &str) -> Option<InferredType> {
+    use crate::model::file_analysis::RefTagFn;
+    match via {
+        RefTagFn::Ref => ref_string_to_type(s),
+        RefTagFn::RefType => ref_string_to_type(s).filter(|t| !t.is_object()),
+        RefTagFn::Blessed => (!s.is_empty()).then(|| InferredType::ClassName(s.to_string())),
+    }
 }
 
 /// The earlier of two optional truncation points (`None` = no bound).
@@ -253,36 +280,38 @@ fn recognize_isa_guard<'a>(builder: &Builder<'a>, call: Node<'a>, source: &[u8])
     })
 }
 
-/// `ref($x) eq 'Foo'` / `reftype($x) eq 'HASH'` (either operand order) →
-/// narrow `$x` to the proven type. `ref($x) eq __PACKAGE__` proves the
-/// enclosing class.
+/// `ref($x) eq 'Foo'` / `reftype($x) eq 'HASH'` / `blessed($x) eq 'Foo'`
+/// (either operand order) → narrow `$x` to the proven type;
+/// `__PACKAGE__` proves the enclosing class. A scalar compared to a
+/// literal (`$ref eq 'ARRAY'`) is a guard on whatever tag it holds —
+/// resolved once its value folds (`emit_tag_narrowing_witnesses`).
 fn recognize_ref_eq_guard<'a>(builder: &Builder<'a>, eq: Node<'a>, source: &[u8]) -> Option<GuardFact> {
     if raw_mid_op(eq, source) != "eq" {
         return None;
     }
     let left = eq.child_by_field_name("left")?;
     let right = eq.child_by_field_name("right")?;
-    let (ref_call, lit) = if left.kind() == "func1op_call_expression" {
-        (left, right)
-    } else if right.kind() == "func1op_call_expression" {
-        (right, left)
-    } else {
-        return None;
-    };
-    let fname = ref_call.child(0)?.utf8_text(source).ok()?;
-    if fname != "ref" && fname != "reftype" {
-        return None;
+    let call = |n: Node<'a>| crate::cst::ref_tag_call(crate::cst::peel_groups(n), source);
+    if let Some(((via, operand), lit)) = call(left).map(|c| (c, right)).or_else(|| call(right).map(|c| (c, left))) {
+        let ty = match crate::cst::plain_string_literal_text(lit, source) {
+            Some(s) => tag_string_to_type(via, &s)?,
+            None => InferredType::ClassName(builder.current_package_literal(lit)?),
+        };
+        return Some(GuardFact {
+            subject: narrow_subject_of(operand, source)?,
+            op: NarrowOp::To(ty),
+            asserts_when_true: true,
+        });
     }
-    let subject = narrow_subject_of(func1op_subject_arg(ref_call)?, source)?;
-    let ty = match crate::cst::plain_string_literal_text(lit, source) {
-        Some(s) => ref_string_to_type(&s)?,
-        None => InferredType::ClassName(builder.current_package_literal(lit)?),
+    let tagged = |var: Node<'a>, lit: Node<'a>| {
+        let var = crate::cst::peel_groups(var);
+        if var.kind() != "scalar" {
+            return None;
+        }
+        Some((crate::cst::canonical_var_name(var, source)?, crate::cst::plain_string_literal_text(lit, source)?))
     };
-    Some(GuardFact {
-        subject,
-        op: NarrowOp::To(ty),
-        asserts_when_true: true,
-    })
+    let (var, lit) = tagged(left, right).or_else(|| tagged(right, left))?;
+    Some(GuardFact { subject: NarrowSubject::TagOf(var), op: NarrowOp::TagEq(lit), asserts_when_true: true })
 }
 
 /// True if an expression is a guaranteed control-flow exit
@@ -312,7 +341,7 @@ pub(super) fn is_exit_expression(node: Node, source: &[u8]) -> bool {
 /// A subject's identity for dedup across arms (its source spelling).
 fn subject_key(subject: &NarrowSubject) -> String {
     match subject {
-        NarrowSubject::Variable(v) => v.clone(),
+        NarrowSubject::Variable(v) | NarrowSubject::TagOf(v) => v.clone(),
         NarrowSubject::Place { key, .. } => key.clone(),
     }
 }
@@ -404,6 +433,9 @@ impl<'a> Builder<'a> {
             let predicate = match &fact.op {
                 NarrowOp::To(ty) => GuardPredicate::IsType(ty.clone()),
                 NarrowOp::StripOptional { .. } => GuardPredicate::Defined,
+                // What it proves is a fold answer; D3/D4 read the prior
+                // type at the guard, which a tag guard has no subject for.
+                NarrowOp::TagEq(_) => continue,
             };
             self.guard_sites.push(GuardSite {
                 subject: subject_key(&fact.subject),
@@ -505,7 +537,7 @@ impl<'a> Builder<'a> {
             NarrowSubject::Place { key, root, .. } => {
                 self.first_place_invalidation(key, root, region, container)
             }
-            NarrowSubject::Variable(_) => None,
+            NarrowSubject::Variable(_) | NarrowSubject::TagOf(_) => None,
         };
         self.pending_narrowings.push(PendingNarrow {
             subject: subject.clone(),
@@ -544,6 +576,56 @@ impl<'a> Builder<'a> {
                 span: region,
             });
         }
+    }
+
+    /// Re-emittable: tag guards. A guard `$ref eq 'LIT'` narrows the
+    /// variable `$ref`'s tag names, when `$ref` holds a `RefTagOf` computed
+    /// in the same sub and its subject is not rebound between the tag and
+    /// the guard. Clear-and-emit on tag `tag_narrowing`: what `$ref` holds
+    /// is a fold answer.
+    pub(super) fn emit_tag_narrowing_witnesses(&mut self) {
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        self.bag.remove_by_source_tag("tag_narrowing");
+        let mut emits: Vec<(String, ScopeId, InferredType, Span)> = Vec::new();
+        for g in &self.tag_narrowings {
+            let Some(InferredType::RefTagOf { subject, site, via }) =
+                self.bag_query_variable(&g.var, g.scope, g.region.start)
+            else {
+                continue;
+            };
+            if self.enclosing_sub_scope_at(site.start) != self.enclosing_sub_scope_at(g.region.start) {
+                continue;
+            }
+            let since_tag = Span { start: site.end, end: g.region.start };
+            if self.first_subject_write_via_edges(&subject, since_tag).is_some() {
+                continue;
+            }
+            let Some(ty) = tag_string_to_type(via, &g.lit) else { continue };
+            let end = self.first_subject_write_via_edges(&subject, g.region).unwrap_or(g.region.end);
+            if point_lt(g.region.start, end) {
+                emits.push((subject, g.scope, ty, Span { start: g.region.start, end }));
+            }
+        }
+        for (name, scope, ty, region) in emits {
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::Variable { name, scope },
+                source: WitnessSource::Builder("tag_narrowing".into()),
+                payload: WitnessPayload::InferredType(ty),
+                span: region,
+            });
+        }
+    }
+
+    /// The innermost sub or method scope holding `at` — the extent a
+    /// variable's tag means anything in.
+    fn enclosing_sub_scope_at(&self, at: Point) -> Option<ScopeId> {
+        use crate::model::file_analysis::ScopeKind;
+        self.scopes
+            .iter()
+            .filter(|s| matches!(s.kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. }))
+            .filter(|s| crate::model::file_analysis::contains_point(&s.span, at))
+            .max_by_key(|s| (s.span.start.row, s.span.start.column))
+            .map(|s| s.id)
     }
 
     /// Point of the first operation in `container` (at or after
@@ -654,8 +736,20 @@ impl<'a> Builder<'a> {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let pending = std::mem::take(&mut self.pending_narrowings);
         for pn in pending {
+            if let (NarrowSubject::TagOf(var), NarrowOp::TagEq(lit)) = (&pn.subject, &pn.op) {
+                // The guard reads the tag once, at the region's start; what
+                // truncates is a write to the subject it names, known only
+                // once the tag resolves.
+                self.tag_narrowings.push(TagNarrowing {
+                    var: var.clone(),
+                    scope: pn.scope,
+                    region: pn.region,
+                    lit: lit.clone(),
+                });
+                continue;
+            }
             let (name, end) = match &pn.subject {
-                NarrowSubject::Variable(var) => {
+                NarrowSubject::Variable(var) | NarrowSubject::TagOf(var) => {
                     (var.clone(), self.first_subject_write_via_edges(var, pn.region))
                 }
                 NarrowSubject::Place { key, key_vars, .. } => {
@@ -688,6 +782,7 @@ impl<'a> Builder<'a> {
                         query_point,
                     });
                 }
+                NarrowOp::TagEq(_) => {}
             }
         }
     }
