@@ -696,14 +696,25 @@ pub trait CrossFileLookup {
             member: member.to_string(),
         };
         crate::model::witnesses::tracked::Tracked::derive(lookup, || {
+            // The row prefilters first: a package reopened by hundreds of
+            // files (`main`) would otherwise decode every one of them for a
+            // name none defines, the common answer for an indirect-object
+            // site's class.
             let cands = self.visible_def_candidates(module_key).read();
+            let attributed = self.candidates_may_declare(&cands, member, pkg);
             cands
                 .iter()
-                .find(|c| self.symbols_present(c).has_sub_in_package(member, pkg))
+                .zip(&attributed)
+                .find(|(c, may)| **may && self.symbols_present(c).has_sub_in_package(member, pkg))
+                .map(|(c, _)| c)
                 .or_else(|| {
+                    let subs = self.candidates_may_declare_kind(&cands, member, SymKind::Sub);
+                    let methods = self.candidates_may_declare_kind(&cands, member, SymKind::Method);
                     cands
                         .iter()
-                        .find(|c| self.symbols_present(c).sub_info_view(member).is_some())
+                        .zip(subs.iter().zip(&methods))
+                        .find(|(c, (s, m))| (**s || **m) && self.symbols_present(c).sub_info_view(member).is_some())
+                        .map(|(c, _)| c)
                 })
                 .cloned()
         })
