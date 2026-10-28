@@ -86,3 +86,6 @@ mod tests;
 #[cfg(all(test, feature = "php"))]
 #[path = "dependency_tests.rs"]
 mod dependency_tests;
+#[cfg(all(test, feature = "python"))]
+#[path = "dependency_python_tests.rs"]
+mod dependency_python_tests;

@@ -41,16 +41,7 @@ pub fn index_pack_language(
     // The dependency map first: its roots are the tier's, so the walk
     // leaves them out whether or not the project ignores them.
     refresh_dependency_map(index, driver, root);
-    // Spelled under the walk's own root so the filter is a prefix test,
-    // not a canonicalize per entry; a root outside the walk needs none.
-    let skip_roots: Vec<PathBuf> = {
-        let canon_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-        index
-            .dependency_roots()
-            .iter()
-            .filter_map(|r| r.strip_prefix(&canon_root).ok().map(|rel| root.join(rel)))
-            .collect()
-    };
+    let skip_roots = index.dependency_roots_under(root);
     let walked = source_files::walk(
         root,
         &source_files::Walk { extensions: driver.extensions(), cap: PACK_FILE_CAP, skip: &skip_roots, ignores: true },

@@ -211,7 +211,7 @@ pub fn discover_inc_paths() -> Vec<PathBuf> {
 /// Add project-local lib paths (lib/, local/lib/perl5/) to the front of @INC.
 /// Called by the resolver thread, test resolver, and CLI tools.
 pub fn add_project_lib_paths(inc_paths: &mut Vec<PathBuf>, workspace_root: &std::path::Path) {
-    for local_lib in &["lib", "local/lib/perl5"] {
+    for local_lib in &["lib", crate::build::carton::LIB] {
         let p = workspace_root.join(local_lib);
         if p.is_dir() {
             log::info!("Auto-discovered project lib: {:?}", p);

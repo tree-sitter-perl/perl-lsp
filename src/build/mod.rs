@@ -3,6 +3,8 @@
 //! sanctioned extraction seam (plugins, pod, query packs, reparse).
 
 pub mod builder;
+// carton's install base: the perl dependency tier's directory
+pub mod carton;
 pub mod cpanfile;
 // Composer's autoload data: the php dependency tier's map
 #[cfg(feature = "php")]
@@ -33,8 +35,13 @@ pub mod query_extract;
 // pre-extraction reparse seam (whose production form is cpp_reparse).
 #[allow(dead_code)]
 pub mod reparse;
+// a dependency map over search roots, named by the pack's `module_paths`
+pub mod search_path;
 // the one source-file walk and guarded analyze the indexers share
 pub mod source_files;
+// python virtual environments: the python dependency tier's map
+#[cfg(feature = "python")]
+pub mod venv;
 // package-marker directories a workspace walk saw (python's `__init__.py`);
 // only a path-named language reads them
 #[cfg_attr(not(feature = "python"), allow(dead_code))]

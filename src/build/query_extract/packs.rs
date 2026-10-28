@@ -30,12 +30,9 @@ pub struct LangPack {
     /// Map a `@type.annot` token's text to a type — the pack predicate
     /// for languages whose ring 3 is partly in the tree (`x: int`).
     pub annot_type: fn(text: &str) -> Option<InferredType>,
-    /// Module-name → workspace-relative candidate paths — the entire
-    /// per-language cross-file resolution strategy ("the one executable
-    /// line"). Python: `pkg.mod` → pkg/mod.py | pkg/mod/__init__.py.
-    /// The Index-layer consumer is future work; the cross-file spike tests
-    /// (`resolve_imports_with_pack` in query_extract_tests.rs) drive it today.
-    #[allow(dead_code)]
+    /// Module-name → candidate paths under a search root. Python: `pkg.mod`
+    /// → pkg/mod.py | pkg/mod/__init__.py. The dependency tier's
+    /// search-path maps (`build::search_path`) locate with it.
     pub module_paths: fn(module: &str) -> Vec<String>,
     /// Guard narrowing: given the guard token (`@narrow.guard` — a
     /// function/operator like `isinstance`, `has_value`; `None` for the

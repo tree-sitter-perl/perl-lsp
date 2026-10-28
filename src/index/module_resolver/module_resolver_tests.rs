@@ -671,3 +671,28 @@ fn a_bulk_index_marks_the_consumers_of_what_changed() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Carton's install base is the dependency tier's, not the project's: the
+/// walk leaves `local/` out whether or not the project ignores it.
+#[test]
+fn the_workspace_walk_leaves_carton_local_out() {
+    use crate::model::file_analysis::CrossFileLookup;
+    let dir = std::env::temp_dir().join(format!("perl-carton-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (rel, body) in [
+        ("lib/App.pm", "package App;\nuse Dep;\n1;\n"),
+        ("local/lib/perl5/Dep.pm", "package Dep;\nsub hi { 1 }\n1;\n"),
+        ("local/bin/tool.pl", "1;\n"),
+    ] {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+    let dir = std::fs::canonicalize(&dir).unwrap();
+    let idx = crate::index::module_index::ModuleIndex::new_for_cli();
+    index_workspace_with_index(&dir, &idx, None, None);
+    let mut files = Vec::new();
+    idx.for_each_workspace_file(&mut |cm| files.push(cm.path.strip_prefix(&dir).unwrap().display().to_string()));
+    assert_eq!(files, ["lib/App.pm"]);
+    assert_eq!(idx.dependency_roots(), [dir.join("local")]);
+}

@@ -33,6 +33,18 @@ pub struct MarkerSnapshot {
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 static SNAPSHOTS: RwLock<Vec<MarkerSnapshot>> = RwLock::new(Vec::new());
+/// Per marker, the roots a file no walk covers is named from besides the
+/// workspace root: the dependency tier's search roots (python's
+/// `site-packages`).
+static SEARCH_ROOTS: RwLock<Vec<(&'static str, Vec<PathBuf>)>> = RwLock::new(Vec::new());
+
+/// Name files under `roots` from them, for `marker`'s language. Replaces
+/// the roots set before.
+pub fn set_search_roots(marker: &'static str, roots: &[PathBuf]) {
+    let mut all = SEARCH_ROOTS.write().unwrap_or_else(|e| e.into_inner());
+    all.retain(|(m, _)| *m != marker);
+    all.push((marker, roots.to_vec()));
+}
 
 impl MarkerSnapshot {
     /// The snapshot of a walk under `root` that yielded `files`.
@@ -157,12 +169,43 @@ impl<'a> MarkedDirs<'a> {
     }
 
     /// `dir` relative to the root the file's module is named from: the
-    /// walk's root, else the workspace root.
+    /// walk's root, else the deepest search root holding it, else the
+    /// workspace root.
     pub fn root_relative(&self, dir: &Path) -> Option<PathBuf> {
-        match self.snapshot {
-            Some(s) => s.relative(dir).map(Path::to_path_buf),
+        if let Some(s) = self.snapshot {
+            return s.relative(dir).map(Path::to_path_buf);
+        }
+        let all = SEARCH_ROOTS.read().unwrap_or_else(|e| e.into_inner());
+        let searched = all
+            .iter()
+            .filter(|(m, _)| *m == self.marker)
+            .flat_map(|(_, roots)| roots)
+            .filter_map(|r| dir.strip_prefix(r).ok())
+            .min_by_key(|rel| rel.components().count());
+        match searched {
+            Some(rel) => Some(rel.to_path_buf()),
             None => crate::build::plugin::rhai_host::workspace_root()
                 .and_then(|root| dir.strip_prefix(root).ok().map(Path::to_path_buf)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file no walk covers is named from the deepest search root holding
+    /// it (a `site-packages` inside the workspace), not the workspace root.
+    #[test]
+    fn a_search_root_names_what_no_walk_covers() {
+        // A marker no other test registers, so the global roots are this test's.
+        const MARKER: &str = "__search_root_test__";
+        let site = std::env::temp_dir().join("ws/.venv/lib/python3/site-packages");
+        set_search_roots(MARKER, &[site.parent().unwrap().to_path_buf(), site.clone()]);
+        let dirs = MarkedDirs::on_disk(MARKER);
+        assert_eq!(dirs.root_relative(&site.join("pkg")), Some(PathBuf::from("pkg")));
+        assert_eq!(dirs.root_relative(&site), Some(PathBuf::new()));
+        set_search_roots(MARKER, &[]);
+        assert_ne!(dirs.root_relative(&site.join("pkg")), Some(PathBuf::from("pkg")));
     }
 }

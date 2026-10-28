@@ -39,6 +39,9 @@ pub fn refresh_dependency_map(
     let Some(locator) = driver.dependency_locator(root) else {
         return generation > 1;
     };
+    if let Some(marker) = driver.module_marker() {
+        crate::build::walk_markers::set_search_roots(marker, locator.search_roots());
+    }
     let always: Vec<PathBuf> = locator.always_loaded().to_vec();
     *guard = Some(DependencyState {
         driver,

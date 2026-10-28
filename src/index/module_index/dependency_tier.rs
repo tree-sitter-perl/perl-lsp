@@ -43,6 +43,23 @@ impl ModuleIndex {
             .unwrap_or_default()
     }
 
+    /// The tier roots under `root`, spelled under it as a walk of `root`
+    /// spells its entries, so a walk's skip is a prefix test, not a
+    /// canonicalize per entry. A root outside the walk needs no skip.
+    pub fn dependency_roots_under(&self, root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let canon_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        self.dependency_roots()
+            .iter()
+            .filter_map(|r| r.strip_prefix(&canon_root).ok().map(|rel| root.join(rel)))
+            .collect()
+    }
+
+    /// Is `path` under one of the current map's tier roots? Such a file is
+    /// never the workspace's.
+    pub fn under_dependency_root(&self, path: &std::path::Path) -> bool {
+        self.dependency_roots().iter().any(|r| path.starts_with(r))
+    }
+
     /// Is `path` a manifest the current map was read from?
     pub fn is_dependency_input(&self, path: &std::path::Path) -> bool {
         let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());

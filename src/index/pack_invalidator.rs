@@ -384,7 +384,7 @@ impl PackInvalidator {
             }
             return Swept { skip_consumers: true, ..Default::default() };
         }
-        if index.dependency_roots().iter().any(|r| canon.starts_with(r)) {
+        if index.under_dependency_root(&canon) {
             return Swept { skip_consumers: true, ..Default::default() };
         }
         let refiled = driver

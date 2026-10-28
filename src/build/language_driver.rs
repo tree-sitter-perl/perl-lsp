@@ -175,6 +175,12 @@ pub trait DependencyLocator: Send + Sync {
     fn roots(&self) -> &[std::path::PathBuf];
     /// The manifests this map was read from: a change to any is a new map.
     fn inputs(&self) -> &[std::path::PathBuf];
+    /// The directories a path-named language names a located file from
+    /// (python's `site-packages`), as it names a workspace file from the
+    /// walk root.
+    fn search_roots(&self) -> &[std::path::PathBuf] {
+        &[]
+    }
 }
 
 /// How a language that names modules by path names one: the marker file
@@ -261,6 +267,12 @@ impl LanguageDriver for PerlDriver {
         // Sigils open variable completion; `>`/`:`/`{` open
         // method/pkg/hash-key slots; `(`/`,` are signature-help adjacent.
         &["$", "@", "%", ">", ":", "{", "(", ","]
+    }
+    fn dependency_locator(&'static self, root: &Path) -> Option<std::sync::Arc<dyn DependencyLocator>> {
+        Some(crate::build::carton::locator(root, self))
+    }
+    fn dependency_manifests(&self) -> &[&'static str] {
+        &["cpanfile.snapshot"]
     }
 }
 
@@ -746,7 +758,7 @@ fn python_driver() -> PackDriver {
         input_fingerprint: None,
         access_regions: None,
         file_module: Some(FileModuleRule { marker: "__init__.py", name: crate::build::packs::python_file_module }),
-        dependencies: None,
+        dependencies: Some(PackDependencies { locator: crate::build::venv::locator, manifests: &["pyvenv.cfg"] }),
     }
 }
 
