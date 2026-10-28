@@ -1895,6 +1895,51 @@ void f(std::optional<Widget> a, std::optional<Widget> b) {
 }
 
 #[test]
+fn a_pack_guard_narrows_every_arm_it_enters() {
+    // One region rule for every pack guard: the arm the pattern tags
+    // `@narrow.arm`, whatever construct holds it, and nothing outside it.
+    let src = "\
+void f(Base* b, std::optional<Widget> o) {
+    if (o) return o->run();
+    int i = dynamic_cast<Derived*>(b) ? b->id() : 0;
+    bool ok = o.has_value() && o->ok();
+    b->tail();
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    use crate::model::file_analysis::InferredType;
+    let at = |v: &str, row, column| fa.inferred_type_via_bag(v, tree_sitter::Point { row, column });
+    let class = |c: &str| Some(InferredType::ClassName(c.into()));
+    assert_eq!(at("o", 1, 18), class("Widget"), "an `if` arm that is no block");
+    assert_eq!(at("b", 2, 40), class("Derived"), "a ternary's consequence");
+    assert_ne!(at("b", 2, 50), class("Derived"), "not its alternative");
+    assert_eq!(at("o", 3, 31), class("Widget"), "the right of `&&`");
+    assert_ne!(at("b", 4, 4), class("Derived"), "nothing after the statement");
+
+    let src = "\
+class Foo:
+    pass
+x = maybe()
+a = x.run() if isinstance(x, Foo) else x.other()
+b = isinstance(x, Foo) and x.run()
+if cond():
+    pass
+elif isinstance(x, Foo):
+    x.run()
+x.tail()
+";
+    let mut parser = python_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let fa = extract(&tree, src.as_bytes(), &python_pack()).unwrap().into_file_analysis();
+    let at = |row, column| fa.inferred_type_via_bag("x", tree_sitter::Point { row, column });
+    assert_eq!(at(3, 4), class("Foo"), "the value a conditional expression yields when the test holds");
+    assert_ne!(at(3, 39), class("Foo"), "not its else value");
+    assert_eq!(at(4, 27), class("Foo"), "the right of `and`");
+    assert_eq!(at(8, 4), class("Foo"), "an `elif` body");
+    assert_ne!(at(9, 0), class("Foo"), "nothing after");
+}
+
+#[test]
 fn cpp_optional_same_name_narrows_to_own_inner_type_per_function() {
     // GOAL-3 regression: `annot_text_by_var` is keyed by (name, SCOPE), so two
     // functions each with a `std::optional<...> opt` of a DIFFERENT inner type

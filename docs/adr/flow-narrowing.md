@@ -192,6 +192,16 @@ rest of the block is the fall-through and takes the opposite polarity.
 Only the fall-through records a `GuardSite`, so the D3/D4 redundancy
 diagnostics see each statement-level guard once, as before.
 
+A pack guard states its region one way: the pattern that recognizes the
+guard tags the arm it enters `@narrow.arm` (an `if`/`elif` body, a
+ternary's consequence, the right of `&&`/`and`), and the extractor attaches
+the refinement in the guard's own scope over that arm, cut at the
+subject's next rebind. The guard and its arm join by match, so neither
+needs to be a scope. Pack guards (`isinstance`, `dynamic_cast`, optional
+engagement) have no complement, so no arm narrows on a false test; the
+early-exit fall-through (`if not isinstance(x, T): return`) waits on a
+pack-side negation (TODO(pack-exit-guard)).
+
 ## A tag is a value: `ref` names its subject
 
 `ref $x`, `reftype $x` and `blessed $x` return a string that says what

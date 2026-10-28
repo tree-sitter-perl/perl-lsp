@@ -220,7 +220,7 @@ spelled! {
 }
 
 spelled! {
-    pub enum NarrowCap { Var = "var", Type = "type", Guard = "guard", Block = "block" }
+    pub enum NarrowCap { Var = "var", Type = "type", Guard = "guard", Arm = "arm" }
 }
 
 spelled! {
