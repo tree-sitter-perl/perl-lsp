@@ -843,6 +843,7 @@ dependencies = [
  "tree-sitter-c",
  "tree-sitter-cmake",
  "tree-sitter-cpp",
+ "tree-sitter-php",
  "tree-sitter-python",
  "tree-sitter-r",
  "ts-parser-perl",
@@ -1441,6 +1442,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
 
 [[package]]
+name = "tree-sitter-php"
+version = "0.24.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d8c17c3ab69052c5eeaa7ff5cd972dd1bc25d1b97ee779fec391ad3b5df5592"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-python"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1462,9 +1473,9 @@ dependencies = [
 
 [[package]]
 name = "ts-parser-perl"
-version = "2.0.0"
+version = "2.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db3cd8574afc19af4d3db44fe0cf94a5e8fc3f4056c0326baf5ba01a29666129"
+checksum = "668b3649f53eeb75113d9a758eaf7c0b92c949a3753ca16a68033933bd228792"
 dependencies = [
  "cc",
  "tree-sitter-language",

@@ -42,8 +42,8 @@ column, not the name.
 | Fact | Find it (as designed) |
 | --- | --- |
 | Perl mints the flag on the package | `grep -n 'mark_package_answers_any_member' src/build/builder/visit_decl.rs` |
-| Pack capture mints it on the class | `grep -n 'def.method.catch_all' src/build/query_extract/extract.rs` |
-| php's catch-all spellings | `queries/php/skeleton.scm`, the `@def.method.catch_all` pattern |
+| Pack capture mints it on the class | `@mark.dynamic_members` → `MarkCap::DynamicMembers` in `src/build/query_extract/vocab.rs` |
+| php's catch-all spellings | `queries/php/skeleton.scm`, the `@mark.dynamic_members` patterns |
 | The one query every lane asks | `grep -n 'fn class_answers_any_member' src/model/file_analysis/ancestry.rs` |
 | Its readers | `grep -rn 'class_answers_any_member' src/ \| grep -v _tests` |
 | Forward-declaration stubs | `grep -n 'fn mint_forward_declarations' src/build/builder/infra.rs` |
