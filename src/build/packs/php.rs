@@ -5,6 +5,7 @@ use crate::model::file_analysis::{ClassCall, ClassSpelling, InferredType, NameSp
 
 pub fn php_pack() -> LangPack {
     LangPack {
+        id: "php",
         query_source: include_str!("../../../queries/php/skeleton.scm"),
         // `\` qualifies, `$` leads every variable, and a written class
         // spelling names the class the file's `use` rows and namespace say

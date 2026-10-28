@@ -4,6 +4,7 @@ use crate::build::query_extract::*;
 
 pub fn perl_pack() -> LangPack {
     LangPack {
+        id: "perl",
         query_source: include_str!("../../../queries/perl/skeleton.scm"),
         names: crate::model::conventions::PERL_SPELLINGS,
         // The builder stores variable symbols WITH sigil. Nothing to
