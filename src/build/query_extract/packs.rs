@@ -70,10 +70,10 @@ pub struct LangPack {
     /// (`(*p)`, `(&o)`, `(p)` → `p`) dropped, through their first named
     /// child, so the invocant types via the inner.
     pub recv_peel: &'static [&'static str],
-    /// Simple-variable node kinds (`identifier`). op-DX fires ONLY when the
-    /// IMMEDIATE member-access receiver is one — the receiver whose
-    /// `deref_stack` resolves by name to decide the expected operator. Also the
-    /// cursor-completion "is this receiver a bare variable" test.
+    /// Simple-variable node kinds (`identifier`): the cursor sentinel's "is
+    /// this receiver a bare variable" test, read off the raw node it climbs
+    /// to like its other node-kind tables. Extraction never reads it: the
+    /// document states a written-name receiver as `@member.recv.name`.
     pub simple_var_kinds: &'static [&'static str],
     /// Member-access node kinds (`field_expression` / `attribute`): a `recv.m`
     /// the cursor-completion path climbs to + types the receiver of. Empty =

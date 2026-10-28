@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::model::file_analysis::{MemberOp, ParamArity};
+use crate::model::conventions::Invocant;
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -24,7 +25,7 @@ pub(super) struct State {
     param_sigs: Vec<(Span, ParamArity)>,
     /// `@member.recv` → the receiver span of a `recv.field` access, joined to
     /// its `@ref.member.*` by match_id so the minted MethodCall ref carries it.
-    pub(super) member_recv: HashMap<usize, (Span, String)>,
+    pub(super) member_recv: HashMap<usize, (Span, Invocant)>,
     /// `@member.op` → the operator token's span, joined to `@ref.member.*` by
     /// match_id; which operator it is comes from `ops_at`.
     pub(super) member_op_span: HashMap<usize, Span>,
@@ -53,23 +54,30 @@ impl State {
     }
 }
 
-/// `@member.recv`: a member access receiver. Peel transparent wrappers
-/// (`(*p)`, `(&o)`, `(p)`) to the typed inner where the node is live, so the
-/// minted MethodCall ref's invocant_span lands on the inner expression
+/// `@member.recv.name` / `@member.recv`: a member access receiver, which
+/// the document states is a written name or an expression. An expression
+/// peels its transparent wrappers (`(*p)`, `(&o)`, `(p)`) to the typed inner,
+/// so the minted MethodCall ref's invocant_span lands on the inner expression
 /// `expr_type_at_span` already types.
 pub(super) fn flatten_recv(
     members: &mut State,
     node: tree_sitter::Node<'_>,
+    cap: MemberCap,
     pack: &LangPack,
     source: &[u8],
     match_id: usize,
     events: &mut Vec<Event>,
 ) {
-    // op-DX applies only to a bare-variable immediate receiver
-    // (its deref_stack resolves by name); a wrapper/chain doesn't.
-    members.member_simple.insert(match_id, pack.simple_var_kinds.contains(&node.kind()));
-    let inner = peel_receiver(node, pack.recv_peel);
+    let named = cap == MemberCap::RecvName;
+    // op-DX applies only to a written-name receiver (its deref_stack
+    // resolves by name); a wrapper/chain doesn't.
+    members.member_simple.insert(match_id, named);
+    let inner = if named { node } else { peel_receiver(node, pack.recv_peel) };
     let text = inner.utf8_text(source).unwrap_or("").to_string();
+    // A written name (`w`, `Widget`) may spell a class; an expression never does.
+    let invocant = if named { Invocant::assume_canonical(text.clone()) } else { Invocant::expr(text.clone()) };
+    let span = Span { start: inner.start_position(), end: inner.end_position() };
+    members.member_recv.insert(match_id, (span, invocant));
     events.push(Event::at(inner, Capture::Member(MemberCap::Recv), text, match_id));
 }
 
@@ -137,9 +145,6 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
 
 pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     match e.cap {
-        Capture::Member(MemberCap::Recv) => {
-            st.members.member_recv.insert(e.match_id, (e.span(), e.text.clone()));
-        }
         Capture::Member(MemberCap::Op) => {
             st.members.member_op_span.insert(e.match_id, e.span());
         }
