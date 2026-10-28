@@ -183,3 +183,23 @@ fn rename_from_the_union_site_refuses_an_arm_it_does_not_cover() {
     let err = cs.rename_edits("noise").expect_err("refuses");
     assert!(err.contains("Fish") && err.contains("un2_tank.pm:4"), "{err}");
 }
+
+#[test]
+fn linked_editing_never_co_edits_a_union_site_rename_refuses() {
+    // From `$c->sound` (Cat's), `$pet->sound` in the same file is also
+    // Bird's: rename refuses it, so typing must not rewrite it either.
+    let f = fixture();
+    let fa = f.idx.workspace_file_for_test(&f.zoo).unwrap();
+    let col = ZOO.lines().nth(4).unwrap().find("sound").unwrap();
+    let rows: Vec<usize> = at(&f, &fa, &f.zoo, 4, col).linked_editing_spans().iter().map(|s| s.start.row).collect();
+    assert!(rows.contains(&4) && !rows.contains(&3), "{rows:?}");
+}
+
+#[test]
+fn prepare_rename_on_one_arm_answers_the_union_refusal() {
+    let f = fixture();
+    let fa = f.idx.workspace_file_for_test(&f.cat).unwrap();
+    let col = CAT.lines().nth(2).unwrap().find("sound").unwrap();
+    let err = at(&f, &fa, &f.cat, 2, col).renameable().expect_err("refuses");
+    assert!(err.contains("Bird") && err.contains("un_zoo.pm:4"), "{err}");
+}

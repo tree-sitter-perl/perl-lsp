@@ -141,14 +141,7 @@ impl<'a> CandidateSet<'a> {
                     .iter()
                     .filter(|s| s.name == class && wanted(&s.kind))
                 {
-                    out.push(RefLocation {
-                        key: FileKey::Path(cached.path.clone()),
-                        span: s.selection_span,
-                        access: AccessKind::Declaration,
-                        rewritable: true,
-                        label: None,
-                        also_on: Vec::new(),
-                    });
+                    out.push(RefLocation::at(FileKey::Path(cached.path.clone()), s.selection_span, AccessKind::Declaration));
                 }
             }
             if out.is_empty() {
@@ -157,17 +150,7 @@ impl<'a> CandidateSet<'a> {
                 // the candidates table doesn't carry): the file top is the
                 // honest goto-def parity answer.
                 if let Some(path) = idx.module_path_cached(class) {
-                    out.push(RefLocation {
-                        key: FileKey::Path(path),
-                        span: Span {
-                            start: tree_sitter::Point::new(0, 0),
-                            end: tree_sitter::Point::new(0, 0),
-                        },
-                        access: AccessKind::Declaration,
-                        rewritable: false,
-                        label: None,
-                        also_on: Vec::new(),
-                    });
+                    out.push(RefLocation::at(FileKey::Path(path), Span { start: tree_sitter::Point::new(0, 0), end: tree_sitter::Point::new(0, 0), }, AccessKind::Declaration).with_rewrite(SiteRewrite::Skip));
                 }
             }
         }
@@ -314,14 +297,7 @@ impl<'a> CandidateSet<'a> {
                     name: s.name.clone(),
                     kind: s.kind,
                     detail: s.package.clone(),
-                    location: RefLocation {
-                        key: location.key,
-                        span: s.selection_span,
-                        access: AccessKind::Declaration,
-                        rewritable: false,
-                        label: None,
-                        also_on: Vec::new(),
-                    },
+                    location: RefLocation::at(location.key, s.selection_span, AccessKind::Declaration).with_rewrite(SiteRewrite::Skip),
                 });
             }
         }
@@ -374,14 +350,7 @@ impl<'a> CandidateSet<'a> {
                             name: caller.name.clone(),
                             kind: caller.kind,
                             detail: caller.package.clone(),
-                            location: RefLocation {
-                                key: loc.key.clone(),
-                                span: caller.selection_span,
-                                access: AccessKind::Declaration,
-                                rewritable: false,
-                                label: None,
-                                also_on: Vec::new(),
-                            },
+                            location: RefLocation::at(loc.key.clone(), caller.selection_span, AccessKind::Declaration).with_rewrite(SiteRewrite::Skip),
                         },
                         sites: vec![loc.span],
                     });

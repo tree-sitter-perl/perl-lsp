@@ -26,14 +26,7 @@ impl<'a> CandidateSet<'a> {
         let idx = self.idx()?;
         let loc_of = |cached: &crate::model::file_analysis::CachedModule, span: Span| {
             Url::from_file_path(&cached.path).ok()?;
-            Some(RefLocation {
-                key: FileKey::Path(cached.path.clone()),
-                span,
-                access: AccessKind::Declaration,
-                rewritable: true,
-                label: None,
-                also_on: Vec::new(),
-            })
+            Some(RefLocation::at(FileKey::Path(cached.path.clone()), span, AccessKind::Declaration))
         };
         // Class-keyed cached module — the fast path when `class` names a
         // struct/class/enum that is itself a cache key. Every candidate
@@ -87,14 +80,7 @@ impl<'a> CandidateSet<'a> {
                 }
             }
         });
-        hit.map(|(p, span)| RefLocation {
-            key: FileKey::Path(PathBuf::from(p)),
-            span,
-            access: AccessKind::Declaration,
-            rewritable: true,
-            label: None,
-            also_on: Vec::new(),
-        })
+        hit.map(|(p, span)| RefLocation::at(FileKey::Path(PathBuf::from(p)), span, AccessKind::Declaration))
     }
 
     /// Decl→def preference (pack routing): when a resolved location is a
@@ -170,14 +156,7 @@ impl<'a> CandidateSet<'a> {
             if defs.iter().any(|l| file_key_eq(&l.key, key) && l.span == span) {
                 return;
             }
-            defs.push(RefLocation {
-                key: key.clone(),
-                span,
-                access: AccessKind::Declaration,
-                rewritable: true,
-                label: None,
-                also_on: Vec::new(),
-            });
+            defs.push(RefLocation::at(key.clone(), span, AccessKind::Declaration));
         };
         // The decl's own file first (a static's forward decl and body).
         for s in decl_fa.symbols().iter().filter(|s| cand_is_def(decl_fa, s)) {
@@ -246,14 +225,7 @@ impl<'a> CandidateSet<'a> {
                             }
                             hits.push((
                                 cached.path.to_string_lossy().into_owned(),
-                                RefLocation {
-                                    key: key.clone(),
-                                    span: s.selection_span,
-                                    access: AccessKind::Declaration,
-                                    rewritable: true,
-                                    label: None,
-                                    also_on: Vec::new(),
-                                },
+                                RefLocation::at(key.clone(), s.selection_span, AccessKind::Declaration),
                             ));
                         }
                     });
@@ -381,14 +353,7 @@ impl<'a> CandidateSet<'a> {
                 key_for_sort(key),
                 span.start.row,
                 span.start.column,
-                RefLocation {
-                    key: key.clone(),
-                    span,
-                    access: AccessKind::Declaration,
-                    rewritable: true,
-                    label: None,
-                    also_on: Vec::new(),
-                },
+                RefLocation::at(key.clone(), span, AccessKind::Declaration),
             ));
         };
         for s in analysis.symbols().iter().filter(|s| {
@@ -465,14 +430,7 @@ impl<'a> CandidateSet<'a> {
 
     /// A declaration site in the origin file.
     pub(super) fn origin_decl(&self, span: Span) -> RefLocation {
-        RefLocation {
-            key: self.origin_key.clone(),
-            span,
-            access: AccessKind::Declaration,
-            rewritable: true,
-            label: None,
-            also_on: Vec::new(),
-        }
+        RefLocation::at(self.origin_key.clone(), span, AccessKind::Declaration)
     }
 
     /// Forward projection: goto-definition. Returns the winning path's
@@ -530,14 +488,7 @@ impl<'a> CandidateSet<'a> {
                     if !ranked.is_empty() {
                         let mut out: Vec<RefLocation> = ranked
                             .iter()
-                            .map(|(m, key, r)| RefLocation {
-                                key: key.clone(),
-                                span: m.selection_span,
-                                access: AccessKind::Declaration,
-                                rewritable: true,
-                                label: r.label(),
-                                also_on: Vec::new(),
-                            })
+                            .map(|(m, key, r)| RefLocation::at(key.clone(), m.selection_span, AccessKind::Declaration).with_label(r.label()))
                             .collect();
                         // See-through: a direct-delegation wrapper
                         // (`#define F(x) G(x)`) also offers the delegate `G`,
@@ -679,14 +630,7 @@ impl<'a> CandidateSet<'a> {
         };
         let line_loc = |path: PathBuf, line: u32| -> RefLocation {
             let p = tree_sitter::Point::new(line as usize, 0);
-            RefLocation {
-                key: FileKey::Path(path),
-                span: Span { start: p, end: p },
-                access: AccessKind::Declaration,
-                rewritable: true,
-                label: None,
-                also_on: Vec::new(),
-            }
+            RefLocation::at(FileKey::Path(path), Span { start: p, end: p }, AccessKind::Declaration)
         };
 
         // Cross-file hash-key defs. Two shapes share the lookup:
@@ -719,14 +663,7 @@ impl<'a> CandidateSet<'a> {
                             .into_iter()
                             .find(|d| d.name == r.target_name)
                         {
-                            return vec![RefLocation {
-                                key: FileKey::Path(cached.path.clone()),
-                                span: def.selection_span,
-                                access: AccessKind::Declaration,
-                                rewritable: true,
-                                label: None,
-                                also_on: Vec::new(),
-                            }];
+                            return vec![RefLocation::at(FileKey::Path(cached.path.clone()), def.selection_span, AccessKind::Declaration)];
                         }
                     }
                 }
@@ -874,14 +811,7 @@ impl<'a> CandidateSet<'a> {
                 for cached in cands {
                     if Url::from_file_path(&cached.path).is_ok() {
                         let whole = idx.whole_present(&cached);
-                        let loc = |span| RefLocation {
-                            key: FileKey::Path(cached.path.clone()),
-                            span,
-                            access: AccessKind::Declaration,
-                            rewritable: true,
-                            label: None,
-                            also_on: Vec::new(),
-                        };
+                        let loc = |span| RefLocation::at(FileKey::Path(cached.path.clone()), span, AccessKind::Declaration);
                         if let Some(s) = whole.symbols().iter().find(|s| {
                             s.name == name
                                 && matches!(
@@ -992,14 +922,7 @@ impl<'a> CandidateSet<'a> {
                                     })
                                 };
                                 let stored_loc = |sym: &crate::model::file_analysis::Symbol| {
-                                    Url::from_file_path(&cached.path).is_ok().then(|| RefLocation {
-                                        key: FileKey::Path(cached.path.clone()),
-                                        span: sym.selection_span,
-                                        access: AccessKind::Declaration,
-                                        rewritable: true,
-                                        label: None,
-                                        also_on: Vec::new(),
-                                    })
+                                    Url::from_file_path(&cached.path).is_ok().then(|| RefLocation::at(FileKey::Path(cached.path.clone()), sym.selection_span, AccessKind::Declaration))
                                 };
                                 // A value read lands on the stored member first.
                                 if want == MemberKind::Value {
@@ -1026,14 +949,7 @@ impl<'a> CandidateSet<'a> {
                                                     && matches!(s.kind, SymKind::Sub | SymKind::Method)
                                                     && pkg_agrees(true, s.package.as_deref(), Some(class))
                                             }) {
-                                                return self.prefer_member_defs(RefLocation {
-                                                    key: FileKey::Path(cached.path.clone()),
-                                                    span: sym.selection_span,
-                                                    access: AccessKind::Declaration,
-                                                    rewritable: true,
-                                                    label: None,
-                                                    also_on: Vec::new(),
-                                                });
+                                                return self.prefer_member_defs(RefLocation::at(FileKey::Path(cached.path.clone()), sym.selection_span, AccessKind::Declaration));
                                             }
                                         }
                                         return vec![line_loc(
@@ -1091,14 +1007,7 @@ impl<'a> CandidateSet<'a> {
                             // A call resolving to a header PROTOTYPE offers
                             // the bodied definition first (decl→def ranking).
                             return self.preferred_definitions(
-                                RefLocation {
-                                    key: FileKey::Path(cached.path.clone()),
-                                    span: sym.selection_span,
-                                    access: AccessKind::Declaration,
-                                    rewritable: true,
-                                    label: None,
-                                    also_on: Vec::new(),
-                                },
+                                RefLocation::at(FileKey::Path(cached.path.clone()), sym.selection_span, AccessKind::Declaration),
                                 &whole,
                             );
                         }
@@ -1119,14 +1028,7 @@ impl<'a> CandidateSet<'a> {
             let out: Vec<RefLocation> = decl_spans
                 .iter()
                 .filter(|(path, _)| path.as_ref().is_none_or(|p| Url::from_file_path(p).is_ok()))
-                .map(|(path, span)| RefLocation {
-                    key: path.clone().map_or_else(|| self.origin_key.clone(), FileKey::Path),
-                    span: *span,
-                    access: AccessKind::Declaration,
-                    rewritable: true,
-                    label: None,
-                    also_on: Vec::new(),
-                })
+                .map(|(path, span)| RefLocation::at(path.clone().map_or_else(|| self.origin_key.clone(), FileKey::Path), *span, AccessKind::Declaration))
                 .collect();
             if !out.is_empty() {
                 return out;
@@ -1168,14 +1070,7 @@ impl<'a> CandidateSet<'a> {
                     crate::model::file_analysis::widened_class_stand_ins(idx, &t.name, &t.names)
                         .into_iter()
                         .filter(|w| Url::from_file_path(&w.path).is_ok())
-                        .map(|w| RefLocation {
-                            key: FileKey::Path(w.path),
-                            span: w.span,
-                            access: AccessKind::Declaration,
-                            rewritable: false,
-                            label: Some(format!("widened: `{}` stands in for `{}`", w.class, t.name)),
-                            also_on: Vec::new(),
-                        })
+                        .map(|w| RefLocation::at(FileKey::Path(w.path), w.span, AccessKind::Declaration).with_rewrite(SiteRewrite::Skip).with_label(Some(format!("widened: `{}` stands in for `{}`", w.class, t.name))))
                         .collect();
                 if !out.is_empty() {
                     return out;

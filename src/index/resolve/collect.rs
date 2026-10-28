@@ -305,14 +305,7 @@ pub(super) fn pack_symbol_def_location(
             key_for_sort(origin_key),
             sym.selection_span.start.row,
             sym.selection_span.start.column,
-            RefLocation {
-                key: origin_key.clone(),
-                span: sym.selection_span,
-                access: AccessKind::Declaration,
-                rewritable: true,
-                label: None,
-                also_on: Vec::new(),
-            },
+            RefLocation::at(origin_key.clone(), sym.selection_span, AccessKind::Declaration),
         ));
     }
     // The FULL candidate table for `name` — a definition legitimately lives
@@ -332,14 +325,7 @@ pub(super) fn pack_symbol_def_location(
                 cached.path.clone(),
                 sym.selection_span.start.row,
                 sym.selection_span.start.column,
-                RefLocation {
-                    key: FileKey::Path(cached.path.clone()),
-                    span: sym.selection_span,
-                    access: AccessKind::Declaration,
-                    rewritable: true,
-                    label: None,
-                    also_on: Vec::new(),
-                },
+                RefLocation::at(FileKey::Path(cached.path.clone()), sym.selection_span, AccessKind::Declaration),
             ));
         }
     }
@@ -774,14 +760,7 @@ pub(super) fn collect_package_var(
             && sym.package.as_deref() == Some(package)
             && sym.name == name
         {
-            out.push(RefLocation {
-                key: key.clone(),
-                span: tail(sym.selection_span),
-                access: AccessKind::Declaration,
-                rewritable: true,
-                label: None,
-                also_on: Vec::new(),
-            });
+            out.push(RefLocation::at(key.clone(), tail(sym.selection_span), AccessKind::Declaration));
         }
     }
     for r in analysis.refs() {
@@ -797,35 +776,14 @@ pub(super) fn collect_package_var(
                 // single-literal fold's rewrite lands on that literal
                 // (rule #9), as for a const-folded method call.
                 let folded = span_is_folded_name(analysis, r.span, false, &r.target_name);
-                out.push(RefLocation {
-                    key: key.clone(),
-                    span: if folded { r.span } else { tail(r.span) },
-                    access: r.access,
-                    rewritable: !folded,
-                    label: None,
-                    also_on: Vec::new(),
-                });
+                out.push(RefLocation::at(key.clone(), if folded { r.span } else { tail(r.span) }, r.access).with_rewrite(SiteRewrite::literal_if(!folded)));
                 if let Some(src) = r.folded_from {
-                    out.push(RefLocation {
-                        key: key.clone(),
-                        span: src,
-                        access: r.access,
-                        rewritable: true,
-                        label: None,
-                        also_on: Vec::new(),
-                    });
+                    out.push(RefLocation::at(key.clone(), src, r.access));
                 }
             }
         } else if r.target_name == name && r.resolved_symbol().is_some_and(is_our_decl) {
             // Unqualified — only this package's `our` var (resolved in-file).
-            out.push(RefLocation {
-                key: key.clone(),
-                span: tail(r.span),
-                access: r.access,
-                rewritable: true,
-                label: None,
-                also_on: Vec::new(),
-            });
+            out.push(RefLocation::at(key.clone(), tail(r.span), r.access));
         }
     }
 }
@@ -1007,14 +965,7 @@ pub(super) fn collect_from_analysis(
     for &sid in analysis.symbols_named(&target.name) {
         let sym = analysis.symbol(sid);
         if symbol_defines_target(sym, target, analysis) {
-            out.push(RefLocation {
-                key: key.clone(),
-                span: sym.selection_span,
-                access: AccessKind::Declaration,
-                rewritable: rewritable_at(sym.selection_span),
-                label: None,
-                also_on: Vec::new(),
-            });
+            out.push(RefLocation::at(key.clone(), sym.selection_span, AccessKind::Declaration).with_rewrite(SiteRewrite::literal_if(rewritable_at(sym.selection_span))));
         }
     }
 
@@ -1364,26 +1315,19 @@ pub(super) fn collect_from_analysis(
             // (rename, highlight) want just the member-name token so they
             // can replace or underline exactly the right characters.
             let span = r.member_site().map_or(r.span, |m| m.name_span);
-            out.push(RefLocation {
-                key: key.clone(),
-                span,
-                access: r.access,
-                rewritable: !alias_matched && rewritable_at(span),
-                label: None,
-                also_on: std::mem::take(&mut also_on),
-            });
+            let rewrite = if alias_matched {
+                SiteRewrite::ThroughMacro
+            } else if !also_on.is_empty() {
+                SiteRewrite::Shared { also_on: std::mem::take(&mut also_on) }
+            } else {
+                SiteRewrite::literal_if(rewritable_at(span))
+            };
+            out.push(RefLocation::at(key.clone(), span, r.access).with_rewrite(rewrite));
             // A call folded from a variable (`my $m = 'process'; $self->$m()`)
             // has a non-rewritable name token above; the rewrite belongs on the
             // source string literal the fold came from (rule #9).
             if let Some(src) = r.folded_from {
-                out.push(RefLocation {
-                    key: key.clone(),
-                    span: src,
-                    access: r.access,
-                    rewritable: rewritable_at(src),
-                    label: None,
-                    also_on: Vec::new(),
-                });
+                out.push(RefLocation::at(key.clone(), src, r.access).with_rewrite(SiteRewrite::literal_if(rewritable_at(src))));
             }
         }
     }
@@ -1398,14 +1342,7 @@ pub(super) fn collect_from_analysis(
     if let TargetKind::Handler { owner, name: hname } = &target.kind {
         for applied in analysis.applicable_dispatches(module_index) {
             if &applied.name == hname && &applied.owner == owner {
-                out.push(RefLocation {
-                    key: key.clone(),
-                    span: applied.span,
-                    access: AccessKind::Read,
-                    rewritable: rewritable_at(applied.span),
-                    label: None,
-                    also_on: Vec::new(),
-                });
+                out.push(RefLocation::at(key.clone(), applied.span, AccessKind::Read).with_rewrite(SiteRewrite::literal_if(rewritable_at(applied.span))));
             }
         }
     }

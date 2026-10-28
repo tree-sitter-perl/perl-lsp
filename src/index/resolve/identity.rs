@@ -175,7 +175,7 @@ pub fn resolve_symbol_scoped(
             collect_package_var(&FileKey::Path(PathBuf::new()), analysis, &package, &name, &mut locs);
             // A group's spans are all rewritten, so a site with no name
             // token of its own (`${$n}`) is represented by its literal.
-            let mut spans: Vec<Span> = locs.into_iter().filter(|l| l.rewritable).map(|l| l.span).collect();
+            let mut spans: Vec<Span> = locs.into_iter().filter(|l| l.rewrite.rewrites()).map(|l| l.span).collect();
             // The decl token is both a symbol and a self-ref; dedup so a span
             // isn't rewritten twice.
             spans.sort_by_key(|s| (s.start.row, s.start.column, s.end.row, s.end.column));
