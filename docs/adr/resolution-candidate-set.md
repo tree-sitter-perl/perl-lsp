@@ -215,10 +215,11 @@ The spike's axes live in CandidateSet construction:
 - **completion** — the pack instance of `complete(prefix)`: the origin's
   include closure is the identifier universe
   (`CrossFileLookup::visible_defs_with_prefix`, no global fallback).
-- **name semantics** — the set's `bare_new_name` hook: Perl sigil rules
-  live in `conventions.rs::strip_variable_sigils`; pack spellings
-  canonicalize at extraction (the LangPack `shape_name` hook, cpp's
-  `canonical_template_spelling`).
+- **name semantics** — the set's `bare_new_name`: every collected site
+  is a name token, so every arm writes the typed name with the origin
+  language's own sigils stripped (`NameSpellings::strip_sigils`); pack
+  spellings canonicalize at extraction (the LangPack `shape_name` hook,
+  cpp's `canonical_template_spelling`).
 - **import facts, not edits** — import-sourced completion candidates
   carry `ImportFact` (`AddToQw`/`NewUse`); the adapter composes fact +
   slot affordance (`complete(prefix, import_slot: bool)`) into the edit.

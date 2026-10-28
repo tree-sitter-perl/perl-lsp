@@ -61,27 +61,22 @@
   (readonly_modifier)? @sym.attr
   type: (_)? @type.annot
   (property_element
-    name: (variable_name (name) @def.field.name @flow.target.member) @def.field.spelled) @def.field)
+    name: (variable_name (name) @def.field.name @flow.target) @def.field.spelled) @def.field)
 ; A constructor parameter with a visibility or `readonly` is also a
 ; property of the class (PHP 8 promotion); the member belongs to the class
 ; body, not to the constructor whose parameter list declares it.
 ; The same token is the constructor's local too, so the match declares
-; the two as one (`@def.pair`): a rename of either rewrites both.
+; the two as one (`@def.pair`): a rename of either rewrites both, and the
+; declared type is the value of each. (A node holds at most three
+; captures; tree-sitter drops the rest silently.)
 (property_promotion_parameter
   readonly: (readonly_modifier)? @sym.attr
   type: (_)? @type.annot
   name: [
-    (variable_name (name) @def.field.name @def.local.name @def.pair @flow.target.member) @def.field.spelled
+    (variable_name (name) @def.field.name @def.local.name @flow.target) @def.field.spelled
     (by_ref
-      (variable_name (name) @def.field.name @def.local.name @def.pair @flow.target.member) @def.field.spelled)
-  ]) @def.field @def.local
-; The local's own value, at its binding site in the constructor.
-(property_promotion_parameter
-  type: (_) @type.annot
-  name: [
-    (variable_name (name) @flow.target)
-    (by_ref (variable_name (name) @flow.target))
-  ])
+      (variable_name (name) @def.field.name @def.local.name @flow.target) @def.field.spelled)
+  ]) @def.field @def.local @def.pair
 
 ; ---- what a declaration is, stated on its name ----
 ; Modifiers come in any order, so each fact is a pattern of its own.

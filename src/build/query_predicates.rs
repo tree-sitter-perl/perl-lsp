@@ -3,8 +3,8 @@
 //! predicate it doesn't know to the caller unevaluated
 //! (`Query::general_predicates`), so a runner that never reads them treats a
 //! filter as a no-op. Both query runners (pack extraction, Perl plugin
-//! patterns) check their queries with `check` when they compile and filter
-//! each match through `admits`. `docs/adr/capture-vocabulary.md`.
+//! patterns) check their queries with `check` and `check_source` when they
+//! compile and filter each match through `admits`. `docs/adr/capture-vocabulary.md`.
 
 use tree_sitter::{Language, Node, Query, QueryMatch, QueryPredicate, QueryPredicateArg};
 
@@ -51,6 +51,64 @@ fn parse(p: &QueryPredicate) -> Option<Result<Structural<'_>, String>> {
         _ => Err(shape()),
     };
     Some(parsed)
+}
+
+/// The most captures one pattern node holds: tree-sitter keeps the first
+/// three and drops the rest without a word.
+const MAX_NODE_CAPTURES: usize = 3;
+
+/// The byte offset of the first node in `source` written with more
+/// captures than a node holds.
+fn overloaded_capture_node(source: &str) -> Option<usize> {
+    let (mut run, mut at, mut in_string) = (0, 0, false);
+    let mut chars = source.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if in_string {
+            match c {
+                '\\' => {
+                    chars.next();
+                }
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                run = 0;
+            }
+            ';' => {
+                while chars.next_if(|&(_, c)| c != '\n').is_some() {}
+            }
+            '@' => {
+                if run == 0 {
+                    at = i;
+                }
+                run += 1;
+                if run > MAX_NODE_CAPTURES {
+                    return Some(at);
+                }
+                while chars.next_if(|&(_, c)| !c.is_whitespace() && !"()[]".contains(c)).is_some() {}
+            }
+            c if c.is_whitespace() => {}
+            _ => run = 0,
+        }
+    }
+    None
+}
+
+/// A query's source as tree-sitter will read it: refused when a node is
+/// written with more captures than it holds, so a document cannot lose a
+/// capture in silence. Both runners check it beside `check`.
+pub fn check_source(source: &str) -> Result<(), String> {
+    match overloaded_capture_node(source) {
+        Some(at) => Err(format!(
+            "line {}: a node holds at most three captures; tree-sitter drops the rest",
+            source[..at].lines().count()
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Every general predicate in `query` is structural and well-formed (each

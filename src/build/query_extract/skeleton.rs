@@ -159,6 +159,8 @@ pub struct SkeletonAnalysis {
     /// is a macro parameter with no type, hence the class is frozen from the
     /// field decl rather than inferred from the (untypeable) invocant.
     pub macro_body_member_reads: Vec<(String, crate::model::file_analysis::Span)>,
+    /// The pack's language id (`LangPack::id`), stamped on the assembly.
+    pub language: &'static str,
     /// The language's name spellings (`LangPack::names`), baked onto
     /// `PackFacts::names`.
     pub names: crate::model::file_analysis::NameSpellings,
@@ -354,6 +356,12 @@ fn brace_body_extent(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
 }
 
 impl SkeletonAnalysis {
+    /// An empty skeleton of `pack`'s language: what extraction fills, and
+    /// what a file that never reached extraction assembles from.
+    pub fn for_pack(pack: &super::LangPack) -> Self {
+        SkeletonAnalysis { language: pack.id, names: pack.names.clone(), ..Default::default() }
+    }
+
     /// Re-anchor members that lost their enclosing container to a tree-sitter
     /// misparse — the re-anchor invariant (`docs/adr/config-superposition-declarations.md`).
     /// When a deep misparse truncates a `class_specifier`/`namespace` node
@@ -1504,6 +1512,7 @@ impl SkeletonAnalysis {
             namespace_ranges: std::mem::take(&mut self.namespace_ranges),
             ..Default::default()
         });
+        fa.language = self.language.to_string();
         // Seal base_*_count so a later enrich pass (the CLI/--batch path
         // runs it unconditionally) truncates to the FULL analysis, not to
         // zero — otherwise enrichment wipes every pack-language symbol.

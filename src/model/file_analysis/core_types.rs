@@ -508,6 +508,13 @@ impl NameSpellings {
         self.sigils.contains(&c)
     }
 
+    /// A typed name without its leading sigils: the bare identity token a
+    /// rename writes (`$total` → `total`). A language with no sigils keeps
+    /// every character — a `$` in its identifiers is identifier text.
+    pub fn strip_sigils<'n>(&self, name: &'n str) -> &'n str {
+        name.trim_start_matches(&self.sigils[..])
+    }
+
     /// The package a written qualifier names: an empty one (a leading
     /// separator) is the root package, when the language declares one.
     pub fn qualifier_package<'a>(&'a self, qualifier: &'a str) -> &'a str {
@@ -674,12 +681,12 @@ pub struct Presentation {
     /// the default `SymKind` → LSP mapping.
     #[serde(default)]
     pub display: Option<HandlerDisplay>,
-    /// Outline-only display-name override. When set, the outline uses
-    /// this verbatim instead of `name` (and drops any kind prefix).
-    /// A chained Mojo helper leaf has `name: "create"` (so method
-    /// resolution works on `$c->users->create`) but labels itself
-    /// `"users.create"`; a mojo-lite route prepends the HTTP verb.
-    /// Doesn't affect resolution, rename, or workspace-symbol.
+    /// The name the symbol is listed by, when it is not `name`: read
+    /// through `Symbol::listed_name` by every listing view. A chained
+    /// Mojo helper leaf has `name: "create"` (so method resolution works
+    /// on `$c->users->create`) but lists as `"users.create"`; a mojo-lite
+    /// route prepends the HTTP verb; a php property lists as written
+    /// (`$x`). Doesn't affect resolution, rename, or workspace-symbol.
     #[serde(default)]
     pub label: Option<String>,
 }
@@ -1022,6 +1029,11 @@ pub fn earliest_rebind_in(flow_edges: &[FlowEdge], var: &str, region: Span) -> O
 }
 
 impl Symbol {
+    /// The name listing views (outline, hover) show the symbol by.
+    pub fn listed_name(&self) -> &str {
+        self.presentation.label.as_deref().unwrap_or(&self.name)
+    }
+
     /// A member RE-EXPORT (`using Base::insert;` in a class body): part of
     /// the class's API surface (outline/completion) but not a definition —
     /// member resolution sees through it to the origin ancestor.
