@@ -2237,6 +2237,16 @@ fn cpp_fa(src: &str) -> crate::model::file_analysis::FileAnalysis {
         .into_file_analysis()
 }
 
+/// A functional cast `Foo(1)` is an instance of the class it calls, as
+/// Python's `Foo()` is (`python_pack_tests::calling_a_class_names_it`).
+#[test]
+fn a_functional_cast_is_an_instance_of_its_class() {
+    use crate::model::file_analysis::{InferredType, Span};
+    let fa = cpp_fa("struct Foo { Foo(int x) {} };\nvoid f() { auto a = Foo(1); }\n");
+    let call = Span { start: tree_sitter::Point::new(1, 20), end: tree_sitter::Point::new(1, 26) };
+    assert_eq!(fa.expr_type_at_span(call, None), Some(InferredType::ClassName("Foo".to_string())));
+}
+
 /// An analysis is of its pack's language however it was assembled — through
 /// the driver, straight from extraction, or as the stand-in for a file that
 /// never parsed — because `resolve()` routes visibility on that stamp.

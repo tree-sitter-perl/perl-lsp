@@ -13,6 +13,8 @@ pub fn cpp_pack() -> LangPack {
         names: NameSpellings {
             member_namespace: MemberNamespace::Shared,
             class_call: ClassCall::Constructs,
+            // TODO(construction-navigation): `Foo(x)` reaches no
+            // constructor yet, so a constructor's references do not list it.
             ..NameSpellings::with_separator("::")
         },
         // Template spellings get ONE canonical whitespace form so a

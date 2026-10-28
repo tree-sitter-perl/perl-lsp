@@ -36,7 +36,7 @@ fn test_refs_to_finds_sub_across_workspace_files() {
             kind: TargetKind::Sub {
                 package: Some("A".to_string()),
             },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -85,7 +85,7 @@ fn test_refs_to_exporter_extensible_cross_file() {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
             kind: TargetKind::Sub { package: Some("Ext".to_string()) },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -126,7 +126,7 @@ fn test_refs_to_exporter_declare_cross_file() {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
             kind: TargetKind::Sub { package: Some("Decl".to_string()) },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -167,7 +167,7 @@ fn test_refs_to_importer_consumer_cross_file() {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
             kind: TargetKind::Sub { package: Some("Src::Mod".to_string()) },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -201,7 +201,7 @@ fn test_refs_to_export_not_registered_without_use() {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "phantom".to_string(),
             kind: TargetKind::Sub { package: Some("Plain".to_string()) },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -242,7 +242,7 @@ $app->routes->post('/users')->to(controller => 'Users', action => 'create');
             kind: TargetKind::Method {
                 class: "Mojolicious::Controller::_Helper::users".to_string(),
             },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -271,7 +271,7 @@ $app->routes->post('/users')->to(controller => 'Users', action => 'create');
             kind: TargetKind::Method {
                 class: "Users".to_string(),
             },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -327,7 +327,7 @@ $b->run;
             kind: TargetKind::Method {
                 class: "Foo".to_string(),
             },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -364,7 +364,7 @@ $b->run;
             kind: TargetKind::Method {
                 class: "Bar".to_string(),
             },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -428,7 +428,7 @@ sub run {
             kind: TargetKind::Method {
                 class: "Widget".to_string(),
             },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -491,7 +491,7 @@ sub run {
             kind: TargetKind::Method {
                 class: "Widget".to_string(),
             },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -616,7 +616,7 @@ Bler->new->hi;
             kind: TargetKind::Method {
                 class: "Sner".to_string(),
             },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -663,7 +663,7 @@ Bler->new->hi;
             kind: TargetKind::Method {
                 class: "Bler".to_string(),
             },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -809,7 +809,7 @@ $b->run;
             names: crate::model::conventions::PERL_SPELLINGS,
             name,
             kind: TargetKind::Method { class },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         other => panic!(
             "rename_kind_at($f->run) should be Method{{class=Foo}}, got {:?}",
@@ -967,7 +967,7 @@ hi();
             kind: TargetKind::Sub {
                 package: package.clone(),
             },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         Some(RenameKind::Method { name, class, .. }) => TargetRef {
             names: crate::model::conventions::PERL_SPELLINGS,
@@ -975,7 +975,7 @@ hi();
             kind: TargetKind::Method {
                 class: class.clone(),
             },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         other => panic!("unexpected rename_kind_at = {:?}", other),
     };
@@ -1275,7 +1275,7 @@ $u->create(name => 'alice');
             names: crate::model::conventions::PERL_SPELLINGS,
             name,
             kind: TargetKind::Method { class },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         other => panic!("expected Method, got {:?}", other),
     };
@@ -1348,7 +1348,7 @@ fn test_refs_to_empty_when_no_hits() {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "nonexistent".to_string(),
             kind: TargetKind::Sub { package: None },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -1385,7 +1385,7 @@ fn test_refs_to_finds_hash_key_def_and_access_same_file() {
                 package: Some("Lib".to_string()),
                 name: "get_config".to_string(),
             },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -1422,7 +1422,7 @@ fn test_refs_to_finds_cross_file_hash_key_def() {
                 package: Some("Lib".to_string()),
                 name: "get_config".to_string(),
             },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -1465,7 +1465,7 @@ fn test_refs_to_package_qualified_sub_owner_isolates_name_collisions() {
                 package: Some("Alpha".to_string()),
                 name: "get_config".to_string(),
             },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -1512,7 +1512,7 @@ fn test_refs_to_qualified_call_resolves_to_def() {
             kind: TargetKind::Sub {
                 package: Some("A".to_string()),
             },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -1553,7 +1553,7 @@ fn test_refs_to_qualified_call_isolates_package() {
             kind: TargetKind::Sub {
                 package: Some("A".to_string()),
             },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -1581,7 +1581,7 @@ fn test_refs_to_role_mask_excludes_workspace() {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "foo".to_string(),
             kind: TargetKind::Sub { package: None },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::OPEN,
     );
@@ -1679,7 +1679,7 @@ $b->touch();
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "touch".to_string(),
         kind: TargetKind::Method { class: "B".to_string() },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::WORKSPACE);
     let consumer_hit = refs.iter().any(|r| {
@@ -1825,7 +1825,7 @@ $x->ping();
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "ping".to_string(),
             kind: TargetKind::Method { class: "C".to_string() },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::WORKSPACE,
     );
@@ -1902,7 +1902,7 @@ sub touch  { 1 }
     let target = TargetRef {
         name: "touch".to_string(),
         kind: TargetKind::Method { class: "B".to_string() },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
 
     // Warm-up — JIT'd registry caches, lazy index allocs.
@@ -1999,7 +1999,7 @@ $x->makeFoo()->ping();
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "ping".to_string(),
             kind: TargetKind::Method { class: "P".to_string() },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::WORKSPACE,
     );
@@ -2117,7 +2117,7 @@ sub fire ($minion) {\n  $minion->enqueue('send_email' => ['a@b']);\n}\n1;\n",
                 owner: crate::model::file_analysis::HandlerOwner::Class("Minion".to_string()),
                 name: "send_email".to_string(),
             },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -2196,7 +2196,7 @@ sub fire {\n  my $self = shift;\n  my $minion = My::Minion->new;\n  $minion->enq
                 owner: crate::model::file_analysis::HandlerOwner::Class("Minion".to_string()),
                 name: "send_email".to_string(),
             },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -2248,7 +2248,7 @@ fn refs_to_fans_runtime_exported_sub_to_consumer() {
             names: crate::model::conventions::PERL_SPELLINGS,
             name: "sweeten".to_string(),
             kind: TargetKind::Sub { package: Some("Sugar::Sub".to_string()) },
-            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );
@@ -2299,7 +2299,7 @@ fn refs_to_links_implicit_export_to_bare_use_consumer() {
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "make_account".to_string(),
         kind: TargetKind::Sub { package: Some("Bank".to_string()) },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
     let hit = |p: &PathBuf| refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if x == p));
@@ -2350,7 +2350,7 @@ fn refs_to_links_return_hash_key_cross_file() {
             package: Some("Cfg".to_string()),
             name: "get_config".to_string(),
         },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     assert!(target.supports_cross_file_rename(), "HashKeyOfSub must rename cross-file now");
 
@@ -2410,7 +2410,7 @@ fn references_cross_file_sub_fans_out_and_stays_package_scoped() {
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "info_to_task".to_string(),
         kind: TargetKind::Sub { package: Some("TaskInfo".to_string()) },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
     let hit = |p: &PathBuf| refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if x == p));
@@ -2465,7 +2465,7 @@ fn references_cross_file_method_matches_inheriting_invocant() {
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "success".to_string(),
         kind: TargetKind::Method { class: "Role::REST".to_string() },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     let refs = refs_to(&store, Some(&idx), &target, RoleMask::EDITABLE);
     let hit = |p: &PathBuf| refs.iter().any(|r| matches!(&r.key, FileKey::Path(x) if x == p));
@@ -2501,7 +2501,7 @@ fn references_mask_scopes_to_editable_for_project_symbols() {
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "thing".to_string(),
         kind: TargetKind::Sub { package: Some("Proj".to_string()) },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     assert_eq!(
         references_mask_for(&store, Some(&idx), &in_ws).bits(),
@@ -2515,7 +2515,7 @@ fn references_mask_scopes_to_editable_for_project_symbols() {
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "nowhere".to_string(),
         kind: TargetKind::Sub { package: Some("CPAN::Thing".to_string()) },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     assert_eq!(
         references_mask_for(&store, Some(&idx), &dep_only).bits(),
@@ -2524,3 +2524,14 @@ fn references_mask_scopes_to_editable_for_project_symbols() {
     );
 }
 
+
+/// A Perl construction calls `new` by name, so a constructor's references
+/// are retrieved under its name alone, never its classes'.
+#[test]
+fn a_perl_constructor_retrieves_under_its_name() {
+    let fa = parse("package Base;\nsub new { bless {}, shift }\npackage Kid;\nuse parent -norequire, 'Base';\n1;\n");
+    assert!(fa.symbols().iter().any(|s| s.name == "new" && s.is_constructor()));
+    let target = TargetRef::method("new".into(), "Base".into(), None, &fa, None, OverrideScope::Dispatch);
+    assert!(target.constructed_classes.is_empty());
+    assert_eq!(target.retrieval_keys([], fa.names()), ["new"]);
+}

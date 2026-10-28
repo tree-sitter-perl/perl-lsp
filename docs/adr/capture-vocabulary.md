@@ -29,13 +29,13 @@ capture name: the driver, the pack hooks and the projection all match on
 the enum. A pack hook that depends on a kind takes the typed kind
 (`default_name: fn(DefCap, Point)`).
 
-One literal is read back out of the document: the constructor's name, the
-single spelling `@mark.constructor`'s `#eq?` admits (`CompiledPack::constructor`).
-`@expr.construct` calls that method, so the declaration's flag and every
-construction site read one spelling. The compiled query keeps text
-predicates private, so `predicate_literals` reads the document's own
-text; a document that constructs without marking a constructor, or marks
-more than one name, does not compile.
+No literal is read back out of the document. A construction
+(`@expr.construct`) never names its constructor: it keys on the class its
+receiver spells, and the constructor is whichever member of that class's
+MRO carries the `CONSTRUCTOR` flag `@mark.constructor` mints
+(`MemberKey::Constructor`). The `#eq?` that picks the constructor's name
+stays in the document, where the grammar can check it, and nothing on the
+Rust side spells it a second time.
 
 ## Decision: the vocabulary is checked when the query compiles
 

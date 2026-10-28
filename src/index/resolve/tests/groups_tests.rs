@@ -578,7 +578,7 @@ fn test_renaming_import_remote_joins_source_alias_stays_local() {
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "beta".to_string(),
         kind: TargetKind::Sub { package: Some("Exp".to_string()) },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     let src_refs = refs_to(&store, Some(&idx), &src, RoleMask::EDITABLE);
     assert!(hit(&src_refs, &exp), "source def missing: {:?}", src_refs);
@@ -589,7 +589,7 @@ fn test_renaming_import_remote_joins_source_alias_stays_local() {
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "rb".to_string(),
         kind: TargetKind::Sub { package: Some("Consumer".to_string()) },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     let alias_refs = refs_to(&store, Some(&idx), &alias, RoleMask::EDITABLE);
     assert!(hit(&alias_refs, &cons), "alias `-as` value + call missing: {:?}", alias_refs);
@@ -1241,7 +1241,7 @@ fn test_event_handler_refs_mark_folded_site_non_rewritable() {
             owner: crate::model::file_analysis::HandlerOwner::Class("App".to_string()),
             name: "connect".to_string(),
         },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     assert!(target.supports_cross_file_rename(), "Handler renames cross-file now");
 
@@ -1474,7 +1474,7 @@ fn test_implementations_of_role_requires_fans_out_to_composers() {
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "fetch".to_string(),
         kind: TargetKind::Method { class: "My::Role".to_string() },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     let origin = parse("package Probe;\n1;\n");
     let results = implementations_of(&origin, Some(&idx), &target);
@@ -1528,7 +1528,7 @@ fn test_implementations_finds_mixin_sibling_override() {
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "save".to_string(),
         kind: TargetKind::Method { class: "Base".to_string() },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     let origin = parse("package Probe;\n1;\n");
     let files: Vec<String> = implementations_of(&origin, Some(&idx), &target)
@@ -1638,7 +1638,7 @@ fn test_implementations_on_sub_decl_target_finds_overrides() {
         names: crate::model::conventions::PERL_SPELLINGS,
         name: "save".to_string(),
         kind: TargetKind::Sub { package: Some("Base".to_string()) },
-        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+        method_classes: Vec::new(), scope: OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
     };
     let origin = parse("package Probe;\n1;\n");
     let files: Vec<String> = implementations_of(&origin, Some(&idx), &target)

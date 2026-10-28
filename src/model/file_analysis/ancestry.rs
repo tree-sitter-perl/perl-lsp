@@ -329,16 +329,17 @@ impl FileAnalysis {
     /// between them are not a family.
     /// `want` is the family the asker names; the member walk admits per
     /// the language's member namespace.
-    pub fn member_override_family(
+    pub fn member_override_family<'k>(
         &self,
         class_name: &str,
-        method_name: &str,
+        member: impl Into<MemberKey<'k>>,
         want: MemberKind,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<String> {
+        let member = member.into();
         let defines = |cls: &str| {
             matches!(
-                self.resolve_member_in_ancestors(cls, method_name, module_index, want),
+                self.resolve_member_key_in_ancestors(cls, member, module_index, want),
                 Some(MethodResolution::Local { class: ref c, .. })
                     | Some(MethodResolution::CrossFile { class: ref c, .. })
                     if c == cls
@@ -476,14 +477,14 @@ impl FileAnalysis {
     /// (inclusive); intermediate ancestors that *override* are
     /// skipped because they're a different method from the
     /// inheritance perspective.
-    pub fn member_rename_chain(
+    pub fn member_rename_chain<'k>(
         &self,
         class_name: &str,
-        method_name: &str,
+        member: impl Into<MemberKey<'k>>,
         want: MemberKind,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<String> {
-        let defining = match self.resolve_member_in_ancestors(class_name, method_name, module_index, want) {
+        let defining = match self.resolve_member_key_in_ancestors(class_name, member.into(), module_index, want) {
             Some(MethodResolution::Local { class, .. })
             | Some(MethodResolution::CrossFile { class, .. }) => class,
             None => return vec![class_name.to_string()],
@@ -512,17 +513,17 @@ impl FileAnalysis {
     fn method_resolution_on_class(
         &self,
         cls: &str,
-        method_name: &str,
+        member: MemberKey<'_>,
         module_index: Option<&dyn CrossFileLookup>,
         want: MemberKind,
     ) -> Option<MethodResolution> {
-        self.member_resolution_on_class_pass(cls, method_name, module_index, want)
+        self.member_resolution_on_class_pass(cls, member, module_index, want)
     }
 
     fn member_resolution_on_class_pass(
         &self,
         cls: &str,
-        method_name: &str,
+        member: MemberKey<'_>,
         module_index: Option<&dyn CrossFileLookup>,
         want: MemberKind,
     ) -> Option<MethodResolution> {
@@ -535,7 +536,13 @@ impl FileAnalysis {
         // Variable/Field must be the class's OWN content — a lexical local
         // inside an inline method carries the class as sticky `package` too
         // (`T* data = this->data();` in a member body is NOT member `data`).
-        for &sid in self.symbols_named(method_name) {
+        let local: Vec<SymbolId> = match member {
+            MemberKey::Named(n) => self.symbols_named(n).to_vec(),
+            MemberKey::Constructor => {
+                self.symbols().iter().filter(|s| member.admits(s)).map(|s| s.id).collect()
+            }
+        };
+        for sid in local {
             let sym = self.symbol(sid);
             let member_kind = match sym.kind {
                 SymKind::Sub | SymKind::Method => true,
@@ -553,7 +560,7 @@ impl FileAnalysis {
             for sym_id in &ns.entities {
                 let Some(sym) = self.symbols.get(sym_id.0 as usize) else { continue };
                 if !matches!(sym.kind, SymKind::Sub | SymKind::Method) { continue; }
-                if sym.name == method_name {
+                if member.admits(sym) {
                     return Some(MethodResolution::Local { class: cls.to_string(), sym_id: *sym_id });
                 }
             }
@@ -584,7 +591,10 @@ impl FileAnalysis {
                 // declares nothing named `method_name` under `cls`. Fail-open
                 // everywhere the store cannot speak; the equiv switch runs the
                 // skipped scan anyway and screams on divergence.
-                let may_declare = widened || idx.candidate_may_declare(&cached, method_name, cls);
+                // The rows carry names, not roles: a by-role ask reads the
+                // candidate's symbols.
+                let may_declare = widened
+                    || member.name().is_none_or(|n| idx.candidate_may_declare(&cached, n, cls));
                 if !may_declare {
                     crate::util::ghost_stats::count("mroc.candidate_prefiltered");
                     if !member_prefilter_equiv() {
@@ -617,7 +627,7 @@ impl FileAnalysis {
                     cls.to_string()
                 };
                 let has_member = whole.symbols.iter().any(|s| {
-                    s.name == method_name
+                    member.admits(s)
                         && s.package.as_deref() == Some(cand_cls.as_str())
                         && !s.is_reexport()
                         && want.admits_decl(s.kind, namespace)
@@ -643,7 +653,7 @@ impl FileAnalysis {
                     });
                     if has_member {
                         log::warn!(
-                            "member prefilter equiv: rows said {cls}::{method_name} \
+                            "member prefilter equiv: rows said {cls}::{member:?} \
                              absent in {:?} but the decode found it — the shred \
                              missed a symbol-minting path",
                             cached.path
@@ -665,9 +675,10 @@ impl FileAnalysis {
             // Cross-package typeglob install: the method is attributed to `cls`
             // but lives in a differently-named module file (`*{'DateTime::'.
             // $sub} = …` inside `package DateTime::PP`). Record the home module.
-            if !reaches_callables {
+            // The remaining lanes are keyed by name.
+            let (true, Some(method_name)) = (reaches_callables, member.name()) else {
                 return None;
-            }
+            };
             if let Some(home) = idx.module_declaring_method_in_package(method_name, cls) {
                 return Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: Some(home), widened: false });
             }
@@ -726,13 +737,77 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
         want: MemberKind,
     ) -> Option<MethodResolution> {
+        self.resolve_member_key_in_ancestors(class_name, MemberKey::Named(method_name), module_index, want)
+    }
+
+    /// The constructor a construction of `class_name` runs: the nearest
+    /// class of its MRO that declares one answers.
+    pub fn resolve_constructor_in_ancestors(
+        &self,
+        class_name: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<MethodResolution> {
+        self.resolve_member_key_in_ancestors(class_name, MemberKey::Constructor, module_index, MemberKind::Callable)
+    }
+
+    /// The constructor `resolve_constructor_in_ancestors` finds, as the
+    /// class declaring it and its name — where the member is known, the
+    /// name-keyed lanes (a definition's location, an override family)
+    /// take it from here.
+    pub fn constructor_of(
+        &self,
+        class_name: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<(String, String)> {
+        match self.resolve_constructor_in_ancestors(class_name, module_index)? {
+            MethodResolution::Local { class, sym_id } => Some((class, self.symbol(sym_id).name.clone())),
+            MethodResolution::CrossFile { class, .. } => {
+                let idx = module_index?;
+                idx.visible_def_candidates(&class).iter().find_map(|cached| {
+                    let whole = idx.symbols_present(cached);
+                    let name = whole
+                        .symbols
+                        .iter()
+                        .find(|s| s.is_constructor() && s.package.as_deref() == Some(class.as_str()))
+                        .map(|s| s.name.clone());
+                    name.map(|n| (class.clone(), n))
+                })
+            }
+        }
+    }
+
+    /// The member `r` calls on `class`: its token's name, or the name of
+    /// the constructor a construction runs. `None` when a construction's
+    /// class declares no constructor anywhere in its MRO.
+    pub fn called_member<'r>(
+        &self,
+        r: &'r Ref,
+        class: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<std::borrow::Cow<'r, str>> {
+        match r.member_key(self.names()) {
+            MemberKey::Named(n) => Some(std::borrow::Cow::Borrowed(n)),
+            MemberKey::Constructor => self.constructor_of(class, module_index).map(|(_, n)| n.into()),
+        }
+    }
+
+    /// `resolve_member_in_ancestors`, asking by name or by role.
+    pub fn resolve_member_key_in_ancestors(
+        &self,
+        class_name: &str,
+        member: MemberKey<'_>,
+        module_index: Option<&dyn CrossFileLookup>,
+        want: MemberKind,
+    ) -> Option<MethodResolution> {
         let _t = crate::util::ghost_stats::ScopedNs::start("mroc.total");
         // An instance's own slots answer before any class member, ancestors
         // included in each (`InstanceSlots::BeforeClass`): python reads the
         // instance `__dict__`, then the class.
-        if self.names().instance_slots == InstanceSlots::BeforeClass
-            && want.admits_decl(SymKind::HashKeyDef, self.names().member_namespace)
-        {
+        let slot_name = member.name().filter(|_| {
+            self.names().instance_slots == InstanceSlots::BeforeClass
+                && want.admits_decl(SymKind::HashKeyDef, self.names().member_namespace)
+        });
+        if let Some(method_name) = slot_name {
             let mut slot: Option<MethodResolution> = None;
             self.for_each_ancestor_class(class_name, module_index, |cls| {
                 match self.slot_on_class(cls, method_name, module_index) {
@@ -750,7 +825,7 @@ impl FileAnalysis {
         let mut result: Option<MethodResolution> = None;
         let mut iface_fallback: Option<MethodResolution> = None;
         self.for_each_ancestor_class(class_name, module_index, |cls| {
-            match self.method_resolution_on_class(cls, method_name, module_index, want) {
+            match self.method_resolution_on_class(cls, member, module_index, want) {
                 // An INTERFACE hit is held as fallback, never the answer
                 // while a concrete definer exists: php's MRO interleaves
                 // `implements` (header) ahead of `use Trait` (body), so the
@@ -864,7 +939,7 @@ impl FileAnalysis {
                 let crate::model::graph::Node::Class(cls) = n else {
                     return crate::model::graph::WalkControl::Continue;
                 };
-                match self.method_resolution_on_class(cls, method_name, module_index, MemberKind::Callable) {
+                match self.method_resolution_on_class(cls, MemberKey::Named(method_name), module_index, MemberKind::Callable) {
                     Some(r) => {
                         if self.hit_class_is_interface(cls, &r, module_index) {
                             iface_fallback.get_or_insert(r);

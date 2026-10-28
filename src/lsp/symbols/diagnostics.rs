@@ -419,8 +419,10 @@ pub fn collect_diagnostics(
         };
         let method_name = &r.target_name;
 
-        // Skip methods every class of its kind answers without declaring.
-        if implicitly_answered.contains(method_name.as_str()) {
+        // Skip methods every class of its kind answers without declaring. A
+        // construction is one: a class with no declared constructor still
+        // constructs, and its token names the class, not a method.
+        if r.constructs() || implicitly_answered.contains(method_name.as_str()) {
             continue;
         }
 

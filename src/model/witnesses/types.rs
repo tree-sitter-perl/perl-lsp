@@ -228,7 +228,7 @@ impl WitnessPayload {
             WitnessPayload::Invoke { callee, receiver, args } => {
                 match callee {
                     Callee::Value(t) => f(t),
-                    Callee::Method { .. } | Callee::Function { .. } => {}
+                    Callee::Method { .. } | Callee::Function { .. } | Callee::Construct { .. } => {}
                 }
                 if let Some(t) = receiver {
                     f(t);
@@ -433,6 +433,11 @@ pub enum Callee {
     /// itself. Kept at the END for bincode variant-index stability (bump
     /// `EXTRACT_VERSION`).
     Function { name: String, local: Option<SymbolId>, member_of: Option<String>, constructs: Option<String> },
+    /// A construction (`new Foo(…)`): an instance of the class `lookup`
+    /// names. It runs that class's constructor, the member flagged
+    /// `CONSTRUCTOR` in its MRO, whose name the site never spells. Kept at
+    /// the END for bincode variant-index stability (bump `EXTRACT_VERSION`).
+    Construct { lookup: Lookup },
 }
 
 /// Where a named method's lookup starts.
