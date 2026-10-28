@@ -1272,6 +1272,23 @@ fn answer_on_stack(idx: &dyn CrossFileLookup, key: &EngineKey, check: Check) -> 
         }
     }
     crate::util::ghost_stats::count("engine.compute");
+    crate::util::ghost_stats::count(match key {
+        EngineKey::Join(_) => "engine.compute.join",
+        EngineKey::Contribution { .. } => "engine.compute.contribution",
+        EngineKey::Providers(a) => match a {
+            WitnessAttachment::ParamWrites { .. } => "engine.compute.providers.param_writes",
+            WitnessAttachment::Param { .. } => "engine.compute.providers.param",
+            WitnessAttachment::Field { .. } => "engine.compute.providers.field",
+            WitnessAttachment::SlotElements { .. } => "engine.compute.providers.slot_elements",
+            _ => "engine.compute.providers.other",
+        },
+        EngineKey::Consult(c) => match c.attachment {
+            WitnessAttachment::ParamWrites { .. } => "engine.compute.consult.param_writes",
+            WitnessAttachment::PackageSymbol { .. } => "engine.compute.consult.package_symbol",
+            _ => "engine.compute.consult.other",
+        },
+        EngineKey::DomainVote { .. } | EngineKey::DomainSites { .. } => "engine.compute.domain",
+    });
     if crate::util::ghost_stats::probe("compute") {
         let depth = FRAMES.with(|f| f.borrow().len());
         eprintln!("[compute] {depth} {key:?}");
