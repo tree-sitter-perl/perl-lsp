@@ -10,9 +10,8 @@ pub(super) struct State {
     /// A context whose same-match `@scope` starts AFTER it (C++ namespace:
     /// `@context` is on the name, `@scope` on the body `{`) must be
     /// registered at the BODY depth, not the file depth — else it goes
-    /// sticky and leaks past the closing brace. Each match's scope start,
-    /// pre-indexed; such contexts defer to the scope push.
-    scope_start_by_match: HashMap<usize, usize>,
+    /// sticky and leaks past the closing brace; it waits here for the
+    /// scope push.
     pending_context: HashMap<usize, (ContextKind, String)>,
     /// Parent edges whose parent is still the written spelling: its index
     /// in `out.parents`, where it was written, and the scope it is written
@@ -69,12 +68,6 @@ pub(super) fn class_scope_rows(st: &ExtractState) -> Vec<(String, ScopeId)> {
     let mut rows: Vec<(String, ScopeId)> = first.into_iter().map(|(c, id)| (c.to_string(), id)).collect();
     rows.sort_by_key(|&(_, id)| id);
     rows
-}
-
-pub(super) fn collect(st: &mut ExtractState, e: &Event) {
-    if let Capture::Scope(_) = e.cap {
-        st.scopes.scope_start_by_match.entry(e.match_id).or_insert(e.start_byte);
-    }
 }
 
 pub(super) fn handle(st: &mut ExtractState, e: &Event) {
@@ -153,7 +146,8 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             // If this match's `@scope` starts AFTER this context, the
             // context belongs to that (not-yet-pushed) body — defer it
             // so it registers at the body depth and pops with the block.
-            if st.scopes.scope_start_by_match.get(&e.match_id).is_some_and(|&s| s > e.start_byte) {
+            let own_scope = st.adorned.of_match(e.match_id).find(|t| matches!(t.cap, Capture::Scope(_)));
+            if own_scope.is_some_and(|s| s.start_byte > e.start_byte) {
                 st.scopes.pending_context.insert(e.match_id, (kind, identity.unwrap_or(text)));
             } else {
                 // Replace any context at the same depth; deeper ones
@@ -169,7 +163,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 // A scope opened by this same match is the container the
                 // context names (php's class node), so a point anywhere in
                 // it, header included, is in that package.
-                if st.scopes.scope_start_by_match.contains_key(&e.match_id) {
+                if own_scope.is_some() {
                     if let Some(&(_, id)) = st.scope_stack.last() {
                         st.out.scopes[id.0 as usize].package = Some(value.clone());
                         if kind == ContextKind::Class {

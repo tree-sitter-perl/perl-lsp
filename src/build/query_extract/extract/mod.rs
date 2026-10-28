@@ -204,12 +204,10 @@ struct ExtractState<'p> {
     package: Option<String>,
     scopes: scopes::State,
     defs: defs::State,
-    refs: refs::State,
     members: members::State,
     flow: flow::State,
     narrowing: narrowing::State,
     commands: commands::State,
-    imports: imports::State,
     /// The module the file IS, when its language names it by path and the
     /// driver had one: its dotted name is the section every declaration
     /// without a namespace of its own joins.
@@ -428,12 +426,10 @@ pub fn extract_in(
         package: None,
         scopes: Default::default(),
         defs,
-        refs: Default::default(),
         members,
         flow: flow::State::new(adorned.events.len()),
         narrowing: Default::default(),
         commands: Default::default(),
-        imports: Default::default(),
         file_module,
     };
     // A module named by its path is one section, the whole file.
@@ -446,19 +442,9 @@ pub fn extract_in(
         });
     }
 
-    // ---- pre-collect the per-match joins a handler reads before the
-    // capture that feeds them fires (a def's name token, its qualifier) ----
+    // ---- one walk in document order: scope stack, sticky contexts and
+    // ancestors; everything else a handler needs, it looks up ----
     let events = &adorned.events;
-    for e in events {
-        match family(e.cap) {
-            Family::Scopes => scopes::collect(&mut st, e),
-            Family::Imports => imports::collect(&mut st, e),
-            Family::Refs => refs::collect(&mut st, e),
-            Family::Defs | Family::Flow | Family::Members | Family::Narrowing | Family::Commands | Family::Links => {}
-        }
-    }
-
-    // ---- the state machine: scope stack + sticky contexts ----
     for (ix, e) in events.iter().enumerate() {
         while st.scope_stack.len() > 1
             && st.scope_stack.last().is_some_and(|&(end, _)| e.start_byte >= end)

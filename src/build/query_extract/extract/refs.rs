@@ -3,18 +3,6 @@
 
 use super::*;
 
-#[derive(Default)]
-pub(super) struct State {
-    /// `@ref.spelled`, joined to the match's reference token.
-    spelled_by_match: std::collections::HashMap<usize, String>,
-}
-
-pub(super) fn collect(st: &mut ExtractState, e: &Event) {
-    if e.cap == Capture::RefSpelled {
-        st.refs.spelled_by_match.insert(e.match_id, e.text.clone());
-    }
-}
-
 pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     let Capture::Ref(ref_kind) = e.cap else { return };
     let pack = st.pack;
@@ -38,7 +26,9 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     let arg_count = m.arg_count(e.match_id);
     st.out.refs.push(SkelRef {
         kind: ref_kind,
-        name: (pack.shape_name)(st.refs.spelled_by_match.get(&e.match_id).unwrap_or(&e.text)),
+        // `@ref.spelled`: the name as the match spells it, where that is
+        // not the reference token's own text.
+        name: (pack.shape_name)(ad.in_match(e.match_id, Capture::RefSpelled).map_or(&e.text, |s| &s.text)),
         start: e.start,
         end: e.end,
         scope: st.cur_scope,

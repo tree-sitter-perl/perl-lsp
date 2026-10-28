@@ -4,37 +4,6 @@
 
 use super::*;
 use crate::model::file_analysis::{ImportPrefix, ImportReach};
-use std::collections::{BTreeMap, HashMap};
-
-#[derive(Default)]
-pub(super) struct State {
-    /// import-call arguments per match (BTreeMap: match ids are
-    /// source-ordered, so imports come out deterministic)
-    import_args: BTreeMap<usize, String>,
-    /// A group import's shared namespace, a relative import's level and an
-    /// import's alias, joined to the match's import name. The alias is
-    /// written after the name, so all are collected ahead of it.
-    prefix_by_match: HashMap<usize, String>,
-    levels_by_match: HashMap<usize, usize>,
-    alias_by_match: HashMap<usize, String>,
-}
-
-pub(super) fn collect(st: &mut ExtractState, e: &Event) {
-    match e.cap {
-        Capture::Import(ImportCap::Prefix) => {
-            st.imports.prefix_by_match.insert(e.match_id, e.text.clone());
-        }
-        Capture::Import(ImportCap::Relative) => {
-            if let Some(sep) = st.pack.names.use_map_sep() {
-                st.imports.levels_by_match.insert(e.match_id, e.text.matches(sep).count());
-            }
-        }
-        Capture::Import(ImportCap::Alias) => {
-            st.imports.alias_by_match.insert(e.match_id, e.text.clone());
-        }
-        _ => {}
-    }
-}
 
 pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     match e.cap {
@@ -46,13 +15,11 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         }
         Capture::Import(ImportCap::Name) => name_row(st, e),
         Capture::Import(ImportCap::Module) => push_import(st, &e.text),
-        Capture::Import(ImportCap::Arg) => {
-            st.imports.import_args.insert(e.match_id, e.text.clone());
-        }
         // The statement anchors its pattern; its name carries the meaning.
-        // A prefix, a level and an alias are read through their import name.
+        // A prefix, a level and an alias are read through their import
+        // name, and a call's argument once every row is in.
         Capture::Import(
-            ImportCap::Statement | ImportCap::Prefix | ImportCap::Relative | ImportCap::Alias,
+            ImportCap::Statement | ImportCap::Prefix | ImportCap::Relative | ImportCap::Alias | ImportCap::Arg,
         ) => {}
         _ => {}
     }
@@ -86,7 +53,7 @@ fn name_row(st: &mut ExtractState, e: &Event) {
     let row = crate::model::file_analysis::UseRow {
         span: e.span(),
         name: crate::model::file_analysis::QualifiedName { namespace, leaf: leaf.to_string() },
-        alias: st.imports.alias_by_match.get(&e.match_id).cloned(),
+        alias: st.adorned.in_match(e.match_id, Capture::Import(ImportCap::Alias)).map(|a| a.text.clone()),
         reach,
     };
     let identity = row.name.identity(sep);
@@ -107,8 +74,9 @@ fn push_import(st: &mut ExtractState, module: &str) {
 /// `pkg.x`). A prefix's own leading separator is absolute (`use
 /// \A\B\{C}`).
 fn module_prefix(st: &ExtractState, match_id: usize, sep: &str) -> Option<String> {
-    let written = st.imports.prefix_by_match.get(&match_id).map(|p| p.trim_start_matches(sep));
-    let levels = st.imports.levels_by_match.get(&match_id).copied();
+    let ad = st.adorned;
+    let written = ad.in_match(match_id, Capture::Import(ImportCap::Prefix)).map(|p| p.text.trim_start_matches(sep));
+    let levels = ad.in_match(match_id, Capture::Import(ImportCap::Relative)).map(|r| r.text.matches(sep).count());
     match (st.pack.names.imports.prefix, levels) {
         (ImportPrefix::PackageRelative, Some(levels)) => {
             let package = st.file_module.as_ref().map(|m| m.package()).unwrap_or_default();
@@ -137,11 +105,11 @@ pub(super) fn bind_reach(st: &mut ExtractState) {
     }
 }
 
-/// Import-call arguments → imports, the module as written.
+/// Import-call arguments → imports, the module as written, in match order.
 pub(super) fn finish(st: &mut ExtractState) {
-    for module in st.imports.import_args.values() {
-        if !st.out.imports.contains(module) {
-            st.out.imports.push(module.clone());
+    for arg in st.adorned.by_match().filter(|e| e.cap == Capture::Import(ImportCap::Arg)) {
+        if !st.out.imports.contains(&arg.text) {
+            st.out.imports.push(arg.text.clone());
         }
     }
 }
