@@ -202,8 +202,8 @@ pub struct SkeletonAnalysis {
     /// slot each, if `declare_slots` finds its owner and no declaration of
     /// the name there.
     pub slot_writes: Vec<SlotWrite>,
-    /// Writes to a member through a receiver (`@flow.member`), undecided:
-    /// which member each writes is the receiver's type's, settled by
+    /// Writes to a member (an `@flow.place` a member read projects),
+    /// undecided: which member each writes is the receiver's type's, settled by
     /// `settle_member_writes`.
     pub member_writes: Vec<MemberWrite>,
     /// The scope each class declared in this file opened as its own, by
@@ -1527,35 +1527,54 @@ fn settle_member_writes(
 ) {
     use crate::model::file_analysis::{class_or_ancestor, SymKind};
     use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
-    let mut values = Vec::new();
-    for w in &writes {
-        let Some(class) = fa.expr_type_at_span(w.receiver, None).and_then(|t| t.class_name().map(str::to_string))
-        else {
-            continue;
-        };
-        let mut declared = None;
-        class_or_ancestor(&class, &fa.packages, |c| {
-            declared = fa.symbols_named(&w.member).iter().map(|&sid| fa.symbol(sid)).find(|m| {
-                m.kind == SymKind::Field && m.package.as_deref() == Some(c)
+    // A receiver can be a member another write fills (`self.a.b = v` reads
+    // `a`, which `self.a = A()` writes), so the writes settle to a fixed
+    // point, clear-and-emit: each round re-derives every write against the
+    // bag the last round left. Each round that moves settles a write it
+    // could not before or retypes one, so the writes' count bounds it.
+    let mut settled: Vec<Witness> = Vec::new();
+    for _ in 0..=writes.len() {
+        let mut values = Vec::new();
+        for w in &writes {
+            let Some(class) =
+                fa.expr_type_at_span(w.receiver, None).and_then(|t| t.class_name().map(str::to_string))
+            else {
+                continue;
+            };
+            let mut declared = None;
+            class_or_ancestor(&class, &fa.packages, |c| {
+                declared = fa.symbols_named(&w.member).iter().map(|&sid| fa.symbol(sid)).find(|m| {
+                    m.kind == SymKind::Field && m.package.as_deref() == Some(c)
+                });
+                declared.is_some()
             });
-            declared.is_some()
-        });
-        let (attachment, scope) = match declared {
-            Some(m) => (WA::Variable { name: m.name.clone(), scope: m.scope }, Some(m.scope)),
-            None => (
-                WA::Field { owner: class.clone(), name: w.member.clone() },
-                class_scopes.iter().find(|(c, _)| *c == class).map(|&(_, scope)| scope),
-            ),
+            let (attachment, scope) = match declared {
+                Some(m) => (WA::Variable { name: m.name.clone(), scope: m.scope }, Some(m.scope)),
+                None => (
+                    WA::Field { owner: class.clone(), name: w.member.clone() },
+                    class_scopes.iter().find(|(c, _)| *c == class).map(|&(_, scope)| scope),
+                ),
+            };
+            values.push(Witness {
+                attachment,
+                source: WitnessSource::Builder(MEMBER_WRITE.into()),
+                payload: WP::Edge(WA::Expr(w.value)),
+                span: scope.map_or(w.value, |scope| fa.scope(scope).span),
+            });
+        }
+        let same = |a: &[Witness], b: &[Witness]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.attachment == y.attachment && x.span == y.span)
         };
-        values.push(Witness {
-            attachment,
-            source: WitnessSource::Builder("member_write".into()),
-            payload: WP::Edge(WA::Expr(w.value)),
-            span: scope.map_or(w.value, |scope| fa.scope(scope).span),
-        });
+        if same(&values, &settled) {
+            return;
+        }
+        fa.witnesses.remove_by_source_tag(MEMBER_WRITE);
+        settled = values.clone();
+        fa.adopt_witnesses(values);
     }
-    fa.adopt_witnesses(values);
 }
+
+const MEMBER_WRITE: &str = "member_write";
 
 /// The model symbol a skeleton def mints, as the `i`-th symbol.
 fn skel_symbol(i: usize, s: &SkelSymbol) -> crate::model::file_analysis::Symbol {

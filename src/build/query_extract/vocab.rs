@@ -182,11 +182,11 @@ spelled! {
         Source = "source",
         /// A rebind with no inflowing value (loop variables).
         Rebind = "rebind",
-        /// The receiver of a member write (`obj` in `obj.x = v`): the
-        /// written member is the one of the class its value is.
-        Receiver = "receiver",
-        /// The member a member write targets (`x` in `obj.x = v`).
-        Member = "member",
+        /// The left side of a write: the place its own read projects
+        /// takes the value (`obj.x` in `obj.x = v` is the member of the
+        /// class `obj` is). A name's place is its binding, which `Target`
+        /// writes and rebinds.
+        Place = "place",
     }
 }
 

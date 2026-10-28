@@ -12,10 +12,11 @@ pub(super) struct State {
     /// flow.assign joins: match_id → (target name+scope, source span)
     flow_targets: HashMap<usize, (String, ScopeId, Point)>,
     flow_sources: HashMap<usize, Span>,
-    /// Member-write joins: match_id → the written member's name, and
-    /// match_id → its receiver's span.
-    flow_members: HashMap<usize, String>,
-    flow_receivers: HashMap<usize, Span>,
+    /// Writes to a place: match_id → the place's span.
+    flow_places: HashMap<usize, Span>,
+    /// Member reads by byte range → (receiver span, member): what a
+    /// place's own read projects, so a write lands where the read looks.
+    member_reads: HashMap<(usize, usize), (Span, String)>,
     /// Rebind shapes with no inflowing value (loop vars: `for x in …`,
     /// `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
     /// cutoff sees them, exactly like Perl's `foreach` var.
@@ -116,11 +117,8 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
         Capture::Flow(FlowCap::Source) => {
             f.flow_sources.insert(e.match_id, e.span());
         }
-        Capture::Flow(FlowCap::Member) => {
-            f.flow_members.insert(e.match_id, (pack.shape_name)(&e.text));
-        }
-        Capture::Flow(FlowCap::Receiver) => {
-            f.flow_receivers.insert(e.match_id, e.span());
+        Capture::Flow(FlowCap::Place) => {
+            f.flow_places.insert(e.match_id, e.span());
         }
         Capture::AnonAggMember => {
             // A field typed by an anonymous aggregate: its members are
@@ -206,15 +204,15 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
                 (in_match(Capture::Ref(RefCap::MemberValue)), in_match(Capture::Member(MemberCap::Recv)))
             {
                 let span = e.span();
+                let member = (pack.shape_name)(&name.text);
                 f.lit_spans.push((e.start_byte, e.end_byte, span));
+                f.member_reads.insert((e.start_byte, e.end_byte), (recv.span(), member.clone()));
                 out.witnesses.push(skeleton_witness(
                     WitnessAttachment::Expr(span),
                     "skeleton-member",
                     WitnessPayload::Projected {
                         base: WitnessAttachment::Expr(recv.span()),
-                        step: crate::model::witnesses::ProjectionStep::ValueHop {
-                            member: (pack.shape_name)(&name.text),
-                        },
+                        step: crate::model::witnesses::ProjectionStep::ValueHop { member },
                     },
                     span,
                 ));
@@ -331,15 +329,19 @@ pub(super) fn finish(st: &mut ExtractState, events: &[Event]) {
             });
         }
     }
-    // A member write's target is decided by its receiver's type, which only
-    // the assembled analysis answers (`skeleton::settle_member_writes`).
-    let mut member_mids: Vec<&usize> = f.flow_members.keys().collect();
-    member_mids.sort_unstable();
-    for mid in member_mids {
-        if let (Some(&receiver), Some(value)) = (f.flow_receivers.get(mid), source_value_span(f, events, *mid)) {
+    // A place is whatever its own read projects. A member read's target is
+    // decided by its receiver's type, which only the assembled analysis
+    // answers (`skeleton::settle_member_writes`). A name's place is its
+    // binding, which `@flow.target` writes and rebinds; a place no read
+    // projects (a call, a literal) takes nothing.
+    let mut place_mids: Vec<&usize> = f.flow_places.keys().collect();
+    place_mids.sort_unstable();
+    for mid in place_mids {
+        let read = byte_range_of(events, *mid, Capture::Flow(FlowCap::Place)).and_then(|r| f.member_reads.get(&r));
+        if let (Some((receiver, member)), Some(value)) = (read, source_value_span(f, events, *mid)) {
             out.member_writes.push(crate::build::query_extract::MemberWrite {
-                receiver,
-                member: f.flow_members[mid].clone(),
+                receiver: *receiver,
+                member: member.clone(),
                 value,
             });
         }
