@@ -100,7 +100,11 @@ impl Adorned {
     /// Match `mid`'s `cap` capture: the first, where a quantified capture
     /// repeats.
     fn in_match(&self, mid: usize, cap: Capture) -> Option<&Event> {
-        self.of_match(mid).find(|e| e.cap == cap)
+        self.in_match_ix(mid, cap).map(|ix| &self.events[ix])
+    }
+
+    fn in_match_ix(&self, mid: usize, cap: Capture) -> Option<usize> {
+        self.of_match_ixs(mid).find(|&ix| self.events[ix].cap == cap)
     }
 
     /// Every match's captures, matches in id order.
@@ -110,8 +114,12 @@ impl Adorned {
 
     /// The events tagged on exactly `range`.
     fn on_range(&self, range: (usize, usize)) -> impl Iterator<Item = &Event> + '_ {
+        self.on_range_ixs(range).map(|ix| &self.events[ix])
+    }
+
+    fn on_range_ixs(&self, range: (usize, usize)) -> impl Iterator<Item = usize> + '_ {
         let lo = self.events.partition_point(|e| (e.start_byte, std::cmp::Reverse(e.end_byte)) < (range.0, std::cmp::Reverse(range.1)));
-        self.events[lo..].iter().take_while(move |e| e.range() == range)
+        (lo..self.events.len()).take_while(move |&ix| self.events[ix].range() == range)
     }
 
     /// The indices of the events inside `range` (and on it): the subtree
@@ -189,6 +197,8 @@ struct ExtractState<'p> {
     /// pops with it (Python class blocks); one set at file depth is sticky
     /// (Perl's flat `package Foo;`).
     context_stack: Vec<(usize, ContextKind, String)>,
+    /// The events whose node holds the current event's, outermost first.
+    ancestors: Vec<usize>,
     /// The innermost scope and sticky context at the current event.
     cur_scope: ScopeId,
     package: Option<String>,
@@ -209,6 +219,12 @@ struct ExtractState<'p> {
 pub use crate::model::file_analysis::FileModule;
 
 impl ExtractState<'_> {
+    /// The current event `e`'s enclosing events and the others tagged on
+    /// its own node: the ones a fact "around this token" is stated by.
+    fn around<'a>(&'a self, e: &Event) -> impl Iterator<Item = usize> + 'a {
+        self.ancestors.iter().copied().chain(self.adorned.on_range_ixs(e.range()))
+    }
+
     /// The section of the namespace lane in force at `at`, as written so
     /// far. Every section that holds `at` is in by then — a section opens
     /// at or before the code it covers, and a statement form is cut short
@@ -406,6 +422,7 @@ pub fn extract_in(
         out,
         scope_stack: vec![(root.end_byte(), ScopeId(0))],
         context_stack: Vec::new(),
+        ancestors: Vec::new(),
         cur_scope: ScopeId(0),
         package: None,
         scopes: Default::default(),
@@ -435,10 +452,9 @@ pub fn extract_in(
         match family(e.cap) {
             Family::Scopes => scopes::collect(&mut st, e),
             Family::Narrowing => narrowing::collect(&mut st, e),
-            Family::Members => members::collect(&mut st, e),
             Family::Imports => imports::collect(&mut st, e),
             Family::Refs => refs::collect(&mut st, e),
-            Family::Defs | Family::Flow | Family::Commands | Family::Links => {}
+            Family::Defs | Family::Flow | Family::Members | Family::Commands | Family::Links => {}
         }
     }
 
@@ -452,19 +468,28 @@ pub fn extract_in(
                 st.context_stack.pop();
             }
         }
+        while st.ancestors.last().is_some_and(|&a| {
+            let a = &events[a];
+            a.start_byte > e.start_byte || a.end_byte < e.end_byte
+        }) {
+            st.ancestors.pop();
+        }
         st.cur_scope = st.scope_stack.last().unwrap().1;
         st.package = st.context_stack.last().map(|(.., p)| p.clone());
         match family(e.cap) {
             Family::Scopes => scopes::handle(&mut st, e),
             Family::Defs => defs::handle(&mut st, e),
             Family::Refs => refs::handle(&mut st, e),
-            Family::Members => members::handle(&mut st, e),
+            // Read through the match (`@member.recv`, `@member.op`) or the
+            // node (`@member.op.<which>`, `@arity.spread`) they tag.
+            Family::Members => {}
             Family::Flow => flow::handle(&mut st, ix, e),
             Family::Narrowing => narrowing::handle(&mut st, e),
             Family::Commands => commands::handle(&mut st, e),
             Family::Imports => imports::handle(&mut st, e),
             Family::Links => {}
         }
+        st.ancestors.push(ix);
     }
 
     // ---- post-passes, in the order their rows and witnesses land ----

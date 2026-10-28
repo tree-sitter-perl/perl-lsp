@@ -15,23 +15,10 @@ pub(super) struct State {
     /// `@ref.member.call`), its argument list (`@arity.args`) and each
     /// argument (`@arity.arg`).
     pub(super) args_by_match: HashMap<usize, Vec<(Span, usize, usize)>>,
-    /// `@arity.spread`: the byte ranges of arguments that flatten to any
-    /// number of values.
-    spreads: std::collections::HashSet<(usize, usize)>,
     /// A callable's declared parameter arity, keyed by the parameter_list span.
     /// Associated to its def symbol by span containment in `into_file_analysis`
     /// (`@arity.sig` fires a separate match from the def name).
     param_sigs: Vec<(Span, ParamArity)>,
-    /// `@member.recv` → the receiver span of a `recv.field` access, joined to
-    /// its `@ref.member.*` by match_id so the minted MethodCall ref carries it.
-    pub(super) member_recv: HashMap<usize, (Span, String)>,
-    /// `@member.op` → the operator token's span, joined to `@ref.member.*` by
-    /// match_id; which operator it is comes from `ops_at`.
-    pub(super) member_op_span: HashMap<usize, Span>,
-    /// `@member.op.<which>` → the operator the document names at a token
-    /// span. A token no pattern names claims no operator, so op-DX stays
-    /// silent rather than guessing.
-    ops_at: HashMap<(Point, Point), MemberOp>,
 }
 
 impl State {
@@ -40,17 +27,26 @@ impl State {
         self.args_by_match.get(&match_id).map(Vec::len)
     }
 
-    /// The call's arguments in order, each with whether it spreads.
-    pub(super) fn call_args(&self, match_id: usize) -> Option<Vec<(Span, bool)>> {
+    /// The call's arguments in order, each with whether it spreads (an
+    /// `@arity.spread` on the argument's node).
+    pub(super) fn call_args(&self, ad: &Adorned, match_id: usize) -> Option<Vec<(Span, bool)>> {
         let args = self.args_by_match.get(&match_id)?;
-        Some(args.iter().map(|&(span, s, e)| (span, self.spreads.contains(&(s, e)))).collect())
+        let spreads = |r| ad.on_range(r).any(|t| t.cap == Capture::Arity(ArityCap::Spread));
+        Some(args.iter().map(|&(span, s, e)| (span, spreads((s, e)))).collect())
     }
+}
 
-    /// The operator a member match wrote, with its span.
-    pub(super) fn op_of(&self, match_id: usize) -> Option<(MemberOp, Span)> {
-        let span = *self.member_op_span.get(&match_id)?;
-        Some((*self.ops_at.get(&(span.start, span.end))?, span))
-    }
+/// The operator a member match wrote, with its span: the
+/// `@member.op.<which>` some pattern names on its `@member.op` token. A
+/// token no pattern names claims no operator, so op-DX stays silent rather
+/// than guessing.
+pub(super) fn op_of(ad: &Adorned, match_id: usize) -> Option<(MemberOp, Span)> {
+    let op = ad.in_match(match_id, Capture::Member(MemberCap::Op))?;
+    let which = ad.on_range(op.range()).filter_map(|t| match t.cap {
+        Capture::MemberOp(which) => Some(which.op()),
+        _ => None,
+    });
+    Some((which.last()?, op.span()))
 }
 
 /// `@member.recv`: a member access receiver. Peel transparent wrappers
@@ -120,31 +116,6 @@ pub(super) fn count_params(members: &mut State, node: tree_sitter::Node<'_>) {
         Span { start: node.start_position(), end: node.end_position() },
         ParamArity { total, required, variadic },
     ));
-}
-
-/// The span-keyed member facts, read before any handler asks them.
-pub(super) fn collect(st: &mut ExtractState, e: &Event) {
-    match e.cap {
-        Capture::MemberOp(which) => {
-            st.members.ops_at.insert((e.start, e.end), which.op());
-        }
-        Capture::Arity(ArityCap::Spread) => {
-            st.members.spreads.insert((e.start_byte, e.end_byte));
-        }
-        _ => {}
-    }
-}
-
-pub(super) fn handle(st: &mut ExtractState, e: &Event) {
-    match e.cap {
-        Capture::Member(MemberCap::Recv) => {
-            st.members.member_recv.insert(e.match_id, (e.span(), e.text.clone()));
-        }
-        Capture::Member(MemberCap::Op) => {
-            st.members.member_op_span.insert(e.match_id, e.span());
-        }
-        _ => {}
-    }
 }
 
 pub(super) fn finish(st: &mut ExtractState) {

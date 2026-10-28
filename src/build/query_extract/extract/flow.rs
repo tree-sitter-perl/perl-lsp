@@ -150,7 +150,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             if let Some((callee, receiver)) = callee {
                 let span = e.span();
                 f.values[ix] = true;
-                let args = st.members.call_args(e.match_id);
+                let args = st.members.call_args(ad, e.match_id);
                 out.call_sites.push(crate::build::query_extract::CallSite {
                     span,
                     callee,

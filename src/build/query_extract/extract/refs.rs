@@ -33,8 +33,9 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         return;
     }
     let m = &st.members;
+    let ad = st.adorned;
     let simple = m.member_simple.get(&e.match_id).copied().unwrap_or(false);
-    let member_op = simple.then(|| m.op_of(e.match_id)).flatten();
+    let member_op = simple.then(|| super::members::op_of(ad, e.match_id)).flatten();
     let arg_count = m.arg_count(e.match_id);
     st.out.refs.push(SkelRef {
         kind: ref_kind,
@@ -42,7 +43,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         start: e.start,
         end: e.end,
         scope: st.cur_scope,
-        invocant: m.member_recv.get(&e.match_id).cloned(),
+        invocant: ad.in_match(e.match_id, Capture::Member(MemberCap::Recv)).map(|r| (r.span(), r.text.clone())),
         member_op,
         arg_count,
     });
