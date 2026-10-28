@@ -63,15 +63,28 @@ pub struct BagContext<'a> {
     pub lattice: &'a crate::model::file_analysis::LatticeRules,
 }
 
+/// A bag's context is the order its joins read: its isa graph (local
+/// parents plus the cross-file graph) and its language's rules. Read in
+/// place, so a join asks it without building anything.
+impl crate::model::file_analysis::TypeOrder for BagContext<'_> {
+    fn isa(&self, child: &str, ancestor: &str) -> bool {
+        crate::model::file_analysis::class_isa(child, ancestor, self.package_parents, self.module_index)
+    }
+
+    fn common_class(&self, classes: &[&str]) -> Option<String> {
+        crate::model::file_analysis::least_common_class(classes, self.package_parents, self.module_index)
+    }
+
+    fn holds(&self, rule: crate::model::file_analysis::Subsumption) -> bool {
+        self.lattice.holds(rule)
+    }
+}
+
 /// The class order a query's joins read: its context's, else none.
-pub(crate) fn class_order<'q>(q: &'q ReducerQuery) -> Box<dyn crate::model::file_analysis::TypeOrder + 'q> {
+pub(crate) fn class_order<'q>(q: &'q ReducerQuery) -> &'q dyn crate::model::file_analysis::TypeOrder {
     match q.context {
-        Some(ctx) => Box::new(crate::model::file_analysis::IsaOrder {
-            local: ctx.package_parents,
-            module_index: ctx.module_index,
-            rules: ctx.lattice,
-        }),
-        None => Box::new(crate::model::file_analysis::Unordered),
+        Some(ctx) => ctx,
+        None => &crate::model::file_analysis::Unordered,
     }
 }
 
@@ -555,7 +568,7 @@ impl WitnessReducer for BranchArmFold {
                 return ReducedValue::None;
             }
             let all: Vec<InferredType> = defined.chain(fallback).collect();
-            return match crate::model::file_analysis::join_all(&all, &*class_order(_q)) {
+            return match crate::model::file_analysis::join_all(&all, class_order(_q)) {
                 Some(t) => ReducedValue::Type(t),
                 None => ReducedValue::None,
             };
@@ -570,7 +583,7 @@ impl WitnessReducer for BranchArmFold {
         // plugin's disagreeing mark costs every other plugin's agreeing ones.
         // Agree on the unbranded base, then keep each namespace's marks the
         // arms share (docs/adr/brands.md, "Joins and the fold").
-        match crate::model::file_analysis::join_return_arms(&typed, undef_arms > 0, &*class_order(_q)) {
+        match crate::model::file_analysis::join_return_arms(&typed, undef_arms > 0, class_order(_q)) {
             Some(t) => ReducedValue::Type(t),
             None => ReducedValue::None,
         }
@@ -642,7 +655,7 @@ impl WitnessReducer for SymbolReturnArmFold {
         if arms.len() < value_arms && arms.iter().all(|t| t.is_undef()) {
             return ReducedValue::None;
         }
-        match crate::model::file_analysis::join_return_arms(&arms, has_undef_arm, &*class_order(_q)) {
+        match crate::model::file_analysis::join_return_arms(&arms, has_undef_arm, class_order(_q)) {
             Some(t) => ReducedValue::Type(t),
             None => ReducedValue::None,
         }
@@ -660,7 +673,7 @@ fn agree_slot_arms(ws: &[&Witness], q: &ReducerQuery) -> ReducedValue {
             _ => None,
         })
         .collect();
-    match crate::model::file_analysis::join_all(&arms, &*class_order(q)) {
+    match crate::model::file_analysis::join_all(&arms, class_order(q)) {
         Some(t) => ReducedValue::Type(t),
         None => ReducedValue::None,
     }
