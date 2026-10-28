@@ -415,6 +415,7 @@ pub fn extract_in(
             .then(tie_rank(a).cmp(&tie_rank(b)))
     });
     let adorned = Adorned::new(events, match_count);
+    defs.declares = vec![false; adorned.events.len()];
 
     let mut st = ExtractState {
         pack,
@@ -451,10 +452,9 @@ pub fn extract_in(
     for e in events {
         match family(e.cap) {
             Family::Scopes => scopes::collect(&mut st, e),
-            Family::Narrowing => narrowing::collect(&mut st, e),
             Family::Imports => imports::collect(&mut st, e),
             Family::Refs => refs::collect(&mut st, e),
-            Family::Defs | Family::Flow | Family::Members | Family::Commands | Family::Links => {}
+            Family::Defs | Family::Flow | Family::Members | Family::Narrowing | Family::Commands | Family::Links => {}
         }
     }
 
@@ -478,7 +478,7 @@ pub fn extract_in(
         st.package = st.context_stack.last().map(|(.., p)| p.clone());
         match family(e.cap) {
             Family::Scopes => scopes::handle(&mut st, e),
-            Family::Defs => defs::handle(&mut st, e),
+            Family::Defs => defs::handle(&mut st, ix, e),
             Family::Refs => refs::handle(&mut st, e),
             // Read through the match (`@member.recv`, `@member.op`) or the
             // node (`@member.op.<which>`, `@arity.spread`) they tag.

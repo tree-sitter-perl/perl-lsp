@@ -9,9 +9,10 @@ pub(super) struct State {
     /// match_id → the pointer/reference declarator stack a `@nested.target`
     /// capture unravelled to. Read by the `def.*` handler to stamp the symbol.
     nested_stacks: HashMap<usize, Vec<crate::model::file_analysis::DerefStep>>,
-    /// The name tokens of the defs seen so far; a ref inside one is the
+    /// The events that are a declaring def's name token (or the def
+    /// itself, where it has no name token); a ref inside one is the
     /// declaration, not a use (`refs::handle`).
-    pub(super) def_name_spans: Vec<(Point, Point)>,
+    pub(super) declares: Vec<bool>,
     /// Each class minted so far, by its name token's start: the identity
     /// it is filed under. A pattern that names the class again (its
     /// `@context.class`, a `@parent` match) reads the class from here
@@ -76,27 +77,28 @@ pub(super) fn flatten_nested(
     }
 }
 
-pub(super) fn handle(st: &mut ExtractState, e: &Event) {
+pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     let Capture::Def { kind, part: DefPart::Node } = e.cap else { return };
     let pack = st.pack;
     let ad = st.adorned;
     let mine = |cap: Capture| ad.in_match(e.match_id, cap);
     // The name token, or for a nameless def the language's default name
     // (a zero-width token) or the def's own text.
-    let name_tok = mine(Capture::Def { kind, part: DefPart::Name });
-    let (name, name_tok, defaulted) = match (name_tok, (pack.default_name)(kind)) {
-        (Some(n), _) => (n.text.clone(), Some(n), false),
+    let name_ix = ad.in_match_ix(e.match_id, Capture::Def { kind, part: DefPart::Name });
+    let (name, name_ix, defaulted) = match (name_ix, (pack.default_name)(kind)) {
+        (Some(n), _) => (ad.events[n].text.clone(), Some(n), false),
         (None, Some(default)) => (default.to_string(), None, true),
-        (None, None) => (e.text.clone(), Some(e), false),
+        (None, None) => (e.text.clone(), Some(ix), false),
     };
+    let name_tok = name_ix.map(|n| &ad.events[n]);
     let (name_start, name_end) = name_tok.map_or((e.start, e.start), |n| (n.start, n.end));
     // A slot written through a receiver is a candidate: its owner is the
     // receiver's type, which the assembled analysis answers
     // (`skeleton::declare_slots`), and which decides whether the write
     // declares. Its name token stays the member reference it is.
     let through = mine(Capture::Def { kind, part: DefPart::Receiver }).map(|r| r.text.clone());
-    if through.is_none() {
-        st.defs.def_name_spans.push((name_start, name_end));
+    if let (None, Some(n)) = (&through, name_ix) {
+        st.defs.declares[n] = true;
     }
     let qualifier = mine(Capture::Qualifier);
     // An out-of-line def's qualifier names its owning class (the innermost
