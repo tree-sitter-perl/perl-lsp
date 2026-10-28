@@ -3,10 +3,14 @@
 use crate::build::query_extract::*;
 use crate::model::file_analysis::{
     join_all, ClassCall, ClassSpelling, ImportPrefix, InstanceSlots, ImportReach, ImportRule, InferredType, MemberNamespace,
-    NameSpellings, Unordered,
+    NameSpellings,
 };
 use crate::build::walk_markers::MarkedDirs;
 use std::path::Path;
+
+/// Python's subsumption rules: `bool <: int`.
+const PYTHON_LATTICE: crate::model::file_analysis::LatticeRules =
+    crate::model::file_analysis::LatticeRules::new(&[crate::model::file_analysis::Subsumption::BoolIntoNumeric]);
 
 pub fn python_pack() -> LangPack {
     LangPack {
@@ -29,7 +33,7 @@ pub fn python_pack() -> LangPack {
             ..NameSpellings::NONE
         },
         // `bool` is a subclass of `int`.
-        lattice: crate::model::file_analysis::LatticeRules::new(&[crate::model::file_analysis::Subsumption::BoolIntoNumeric]),
+        lattice: PYTHON_LATTICE,
         shape_name: |raw| raw.to_string(),
         default_name: |_| None,
         annot_type: annotation_type,
@@ -69,7 +73,8 @@ fn annotation_type(text: &str) -> Option<InferredType> {
             .into_iter()
             .map(|arm| if arm == "None" { Some(InferredType::Undef) } else { annotation_type(arm) })
             .collect::<Option<Vec<_>>>()?;
-        return join_all(&types, &Unordered);
+        // An annotation names no classes' relations, only the language's.
+        return join_all(&types, &PYTHON_LATTICE);
     }
     match t {
         "str" => Some(InferredType::String),
