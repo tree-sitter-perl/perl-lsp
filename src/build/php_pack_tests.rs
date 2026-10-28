@@ -4,6 +4,9 @@ use super::*;
 use crate::build::packs::php_pack;
 use crate::model::file_analysis::{FileAnalysis, SymKind};
 
+// TODO(language-stamped-at-assembly): the driver stamps `language`, so an
+// analysis assembled without it (other packs' test helpers) routes as the
+// host; the stamp belongs where the skeleton is assembled.
 fn php(src: &str) -> FileAnalysis {
     crate::build::language_driver::LanguageRegistry::compiled()
         .for_path(std::path::Path::new("t.php"))
