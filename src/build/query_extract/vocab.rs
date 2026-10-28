@@ -46,6 +46,10 @@ spelled! {
         Local = "local",
         /// A struct/class data member.
         Field = "field",
+        /// An instance slot: a key of the per-instance store a write through
+        /// a receiver creates (python's `self.x = …`). A class-owned
+        /// `HashKeyDef`, Perl's `$self->{x}` slot.
+        Slot = "slot",
         Constant = "constant",
         Enumerator = "enumerator",
         Label = "label",
@@ -105,6 +109,23 @@ spelled! {
         Sub = "sub",
         /// A sub body whose bare names may elide the member receiver.
         SubImplicitReceiver = "sub.implicit_receiver",
+        /// A scope whose names are in force only for code written
+        /// DIRECTLY in it: a callable nested inside looks a name up in the
+        /// scopes around the scope, never in it. Python's class body says
+        /// it of its class scope; a document that says nothing keeps the
+        /// plain chain. It names what the scope does, not which language
+        /// declared it, so `Scope::direct` and the one lookup walk over it
+        /// (`lookup_chain`) serve any language that states the same rule.
+        Direct = "direct",
+        /// A def's header: the code its node holds outside its body
+        /// (Python's parameter annotations and defaults, its `-> T`, a
+        /// class's base list), which runs in the scope the def is declared
+        /// in though the def's own scope covers it. Minted as a scope whose
+        /// parent is that declaring scope, so every use written in it, and
+        /// every lookup at a point in it, starts outside the def; a name
+        /// the header declares (a parameter) still binds in the def's own
+        /// scope.
+        Header = "header",
     }
 }
 
@@ -299,17 +320,26 @@ spelled! {
     }
 }
 
-/// Whether a `@def.<kind>` capture is the def node or its name token.
+/// Whether a `@def.<kind>` capture is the def node, its name token, or
+/// the receiver a member def is written through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DefPart {
     Node,
     Name,
+    /// The receiver a slot def is written through (python's `self` in
+    /// `self.x = …`): the slot belongs to the class the receiver is typed
+    /// as at the write.
+    Receiver,
 }
 
 /// One capture of a pack query document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Capture {
     Def { kind: DefCap, part: DefPart },
+    /// The one name token two defs of this match declare together (python's
+    /// class-body binding: the class's member and the name the body reads).
+    /// They are one declaration, linked each way as `Symbol::declared_with`.
+    DefPair,
     Ref(RefCap),
     /// The whole written spelling of the match's reference when its token
     /// is only the leaf (`Base\Model` around `Model`): the reference
@@ -389,8 +419,10 @@ impl Capture {
         use Capture as C;
         let segs: Vec<&str> = name.split('.').collect();
         Some(match segs.as_slice() {
+            ["def", "pair"] => C::DefPair,
             ["def", k] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Node },
             ["def", k, "name"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Name },
+            ["def", k, "receiver"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Receiver },
             ["ref", "spelled"] => C::RefSpelled,
             ["ref", rest @ ..] => C::Ref(RefCap::parse(&rest.join("."))?),
             ["scope"] => C::Scope(ScopeCap::Block),
@@ -455,7 +487,9 @@ impl fmt::Display for Capture {
         };
         match *self {
             C::Def { kind, part: DefPart::Node } => write!(f, "def.{kind}"),
+            C::DefPair => f.write_str("def.pair"),
             C::Def { kind, part: DefPart::Name } => write!(f, "def.{kind}.name"),
+            C::Def { kind, part: DefPart::Receiver } => write!(f, "def.{kind}.receiver"),
             C::Ref(k) => write!(f, "ref.{k}"),
             C::RefSpelled => f.write_str("ref.spelled"),
             C::Scope(k) => family(f, "scope", k.spelling()),
@@ -569,6 +603,7 @@ impl DefCap {
             // `reexport` marker makes resolution see through it.
             DefCap::Method | DefCap::Reexport => SymKind::Method,
             DefCap::Field => SymKind::Field,
+            DefCap::Slot => SymKind::HashKeyDef,
             DefCap::Enumerator => SymKind::Enumerator,
             DefCap::Var | DefCap::Local | DefCap::Label | DefCap::UnionField => SymKind::Variable,
         }

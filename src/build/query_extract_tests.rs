@@ -992,6 +992,7 @@ fn sksym(src: &str, kind: DefCap, name: &str, occ: usize, package: Option<&str>)
         name_end: Point { row: ns.row, column: ns.column + name.len() },
         package: package.map(str::to_string),
         scope: crate::model::file_analysis::ScopeId(0),
+        pair: None,
         return_type: None,
         deref_stack: Vec::new(),
         attributes: Vec::new(),
@@ -1790,13 +1791,15 @@ void f() {
 }
 ";
     let fa = cpp_skel(src).into_file_analysis();
-    let off = crate::lsp::symbols::pack_diagnostics(&fa, crate::lsp::symbols::DiagnosticOptions::default());
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let off = crate::lsp::symbols::pack_diagnostics(&fa, &idx, crate::lsp::symbols::DiagnosticOptions::default());
     assert!(
         !off.iter().any(|d| matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(s)) if s == "use-after-move")),
         "off by default: {off:?}",
     );
     let on = crate::lsp::symbols::pack_diagnostics(
         &fa,
+        &idx,
         crate::lsp::symbols::DiagnosticOptions { use_after_move: true, ..Default::default() },
     );
     assert!(

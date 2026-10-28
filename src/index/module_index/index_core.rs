@@ -64,6 +64,12 @@ pub(crate) struct IndexCore {
     /// Shared: the resolver thread adopts @INC providers here, the async
     /// side adopts workspace candidates.
     pub(crate) all_defs: DashMap<String, Vec<Arc<CachedModule>>>,
+    /// The files declaring a use-map class, keyed by the class's LEAF —
+    /// the widening relation (`CrossFileLookup::leaf_def_candidates`). Its
+    /// own table, never `all_defs`: a leaf key there would join every
+    /// bare-name lookup and compete for the name-slot winner, so the leaf
+    /// answers only where nothing indexed declares the identity.
+    pub(crate) leaf_defs: DashMap<String, Vec<Arc<CachedModule>>>,
     /// The `@INC` roots this process resolves from, canonical, most-
     /// preferred first. Recorded ONCE by the resolver thread (discovery
     /// shells out to `perl`, so no query path may re-derive it) and read by
@@ -196,6 +202,7 @@ impl IndexCore {
             builtins: DashMap::new(),
             available_modules: DashMap::new(),
             all_defs: DashMap::new(),
+            leaf_defs: DashMap::new(),
             inc_roots: std::sync::RwLock::new(Arc::new(Vec::new())),
             queue: ResolveQueue {
                 priority: Mutex::new(Vec::new()),

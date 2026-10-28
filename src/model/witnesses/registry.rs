@@ -3648,9 +3648,9 @@ impl ReducerRegistry {
         receiver: Option<&InferredType>,
         state: &mut QueryState,
     ) -> Option<InferredType> {
-        let chain = crate::model::file_analysis::scope_chain_of(ctx.scopes, scope);
+        let chain = crate::model::file_analysis::lookup_chain(ctx.scopes, scope);
         let framework = chain
-            .iter()
+            .scopes()
             .find_map(|sid| ctx.scopes[sid.0 as usize].package.as_ref())
             .and_then(|pkg| ctx.package_framework.framework_of(pkg))
             .unwrap_or(FrameworkFact::Plain);
@@ -3666,7 +3666,7 @@ impl ReducerRegistry {
         // (`my $x = {}`) still wins. Defer the weak answer until the chain
         // is exhausted.
         let mut weak: Option<InferredType> = None;
-        for sid in chain {
+        for sid in chain.scopes() {
             let att = WitnessAttachment::Variable {
                 name: var.to_string(),
                 scope: sid,

@@ -2,10 +2,22 @@
 ; engine. ~40 lines for outline + lexical typing through the
 ; production witness bag.
 
-; A class is filed under its module's namespace; its body's members file
-; under the class's identity.
+; A class is filed under its home — the class whose scope it is written
+; in (`pkg.mod.Outer.Inner`), else its module; its body's members file
+; under the class's identity. `@scope.direct` is Python's class-scope rule:
+; the body's names, nested classes included, are in force for the code
+; written directly in it, so a method of the class, or a class nested in
+; it, looks a bare name up past the class.
 (class_definition
-  name: (identifier) @def.class.name @context.class) @def.class @scope
+  name: (identifier) @def.class.name @context.class) @def.class @scope.direct
+
+; A def's header runs where the def is written: a class's base list, a
+; function's parameter annotations and defaults and its `-> T` are code of
+; the scope around the def, so a method's `x: Inner = Inner()` names the
+; class body's `Inner`. The parameter names still bind in the function.
+(class_definition superclasses: (argument_list) @scope.header)
+(function_definition parameters: (parameters) @scope.header)
+(function_definition return_type: (type) @scope.header)
 
 ; inheritance: `class Dog(Animal):` → Dog parent Animal (one @parent per
 ; base; member completion + method resolution walk the ancestors). The
@@ -26,14 +38,51 @@
 ; class package; the Sub boundary is what marks it a local, not a member).
 (function_definition) @scope.sub
 
-; `self.attr = ...` → an instance attribute: a member of the enclosing
-; class (the sticky @context.class tags it). THE dominant Python member
-; idiom — without it `obj.` offers no data attributes.
+; A name a class body binds — `count = 0`, `a: int`, `b: int = 5` — is two
+; things from one token: a data member of the class (`Counter.count`) and a
+; name in the class scope (code written directly in the body reads it
+; bare). The match declares the two as one (`@def.pair`), so a rename of
+; either rewrites both. Its value is the assignment's flow target below,
+; typed by an annotation where there is one.
+(class_definition
+  body: (block
+    (expression_statement
+      (assignment
+        left: (identifier) @def.field.name @def.var.name @def.pair) @def.field @def.var)))
+
+; A class-body binding with a value is the class's own attribute, read
+; through the class itself; a bare annotation declares an instance's.
+(class_definition
+  body: (block
+    (expression_statement
+      (assignment left: (identifier) @mark.static right: (_)))))
+
+; `self.attr = ...` → an instance slot of the class the receiver is typed
+; as (`self`, or an annotated `other: Counter`), declared by a write only
+; when neither the class nor an ancestor declares the name already. THE
+; dominant Python member idiom — without it `obj.` offers no data
+; attributes. It is no bare name anywhere; a later write, or one through an
+; untyped receiver, is a use of it.
 (assignment
-  left: (attribute attribute: (identifier) @def.var.name @def.var))
+  left: (attribute
+    object: (identifier) @def.slot.receiver
+    attribute: (identifier) @def.slot.name) @def.slot)
 
 (parameters
   (identifier) @def.var.name @def.var)
+(typed_parameter . (identifier) @def.var.name @def.var)
+(default_parameter name: (identifier) @def.var.name @def.var)
+(typed_default_parameter name: (identifier) @def.var.name @def.var)
+
+; An annotated parameter holds a value of its annotation, as an annotated
+; assignment's target does.
+(typed_parameter . (identifier) @flow.target type: (type) @type.annot)
+(typed_default_parameter name: (identifier) @flow.target type: (type) @type.annot)
+
+; An annotation names a class: a dotted one by its whole spelling,
+; rewriting only its last name.
+(type (identifier) @ref.type)
+(type (attribute attribute: (identifier) @ref.type) @ref.spelled)
 
 ; a method's leading `self` / `cls` is its receiver: the object, not a member
 ; of the class it is declared in.
@@ -124,7 +173,11 @@
     object: (_) @member.recv
     attribute: (identifier) @ref.member.call)
   arguments: [(argument_list ((_) @arity.arg ","?)*) @arity.args (generator_expression)]) @expr.call
-(identifier) @expr.read.var
+; A bare name read. An attribute's name (`count` in `o.count`) is the member
+; read above, never a bare name; its receiver is.
+((identifier) @expr.read.var
+ (#not-has-parent? @expr.read.var attribute))
+(attribute object: (identifier) @expr.read.var)
 
 (string) @expr.lit.string
 (integer) @expr.lit.number

@@ -200,14 +200,15 @@ pub enum Bridge {
 /// the walk beyond contributing its bridge.
 pub const APP_SURFACE_CLASS: &str = "Mojolicious::_AppSurface";
 
-/// The lexical scope chain `[start, parent, …, file]` over a bare
-/// `&[Scope]` slice — the single source of the parent-climb. A free
-/// function (not a `FileAnalysis` method) so the witness-bag query path,
-/// which holds `BagContext.scopes: &[Scope]` and never a
-/// `&FileAnalysis`, shares it. `FileAnalysis::scope_chain` is the thin
-/// wrapper. A scope has one parent and no cycles, so this is a linked-
-/// list climb, not a graph walk — the graph deliberately does not model
-/// it (`docs/adr/graph-walking.md`).
+/// The containment chain `[start, parent, …, file]` over a bare
+/// `&[Scope]` slice: what a scope is INSIDE (its class, its callable, its
+/// package), never what it can see. It is plain ids and lists no names;
+/// a name lookup takes `lookup_chain`, which states the scoping rules.
+/// Every caller outside this file is allowlisted with its reason
+/// (`layering_tests::raw_scope_climbs_are_containment_only`). A scope has
+/// one parent and no cycles, so this is a linked-list climb, not a graph
+/// walk — the graph deliberately does not model it
+/// (`docs/adr/graph-walking.md`).
 pub fn scope_chain_of(scopes: &[Scope], start: ScopeId) -> Vec<ScopeId> {
     let mut chain = Vec::new();
     let mut current = Some(start);
@@ -216,6 +217,153 @@ pub fn scope_chain_of(scopes: &[Scope], start: ScopeId) -> Vec<ScopeId> {
         current = scopes[id.0 as usize].parent;
     }
     chain
+}
+
+/// Where a name used in a scope is looked up, innermost first: the scope
+/// chain minus the scopes whose own rule says a use written there cannot
+/// see their names. THE value every name lookup walks — a variable read,
+/// a bare class spelling (`UseMap`'s scope step), in-scope completion,
+/// Perl's binders — so a language's scoping rule is stated once, as an
+/// arm of `lookup_chain`, and inherited by all of them. It is the only
+/// way to list the names a scope binds for lookup (`bindings`);
+/// `scope_chain_of` is the containment climb and lists none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupChain(Vec<ScopeId>);
+
+impl LookupChain {
+    /// The scopes a name is looked up in, innermost first.
+    pub fn scopes(&self) -> impl Iterator<Item = ScopeId> + '_ {
+        self.0.iter().copied()
+    }
+
+    /// Whether a declaration made in `scope` is in view.
+    pub fn contains(&self, scope: ScopeId) -> bool {
+        self.0.contains(&scope)
+    }
+
+    /// Every symbol a scope on the chain binds, innermost scope first and
+    /// in declaration order within one. A key — of a hash, or an
+    /// instance's slot (`self.x = …`) — is reached through its container
+    /// and binds no name.
+    pub fn bindings(self, symbols: &SymbolTable) -> impl Iterator<Item = &Symbol> {
+        self.0
+            .into_iter()
+            .flat_map(move |scope| symbols.declared_directly_in(scope).iter().map(move |sid| &symbols[sid.0 as usize]))
+            .filter(|s| s.kind != SymKind::HashKeyDef)
+    }
+}
+
+/// `from` and the scopes around it, out to and including the nearest
+/// callable: where code written in `from` can stand without leaving the
+/// callable it runs in. THE callable boundary. Ownership reads it (a
+/// declaration joins the class whose own scope is on it — a method's
+/// declarations are its locals) and so does `lookup_chain`'s direct arm.
+pub fn callable_reach(scopes: &[Scope], from: ScopeId) -> impl Iterator<Item = ScopeId> + '_ {
+    let mut next = Some(from);
+    std::iter::from_fn(move || {
+        let id = next?;
+        let scope = &scopes[id.0 as usize];
+        next = match scope.kind {
+            ScopeKind::Sub { .. } | ScopeKind::Method { .. } => None,
+            _ => scope.parent,
+        };
+        Some(id)
+    })
+}
+
+/// The `LookupChain` from `from`. Every block stays on it: a Perl or C++
+/// block binds its own locals.
+///
+/// Arms:
+/// - `Scope::direct` (`@scope.direct`): in force only for code written
+///   directly in the scope, so only the innermost direct scope within
+///   `from`'s `callable_reach` is on the chain. From a method of a Python
+///   class, or a class nested in it, the class body is not.
+pub fn lookup_chain(scopes: &[Scope], from: ScopeId) -> LookupChain {
+    let direct = callable_reach(scopes, from).find(|&id| scopes[id.0 as usize].direct);
+    let mut chain = scope_chain_of(scopes, from);
+    chain.retain(|&id| !scopes[id.0 as usize].direct || Some(id) == direct);
+    LookupChain(chain)
+}
+
+/// Three-way outcome of resolving a [`ReceiverGated`] value against a
+/// concrete receiver class. Splitting "doesn't apply" from "can't tell"
+/// is load-bearing: `DoesNotApply` is a settled negative (the receiver
+/// typed, it just isn't a descendant of the gate), while `ReceiverUntyped`
+/// is a *typing gap* — the receiver couldn't be pinned to any class, so
+/// applicability is unknown. The opt-in `unresolved-dispatch` diagnostic
+/// fires only on the latter; treating the two alike would either bury real
+/// gaps or spew noise on every unrelated receiver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateResult<U> {
+    /// Receiver `isa` the gate class — here is the inner value.
+    Applies(U),
+    /// Receiver typed to a concrete class that is NOT a descendant of the
+    /// gate. Settled negative; never diagnosed.
+    DoesNotApply,
+    /// Receiver class is unknown (`None` / unresolved). A genuine typing
+    /// gap — the only state the diagnostic surfaces.
+    ReceiverUntyped,
+}
+
+/// A value whose inner payload can be read ONLY through a cross-file isa
+/// check against a receiver class. The enforcement is structural, not a
+/// convention: `inner` is private with no `pub` field, no `Deref`, no
+/// `into_inner` — the sole reader is [`resolve_for`](Self::resolve_for),
+/// which gates on the receiver. A consumer therefore *cannot* observe
+/// gated content without first asking "does this receiver qualify?", so a
+/// future caller that forgets the isa filter is a compile error, not a
+/// silent drift (rule #10: the type carries the rule, the consumer can't
+/// re-decide it).
+///
+/// `gate` is a single `ClassName` today; widening it to a set later is a
+/// change to `resolve_for`'s internals, not to call sites — they already
+/// only ever see `Applies`/`DoesNotApply`/`ReceiverUntyped`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiverGated<T> {
+    /// The receiver must `isa` this class for `inner` to be readable.
+    gate: String,
+    /// Gated payload. PRIVATE by design — see the type's doc.
+    inner: T,
+}
+
+impl<T> ReceiverGated<T> {
+    /// Mint a gated value. The only constructor — pairs the payload with
+    /// the class the receiver must descend from to read it.
+    pub fn new(gate: impl Into<String>, inner: T) -> Self {
+        Self { gate: gate.into(), inner }
+    }
+
+    /// The gate class, exposed for diagnostics/observability. Reading the
+    /// gate is harmless — it's the *inner payload* that's protected.
+    pub fn gate(&self) -> &str {
+        &self.gate
+    }
+
+    /// The one reader. `receiver_class` is the concrete class of the
+    /// dispatch receiver as the bag resolved it (cross-file aware); `None`
+    /// or an unresolved name yields `ReceiverUntyped`. Otherwise the inner
+    /// value is handed back iff the receiver `isa` the gate, walking the
+    /// single `class_isa` seam (local `PackageFacts::parents` ∪ cross-file
+    /// `parents_cached`).
+    pub fn resolve_for(
+        &self,
+        receiver_class: Option<&str>,
+        local: &dyn LocalParents,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> GateResult<&T> {
+        match receiver_class {
+            None => GateResult::ReceiverUntyped,
+            Some(recv) if recv.is_empty() => GateResult::ReceiverUntyped,
+            Some(recv) => {
+                if class_isa(recv, &self.gate, local, module_index) {
+                    GateResult::Applies(&self.inner)
+                } else {
+                    GateResult::DoesNotApply
+                }
+            }
+        }
+    }
 }
 
 // ---- Hash key owner (for scope graph) ----

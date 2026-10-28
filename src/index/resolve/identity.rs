@@ -42,14 +42,14 @@ pub(super) fn attr_group_via_ancestors(
     // `field` is per-class PRIVATE storage — never widen it, mint from the
     // nearest declarer so a subclass's field doesn't capture an ancestor's.
     let mut defining: Option<String> = None;
-    let mut nearest_field_backed = false;
+    let mut nearest_private = false;
     origin.for_each_ancestor_class(start_class, Some(idx), |c| {
         if let Some(p) = proj(c) {
             if defining.is_none() {
-                nearest_field_backed = p.field_backed;
+                nearest_private = p.private;
             }
             defining = Some(c.to_string());
-            if nearest_field_backed || scope == OverrideScope::Dispatch {
+            if nearest_private || scope == OverrideScope::Dispatch {
                 return std::ops::ControlFlow::Break(());
             }
         }
@@ -155,10 +155,10 @@ pub fn resolve_symbol_scoped(
                     }
                 }
             }
-            RefKind::MethodCall { .. } => {
+            RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => {
                 let bare = r.unqualified_target_name(analysis.names()).to_string();
                 if let Some(class) = analysis.method_call_invocant_class(r, module_index) {
-                    // Only an accessor-bearing group may claim a method-call
+                    // Only an accessor-bearing group may claim a member
                     // cursor (`require_reader`).
                     if let Some(g) =
                         attr_group_via_ancestors(&class, &bare, analysis, idx, true, false, scope)
@@ -185,7 +185,9 @@ pub fn resolve_symbol_scoped(
             // same root as multi-app Mojo instance brands).
             let mut locs = Vec::new();
             collect_package_var(&FileKey::Path(PathBuf::new()), analysis, &package, &name, &mut locs);
-            let mut spans: Vec<Span> = locs.into_iter().map(|l| l.span).collect();
+            // A group's spans are all rewritten, so a site with no name
+            // token of its own (`${$n}`) is represented by its literal.
+            let mut spans: Vec<Span> = locs.into_iter().filter(|l| l.rewritable).map(|l| l.span).collect();
             // The decl token is both a symbol and a self-ref; dedup so a span
             // isn't rewritten twice.
             spans.sort_by_key(|s| (s.start.row, s.start.column, s.end.row, s.end.column));

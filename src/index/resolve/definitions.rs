@@ -837,7 +837,17 @@ impl<'a> CandidateSet<'a> {
             // `module_path_cached`'s file with a separately-scoped
             // `get_cached`'s range splices two candidates when the name is
             // defined in more than one file.
-            if matches!(r.kind, RefKind::PackageRef) {
+            //
+            // The name is the class the token names as its file spells it
+            // (`\Lib\Clock` is `Lib\Clock`). A widened answer is a stand-in,
+            // not a declaration of it: the labeled widening lane lands those.
+            let named_class = matches!(r.kind, RefKind::PackageRef)
+                .then(|| analysis.spelled_identity(r))
+                .and_then(|name| match idx.visible_def_candidates_widening(&name).read() {
+                    (_, true) => None,
+                    (cands, false) => Some((name, cands)),
+                });
+            if let Some((name, cands)) = named_class {
                 // EVERY file declaring the package is a legitimate landing —
                 // a reopened package surfaces as a multi-location picker.
                 // Two tiers: files whose symbol lives in TYPE space
@@ -846,7 +856,7 @@ impl<'a> CandidateSet<'a> {
                 // the picker when a real type declaration exists.
                 let mut type_hits: Vec<RefLocation> = Vec::new();
                 let mut value_hits: Vec<RefLocation> = Vec::new();
-                for cached in idx.visible_def_candidates(&r.target_name).read() {
+                for cached in cands {
                     if Url::from_file_path(&cached.path).is_ok() {
                         let whole = idx.whole_present(&cached);
                         let loc = |span| RefLocation {
@@ -857,7 +867,7 @@ impl<'a> CandidateSet<'a> {
                             label: None,
                         };
                         if let Some(s) = whole.symbols().iter().find(|s| {
-                            s.name == r.target_name
+                            s.name == name
                                 && matches!(
                                     s.kind,
                                     SymKind::Package | SymKind::Class | SymKind::Module
@@ -871,7 +881,7 @@ impl<'a> CandidateSet<'a> {
                         // file top. Pack-only structural gates; Perl module
                         // lookups keep the file-top fallback.
                         } else if let Some(s) = whole.symbols().iter().find(|s| {
-                            s.name == r.target_name
+                            s.name == name
                                 && (whole.symbol_is_class_content(s)
                                     || whole.symbol_is_file_scope_value(s))
                         }) {
@@ -890,7 +900,7 @@ impl<'a> CandidateSet<'a> {
                 }
                 // No analysis cached: the path map alone still beats no
                 // answer — land at the top of the file.
-                if let Some(path) = idx.module_path_cached(&r.target_name).read() {
+                if let Some(path) = idx.module_path_cached(&name).read() {
                     if Url::from_file_path(&path).is_ok() {
                         return vec![line_loc(path, 0)];
                     }
@@ -1109,6 +1119,30 @@ impl<'a> CandidateSet<'a> {
                 .collect();
             if !decls.is_empty() {
                 return decls;
+            }
+        }
+
+        // A class identity nothing indexed declares lands on the same-leaf
+        // classes that stand in for it where the scope widens — after every
+        // exact lane, so a stranger never competes with the identity's own
+        // declaration, and labeled with the class it actually is.
+        if let Some(ResolvedTarget::Target(t)) = self.resolution() {
+            if matches!(t.kind, TargetKind::Package) {
+                let out: Vec<RefLocation> =
+                    crate::model::file_analysis::widened_class_stand_ins(idx, &t.name, &t.names)
+                        .into_iter()
+                        .filter(|w| Url::from_file_path(&w.path).is_ok())
+                        .map(|w| RefLocation {
+                            key: FileKey::Path(w.path),
+                            span: w.span,
+                            access: AccessKind::Declaration,
+                            rewritable: false,
+                            label: Some(format!("widened: `{}` stands in for `{}`", w.class, t.name)),
+                        })
+                        .collect();
+                if !out.is_empty() {
+                    return out;
+                }
             }
         }
 

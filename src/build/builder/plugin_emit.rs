@@ -563,6 +563,12 @@ impl<'a> Builder<'a> {
                     empty_import: false,
                 });
             }
+            plugin::EmitAction::PackageVariable { name, span } => {
+                self.declare_package_variable(name, span);
+            }
+            plugin::EmitAction::RequireDeclaration { required, span } => {
+                self.switch_declaration_rule(span, required);
+            }
             plugin::EmitAction::VarType { variable, at, inferred_type } => {
                 // Scope resolution is deferred to the end of the build —
                 // plugin dispatch runs BEFORE we recurse into call
@@ -611,7 +617,7 @@ impl<'a> Builder<'a> {
                 // `on_use` hooks, has-synthesizers, etc.) gets its own
                 // emitter's id through the regular `apply_emit_action`
                 // path; the namespace chain works out naturally.
-                self.process_use(module, args, imports, span, span, None, Some(plugin_id));
+                self.process_use(module, args, imports, Vec::new(), false, span, span, None, Some(plugin_id));
             }
             plugin::EmitAction::PluginNamespace {
                 id,

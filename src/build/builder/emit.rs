@@ -819,7 +819,14 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn emit_expr_witness(&mut self, node: Node<'a>) {
-        
+        // A written element and the levels on its path are the write, not
+        // drills: their keys extend the shape (`emit_mutation_extension_witnesses`)
+        // instead of being read out of it.
+        if matches!(node.kind(), "hash_element_expression" | "array_element_expression")
+            && (self.is_written_element(node) || self.on_write_path(node))
+        {
+            return;
+        }
         if self.expr_type_depth >= Self::MAX_EXPR_TYPE_DEPTH {
             return;
         }

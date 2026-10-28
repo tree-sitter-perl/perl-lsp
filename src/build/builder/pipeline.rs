@@ -110,11 +110,19 @@ pub(crate) const MAX_CST_DEPTH: usize = 100_000;
 /// Maximum node depth of the tree, measured iteratively (`TreeCursor`, no
 /// recursion — safe to run on exactly the trees the walk cannot handle).
 pub(crate) fn cst_depth(tree: &Tree) -> usize {
-    let mut cursor = tree.root_node().walk();
+    survey(tree.root_node(), |_| {})
+}
+
+/// Depth of the tree under `root`, calling `visit` on every node on the way
+/// — one iterative pass for every whole-tree screen the build needs.
+fn survey<'t>(root: Node<'t>, mut visit: impl FnMut(Node<'t>)) -> usize {
+    let mut cursor = root.walk();
     let mut depth = 0usize;
     let mut max_depth = 0usize;
+    visit(root);
     loop {
         if cursor.goto_first_child() {
+            visit(cursor.node());
             depth += 1;
             if depth > max_depth {
                 max_depth = depth;
@@ -123,6 +131,7 @@ pub(crate) fn cst_depth(tree: &Tree) -> usize {
         }
         loop {
             if cursor.goto_next_sibling() {
+                visit(cursor.node());
                 break;
             }
             if !cursor.goto_parent() {
@@ -131,6 +140,31 @@ pub(crate) fn cst_depth(tree: &Tree) -> usize {
             depth -= 1;
         }
     }
+}
+
+/// Every `s///e` replacement parsed as Perl over the file's own bytes
+/// (tree-sitter included ranges), so its nodes index `source` and the walk
+/// visits them as code. Keyed by the replacement's start byte; replacements
+/// nested inside one are parsed too.
+fn parse_eval_replacements(mut ranges: Vec<tree_sitter::Range>, source: &[u8]) -> Vec<(usize, Tree)> {
+    let mut out = Vec::new();
+    if ranges.is_empty() {
+        return out;
+    }
+    let mut parser = super::create_parser();
+    while let Some(range) = ranges.pop() {
+        if parser.set_included_ranges(&[range]).is_err() {
+            continue;
+        }
+        let Some(code) = parser.parse(source, None) else { continue };
+        survey(code.root_node(), |n| {
+            if let Some(r) = crate::cst::eval_replacement(n, source) {
+                ranges.push(r.range());
+            }
+        });
+        out.push((range.start_byte, code));
+    }
+    out
 }
 
 /// Honest degradation for a tree too deep to walk: no analysis, and a
@@ -152,6 +186,8 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
             package: Some("main".to_string()),
             owner: None,
             implicit_receiver: false,
+            direct: false,
+            declaration_rules: Vec::new(),
         }],
         plugin: crate::model::file_analysis::PluginFacts {
             diagnostics: vec![PluginDiagnostic {
@@ -292,14 +328,21 @@ fn build_once(
     // Cheap structural bound, measured iteratively so it is safe on exactly
     // the trees it screens. See `MAX_CST_DEPTH` for why the number is what
     // it is and what it does — and no longer does.
-    let depth = cst_depth(tree);
+    let mut evals = Vec::new();
+    let depth = survey(tree.root_node(), |n| {
+        if let Some(r) = crate::cst::eval_replacement(n, source) {
+            evals.push(r.range());
+        }
+    });
     if depth > MAX_CST_DEPTH {
         return too_deep_analysis(tree, depth);
     }
+    let eval_trees = parse_eval_replacements(evals, source);
     let topic_dsls: Vec<plugin::TopicRouteDsl> =
         plugins.all().filter_map(|pl| pl.topic_route_dsl()).collect();
     let mut b = Builder {
         source,
+        eval_injections: eval_trees.iter().map(|(at, t)| (*at, t.root_node())).collect(),
         scopes: Vec::new(),
         symbols: Vec::new(),
         owner_scope: std::collections::HashMap::new(),
@@ -307,6 +350,7 @@ fn build_once(
         deferred_var_types: Vec::new(),
         deferred_named_sub_param_types: Vec::new(),
         method_or_helper_subs: Vec::new(),
+        arg_head_consumes: Vec::new(),
         plain_called_subs: std::collections::HashSet::new(),
         fold_ranges: Vec::new(),
         imports: Vec::new(),
@@ -352,8 +396,9 @@ fn build_once(
         current_package: Some("main".to_string()),
         next_scope_id: 0,
         next_symbol_id: 0,
-        package_ranges: Vec::new(),
-        open_statement_package: None,
+        namespace_ranges: Vec::new(),
+        open_sections: Default::default(),
+        package_regions: Vec::new(),
         plugins,
         dispatch_manifest: std::collections::HashMap::new(),
         load_manifest: std::collections::HashMap::new(),
@@ -705,7 +750,7 @@ fn build_once(
             ..Default::default()
         },
         type_provenance: b.type_provenance,
-        package_ranges: b.package_ranges,
+        namespace_ranges: b.namespace_ranges,
         witnesses: b.bag,
         provisional_dispatches: b.provisional_dispatches,
         guard_sites: b.guard_sites,
@@ -844,12 +889,7 @@ impl<'a> Builder<'a> {
             heads.push((scope.id, scope.span, (is_method || (class_pkg && convention)).then(|| InferredType::FirstParam { package: pkg })));
         }
         for (id, span, head) in heads {
-            self.push_type_constraint(TypeConstraint {
-                variable: "@_".into(),
-                scope: id,
-                constraint_span: span,
-                inferred_type: InferredType::Sequence(head.into_iter().collect()),
-            });
+            self.seed_arg_window(id, span, head.into_iter().collect());
         }
     }
 
@@ -1141,11 +1181,8 @@ impl<'a> Builder<'a> {
         // module that's the only package in the file.
         let data_start = data.start_position();
         let owner_pkg = self
-            .package_ranges
-            .iter()
-            .rev()
-            .find(|r| crate::model::file_analysis::contains_point(&r.span, data_start))
-            .map(|r| r.package.clone())
+            .package_at_pos(data_start)
+            .map(str::to_string)
             .or_else(|| self.current_package.clone());
 
         let Some(pkg) = owner_pkg else { return };
@@ -1219,12 +1256,8 @@ impl<'a> Builder<'a> {
         for r in self.refs.iter_mut() {
             if matches!(r.kind, RefKind::FunctionCall) {
                 if r.settled_binding().is_none() && synth_names.contains(&r.target_name) {
-                    let in_pkg = self
-                        .package_ranges
-                        .iter()
-                        .rev()
-                        .find(|pr| crate::model::file_analysis::contains_point(&pr.span, r.span.start))
-                        .is_some_and(|pr| pr.package == pkg);
+                    let in_pkg = crate::model::file_analysis::namespace_range_at(&self.namespace_ranges, r.span.start)
+                        .is_some_and(|pr| pr.namespace == pkg);
                     if in_pkg {
                         r.bind_function_package(pkg.clone());
                     }

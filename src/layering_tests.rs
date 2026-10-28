@@ -1377,7 +1377,7 @@ fn language_spellings_have_one_home() {
         ("model/conventions.rs", 8, "Perl's home: `PERL_SPELLINGS` and the sigil sites, plus the test's php-shaped fixture spellings and its use-map assertion"),
         ("model/file_analysis/class_queries.rs", 1, "Perl sigil trim on a Corinna field (legacy)"),
         ("model/file_analysis/completion.rs", 10, "Perl sigils re-derived outside conventions.rs — legacy, shrink-only"),
-        ("model/file_analysis/cursor_queries.rs", 4, "Perl sigil sites (legacy)"),
+        ("model/file_analysis/cursor_queries.rs", 3, "Perl sigil sites (legacy)"),
         ("model/file_analysis/enrichment.rs", 1, "Perl sigil on a hash-key access (legacy)"),
         ("model/file_analysis/invocants.rs", 3, "Perl sigil sites (legacy)"),
         ("model/file_analysis/outline.rs", 1, "Perl sigil default (legacy)"),
@@ -1402,9 +1402,8 @@ fn language_spellings_have_one_home() {
         ("build/query_extract/extract/defs.rs", 2, "the extractor mints `anonymous` and `inline`: the minting side"),
         ("build/query_extract/vocab.rs", 13, "the closed capture vocabulary: capture suffixes, the attribute each def kind marks, and the `@mark` suffixes spelled as the attribute they mint"),
         ("model/conventions.rs", 3, "Perl's own attribute spellings (`field_attribute_flag`): Perl's home"),
-        ("model/file_analysis/core_types.rs", 16, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`): the one table every language maps its spellings onto"),
-        ("model/file_analysis/completion.rs", 1, "a `DeclKind` rendered as completion detail text, not an attribute read"),
-        ("model/file_analysis/outline.rs", 2, "outline detail text for a union container and a param decl kind"),
+        ("model/file_analysis/core_types.rs", 17, "the canonical attribute vocabulary (`TryFrom<&str> for SymbolFlags`): the one table every language maps its spellings onto; plus `DeclKind::label`, a decl kind rendered as outline/completion detail text"),
+        ("model/file_analysis/outline.rs", 1, "outline detail text for a union container"),
         ("model/witnesses/registry.rs", 1, "the `param` owner-keyed fallback key: a witness attachment name"),
         ("lsp/symbols/hover.rs", 1, "the hover LABEL for a macro-shaped Sub: display text (the fact itself is read as a flag)"),
     ];
@@ -1517,7 +1516,7 @@ fn rendered_strings_are_not_reparsed() {
     let fns = [".split(", ".rsplit(", ".split_once(", ".rsplit_once(", ".splitn(", ".rsplitn("];
     let seen = count_lines(&files, &|l| fns.iter().any(|f| l.contains(f)));
     let allow: &[(&str, usize, &str)] = &[
-        ("model/conventions.rs", 6, "source text: a name split on its language's declared separator, class-token segments, Perl method tokens, and `use VERSION` literals"),
+        ("model/conventions.rs", 7, "source text: a name split on its language's declared separator, class-token segments, Perl method tokens, and `use VERSION` literals"),
         ("model/file_analysis/invocants.rs", 2, "Perl `::` on source-spelled class and sub names"),
         ("model/file_analysis/types.rs", 1, "canonical_template_spelling — a C++ instance as written in source"),
         ("model/file_analysis/use_map.rs", 2, "a WRITTEN spelling's leaf and its qualifier's head segment"),
@@ -1617,8 +1616,8 @@ fn positional_reads_skip_grammar_extras() {
         ("build/builder/pipeline.rs", 3, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/plugin_emit.rs", 2, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/visit_bless.rs", 3, "legacy: inside nodes that hold no extra, or kind-gated"),
-        ("build/builder/visit_calls.rs", 45, "legacy: inside nodes that hold no extra, or kind-gated"),
-        ("build/builder/visit_decl.rs", 19, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/visit_calls.rs", 41, "legacy: inside nodes that hold no extra, or kind-gated"),
+        ("build/builder/visit_decl.rs", 17, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/visit_method.rs", 4, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/builder/visit_use.rs", 17, "legacy: inside nodes that hold no extra, or kind-gated"),
         ("build/cpp_reparse/defs.rs", 7, "C++ reparse spike: legacy"),
@@ -1627,11 +1626,47 @@ fn positional_reads_skip_grammar_extras() {
         ("build/cursor_sentinel.rs", 11, "pack member-access probes over the sentinel reparse: legacy"),
         ("build/pod.rs", 21, "the POD grammar: legacy"),
         ("build/query_extract/extract/members.rs", 1, "receiver peel, filtering `is_extra()` itself"),
-        ("cst.rs", 26, "the typed view: `elements()` itself, and reads inside nodes that hold no extra"),
+        ("cst.rs", 27, "the typed view: `elements()` itself, reads inside nodes that hold no extra, and `braced_varname`'s scan of every child for the brace token (not positional)"),
         ("lsp/cursor_context.rs", 8, "the Perl cursor detector (rule #6): legacy"),
         ("lsp/symbols/signature.rs", 1, "legacy: inside nodes that hold no extra, or kind-gated"),
     ];
     let drift = allowlist_drift("positional reads (NodeExt::elements)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}
+
+/// A name lookup walks `lookup_chain` — the `LookupChain` a scope's
+/// bindings are listed through, which carries every language's scoping
+/// rule (`Scope::direct`, …). A raw climb up `Scope::parent` sees every
+/// enclosing scope's names, so a lookup written as one silently ignores
+/// those rules (a Python method offered its class body's names). The raw
+/// climbs that remain answer CONTAINMENT — what a scope is inside — and
+/// each is listed with that reason; a new one fails until it is either
+/// moved onto the lookup chain or justified here. The walkers themselves
+/// live in `model/file_analysis/dispatch.rs`.
+#[test]
+fn raw_scope_climbs_are_containment_only() {
+    let files: Vec<(String, String)> =
+        layer_files(&[Layer::Util, Layer::Model, Layer::Cst, Layer::Build, Layer::Index, Layer::Lsp])
+            .into_iter()
+            .filter(|(rel, _)| rel != "model/file_analysis/dispatch.rs")
+            .collect();
+    let seen = count_lines(&files, &|l| {
+        let t = l.trim();
+        let chain_call = (t.contains("scope_chain(") || t.contains("scope_chain_of(")) && !t.contains("fn scope_chain");
+        let parent_step = t.ends_with(".parent;") && t.contains(" = ");
+        chain_call || parent_step || t.contains("scope_parent") || (t.contains("successors(") && t.contains(".parent"))
+    });
+    let allow: &[(&str, usize, &str)] = &[
+        ("build/builder/infra.rs", 1, "package_for_node: the package of the innermost scope that names one"),
+        ("build/builder/visit_use.rs", 2, "find_sub_symbol_for[_scope]: the Sub/Method body a scope sits in"),
+        ("build/query_extract/skeleton.rs", 1, "the callable a return site is an arm of"),
+        ("model/file_analysis/class_queries.rs", 2, "a member's declaring scope inside its class body; package_at's innermost scope that names a package"),
+        ("model/file_analysis/cursor_queries.rs", 1, "enclosing_callable_at: the first body up the tree that names its callable"),
+        ("model/file_analysis/invocants.rs", 5, "the enclosing class or package of a scope (x3), the body that elides its receiver, a symbol's class-span containment"),
+        ("model/file_analysis/outline.rs", 1, "scope_within_sub_body: whether a scope sits inside a callable"),
+        ("model/file_analysis/queries.rs", 4, "the `scope_chain` wrapper itself; move-after-use: is the move inside a callable, is the read in the move's subtree; declaration_required_at: the strict rule in force is the innermost enclosing block that switches it, a lexical pragma, not a name"),
+    ];
+    let drift = allowlist_drift("raw scope climbs (a lookup takes LookupChain)", &seen, allow);
     assert!(drift.is_empty(), "{}", drift.join("\n"));
 }
 

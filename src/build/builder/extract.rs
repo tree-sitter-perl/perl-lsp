@@ -160,6 +160,29 @@ impl<'a> Builder<'a> {
         });
     }
 
+    /// An element on the path of an element written in place, below it:
+    /// `$m{a}{b}` in `$m{a}{b}{c}{d} = 1`. Perl autovivifies these levels;
+    /// they are the write's path, not reads of keys the shape must have.
+    pub(super) fn on_write_path(&self, elem: Node<'a>) -> bool {
+        let mut top = elem;
+        while let Some(p) = top.parent().filter(|p| {
+            matches!(p.kind(), "hash_element_expression" | "array_element_expression")
+                && crate::cst::is_element_access_base(top)
+        }) {
+            top = p;
+        }
+        top != elem && self.is_written_element(top)
+    }
+
+    /// An element some write targets: an assignment's left side, or a
+    /// write in place (`element_written_in_place`).
+    pub(super) fn is_written_element(&self, elem: Node<'a>) -> bool {
+        let assigned = elem.parent().is_some_and(|p| {
+            p.kind() == "assignment_expression" && p.child_by_field_name("left") == Some(elem)
+        });
+        assigned || self.element_written_in_place(elem)
+    }
+
     /// An element written in place. A list-assignment target's write is the
     /// list binder's (`mint_flow_edges_via_query`), which gives it its slot's
     /// value the way it does a variable target's.

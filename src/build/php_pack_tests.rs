@@ -531,3 +531,200 @@ fn calling_a_class_name_is_a_function_call() {
     rows.sort();
     assert_eq!(rows, [2, 3]);
 }
+
+/// Index `files` (path, source) through the php driver.
+#[cfg(feature = "php")]
+fn php_indexed(files: &[(&str, &str)]) -> crate::index::module_index::ModuleIndex {
+    use crate::build::language_driver::LanguageRegistry;
+    let driver = LanguageRegistry::compiled().for_path(std::path::Path::new("x.php")).unwrap();
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    for (path, src) in files {
+        let p = std::path::PathBuf::from(path);
+        idx.insert_workspace_for_test(p.clone(), driver.analyze_with_path(src, Some(&p)));
+    }
+    idx
+}
+
+/// goto-def's (file, row, label) answers at `at` in `path`, and the hover
+/// candidate's file.
+#[cfg(feature = "php")]
+fn php_landing(
+    idx: &crate::index::module_index::ModuleIndex,
+    path: &str,
+    at: tree_sitter::Point,
+) -> (Vec<(String, usize, Option<String>)>, Option<String>) {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let p = std::path::PathBuf::from(path);
+    let fa = idx.workspace_file_for_test(&p).unwrap();
+    let store = OpenDocs::new();
+    let cs = resolve(&store, &fa, FileKey::Path(p), at, Some(idx), OverrideScope::default());
+    let short = |k: &FileKey| match k {
+        FileKey::Path(p) => p.strip_prefix("/fake/php").unwrap().display().to_string(),
+        FileKey::Url(u) => u.to_string(),
+    };
+    (
+        cs.definitions().iter().map(|d| (short(&d.key), d.span.start.row, d.label.clone())).collect(),
+        cs.hover_candidate().map(|d| short(&d.key)),
+    )
+}
+
+/// The member `name` on `class`, through `path`'s own scope.
+#[cfg(feature = "php")]
+fn php_member(
+    idx: &crate::index::module_index::ModuleIndex,
+    path: &str,
+    class: &str,
+) -> Option<crate::model::file_analysis::MethodResolution> {
+    use crate::build::language_driver::LanguageRegistry;
+    use crate::model::file_analysis::{CrossFileLookup, ScopedLookup, VisibilityAxis};
+    let fa = idx.workspace_file_for_test(std::path::Path::new(path)).unwrap();
+    let base: &dyn CrossFileLookup = idx;
+    let vis = LanguageRegistry::pack_visibility(&fa.language);
+    let scoped = ScopedLookup::new(base, &fa.pack.include_closure, None, VisibilityAxis::for_origin(&fa, None, base, vis));
+    fa.resolve_method_in_ancestors(class, "name", Some(&scoped))
+}
+
+#[cfg(feature = "php")]
+fn php_widening(idx: &crate::index::module_index::ModuleIndex, path: &str) -> Vec<(u32, u32, String)> {
+    let fa = idx.workspace_file_for_test(std::path::Path::new(path)).unwrap();
+    crate::lsp::symbols::widening_diagnostics(&fa, idx)
+        .into_iter()
+        .map(|d| (d.range.start.line, d.range.start.character, d.message))
+        .collect()
+}
+
+const PHP_STRANGER: (&str, &str) =
+    ("/fake/php/A/Model.php", "<?php\nnamespace A;\nclass Model { function name() {} }\n");
+const PHP_LIB: (&str, &str) =
+    ("/fake/php/Lib/Model.php", "<?php\nnamespace Lib;\nclass Model { function name() {} }\n");
+
+/// A same-leaf class in a namespace that sorts first is registered for
+/// widening, yet goto-def, hover and the member walk land on the class
+/// the `use` row names.
+#[cfg(feature = "php")]
+#[test]
+fn a_same_leaf_class_never_competes_with_the_identity() {
+    use crate::model::file_analysis::{CrossFileLookup, MethodResolution};
+    use tree_sitter::Point;
+    let user = ("/fake/php/App/User.php", "<?php\nnamespace App;\nuse Lib\\Model;\nclass User extends Model {}\n");
+    let idx = php_indexed(&[PHP_STRANGER, PHP_LIB, user]);
+    assert_eq!(idx.leaf_def_candidates("Model").len(), 2, "the leaf is registered");
+    assert!(idx.def_candidates("Model").is_empty(), "and answers no name lookup");
+    for at in [Point::new(2, 8), Point::new(3, 19)] {
+        let (defs, hover) = php_landing(&idx, user.0, at);
+        assert_eq!(defs, [("Lib/Model.php".to_string(), 2, None)], "goto-def from {at:?}");
+        assert_eq!(hover.as_deref(), Some("Lib/Model.php"), "hover from {at:?}");
+    }
+    assert!(matches!(
+        php_member(&idx, user.0, "App\\User"),
+        Some(MethodResolution::CrossFile { ref class, widened: false, .. }) if class == "Lib\\Model"
+    ));
+    assert!(php_widening(&idx, user.0).is_empty());
+}
+
+/// `use Vendor\Model;` with no `Vendor\Model` indexed: the class answers
+/// through its leaf, labeled, the member it finds is stamped widened, and
+/// the diagnostic fires on each class token naming it — the `use` row's
+/// leaf and the parent clause. Indexing `Vendor\Model` ends it.
+#[cfg(feature = "php")]
+#[test]
+fn an_unindexed_identity_widens_to_its_leaf_out_loud() {
+    use crate::model::file_analysis::MethodResolution;
+    use tree_sitter::Point;
+    let sub = ("/fake/php/App/Sub.php", "<?php\nnamespace App;\nuse Vendor\\Model;\nclass Sub extends Model {}\n");
+    let idx = php_indexed(&[PHP_STRANGER, sub]);
+    let (defs, hover) = php_landing(&idx, sub.0, Point::new(3, 19));
+    assert_eq!(
+        defs,
+        [("A/Model.php".to_string(), 2, Some("widened: `A\\Model` stands in for `Vendor\\Model`".to_string()))]
+    );
+    assert_eq!(hover.as_deref(), Some("A/Model.php"));
+    assert!(matches!(
+        php_member(&idx, sub.0, "App\\Sub"),
+        Some(MethodResolution::CrossFile { ref class, widened: true, .. }) if class == "A\\Model"
+    ));
+    let msg = "nothing indexed declares `Vendor\\Model`; resolved by its leaf to `A\\Model`".to_string();
+    assert_eq!(php_widening(&idx, sub.0), [(2, 11, msg.clone()), (3, 18, msg)]);
+
+    let vendor = ("/fake/php/Vendor/Model.php", "<?php\nnamespace Vendor;\nclass Model { function name() {} }\n");
+    let idx = php_indexed(&[PHP_STRANGER, vendor, sub]);
+    let (defs, _) = php_landing(&idx, sub.0, Point::new(3, 19));
+    assert_eq!(defs, [("Vendor/Model.php".to_string(), 2, None)]);
+    assert!(matches!(
+        php_member(&idx, sub.0, "App\\Sub"),
+        Some(MethodResolution::CrossFile { ref class, widened: false, .. }) if class == "Vendor\\Model"
+    ));
+    assert!(php_widening(&idx, sub.0).is_empty());
+}
+
+/// (namespace, start row, end row) of every lane section, in write order.
+fn lane(fa: &FileAnalysis) -> Vec<(&str, usize, usize)> {
+    fa.namespace_ranges.iter().map(|r| (r.namespace.as_str(), r.span.start.row, r.span.end.row)).collect()
+}
+
+#[test]
+fn statement_namespaces_fill_the_lane_and_a_method_belongs_to_its_class() {
+    let fa = php("<?php
+namespace A;
+class X {
+    function m() { return 1; }
+}
+namespace B;
+function f() { return 2; }
+");
+    assert_eq!(lane(&fa), vec![("A", 1, 5), ("B", 5, 7)]);
+    let in_m = tree_sitter::Point::new(3, 20);
+    // The namespace is not the class: `$this` in `m` is `A\X`.
+    assert_eq!(fa.package_at(in_m), Some("A\\X"));
+    assert_eq!(fa.namespace_at(in_m), Some("A"));
+    assert_eq!(fa.namespace_at(tree_sitter::Point::new(6, 16)), Some("B"));
+}
+
+#[test]
+fn braced_namespaces_cover_their_bodies() {
+    let fa = php("<?php
+namespace A {
+    class X {
+        function m() { return 1; }
+    }
+}
+namespace B {
+    function f() { return 2; }
+}
+");
+    assert_eq!(lane(&fa), vec![("A", 1, 5), ("B", 6, 8)]);
+    let in_m = tree_sitter::Point::new(3, 24);
+    assert_eq!(fa.package_at(in_m), Some("A\\X"));
+    assert_eq!(fa.namespace_at(in_m), Some("A"));
+    assert_eq!(fa.namespace_at(tree_sitter::Point::new(7, 20)), Some("B"));
+}
+
+/// A fully-qualified class spelling (`\Lib\Model`) names its identity:
+/// goto-def lands on the declaration, never the declaring file's top, and
+/// the spelling widens nothing.
+#[cfg(feature = "php")]
+#[test]
+fn a_fully_qualified_class_spelling_lands_on_its_declaration() {
+    let sub = ("/fake/php/App/Sub.php", "<?php\nnamespace App;\nclass Sub extends \\Lib\\Model {}\n");
+    let idx = php_indexed(&[PHP_STRANGER, PHP_LIB, sub]);
+    let (defs, hover) = php_landing(&idx, sub.0, tree_sitter::Point::new(2, 24));
+    assert_eq!(defs, [("Lib/Model.php".to_string(), 2, None)]);
+    assert_eq!(hover.as_deref(), Some("Lib/Model.php"));
+    assert!(php_widening(&idx, sub.0).is_empty());
+}
+
+/// A relative qualified parent (`Sub\Model` in `namespace App`) names
+/// `App\Sub\Model`: goto-def lands on that declaration, never on the
+/// file tops of the same-leaf classes.
+#[cfg(feature = "php")]
+#[test]
+fn a_relative_qualified_parent_lands_on_its_resolved_class() {
+    let model = ("/fake/php/App/Sub/Model.php", "<?php\nnamespace App\\Sub;\nclass Model { function name() {} }\n");
+    let user = ("/fake/php/App/User.php", "<?php\nnamespace App;\nclass User extends Sub\\Model {}\n");
+    let idx = php_indexed(&[PHP_STRANGER, PHP_LIB, model, user]);
+    let (defs, hover) = php_landing(&idx, user.0, tree_sitter::Point::new(2, 23));
+    assert_eq!(defs, [("App/Sub/Model.php".to_string(), 2, None)]);
+    assert_eq!(hover.as_deref(), Some("App/Sub/Model.php"));
+    assert!(php_widening(&idx, user.0).is_empty());
+}

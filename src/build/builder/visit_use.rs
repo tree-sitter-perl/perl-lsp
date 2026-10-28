@@ -78,7 +78,13 @@ impl<'a> Builder<'a> {
         let Some(module_node) = node.child_by_field_name("module") else { return };
         let Ok(module_name) = module_node.utf8_text(self.source) else { return };
         let raw_args = self.extract_mojo_base_args(node);
-        let (imports, _qw_close) = self.extract_use_import_list(node);
+        let (words, _qw_close) = self.extract_use_import_list(node);
+        let negated = crate::cst::is_negated_use(node);
+        let imports: Vec<String> = words.iter().map(|(text, _)| text.clone()).collect();
+        let import_words: Vec<plugin::ImportWord> = words
+            .into_iter()
+            .map(|(text, span)| plugin::ImportWord { text, span })
+            .collect();
         self.record_feature_pragma(node, module_name, &imports);
 
         // `use lib` is not an import — it prepends search-path roots to the
@@ -108,6 +114,8 @@ impl<'a> Builder<'a> {
                         source_module.clone(),
                         raw_args,
                         names.to_vec(),
+                        import_words[1..].to_vec(),
+                        negated,
                         node_to_span(node),
                         node_to_span(module_node),
                         Some(node),
@@ -122,6 +130,8 @@ impl<'a> Builder<'a> {
             module_name.to_string(),
             raw_args,
             imports,
+            import_words,
+            negated,
             node_to_span(node),
             node_to_span(module_node),
             Some(node),
@@ -203,6 +213,26 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// A package global of the current package declared at `span`, as
+    /// `our` declares one (`EmitAction::PackageVariable`). A qualified or
+    /// sigil-less name declares nothing.
+    pub(super) fn declare_package_variable(&mut self, name: String, span: Span) {
+        let Some(sigil) = name.chars().next() else { return };
+        if !crate::model::conventions::PERL_SPELLINGS.is_sigil(sigil)
+            || crate::model::conventions::split_qualified_var(&name, &crate::model::conventions::PERL_SPELLINGS).is_some()
+        {
+            return;
+        }
+        self.add_symbol(
+            name.clone(),
+            SymKind::Variable,
+            span,
+            span,
+            SymbolDetail::Variable { sigil, decl_kind: DeclKind::Our },
+        );
+        self.add_ref(RefKind::Variable, span, name, AccessKind::Declaration);
+    }
+
     /// Walk a `use Class::Tiny ...` node's args for attribute names, handling
     /// the qw-list, hashref, and combined (`qw(a), { b => ... }`) shapes. The
     /// combined form nests both arg shapes under a `list_expression`, so recurse.
@@ -280,11 +310,14 @@ impl<'a> Builder<'a> {
     /// span still re-runs (distinct source statements are distinct work);
     /// a SyntheticUse cycle (kit plugin reacting to its own emission,
     /// re-firing with the SAME propagated span) short-circuits here.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn process_use(
         &mut self,
         module_name: String,
         raw_args: Vec<String>,
         imports: Vec<String>,
+        import_words: Vec<plugin::ImportWord>,
+        negated: bool,
         span: Span,
         module_name_span: Span,
         node: Option<Node<'a>>,
@@ -433,9 +466,12 @@ impl<'a> Builder<'a> {
                     // entry, not a sub — they must not earn a FunctionCall ref
                     // (rule #7: a ref only on a real call target), or the
                     // unresolved-function diagnostic flags the selector itself.
+                    // A sigiled word names a variable, not a sub, for the
+                    // same reason.
                     let sym_set: std::collections::HashSet<&str> = imports
                         .iter()
                         .filter(|s| !s.starts_with(':') && !s.starts_with('-'))
+                        .filter(|s| !s.starts_with(|c| crate::model::conventions::PERL_SPELLINGS.is_sigil(c)))
                         .map(|s| s.as_str())
                         .collect();
                     self.emit_refs_for_strings(
@@ -522,6 +558,8 @@ impl<'a> Builder<'a> {
                 module_name,
                 imports,
                 raw_args,
+                import_words,
+                negated,
                 current_package: self.current_package.clone(),
                 span,
             };
@@ -1118,15 +1156,14 @@ impl<'a> Builder<'a> {
         alias
     }
 
-    /// Extract the import list from a use statement.
-    /// Returns (imported_symbols, qw_close_paren_position).
-    pub(super) fn extract_use_import_list(&self, node: Node<'a>) -> (Vec<String>, Option<Point>) {
-        let qw_close = self.find_qw_close_position(node);
-        let names = self.extract_string_names(node);
-        if !names.is_empty() {
-            return (names, qw_close);
+    /// Extract the import list from a use statement: each word with its
+    /// span, and the qw close-paren position.
+    pub(super) fn extract_use_import_list(&self, node: Node<'a>) -> (Vec<(String, Span)>, Option<Point>) {
+        let words = self.extract_string_list(node);
+        if words.is_empty() {
+            return (vec![], None);
         }
-        (vec![], None)
+        (words, self.find_qw_close_position(node))
     }
 
     /// Classify an assignment LHS as an export package-variable, tolerating a

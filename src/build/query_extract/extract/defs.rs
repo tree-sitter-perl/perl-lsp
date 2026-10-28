@@ -11,6 +11,9 @@ pub(super) struct State {
     nested_stacks: HashMap<usize, Vec<crate::model::file_analysis::DerefStep>>,
     /// A def's name token, joined to its def event by match.
     names_by_match: HashMap<(usize, DefCap), (String, Point, Point)>,
+    /// `@def.<kind>.receiver`: the receiver a member def is written
+    /// through, joined to the def by match.
+    receivers_by_match: HashMap<(usize, DefCap), String>,
     /// `@qualifier` (a `Class::` on an out-of-line def) and `@rettype` (a
     /// method's declared return type) — pre-collected like names because the
     /// `@def` event fires before these inner captures.
@@ -47,15 +50,29 @@ pub(super) struct State {
     /// parameterizes per match; joined into ordered per-class lists.
     tmpl_param_by_match: HashMap<usize, (String, usize)>,
     tmpl_owner_by_match: HashMap<usize, String>,
-    /// Byte ranges of the def nodes seen so far; a ref inside one is the
+    /// The name tokens of the defs seen so far; a ref inside one is the
     /// declaration, not a use (`refs::handle`).
-    pub(super) def_name_spans: Vec<(usize, usize)>,
+    pub(super) def_name_spans: Vec<(Point, Point)>,
+    /// Each class minted so far, by its name token's start: the identity
+    /// it is filed under. A pattern that names the class again (its
+    /// `@context.class`, a `@parent` match) reads the class from here
+    /// rather than minting it a second time.
+    classes_by_name: HashMap<Point, String>,
+    /// Matches whose defs share one name token as one declaration (`@def.pair`).
+    paired_matches: std::collections::HashSet<usize>,
 }
 
 impl State {
-    /// The name token a match captured for its def of `kind`.
-    pub(super) fn name_of(&self, match_id: usize, kind: DefCap) -> Option<&str> {
-        self.names_by_match.get(&(match_id, kind)).map(|(n, _, _)| n.as_str())
+    /// The match's `@def.<kind>.name` token: its text and where it starts.
+    pub(super) fn name_of(&self, match_id: usize, kind: DefCap) -> Option<(&str, Point)> {
+        self.names_by_match.get(&(match_id, kind)).map(|(n, s, _)| (n.as_str(), *s))
+    }
+
+    /// The class whose `@def.class.name` this match captured, as its def
+    /// minted it.
+    pub(super) fn class_of_match(&self, match_id: usize) -> Option<&str> {
+        let (_, at) = self.name_of(match_id, DefCap::Class)?;
+        self.classes_by_name.get(&at).map(String::as_str)
     }
 }
 
@@ -113,6 +130,12 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
         Capture::Def { kind, part: DefPart::Name } => {
             d.names_by_match.insert((e.match_id, kind), (e.text.clone(), e.start, e.end));
         }
+        Capture::DefPair => {
+            d.paired_matches.insert(e.match_id);
+        }
+        Capture::Def { kind, part: DefPart::Receiver } => {
+            d.receivers_by_match.insert((e.match_id, kind), e.text.clone());
+        }
         Capture::Qualifier => {
             d.qualifier_by_match.insert(e.match_id, e.text.clone());
         }
@@ -157,7 +180,6 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
 pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     let Capture::Def { kind, part: DefPart::Node } = e.cap else { return };
     let pack = st.pack;
-    st.defs.def_name_spans.push((e.start_byte, e.end_byte));
     let d = &st.defs;
     let (name, name_start, name_end, defaulted) = d
         .names_by_match
@@ -166,22 +188,41 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         .map(|(n, s, en)| (n, s, en, false))
         .or_else(|| (pack.default_name)(kind).map(|n| (n.to_string(), e.start, e.start, true)))
         .unwrap_or((e.text.clone(), e.start, e.end, false));
+    // A slot written through a receiver is a candidate: its owner is the
+    // receiver's type, which the assembled analysis answers
+    // (`skeleton::declare_slots`), and which decides whether the write
+    // declares. Its name token stays the member reference it is.
+    let through = d.receivers_by_match.get(&(e.match_id, kind)).cloned();
+    if through.is_none() {
+        st.defs.def_name_spans.push((name_start, name_end));
+    }
+    let d = &st.defs;
     // An out-of-line def's qualifier names its owning class (the innermost
     // scope), overriding the enclosing-namespace context.
-    let pkg = d.qualifier_by_match.get(&e.match_id).cloned().or_else(|| st.package.clone());
+    let pkg = match through {
+        Some(_) => None,
+        None => d.qualifier_by_match.get(&e.match_id).cloned().or_else(|| st.package.clone()),
+    };
     let shaped = (pack.shape_name)(&name);
     // Under a use-map a class is filed under its identity, and its package
-    // is the namespace that identity carries.
+    // is the home that identity joins (`scopes::home_of`).
     let (shaped, pkg) = match (kind, pack.names.use_map_sep()) {
-        (DefCap::Class, Some(_)) => (st.class_identity(&shaped), st.namespace().map(str::to_string)),
+        (DefCap::Class, Some(sep)) => {
+            let home = super::scopes::home_of(st, st.cur_scope, e.start).map(str::to_string);
+            (crate::model::conventions::join_qualified(home.as_deref().unwrap_or(""), &shaped, sep), home)
+        }
         _ => (shaped, pkg),
     };
+    if kind == DefCap::Class {
+        st.defs.classes_by_name.insert(name_start, shaped.clone());
+    }
+    let d = &st.defs;
     // A class-spec def carries its primary's name — the
     // (spec, primary) family edge `Specializes` derives from.
     if let Some(primary) = d.spec_primary_by_match.get(&e.match_id) {
         st.out.specializations.push((shaped.clone(), (pack.shape_name)(primary)));
     }
-    st.out.symbols.push(SkelSymbol {
+    let symbol = SkelSymbol {
         name: shaped,
         kind,
         start: e.start,
@@ -189,7 +230,10 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         name_start,
         name_end,
         package: pkg,
-        scope: st.cur_scope,
+        // A data member belongs to its class body even where it is written
+        // inside a callable.
+        scope: if matches!(kind, DefCap::Field | DefCap::Slot) { st.member_scope() } else { st.bind_scope() },
+        pair: d.paired_matches.contains(&e.match_id).then_some(e.match_id),
         return_type: d.rettype_by_match.get(&e.match_id).and_then(|t| (pack.annot_type)(t)),
         deref_stack: d.nested_stacks.get(&e.match_id).cloned().unwrap_or_default(),
         attributes: {
@@ -206,7 +250,36 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         arity: None,
         qualifier_owned: d.qualifier_by_match.contains_key(&e.match_id),
         flags: d.marks.get(&(name_start, name_end)).copied().unwrap_or_default(),
-    });
+    };
+    match through {
+        Some(receiver) => st.out.slot_writes.push(SlotWrite { symbol, receiver }),
+        None => st.out.symbols.push(symbol),
+    }
+}
+
+/// A method's receiver parameter (`@param.receiver`) holds an instance of
+/// the class the method is declared in: its value, stated at its binding
+/// site, so a member written or read through it dispatches on that class.
+pub(super) fn emit_receiver_types(st: &mut ExtractState) {
+    use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+    let typed: Vec<Witness> = st
+        .out
+        .symbols
+        .iter()
+        .filter(|s| s.flags.contains(crate::model::file_analysis::SymbolFlags::RECEIVER))
+        .filter_map(|s| {
+            let class = s.package.clone()?;
+            Some(Witness {
+                attachment: WitnessAttachment::Variable { name: s.name.clone(), scope: s.scope },
+                source: WitnessSource::Builder("receiver".into()),
+                payload: WitnessPayload::InferredType(InferredType::ClassName(class)),
+                // zero-width at the binding: a local's value holds from
+                // its binding on, as every flow-typed local's does
+                span: Span { start: s.name_start, end: s.name_start },
+            })
+        })
+        .collect();
+    st.out.witnesses.extend(typed);
 }
 
 /// Template params joined to their owner class — the owner shaped like a
@@ -249,10 +322,21 @@ pub(super) fn tag_inline_namespaces(st: &mut ExtractState) {
 /// trailing sibling (keep the rettype-bearing copy).
 pub(super) fn dedup(st: &mut ExtractState) {
     let symbols = &mut st.out.symbols;
-    let mut best: HashMap<(usize, usize), usize> = HashMap::new();
+    // The defs a pair declares at one token are both kept, and stand in
+    // for any other match's def of the same kind there.
+    let paired: std::collections::HashSet<(usize, usize, DefCap)> = symbols
+        .iter()
+        .filter(|s| s.pair.is_some())
+        .map(|s| (s.name_start.row, s.name_start.column, s.kind))
+        .collect();
+    let mut best: HashMap<(usize, usize, Option<DefCap>), usize> = HashMap::new();
     let mut keep = vec![true; symbols.len()];
     for (i, sym) in symbols.iter().enumerate() {
-        let key = (sym.name_start.row, sym.name_start.column);
+        if sym.pair.is_none() && paired.contains(&(sym.name_start.row, sym.name_start.column, sym.kind)) {
+            keep[i] = false;
+            continue;
+        }
+        let key = (sym.name_start.row, sym.name_start.column, sym.pair.map(|_| sym.kind));
         match best.get(&key) {
             None => {
                 best.insert(key, i);

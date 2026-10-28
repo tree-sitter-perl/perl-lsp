@@ -71,6 +71,7 @@ fn family(cap: Capture) -> Family {
     match cap {
         C::Scope(_) | C::Context(_) | C::Parent => Family::Scopes,
         C::Def { .. }
+        | C::DefPair
         | C::Qualifier
         | C::OolDef
         | C::NestedTarget
@@ -126,58 +127,52 @@ struct ExtractState<'p> {
     commands: commands::State,
     imports: imports::State,
     /// The module the file IS, when its language names it by path and the
-    /// driver had one, and that module's dotted name: the namespace every
-    /// declaration without a namespace context of its own joins.
+    /// driver had one: its dotted name is the section every declaration
+    /// without a namespace of its own joins.
     file_module: Option<&'p FileModule>,
-    file_namespace: Option<String>,
     /// Matches carrying `#names-class?`: their call may construct a class.
     names_class: std::collections::HashSet<usize>,
 }
 
-/// The module a file is, for a language whose module names come from the
-/// file's place on disk (python's `pkg/models.py` is `pkg.models`): its
-/// path segments, and whether the file is its package's own module
-/// (`pkg/__init__.py` is `pkg`, and relative imports start from `pkg`
-/// itself rather than its parent). Derived by the driver, which has the
-/// path; the extractor only reads it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileModule {
-    pub segments: Vec<String>,
-    pub is_package: bool,
-}
-
-impl FileModule {
-    /// The package relative imports resolve from.
-    pub fn package(&self) -> &[String] {
-        match self.is_package {
-            true => &self.segments,
-            false => &self.segments[..self.segments.len().saturating_sub(1)],
-        }
-    }
-}
+pub use crate::model::file_analysis::FileModule;
 
 impl ExtractState<'_> {
-    /// The innermost namespace context in force at the current event, else
-    /// the file's own module.
-    fn namespace(&self) -> Option<&str> {
-        self.context_stack
-            .iter()
-            .rev()
-            .find(|(_, kind, _)| *kind == ContextKind::Namespace)
-            .map(|(.., ns)| ns.as_str())
-            .or(self.file_namespace.as_deref())
+    /// The section of the namespace lane in force at `at`, as written so
+    /// far. Every section that holds `at` is in by then — a section opens
+    /// at or before the code it covers, and a statement form is cut short
+    /// only where its successor starts.
+    fn namespace_at(&self, at: Point) -> Option<&str> {
+        crate::model::file_analysis::namespace_range_at(&self.out.namespace_ranges, at)
+            .map(|r| r.namespace.as_str())
+            .filter(|ns| !ns.is_empty())
     }
 
-    /// The identity a class named `leaf` and declared at the current event
-    /// is filed under. Under a use-map it is the leaf joined to the
-    /// namespace in force, whatever container the class is written in, so
-    /// every spelling of the class resolves to the key it is filed under.
-    /// Otherwise the spelling is the identity.
-    fn class_identity(&self, leaf: &str) -> String {
+    /// The scope a class member declared at the current event belongs to:
+    /// the innermost scope that is not a callable's body.
+    fn member_scope(&self) -> ScopeId {
+        self.scope_stack
+            .iter()
+            .rev()
+            .map(|&(_, id)| id)
+            .find(|id| !matches!(self.out.scopes[id.0 as usize].kind, ScopeKind::Sub { .. }))
+            .unwrap_or(self.cur_scope)
+    }
+
+    /// The identity a class named `leaf`, declared in `from` at `at`, is
+    /// filed under. Under a use-map it is the leaf joined to its home
+    /// (`scopes::home_of`) — the class it is written in, else the
+    /// namespace in force — so every spelling of the class resolves to the
+    /// key it is filed under. Otherwise the spelling is the identity.
+    /// The scope a def at the current event binds in: the innermost one,
+    /// or for a def written in a header (a parameter), the def scope the
+    /// header belongs to.
+    fn bind_scope(&self) -> ScopeId {
+        self.scopes.headed.get(&self.cur_scope).copied().unwrap_or(self.cur_scope)
+    }
+
+    fn class_identity(&self, leaf: &str, from: ScopeId, at: Point) -> String {
         match self.pack.names.use_map_sep() {
-            Some(sep) => {
-                crate::model::conventions::join_qualified(self.namespace().unwrap_or(""), leaf, sep)
-            }
+            Some(sep) => crate::model::conventions::join_qualified(scopes::home_of(self, from, at).unwrap_or(""), leaf, sep),
             None => leaf.to_string(),
         }
     }
@@ -185,10 +180,10 @@ impl ExtractState<'_> {
 
 /// A written type as the identities it names at `site`: under a use-map
 /// every class spelling it carries resolves through the rows that reach
-/// the site and the namespace in force there. Runs once every row and
-/// section is in.
+/// the site and the namespace in force there. Runs once every row,
+/// section and class is in.
 fn written_type_at(out: &SkeletonAnalysis, names: &crate::model::file_analysis::NameSpellings, t: InferredType, site: Point) -> InferredType {
-    match crate::model::file_analysis::UseMap::at(&out.use_rows, &out.namespace_sections, names, site) {
+    match crate::model::file_analysis::UseMap::at(&out.use_rows, &out.namespace_ranges, &out.scopes, names, site, &out.symbols) {
         Some(map) => t.map_class_names(&mut |c| map.resolve(c).identity(map.sep)),
         None => t,
     }
@@ -292,6 +287,8 @@ pub fn extract_in(
         package: None,
         owner: None,
         implicit_receiver: false,
+        direct: false,
+        declaration_rules: Vec::new(),
     });
     let mut st = ExtractState {
         pack,
@@ -309,18 +306,16 @@ pub fn extract_in(
         commands: Default::default(),
         imports: Default::default(),
         file_module,
-        file_namespace: None,
         names_class: Default::default(),
     };
     // A module named by its path is one section, the whole file.
     if let (Some(m), Some(sep)) = (file_module, pack.names.use_map_sep()) {
         let ns = m.segments.iter().fold(String::new(), |ns, seg| crate::model::conventions::join_qualified(&ns, seg, sep));
-        st.out.namespace_sections.push(crate::model::file_analysis::PackageRange {
-            package: ns.clone(),
+        st.out.namespace_ranges.push(crate::model::file_analysis::NamespaceRange {
+            namespace: ns,
             span: st.out.scopes[0].span,
-            kind: crate::model::file_analysis::PackageKind::Statement,
+            kind: crate::model::file_analysis::SectionKind::Statement,
         });
-        st.file_namespace = Some(ns);
     }
 
     // ---- flatten matches into ordered events ----
@@ -350,13 +345,18 @@ pub fn extract_in(
     // contents. A `@scope` on the SAME node as a `@def` (a function_definition
     // carries its own body scope) must open AFTER the def is recorded, so the
     // symbol attributes to its ENCLOSING scope, not its own body — hence scope
-    // sorts last among identical-span ties.
-    let is_scope = |e: &Event| matches!(e.cap, Capture::Scope(_));
+    // sorts last among identical-span ties. A header holds no def of its own
+    // node, and a token can be the whole of one (`-> T`), so it opens first.
+    let tie_rank = |e: &Event| match e.cap {
+        Capture::Scope(ScopeCap::Header) => 0,
+        Capture::Scope(_) => 2,
+        _ => 1,
+    };
     events.sort_by(|a, b| {
         a.start_byte
             .cmp(&b.start_byte)
             .then(b.end_byte.cmp(&a.end_byte))
-            .then(is_scope(a).cmp(&is_scope(b)))
+            .then(tie_rank(a).cmp(&tie_rank(b)))
     });
 
     // ---- pre-collect the per-match joins a handler reads before the
@@ -409,10 +409,12 @@ pub fn extract_in(
     // resolves once every row is in.
     scopes::resolve_parents(&mut st);
     defs::dedup(&mut st);
+    defs::emit_receiver_types(&mut st);
     commands::finish(&mut st);
     defs::emit_type_aliases(&mut st);
     // Reads the symbol table after dedup and the command defs.
     flow::finish(&mut st, &events);
+    st.out.class_scopes = scopes::class_scope_rows(&st);
     // The narrowing cutoff reads the flow edges.
     narrowing::finish(&mut st);
     members::finish(&mut st);

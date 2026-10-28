@@ -74,12 +74,13 @@ pub struct FileAnalysis {
     pub call_bindings: Vec<CallBinding>,
     pub method_call_bindings: Vec<MethodCallBinding>,
 
-    /// Flat list of `package`/`class` declarations and the byte ranges
-    /// they govern. Replaces `Scope::package` walks for `package_at`.
-    /// `#[serde(default)]` so older cache blobs deserialize as empty
-    /// (`package_at` falls back to the legacy scope walk in that case).
+    /// The namespace lane: which namespace is in force over each range of
+    /// the file (`namespace_at`) — Perl's packages, PHP's namespace
+    /// sections, a Python module's file. In Perl the namespace is also the
+    /// class its code belongs to; whether `package_at` reads it is the
+    /// language's `NameSpellings::enclosing_class`.
     #[serde(default)]
-    pub package_ranges: Vec<PackageRange>,
+    pub namespace_ranges: Vec<NamespaceRange>,
 
     /// Everything a pack driver recorded that Perl has no analog for —
     /// macros, the include graph, template parameters, move tracking.
@@ -594,7 +595,7 @@ pub struct FileAnalysisParts {
     pub reexport_modules: Vec<String>,
     pub lib_roots: Vec<String>,
     pub type_provenance: HashMap<SymbolId, TypeProvenance>,
-    pub package_ranges: Vec<PackageRange>,
+    pub namespace_ranges: Vec<NamespaceRange>,
     pub witnesses: crate::model::witnesses::WitnessBag,
     pub provisional_dispatches: Vec<ProvisionalDispatch>,
     pub guard_sites: Vec<GuardSite>,
@@ -709,6 +710,10 @@ pub struct FieldProjections {
     pub bare: String,
     pub has_param: bool,
     pub has_reader: bool,
+    /// The family the reader spelling is asked as: an accessor is called,
+    /// whatever backs it; a member that IS the field (python's class-body
+    /// binding, `obj.count`) is read.
+    pub reader_kind: MemberKind,
     /// An `InternalKey` projection was minted (hash-backed repr) —
     /// `$obj->{attr}` slot pokes join the group, cross-file included.
     pub has_internal: bool,
@@ -718,10 +723,11 @@ pub struct FieldProjections {
     /// arg keys (`Sub{class, verb}`-owned) — joins the group. Distinct from
     /// `has_internal` (STRICT `Class` match, Moo/bless internal slots).
     pub has_class_key: bool,
-    /// Backed by a Corinna `field $x` lexical (vs a `has`/column pair). Field
-    /// storage is per-class PRIVATE — not inherited — so the inheritance bridge
-    /// must NOT widen a field-backed group to an ancestor's same-named field.
-    pub field_backed: bool,
+    /// Per-class PRIVATE storage (a Corinna `field $x`), never inherited, so
+    /// the inheritance bridge must NOT widen the group to an ancestor's
+    /// same-named field. A `has`/column pair and a python class-body member
+    /// are shared down the hierarchy.
+    pub private: bool,
     /// Origin-file variable spellings (decl + body uses), bare-adjusted.
     pub variable_spans: Vec<Span>,
     /// The DECLARATION subset of `variable_spans` — the `has`/column token,
@@ -741,16 +747,19 @@ pub struct MappedMember {
 }
 
 /// One field/attr-group entity: the facts the projection union needs.
-/// Corinna fields carry the field symbol (variable spellings live on it);
-/// Moo `has` attrs have no variable side — their decl token is the
-/// synthesized pair's selection span.
+/// A field's variable spellings live on `spelling_sym` — a Corinna field's
+/// own lexical, or the bare name a member was declared with from one token
+/// (`Symbol::declared_with`). Moo `has` attrs have no variable side — their
+/// decl token is the synthesized pair's selection span.
 struct FieldGroup {
-    field_sym: Option<SymbolId>,
+    spelling_sym: Option<SymbolId>,
+    private: bool,
     decl_span: Option<Span>,
     class: String,
     bare: String,
     has_param: bool,
     has_reader: bool,
+    reader_kind: MemberKind,
 }
 
 /// Occurs-check + memo node for the `expr_type_at_span` ⇄

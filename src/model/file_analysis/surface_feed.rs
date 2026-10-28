@@ -79,7 +79,6 @@ impl FileAnalysis {
                     type_display: _type_display,     // LangPack-wide display vocabulary, same reasoning
                     specializes: _specializes,       // family edges; the file re-registers on its own rebuild even when Unchanged
                     use_rows: _use_rows,                   // this file's OWN spelling table: what its spellings mean, never what another file sees
-                    namespace_sections: _namespace_sections, // same: where this file's spellings resolve; its classes' identities already carry the namespace
                     qualified_spellings: _qualified_spellings, // same: how THIS file spells classes
                     names: _names,                   // language-wide convention, identical across the language's files
                     template_params: _template_params, // instantiation substitution reads the provider live
@@ -89,6 +88,7 @@ impl FileAnalysis {
                     control_regions: _control_regions, // own-file straight-line gate spans
                     param_regions: _param_regions,   // own-file parameter-region spans
                     probe_regions: _probe_regions,   // own-file existence-probe spans
+                    file_module: _file_module,       // the namespace this file's classes join: projected through their identities
                 },
             plugin:
                 PluginFacts {
@@ -113,7 +113,7 @@ impl FileAnalysis {
             // Surface edge for them.
             refs: _refs,                         // the whole reference axis — use-sites, their indices, their baseline and eviction flag
             fold_ranges: _fold_ranges,
-            package_ranges: _package_ranges,
+            namespace_ranges: _namespace_ranges, // where this file's own code and spellings sit; its classes' identities already carry the namespace
             call_bindings: _call_bindings,       // this file's call sites — the CONSUMER half of the edge; the provider names ride `imports`
             method_call_bindings: _method_call_bindings, // same consumer half, method form
             guard_sites: _guard_sites,           // own-file narrowing diagnostics

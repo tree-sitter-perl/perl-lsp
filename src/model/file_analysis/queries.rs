@@ -22,25 +22,61 @@ impl FileAnalysis {
         }
     }
 
+    /// Whether every variable must be declared at `at` in `scope`: the
+    /// latest switch on the scope chain, innermost first. Off by default —
+    /// Perl without `strict` creates globals on first mention.
+    pub fn declaration_required_at(&self, scope: ScopeId, at: Point) -> bool {
+        let mut current = Some(scope);
+        while let Some(id) = current {
+            let s = self.scope(id);
+            if let Some(rule) = s.declaration_rules.iter().rev().find(|r| r.at <= at) {
+                return rule.required;
+            }
+            current = s.parent;
+        }
+        false
+    }
+
+    /// Every use of a variable no declaration reaches that `use strict
+    /// 'vars'` rejects: the refs bound to an implicit global where
+    /// declarations are required, minus the names strict exempts
+    /// (`$a`/`$b`). Declarations a `use` brings in (Exporter's `qw($x)`)
+    /// are the caller's to rule out — they need the producer's surface.
+    pub fn undeclared_variable_uses(&self) -> impl Iterator<Item = &Ref> + '_ {
+        // A qualified `$main::x` names its package, so strict accepts it.
+        self.refs().iter().filter(move |r| {
+            self.declaration_required_at(r.scope, r.span.start)
+                && r.qualified_var_target(self.names()).is_none()
+                && r.resolved_symbol().is_some_and(|id| {
+                let s = self.symbol(id);
+                matches!(s.detail, SymbolDetail::Variable { decl_kind: DeclKind::Implicit, .. })
+                    && !crate::model::conventions::is_strict_vars_exempt(&s.name)
+                })
+        })
+    }
+
     // ---- Query methods ----
 
     /// Find the innermost scope containing a point.
     pub fn scope_at(&self, point: Point) -> Option<ScopeId> {
-        let mut best: Option<(ScopeId, usize)> = None; // (id, span_size)
-        for scope in &self.scopes {
-            if contains_point(&scope.span, point) {
-                let size = span_size(&scope.span);
-                if best.is_none() || size <= best.unwrap().1 {
-                    best = Some((scope.id, size));
-                }
-            }
-        }
-        best.map(|(id, _)| id)
+        innermost_scope_at(&self.scopes, point)
     }
 
-    /// Walk the scope chain from a scope upward to file root.
+    /// What `start` is inside, innermost first (`scope_chain_of`) — a
+    /// containment climb that lists no names.
     pub fn scope_chain(&self, start: ScopeId) -> Vec<ScopeId> {
         scope_chain_of(&self.scopes, start)
+    }
+
+    /// Where a name used in `from` is looked up (`lookup_chain`).
+    pub fn lookup_chain(&self, from: ScopeId) -> LookupChain {
+        lookup_chain(&self.scopes, from)
+    }
+
+    /// Every symbol a use written in `from` can name bare, wherever it is
+    /// declared in its scope (`LookupChain::bindings`).
+    pub fn bindings_seen_from(&self, from: ScopeId) -> Vec<&Symbol> {
+        self.lookup_chain(from).bindings(&self.symbols).collect()
     }
 
     /// Get the scope struct by ID.
@@ -59,37 +95,23 @@ impl FileAnalysis {
             Some(s) => s,
             None => return Vec::new(),
         };
-        let chain = self.scope_chain(scope);
-        let mut result = Vec::new();
-        for scope_id in &chain {
-            for sid in self.symbols.in_scope(*scope_id) {
-                let sym = &self.symbols[sid.0 as usize];
-                // Symbol must be declared before the point (or be a sub/package/class)
-                if sym.span.start <= point || matches!(sym.kind, SymKind::Sub | SymKind::Method | SymKind::Package | SymKind::Class) {
-                    result.push(sym);
-                }
-            }
-        }
-        result
+        // Declared before the point, or a sub/package/class.
+        self.lookup_chain(scope)
+            .bindings(&self.symbols)
+            .filter(|sym| {
+                sym.span.start <= point
+                    || matches!(sym.kind, SymKind::Sub | SymKind::Method | SymKind::Package | SymKind::Class)
+            })
+            .collect()
     }
 
     /// Resolve a variable name to its declaration at a given point.
     /// Returns the innermost-scope match (Perl lexical scoping).
     pub fn resolve_variable(&self, name: &str, point: Point) -> Option<&Symbol> {
         let scope = self.scope_at(point)?;
-        let chain = self.scope_chain(scope);
-        for scope_id in &chain {
-            for sid in self.symbols.in_scope(*scope_id) {
-                let sym = &self.symbols[sid.0 as usize];
-                if sym.name == name
-                    && matches!(sym.kind, SymKind::Variable | SymKind::Field)
-                    && sym.span.start <= point
-                {
-                    return Some(sym);
-                }
-            }
-        }
-        None
+        self.lookup_chain(scope)
+            .bindings(&self.symbols)
+            .find(|sym| sym.name == name && matches!(sym.kind, SymKind::Variable | SymKind::Field) && sym.span.start <= point)
     }
 
     /// The pointer/reference declarator stack of the in-scope variable
@@ -172,10 +194,10 @@ impl FileAnalysis {
             // without subobject + path analysis. Detect param-ness by the moved
             // var's declaration landing inside a parameter list; only moves of
             // LOCALS are flagged. This is what clears the last real-header FPs.
-            let chain = scope_chain_of(&self.scopes, *move_scope);
+            let chain = self.lookup_chain(*move_scope);
             let moved_is_param = self.symbols.iter().any(|s| {
                 s.name == *name
-                    && chain.contains(&s.scope)
+                    && chain.contains(s.scope)
                     && self
                         .pack.param_regions
                         .iter()
@@ -438,10 +460,10 @@ impl FileAnalysis {
         if self.gated_param_types.is_empty() {
             return None;
         }
-        let chain = self.scope_chain(scope);
+        let chain = self.lookup_chain(scope);
         for gated in &self.gated_param_types {
             if let Some(tc) = gated.pick(self, module_index).reading {
-                if tc.variable == var && chain.contains(&tc.scope) {
+                if tc.variable == var && chain.contains(tc.scope) {
                     return Some(tc.inferred_type.clone());
                 }
             }

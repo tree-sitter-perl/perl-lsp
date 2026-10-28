@@ -24,12 +24,11 @@ pub(super) fn group_from_projections(
         // `p.class` and its descendants, never upward at a framework ancestor
         // that defines a real same-named `sub` (e.g. an `id` column colliding
         // with `DBIx::Class::PK::id`).
-        let target = if p.field_backed {
+        let mut target = if p.private {
             TargetRef::method(
                 p.bare.clone(),
                 p.class.clone(),
-                // a reader is called, whatever backs it
-                Some(MemberKind::Callable),
+                Some(p.reader_kind),
                 class_analysis,
                 module_index,
                 OverrideScope::Dispatch,
@@ -38,10 +37,12 @@ pub(super) fn group_from_projections(
             TargetRef::owned_accessor(
                 p.bare.clone(),
                 p.class.clone(),
+                p.reader_kind,
                 class_analysis,
                 module_index,
             )
         };
+        target.def_paths = pack_class_def_paths(&target, class_analysis, module_index);
         members.push(GroupMember {
             target,
             rename: MemberRename::Bare,
@@ -91,6 +92,7 @@ pub(super) fn group_from_projections(
             target: TargetRef::owned_accessor(
                 m.method.clone(),
                 p.class.clone(),
+                MemberKind::Callable,
                 class_analysis,
                 module_index,
             ),

@@ -79,13 +79,12 @@ impl PackHealCtx {
     /// `run_gather_loop` owns retirement. A stale-text result is dropped
     /// (no clobber); the loop's `finish` decides whether to re-run.
     async fn run_gather_once(&self, uri: &Url) {
+        // Every requester decided this doc has something to re-gather: a
+        // gather-dependent language's heal, or the invalidator naming a doc
+        // whose path inputs changed (a python module re-filed by a marker).
         let Some((text, path, language)) = self
             .open_docs
             .get_open(uri)
-            .filter(|d| {
-                // Only a gather-dependent language has anything to re-gather.
-                crate::build::language_driver::LanguageRegistry::caps(d.language).context_gather
-            })
             .map(|d| (d.text.clone(), d.path.clone(), d.language))
         else {
             return;
@@ -130,7 +129,7 @@ impl PackHealCtx {
         let diags = self
             .open_docs
             .get_open(uri)
-            .map(|doc| symbols::pack_diagnostics(&doc.analysis, self.options));
+            .map(|doc| symbols::pack_diagnostics(&doc.analysis, &self.module_index, self.options));
         if let Some(diags) = diags {
             self.client
                 .publish_diagnostics(uri.clone(), diags, None)
@@ -272,7 +271,7 @@ impl Backend {
             }
             let diags = open_docs
                 .get_open(&uri)
-                .map(|doc| symbols::pack_diagnostics(&doc.analysis, options));
+                .map(|doc| symbols::pack_diagnostics(&doc.analysis, &module_index, options));
             if let Some(diags) = diags {
                 client.publish_diagnostics(uri.clone(), diags, None).await;
             }
@@ -517,7 +516,7 @@ impl DiagCtx {
             Some(_) => self
                 .open_docs
                 .get_open(uri)
-                .map(|doc| symbols::pack_diagnostics(&doc.analysis, self.options))
+                .map(|doc| symbols::pack_diagnostics(&doc.analysis, &self.module_index, self.options))
                 .unwrap_or_default(),
             None => vec![],
         };
@@ -621,7 +620,7 @@ pub(super) fn refresh_open_diagnostics(
             }
         } else {
             match open_docs.get_open(&uri) {
-                Some(doc) => symbols::pack_diagnostics(&doc.analysis, options),
+                Some(doc) => symbols::pack_diagnostics(&doc.analysis, module_index, options),
                 None => continue,
             }
         };

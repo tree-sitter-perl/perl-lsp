@@ -1,0 +1,10 @@
+/home/user/perl-lsp/target-py/release/deps/ts_parser_perl-ee880e2513101187.d: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ts-parser-perl-2.0.0/bindings/rust/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ts-parser-perl-2.0.0/bindings/rust/../../src/node-types.json /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ts-parser-perl-2.0.0/bindings/rust/../../queries/highlights.scm /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ts-parser-perl-2.0.0/bindings/rust/../../queries/injections.scm
+
+/home/user/perl-lsp/target-py/release/deps/libts_parser_perl-ee880e2513101187.rlib: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ts-parser-perl-2.0.0/bindings/rust/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ts-parser-perl-2.0.0/bindings/rust/../../src/node-types.json /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ts-parser-perl-2.0.0/bindings/rust/../../queries/highlights.scm /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ts-parser-perl-2.0.0/bindings/rust/../../queries/injections.scm
+
+/home/user/perl-lsp/target-py/release/deps/libts_parser_perl-ee880e2513101187.rmeta: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ts-parser-perl-2.0.0/bindings/rust/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ts-parser-perl-2.0.0/bindings/rust/../../src/node-types.json /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ts-parser-perl-2.0.0/bindings/rust/../../queries/highlights.scm /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ts-parser-perl-2.0.0/bindings/rust/../../queries/injections.scm
+
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ts-parser-perl-2.0.0/bindings/rust/lib.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ts-parser-perl-2.0.0/bindings/rust/../../src/node-types.json:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ts-parser-perl-2.0.0/bindings/rust/../../queries/highlights.scm:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ts-parser-perl-2.0.0/bindings/rust/../../queries/injections.scm:

@@ -1309,7 +1309,7 @@ fn for_each_tree_diagnostic(
         let file = cm.path.display().to_string();
         // Same whole-view routing: pack index copies are evicted.
         let whole = file_analysis::CrossFileLookup::whole_present(idx, cm);
-        for d in symbols::pack_diagnostics(&whole, options) {
+        for d in symbols::pack_diagnostics(&whole, idx, options) {
             emit(&file, d);
         }
     });

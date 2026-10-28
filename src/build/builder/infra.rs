@@ -23,6 +23,8 @@ impl<'a> Builder<'a> {
             span,
             owner: None,
             implicit_receiver: false,
+            direct: false,
+            declaration_rules: Vec::new(),
             package: pkg,
         });
         self.scope_stack.push(id);
@@ -31,6 +33,15 @@ impl<'a> Builder<'a> {
 
     pub(super) fn pop_scope(&mut self) -> Option<ScopeId> {
         self.scope_stack.pop()
+    }
+
+    /// Switch the declaration rule from the end of `span` on, in the scope
+    /// `span` sits in.
+    pub(super) fn switch_declaration_rule(&mut self, span: Span, required: bool) {
+        let scope = self.scope_at_point(span.start);
+        self.scopes[scope.0 as usize]
+            .declaration_rules
+            .push(crate::model::file_analysis::DeclarationRule { at: span.end, required });
     }
 
     pub(super) fn current_scope(&self) -> ScopeId {
@@ -65,21 +76,49 @@ impl<'a> Builder<'a> {
     /// tier.md`); any other opens it, so later reads answer unknown.
     pub(super) fn consume_arg_head(&mut self, node: Node<'a>) {
         let Some(scope) = self.enclosing_sub_scope() else { return };
+        let conditional = crate::cst::is_conditionally_executed(node);
         let shifts = self.arg_shifts.entry(scope).or_default();
         let before = shifts.last().map_or(Some(0), |(_, n)| *n);
-        let after = before.filter(|_| !crate::cst::is_conditionally_executed(node)).map(|n| n + 1);
+        let after = before.filter(|_| !conditional).map(|n| n + 1);
         shifts.push((node.end_position(), after));
         let tail = match self.arg_window_at(node) {
-            Some(InferredType::Sequence(v)) if !crate::cst::is_conditionally_executed(node) => {
-                v.into_iter().skip(1).collect()
-            }
+            Some(InferredType::Sequence(v)) if !conditional => v.into_iter().skip(1).collect(),
             _ => Vec::new(),
         };
+        let at = node.end_position();
+        self.arg_head_consumes.push((scope, at, conditional));
+        self.push_arg_window(scope, Span { start: at, end: at }, tail);
+    }
+
+    /// Seed `scope`'s argument window at `span` with `window`. A seed laid
+    /// after the walk follows the walk's shifts in the bag, and the
+    /// variable fold is latest-wins in bag order, so the scope's shifts
+    /// are replayed after it: each consumes the head of the window it
+    /// follows, as `consume_arg_head` did at its own point.
+    // TODO(source-order-fold): evaluate making the variable fold latest-wins
+    // by source position (on the whole-program branch, design/whole-program-residuals.md);
+    // a late seed would then lose to the shifts below it and this replay goes.
+    pub(super) fn seed_arg_window(&mut self, scope: ScopeId, span: Span, window: Vec<InferredType>) {
+        self.push_arg_window(scope, span, window.clone());
+        let consumes: Vec<(Point, bool)> = self
+            .arg_head_consumes
+            .iter()
+            .filter(|(s, ..)| *s == scope)
+            .map(|(_, at, conditional)| (*at, *conditional))
+            .collect();
+        let mut window = window;
+        for (at, conditional) in consumes {
+            window = if conditional { Vec::new() } else { window.into_iter().skip(1).collect() };
+            self.push_arg_window(scope, Span { start: at, end: at }, window.clone());
+        }
+    }
+
+    fn push_arg_window(&mut self, scope: ScopeId, span: Span, window: Vec<InferredType>) {
         self.push_type_constraint(TypeConstraint {
             variable: "@_".into(),
             scope,
-            constraint_span: Span { start: node.end_position(), end: node.end_position() },
-            inferred_type: InferredType::Sequence(tail),
+            constraint_span: span,
+            inferred_type: InferredType::Sequence(window),
         });
     }
 
@@ -180,10 +219,28 @@ impl<'a> Builder<'a> {
         namespace: Namespace,
         package: Option<String>,
     ) -> SymbolId {
+        let scope = self.current_scope();
+        self.add_symbol_in_scope(scope, name, kind, span, selection_span, detail, namespace, package)
+    }
+
+    /// `add_symbol_in_package` into an explicit scope — for post-walk
+    /// minting, after the scope stack has unwound.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn add_symbol_in_scope(
+        &mut self,
+        scope: ScopeId,
+        name: String,
+        kind: SymKind,
+        span: Span,
+        selection_span: Span,
+        detail: SymbolDetail,
+        namespace: Namespace,
+        package: Option<String>,
+    ) -> SymbolId {
         let id = SymbolId(self.next_symbol_id);
         self.next_symbol_id += 1;
         if matches!(kind, SymKind::Variable | SymKind::Field) {
-            self.var_decls.entry((self.current_scope(), name.clone())).or_default().push(id);
+            self.var_decls.entry((scope, name.clone())).or_default().push(id);
         }
         // Perl says "this constructs" with a name and nothing else, so the
         // convention is read here, at the mint, and consumers ask the flag.
@@ -195,7 +252,7 @@ impl<'a> Builder<'a> {
             Default::default()
         };
         // Every symbol attaches to the current lexical scope. Package
-        // context lives separately in `package_ranges`; the variable
+        // context lives separately in `namespace_ranges`; the variable
         // resolver gates `our` decls by package match at lookup time
         // (so bare `$version` from a sibling `package main;` doesn't
         // reach a Calculator-package `our $version`).
@@ -205,7 +262,7 @@ impl<'a> Builder<'a> {
             kind,
             span,
             selection_span,
-            scope: self.current_scope(),
+            scope,
             package,
             detail,
             namespace,
@@ -231,76 +288,32 @@ impl<'a> Builder<'a> {
         &mut self.symbols[id.0 as usize].presentation
     }
 
-    // ---- Package-range tracking ----
+    // ---- Namespace-lane tracking ----
 
-    /// Record a `package Foo;` / `class Foo;` (statement form). Trims
-    /// the previously-open statement range to end at `start`, then
-    /// pushes a new range whose end is seeded with the file end —
-    /// trimmed in turn when a successor appears, or left at file end
-    /// if none does.
+    /// Record a `package Foo;` / `class Foo;` (statement form): in force to
+    /// the end of the `{ … }` block it is written in (the file, at top
+    /// level), until a successor at the same block depth ends it.
     pub(super) fn open_statement_package_range(&mut self, name: String, start: Point) {
-        use crate::model::file_analysis::{PackageKind, PackageRange};
-        if let Some(idx) = self.open_statement_package.take() {
-            self.package_ranges[idx].span.end = start;
-        }
-        let file_end = self
-            .scope_stack
-            .first()
-            .map(|id| self.scopes[id.0 as usize].span.end)
-            .unwrap_or(start);
-        self.package_ranges.push(PackageRange {
-            package: name,
-            span: Span { start, end: file_end },
-            kind: PackageKind::Statement,
+        let region_end = self.package_regions.last().copied().unwrap_or_else(|| {
+            self.scope_stack.first().map(|id| self.scopes[id.0 as usize].span.end).unwrap_or(start)
         });
-        self.open_statement_package = Some(self.package_ranges.len() - 1);
+        let depth = self.package_regions.len();
+        self.open_sections.open_statement(&mut self.namespace_ranges, name, start, region_end, depth);
     }
 
-    /// Record a `package Foo { … }` / `class Foo { … }` (block form).
-    /// Span is the node's own span — no successor-trimming required.
-    /// Block forms do NOT supplant any statement-form range that
-    /// brackets them: `package Foo; package Bar { … }` leaves Foo
-    /// covering everything outside the Bar block.
+    /// Record a `package Foo { … }` / `class Foo { … }` (block form). Block
+    /// forms do NOT supplant any statement-form range that brackets them:
+    /// `package Foo; package Bar { … }` leaves Foo covering everything
+    /// outside the Bar block.
     pub(super) fn push_block_package_range(&mut self, name: String, span: Span) {
-        use crate::model::file_analysis::{PackageKind, PackageRange};
-        self.package_ranges.push(PackageRange {
-            package: name,
-            span,
-            kind: PackageKind::Block,
-        });
+        crate::model::file_analysis::OpenSections::push_block(&mut self.namespace_ranges, name, span);
     }
 
-    /// Build-time mirror of `FileAnalysis::package_at`. Used by the
-    /// variable resolver to gate `our` decls by package context — the
-    /// builder can't call into FileAnalysis (it hasn't been
-    /// constructed yet).
+    /// The package in force at `point`, as the walk has recorded it so
+    /// far — `FileAnalysis::package_at`'s answer for Perl, before the
+    /// analysis exists.
     pub(super) fn package_at_pos(&self, point: Point) -> Option<&str> {
-        let mut best: Option<&crate::model::file_analysis::PackageRange> = None;
-        for r in &self.package_ranges {
-            if !crate::model::file_analysis::contains_point(&r.span, point) {
-                continue;
-            }
-            let win = match best {
-                None => true,
-                Some(prev) => {
-                    let cur_start = (r.span.start.row, r.span.start.column);
-                    let prev_start = (prev.span.start.row, prev.span.start.column);
-                    let cur_size = (
-                        r.span.end.row - r.span.start.row,
-                        r.span.end.column.saturating_sub(r.span.start.column),
-                    );
-                    let prev_size = (
-                        prev.span.end.row - prev.span.start.row,
-                        prev.span.end.column.saturating_sub(prev.span.start.column),
-                    );
-                    cur_start > prev_start || (cur_start == prev_start && cur_size < prev_size)
-                }
-            };
-            if win {
-                best = Some(r);
-            }
-        }
-        best.map(|r| r.package.as_str())
+        crate::model::file_analysis::namespace_range_at(&self.namespace_ranges, point).map(|r| r.namespace.as_str())
     }
 
     pub(super) fn add_ref(&mut self, kind: RefKind, span: Span, target_name: String, access: AccessKind) {

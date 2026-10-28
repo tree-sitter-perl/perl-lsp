@@ -128,9 +128,9 @@ fn module_prefix(st: &ExtractState, match_id: usize, sep: &str) -> Option<String
 /// narrower: `namespace A; use X\M;` reaches to the next `namespace`, a
 /// row in a braced namespace to its closing brace.
 pub(super) fn bind_reach(st: &mut ExtractState) {
-    let sections = &st.out.namespace_sections;
+    let sections = &st.out.namespace_ranges;
     for row in st.out.use_rows.iter_mut() {
-        if let Some(sec) = crate::model::file_analysis::section_at(sections, row.span.start) {
+        if let Some(sec) = crate::model::file_analysis::namespace_range_at(sections, row.span.start) {
             row.reach.start = row.reach.start.max(sec.span.start);
             row.reach.end = row.reach.end.min(sec.span.end);
         }

@@ -96,6 +96,28 @@ fn collect_linkage_feed(analysis: &FileAnalysis) -> Vec<(String, bool)> {
     feed
 }
 
+/// The leaves a registration files a feed's classes under for widening
+/// (`IndexCore::leaf_defs`): each class identity's leaf, keyed the way the
+/// row store keys it (`name_match_key`), where it differs from the
+/// identity. Empty for a language whose class spellings are identities as
+/// written, which never widens.
+fn widening_leaves(names: &crate::model::file_analysis::NameSpellings, feed: &[(String, bool)]) -> Vec<String> {
+    if names.use_map_sep().is_none() {
+        return Vec::new();
+    }
+    let mut leaves: Vec<String> = feed
+        .iter()
+        .filter(|(_, is_class)| *is_class)
+        .filter_map(|(name, _)| {
+            let leaf = crate::model::file_analysis::name_match_key(name, names);
+            (leaf != *name).then_some(leaf)
+        })
+        .collect();
+    leaves.sort();
+    leaves.dedup();
+    leaves
+}
+
 /// Pick the winner among same-name candidates by the SAME total order
 /// `register_symbols` uses for the global cache slot: a TYPE (Class) beats a
 /// Sub/value, then the smallest canonical path breaks the tie (order-independent

@@ -226,28 +226,28 @@ pub(crate) fn candidate_to_completion_item(c: CompletionCandidate) -> Completion
 
 /// Language-agnostic in-scope completion: every symbol visible from
 /// `point` — top-level definitions (functions / classes / packages,
-/// globally addressable) plus locals / params / methods / fields whose
-/// declaring scope encloses the cursor — as plain CompletionItems. The
+/// globally addressable) plus the locals / params / methods / fields a
+/// scope on the cursor's lookup chain binds — as plain CompletionItems. The
 /// client filters by the typed prefix (sigils and all). This is the
 /// pack-language completion path (half 1): no cursor context, no member
 /// resolution — the `.`/`->` receiver seam is a separate design.
 pub fn in_scope_completion(analysis: &FileAnalysis, point: Point) -> Vec<CompletionItem> {
     use std::collections::HashSet;
-    let chain: HashSet<_> = analysis
+    let bound: HashSet<_> = analysis
         .scope_at(point)
-        .map(|s| analysis.scope_chain(s).into_iter().collect())
+        .map(|s| analysis.bindings_seen_from(s).into_iter().map(|sym| sym.id).collect())
         .unwrap_or_default();
     let mut seen: HashSet<&str> = HashSet::new();
     let mut items = Vec::new();
     for sym in analysis.symbols() {
         // Top-level defs are addressable anywhere; everything else
-        // (params, locals, a class's methods/fields) only where the
-        // declaring scope is on the cursor's scope chain.
+        // (params, locals, a class's methods/fields) only where a scope
+        // on the cursor's lookup chain binds it.
         let top_level = matches!(
             sym.kind,
             FaSymKind::Sub | FaSymKind::Class | FaSymKind::Package
         );
-        if !top_level && !chain.contains(&sym.scope) {
+        if !top_level && !bound.contains(&sym.id) {
             continue;
         }
         if sym.name.is_empty() || !seen.insert(sym.name.as_str()) {

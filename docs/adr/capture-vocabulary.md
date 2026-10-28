@@ -103,6 +103,115 @@ family routing line, and the family file it lives in. When a language
 needs extraction a query cannot express, its frontend adds a typed Rust
 handler in the same shape rather than a string-keyed hook on the pack.
 
+## Decision: a scope capture says what the scope does
+
+A scope's name-lookup rule is the document's to state, never something a
+consumer reads off the shape of the scope or the language serving it.
+Python's class body is in force for the code written directly in it and
+not for a method of the class or a class nested in it; PHP's function
+body sees no variable of the scopes around it but the ones it captures.
+Both are rules ABOUT a scope, so each is a `ScopeCap` spelling the
+document opts into (`@scope.direct`), minted as a field on the model's
+`Scope` (`Scope::direct`) — rule #11, at the producer — and read by ONE
+walk, `lookup_chain`, which every name lookup takes: a variable read, a
+bare class spelling. A pack that says nothing keeps the plain lexical
+chain.
+
+The walk is a type, so a lookup cannot route around it. `lookup_chain`
+returns a `LookupChain`, and that value is the only way to list the
+names a scope binds for lookup (`LookupChain::bindings`, which also
+drops a member declared through a receiver). The containment climb,
+`scope_chain_of` — what a scope is inside: its class, its callable, its
+package — returns bare ids and lists no names; what a scope DECLARES,
+for the outline and a class's members, is `SymbolTable::
+declared_directly_in`, named so no one reads it as a lookup. Every raw
+climb up `Scope::parent` outside the walkers is allowlisted with its
+containment reason (`layering_tests::raw_scope_climbs_are_containment_only`,
+count-exact, shrink-only): a new one fails `cargo test` until it moves
+onto the lookup chain or says why it is containment. In-scope
+completion, `visible_symbols`, the receiver a `self.x` write joins, and
+Perl's binders (`resolve_variable_refs`, the hash-key owner fallback,
+`visible_variable_decl`, gated parameter types) walk it; Perl marks no
+scope `direct`, so its answers are unchanged.
+
+Lookup is not ownership. Whose member a declaration is comes from the
+scope a class's own match opened (`@context.class` with its `@scope`),
+and stops at a callable whatever the document marks; how a name resolves
+comes from `lookup_chain`. The two share one fact, the callable boundary
+(`callable_reach`: a site's scope out to the nearest callable). A
+declaration joins the class whose body is on its reach, and a direct
+scope is in force for a use only as the innermost direct scope on its
+reach. Neither is a namespace section: the lane holds namespaces only.
+
+Where code runs is a scope fact too. A def's header — Python's base
+list, parameter annotations and defaults, `-> T` — is evaluated in the
+scope the def is written in, though the def's own `@scope` covers it.
+The document marks each header region `@scope.header`, and the extractor
+mints it as a scope whose parent is the def's declaring scope: a use
+written there, and a lookup at any point in it, starts outside the def
+by the ordinary walk, with no consumer comparing a position against a
+body. A name the header DECLARES (a parameter) still binds in the def's
+own scope (`ExtractState::bind_scope`). One fact for every header
+expression, not an arm per construct: the base list is one more region.
+
+The spelling names the behaviour, not the construct: `direct` is a scope
+whose names are in force only for code written directly in it, whatever
+the language calls that scope. A generic capture may never carry one
+language's rule — `@scope.sub` once minted a Python-only section kind,
+which is why the rule moved here.
+
+## Decision: a member is declared where the document says, once
+
+Python's document captures two member shapes, and each reuses a model
+the rest of the server already reads.
+
+A name a class body binds (`count = 0`, `a: int`, `b: int = 5`) is two
+names from one token: the class's data member (`@def.field`,
+`Counter.count`) and a name in the class scope (`@def.var`), which code
+written directly in the body reads bare through `lookup_chain`. The match
+says so with `@def.pair`: the two defs carrying one match id are linked
+each way as `Symbol::declared_with`, the relation Perl's `has` already
+mints. The twin is no class content of its own. The pair is a field group
+(`field-projections.md`): the member is its reader, read rather than
+called, and the twin's uses are its variable spellings, so a rename from
+either spelling, in any file, rewrites both. A
+binding with a value is `@mark.static`; a bare annotation declares an
+instance's attribute and stays unmarked.
+
+A write through a receiver (`self.n = …`, `@def.slot`, receiver token
+`@def.slot.receiver`) declares an instance slot: a `HashKeyDef` owned by
+`HashKeyOwner::Class`, Perl's own model for `$self->{n}`. The owner is the
+class the receiver is TYPED as at the write — the receiver parameter's
+class, an annotated parameter's or local's annotation, a local's value
+(`o = Counter()`) — asked of the assembled analysis's own registry
+(`skeleton::declare_slots`, the last step of `into_file_analysis`, the
+slots adopted into the sealed baseline). A write declares only when
+neither its class nor an ancestor already declares the name (a class-body
+binding, a member, an earlier slot); every other write, augmented or not,
+and any write through an untyped receiver, stays a member reference. The
+write's own token stays a member reference too.
+
+`TODO(slot-owner-deferred)`: an owner only the index can name (a receiver
+typed by another file, a parent declared in another file) is still decided
+without it. The target is Perl's shape — the write is a ref whose owner is
+a late binding (`resolve_hash_key_owners`,
+`fixup_call_bound_hash_key_owners`, `deferred_hash_key_owner`), and
+"declared" is the first write whose decided owner is the class — landing
+with the php variables stack (`unify_assigned`, `TODO(assigned-unify)`).
+
+A slot is reached only through a receiver: it is no bare name anywhere,
+because the lexical walk binds Variables alone. Member lookup reads it
+first — `NameSpellings::instance_slots` is the language's data saying its
+instance slots shadow the class's members (`BeforeClass`), so
+`resolve_member_in_ancestors` walks the ancestry for a class-owned slot
+before it walks it for members, and `slot_class_of` makes a slot class
+content for goto-def, references, rename, hover and completion. Perl
+keeps its keys apart from its methods (`Apart`), so nothing changes there.
+
+A receiver parameter holds an instance of its method's class. The
+extractor states that as the parameter's value at its binding site, so a
+member written or read through `self` dispatches on the class.
+
 ## Decision: a fact the grammar parses is a capture, not a text probe
 
 When the grammar already gives a fact its own node, the document captures

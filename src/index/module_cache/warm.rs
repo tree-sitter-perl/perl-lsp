@@ -193,10 +193,14 @@ pub enum WarmDirective {
 /// metadata read, and the caller records them inside the predicate.
 /// Closure-stamp validation runs on whichever struct is in hand (stub
 /// skeleton or full analysis); both carry the pinned `include_closure`.
+/// So does `inputs_current`, the driver's word on what the analysis read
+/// from its path (the module it was filed under); a row it rejects is
+/// skipped like a stamp-stale one.
 pub fn warm_pack_stream_with_stubs(
     conn: &Connection,
     use_stubs: bool,
     admit: &mut dyn FnMut(&std::path::Path) -> bool,
+    inputs_current: &mut dyn FnMut(&std::path::Path, &FileAnalysis) -> bool,
     each: &mut dyn FnMut(PathBuf, WarmPayload) -> WarmDirective,
 ) -> usize {
     // Cheap integer/text columns first; the stub BLOB is column 6 and is
@@ -256,6 +260,7 @@ pub fn warm_pack_stream_with_stubs(
             if let Some(stub) = stub_blob.as_deref().and_then(decode_stub) {
                 if closure_stamp(&stub.skeleton.pack.include_closure, &mut stat_memo)
                     != row_deps_stamp
+                    || !inputs_current(&path, &stub.skeleton)
                 {
                     continue;
                 }
@@ -269,7 +274,9 @@ pub fn warm_pack_stream_with_stubs(
         }
         let module_name = row.get::<_, String>(0).unwrap_or_default();
         let Some(fa) = load_one(conn, &path_str) else { continue };
-        if closure_stamp(&fa.pack.include_closure, &mut stat_memo) != row_deps_stamp {
+        if closure_stamp(&fa.pack.include_closure, &mut stat_memo) != row_deps_stamp
+            || !inputs_current(&path, &fa)
+        {
             continue;
         }
         count += 1;

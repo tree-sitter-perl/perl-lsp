@@ -194,7 +194,20 @@ pub struct UseContext {
     pub imports: Vec<String>,
     /// Raw text of each arg — lets plugins detect flags like `-strict`.
     pub raw_args: Vec<String>,
+    /// The use-list's string words with their source spans, so an action
+    /// can anchor on the word it is about. Empty for a synthetic `use`.
+    #[serde(default)]
+    pub import_words: Vec<ImportWord>,
+    /// `no Module LIST` rather than `use Module LIST`.
+    #[serde(default)]
+    pub negated: bool,
     pub current_package: Option<String>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportWord {
+    pub text: String,
     pub span: Span,
 }
 
@@ -598,6 +611,19 @@ pub enum EmitAction {
         imported_symbols: Vec<crate::model::file_analysis::ImportedSymbol>,
         span: Span,
     },
+
+    /// Declare a package global of the current package, as `our` does:
+    /// `use vars qw($x)` names `$x` at its word. `name` is sigiled and
+    /// unqualified; `span` is the word declaring it. The variable is
+    /// Perl's, not the plugin's — it lands in the language namespace and
+    /// resolves like any `our`.
+    PackageVariable { name: String, span: Span },
+
+    /// From the end of `span` to the end of its enclosing scope, every
+    /// variable must (`required`) or need not be declared: `use strict`,
+    /// `no strict 'vars'`, and the modules that turn strict on for their
+    /// importer (`frameworks/strict.rhai`).
+    RequireDeclaration { required: bool, span: Span },
 
     /// Declare a type for a variable inside a scope. Plugins use this
     /// when they know a framework-provided variable's type that the

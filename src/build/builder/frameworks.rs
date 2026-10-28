@@ -824,7 +824,7 @@ impl<'a> Builder<'a> {
         if args.is_empty() {
             // Fallback to standard extraction
             let (standard, _) = self.extract_use_import_list(node);
-            return standard;
+            return standard.into_iter().map(|(text, _)| text).collect();
         }
         args
     }

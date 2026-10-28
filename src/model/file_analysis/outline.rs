@@ -111,7 +111,7 @@ impl FileAnalysis {
     /// nested instead of flat (#62).
     ///
     /// A statement-form `package Foo;` is a namespace pin, not a lexical scope,
-    /// so its subs/vars live at file scope tagged via `package_ranges`; we
+    /// so its subs/vars live at file scope tagged via `namespace_ranges`; we
     /// attach each non-container sibling to the most recent preceding container
     /// whose range governs it (`package_at`). Block-form classes already nest
     /// through their lexical body scope and arrive with their children intact;
@@ -327,14 +327,7 @@ impl FileAnalysis {
                         (sym.name.clone(), Some("union".to_string()), children)
                     } else {
                         let detail = match &sym.detail {
-                            SymbolDetail::Variable { decl_kind, .. } => match decl_kind {
-                                DeclKind::My => "my",
-                                DeclKind::Our => "our",
-                                DeclKind::State => "state",
-                                DeclKind::Field => "field",
-                                DeclKind::Param => "param",
-                                DeclKind::ForVar => "for",
-                            },
+                            SymbolDetail::Variable { decl_kind, .. } => decl_kind.label(),
                             _ => "my",
                         };
                         (sym.name.clone(), Some(detail.to_string()), Vec::new())
@@ -453,6 +446,9 @@ impl FileAnalysis {
                 SymKind::Variable | SymKind::Field => {
                     let is_self = crate::model::conventions::is_conventional_invocant_name(&sym.name);
                     let (sigil, is_readonly, is_param) = match &sym.detail {
+                        // Anchored on a use, not a declaration: the use's
+                        // own ref carries the token.
+                        SymbolDetail::Variable { decl_kind: DeclKind::Implicit, .. } => continue,
                         SymbolDetail::Variable { sigil, decl_kind } => {
                             let readonly = matches!(decl_kind, DeclKind::Field);
                             let is_param = matches!(decl_kind, DeclKind::Param | DeclKind::ForVar);

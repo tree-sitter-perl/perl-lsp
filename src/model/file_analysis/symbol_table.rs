@@ -71,8 +71,10 @@ impl SymbolTable {
         self.by_name.get(name).map_or(&[], |v| v.as_slice())
     }
 
-    /// SymbolIds whose declaring scope is `scope`.
-    pub fn in_scope(&self, scope: ScopeId) -> &[SymbolId] {
+    /// SymbolIds whose declaring scope is `scope`: what the scope
+    /// DECLARES, for the outline and a class's members. Not a lookup — a
+    /// name use sees a scope's bindings only through `LookupChain`.
+    pub fn declared_directly_in(&self, scope: ScopeId) -> &[SymbolId] {
         self.by_scope.get(&scope).map_or(&[], |v| v.as_slice())
     }
 
@@ -199,8 +201,9 @@ impl FileAnalysis {
     /// `symbols_are_evicted`.
 
     /// Adopt build-time symbols minted after assembly (the driver's path
-    /// rails): ids assigned in order, indexed, and sealed into the
-    /// enrichment baseline — facts of the build, not enrichment.
+    /// rails, a pack's instance slots): ids assigned in order, indexed, and
+    /// sealed into the enrichment baseline — facts of the build, not
+    /// enrichment.
     pub fn adopt_path_symbols(&mut self, symbols: Vec<Symbol>) {
         if symbols.is_empty() {
             return;

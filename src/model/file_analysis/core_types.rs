@@ -116,6 +116,29 @@ pub struct Scope {
     /// names no package, so nothing binds.
     #[serde(default)]
     pub implicit_receiver: bool,
+    /// The names declared in this scope are in force only for code
+    /// written directly in it (`@scope.direct`): a use inside a callable,
+    /// or inside another such scope, nested here looks past the scope, as
+    /// Python's class body does for its methods and its nested classes.
+    /// Read through `lookup_chain`, the one walk every name lookup takes,
+    /// so a language states the rule once.
+    #[serde(default)]
+    pub direct: bool,
+    /// Where this scope switches "every variable must be declared" on or
+    /// off (Perl's `use strict 'vars'` / `no strict 'vars'`), in source
+    /// order. Lexical: a nested scope inherits the switch in force where it
+    /// opens, and its own switches end with it.
+    #[serde(default)]
+    pub declaration_rules: Vec<DeclarationRule>,
+}
+
+/// One switch of a scope's declaration rule: from `at` on, an undeclared
+/// variable is (`required`) or is not an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclarationRule {
+    #[serde(with = "PointDef")]
+    pub at: Point,
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,28 +175,102 @@ pub struct PluginDiagnostic {
     pub plugin_id: String,
 }
 
-/// Flat per-file record of which `package`/`class` declaration governs a
-/// byte range. Independent of the lexical scope tree — `package Foo;` is
-/// not a lexical boundary in Perl, so collapsing the two concepts would
-/// force shims (lift `my` past the package "scope", merge buckets in the
-/// outline) we'd rather not have.
+/// One section of a file's namespace lane (`FileAnalysis::namespace_ranges`):
+/// the namespace a declaration puts in force over a range — Perl's
+/// `package Foo;` / `class Foo { … }`, PHP's `namespace A;` / `namespace A
+/// { … }`, a Python module's whole file. Independent of the lexical scope
+/// tree: `package Foo;` is not a lexical boundary in Perl, so collapsing
+/// the two would force shims (lift `my` past the package "scope", merge
+/// buckets in the outline).
 ///
-/// Query via `FileAnalysis::package_at(point)` — innermost (latest-starting)
-/// containing range wins for nested `package Foo { … package Bar; … }`.
+/// Written through `OpenSections`, read through `namespace_range_at`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PackageRange {
-    pub package: String,
+pub struct NamespaceRange {
+    pub namespace: String,
     pub span: Span,
-    pub kind: PackageKind,
+    pub kind: SectionKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PackageKind {
-    /// `package Foo;` / `class Foo;` — flows until the next sibling
-    /// declaration or end of file/block.
+pub enum SectionKind {
+    /// `package Foo;` / `namespace A;` — in force until the next statement
+    /// form in the same region, or the region's end.
     Statement,
-    /// `package Foo { … }` / `class Foo { … }` — span equals the block.
+    /// `package Foo { … }` / `namespace A { … }` — span equals the block.
     Block,
+}
+
+/// The section in force at `point`: the innermost containing one — the
+/// latest-starting, and on a tie the narrower. `None` outside every
+/// section. The one lookup over a namespace lane, for the model and both
+/// builders alike.
+pub fn namespace_range_at(ranges: &[NamespaceRange], point: Point) -> Option<&NamespaceRange> {
+    ranges
+        .iter()
+        .filter(|r| contains_point(&r.span, point))
+        .max_by_key(|r| (r.span.start, std::cmp::Reverse(r.span.end)))
+}
+
+/// The innermost scope containing `point`, over a bare slice — the
+/// lookup `FileAnalysis::scope_at` is the method form of, shared with the
+/// use-map, which holds scopes without a `FileAnalysis`.
+pub fn innermost_scope_at(scopes: &[Scope], point: Point) -> Option<ScopeId> {
+    let mut best: Option<(ScopeId, usize)> = None; // (id, span_size)
+    for scope in scopes {
+        if contains_point(&scope.span, point) {
+            let size = span_size(&scope.span);
+            if best.is_none() || size <= best.unwrap().1 {
+                best = Some((scope.id, size));
+            }
+        }
+    }
+    best.map(|(id, _)| id)
+}
+
+/// The statement-form sections a builder's walk still has running, by the
+/// region depth each was declared at — the one closing rule both builders
+/// write their lane by. A region is whatever bounds a statement form in
+/// the language (a Perl `{ … }` block, a pack scope); depth is how many
+/// enclose the declaration.
+#[derive(Debug, Default, Clone)]
+pub struct OpenSections(Vec<RunningSection>);
+
+/// One statement-form section still running. It holds the lane index, not
+/// a reference, because the lane keeps growing while the section runs.
+#[derive(Debug, Clone, Copy)]
+struct RunningSection {
+    /// Regions enclosing the declaration.
+    depth: usize,
+    /// Its entry in the namespace lane.
+    lane_index: usize,
+}
+
+impl OpenSections {
+    /// A statement form at `start`, `depth` regions deep: in force to
+    /// `region_end` — the end of the region it is written in — and ending
+    /// every section still running at its depth or deeper where it starts.
+    /// A section only ever shortens: one a closed deeper region left
+    /// behind keeps that region's end.
+    pub fn open_statement(
+        &mut self,
+        lane: &mut Vec<NamespaceRange>,
+        namespace: String,
+        start: Point,
+        region_end: Point,
+        depth: usize,
+    ) {
+        while let Some(running) = self.0.pop_if(|r| r.depth >= depth) {
+            let end = &mut lane[running.lane_index].span.end;
+            *end = (*end).min(start);
+        }
+        self.0.push(RunningSection { depth, lane_index: lane.len() });
+        lane.push(NamespaceRange { namespace, span: Span { start, end: region_end }, kind: SectionKind::Statement });
+    }
+
+    /// A braced form: its block is its section, and it ends nothing.
+    pub fn push_block(lane: &mut Vec<NamespaceRange>, namespace: String, span: Span) {
+        lane.push(NamespaceRange { namespace, span, kind: SectionKind::Block });
+    }
 }
 
 // ---- Namespace ----
@@ -252,6 +349,42 @@ pub struct NameSpellings {
     /// How a use-map language's import rows bind — read by the extractor
     /// as it mints each row, never by a consumer.
     pub imports: ImportRule,
+    /// Which class a site's code belongs to (`FileAnalysis::package_at`).
+    pub enclosing_class: EnclosingClass,
+    /// Whether a member access reaches an instance's slots
+    /// (`FileAnalysis::slot_class_of`).
+    pub instance_slots: InstanceSlots,
+}
+
+/// Whether a language's member access (`obj.x`) reaches the slots an
+/// instance holds (a class-owned `HashKeyDef`) as well as its class's
+/// members. A language declares it on its spellings; the member walk reads
+/// the value and never asks which language it serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum InstanceSlots {
+    /// Member access reaches only the class's members. Perl's slots are
+    /// reached by `$obj->{key}`, a syntax of their own.
+    #[default]
+    Apart,
+    /// Member access reads the instance's slots first, then its class's
+    /// members, ancestors included in each: Python's instance `__dict__`
+    /// before the class.
+    BeforeClass,
+}
+
+/// Where a language's code finds the class it belongs to — the class
+/// `$self` / `$this` names, the outline container, the package a trigger
+/// view gates on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum EnclosingClass {
+    /// The innermost scope a class body names. A namespace only qualifies
+    /// names: PHP's `namespace App;` and a Python module hold classes, and
+    /// the class is the body they declare.
+    #[default]
+    ScopeChain,
+    /// The namespace in force: Perl's `package Foo;` makes the code after
+    /// it Foo's, so the namespace lane answers.
+    NamespaceInForce,
 }
 
 /// A use-map language's import semantics, as data the extractor mints a
@@ -310,6 +443,8 @@ impl NameSpellings {
         root_package: None,
         member_namespace: MemberNamespace::PerFamily,
         imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
+        enclosing_class: EnclosingClass::ScopeChain,
+        instance_slots: InstanceSlots::Apart,
     };
 
     /// A language with a namespace separator, no sigils, and spellings
@@ -323,6 +458,8 @@ impl NameSpellings {
             root_package: None,
             member_namespace: MemberNamespace::PerFamily,
             imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
+            enclosing_class: EnclosingClass::ScopeChain,
+            instance_slots: InstanceSlots::Apart,
         }
     }
 
@@ -1118,6 +1255,33 @@ pub enum DeclKind {
     Field,
     Param,
     ForVar,
+    /// No declaration: an undeclared variable is the package global Perl
+    /// creates on first mention (`$x = 1` in `main` is `$main::x`). The
+    /// builder mints the symbol at the first use in the file.
+    Implicit,
+}
+
+impl DeclKind {
+    /// A package global with a lexical alias (`our`) or none at all
+    /// (`Implicit`): reachable as `$Pkg::name`, and a bare use reaches it
+    /// only from its own package.
+    pub fn is_package_global(self) -> bool {
+        matches!(self, DeclKind::Our | DeclKind::Implicit)
+    }
+
+    /// The keyword the declaration was spelled with, as outline and
+    /// completion show it.
+    pub fn label(self) -> &'static str {
+        match self {
+            DeclKind::My => "my",
+            DeclKind::Our => "our",
+            DeclKind::State => "state",
+            DeclKind::Field => "field",
+            DeclKind::Param => "param",
+            DeclKind::ForVar => "for",
+            DeclKind::Implicit => "global",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

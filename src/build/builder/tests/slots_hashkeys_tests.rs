@@ -1399,3 +1399,20 @@ sub f {
             && matches!(fe.extraction, Extraction::Rebind)), "{v} rebind edge");
     }
 }
+
+#[test]
+fn levels_on_a_write_path_are_not_read_as_drills() {
+    // `$m{a}{x}{k0}{k1} = …` autovivifies `$m{a}{x}`: the levels a write
+    // passes through are its path, not reads that the shape must already
+    // have, however deep the write goes.
+    let fa = build_fa(
+        "package Foo;\nsub hw {\n my %m = ();\n $m{'1.0'}{'system'}{'k0'}{'k1'}{'k2'} = 1;\n $m{'1.0'}{'emeter'}{'k0'}{'k1'}{'k2'} = 2;\n return %m;\n}\n1;\n",
+    );
+    let typos: Vec<String> = fa.projected_key_typos(None).into_iter().map(|t| t.key).collect();
+    assert!(typos.is_empty(), "{:?}", typos);
+    let m = fa.inferred_type_via_bag("%m", Point::new(5, 0)).expect("%m typed");
+    let InferredType::HashWithKeys { keys, .. } = &m else { panic!("%m: {:?}", m) };
+    let Some(InferredType::HashWithKeys { keys: inner, .. }) = keys[0].1.as_deref() else { panic!("1.0: {:?}", keys[0]) };
+    let names: Vec<&str> = inner.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(names, ["system", "emeter"]);
+}
