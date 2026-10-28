@@ -32,6 +32,7 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     enclosing_class: crate::model::file_analysis::EnclosingClass::NamespaceInForce,
     // `$obj->{key}` reaches a slot; `$obj->key` never does.
     instance_slots: crate::model::file_analysis::InstanceSlots::Apart,
+    functions: NameSpellings::NONE.functions,
 };
 
 /// Split a possibly-qualified name into `(Option<package>, basename)`.
@@ -536,6 +537,7 @@ mod tests {
             class_call: NameSpellings::NONE.class_call,
             enclosing_class: NameSpellings::NONE.enclosing_class,
             instance_slots: NameSpellings::NONE.instance_slots,
+            functions: NameSpellings::NONE.functions,
         };
         assert_eq!(super::split_qualified("App\\Models\\User", &php), (Some("App\\Models"), "User"));
         assert_eq!(super::name_match_key("App\\Models\\User", &php), "User");

@@ -356,6 +356,27 @@ pub struct NameSpellings {
     /// Whether a member access reaches an instance's slots
     /// (`FileAnalysis::slot_class_of`).
     pub instance_slots: InstanceSlots,
+    /// Where a use-map language's bare function call finds its function.
+    pub functions: FunctionLookup,
+}
+
+/// Where a bare (unqualified) function call finds its function in a
+/// use-map language. A qualified call resolves like a class spelling in
+/// both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FunctionLookup {
+    /// The global function of that name.
+    ///
+    /// TODO(module-functions): Python files its functions by bare name, not
+    /// under their module, so a call names the leaf. Filed under the
+    /// module, a call would resolve through the use-map like a class
+    /// spelling (`from app.a import helper`).
+    #[default]
+    Global,
+    /// The namespace in force when it declares the function, else the
+    /// global namespace: PHP's fallback for an unqualified function, which
+    /// its `use` rows never name.
+    NamespaceThenGlobal,
 }
 
 /// Whether a language's member access (`obj.x`) reaches the slots an
@@ -461,6 +482,7 @@ impl NameSpellings {
         class_call: ClassCall::FunctionCall,
         enclosing_class: EnclosingClass::ScopeChain,
         instance_slots: InstanceSlots::Apart,
+        functions: FunctionLookup::Global,
     };
 
     /// A language with a namespace separator, no sigils, and spellings
@@ -477,6 +499,7 @@ impl NameSpellings {
             class_call: ClassCall::FunctionCall,
             enclosing_class: EnclosingClass::ScopeChain,
             instance_slots: InstanceSlots::Apart,
+            functions: FunctionLookup::Global,
         }
     }
 

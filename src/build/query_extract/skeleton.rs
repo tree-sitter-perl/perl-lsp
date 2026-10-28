@@ -987,7 +987,7 @@ impl SkeletonAnalysis {
                     ),
                     None => match use_map_at(span.start) {
                         Some(map) => {
-                            let fq = function_identity(&map, name, &free_functions);
+                            let fq = function_identity(&map, self.names.functions, name, &free_functions);
                             // under a use-map a class is filed under the
                             // identity its spelling names at the call
                             let identity = map.resolve(name).identity(map.sep);
@@ -1129,7 +1129,7 @@ impl SkeletonAnalysis {
                     RefCap::Call => {
                         let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &names, r.start, &symbols);
                         if let Some(map) = map {
-                            let namespace = function_identity(&map, &r.name, &free_functions).namespace;
+                            let namespace = function_identity(&map, names.functions, &r.name, &free_functions).namespace;
                             binding = (!namespace.is_empty()).then_some(RefBinding::Function { package: namespace });
                         }
                         RefKind::FunctionCall
@@ -1521,20 +1521,23 @@ impl SkeletonAnalysis {
 }
 
 /// The free function `written` names at a use-map site, as its namespace
-/// and leaf. A qualified spelling resolves like a class spelling; a bare
-/// name is the namespace in force's own function when the file declares
-/// one there, else the global namespace's.
+/// and leaf: a qualified spelling resolves like a class spelling, a bare
+/// one by the language's `FunctionLookup`.
 fn function_identity(
     map: &crate::model::file_analysis::UseMap,
+    lookup: crate::model::file_analysis::FunctionLookup,
     written: &str,
     free_functions: &FreeFunctions,
 ) -> crate::model::file_analysis::QualifiedName {
-    use crate::model::file_analysis::QualifiedName;
-    if written.contains(map.sep) {
-        return map.resolve(written);
+    use crate::model::file_analysis::{FunctionLookup, QualifiedName};
+    match lookup {
+        _ if written.contains(map.sep) => map.resolve(written),
+        FunctionLookup::Global => QualifiedName::new("", written),
+        FunctionLookup::NamespaceThenGlobal => {
+            let own = map.own_namespace.unwrap_or("");
+            QualifiedName::new(if free_functions.contains_key(&(own, written)) { own } else { "" }, written)
+        }
     }
-    let own = map.own_namespace.unwrap_or("");
-    QualifiedName::new(if free_functions.contains_key(&(own, written)) { own } else { "" }, written)
 }
 
 /// A file's free functions by (namespace, leaf); the global namespace is `""`.
