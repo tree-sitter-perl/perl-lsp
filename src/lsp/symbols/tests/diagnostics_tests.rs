@@ -1094,6 +1094,64 @@ fn missing_declaration_knows_use_english() {
     assert!(found[0].1.contains("'$MATCH'"), "{found:?}");
 }
 
+/// `use Env qw(...)` ties package variables to `%ENV` through Env's own
+/// `import`; the bundled `env` plugin declares each listed word, a bare
+/// word as a scalar.
+#[test]
+fn missing_declaration_knows_use_env() {
+    let module_index = pragma_index();
+    module_index.insert_cache(
+        "Env",
+        Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+            std::path::PathBuf::from("/fake/Env.pm"),
+            std::sync::Arc::new(parse_analysis("package Env;\nsub import {}\n1;\n")),
+        ))),
+    );
+    let analysis = parse_analysis("use strict; use Env qw(WEBWORK_ROOT @PATH $HOME);\nprint $WEBWORK_ROOT, @PATH, $HOME, $OTHER, @WEBWORK_ROOT;\n");
+    let names: Vec<String> = missing_declarations(&collect_diagnostics(&analysis, &module_index, Default::default()))
+        .into_iter()
+        .map(|(_, m)| m)
+        .collect();
+    assert_eq!(names.len(), 2, "{names:?}");
+    assert!(names[0].contains("'$OTHER'"), "{names:?}");
+    assert!(names[1].contains("'@WEBWORK_ROOT'"), "{names:?}");
+}
+
+/// Log::Log4perl installs its exports from tags at runtime; the bundled
+/// `log4perl` plugin states them: `:levels` the level scalars, `:easy`
+/// those plus the stealth loggers, and a bare `use Log::Log4perl::Level`
+/// the scalars plus their `*_INT` functions.
+#[test]
+fn log4perl_tags_declare_their_exports() {
+    let module_index = pragma_index();
+    for name in ["Log::Log4perl", "Log::Log4perl::Level"] {
+        module_index.insert_cache(
+            name,
+            Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+                std::path::PathBuf::from(format!("/fake/{name}.pm")),
+                std::sync::Arc::new(parse_analysis(&format!("package {name};\nsub import {{}}\n1;\n"))),
+            ))),
+        );
+    }
+    let messages = |src: &str| -> Vec<String> {
+        collect_diagnostics(&parse_analysis(src), &module_index, Default::default())
+            .into_iter()
+            .map(|d| d.message)
+            .collect()
+    };
+    let levels = messages("use strict; use Log::Log4perl qw(:levels);\nmy $l = $WARN + $DEBUG;\n");
+    assert!(levels.is_empty(), "{levels:?}");
+
+    let easy = messages("use strict; use Log::Log4perl qw(:easy);\nmy $l = $WARN; DEBUG('x'); LOGDIE('y'); get_logger();\n");
+    assert!(easy.is_empty(), "{easy:?}");
+
+    let level_mod = messages("use strict; use Log::Log4perl::Level;\nmy $l = $INFO + WARN_INT();\n");
+    assert!(level_mod.is_empty(), "{level_mod:?}");
+
+    let untagged = messages("use strict; use Log::Log4perl;\nmy $l = $WARN;\n");
+    assert!(untagged.iter().any(|m| m.contains("'$WARN'")), "{untagged:?}");
+}
+
 /// The lint is `use strict 'vars'`: silent where strict isn't in force.
 /// Strict is lexical — on from its statement to the end of the enclosing
 /// scope, off in a `no strict 'vars'` block — and `use v5.12`+ or a module

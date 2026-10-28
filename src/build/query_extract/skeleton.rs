@@ -219,6 +219,10 @@ pub struct SkeletonAnalysis {
     /// slot each, if `declare_slots` finds its owner and no declaration of
     /// the name there.
     pub slot_writes: Vec<SlotWrite>,
+    /// Writes to a member (an `@flow.place` a member read projects),
+    /// undecided: which member each writes is the receiver's type's, settled by
+    /// `settle_member_writes`.
+    pub member_writes: Vec<MemberWrite>,
     /// The scope each class declared in this file opened as its own, by
     /// the class's identity: where a slot of it is filed.
     pub class_scopes: Vec<(String, crate::model::file_analysis::ScopeId)>,
@@ -230,6 +234,15 @@ pub struct SkeletonAnalysis {
 pub struct SlotWrite {
     pub symbol: SkelSymbol,
     pub receiver: String,
+}
+
+/// An assignment to a member through a receiver (`obj.x = v`): the
+/// receiver expression, the member's name, and the value written.
+#[derive(Debug, Clone)]
+pub struct MemberWrite {
+    pub receiver: crate::model::file_analysis::Span,
+    pub member: String,
+    pub value: crate::model::file_analysis::Span,
 }
 
 /// What a function-like macro's return resolves to (`SkeletonAnalysis::
@@ -448,6 +461,7 @@ impl SkeletonAnalysis {
         };
         let names = self.names.clone();
         let slot_writes = std::mem::take(&mut self.slot_writes);
+        let member_writes = std::mem::take(&mut self.member_writes);
         let class_scopes = std::mem::take(&mut self.class_scopes);
         // A NAMED typedef `typedef struct N {...} N;` matches both the
         // struct_specifier and the type_definition → two `class N` AT THE
@@ -876,8 +890,10 @@ impl SkeletonAnalysis {
             // an unknown uppercase macro leaves the enclosing `auto x =
             // F(..)` honestly untyped). Where calling a class constructs it
             // (`NameSpellings::class_call`), prefer a `Class` over a
-            // like-named callable (the constructor is the stronger claim);
-            // elsewhere a class is no callee at all. A method is
+            // like-named callable (the constructor is the stronger claim),
+            // and a name looked up across files carries the class identity
+            // it spells here, so a class declared under it elsewhere answers
+            // too; elsewhere a class is no callee at all. A method is
             // never a free callee: a bare call in a member body reaches it
             // through `member_of`, with the class as its receiver.
             let use_map_at = |site: tree_sitter::Point| {
@@ -906,10 +922,10 @@ impl SkeletonAnalysis {
                 });
                 receiver_class.insert(r.span, class);
             }
+            let calls_construct = self.names.class_call == crate::model::file_analysis::ClassCall::Constructs;
             let callee_sid: std::collections::HashMap<&str, SymbolId> = {
                 let mut m: std::collections::HashMap<&str, SymbolId> =
                     std::collections::HashMap::new();
-                let calls_construct = self.names.class_call == crate::model::file_analysis::ClassCall::Constructs;
                 for s in &symbols {
                     match s.kind {
                         SymKind::Class if calls_construct => {
@@ -969,18 +985,19 @@ impl SkeletonAnalysis {
                     None => match use_map_at(span.start) {
                         Some(map) => {
                             let fq = function_identity(&map, name, &free_functions);
-                            let local = free_functions.get(&(fq.namespace.as_str(), fq.leaf.as_str())).copied().or_else(|| {
-                                // a bare name may name a class called as a
-                                // callable, filed under its identity
-                                (!name.contains(map.sep))
-                                    .then(|| callee_sid.get(map.resolve(name).identity(map.sep).as_str()).copied())
-                                    .flatten()
-                            });
+                            // under a use-map a class is filed under the
+                            // identity its spelling names at the call
+                            let identity = map.resolve(name).identity(map.sep);
+                            let local = free_functions
+                                .get(&(fq.namespace.as_str(), fq.leaf.as_str()))
+                                .or_else(|| callee_sid.get(identity.as_str()))
+                                .copied();
                             (
                                 crate::model::witnesses::Callee::Function {
                                     name: fq.leaf,
                                     local,
                                     member_of: elided_class.get(site.scope.0 as usize).cloned().flatten(),
+                                    constructs: calls_construct.then_some(identity),
                                 },
                                 None,
                             )
@@ -990,6 +1007,7 @@ impl SkeletonAnalysis {
                                 name: name.clone(),
                                 local: callee_sid.get(name.as_str()).copied(),
                                 member_of: elided_class.get(site.scope.0 as usize).cloned().flatten(),
+                                constructs: calls_construct.then(|| name.clone()),
                             },
                             None,
                         ),
@@ -1493,6 +1511,7 @@ impl SkeletonAnalysis {
         // Last, over the assembled analysis: an owner is a type, and the
         // registry answers types from the whole bag.
         declare_slots(&mut fa, slot_writes, &class_scopes);
+        settle_member_writes(&mut fa, member_writes, &class_scopes);
         fa
     }
 }
@@ -1591,6 +1610,80 @@ fn declare_slots(
     }
     fa.adopt_path_symbols(slots);
 }
+
+/// Each member write is an assignment to the member of the class its
+/// receiver's value is, asked of the assembled analysis's own registry, as
+/// `declare_slots` asks for a slot's owner. A member this file declares on
+/// that class or an ancestor takes the write the way a variable takes one:
+/// into its declaration's `Variable`, whose fold ranks a declared type over
+/// what flows in. Any other member — an instance slot, or one declared in
+/// another file — takes it on `Field{owner, name}`, the attachment a member
+/// read's `ValueHop` chases, where every write is one arm of the slot's
+/// value. A write through a receiver of no known class states nothing.
+///
+/// Class-wide, as a member declaration's value is: a method above
+/// `__init__` reads what `__init__` writes.
+///
+/// TODO(member-write-declared-elsewhere): a write to a member declared in
+/// another file (a parent's annotated attribute) lands on the writer's
+/// `Field`, and an answer there is found before the declaring file's, so
+/// the write's value shadows the declared type. Deciding the declaration
+/// needs the index, the same deferral as `TODO(slot-owner-deferred)`.
+fn settle_member_writes(
+    fa: &mut crate::model::file_analysis::FileAnalysis,
+    writes: Vec<MemberWrite>,
+    class_scopes: &[(String, crate::model::file_analysis::ScopeId)],
+) {
+    use crate::model::file_analysis::{class_or_ancestor, SymKind};
+    use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
+    // A receiver can be a member another write fills (`self.a.b = v` reads
+    // `a`, which `self.a = A()` writes), so the writes settle to a fixed
+    // point, clear-and-emit: each round re-derives every write against the
+    // bag the last round left. Each round that moves settles a write it
+    // could not before or retypes one, so the writes' count bounds it.
+    let mut settled: Vec<Witness> = Vec::new();
+    for _ in 0..=writes.len() {
+        let mut values = Vec::new();
+        for w in &writes {
+            let Some(class) =
+                fa.expr_type_at_span(w.receiver, None).and_then(|t| t.class_name().map(str::to_string))
+            else {
+                continue;
+            };
+            let mut declared = None;
+            class_or_ancestor(&class, &fa.packages, |c| {
+                declared = fa.symbols_named(&w.member).iter().map(|&sid| fa.symbol(sid)).find(|m| {
+                    m.kind == SymKind::Field && m.package.as_deref() == Some(c)
+                });
+                declared.is_some()
+            });
+            let (attachment, scope) = match declared {
+                Some(m) => (WA::Variable { name: m.name.clone(), scope: m.scope }, Some(m.scope)),
+                None => (
+                    WA::Field { owner: class.clone(), name: w.member.clone() },
+                    class_scopes.iter().find(|(c, _)| *c == class).map(|&(_, scope)| scope),
+                ),
+            };
+            values.push(Witness {
+                attachment,
+                source: WitnessSource::Builder(MEMBER_WRITE.into()),
+                payload: WP::Edge(WA::Expr(w.value)),
+                span: scope.map_or(w.value, |scope| fa.scope(scope).span),
+            });
+        }
+        let same = |a: &[Witness], b: &[Witness]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.attachment == y.attachment && x.span == y.span)
+        };
+        if same(&values, &settled) {
+            return;
+        }
+        fa.witnesses.remove_by_source_tag(MEMBER_WRITE);
+        settled = values.clone();
+        fa.adopt_witnesses(values);
+    }
+}
+
+const MEMBER_WRITE: &str = "member_write";
 
 /// The model symbol a skeleton def mints, as the `i`-th symbol.
 fn skel_symbol(i: usize, s: &SkelSymbol) -> crate::model::file_analysis::Symbol {
