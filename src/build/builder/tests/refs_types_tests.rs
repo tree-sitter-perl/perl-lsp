@@ -489,6 +489,18 @@ fn conditional_deref_types_its_arm_only() {
     assert_eq!(at("$d", 6, 0), Some(InferredType::ArrayRef));
 }
 
+/// A write in a postfix modifier's condition runs whenever the statement
+/// does; only the modified statement is the arm that may be skipped.
+#[test]
+fn a_rebind_in_a_postfix_condition_is_unconditional() {
+    let fa = build_fa(
+        "sub f {\nmy ($x, $y) = (1, 2);\nprint 1 if ($x = 'a');\n$y = 'b' if $x;\nreturn;\n}\n",
+    );
+    let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(4, 0));
+    assert_eq!(at("$x"), Some(InferredType::String));
+    assert_eq!(at("$y"), Some(InferredType::Unknown), "the modified statement may not run");
+}
+
 /// `&$x` / `&{$x}` call a code ref; `$$x` / `*{$x}` deref a scalar or glob
 /// ref, which the lattice has no type for.
 #[test]
