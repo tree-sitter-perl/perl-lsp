@@ -67,15 +67,16 @@
 ; body, not to the constructor whose parameter list declares it.
 ; The same token is the constructor's local too, so the match declares
 ; the two as one (`@def.pair`): a rename of either rewrites both, and the
-; declared type is the value of each.
+; declared type is the value of each. (A node holds at most three
+; captures; tree-sitter drops the rest silently.)
 (property_promotion_parameter
   readonly: (readonly_modifier)? @sym.attr
   type: (_)? @type.annot
   name: [
-    (variable_name (name) @def.field.name @def.local.name @def.pair @flow.target) @def.field.spelled
+    (variable_name (name) @def.field.name @def.local.name @flow.target) @def.field.spelled
     (by_ref
-      (variable_name (name) @def.field.name @def.local.name @def.pair @flow.target) @def.field.spelled)
-  ]) @def.field @def.local
+      (variable_name (name) @def.field.name @def.local.name @flow.target) @def.field.spelled)
+  ]) @def.field @def.local @def.pair
 
 ; ---- what a declaration is, stated on its name ----
 ; Modifiers come in any order, so each fact is a pattern of its own.
