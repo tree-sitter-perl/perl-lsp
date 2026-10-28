@@ -57,38 +57,11 @@ impl FileAnalysis {
             if shapes.is_empty() {
                 continue;
             }
-            let agreed = if shapes.windows(2).all(|w| w[0] == w[1]) {
-                shapes.pop().unwrap()
-            } else {
-                // disagree → widen: union of keys when every shape is
-                // keyed, OPEN (a key any caller passes may arrive);
-                // anything else declines.
-                let mut keys: Vec<(String, Option<Box<InferredType>>)> = Vec::new();
-                let mut all_keyed = true;
-                for sh in &shapes {
-                    match sh {
-                        InferredType::HashWithKeys { keys: ks, .. } => {
-                            for (k, v) in ks.iter() {
-                                match keys.iter_mut().find(|(ek, _)| ek == k) {
-                                    None => keys.push((k.clone(), v.clone())),
-                                    Some((_, ev)) => {
-                                        if *ev != *v {
-                                            *ev = None;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        _ => {
-                            all_keyed = false;
-                            break;
-                        }
-                    }
-                }
-                if !all_keyed {
-                    continue;
-                }
-                InferredType::HashWithKeys { keys: crate::model::file_analysis::SharedKeys::new(keys), open: true }
+            // Every caller's shape, joined: keyed hashes keep every key any
+            // caller passes. Callers that pass no one shape type nothing.
+            let agreed = match crate::model::file_analysis::join_all(&shapes, &self.type_order(module_index)) {
+                Some(InferredType::Union(_) | InferredType::Unknown) | None => continue,
+                Some(t) => t,
             };
             // Anchored at the parameter's binding token (a write marker at
             // its declaration retires what lies strictly before it), else
