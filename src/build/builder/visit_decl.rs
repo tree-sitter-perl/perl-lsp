@@ -986,7 +986,10 @@ impl<'a> Builder<'a> {
                 };
                 let assign = match assign {
                     Some(a) => a,
-                    None => break, // stop at first non-assignment statement
+                    // A statement that leaves `@_` alone consumes no argument,
+                    // so the next `shift` still binds the same position.
+                    None if !self.touches_args(stmt) => continue,
+                    None => break,
                 };
 
                 if let Some(right) = assign.child_by_field_name("right") {
@@ -1065,8 +1068,11 @@ impl<'a> Builder<'a> {
                     }
                 }
 
-                // Not a recognized param pattern — stop collecting
-                break;
+                // Not a param pattern: one that leaves `@_` alone (`my $target
+                // = caller`) consumes no argument; any other ends the preamble.
+                if self.touches_args(assign) {
+                    break;
+                }
             }
 
             if !shift_params.is_empty() {
@@ -1128,18 +1134,48 @@ impl<'a> Builder<'a> {
 
     /// Check if a node is a `shift` call (bare or with parens).
     pub(super) fn is_shift_call(&self, node: Node<'a>) -> bool {
+        self.is_bare_call_of(node, "shift")
+    }
+
+    /// A call of `op` written with no argument (`shift`, `pop`, `shift()`).
+    fn is_bare_call_of(&self, node: Node<'a>, op: &str) -> bool {
         match node.kind() {
-            "bareword" => node.utf8_text(self.source).ok() == Some("shift"),
+            "bareword" => node.utf8_text(self.source).ok() == Some(op),
             "func1op_call_expression" => {
                 crate::cst::nth_element(node, 0).is_none()
-                    && node.child(0).and_then(|c| c.utf8_text(self.source).ok()) == Some("shift")
+                    && node.child(0).and_then(|c| c.utf8_text(self.source).ok()) == Some(op)
             }
             "ambiguous_function_call_expression" | "function_call_expression" => {
                 use crate::cst::NodeExt;
-                node.field_text("function", self.source) == Some("shift")
+                node.field_text("function", self.source) == Some(op)
             }
             _ => false,
         }
+    }
+
+    /// Whether `node` reads or hands on the sub's argument array: `@_` or
+    /// `$_[N]` by name, a bare `shift` / `pop` (which default to it), and
+    /// `&f;` / `goto &f` (which pass it on). Perl has no other way to.
+    fn touches_args(&self, node: Node<'a>) -> bool {
+        let mut stack = vec![node];
+        while let Some(n) = stack.pop() {
+            let hit = match n.kind() {
+                "array" | "container_variable" => {
+                    crate::cst::varname_child(n).and_then(|v| v.utf8_text(self.source).ok()) == Some("_")
+                }
+                "goto_expression" => true,
+                "function_call_expression" => {
+                    n.child_by_field_name("arguments").is_none()
+                        && n.utf8_text(self.source).is_ok_and(|t| t.starts_with('&') && !t.ends_with(')'))
+                }
+                _ => self.is_bare_call_of(n, "shift") || self.is_bare_call_of(n, "pop"),
+            };
+            if hit {
+                return true;
+            }
+            stack.extend(crate::cst::NodeExt::elements(&n));
+        }
+        false
     }
 
     pub(super) fn extract_signature_params(&self, sig: Node<'a>) -> Vec<ParamInfo> {
