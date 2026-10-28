@@ -698,7 +698,7 @@ pub fn signature_help(
                 // plugin-marked invocants like a helper's `$c`); name
                 // convention as backstop for pre-flag cache blobs.
                 if p.is_invocant
-                    || crate::model::conventions::is_conventional_invocant_name(&p.name)
+                    || crate::model::conventions::is_conventional_invocant_name(&p.name, analysis.names())
                 {
                     return base;
                 }

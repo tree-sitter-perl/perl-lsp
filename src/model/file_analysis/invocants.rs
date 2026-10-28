@@ -863,7 +863,7 @@ impl FileAnalysis {
                 // type (`$self->{count}++` observations must not demote
                 // `$self` to a plain hashref).
                 if self.dispatch_class_of(&t, module_index).is_none()
-                    && crate::model::conventions::is_conventional_invocant_name(invocant)
+                    && crate::model::conventions::is_conventional_invocant_name(invocant, self.names())
                 {
                     return self.enclosing_class_for_scope(r.scope).map(InferredType::ClassName);
                 }
@@ -872,7 +872,7 @@ impl FileAnalysis {
             // Enclosing-class fallback for an untyped conventional
             // invocant. Other untyped variable invocants stay None —
             // better than poisoning them with the surrounding package.
-            if crate::model::conventions::is_conventional_invocant_name(invocant) {
+            if crate::model::conventions::is_conventional_invocant_name(invocant, self.names()) {
                 return self.enclosing_class_for_scope(r.scope).map(InferredType::ClassName);
             }
             return None;
@@ -990,7 +990,7 @@ impl FileAnalysis {
                         // with `$r` un-typed would pretend `to` is a method on
                         // the enclosing package (MyApp), and goto-def on the
                         // method name lands on `package MyApp;`.
-                        if crate::model::conventions::is_conventional_invocant_name(invocant) {
+                        if crate::model::conventions::is_conventional_invocant_name(invocant, self.names()) {
                             enclosing()
                         } else {
                             None

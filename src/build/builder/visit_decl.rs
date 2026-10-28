@@ -683,7 +683,7 @@ impl<'a> Builder<'a> {
         let mut method_or_helper = false;
         if let Some(first) = params.first_mut() {
             let name_says_invocant =
-                crate::model::conventions::is_conventional_invocant_name(&first.name);
+                crate::model::conventions::is_conventional_invocant_name(&first.name, &crate::model::conventions::PERL_SPELLINGS);
             if is_method || name_says_invocant {
                 first.is_invocant = true;
             } else if first.name.starts_with('$') {

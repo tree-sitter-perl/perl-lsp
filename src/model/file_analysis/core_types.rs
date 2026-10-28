@@ -356,6 +356,25 @@ pub struct NameSpellings {
     /// Whether a member access reaches an instance's slots
     /// (`FileAnalysis::slot_class_of`).
     pub instance_slots: InstanceSlots,
+    /// Whether a name alone says a variable is a method's receiver.
+    pub receiver_names: ReceiverNames,
+}
+
+/// How a language says which variable is a method's receiver. Every
+/// receiver-aware consumer asks `conventions::is_conventional_invocant_name`
+/// with the file's spellings, so a language that states its receivers is
+/// never read through another's names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ReceiverNames {
+    /// The document states each receiver (`@receiver`): a declared one is a
+    /// `SymbolFlags::RECEIVER` symbol, an undeclared one a typed read. No
+    /// name is a receiver by itself.
+    #[default]
+    Stated,
+    /// A conventional name alone marks the receiver (Perl's `$self`,
+    /// `$class`, …): a sub declares its receiver as an ordinary
+    /// parameter, so the name is the only statement there is.
+    Conventional,
 }
 
 /// Whether a language's member access (`obj.x`) reaches the slots an
@@ -461,6 +480,7 @@ impl NameSpellings {
         class_call: ClassCall::FunctionCall,
         enclosing_class: EnclosingClass::ScopeChain,
         instance_slots: InstanceSlots::Apart,
+        receiver_names: ReceiverNames::Stated,
     };
 
     /// A language with a namespace separator, no sigils, and spellings
@@ -477,6 +497,7 @@ impl NameSpellings {
             class_call: ClassCall::FunctionCall,
             enclosing_class: EnclosingClass::ScopeChain,
             instance_slots: InstanceSlots::Apart,
+            receiver_names: ReceiverNames::Stated,
         }
     }
 

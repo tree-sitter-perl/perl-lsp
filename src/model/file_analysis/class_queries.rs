@@ -1020,7 +1020,7 @@ impl FileAnalysis {
     pub fn invocant_text_to_class(&self, invocant: Option<&str>, point: Point) -> Option<String> {
         use crate::model::conventions::InvocantText;
         let text = invocant?;
-        if crate::model::conventions::is_conventional_invocant_name(text) {
+        if crate::model::conventions::is_conventional_invocant_name(text, self.names()) {
             return self.package_at(point).map(|s| s.to_string());
         }
         match InvocantText::parse(text) {

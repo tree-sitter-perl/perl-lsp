@@ -816,7 +816,7 @@ impl FileAnalysis {
                 let is_method = is_method
                     || sym_is_method
                     || params.first().map_or(false, |p| {
-                        crate::model::conventions::is_conventional_invocant_name(&p.name)
+                        crate::model::conventions::is_conventional_invocant_name(&p.name, self.names())
                     });
 
                 // Strip the implicit invocant from the display list.
@@ -850,7 +850,7 @@ impl FileAnalysis {
                 let is_method = is_method
                     || cf_is_method
                     || params.first().map_or(false, |p| {
-                        crate::model::conventions::is_conventional_invocant_name(&p.name)
+                        crate::model::conventions::is_conventional_invocant_name(&p.name, self.names())
                     });
 
                 // Same invocant-strip as the local branch — by flag,
