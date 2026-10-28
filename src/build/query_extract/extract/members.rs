@@ -4,23 +4,18 @@
 use super::*;
 use crate::model::file_analysis::{MemberOp, ParamArity};
 
-/// The call's arguments in order (its `@arity.arg`s), each with whether
-/// it spreads (an `@arity.spread` on the argument's node); `None` when the
-/// match wrote no argument list.
+/// The call's arguments in order (the `@arity.arg`s of its match's
+/// `@arity.args` list), each with whether it spreads (an `@arity.spread` on
+/// the argument's node); `None` when the match wrote no argument list.
 pub(super) fn call_args(ad: &Adorned, match_id: usize) -> Option<Vec<(Span, bool)>> {
-    let mut wrote_list = false;
-    let mut args = Vec::new();
-    for t in ad.of_match(match_id) {
-        match t.cap {
-            Capture::Arity(ArityCap::Args) => wrote_list = true,
-            Capture::Arity(ArityCap::Arg) => {
-                wrote_list = true;
-                args.push((t.span(), ad.on_range(t.range()).any(|s| s.cap == Capture::Arity(ArityCap::Spread))));
-            }
-            _ => {}
-        }
-    }
-    wrote_list.then_some(args)
+    let list = ad.in_match(match_id, Capture::Arity(ArityCap::Args))?;
+    let spreads = |a: &Event| ad.on_range(a.range()).any(|s| s.cap == Capture::Arity(ArityCap::Spread));
+    Some(
+        ad.list_items(list)
+            .filter(|a| a.cap == Capture::Arity(ArityCap::Arg))
+            .map(|a| (a.span(), spreads(a)))
+            .collect(),
+    )
 }
 
 /// The operator a member match wrote, with its span: the
@@ -49,17 +44,11 @@ pub(super) fn flatten_recv(node: tree_sitter::Node<'_>, pack: &LangPack, source:
     Event::at(inner, Capture::Member(MemberCap::Recv), text, match_id).with(Payload::SimpleRecv(simple))
 }
 
-/// A signature's arity: the parameters tagged in its subtree, less those
-/// of a signature nested in it (a callback parameter's own list).
+/// A signature's arity: the parameters tagged in its list.
 fn arity_of(ad: &Adorned, sig: &Event) -> ParamArity {
     let mut arity = ParamArity { total: 0, required: 0, variadic: false };
-    let mut nested_end = 0;
-    for t in ad.within(sig.range()).map(|ix| &ad.events[ix]) {
-        if t.start_byte < nested_end {
-            continue;
-        }
+    for t in ad.list_items(sig) {
         match t.cap {
-            Capture::Arity(ArityCap::Sig) if t.range() != sig.range() => nested_end = t.end_byte,
             Capture::Arity(ArityCap::Required) => {
                 arity.total += 1;
                 arity.required += 1;

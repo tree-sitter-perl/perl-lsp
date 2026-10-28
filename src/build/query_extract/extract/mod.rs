@@ -139,6 +139,23 @@ impl Adorned {
         (lo..self.events.len()).take_while(move |&ix| self.events[ix].range() == range)
     }
 
+    /// The events tagged in `list`'s subtree that are its own: a list of
+    /// the same tag nested in it (a call in an argument, a callback's
+    /// parameters) holds its own items, so its subtree is skipped.
+    fn list_items<'a>(&'a self, list: &'a Event) -> impl Iterator<Item = &'a Event> + 'a {
+        let mut nested_end = 0;
+        self.within(list.range()).map(|ix| &self.events[ix]).filter(move |t| {
+            if t.start_byte < nested_end {
+                return false;
+            }
+            if t.cap == list.cap && t.range() != list.range() {
+                nested_end = t.end_byte;
+                return false;
+            }
+            true
+        })
+    }
+
     /// The indices of the events inside `range` (and on it): the subtree
     /// of the node there, in preorder.
     fn within(&self, range: (usize, usize)) -> impl Iterator<Item = usize> + '_ {
@@ -346,6 +363,9 @@ fn record_matches<'t>(
                 }
                 Some(Capture::Deref(level)) => links.mark_level(c.node, level),
                 Some(Capture::DerefLeaf(def)) => links.mark_leaf(c.node, def),
+                // A wildcard also matches the grammar's extras (a comment),
+                // which are never code: no capture lands on one.
+                Some(_) if c.node.is_extra() => {}
                 Some(cap) => captured.push((c.node, cap, match_counter)),
             }
         }
@@ -418,10 +438,6 @@ pub fn extract_in(
             Capture::OolDef => defs::flatten_ool_def(node, &links, source, match_id, &mut events),
             Capture::NestedTarget => defs::flatten_nested(node, &links, source, match_id, &mut events),
             Capture::Member(MemberCap::Recv) => events.push(members::flatten_recv(node, pack, source, match_id)),
-            // A wildcard in a query also matches the grammar's extras, and a
-            // predicate filters a whole match rather than one quantified
-            // capture, so a comment between two arguments is dropped here.
-            Capture::Arity(ArityCap::Arg) if node.is_extra() => {}
             Capture::Qualifier => events.push(Event::at(node, cap, links.qualifier_text(node, source), match_id)),
             _ => events.push(Event::at(node, cap, node.utf8_text(source).unwrap_or("").to_string(), match_id)),
         }
