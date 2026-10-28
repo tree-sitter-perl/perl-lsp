@@ -205,10 +205,7 @@ impl FileAnalysis {
         t: &InferredType,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<(String, InferredType)> {
-        let mut t = t;
-        while let Some(inner) = t.optional_inner() {
-            t = inner;
-        }
+        let Some(t) = t.defined_part() else { return Vec::new() };
         let mut out: Vec<(String, InferredType)> = Vec::new();
         if let Some(p) = t.as_parametric() {
             if let Some(spelling) = p.exact_spelling() {
@@ -325,26 +322,24 @@ impl FileAnalysis {
         module_index: Option<&dyn CrossFileLookup>,
         arg_count: Option<usize>,
     ) -> Option<InferredType> {
-        if let InferredType::Union(_) = receiver {
-            return receiver.join_over_arms(&self.type_order(module_index), |arm| {
-                self.member_value_type(arm, member, module_index, arg_count)
-            });
-        }
-        // The whole ladder, most-specific first: a member the winning spec
-        // doesn't define falls through to the next rung (ultimately the
-        // primary) — same never-pruned order goto-def presents.
-        for (class, recv) in self.dispatch_ladder_of(receiver, module_index) {
-            if let Some(t) =
-                self.method_return_type_on(&class, &recv, member, module_index, arg_count)
-            {
-                return Some(t);
+        receiver.join_over_arms(&self.type_order(module_index), |arm| {
+            // The whole ladder, most-specific first: a member the winning
+            // spec doesn't define falls through to the next rung
+            // (ultimately the primary) — same never-pruned order goto-def
+            // presents.
+            for (class, recv) in self.dispatch_ladder_of(arm, module_index) {
+                if let Some(t) =
+                    self.method_return_type_on(&class, &recv, member, module_index, arg_count)
+                {
+                    return Some(t);
+                }
+                let Some(raw) = self.field_type_on_class(&class, member, module_index) else {
+                    continue;
+                };
+                return Some(self.substitute_member_type(raw, &class, &recv, module_index));
             }
-            let Some(raw) = self.field_type_on_class(&class, member, module_index) else {
-                continue;
-            };
-            return Some(self.substitute_member_type(raw, &class, &recv, module_index));
-        }
-        None
+            None
+        })
     }
 
     /// A VALUE member's type on a receiver — what a `FieldAccess` ref
@@ -357,18 +352,12 @@ impl FileAnalysis {
         member: &str,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Option<InferredType> {
-        if let InferredType::Union(_) = receiver {
-            return receiver.join_over_arms(&self.type_order(module_index), |arm| {
-                self.field_value_type(arm, member, module_index)
-            });
-        }
-        for (class, recv) in self.dispatch_ladder_of(receiver, module_index) {
-            let Some(raw) = self.field_type_on_class(&class, member, module_index) else {
-                continue;
-            };
-            return Some(self.substitute_member_type(raw, &class, &recv, module_index));
-        }
-        None
+        receiver.join_over_arms(&self.type_order(module_index), |arm| {
+            self.dispatch_ladder_of(arm, module_index).into_iter().find_map(|(class, recv)| {
+                let raw = self.field_type_on_class(&class, member, module_index)?;
+                Some(self.substitute_member_type(raw, &class, &recv, module_index))
+            })
+        })
     }
 
     /// A field's declared type with the class's template params substituted
