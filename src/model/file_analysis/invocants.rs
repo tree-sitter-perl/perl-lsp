@@ -729,8 +729,9 @@ impl FileAnalysis {
                     )
                     .map(InferredType::ClassName);
             }
-            crate::model::conventions::Invocant::Name(n) => n,
+            crate::model::conventions::Invocant::Name(n) | crate::model::conventions::Invocant::Expr(n) => n,
         };
+        let spelled_class_possible = matches!(site.invocant, crate::model::conventions::Invocant::Name(_));
         if invocant.is_empty() {
             return None;
         }
@@ -880,13 +881,13 @@ impl FileAnalysis {
         // Bareword invocant. Could be a zero-arg sub returning ClassName
         // (`app->routes` where `app` is plugin-emitted); promote that.
         // Otherwise the bareword text *is* the class (`Foo->method`) — but
-        // ONLY for text shaped like a class token. A pack chain receiver's
-        // recorded text is the whole receiver EXPRESSION; minting it as a
-        // ClassName poisons the build-time freeze (the garbage edge then
-        // reads as a baked verdict, so the references matcher never
-        // re-resolves with the index) — answer None and leave the site to
-        // the query-time rungs above.
-        if !crate::model::conventions::is_bareword_class_name(invocant, self.names()) {
+        // ONLY for a written name shaped like a class token. A receiver
+        // EXPRESSION (`Invocant::Expr`) is the bag's to type, however its
+        // text reads (`self.x`): minting it as a ClassName poisons the
+        // build-time freeze (the garbage edge then reads as a baked
+        // verdict, so the references matcher never re-resolves with the
+        // index) — answer None and leave the site to the rungs above.
+        if !spelled_class_possible || !crate::model::conventions::is_bareword_class_name(invocant, self.names()) {
             return None;
         }
         let bare = split_qualified(invocant, self.names()).1;

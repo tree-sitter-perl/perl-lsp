@@ -60,11 +60,12 @@ pub struct SkelRef {
     pub start: Point,
     pub end: Point,
     pub scope: crate::model::file_analysis::ScopeId,
-    /// For a member access (`recv.field`) — the receiver subtree's (span,
-    /// text), so `into_file_analysis` mints a `RefKind::MethodCall` whose
-    /// invocant types query-time via `expr_type_at_span(span)` (text → the
-    /// `InvocantName`). `None` for plain calls / var refs.
-    pub invocant: Option<(crate::model::file_analysis::Span, String)>,
+    /// For a member access (`recv.field`) — the receiver subtree's span and
+    /// its `Invocant`, minted by the extractor that saw whether the receiver
+    /// is a written name or an expression. `into_file_analysis` puts it on a
+    /// `RefKind::MethodCall`/`FieldAccess`, whose invocant types query-time
+    /// via `expr_type_at_span(span)`. `None` for plain calls / var refs.
+    pub invocant: Option<(crate::model::file_analysis::Span, crate::model::conventions::Invocant)>,
     /// The written member operator (`.`/`->`) + its span, mapped from the
     /// `@member.op.<which>` capture on the operator token, `Some` only when the
     /// IMMEDIATE receiver is a simple variable. Rides onto the MethodCall ref
@@ -195,6 +196,10 @@ pub struct SkeletonAnalysis {
     /// (join to the owning callable, chain it when the callable declares no
     /// return) is `into_file_analysis`'s.
     pub return_sites: Vec<(crate::model::file_analysis::ScopeId, Span)>,
+    /// Reads of the implicit receiver (`@expr.read.receiver`, C++ `this`):
+    /// (enclosing scope, span). Typed in `into_file_analysis` as the class of
+    /// the eliding body around them.
+    pub receiver_reads: Vec<(crate::model::file_analysis::ScopeId, Span)>,
     /// Callable parameter arities keyed by parameter_list span (`@arity.sig`).
     /// Associated to def symbols by span containment in `into_file_analysis`.
     pub param_sigs: Vec<(crate::model::file_analysis::Span, crate::model::file_analysis::ParamArity)>,
@@ -780,6 +785,17 @@ impl SkeletonAnalysis {
                 let span = self.scopes.get(sym.scope.0 as usize).map_or(sym.span, |sc| sc.span);
                 bag.push(mk(WA::Field { owner: class.clone(), name: sym.name.clone() }, pay, span));
             }
+            // A receiver read (`this`) is the object the eliding body belongs
+            // to: its value is that class. Outside such a body it names none.
+            for (scope, span) in &self.receiver_reads {
+                let Some(class) = elided_class.get(scope.0 as usize).cloned().flatten() else { continue };
+                bag.push(Witness {
+                    attachment: WA::Expr(*span),
+                    source: WitnessSource::Builder("skeleton".into()),
+                    payload: WP::InferredType(InferredType::ClassName(class)),
+                    span: *span,
+                });
+            }
             // A class VIEWED AS A CALLABLE (a functional cast / constructor,
             // `Widget(x)`) produces an instance of itself. Its `Symbol` answers
             // `ClassName(name)` so a call site edging to it materializes the
@@ -1063,9 +1079,9 @@ impl SkeletonAnalysis {
                     // invocant types query-time via
                     // `expr_type_at_span(invocant_span)`.
                     RefCap::MemberValue => {
-                        let (inv_span, inv_text) = r.invocant.clone()?;
+                        let (inv_span, invocant) = r.invocant.clone()?;
                         RefKind::FieldAccess {
-                            invocant: crate::model::conventions::Invocant::assume_canonical(inv_text),
+                            invocant,
                             invocant_span: Some(inv_span),
                             member_name_span: Span { start: r.start, end: r.end },
                             member_op: r.member_op,
@@ -1075,9 +1091,9 @@ impl SkeletonAnalysis {
                     // Perl `$obj->m`; `find_definition`/`refs_to`/hover all
                     // flow from it.
                     RefCap::MemberCall => {
-                        let (inv_span, inv_text) = r.invocant.clone()?;
+                        let (inv_span, invocant) = r.invocant.clone()?;
                         RefKind::MethodCall {
-                            invocant: crate::model::conventions::Invocant::assume_canonical(inv_text),
+                            invocant,
                             invocant_span: Some(inv_span),
                             method_name_span: Span { start: r.start, end: r.end },
                             member_op: r.member_op,

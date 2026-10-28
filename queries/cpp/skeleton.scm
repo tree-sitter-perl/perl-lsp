@@ -833,6 +833,9 @@
 (binary_expression
   operator: ["==" "!=" "<" ">" "<=" ">=" "&&" "||"]) @expr.lit.bool
 (identifier) @expr.read.var
+; `this` is the object the enclosing member body runs on: the class of the
+; `@scope.sub.implicit_receiver` around it, never a name to spell a class.
+(this) @expr.read.receiver
 
 ; `return EXPR;` — the returned expression's OWN span already carries
 ; whatever witness the general rules above minted for its shape (a literal,

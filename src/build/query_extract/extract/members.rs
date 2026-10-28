@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::model::file_analysis::{MemberOp, ParamArity};
+use crate::model::conventions::Invocant;
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -10,6 +11,10 @@ pub(super) struct State {
     /// match_id → was the IMMEDIATE member-access receiver a simple variable?
     /// Recorded at construction (the un-peeled node); gates op-DX at the mint.
     pub(super) member_simple: HashMap<usize, bool>,
+    /// match_id → was the PEELED receiver a written name (`w`, `Widget`)
+    /// rather than an expression (`self.x`, `f()`)? Decides whether the
+    /// receiver's text may spell a class.
+    recv_named: HashMap<usize, bool>,
     /// A call's written arguments (span + byte range), keyed by the match
     /// that captured its callee (`@ref.call` / `@ref.qcall` /
     /// `@ref.member.call`), its argument list (`@arity.args`) and each
@@ -24,7 +29,7 @@ pub(super) struct State {
     param_sigs: Vec<(Span, ParamArity)>,
     /// `@member.recv` → the receiver span of a `recv.field` access, joined to
     /// its `@ref.member.*` by match_id so the minted MethodCall ref carries it.
-    pub(super) member_recv: HashMap<usize, (Span, String)>,
+    pub(super) member_recv: HashMap<usize, (Span, Invocant)>,
     /// `@member.op` → the operator token's span, joined to `@ref.member.*` by
     /// match_id; which operator it is comes from `ops_at`.
     pub(super) member_op_span: HashMap<usize, Span>,
@@ -69,6 +74,7 @@ pub(super) fn flatten_recv(
     // (its deref_stack resolves by name); a wrapper/chain doesn't.
     members.member_simple.insert(match_id, pack.simple_var_kinds.contains(&node.kind()));
     let inner = peel_receiver(node, pack.recv_peel);
+    members.recv_named.insert(match_id, pack.simple_var_kinds.contains(&inner.kind()));
     let text = inner.utf8_text(source).unwrap_or("").to_string();
     events.push(Event::at(inner, Capture::Member(MemberCap::Recv), text, match_id));
 }
@@ -138,7 +144,13 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
 pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     match e.cap {
         Capture::Member(MemberCap::Recv) => {
-            st.members.member_recv.insert(e.match_id, (e.span(), e.text.clone()));
+            let named = st.members.recv_named.get(&e.match_id).copied().unwrap_or(false);
+            let invocant = if named {
+                Invocant::assume_canonical(e.text.clone())
+            } else {
+                Invocant::expr(e.text.clone())
+            };
+            st.members.member_recv.insert(e.match_id, (e.span(), invocant));
         }
         Capture::Member(MemberCap::Op) => {
             st.members.member_op_span.insert(e.match_id, e.span());

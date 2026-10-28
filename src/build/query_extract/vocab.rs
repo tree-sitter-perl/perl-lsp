@@ -207,6 +207,9 @@ pub enum ExprCap {
     Call,
     Lit(LitKind),
     ReadVar,
+    /// A read of the receiver a `@scope.sub.implicit_receiver` body elides
+    /// (C++ `this`): the object of the class the body belongs to.
+    ReadReceiver,
     ReturnValue,
     /// A keyed-value constructor call; `@shape.*` join it by span.
     Shape,
@@ -447,6 +450,7 @@ impl Capture {
             ["expr", "call"] => C::Expr(ExprCap::Call),
             ["expr", "lit", k] => C::Expr(ExprCap::Lit(LitKind::parse(k)?)),
             ["expr", "read", "var"] => C::Expr(ExprCap::ReadVar),
+            ["expr", "read", "receiver"] => C::Expr(ExprCap::ReadReceiver),
             ["expr", "return", "value"] => C::Expr(ExprCap::ReturnValue),
             ["expr", "shape"] => C::Expr(ExprCap::Shape),
             ["expr", "member"] => C::Expr(ExprCap::Member),
@@ -512,6 +516,7 @@ impl fmt::Display for Capture {
             C::Expr(ExprCap::Call) => f.write_str("expr.call"),
             C::Expr(ExprCap::Lit(k)) => write!(f, "expr.lit.{k}"),
             C::Expr(ExprCap::ReadVar) => f.write_str("expr.read.var"),
+            C::Expr(ExprCap::ReadReceiver) => f.write_str("expr.read.receiver"),
             C::Expr(ExprCap::ReturnValue) => f.write_str("expr.return.value"),
             C::Expr(ExprCap::Shape) => f.write_str("expr.shape"),
             C::Expr(ExprCap::Member) => f.write_str("expr.member"),
