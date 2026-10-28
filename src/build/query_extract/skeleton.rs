@@ -196,10 +196,10 @@ pub struct SkeletonAnalysis {
     /// (join to the owning callable, chain it when the callable declares no
     /// return) is `into_file_analysis`'s.
     pub return_sites: Vec<(crate::model::file_analysis::ScopeId, Span)>,
-    /// Reads of the implicit receiver (`@expr.read.receiver`, C++ `this`):
-    /// (enclosing scope, span). Typed in `into_file_analysis` as the class of
-    /// the eliding body around them.
-    pub receiver_reads: Vec<(crate::model::file_analysis::ScopeId, Span)>,
+    /// Nodes naming the receiver of the method around them (`@receiver`):
+    /// (enclosing scope, span). `into_file_analysis` types each as that
+    /// method's class, once the scopes know their callables.
+    pub receivers: Vec<(crate::model::file_analysis::ScopeId, Span)>,
     /// Callable parameter arities keyed by parameter_list span (`@arity.sig`).
     /// Associated to def symbols by span containment in `into_file_analysis`.
     pub param_sigs: Vec<(crate::model::file_analysis::Span, crate::model::file_analysis::ParamArity)>,
@@ -675,6 +675,40 @@ impl SkeletonAnalysis {
                 }
             }
         }
+        // A receiver is an object of the class of the method it belongs to:
+        // the nearest enclosing callable's, so a lambda (no owner) is
+        // transparent and a free function (a `Sub`) has none. A declared
+        // receiver is a parameter, flagged and typed from its binding on in
+        // the scope it binds in (a header parameter binds in the body); an
+        // undeclared one (`this`) is a value at its own read.
+        let mut receiver_witnesses: Vec<crate::model::witnesses::Witness> = Vec::new();
+        {
+            use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
+            for &(site_scope, span) in &self.receivers {
+                let declared = symbols.iter().position(|s| s.selection_span == span);
+                let scope = declared.map_or(site_scope, |i| symbols[i].scope);
+                let class = owning_callable(&self.scopes, scope)
+                    .and_then(|sid| symbols.get(sid.0 as usize))
+                    .filter(|s| matches!(s.kind, SymKind::Method))
+                    .and_then(|s| s.package.clone());
+                let (attachment, at) = match declared {
+                    Some(i) => {
+                        let sym = &mut symbols[i];
+                        sym.flags |= crate::model::file_analysis::SymbolFlags::RECEIVER;
+                        let at = Span { start: span.start, end: span.start };
+                        (WA::Variable { name: sym.name.clone(), scope: sym.scope }, at)
+                    }
+                    None => (WA::Expr(span), span),
+                };
+                let Some(class) = class else { continue };
+                receiver_witnesses.push(Witness {
+                    attachment,
+                    source: WitnessSource::Builder("receiver".into()),
+                    payload: WP::InferredType(InferredType::ClassName(class)),
+                    span: at,
+                });
+            }
+        }
         // Implicit receiver: where the document says a body elides it, a bare
         // name is a member of the class the body belongs to. That class is
         // the package of the eliding scope's owning METHOD, in-class and
@@ -785,16 +819,8 @@ impl SkeletonAnalysis {
                 let span = self.scopes.get(sym.scope.0 as usize).map_or(sym.span, |sc| sc.span);
                 bag.push(mk(WA::Field { owner: class.clone(), name: sym.name.clone() }, pay, span));
             }
-            // A receiver read (`this`) is the object the eliding body belongs
-            // to: its value is that class. Outside such a body it names none.
-            for (scope, span) in &self.receiver_reads {
-                let Some(class) = elided_class.get(scope.0 as usize).cloned().flatten() else { continue };
-                bag.push(Witness {
-                    attachment: WA::Expr(*span),
-                    source: WitnessSource::Builder("skeleton".into()),
-                    payload: WP::InferredType(InferredType::ClassName(class)),
-                    span: *span,
-                });
+            for w in receiver_witnesses.drain(..) {
+                bag.push(w);
             }
             // A class VIEWED AS A CALLABLE (a functional cast / constructor,
             // `Widget(x)`) produces an instance of itself. Its `Symbol` answers
@@ -1339,10 +1365,7 @@ impl SkeletonAnalysis {
             // would read, so the first arm would block every later one.
             let mut undeclared: std::collections::HashMap<SymbolId, bool> = Default::default();
             for (ret_scope, ret_span) in &self.return_sites {
-                let owner = crate::model::file_analysis::scope_chain_of(&self.scopes, *ret_scope)
-                    .into_iter()
-                    .find_map(|sc| self.scopes.get(sc.0 as usize).and_then(|s| s.owner));
-                let Some(sid) = owner else { continue };
+                let Some(sid) = owning_callable(&self.scopes, *ret_scope) else { continue };
                 let first = !undeclared.contains_key(&sid);
                 let open = *undeclared
                     .entry(sid)
@@ -1441,6 +1464,17 @@ impl SkeletonAnalysis {
         settle_member_writes(&mut fa, member_writes, &class_scopes);
         fa
     }
+}
+
+/// The callable whose body a scope sits in: the nearest scope up the chain
+/// that names its callable.
+fn owning_callable(
+    scopes: &[crate::model::file_analysis::Scope],
+    scope: crate::model::file_analysis::ScopeId,
+) -> Option<crate::model::file_analysis::SymbolId> {
+    crate::model::file_analysis::scope_chain_of(scopes, scope)
+        .into_iter()
+        .find_map(|sc| scopes.get(sc.0 as usize).and_then(|s| s.owner))
 }
 
 /// Settle each write through a receiver. Its owner is the class the

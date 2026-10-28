@@ -207,9 +207,6 @@ pub enum ExprCap {
     Call,
     Lit(LitKind),
     ReadVar,
-    /// A read of the receiver a `@scope.sub.implicit_receiver` body elides
-    /// (C++ `this`): the object of the class the body belongs to.
-    ReadReceiver,
     ReturnValue,
     /// A keyed-value constructor call; `@shape.*` join it by span.
     Shape,
@@ -377,9 +374,10 @@ pub enum Capture {
     Member(MemberCap),
     /// The operator token a member access wrote, by which operator it is.
     MemberOp(MemberOpCap),
-    /// A method's receiver parameter (python `self`): the object, not a
-    /// member.
-    ParamReceiver,
+    /// A node that names the receiver of the method around it — declared
+    /// (python's `self` parameter) or not (C++ `this`): the object, never a
+    /// member and never a class spelling.
+    Receiver,
     /// A fact the document states about the declaration at this name token.
     Mark(MarkCap),
     Arity(ArityCap),
@@ -450,7 +448,6 @@ impl Capture {
             ["expr", "call"] => C::Expr(ExprCap::Call),
             ["expr", "lit", k] => C::Expr(ExprCap::Lit(LitKind::parse(k)?)),
             ["expr", "read", "var"] => C::Expr(ExprCap::ReadVar),
-            ["expr", "read", "receiver"] => C::Expr(ExprCap::ReadReceiver),
             ["expr", "return", "value"] => C::Expr(ExprCap::ReturnValue),
             ["expr", "shape"] => C::Expr(ExprCap::Shape),
             ["expr", "member"] => C::Expr(ExprCap::Member),
@@ -460,11 +457,8 @@ impl Capture {
             ["move", k] => C::Move(MoveCap::parse(k)?),
             ["guard", "region"] => C::GuardRegion,
             ["unevaluated"] => C::Unevaluated,
-            ["param", k] => match *k {
-                "region" => C::ParamRegion,
-                "receiver" => C::ParamReceiver,
-                _ => return None,
-            },
+            ["param", "region"] => C::ParamRegion,
+            ["receiver"] => C::Receiver,
             ["mark", k] => C::Mark(MarkCap::parse(k)?),
             ["member", "op", k] => C::MemberOp(MemberOpCap::parse(k)?),
             ["member", k] => C::Member(MemberCap::parse(k)?),
@@ -516,7 +510,6 @@ impl fmt::Display for Capture {
             C::Expr(ExprCap::Call) => f.write_str("expr.call"),
             C::Expr(ExprCap::Lit(k)) => write!(f, "expr.lit.{k}"),
             C::Expr(ExprCap::ReadVar) => f.write_str("expr.read.var"),
-            C::Expr(ExprCap::ReadReceiver) => f.write_str("expr.read.receiver"),
             C::Expr(ExprCap::ReturnValue) => f.write_str("expr.return.value"),
             C::Expr(ExprCap::Shape) => f.write_str("expr.shape"),
             C::Expr(ExprCap::Member) => f.write_str("expr.member"),
@@ -529,7 +522,7 @@ impl fmt::Display for Capture {
             C::ParamRegion => f.write_str("param.region"),
             C::Member(k) => write!(f, "member.{k}"),
             C::MemberOp(k) => write!(f, "member.op.{k}"),
-            C::ParamReceiver => f.write_str("param.receiver"),
+            C::Receiver => f.write_str("receiver"),
             C::Mark(k) => write!(f, "mark.{k}"),
             C::Arity(k) => write!(f, "arity.{k}"),
             C::Domain(k) => write!(f, "domain.{k}"),

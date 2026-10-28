@@ -82,7 +82,6 @@ fn family(cap: Capture) -> Family {
         | C::Alias(_)
         | C::MacroAlias(_)
         | C::Tmpl(_)
-        | C::ParamReceiver
         | C::Mark(_) => Family::Defs,
         C::Ref(_) | C::RefSpelled => Family::Refs,
         C::Member(_) | C::MemberOp(_) | C::Arity(_) => Family::Members,
@@ -93,7 +92,8 @@ fn family(cap: Capture) -> Family {
         | C::Domain(_)
         | C::Shape(_)
         | C::TypeAnnot
-        | C::AnonAggMember => Family::Flow,
+        | C::AnonAggMember
+        | C::Receiver => Family::Flow,
         C::Narrow(_) | C::Move(_) | C::GuardRegion | C::Unevaluated | C::ParamRegion => {
             Family::Narrowing
         }
@@ -399,7 +399,6 @@ pub fn extract_in(
     // resolves once every row is in.
     scopes::resolve_parents(&mut st);
     defs::dedup(&mut st);
-    defs::emit_receiver_types(&mut st);
     commands::finish(&mut st);
     defs::emit_type_aliases(&mut st);
     // Reads the symbol table after dedup and the command defs.

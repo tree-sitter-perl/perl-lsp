@@ -1075,7 +1075,7 @@ fn remap_spans(
         // name/scope-keyed — no spans to fix.
         field_types: _,
         return_sites,
-        receiver_reads,
+        receivers,
         param_sigs,
         // Populated later (enrich_skeleton) already in original coords — no remap.
         macro_body_member_reads: _,
@@ -1152,7 +1152,7 @@ fn remap_spans(
             *arg = rspan(*arg);
         }
     }
-    for (_, span) in return_sites.iter_mut().chain(receiver_reads.iter_mut()) {
+    for (_, span) in return_sites.iter_mut().chain(receivers.iter_mut()) {
         *span = rspan(*span);
     }
     // Member writes settle through `expr_type_at_span` on the receiver and an

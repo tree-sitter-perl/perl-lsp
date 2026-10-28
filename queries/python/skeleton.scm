@@ -93,8 +93,8 @@
 
 ; a method's leading `self` / `cls` is its receiver: the object, not a member
 ; of the class it is declared in.
-((parameters . (identifier) @param.receiver)
-  (#match? @param.receiver "^(self|cls)$"))
+((parameters . (identifier) @receiver)
+  (#match? @receiver "^(self|cls)$"))
 
 ; ---- imports: the module a statement loads, and the names it binds ----
 (import_statement
