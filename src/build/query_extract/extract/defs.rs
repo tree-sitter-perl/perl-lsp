@@ -14,8 +14,6 @@ pub(super) struct State {
     /// `@def.<kind>.receiver`: the receiver a member def is written
     /// through, joined to the def by match.
     receivers_by_match: HashMap<(usize, DefCap), String>,
-    /// `@def.<kind>.value`: the value a member def is written with.
-    values_by_match: HashMap<(usize, DefCap), Span>,
     /// `@qualifier` (a `Class::` on an out-of-line def) and `@rettype` (a
     /// method's declared return type) — pre-collected like names because the
     /// `@def` event fires before these inner captures.
@@ -138,9 +136,6 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
         Capture::Def { kind, part: DefPart::Receiver } => {
             d.receivers_by_match.insert((e.match_id, kind), e.text.clone());
         }
-        Capture::Def { kind, part: DefPart::Value } => {
-            d.values_by_match.insert((e.match_id, kind), e.span());
-        }
         Capture::Qualifier => {
             d.qualifier_by_match.insert(e.match_id, e.text.clone());
         }
@@ -198,7 +193,6 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     // (`skeleton::declare_slots`), and which decides whether the write
     // declares. Its name token stays the member reference it is.
     let through = d.receivers_by_match.get(&(e.match_id, kind)).cloned();
-    let value = d.values_by_match.get(&(e.match_id, kind)).copied();
     if through.is_none() {
         st.defs.def_name_spans.push((name_start, name_end));
     }
@@ -258,7 +252,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         flags: d.marks.get(&(name_start, name_end)).copied().unwrap_or_default(),
     };
     match through {
-        Some(receiver) => st.out.slot_writes.push(SlotWrite { symbol, receiver, value }),
+        Some(receiver) => st.out.slot_writes.push(SlotWrite { symbol, receiver }),
         None => st.out.symbols.push(symbol),
     }
 }

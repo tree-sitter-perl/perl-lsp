@@ -1268,3 +1268,46 @@ def f(h: Holder):
         assert_eq!(defs, [("holder.py".to_string(), 1)], "goto-def on spin in {file}");
     }
 }
+
+/// A write to a member is an assignment to it, through any receiver: a
+/// declared attribute keeps its annotation over what is written to it,
+/// and an undeclared one whose writes disagree on the class has no value.
+#[cfg(feature = "python")]
+#[test]
+fn a_member_write_is_an_assignment_to_the_member() {
+    let src = "\
+class Widget:
+    def spin(self):
+        return 1
+
+class Gadget:
+    def spin(self):
+        return 2
+
+class Holder:
+    made: Widget
+    def __init__(self):
+        self.made = Gadget()
+        self.either = Widget()
+    def swap(self):
+        self.either = Gadget()
+    def go(self):
+        return self.made.spin()
+    def maybe(self):
+        return self.either.spin()
+
+def fill(h: Holder):
+    h.kept = Gadget()
+
+def use(h: Holder):
+    return h.kept.spin()
+";
+    let (t, idx) = indexed("pymemberwrite", &[("pkg/__init__.py", ""), ("pkg/mod.py", src)]);
+    let path = t.0.join("pkg/mod.py");
+    let (defs, _, _) = landing(&idx, &path, Point::new(16, 25));
+    assert_eq!(defs, [("mod.py".to_string(), 1)], "the annotation governs `made`");
+    let (defs, _, _) = landing(&idx, &path, Point::new(18, 27));
+    assert_eq!(defs, [], "`either` is written a Widget and a Gadget");
+    let (defs, _, _) = landing(&idx, &path, Point::new(24, 18));
+    assert_eq!(defs, [("mod.py".to_string(), 5)], "a write through a parameter states the value");
+}

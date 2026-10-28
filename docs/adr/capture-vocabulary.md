@@ -191,13 +191,25 @@ binding, a member, an earlier slot); every other write, augmented or not,
 and any write through an untyped receiver, stays a member reference. The
 write's own token stays a member reference too.
 
-Every write with an owner also states the slot's value: the written value
-(`@def.slot.value`) becomes `Field{owner, name} → Edge(Expr(rhs))`, the
-same attachment a C++ or php member declaration's value rides and a member
-read's `ValueHop` chases, so the ancestry and cross-file ladders already
-serve it. The witness spans the class body, as theirs do, so a method
-above `__init__` reads it, and it is adopted into the sealed baseline with
-the slots (`FileAnalysis::adopt_witnesses`).
+What a write puts in a member is a separate fact, and not a slot's: a
+write to a member is an assignment to it. `@flow.member` names the member
+and `@flow.receiver` the receiver, beside the `@flow.source` an assignment
+to a name carries, so any member write, through any receiver, is one
+pattern of the document. Its target is the member of the class the
+receiver's value is (`skeleton::settle_member_writes`, after the slots,
+adopted into the sealed baseline with `FileAnalysis::adopt_witnesses`). A
+member the file declares on that class or an ancestor takes the write
+into its declaration's `Variable`, as a variable takes one, so a declared
+type outranks what flows in. Any other member — an instance slot, or one
+declared in another file — takes it on `Field{owner, name}`, the
+attachment a C++ or php member declaration's value rides and a member
+read's `ValueHop` chases, where each write is an arm and the arms agree
+as a hash slot's writes do: two classes are no answer. The witness spans
+the class body, as a declaration's does, so a method above `__init__`
+reads what `__init__` writes.
+`TODO(member-write-declared-elsewhere)`: a write to a member declared in
+another file lands on the writer's `Field` and shadows the declared type
+until the declaration is decided with the index.
 
 `TODO(slot-owner-deferred)`: an owner only the index can name (a receiver
 typed by another file, a parent declared in another file) is still decided

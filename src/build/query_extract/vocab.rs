@@ -182,6 +182,11 @@ spelled! {
         Source = "source",
         /// A rebind with no inflowing value (loop variables).
         Rebind = "rebind",
+        /// The receiver of a member write (`obj` in `obj.x = v`): the
+        /// written member is the one of the class its value is.
+        Receiver = "receiver",
+        /// The member a member write targets (`x` in `obj.x = v`).
+        Member = "member",
     }
 }
 
@@ -330,9 +335,6 @@ pub enum DefPart {
     /// `self.x = …`): the slot belongs to the class the receiver is typed
     /// as at the write.
     Receiver,
-    /// The value a slot def is written with (`rhs` in `self.x = rhs`): the
-    /// slot's value at the write.
-    Value,
 }
 
 /// One capture of a pack query document.
@@ -426,7 +428,6 @@ impl Capture {
             ["def", k] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Node },
             ["def", k, "name"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Name },
             ["def", k, "receiver"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Receiver },
-            ["def", k, "value"] => C::Def { kind: DefCap::parse(k)?, part: DefPart::Value },
             ["ref", "spelled"] => C::RefSpelled,
             ["ref", rest @ ..] => C::Ref(RefCap::parse(&rest.join("."))?),
             ["scope"] => C::Scope(ScopeCap::Block),
@@ -494,7 +495,6 @@ impl fmt::Display for Capture {
             C::DefPair => f.write_str("def.pair"),
             C::Def { kind, part: DefPart::Name } => write!(f, "def.{kind}.name"),
             C::Def { kind, part: DefPart::Receiver } => write!(f, "def.{kind}.receiver"),
-            C::Def { kind, part: DefPart::Value } => write!(f, "def.{kind}.value"),
             C::Ref(k) => write!(f, "ref.{k}"),
             C::RefSpelled => f.write_str("ref.spelled"),
             C::Scope(k) => family(f, "scope", k.spelling()),

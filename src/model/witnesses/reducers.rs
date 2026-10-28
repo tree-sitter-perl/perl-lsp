@@ -674,30 +674,35 @@ impl WitnessReducer for SlotTypeFold {
     }
 
     fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
-        let arms: Vec<InferredType> = ws
-            .iter()
-            .filter_map(|w| match &w.payload {
-                WitnessPayload::InferredType(t) => Some(t.clone()),
-                _ => None,
-            })
-            .collect();
-        // Two distinct class identities never agree: a slot can't be
-        // both `A` and `B`. `class_name()` is the value's own "what
-        // class am I" answer (rule #10) — distinct answers → None.
-        let mut seen_class: Option<String> = None;
-        for t in &arms {
-            if let Some(cn) = t.class_name() {
-                match &seen_class {
-                    None => seen_class = Some(cn.to_string()),
-                    Some(prev) if prev != cn => return ReducedValue::None,
-                    _ => {}
-                }
+        agree_slot_arms(ws)
+    }
+}
+
+/// One stored slot's value over its writes: each `InferredType` is an arm,
+/// agreed via `resolve_return_type`, except that two distinct class
+/// identities never agree — a slot can't be both `A` and `B`, and
+/// `class_name()` is the value's own "what class am I" answer (rule #10).
+fn agree_slot_arms(ws: &[&Witness]) -> ReducedValue {
+    let arms: Vec<InferredType> = ws
+        .iter()
+        .filter_map(|w| match &w.payload {
+            WitnessPayload::InferredType(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut seen_class: Option<String> = None;
+    for t in &arms {
+        if let Some(cn) = t.class_name() {
+            match &seen_class {
+                None => seen_class = Some(cn.to_string()),
+                Some(prev) if prev != cn => return ReducedValue::None,
+                _ => {}
             }
         }
-        match crate::model::file_analysis::resolve_return_type(&arms) {
-            Some(t) => ReducedValue::Type(t),
-            None => ReducedValue::None,
-        }
+    }
+    match crate::model::file_analysis::resolve_return_type(&arms) {
+        Some(t) => ReducedValue::Type(t),
+        None => ReducedValue::None,
     }
 }
 
@@ -841,9 +846,11 @@ impl WitnessReducer for TypeNameReducer {
 // ---- Field value ----
 //
 // Claims `Field{owner, name}` carrying a materialized `InferredType` — the
-// storage slot's value edge (`Edge(Variable{decl})`, pushed per field
-// declaration) after `materialize` chased it. Latest wins: the declaring
-// file's `Variable` fold already ranked annotation over assignment.
+// storage slot's value edges after `materialize` chased them: one per field
+// declaration (`Edge(Variable{decl})`, whose own fold already ranked
+// annotation over assignment) and one per write to a member nothing in the
+// writing file declares. Each is an arm; the arms agree as a hash slot's
+// writes do (`agree_slot_arms`).
 
 pub struct FieldValueReducer;
 
@@ -858,12 +865,7 @@ impl WitnessReducer for FieldValueReducer {
     }
 
     fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
-        for w in ws.iter().rev() {
-            if let WitnessPayload::InferredType(t) = &w.payload {
-                return ReducedValue::Type(t.clone());
-            }
-        }
-        ReducedValue::None
+        agree_slot_arms(ws)
     }
 }
 

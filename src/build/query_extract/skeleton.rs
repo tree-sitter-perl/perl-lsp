@@ -202,19 +202,30 @@ pub struct SkeletonAnalysis {
     /// slot each, if `declare_slots` finds its owner and no declaration of
     /// the name there.
     pub slot_writes: Vec<SlotWrite>,
+    /// Writes to a member through a receiver (`@flow.member`), undecided:
+    /// which member each writes is the receiver's type's, settled by
+    /// `settle_member_writes`.
+    pub member_writes: Vec<MemberWrite>,
     /// The scope each class declared in this file opened as its own, by
     /// the class's identity: where a slot of it is filed.
     pub class_scopes: Vec<(String, crate::model::file_analysis::ScopeId)>,
 }
 
 /// A write through a receiver (`obj.x = …`): the slot it would declare
-/// (no owner yet), the receiver whose type names the owner, and the value
-/// written.
+/// (no owner yet) and the receiver whose type names the owner.
 #[derive(Debug, Clone)]
 pub struct SlotWrite {
     pub symbol: SkelSymbol,
     pub receiver: String,
-    pub value: Option<crate::model::file_analysis::Span>,
+}
+
+/// An assignment to a member through a receiver (`obj.x = v`): the
+/// receiver expression, the member's name, and the value written.
+#[derive(Debug, Clone)]
+pub struct MemberWrite {
+    pub receiver: crate::model::file_analysis::Span,
+    pub member: String,
+    pub value: crate::model::file_analysis::Span,
 }
 
 /// What a function-like macro's return resolves to (`SkeletonAnalysis::
@@ -433,6 +444,7 @@ impl SkeletonAnalysis {
         };
         let names = self.names.clone();
         let slot_writes = std::mem::take(&mut self.slot_writes);
+        let member_writes = std::mem::take(&mut self.member_writes);
         let class_scopes = std::mem::take(&mut self.class_scopes);
         // A NAMED typedef `typedef struct N {...} N;` matches both the
         // struct_specifier and the type_definition → two `class N` AT THE
@@ -1406,6 +1418,7 @@ impl SkeletonAnalysis {
         // Last, over the assembled analysis: an owner is a type, and the
         // registry answers types from the whole bag.
         declare_slots(&mut fa, slot_writes, &class_scopes);
+        settle_member_writes(&mut fa, member_writes, &class_scopes);
         fa
     }
 }
@@ -1419,11 +1432,6 @@ impl SkeletonAnalysis {
 /// already declares the name — a class-body binding, a member, an earlier
 /// slot of the class, or any slot write of an ancestor's — and every other
 /// write stays the reference to that member it already is.
-///
-/// Every write with an owner also states the slot's value: `Field{owner,
-/// name} → Edge(Expr(rhs))`, the attachment a member read's `ValueHop`
-/// chases, as a C++ or php member's declaration does. Class-wide like
-/// theirs, so a method above `__init__` reads it too.
 ///
 /// Runs after `finalize_post_walk`, adopting the slots into the sealed
 /// baseline: it is the latest point a fact of the build can land. Anything
@@ -1467,23 +1475,9 @@ fn declare_slots(
         .collect();
     let mut accepted: std::collections::HashSet<(String, String)> = Default::default();
     let mut slots = Vec::new();
-    let mut values = Vec::new();
     for (w, owner) in writes.iter().zip(&owners) {
         let Some(class) = owner else { continue };
         let name = w.symbol.name.as_str();
-        if let Some(rhs) = w.value {
-            use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
-            let span = class_scopes
-                .iter()
-                .find(|(c, _)| c == class)
-                .map_or(rhs, |&(_, scope)| fa.scope(scope).span);
-            values.push(Witness {
-                attachment: WA::Field { owner: class.clone(), name: name.to_string() },
-                source: WitnessSource::Builder("slot_value".into()),
-                payload: WP::Edge(WA::Expr(rhs)),
-                span,
-            });
-        }
         let declares = |c: &str| {
             fa.symbols_named(name).iter().map(|&sid| fa.symbol(sid)).any(|m| {
                 m.package.as_deref() == Some(c) && matches!(m.kind, SymKind::Field | SymKind::Sub | SymKind::Method)
@@ -1502,6 +1496,60 @@ fn declare_slots(
         slots.push(skel_symbol(0, &s));
     }
     fa.adopt_path_symbols(slots);
+}
+
+/// Each member write is an assignment to the member of the class its
+/// receiver's value is, asked of the assembled analysis's own registry, as
+/// `declare_slots` asks for a slot's owner. A member this file declares on
+/// that class or an ancestor takes the write the way a variable takes one:
+/// into its declaration's `Variable`, whose fold ranks a declared type over
+/// what flows in. Any other member — an instance slot, or one declared in
+/// another file — takes it on `Field{owner, name}`, the attachment a member
+/// read's `ValueHop` chases, where every write is one arm of the slot's
+/// value. A write through a receiver of no known class states nothing.
+///
+/// Class-wide, as a member declaration's value is: a method above
+/// `__init__` reads what `__init__` writes.
+///
+/// TODO(member-write-declared-elsewhere): a write to a member declared in
+/// another file (a parent's annotated attribute) lands on the writer's
+/// `Field`, and an answer there is found before the declaring file's, so
+/// the write's value shadows the declared type. Deciding the declaration
+/// needs the index, the same deferral as `TODO(slot-owner-deferred)`.
+fn settle_member_writes(
+    fa: &mut crate::model::file_analysis::FileAnalysis,
+    writes: Vec<MemberWrite>,
+    class_scopes: &[(String, crate::model::file_analysis::ScopeId)],
+) {
+    use crate::model::file_analysis::{class_or_ancestor, SymKind};
+    use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
+    let mut values = Vec::new();
+    for w in &writes {
+        let Some(class) = fa.expr_type_at_span(w.receiver, None).and_then(|t| t.class_name().map(str::to_string))
+        else {
+            continue;
+        };
+        let mut declared = None;
+        class_or_ancestor(&class, &fa.packages, |c| {
+            declared = fa.symbols_named(&w.member).iter().map(|&sid| fa.symbol(sid)).find(|m| {
+                m.kind == SymKind::Field && m.package.as_deref() == Some(c)
+            });
+            declared.is_some()
+        });
+        let (attachment, scope) = match declared {
+            Some(m) => (WA::Variable { name: m.name.clone(), scope: m.scope }, Some(m.scope)),
+            None => (
+                WA::Field { owner: class.clone(), name: w.member.clone() },
+                class_scopes.iter().find(|(c, _)| *c == class).map(|&(_, scope)| scope),
+            ),
+        };
+        values.push(Witness {
+            attachment,
+            source: WitnessSource::Builder("member_write".into()),
+            payload: WP::Edge(WA::Expr(w.value)),
+            span: scope.map_or(w.value, |scope| fa.scope(scope).span),
+        });
+    }
     fa.adopt_witnesses(values);
 }
 

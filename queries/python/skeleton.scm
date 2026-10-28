@@ -66,8 +66,15 @@
 (assignment
   left: (attribute
     object: (identifier) @def.slot.receiver
-    attribute: (identifier) @def.slot.name) @def.slot
-  right: (_) @def.slot.value)
+    attribute: (identifier) @def.slot.name) @def.slot)
+
+; A write to a member is an assignment to it: the member of the class the
+; receiver's value is.
+(assignment
+  left: (attribute
+    object: (_) @flow.receiver
+    attribute: (identifier) @flow.member)
+  right: (_) @flow.source) @flow.assign
 
 (parameters
   (identifier) @def.var.name @def.var)
