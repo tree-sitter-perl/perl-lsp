@@ -1479,3 +1479,32 @@ fn a_perl_constructor_and_a_requires_marker_are_flags() {
     assert!(!flags("newer").contains(SymbolFlags::CONSTRUCTOR));
     assert!(flags("fetch").contains(SymbolFlags::CONTRACT));
 }
+
+fn param_names(fa: &FileAnalysis, sub: &str) -> Vec<String> {
+    let sym = fa.symbols().iter().find(|s| s.name == sub).expect("sub");
+    match &sym.detail {
+        SymbolDetail::Sub { params, .. } => params.iter().map(|p| p.name.clone()).collect(),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A statement that leaves `@_` alone consumes no argument, so the
+/// unpack after it still binds the next one (Moo's `import`:
+/// `my $target = caller; my $class = shift;`). One that reads or hands on
+/// `@_` ends the preamble.
+#[test]
+fn args_untouched_statements_do_not_end_the_unpack() {
+    let fa = build_fa(
+        "package Moo;\n\
+         sub import { my $target = caller; my $class = shift; $class->make_class($target); }\n\
+         sub make_class { 1 }\n\
+         sub counted { my $n = scalar(@_); my $x = shift; }\n\
+         sub handed { &other; my $x = shift; }\n\
+         sub guarded { return unless defined $_[0]; my $x = shift; }\n",
+    );
+    assert_eq!(param_names(&fa, "import"), ["$class"]);
+    assert!(fa.is_receiver_at("$class", Point::new(1, 60)), "the conventional invocant name settles it as the receiver");
+    assert!(param_names(&fa, "counted").is_empty(), "`@_` read: the preamble ends");
+    assert!(param_names(&fa, "handed").is_empty(), "`&other;` hands `@_` on");
+    assert!(param_names(&fa, "guarded").is_empty(), "`$_[0]` read");
+}
