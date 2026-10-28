@@ -31,7 +31,11 @@ crate / VS Code extension versions.
   renaming a variable rewrites inside the braces (`"${x}s"` used to be
   left behind).
 - **New default-on `missing-declaration` warning** on each use of a variable
-  nothing declares, mirroring `use strict 'vars'`. `$a`/`$b`, Perl's
+  nothing declares, wherever `strict 'vars'` is in force: after `use strict`
+  (bare or naming `vars`), `use v5.12` or later, or a module that turns
+  strict on (Moo, Moose, Mojo::Base, Modern::Perl, ...), to the end of the
+  enclosing block; a `no strict` / `no strict 'vars'` block switches it
+  off. Code without strict never fires. `$a`/`$b`, Perl's
   special variables and qualified names are exempt; a variable an import
   brings in (`use FindBin qw($Bin)`, an exported `*glob`) counts as
   declared. A file with a bare `use` whose module isn't resolved yet stays
@@ -40,6 +44,12 @@ crate / VS Code extension versions.
 - **`use English` variables are declared.** English builds its export list
   at runtime; a bundled `english` plugin states it, so `$ERRNO` and friends
   count as declared (match variables only without `-no_match_vars`).
+- **`use Env` and Log4perl's tags declare their variables.** Both build
+  their exports at runtime, so bundled `env` and `log4perl` plugins state
+  them: each word of `use Env qw(HOME @PATH)` is a package variable (a bare
+  word a scalar), and `use Log::Log4perl qw(:levels)` / `qw(:easy)` bring in
+  `$DEBUG`, `$WARN`, ... (`:easy` also `DEBUG(...)`, `LOGDIE(...)` and
+  friends), as does a bare `use Log::Log4perl::Level`.
 - **Symbolic references to a constant name are the variable they name.**
   `${"abel"}`, `@{"Foo::q"}`, and `${$n}` where `$n` holds one string
   literal reach the package variable — never a lexical of the same name —

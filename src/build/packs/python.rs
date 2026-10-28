@@ -34,7 +34,12 @@ pub fn python_pack() -> LangPack {
             "int" | "float" => Some(InferredType::Numeric),
             "list" => Some(InferredType::ArrayRef),
             "dict" => Some(InferredType::HashRef),
-            t if t.chars().next().is_some_and(|c| c.is_uppercase()) => {
+            // `None` is the null value's type, and a subscript, union or
+            // string annotation is no class spelling.
+            "None" => None,
+            t if t.chars().next().is_some_and(|c| c.is_uppercase())
+                && t.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') =>
+            {
                 Some(InferredType::ClassName(t.to_string()))
             }
             _ => None,

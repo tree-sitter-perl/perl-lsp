@@ -42,14 +42,14 @@ pub(super) fn attr_group_via_ancestors(
     // `field` is per-class PRIVATE storage — never widen it, mint from the
     // nearest declarer so a subclass's field doesn't capture an ancestor's.
     let mut defining: Option<String> = None;
-    let mut nearest_field_backed = false;
+    let mut nearest_private = false;
     origin.for_each_ancestor_class(start_class, Some(idx), |c| {
         if let Some(p) = proj(c) {
             if defining.is_none() {
-                nearest_field_backed = p.field_backed;
+                nearest_private = p.private;
             }
             defining = Some(c.to_string());
-            if nearest_field_backed || scope == OverrideScope::Dispatch {
+            if nearest_private || scope == OverrideScope::Dispatch {
                 return std::ops::ControlFlow::Break(());
             }
         }
@@ -155,10 +155,10 @@ pub fn resolve_symbol_scoped(
                     }
                 }
             }
-            RefKind::MethodCall { .. } => {
+            RefKind::MethodCall { .. } | RefKind::FieldAccess { .. } => {
                 let bare = r.unqualified_target_name(analysis.names()).to_string();
                 if let Some(class) = analysis.method_call_invocant_class(r, module_index) {
-                    // Only an accessor-bearing group may claim a method-call
+                    // Only an accessor-bearing group may claim a member
                     // cursor (`require_reader`).
                     if let Some(g) =
                         attr_group_via_ancestors(&class, &bare, analysis, idx, true, false, scope)
@@ -211,9 +211,6 @@ pub fn resolve_symbol_scoped(
     // already does forward, on the SAME key. All gates are structural facts
     // Perl analyses never exhibit (sigil-less Variable/Field symbols,
     // `macro_defs`), so Perl cursors fall through untouched.
-    if let Some(g) = codeclared_member_group(analysis, point, module_index, scope) {
-        return Some(g);
-    }
     if let Some(sym) = analysis.symbol_at(point) {
         // A `#define`'s own def site (its symbol's selection span IS a
         // MacroDef). The forward macro lane keys on the bare word
@@ -453,98 +450,5 @@ pub(super) fn class_member_bare_constant(
                 v
             })
         })
-    })
-}
-
-/// A class member and a local declared by ONE token (php's promoted
-/// constructor parameter, python's class-body binding,
-/// `Symbol::declared_with`) are one name: from the token or a use of
-/// either, the group is the local's spellings plus the member's target, so
-/// a rename rewrites both. A read of the member in another file mints the
-/// group from the declaring file, its spellings pinned there.
-fn codeclared_member_group(
-    analysis: &FileAnalysis,
-    point: tree_sitter::Point,
-    module_index: Option<&dyn CrossFileLookup>,
-    scope: OverrideScope,
-) -> Option<ResolvedTarget> {
-    use crate::model::file_analysis::{MethodResolution, MethodTarget};
-    let r = analysis.ref_at(point);
-    let here = analysis.symbol_at(point).or_else(|| {
-        let r = r?;
-        let id = r.resolved_symbol().or_else(|| match r.method_target()? {
-            MethodTarget::Local { sym_id, .. } => Some(*sym_id),
-            MethodTarget::CrossFile { .. } => None,
-        })?;
-        Some(analysis.symbol(id))
-    });
-    if let Some(sym) = here {
-        return codeclared_group(analysis, analysis, sym, None, module_index, scope);
-    }
-    let r = r.filter(|r| matches!(r.kind, RefKind::FieldAccess { .. }))?;
-    let idx = module_index?;
-    let name = r.unqualified_target_name(analysis.names());
-    let class = analysis.method_call_invocant_class(r, Some(idx))?;
-    let Some(MethodResolution::CrossFile { class: owner, .. }) = analysis.resolve_field_in_ancestors(&class, name, Some(idx))
-    else {
-        return None;
-    };
-    idx.visible_def_candidates(&owner).iter().find_map(|cached| {
-        let whole = idx.whole_present(cached);
-        let sym = whole.symbols().iter().find(|s| {
-            matches!(s.kind, SymKind::Field) && s.name == name && s.package.as_deref() == Some(owner.as_str())
-        })?;
-        codeclared_group(analysis, &whole, sym, Some(cached.path.clone()), Some(idx), scope)
-    })
-}
-
-/// The group of `sym` and its co-declared partner, minted from `analysis`;
-/// `pinned` is that file when it is not `origin`, the cursor's.
-fn codeclared_group(
-    origin: &FileAnalysis,
-    analysis: &FileAnalysis,
-    sym: &crate::model::file_analysis::Symbol,
-    pinned: Option<PathBuf>,
-    module_index: Option<&dyn CrossFileLookup>,
-    scope: OverrideScope,
-) -> Option<ResolvedTarget> {
-    let partner = analysis.symbol(sym.declared_with?);
-    let (local, member) = if analysis.symbol_is_class_content(partner) {
-        (sym, partner)
-    } else if analysis.symbol_is_class_content(sym) {
-        (partner, sym)
-    } else {
-        return None;
-    };
-    let mut target = TargetRef::method(
-        member.name.clone(),
-        member.package.clone()?,
-        Some(MemberKind::of_sym(member.kind)),
-        analysis,
-        module_index,
-        scope,
-    );
-    // Def paths are relative to the cursor's file, which the index's
-    // visibility scope is keyed by.
-    target.def_paths = pack_class_def_paths(&target, origin, module_index);
-    let spans: Vec<Span> = analysis
-        .find_occurrences(local.selection_span.start, module_index)
-        .into_iter()
-        .map(|(s, _)| s)
-        .collect();
-    let members = vec![GroupMember { target, rename: MemberRename::Bare }];
-    Some(match pinned {
-        None => ResolvedTarget::Group {
-            local_spans: spans,
-            pinned_spans: Vec::new(),
-            decl_spans: vec![(None, member.selection_span)],
-            members,
-        },
-        Some(path) => ResolvedTarget::Group {
-            local_spans: Vec::new(),
-            pinned_spans: spans.into_iter().map(|s| (path.clone(), s)).collect(),
-            decl_spans: vec![(Some(path), member.selection_span)],
-            members,
-        },
     })
 }

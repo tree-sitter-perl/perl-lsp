@@ -23,7 +23,7 @@ invocants too, so it belongs inside), `refs_to` for its other callers, and
 `OpenDocs::enrich_open`, because the open-doc heal runs the same cascade on
 a background thread. Nested enters ride the open one. While it is open the
 `PackageSymbol` /
-`SlotType` cross-file hops answer from a memo of **candidate
+`Field` cross-file hops answer from a memo of **candidate
 contributions**: "what does the file at `path` contribute to this query".
 It also shares `visible_def_candidates` (a clone + sort of the whole
 candidate vec per call, asked millions of times per walk) and carries the

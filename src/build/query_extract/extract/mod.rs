@@ -284,6 +284,7 @@ pub fn extract_in(
         owner: None,
         implicit_receiver: false,
         direct: false,
+        declaration_rules: Vec::new(),
     });
     let mut st = ExtractState {
         pack,
@@ -413,8 +414,7 @@ pub fn extract_in(
     defs::emit_type_aliases(&mut st);
     // Reads the symbol table after dedup and the command defs.
     flow::finish(&mut st);
-    // Reads the annotation witnesses flow lowered.
-    defs::declare_slots(&mut st);
+    st.out.class_scopes = scopes::class_scope_rows(&st);
     // The narrowing cutoff reads the flow edges.
     narrowing::finish(&mut st);
     members::finish(&mut st);

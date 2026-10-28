@@ -13,7 +13,7 @@ use crate::model::witnesses::TypeObservation;
 
 /// A ready-to-parse tree-sitter Parser for the Perl grammar — the one
 /// constructor every parse site (resolver, document, CLI, the s///e
-/// snippet re-parse) shares. Lives in the builder layer: the resolver
+/// replacement parse) shares. Lives in the builder layer: the resolver
 /// calling down is fine, the builder reaching up was not.
 pub fn create_parser() -> tree_sitter::Parser {
     let mut parser = tree_sitter::Parser::new();
@@ -261,6 +261,13 @@ pub(super) enum TailArm {
 
 struct Builder<'a> {
     source: &'a [u8],
+    /// The code of each `s///e` replacement, by the replacement's start
+    /// byte — see `parse_eval_replacements`.
+    // TODO(injected-trees): only the walk sees these. Post-walk passes that
+    // traverse from the main root (pattern dispatch, flow query, the chain
+    // typing index) miss replacement code; the fix is a file tree type that
+    // yields injected trees transparently, not a roots list each pass loops.
+    eval_injections: std::collections::HashMap<usize, Node<'a>>,
 
     scopes: Vec<Scope>,
     symbols: Vec<Symbol>,
@@ -305,7 +312,7 @@ struct Builder<'a> {
     /// For each `$obj->{k} = <rhs>` hash-key WRITE, maps the key node's
     /// span (the span the matching `HashKeyAccess` Write ref carries) to
     /// the RHS expression's span. `populate_witness_bag`'s mutation loop
-    /// reads it to seed `SlotType{class, key} → Edge(Expr(rhs_span))`
+    /// reads it to seed `Field{class, key} → Edge(Expr(rhs_span))`
     /// alongside the untyped mutation Fact. Hash-element LHS only; plain
     /// variable assignments never enter it.
     slot_write_rhs_span: std::collections::HashMap<Span, Span>,

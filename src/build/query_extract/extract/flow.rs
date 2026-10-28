@@ -16,6 +16,11 @@ pub(super) struct State {
     /// match_id → the source with the pack's transparent wrappers peeled
     /// off (`(5)` → `5`): the node whose value the source is.
     source_inner: HashMap<usize, Span>,
+    /// Writes to a place: match_id → the place's span and byte range.
+    flow_places: HashMap<usize, (Span, (usize, usize))>,
+    /// Member reads by byte range → (receiver span, member): what a
+    /// place's own read projects, so a write lands where the read looks.
+    member_reads: HashMap<(usize, usize), (Span, String)>,
     /// Rebind shapes with no inflowing value (loop vars: `for x in …`,
     /// `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
     /// cutoff sees them, exactly like Perl's `foreach` var.
@@ -167,6 +172,9 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
         Capture::Flow(FlowCap::Source) => {
             f.flow_sources.insert(e.match_id, e.span());
         }
+        Capture::Flow(FlowCap::Place) => {
+            f.flow_places.insert(e.match_id, (e.span(), (e.start_byte, e.end_byte)));
+        }
         Capture::AnonAggMember => {
             // A field typed by an anonymous aggregate: its members are
             // flattened onto the enclosing named container, so the field's
@@ -298,15 +306,15 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
                 (in_match(Capture::Ref(RefCap::MemberValue)), in_match(Capture::Member(MemberCap::Recv)))
             {
                 let span = e.span();
+                let member = (pack.shape_name)(&name.text);
                 f.lit_spans.push((e.start_byte, e.end_byte, span));
+                f.member_reads.insert((e.start_byte, e.end_byte), (recv.span(), member.clone()));
                 out.witnesses.push(skeleton_witness(
                     WitnessAttachment::Expr(span),
                     "skeleton-member",
                     WitnessPayload::Projected {
                         base: WitnessAttachment::Expr(recv.span()),
-                        step: crate::model::witnesses::ProjectionStep::ValueHop {
-                            member: (pack.shape_name)(&name.text),
-                        },
+                        step: crate::model::witnesses::ProjectionStep::ValueHop { member },
                     },
                     span,
                 ));
@@ -424,16 +432,7 @@ pub(super) fn finish(st: &mut ExtractState) {
                 });
             }
         }
-        if let Some(src_span) = f.flow_sources.get(mid) {
-            // A source that states no value of its own takes the value its
-            // transparent wrappers hold (`(5)`). A value merely inside it —
-            // an argument, an operand, a subscripted call — is not its
-            // value, so the edge stays on the source.
-            let valued = |sp: &Span| f.lit_spans.iter().any(|(_, _, l)| l == sp);
-            let target_span = match f.source_inner.get(mid) {
-                Some(inner) if !valued(src_span) && valued(inner) => *inner,
-                _ => *src_span,
-            };
+        if let Some(target_span) = source_value_span(f, *mid) {
             // Mint a value-flow edge (cpp init is `Whole`); the witness is its
             // lowering, so type inference sees the same `Variable → Edge(Expr)`
             // it always did — now with the source span kept for provenance.
@@ -444,6 +443,23 @@ pub(super) fn finish(st: &mut ExtractState) {
                 source: target_span,
                 extraction: crate::model::file_analysis::Extraction::Whole,
                 reassigns: reassigns(name, token),
+            });
+        }
+    }
+    // A place is whatever its own read projects. A member read's target is
+    // decided by its receiver's type, which only the assembled analysis
+    // answers (`skeleton::settle_member_writes`). A name's place is its
+    // binding, which `@flow.target` writes and rebinds; a place no read
+    // projects (a call, a literal) takes nothing.
+    let mut place_mids: Vec<&usize> = f.flow_places.keys().collect();
+    place_mids.sort_unstable();
+    for mid in place_mids {
+        let read = f.member_reads.get(&f.flow_places[mid].1);
+        if let (Some((receiver, member)), Some(value)) = (read, source_value_span(f, *mid)) {
+            out.member_writes.push(crate::build::query_extract::MemberWrite {
+                receiver: *receiver,
+                member: member.clone(),
+                value,
             });
         }
     }
@@ -467,6 +483,19 @@ pub(super) fn finish(st: &mut ExtractState) {
             out.witnesses.push(w);
         }
     }
+}
+
+/// The span whose witness is match `mid`'s inflowing value. A source that
+/// states no value of its own takes the value its transparent wrappers hold
+/// (`(5)`). A value merely inside it — an argument, an operand, a
+/// subscripted call — is not its value, so the edge stays on the source.
+fn source_value_span(f: &State, mid: usize) -> Option<Span> {
+    let src_span = f.flow_sources.get(&mid)?;
+    let valued = |sp: &Span| f.lit_spans.iter().any(|(_, _, l)| l == sp);
+    Some(match f.source_inner.get(&mid) {
+        Some(inner) if !valued(src_span) && valued(inner) => *inner,
+        _ => *src_span,
+    })
 }
 
 /// A bare identifier lexeme — the only shape that can name an enumerator.

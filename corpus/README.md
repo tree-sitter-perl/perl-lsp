@@ -96,9 +96,25 @@ gives a local, non-root, reproducible set — no system mutation. `micromamba`
 covers most of the same ground. Both are heavier than the problem currently
 warrants.
 
+## House plugins
+
+Some of what a corpus does at runtime is invisible to any static reading, and
+is the corpus's own code, not a CPAN module's: openfoodfacts'
+`ProductOpener::Config` loads its export list from `Config_$flavor` chosen by
+an environment variable, and FHEM's modules use the globals `fhem.pl` declares
+with `use vars` before it `do`-loads them. A team using perl-lsp on such a
+codebase writes a plugin for it; `house/<name>/*.rhai` is that plugin, and
+`bootstrap.sh` copies it into the repo's `.perl-lsp/` (git-excluded), which
+the server loads for that workspace root with no environment. Without them the
+corpus reports the house's magic as `missing-declaration` thousands of times
+over, measuring a gap a real user has already closed.
+
+House plugins state names copied from the source at the pinned commit, so a
+pin bump re-reads them. Magic that comes from a CPAN module (`use Env`,
+Log4perl's tags) is not a house plugin; it ships bundled in `frameworks/`.
+
 ## Reproducibility caveat
 
-`bootstrap.sh` clones **default branches at depth 1** and installs **current**
-CPAN. Two runs weeks apart are not the same corpus. Nothing here is pinned,
-because the corpus exists to find pathologies rather than to gate CI — if it
-ever gates anything, pin the clones to SHAs and the deps to a snapshot first.
+`bootstrap.sh` pins each clone to a commit (fetched at depth 1) but installs
+**current** CPAN, so two runs weeks apart can still resolve different
+dependencies. Pin the deps to a snapshot before the corpus gates anything.

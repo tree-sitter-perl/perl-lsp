@@ -96,9 +96,9 @@ pub(crate) fn emit_mutation_extension_witnesses(
             // lands in the slot's value, which every method shares.
             ref obj if !w.path.is_empty() && obj.class_name().is_some() => {
                 let crate::model::file_analysis::WriteKey::Hash(ref slot) = w.key else { continue };
-                let att = WitnessAttachment::SlotType {
-                    class: obj.class_name().unwrap_or_default().to_string(),
-                    key: slot.clone(),
+                let att = WitnessAttachment::Field {
+                    owner: obj.class_name().unwrap_or_default().to_string(),
+                    name: slot.clone(),
                 };
                 let reg = ReducerRegistry::with_defaults();
                 let q = ReducerQuery {
