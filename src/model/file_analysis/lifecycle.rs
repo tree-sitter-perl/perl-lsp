@@ -272,6 +272,17 @@ impl FileAnalysis {
         self.refs.seal_baseline();
     }
 
+    /// Adopt build-time witnesses minted after assembly (a pack's slot
+    /// values, whose owner is a type only the assembled analysis answers),
+    /// sealed into the enrichment baseline as `adopt_path_symbols` seals
+    /// its symbols.
+    pub fn adopt_witnesses(&mut self, witnesses: Vec<crate::model::witnesses::Witness>) {
+        for w in witnesses {
+            self.witnesses.push(w);
+        }
+        self.base_witness_count = self.witnesses.len();
+    }
+
     /// Derive `unrowed_attachment_names` from the FINAL bag: every
     /// class-keyed attachment name the relational rows would deny.
     ///

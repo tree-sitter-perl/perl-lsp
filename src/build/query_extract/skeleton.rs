@@ -208,11 +208,13 @@ pub struct SkeletonAnalysis {
 }
 
 /// A write through a receiver (`obj.x = …`): the slot it would declare
-/// (no owner yet) and the receiver whose type names the owner.
+/// (no owner yet), the receiver whose type names the owner, and the value
+/// written.
 #[derive(Debug, Clone)]
 pub struct SlotWrite {
     pub symbol: SkelSymbol,
     pub receiver: String,
+    pub value: Option<crate::model::file_analysis::Span>,
 }
 
 /// What a function-like macro's return resolves to (`SkeletonAnalysis::
@@ -1418,6 +1420,11 @@ impl SkeletonAnalysis {
 /// slot of the class, or any slot write of an ancestor's — and every other
 /// write stays the reference to that member it already is.
 ///
+/// Every write with an owner also states the slot's value: `Field{owner,
+/// name} → Edge(Expr(rhs))`, the attachment a member read's `ValueHop`
+/// chases, as a C++ or php member's declaration does. Class-wide like
+/// theirs, so a method above `__init__` reads it too.
+///
 /// Runs after `finalize_post_walk`, adopting the slots into the sealed
 /// baseline: it is the latest point a fact of the build can land. Anything
 /// later is enrichment, which truncates back to that baseline.
@@ -1460,9 +1467,23 @@ fn declare_slots(
         .collect();
     let mut accepted: std::collections::HashSet<(String, String)> = Default::default();
     let mut slots = Vec::new();
+    let mut values = Vec::new();
     for (w, owner) in writes.iter().zip(&owners) {
         let Some(class) = owner else { continue };
         let name = w.symbol.name.as_str();
+        if let Some(rhs) = w.value {
+            use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
+            let span = class_scopes
+                .iter()
+                .find(|(c, _)| c == class)
+                .map_or(rhs, |&(_, scope)| fa.scope(scope).span);
+            values.push(Witness {
+                attachment: WA::Field { owner: class.clone(), name: name.to_string() },
+                source: WitnessSource::Builder("slot_value".into()),
+                payload: WP::Edge(WA::Expr(rhs)),
+                span,
+            });
+        }
         let declares = |c: &str| {
             fa.symbols_named(name).iter().map(|&sid| fa.symbol(sid)).any(|m| {
                 m.package.as_deref() == Some(c) && matches!(m.kind, SymKind::Field | SymKind::Sub | SymKind::Method)
@@ -1481,6 +1502,7 @@ fn declare_slots(
         slots.push(skel_symbol(0, &s));
     }
     fa.adopt_path_symbols(slots);
+    fa.adopt_witnesses(values);
 }
 
 /// The model symbol a skeleton def mints, as the `i`-th symbol.

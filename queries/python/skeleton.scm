@@ -66,7 +66,8 @@
 (assignment
   left: (attribute
     object: (identifier) @def.slot.receiver
-    attribute: (identifier) @def.slot.name) @def.slot)
+    attribute: (identifier) @def.slot.name) @def.slot
+  right: (_) @def.slot.value)
 
 (parameters
   (identifier) @def.var.name @def.var)

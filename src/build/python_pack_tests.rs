@@ -1226,3 +1226,45 @@ def f(o):
     reads.sort();
     assert_eq!(reads, [(2, true), (4, true), (5, true), (8, true)]);
 }
+
+/// A write through `self` states the slot's value: a read of the slot,
+/// in a method above the write, through a subclass in another file, or
+/// on an annotated instance in a third, has the written value's type.
+#[cfg(feature = "python")]
+#[test]
+fn a_slot_write_states_the_slots_value() {
+    let holder = "\
+class Widget:
+    def spin(self):
+        return 1
+
+class Holder:
+    def early(self):
+        return self.made.spin()
+    def __init__(self):
+        self.made = Widget()
+";
+    let child = "\
+from pkg.holder import Holder
+
+class Child(Holder):
+    def go(self):
+        return self.made.spin()
+";
+    let main = "\
+from pkg.holder import Holder
+
+def f(h: Holder):
+    return h.made.spin()
+";
+    let (t, idx) = indexed("pyslotvalue", &[
+        ("pkg/__init__.py", ""),
+        ("pkg/holder.py", holder),
+        ("pkg/child.py", child),
+        ("pkg/main.py", main),
+    ]);
+    for (file, at) in [("pkg/holder.py", Point::new(6, 25)), ("pkg/child.py", Point::new(4, 25)), ("pkg/main.py", Point::new(3, 18))] {
+        let (defs, _, _) = landing(&idx, &t.0.join(file), at);
+        assert_eq!(defs, [("holder.py".to_string(), 1)], "goto-def on spin in {file}");
+    }
+}

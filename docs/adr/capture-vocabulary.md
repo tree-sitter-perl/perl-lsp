@@ -191,6 +191,14 @@ binding, a member, an earlier slot); every other write, augmented or not,
 and any write through an untyped receiver, stays a member reference. The
 write's own token stays a member reference too.
 
+Every write with an owner also states the slot's value: the written value
+(`@def.slot.value`) becomes `Field{owner, name} → Edge(Expr(rhs))`, the
+same attachment a C++ or php member declaration's value rides and a member
+read's `ValueHop` chases, so the ancestry and cross-file ladders already
+serve it. The witness spans the class body, as theirs do, so a method
+above `__init__` reads it, and it is adopted into the sealed baseline with
+the slots (`FileAnalysis::adopt_witnesses`).
+
 `TODO(slot-owner-deferred)`: an owner only the index can name (a receiver
 typed by another file, a parent declared in another file) is still decided
 without it. The target is Perl's shape — the write is a ref whose owner is
