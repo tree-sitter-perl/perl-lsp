@@ -22,8 +22,11 @@ pub(super) struct State {
     /// `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
     /// cutoff sees them, exactly like Perl's `foreach` var.
     pub(super) flow_rebinds: Vec<(String, ScopeId, Point)>,
-    /// `@type.annot` — a declaration's type text, joined per match.
-    annots: HashMap<usize, String>,
+    /// `@type.annot` — a declaration's type text and span, joined per match.
+    annots: HashMap<usize, (String, Point, Point)>,
+    /// The class each `@type.enclosing` annotation names: the one in force
+    /// where it is written, known only once the walk reaches it.
+    enclosing_annots: HashMap<usize, String>,
     /// `@expr.read.var.name` — a read's name token, joined to its node.
     read_names: HashMap<usize, (String, Span)>,
     /// expr-literal spans, for narrowing an Edge target onto the actual
@@ -45,7 +48,7 @@ pub(super) struct State {
 pub(super) fn collect(st: &mut ExtractState, e: &Event) {
     match e.cap {
         Capture::TypeAnnot => {
-            st.flow.annots.insert(e.match_id, e.text.clone());
+            st.flow.annots.insert(e.match_id, (e.text.clone(), e.start, e.end));
         }
         Capture::Expr(ExprCap::ReadVarName) => {
             st.flow.read_names.insert(e.match_id, (e.text.clone(), e.span()));
@@ -124,9 +127,12 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
             // for the token-less optional-engagement narrowing. cur_scope is
             // only known here (scopes mint during this walk); the type-annot
             // half was pre-collected (it precedes the declarator in source).
-            if let Some(annot) = f.annots.get(&e.match_id) {
+            if let Some((annot, s, en)) = f.annots.get(&e.match_id) {
                 for &scope in &target_scopes {
                     st.narrowing.annot_text_by_var.insert(((pack.shape_name)(&e.text), scope), annot.clone());
+                }
+                if let Some(class) = st.package.as_ref().filter(|_| st.defs.names_enclosing(*s, *en)) {
+                    f.enclosing_annots.insert(e.match_id, class.clone());
                 }
             }
             f.flow_targets.insert(e.match_id, ((pack.shape_name)(&e.text), target_scopes, e.start));
@@ -322,14 +328,18 @@ pub(super) fn finish(st: &mut ExtractState, events: &[Event]) {
             .get(&(name.clone(), *scope))
             .copied()
             .unwrap_or(Span { start: *at, end: *at });
-        if let Some(annot) = f.annots.get(mid) {
+        if let Some((annot, ..)) = f.annots.get(mid) {
             // A class-shaped declared type edges into the alias graph (it may
             // be a typedef — `U16 x;` where `typedef unsigned short U16`);
             // primitives stay leaves; `None` (auto/void) defers to the flow
             // edge as before. `TypeName` chases the typedef or falls back to
             // the same `ClassName`, so a plain struct/class is unchanged.
-            let annot_type =
-                (st.pack.annot_type)(annot).map(|t| written_type_at(out, &st.pack.names, t, annot_span.start));
+            // A type naming the class it is written in is that class, already
+            // an identity; any other spelling resolves at its site.
+            let annot_type = match f.enclosing_annots.get(mid) {
+                Some(class) => Some(InferredType::ClassName(class.clone())),
+                None => (st.pack.annot_type)(annot).map(|t| written_type_at(out, &st.pack.names, t, annot_span.start)),
+            };
             if let (Some(t), true) = (&annot_type, field_scope_span.contains_key(&(name.clone(), *scope))) {
                 out.field_types.push((name.clone(), *scope, t.clone()));
             }

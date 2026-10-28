@@ -76,7 +76,7 @@ fn family(cap: Capture) -> Family {
         | C::OolDef
         | C::NestedTarget
         | C::RetType
-        | C::RetTypeEnclosing
+        | C::TypeEnclosing
         | C::SymAttr
         | C::SpecPrimary
         | C::NsInline

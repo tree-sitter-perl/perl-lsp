@@ -31,17 +31,19 @@
   "trait" @sym.attr
   name: (name) @def.class.name @context.class) @def.class @scope
 
+; ---- written types ----
+; `self` and `static` name the class they are written in, nullable or not,
+; wherever a type is written: a return, a parameter, a property.
+(([
+  (named_type (name) @_class)
+  (optional_type (named_type (name) @_class))
+ ] @type.enclosing)
+ (#any-of? @_class "self" "static"))
+
 ; ---- callables ----
-; A declared return is the callable's value at every call. `self` and
-; `static` name the class the method is written in, nullable or not.
+; A declared return is the callable's value at every call.
 (function_definition name: (name) @def.sub.name return_type: (_)? @rettype) @def.sub
 (method_declaration name: (name) @def.method.name return_type: (_)? @rettype) @def.method
-((method_declaration
-  return_type: [
-    (named_type (name) @_class)
-    (optional_type (named_type (name) @_class))
-  ] @rettype.enclosing)
- (#any-of? @_class "self" "static"))
 ; Parameters and locals are body content, not members. A closure's
 ; parameters are its own.
 (function_definition) @scope.sub

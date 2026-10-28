@@ -96,8 +96,9 @@ match rather than one capture, so the extractor drops a captured comment.
   so every `Invoke` that resolves to it carries that type and a chain types
   hop by hop. The spelling is read like a parameter's declared type (the
   pack's `annot_type`, then the use-map at the return's site), and
-  `@rettype.enclosing` marks a return naming the class the method is written
-  in (php's `self`, `static`, nullable or not): the method's own class.
+  `@type.enclosing` marks a written type naming the class it is written in
+  (php's `self`, `static`, nullable or not), in a return, a parameter or a
+  property alike: that class.
   Like `static::`, a `static` return names the writing class, not the
   receiver's.
 - A receiver whose own expression has a value is typed by it before the

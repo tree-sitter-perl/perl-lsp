@@ -25,10 +25,10 @@ pub(super) struct State {
     /// `@def` event fires before these inner captures.
     qualifier_by_match: HashMap<usize, String>,
     rettype_by_match: HashMap<usize, (String, Point, Point)>,
-    /// `@rettype.enclosing`: the declared returns that name the class their
-    /// method is written in. Joined to a def's `@rettype` by span, because
-    /// the stating pattern is not the def's match.
-    enclosing_returns: std::collections::HashSet<(Point, Point)>,
+    /// `@type.enclosing`: the written types that name the class they are
+    /// written in. Joined to a `@rettype` or `@type.annot` by span, because
+    /// the stating pattern is not the writing site's match.
+    enclosing_types: std::collections::HashSet<(Point, Point)>,
     /// (symbol index, site) of each declared return a class spelling may
     /// name, resolved through the use-map once every row is in.
     written_returns: Vec<(usize, Point)>,
@@ -138,6 +138,12 @@ pub(super) fn flatten_nested(
 }
 
 impl State {
+    /// Whether the written type at `start..end` names the class it is
+    /// written in (`@type.enclosing`).
+    pub(super) fn names_enclosing(&self, start: Point, end: Point) -> bool {
+        self.enclosing_types.contains(&(start, end))
+    }
+
     /// The kinds of def whose name token `e` is, in its own match.
     pub(super) fn declared_by(&self, e: &Event) -> &[DefCap] {
         self.kinds_by_name.get(&(e.match_id, e.start)).map_or(&[], Vec::as_slice)
@@ -166,8 +172,8 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
         Capture::RetType => {
             d.rettype_by_match.insert(e.match_id, (e.text.clone(), e.start, e.end));
         }
-        Capture::RetTypeEnclosing => {
-            d.enclosing_returns.insert((e.start, e.end));
+        Capture::TypeEnclosing => {
+            d.enclosing_types.insert((e.start, e.end));
         }
         Capture::ParamReceiver => {
             *d.marks.entry((e.start, e.end)).or_default() |= crate::model::file_analysis::SymbolFlags::RECEIVER;
@@ -254,7 +260,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     // parameter's once the walk is done (`resolve_returns`).
     let mut written_return = None;
     let return_type = match d.rettype_by_match.get(&e.match_id).cloned() {
-        Some((_, s, en)) if d.enclosing_returns.contains(&(s, en)) => pkg.clone().map(InferredType::ClassName),
+        Some((_, s, en)) if d.names_enclosing(s, en) => pkg.clone().map(InferredType::ClassName),
         Some((t, s, _)) => {
             let t = (pack.annot_type)(&t);
             if t.is_some() {

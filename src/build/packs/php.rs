@@ -41,10 +41,9 @@ pub fn php_pack() -> LangPack {
 }
 
 /// A declared type as written (`int`, `?Foo`, `\App\User`). A union has
-/// no single type in the lattice, and `self` / `parent` name a class by
-/// where they are written rather than by spelling, so each reads as no
-/// declared type; a class spelling resolves through the use-map at its
-/// site.
+/// no single type in the lattice, so it reads as no declared type; a class
+/// spelling resolves through the use-map at its site. `self` and `static`
+/// never reach here: the document marks them `@type.enclosing`.
 fn declared_type(text: &str) -> Option<InferredType> {
     let t = text.trim().trim_start_matches('?');
     if t.contains(['|', '&', '(']) {
@@ -54,8 +53,11 @@ fn declared_type(text: &str) -> Option<InferredType> {
         "int" | "float" => Some(InferredType::Numeric),
         "string" => Some(InferredType::String),
         "bool" | "true" | "false" => Some(InferredType::Bool),
-        "array" | "iterable" | "callable" | "object" | "mixed" | "null" | "void" | "never" | "self"
-        | "parent" => None,
+        "array" | "iterable" | "callable" | "object" | "mixed" | "null" | "void" | "never" => None,
+        // TODO(parent-type): `parent` names the class's parent by where it
+        // is written; it goes through `Lookup::Super` with every other
+        // `parent` site (the `new` layer).
+        "parent" => None,
         _ => Some(InferredType::ClassName(t.to_string())),
     }
 }

@@ -91,10 +91,10 @@ of the method the token is written in (php's `$this`, `self::`,
 no receiver spelling.
 
 `@rettype` is a callable's declared return, captured in the def's match.
-`@rettype.enclosing` sits on a return the document says names the class the
-method is written in rather than a class by its spelling (php's `self`,
-`static`). It is a pattern of its own, joined to the def's `@rettype` by
-span.
+`@type.enclosing` sits on any written type (a return, a parameter's or
+property's `@type.annot`) the document says names the class it is written
+in rather than a class by its spelling (php's `self`, `static`). It is a
+pattern of its own, joined to the writing site's capture by span.
 
 ## Decision: a kind's meaning lives on the kind
 

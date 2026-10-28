@@ -1226,6 +1226,37 @@ fn a_declared_return_is_the_callables_value() {
     assert_eq!(fa.sub_return_type_at_arity("make", Some(0)), builder, "a function's declared return");
 }
 
+/// `self` and `static` name the class they are written in wherever a type
+/// is written: a parameter, a property, a promoted parameter, a closure's
+/// parameter, nullable or not.
+#[test]
+fn self_names_the_enclosing_class_in_every_written_type() {
+    use crate::model::file_analysis::RefKind;
+    let fa = php("<?php
+namespace App;
+
+class Node {
+    private ?self $next;
+    public function __construct(private self $peer) {}
+    public function link(self $other) {
+        $other->hop();
+        $this->next->hop();
+        $this->peer->hop();
+        $f = function (?self $n) { $n->hop(); };
+    }
+    public function hop() {}
+}
+");
+    let receivers: Vec<Option<String>> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "hop")
+        .map(|r| fa.method_call_invocant_class(r, None))
+        .collect();
+    let node = || Some("App\\Node".to_string());
+    assert_eq!(receivers, [node(), node(), node(), node()]);
+}
+
 /// A call's value is its callee's declared return, so a chain of calls
 /// types hop by hop: every receiver in `$this->with()->again()->…->tick()`
 /// is the class the previous call returns, and a free call's value starts
