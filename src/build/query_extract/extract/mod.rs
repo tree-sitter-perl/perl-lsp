@@ -48,6 +48,79 @@ impl Event {
     fn span(&self) -> Span {
         Span { start: self.start, end: self.end }
     }
+
+    fn range(&self) -> (usize, usize) {
+        (self.start_byte, self.end_byte)
+    }
+}
+
+/// The capture events adorned onto the tree. Sorted outermost-first, the
+/// events are a preorder walk of the tagged nodes, so the events a node
+/// contains are one contiguous run after it; indexed by match, every
+/// capture of one match is a lookup. A handler asks "the `@x` of my
+/// match" or "what else is tagged on this node" instead of keeping a
+/// join table of its own.
+struct Adorned {
+    events: Vec<Event>,
+    /// Event indices grouped by match id (`match_start[m]..match_start[m+1]`
+    /// in `by_match`), each group in event order.
+    by_match: Vec<u32>,
+    match_start: Vec<u32>,
+}
+
+impl Adorned {
+    fn new(events: Vec<Event>, match_count: usize) -> Self {
+        let mut match_start = vec![0u32; match_count + 2];
+        for e in &events {
+            match_start[e.match_id + 1] += 1;
+        }
+        for m in 1..match_start.len() {
+            match_start[m] += match_start[m - 1];
+        }
+        let mut fill = match_start.clone();
+        let mut by_match = vec![0u32; events.len()];
+        for (ix, e) in events.iter().enumerate() {
+            by_match[fill[e.match_id] as usize] = ix as u32;
+            fill[e.match_id] += 1;
+        }
+        Adorned { events, by_match, match_start }
+    }
+
+    /// The indices of every capture of match `mid`, in event order.
+    fn of_match_ixs(&self, mid: usize) -> impl Iterator<Item = usize> + '_ {
+        let (lo, hi) = (self.match_start[mid] as usize, self.match_start[mid + 1] as usize);
+        self.by_match[lo..hi].iter().map(|&ix| ix as usize)
+    }
+
+    /// Every capture of match `mid`, in event order.
+    fn of_match(&self, mid: usize) -> impl Iterator<Item = &Event> + '_ {
+        self.of_match_ixs(mid).map(|ix| &self.events[ix])
+    }
+
+    /// Match `mid`'s `cap` capture: the first, where a quantified capture
+    /// repeats.
+    fn in_match(&self, mid: usize, cap: Capture) -> Option<&Event> {
+        self.of_match(mid).find(|e| e.cap == cap)
+    }
+
+    /// Every match's captures, matches in id order.
+    fn by_match(&self) -> impl Iterator<Item = &Event> + '_ {
+        self.by_match.iter().map(|&ix| &self.events[ix as usize])
+    }
+
+    /// The events tagged on exactly `range`.
+    fn on_range(&self, range: (usize, usize)) -> impl Iterator<Item = &Event> + '_ {
+        let lo = self.events.partition_point(|e| (e.start_byte, std::cmp::Reverse(e.end_byte)) < (range.0, std::cmp::Reverse(range.1)));
+        self.events[lo..].iter().take_while(move |e| e.range() == range)
+    }
+
+    /// The indices of the events inside `range` (and on it): the subtree
+    /// of the node there, in preorder.
+    fn within(&self, range: (usize, usize)) -> impl Iterator<Item = usize> + '_ {
+        let lo = self.events.partition_point(|e| e.start_byte < range.0);
+        let hi = self.events.partition_point(|e| e.start_byte < range.1);
+        (lo..hi).filter(move |&ix| self.events[ix].end_byte <= range.1)
+    }
 }
 
 /// Which family file handles a capture. Exhaustive, so a new `Capture`
@@ -107,6 +180,7 @@ fn family(cap: Capture) -> Family {
 /// per-match joins.
 struct ExtractState<'p> {
     pack: &'p LangPack,
+    adorned: &'p Adorned,
     out: SkeletonAnalysis,
     /// (end_byte, ScopeId) — real Scope rows are minted as we go so the
     /// resulting FileAnalysis carries a genuine lexical tree.
@@ -281,51 +355,28 @@ pub fn extract_in(
         direct: false,
         declaration_rules: Vec::new(),
     });
-    let mut st = ExtractState {
-        pack,
-        out,
-        scope_stack: vec![(root.end_byte(), ScopeId(0))],
-        context_stack: Vec::new(),
-        cur_scope: ScopeId(0),
-        package: None,
-        scopes: Default::default(),
-        defs: Default::default(),
-        refs: Default::default(),
-        members: Default::default(),
-        flow: Default::default(),
-        narrowing: Default::default(),
-        commands: Default::default(),
-        imports: Default::default(),
-        file_module,
-    };
-    // A module named by its path is one section, the whole file.
-    if let (Some(m), Some(sep)) = (file_module, pack.names.use_map_sep()) {
-        let ns = m.segments.iter().fold(String::new(), |ns, seg| crate::model::conventions::join_qualified(&ns, seg, sep));
-        st.out.namespace_ranges.push(crate::model::file_analysis::NamespaceRange {
-            namespace: ns,
-            span: st.out.scopes[0].span,
-            kind: crate::model::file_analysis::SectionKind::Statement,
-        });
-    }
 
     // ---- flatten matches into ordered events ----
     let (links, captured) = record_matches(compiled, root, source);
+    let mut defs = defs::State::default();
+    let mut members = members::State::default();
     // A capture whose meaning needs its LIVE node (a declarator to peel, an
     // argument list to count) is read here, where the node is in hand;
     // everything else becomes an event carrying its text.
     let mut events: Vec<Event> = Vec::new();
+    let match_count = captured.last().map_or(0, |&(_, _, mid)| mid);
     for (node, cap, match_id) in captured {
         match cap {
             Capture::OolDef => defs::flatten_ool_def(node, &links, source, match_id, &mut events),
             Capture::NestedTarget => {
-                defs::flatten_nested(&mut st.defs, node, &links, source, match_id, &mut events)
+                defs::flatten_nested(&mut defs, node, &links, source, match_id, &mut events)
             }
             Capture::Member(MemberCap::Recv) => {
-                members::flatten_recv(&mut st.members, node, pack, source, match_id, &mut events)
+                members::flatten_recv(&mut members, node, pack, source, match_id, &mut events)
             }
-            Capture::Arity(ArityCap::Args) => members::open_args(&mut st.members, match_id),
-            Capture::Arity(ArityCap::Arg) => members::record_arg(&mut st.members, node, match_id),
-            Capture::Arity(ArityCap::Sig) => members::count_params(&mut st.members, node),
+            Capture::Arity(ArityCap::Args) => members::open_args(&mut members, match_id),
+            Capture::Arity(ArityCap::Arg) => members::record_arg(&mut members, node, match_id),
+            Capture::Arity(ArityCap::Sig) => members::count_params(&mut members, node),
             Capture::Qualifier => events.push(Event::at(node, cap, links.qualifier_text(node, source), match_id)),
             _ => events.push(Event::at(node, cap, node.utf8_text(source).unwrap_or("").to_string(), match_id)),
         }
@@ -347,24 +398,52 @@ pub fn extract_in(
             .then(b.end_byte.cmp(&a.end_byte))
             .then(tie_rank(a).cmp(&tie_rank(b)))
     });
+    let adorned = Adorned::new(events, match_count);
+
+    let mut st = ExtractState {
+        pack,
+        adorned: &adorned,
+        out,
+        scope_stack: vec![(root.end_byte(), ScopeId(0))],
+        context_stack: Vec::new(),
+        cur_scope: ScopeId(0),
+        package: None,
+        scopes: Default::default(),
+        defs,
+        refs: Default::default(),
+        members,
+        flow: flow::State::new(adorned.events.len()),
+        narrowing: Default::default(),
+        commands: Default::default(),
+        imports: Default::default(),
+        file_module,
+    };
+    // A module named by its path is one section, the whole file.
+    if let (Some(m), Some(sep)) = (file_module, pack.names.use_map_sep()) {
+        let ns = m.segments.iter().fold(String::new(), |ns, seg| crate::model::conventions::join_qualified(&ns, seg, sep));
+        st.out.namespace_ranges.push(crate::model::file_analysis::NamespaceRange {
+            namespace: ns,
+            span: st.out.scopes[0].span,
+            kind: crate::model::file_analysis::SectionKind::Statement,
+        });
+    }
 
     // ---- pre-collect the per-match joins a handler reads before the
     // capture that feeds them fires (a def's name token, its qualifier) ----
-    for e in &events {
+    let events = &adorned.events;
+    for e in events {
         match family(e.cap) {
             Family::Scopes => scopes::collect(&mut st, e),
-            Family::Defs => defs::collect(&mut st, e),
-            Family::Flow => flow::collect(&mut st, e),
             Family::Narrowing => narrowing::collect(&mut st, e),
             Family::Members => members::collect(&mut st, e),
             Family::Imports => imports::collect(&mut st, e),
             Family::Refs => refs::collect(&mut st, e),
-            Family::Commands | Family::Links => {}
+            Family::Defs | Family::Flow | Family::Commands | Family::Links => {}
         }
     }
 
     // ---- the state machine: scope stack + sticky contexts ----
-    for e in &events {
+    for (ix, e) in events.iter().enumerate() {
         while st.scope_stack.len() > 1
             && st.scope_stack.last().is_some_and(|&(end, _)| e.start_byte >= end)
         {
@@ -380,7 +459,7 @@ pub fn extract_in(
             Family::Defs => defs::handle(&mut st, e),
             Family::Refs => refs::handle(&mut st, e),
             Family::Members => members::handle(&mut st, e),
-            Family::Flow => flow::handle(&mut st, e, &events),
+            Family::Flow => flow::handle(&mut st, ix, e),
             Family::Narrowing => narrowing::handle(&mut st, e),
             Family::Commands => commands::handle(&mut st, e),
             Family::Imports => imports::handle(&mut st, e),
@@ -390,7 +469,6 @@ pub fn extract_in(
 
     // ---- post-passes, in the order their rows and witnesses land ----
     defs::join_template_params(&mut st);
-    defs::tag_inline_namespaces(&mut st);
     flow::emit_keyed_shapes(&mut st);
     imports::finish(&mut st);
     imports::bind_reach(&mut st);
@@ -402,12 +480,27 @@ pub fn extract_in(
     commands::finish(&mut st);
     defs::emit_type_aliases(&mut st);
     // Reads the symbol table after dedup and the command defs.
-    flow::finish(&mut st, &events);
+    flow::finish(&mut st);
     st.out.class_scopes = scopes::class_scope_rows(&st);
     // The narrowing cutoff reads the flow edges.
     narrowing::finish(&mut st);
     members::finish(&mut st);
+    dump_for_equivalence(source, pack, file_module, &st.out);
     Ok(st.out)
+}
+
+/// `PERL_LSP_SKEL_DUMP_DIR=<dir>`: write every extraction's
+/// `SkeletonAnalysis` to `<dir>/<hash of input>`, so two builds of the
+/// extractor diff over every source any test feeds it.
+fn dump_for_equivalence(source: &[u8], pack: &LangPack, file_module: Option<&FileModule>, out: &SkeletonAnalysis) {
+    use std::hash::{Hash, Hasher};
+    static DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    let Some(dir) = DIR.get_or_init(|| std::env::var_os("PERL_LSP_SKEL_DUMP_DIR").map(Into::into)) else {
+        return;
+    };
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (source, pack.query_source, file_module.map(|m| (&m.segments, m.is_package))).hash(&mut h);
+    let _ = std::fs::write(dir.join(format!("{:016x}", h.finish())), format!("{out:#?}"));
 }
 
 // The canonical template-spelling rule lives in the Model layer
@@ -448,11 +541,4 @@ pub(crate) fn looks_like_type_spelling(body: &str) -> bool {
         return false;
     }
     b.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':' || c == ' ')
-}
-
-fn byte_range_of(events: &[Event], match_id: usize, cap: Capture) -> Option<(usize, usize)> {
-    events
-        .iter()
-        .find(|e| e.match_id == match_id && e.cap == cap)
-        .map(|e| (e.start_byte, e.end_byte))
 }

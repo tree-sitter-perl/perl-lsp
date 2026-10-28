@@ -146,7 +146,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             // the class's def minted it.
             let identity = (kind == ContextKind::Class && pack.names.use_map_sep().is_some()).then(|| {
                 st.defs
-                    .class_of_match(e.match_id)
+                    .class_of_match(st.adorned, e.match_id)
                     .map(str::to_string)
                     .unwrap_or_else(|| st.class_identity(&text, st.cur_scope, e.start))
             });
@@ -186,7 +186,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             // class as its def minted it. The base is shaped like a def
             // name (cpp canonicalizes a template-spelled base) so the edge
             // joins the identity the target class was filed under.
-            if let Some(child) = st.defs.class_of_match(e.match_id).map(str::to_string) {
+            if let Some(child) = st.defs.class_of_match(st.adorned, e.match_id).map(str::to_string) {
                 if pack.names.use_map_sep().is_some() {
                     st.scopes.written_parents.push((st.out.parents.len(), e.span().start, st.cur_scope));
                 }
