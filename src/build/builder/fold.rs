@@ -294,7 +294,7 @@ impl<'a> Builder<'a> {
                     module_index: None,
                     package_parents: &self.package_parents,
                     app_surface_consumers: &self.app_surface_consumers,
-                    lattice: &crate::model::conventions::PERL_LATTICE,
+                    lattice: crate::model::conventions::lattice_for(crate::model::conventions::PERL_LANGUAGE),
                 };
                 crate::model::witnesses::emit_mutation_extension_witnesses(
                     &mut self.bag,
@@ -1117,7 +1117,7 @@ impl<'a> Builder<'a> {
             module_index: None,
             package_parents: &self.package_parents,
             app_surface_consumers: &self.app_surface_consumers,
-            lattice: &crate::model::conventions::PERL_LATTICE,
+            lattice: crate::model::conventions::lattice_for(crate::model::conventions::PERL_LANGUAGE),
         }
     }
 
