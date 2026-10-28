@@ -413,6 +413,10 @@ impl std::fmt::Display for InvocantName {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Invocant {
     Name(InvocantName),
+    /// A receiver EXPRESSION (a pack's `recv.m`, `obj->m`): its value is
+    /// whatever the bag types at its span, and its text is never a class
+    /// spelling, however much it looks like one (`self.x`).
+    Expr(InvocantName),
     Bridged { plugin: String, token: String, match_mode: BridgedMatch },
 }
 
@@ -438,6 +442,11 @@ impl Invocant {
         Invocant::Name(InvocantName::assume_canonical(s))
     }
 
+    /// A receiver expression, typed only by the bag at its span.
+    pub fn expr(s: impl Into<String>) -> Self {
+        Invocant::Expr(InvocantName::assume_canonical(s))
+    }
+
     /// A plugin-routed token: `plugin` names the emitting plugin (provenance),
     /// `token` is the class key it already transformed (e.g. a camelized Mojo
     /// controller name), and `match_mode` says how core matches it to a class.
@@ -454,7 +463,7 @@ impl Invocant {
     /// `Class->`) bind through this and skip bridged tokens.
     pub fn as_name(&self) -> Option<&InvocantName> {
         match self {
-            Invocant::Name(n) => Some(n),
+            Invocant::Name(n) | Invocant::Expr(n) => Some(n),
             Invocant::Bridged { .. } => None,
         }
     }
@@ -469,7 +478,7 @@ impl Invocant {
     /// callers match the variant instead.
     pub fn text(&self) -> &str {
         match self {
-            Invocant::Name(n) => n,
+            Invocant::Name(n) | Invocant::Expr(n) => n,
             Invocant::Bridged { token, .. } => token,
         }
     }

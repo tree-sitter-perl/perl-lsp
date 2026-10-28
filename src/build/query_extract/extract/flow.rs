@@ -94,6 +94,9 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
                 span,
             ));
         }
+        Capture::Receiver => {
+            out.receivers.push((cur_scope, e.span()));
+        }
         Capture::Expr(ExprCap::ReturnValue) => {
             // The returned expression's own general-rule witness (literal
             // / var-read / member / call — whichever matched this same

@@ -695,12 +695,9 @@ pub fn signature_help(
                 } else {
                     p.name.clone()
                 };
-                // Skip the invocant — its type is obvious. Flag first (covers
-                // plugin-marked invocants like a helper's `$c`); name
-                // convention as backstop for pre-flag cache blobs.
-                if p.is_invocant
-                    || crate::model::conventions::is_conventional_invocant_name(&p.name)
-                {
+                // Skip the invocant — its type is obvious (covers
+                // plugin-marked invocants like a helper's `$c`).
+                if p.is_invocant {
                     return base;
                 }
                 // Cross-file: use pre-resolved param types
