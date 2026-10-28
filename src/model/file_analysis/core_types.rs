@@ -116,6 +116,15 @@ pub struct Scope {
     /// names no package, so nothing binds.
     #[serde(default)]
     pub implicit_receiver: bool,
+    /// A body that sees no variable of the code around it but the ones it
+    /// captures (`@scope.sub.closed`: php's functions, methods and
+    /// closures). Read through `variable_lookup_chain`.
+    #[serde(default)]
+    pub closed: bool,
+    /// The names a closed body takes from the code around it
+    /// (`@closure.capture`, php's `use ($x)`).
+    #[serde(default)]
+    pub captures: Vec<String>,
     /// The names declared in this scope are in force only for code
     /// written directly in it (`@scope.direct`): a use inside a callable,
     /// or inside another such scope, nested here looks past the scope, as

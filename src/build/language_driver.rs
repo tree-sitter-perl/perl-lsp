@@ -887,6 +887,8 @@ fn inject_member_blocks(
             package: Some(base.macro_name.clone()),
             owner: None,
             implicit_receiver: false,
+            closed: false,
+            captures: Vec::new(),
             direct: false,
             declaration_rules: Vec::new(),
         });
@@ -1056,8 +1058,6 @@ fn remap_spans(
         var_reads,
         var_writes,
         // scope-keyed — no spans to fix.
-        closed_scopes: _,
-        captures: _,
         write_sites,
         label_refs,
         flow_edges,

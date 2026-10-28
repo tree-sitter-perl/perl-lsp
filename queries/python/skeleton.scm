@@ -133,11 +133,12 @@
 (import_from_statement
   name: (dotted_name (identifier) @ref.call))
 
-; Assignment IS declaration in Python — the same identifier is both
-; the def and the flow target.
+; A variable belongs to the function it is assigned in: the first write
+; declares it, and every later write and every read in the body is that
+; one variable. A write lands once the assignment has read what it reads.
 (assignment
-  left: (identifier) @def.var.name @def.var @flow.target
-  right: (_) @flow.source) @flow.assign
+  left: (identifier) @def.assigned.name @flow.target
+  right: (_) @flow.source) @def.assigned @flow.assign
 
 ; Annotated assignment: `x: int = ...` — ring 3 is partly IN the tree
 ; here; the annotation emits a direct type witness via the pack's

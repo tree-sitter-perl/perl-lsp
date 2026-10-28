@@ -115,12 +115,11 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 package,
                 owner: None,
                 implicit_receiver: scope_cap == ScopeCap::SubImplicitReceiver,
+                closed: scope_cap == ScopeCap::SubClosed,
+                captures: Vec::new(),
                 direct: scope_cap == ScopeCap::Direct,
                 declaration_rules: Vec::new(),
             });
-            if scope_cap == ScopeCap::SubClosed {
-                st.out.closed_scopes.insert(id);
-            }
             st.scope_stack.push((e.end_byte, id));
             st.out.scope_count += 1;
             // a context deferred to THIS scope (C++ namespace) →
@@ -186,7 +185,11 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             }
         }
         Capture::ClosureCapture => {
-            st.out.captures.insert((st.cur_scope, (pack.shape_name)(&e.text)));
+            let name = (pack.shape_name)(&e.text);
+            let captures = &mut st.out.scopes[st.cur_scope.0 as usize].captures;
+            if !captures.contains(&name) {
+                captures.push(name);
+            }
         }
         Capture::Parent => {
             // `@parent` (a base class) pairs with the `@def.class.name`

@@ -1503,3 +1503,49 @@ def f():
     assert_ne!(fa.inferred_type_via_bag("x", Point::new(7, 11)), foo, "the later write replaces it");
     assert_eq!(fa.inferred_type_via_bag("n", Point::new(7, 4)), foo, "the right side read the old `n`");
 }
+
+/// A variable is the function's it is assigned in: the first write
+/// declares it, and every later write and every read is that one variable.
+/// A nested function that assigns the name makes its own, and reads the
+/// one around it until it does.
+#[test]
+fn a_variable_is_one_across_its_writes_in_its_function() {
+    use crate::model::file_analysis::{RefKind, SymKind};
+    let fa = py_in(
+        "x = 0
+def f():
+    x = 1
+    if x:
+        x = 2
+    def g():
+        return x
+    def h():
+        x = 3
+        return x
+    return x
+",
+        None,
+    );
+    let decls: Vec<(usize, usize)> = fa
+        .symbols()
+        .iter()
+        .filter(|s| s.kind == SymKind::Variable && s.name == "x")
+        .map(|s| (s.selection_span.start.row, s.selection_span.start.column))
+        .collect();
+    assert_eq!(decls, [(0, 0), (2, 4), (8, 8)], "the module's, f's and h's");
+    let decl_row = |r: &crate::model::file_analysis::Ref| {
+        r.resolved_symbol().map(|sid| fa.symbol(sid).selection_span.start.row)
+    };
+    let mut uses: Vec<(usize, Option<usize>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::Variable) && r.target_name == "x")
+        .map(|r| (r.span.start.row, decl_row(r)))
+        .collect();
+    uses.sort();
+    assert_eq!(
+        uses,
+        [(3, Some(2)), (4, Some(2)), (6, Some(2)), (9, Some(8)), (10, Some(2))],
+        "the write in a branch, g's read and f's return are f's; h's are h's"
+    );
+}

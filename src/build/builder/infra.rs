@@ -23,6 +23,8 @@ impl<'a> Builder<'a> {
             span,
             owner: None,
             implicit_receiver: false,
+            closed: false,
+            captures: Vec::new(),
             direct: false,
             declaration_rules: Vec::new(),
             package: pkg,

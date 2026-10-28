@@ -1427,6 +1427,32 @@ class Timer {
 }
 ";
 
+/// A body that sees no variable around it answers no type for one: a
+/// function's `$config` is not the script's, and a method's bare `$peer`
+/// is not the property a promoted parameter declares.
+#[test]
+fn a_closed_body_types_no_variable_of_the_code_around_it() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = "<?php
+namespace App;
+
+class Clock { public function tick() {} }
+function clock(): Clock {}
+
+$config = clock();
+function f() { return $config; }
+class Box {
+    public function __construct(private Clock $peer) {}
+    public function m() { return $peer; }
+}
+";
+    let fa = php(src);
+    let clock = Some(T::ClassName("App\\Clock".into()));
+    assert_eq!(fa.inferred_type_via_bag("config", at(src, "; }", 0)), None);
+    assert_eq!(fa.inferred_type_via_bag("config", at(src, "\nfunction f", 0)), clock, "the script's own");
+    assert_eq!(fa.inferred_type_via_bag("peer", at(src, "; }\n}", 0)), None);
+}
+
 /// (name, row, column) of every local `Variable` the analysis declares.
 fn locals(fa: &FileAnalysis) -> Vec<(String, usize, usize)> {
     fa.symbols()

@@ -44,10 +44,10 @@ spelled! {
         Var = "var",
         /// A parameter or block local.
         Local = "local",
-        /// A variable declared by being written (php's `$x = …`): the first
-        /// such def of a name in its callable is the declaration, unless
-        /// something the callable sees already declares the name; every
-        /// other one is a write of that declaration.
+        /// A variable declared by being written (php's `$x = …`, python's
+        /// and R's `x = …`): the first such def of a name in its callable is
+        /// the declaration, unless a declaration the write reaches is
+        /// already in force; every other one is a write of that declaration.
         Assigned = "assigned",
         /// A struct/class data member.
         Field = "field",
@@ -675,6 +675,13 @@ impl DefCap {
                 SymKind::Variable
             }
         }
+    }
+
+    /// A def every assignment of a name mints (`@def.var`,
+    /// `@def.assigned`): a more specific def at the same token (R's
+    /// `f <- function…` is a sub) stands in for it.
+    pub fn is_general(self) -> bool {
+        matches!(self, DefCap::Var | DefCap::Assigned)
     }
 
     /// The structural marker a def of this kind carries onto

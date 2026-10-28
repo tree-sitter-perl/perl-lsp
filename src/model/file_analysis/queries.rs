@@ -108,7 +108,7 @@ impl FileAnalysis {
     /// Returns the innermost-scope match (Perl lexical scoping).
     pub fn resolve_variable(&self, name: &str, point: Point) -> Option<&Symbol> {
         let scope = self.scope_at(point)?;
-        self.lookup_chain(scope)
+        variable_lookup_chain(&self.scopes, scope, name)
             .bindings(&self.symbols)
             .find(|sym| sym.name == name && matches!(sym.kind, SymKind::Variable | SymKind::Field) && sym.span.start <= point)
     }
