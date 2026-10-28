@@ -1035,3 +1035,19 @@ fn admits_refuses_files_another_driver_claims() {
         assert!(LanguageRegistry::admits(cpp, std::path::Path::new("commands.def")).is_ok());
     }
 }
+
+// `this` is an instance of the class whose method it is written in, in-class
+// and out-of-line alike, never a class spelled `this`.
+#[cfg(feature = "cpp")]
+#[test]
+fn this_is_an_instance_of_the_methods_class() {
+    let src = "struct C { int x; int get() { return this->x; } int put(); };\nint C::put() { return this->x; }\n";
+    let fa = cpp_driver().analyze(src);
+    let classes: Vec<_> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.target_name == "x" && r.member_site().is_some())
+        .map(|r| fa.method_call_invocant_class(r, None))
+        .collect();
+    assert_eq!(classes, [Some("C".to_string()), Some("C".to_string())]);
+}

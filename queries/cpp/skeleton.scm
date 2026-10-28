@@ -714,6 +714,10 @@
     field: (field_identifier) @ref.member.call)
   arguments: (argument_list ((_) @arity.arg ","?)*) @arity.args) @expr.call
 
+; `this` is the object the enclosing method runs on, an instance of the
+; method's class (out-of-line bodies included).
+(this) @receiver.enclosing
+
 ; which operator a member access wrote, so op-DX can name the other one. A
 ; token no pattern names here claims no operator.
 (field_expression operator: "->" @member.op.arrow)
