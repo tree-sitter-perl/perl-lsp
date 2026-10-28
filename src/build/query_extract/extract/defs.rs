@@ -9,24 +9,14 @@ pub(super) struct State {
     /// match_id → the pointer/reference declarator stack a `@nested.target`
     /// capture unravelled to. Read by the `def.*` handler to stamp the symbol.
     nested_stacks: HashMap<usize, Vec<crate::model::file_analysis::DerefStep>>,
-    /// The events that are a declaring def's name token (or the def
-    /// itself, where it has no name token); a ref inside one is the
-    /// declaration, not a use (`refs::handle`).
-    pub(super) declares: Vec<bool>,
-    /// Each class minted so far, by its name token's start: the identity
-    /// it is filed under. A pattern that names the class again (its
-    /// `@context.class`, a `@parent` match) reads the class from here
-    /// rather than minting it a second time.
-    classes_by_name: HashMap<Point, String>,
 }
 
-impl State {
-    /// The class whose `@def.class.name` this match captured, as its def
-    /// minted it.
-    pub(super) fn class_of_match(&self, ad: &Adorned, match_id: usize) -> Option<&str> {
-        let name = ad.in_match(match_id, Capture::Def { kind: DefCap::Class, part: DefPart::Name })?;
-        self.classes_by_name.get(&name.start).map(String::as_str)
-    }
+/// The class whose `@def.class.name` this match captured, as its def
+/// minted it: a pattern that names the class again (its `@context.class`,
+/// a `@parent` match) reads it rather than minting it a second time.
+pub(super) fn class_of_match<'s>(st: &'s ExtractState, match_id: usize) -> Option<&'s str> {
+    let name = st.adorned.in_match(match_id, Capture::Def { kind: DefCap::Class, part: DefPart::Name })?;
+    st.class_on(name.range())
 }
 
 /// `@ool.def`: a function definition whose declared name may be qualified
@@ -98,7 +88,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     // declares. Its name token stays the member reference it is.
     let through = mine(Capture::Def { kind, part: DefPart::Receiver }).map(|r| r.text.clone());
     if let (None, Some(n)) = (&through, name_ix) {
-        st.defs.declares[n] = true;
+        st.minted[n].declares = true;
     }
     let qualifier = mine(Capture::Qualifier);
     // An out-of-line def's qualifier names its owning class (the innermost
@@ -118,7 +108,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         _ => (shaped, pkg),
     };
     if kind == DefCap::Class {
-        st.defs.classes_by_name.insert(name_start, shaped.clone());
+        st.minted[name_ix.unwrap_or(ix)].class = Some(shaped.as_str().into());
     }
     // A class-spec def carries its primary's name — the
     // (spec, primary) family edge `Specializes` derives from.

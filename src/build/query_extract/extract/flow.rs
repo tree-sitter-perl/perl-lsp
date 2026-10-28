@@ -7,6 +7,7 @@ use super::*;
 use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
 use std::collections::{BTreeMap, HashMap};
 
+#[derive(Default)]
 pub(super) struct State {
     /// Each `@flow.target`'s binding, by its match: the scope it binds in
     /// is known only while the walk is at it.
@@ -15,15 +16,6 @@ pub(super) struct State {
     /// `for (auto x : …)`) — they mint a `Rebind` FlowEdge so the narrowing
     /// cutoff sees them, exactly like Perl's `foreach` var.
     pub(super) flow_rebinds: Vec<(String, ScopeId, Point)>,
-    /// The events that minted a value witness on their own span: what a
-    /// flow edge narrows its source onto when the rhs node wraps one.
-    values: Vec<bool>,
-}
-
-impl State {
-    pub(super) fn new(event_count: usize) -> Self {
-        State { flow_targets: BTreeMap::new(), flow_rebinds: Vec::new(), values: vec![false; event_count] }
-    }
 }
 
 fn skeleton_witness(attachment: WitnessAttachment, source: &str, payload: WitnessPayload, span: Span) -> Witness {
@@ -40,7 +32,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
     match e.cap {
         Capture::Expr(ExprCap::Lit(lit)) => {
             let span = e.span();
-            f.values[ix] = true;
+            st.minted[ix].value = true;
             out.witnesses.push(skeleton_witness(
                 WitnessAttachment::Expr(span),
                 "skeleton",
@@ -149,7 +141,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                 });
             if let Some((callee, receiver)) = callee {
                 let span = e.span();
-                f.values[ix] = true;
+                st.minted[ix].value = true;
                 let args = st.members.call_args(ad, e.match_id);
                 out.call_sites.push(crate::build::query_extract::CallSite {
                     span,
@@ -169,7 +161,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
                 (in_match(Capture::Ref(RefCap::MemberValue)), in_match(Capture::Member(MemberCap::Recv)))
             {
                 let span = e.span();
-                f.values[ix] = true;
+                st.minted[ix].value = true;
                 out.witnesses.push(skeleton_witness(
                     WitnessAttachment::Expr(span),
                     "skeleton-member",
@@ -212,7 +204,7 @@ pub(super) fn emit_keyed_shapes(st: &mut ExtractState) {
         let mut keys: Vec<(String, Option<Box<InferredType>>)> =
             key_ixs.iter().map(|&k| (ad.events[k].text.clone(), None)).collect();
         keys.dedup_by(|a, b| a.0 == b.0);
-        st.flow.values[ix] = true;
+        st.minted[ix].value = true;
         let span = e.span();
         st.out.witnesses.push(skeleton_witness(
             WitnessAttachment::Expr(span),
@@ -291,7 +283,7 @@ pub(super) fn finish(st: &mut ExtractState) {
             let src_span = src.span();
             let target_span = ad
                 .within(src.range())
-                .filter(|&ix| f.values[ix])
+                .filter(|&ix| st.minted[ix].value)
                 .map(|ix| &ad.events[ix])
                 .max_by_key(|v| v.end_byte - v.start_byte)
                 .map(Event::span)

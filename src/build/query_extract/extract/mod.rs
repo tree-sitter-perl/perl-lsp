@@ -131,6 +131,19 @@ impl Adorned {
     }
 }
 
+/// What the walk minted on an event's node, for a later capture — of any
+/// match — that names the same node to ask, instead of re-deriving it.
+#[derive(Default)]
+struct Minted {
+    /// A value witness on its span: a flow source narrows onto it.
+    value: bool,
+    /// The name token of a def that declares it: a ref inside is the
+    /// declaration, not a use.
+    declares: bool,
+    /// The identity a class def filed itself under.
+    class: Option<Box<str>>,
+}
+
 /// Which family file handles a capture. Exhaustive, so a new `Capture`
 /// variant does not compile until it has a home.
 #[derive(Clone, Copy)]
@@ -199,6 +212,8 @@ struct ExtractState<'p> {
     context_stack: Vec<(usize, ContextKind, String)>,
     /// The events whose node holds the current event's, outermost first.
     ancestors: Vec<usize>,
+    /// Per event, what the walk minted on it so far.
+    minted: Vec<Minted>,
     /// The innermost scope and sticky context at the current event.
     cur_scope: ScopeId,
     package: Option<String>,
@@ -252,6 +267,12 @@ impl ExtractState<'_> {
     /// The scope a def at the current event binds in: the innermost one,
     /// or for a def written in a header (a parameter), the def scope the
     /// header belongs to.
+    /// The class a def minted on the node `range` names, as its def filed
+    /// it.
+    fn class_on(&self, range: (usize, usize)) -> Option<&str> {
+        self.adorned.on_range_ixs(range).find_map(|ix| self.minted[ix].class.as_deref())
+    }
+
     fn bind_scope(&self) -> ScopeId {
         self.scopes.headed.get(&self.cur_scope).copied().unwrap_or(self.cur_scope)
     }
@@ -413,7 +434,6 @@ pub fn extract_in(
             .then(tie_rank(a).cmp(&tie_rank(b)))
     });
     let adorned = Adorned::new(events, match_count);
-    defs.declares = vec![false; adorned.events.len()];
 
     let mut st = ExtractState {
         pack,
@@ -422,12 +442,13 @@ pub fn extract_in(
         scope_stack: vec![(root.end_byte(), ScopeId(0))],
         context_stack: Vec::new(),
         ancestors: Vec::new(),
+        minted: std::iter::repeat_with(Minted::default).take(adorned.events.len()).collect(),
         cur_scope: ScopeId(0),
         package: None,
         scopes: Default::default(),
         defs,
         members,
-        flow: flow::State::new(adorned.events.len()),
+        flow: Default::default(),
         narrowing: Default::default(),
         commands: Default::default(),
         file_module,

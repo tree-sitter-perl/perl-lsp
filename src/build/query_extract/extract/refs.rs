@@ -15,7 +15,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     // (python's `def f(o): return o.count` ends at `count`). `ref.type`
     // is exempt; its decl-name overlap is suppressed precisely (exact
     // selection-span match) in `into_file_analysis`.
-    let inside_def = ref_kind != RefCap::Type && st.around(e).any(|a| st.defs.declares[a]);
+    let inside_def = ref_kind != RefCap::Type && st.around(e).any(|a| st.minted[a].declares);
     if inside_def {
         return;
     }
