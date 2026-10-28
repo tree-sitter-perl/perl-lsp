@@ -44,6 +44,12 @@ crate / VS Code extension versions.
 - **`use English` variables are declared.** English builds its export list
   at runtime; a bundled `english` plugin states it, so `$ERRNO` and friends
   count as declared (match variables only without `-no_match_vars`).
+- **`use Env` and Log4perl's tags declare their variables.** Both build
+  their exports at runtime, so bundled `env` and `log4perl` plugins state
+  them: each word of `use Env qw(HOME @PATH)` is a package variable (a bare
+  word a scalar), and `use Log::Log4perl qw(:levels)` / `qw(:easy)` bring in
+  `$DEBUG`, `$WARN`, ... (`:easy` also `DEBUG(...)`, `LOGDIE(...)` and
+  friends), as does a bare `use Log::Log4perl::Level`.
 - **Symbolic references to a constant name are the variable they name.**
   `${"abel"}`, `@{"Foo::q"}`, and `${$n}` where `$n` holds one string
   literal reach the package variable — never a lexical of the same name —
