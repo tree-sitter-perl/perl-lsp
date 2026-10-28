@@ -508,6 +508,13 @@ impl NameSpellings {
         self.sigils.contains(&c)
     }
 
+    /// A typed name without its leading sigils: the bare identity token a
+    /// rename writes (`$total` → `total`). A language with no sigils keeps
+    /// every character — a `$` in its identifiers is identifier text.
+    pub fn strip_sigils<'n>(&self, name: &'n str) -> &'n str {
+        name.trim_start_matches(&self.sigils[..])
+    }
+
     /// The package a written qualifier names: an empty one (a leading
     /// separator) is the root package, when the language declares one.
     pub fn qualifier_package<'a>(&'a self, qualifier: &'a str) -> &'a str {

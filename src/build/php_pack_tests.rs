@@ -578,7 +578,8 @@ fn the_outline_lists_properties_under_their_class() {
 }
 
 /// Rename from a property's declaration rewrites its bare name, never the
-/// `$`, and never the method that shares the name.
+/// `$` (a typed `$` is the sigil, not part of the name), and never the
+/// method that shares the name.
 #[test]
 fn a_property_renames_from_its_declaration() {
     use crate::index::open_docs::{FileKey, OpenDocs};
@@ -593,7 +594,7 @@ fn a_property_renames_from_its_declaration() {
         let at = tree_sitter::Point { row, column };
         let cs = resolve(&store, &file, FileKey::Path(path.clone()), at, Some(&idx), OverrideScope::default());
         let mut sites: Vec<(usize, usize, usize, String)> = cs
-            .rename_edits("label")
+            .rename_edits("$label")
             .unwrap()
             .into_iter()
             .map(|(loc, text)| (loc.span.start.row, loc.span.start.column, loc.span.end.column, text))
