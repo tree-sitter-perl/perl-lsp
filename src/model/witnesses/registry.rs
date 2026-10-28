@@ -1100,7 +1100,7 @@ impl ReducerRegistry {
         q: &ReducerQuery,
         state: &mut QueryState,
     ) -> ReducedValue {
-        let materialized = self.materialize(bag, q, state);
+        let (materialized, effects) = self.materialize(bag, q, state);
 
         for r in &self.reducers {
             let claimed: Vec<&Witness> =
@@ -1110,7 +1110,7 @@ impl ReducerRegistry {
             }
             let v = r.reduce(&claimed, q);
             if v != ReducedValue::None {
-                return v;
+                return apply_call_effects(v, &materialized, effects, q);
             }
         }
 
@@ -2187,9 +2187,22 @@ impl ReducerRegistry {
         // `main` is declared by hundreds of files in a script-heavy tree;
         // decoding each bag to find the one that defines the sub was the
         // whole of FHEM's --check.
-        let mention = attachment.provider_mention();
-        for cached in idx.visible_def_candidates(owner).read() {
-            if mention.is_some_and(|m| !idx.candidate_bag_may_answer(&cached, m, owner, false)) {
+        let rows = attachment.provider_rows();
+        let cands = idx.visible_def_candidates(owner).read();
+        // Declaration rows answer the whole candidate set in one lookup.
+        let declares = match rows {
+            Some(super::ProviderRows::Declares(m)) => Some(idx.candidates_may_declare(&cands, m, owner)),
+            _ => None,
+        };
+        for (i, cached) in cands.into_iter().enumerate() {
+            let may = match (rows, &declares) {
+                (_, Some(d)) => d[i],
+                (Some(super::ProviderRows::Mentions(m)), None) => {
+                    idx.candidate_bag_may_answer(&cached, m, owner, false)
+                }
+                _ => true,
+            };
+            if !may {
                 crate::util::ghost_stats::count("moc.provider_skipped");
                 continue;
             }
@@ -2891,8 +2904,9 @@ impl ReducerRegistry {
         bag: &WitnessBag,
         q: &ReducerQuery,
         state: &mut QueryState,
-    ) -> Vec<Witness> {
+    ) -> (Vec<Witness>, Vec<(Point, InferredType)>) {
         let raw = bag.for_attachment(q.attachment);
+        let mut effects: Vec<(Point, InferredType)> = Vec::new();
         // Is this attachment's value a pass-through of ONE sub-chase, or a fold
         // over several? With siblings present, whatever a sub-chase answers is
         // combined with them before this frame returns, so no single exit key
@@ -3029,6 +3043,42 @@ impl ReducerRegistry {
                     // Opaque throughout: this frame returns a value drilled OUT
                     // of the sub-chase's answer, never the answer itself, so no
                     // exit key beneath it names what this frame produces.
+                    //
+                    // A call's write effect is never chased through its base
+                    // (the variable as it stood at the argument, itself the
+                    // previous call's effect): a read after the Nth call
+                    // would walk all N, refolding every earlier witness at
+                    // each, cubic in a FHEM sub passing `$hash` a few hundred
+                    // times. The effect is applied on top of the fold's
+                    // answer instead (`apply_call_effects`).
+                    if let ProjectionStep::WrittenBy { package, name, index, method } = step {
+                        if q.point.is_some_and(|p| w.span.start > p) {
+                            continue;
+                        }
+                        let att = WitnessAttachment::ParamWrites {
+                            package: package.clone(),
+                            name: name.clone(),
+                            index: *index,
+                            method: *method,
+                        };
+                        let sub_q = ReducerQuery {
+                            attachment: &att,
+                            point: None,
+                            framework: q.framework,
+                            arity_hint: None,
+                            receiver: None,
+                            args: Vec::new(),
+                            context: q.context,
+                        };
+                        let written = state.in_opaque_frame(|state| match &*self.query_rec(bag, &sub_q, state) {
+                            ReducedValue::Type(t) => Some(t.clone()),
+                            ReducedValue::FactMap(_) | ReducedValue::None => None,
+                        });
+                        if let Some(t) = written {
+                            effects.push((w.span.start, t));
+                        }
+                        continue;
+                    }
                     let base_t = state.in_opaque_frame(|state| match (base, q.context) {
                         (WitnessAttachment::Variable { name, scope }, Some(ctx)) => {
                             // The read's own point, as the Edge arm above.
@@ -3217,35 +3267,7 @@ impl ReducerRegistry {
                                 )]),
                                 open: false,
                             }),
-                            ProjectionStep::WrittenBy {
-                                package,
-                                name,
-                                index,
-                                method,
-                            } => {
-                                let att = WitnessAttachment::ParamWrites {
-                                    package: package.clone(),
-                                    name: name.clone(),
-                                    index: *index,
-                                    method: *method,
-                                };
-                                let sub_q = ReducerQuery {
-                                    attachment: &att,
-                                    point: None,
-                                    framework: q.framework,
-                                    arity_hint: None,
-                                    receiver: None,
-                                    args: Vec::new(),
-                                    context: q.context,
-                                };
-                                let written = state.in_opaque_frame(|state| {
-                                    match &*self.query_rec(bag, &sub_q, state) {
-                                        ReducedValue::Type(t) => Some(t.clone()),
-                                        ReducedValue::FactMap(_) | ReducedValue::None => None,
-                                    }
-                                });
-                                written.and_then(|w| merge_written_keys(&t, &w))
-                            }
+                            ProjectionStep::WrittenBy { .. } => None,
                         };
                         if let Some(t) = projected {
                             out.push(Witness {
@@ -3327,7 +3349,7 @@ impl ReducerRegistry {
                 _ => out.push(w.clone()),
             }
         }
-        out
+        (out, effects)
     }
 
     /// Materialize `att` under `q`'s point and context, in an opaque frame:
@@ -3974,6 +3996,39 @@ pub(super) fn compute_engine_key(
 /// `base` with the keys a callee wrote through it merged in: a written key
 /// takes the callee's value type, an unwritten one keeps the caller's. Only
 /// a hash shape takes keys; anything else is left as it was.
+/// The fold's answer with the write effects of the calls that came after
+/// the latest value it folded, in source order: the keys each callee
+/// writes through the argument join the hash it was handed.
+fn apply_call_effects(
+    v: ReducedValue,
+    folded: &[Witness],
+    mut effects: Vec<(Point, InferredType)>,
+    q: &ReducerQuery,
+) -> ReducedValue {
+    if effects.is_empty() {
+        return v;
+    }
+    let ReducedValue::Type(mut t) = v else {
+        return v;
+    };
+    // Only a witness that SETS the value supersedes an earlier call's
+    // effect; an observation (`$h->{k}` read as a hash) does not.
+    let after = folded
+        .iter()
+        .filter(|w| q.point.is_none_or(|p| w.span.start <= p))
+        .filter(|w| matches!(w.payload, WitnessPayload::InferredType(_) | WitnessPayload::Reset))
+        .map(|w| w.span.start)
+        .max();
+    effects.retain(|(at, _)| after.is_none_or(|a| *at > a));
+    effects.sort_by_key(|(at, _)| *at);
+    for (_, written) in &effects {
+        if let Some(merged) = merge_written_keys(&t, written) {
+            t = merged;
+        }
+    }
+    ReducedValue::Type(t)
+}
+
 fn merge_written_keys(base: &InferredType, written: &InferredType) -> Option<InferredType> {
     let (
         InferredType::HashWithKeys { keys, open },

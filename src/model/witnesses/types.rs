@@ -207,6 +207,15 @@ pub enum WitnessAttachment {
     ParamWrites { package: String, name: String, index: u32, method: bool },
 }
 
+/// What an answering file's rows must hold (`WitnessAttachment::provider_rows`).
+#[derive(Clone, Copy)]
+pub enum ProviderRows<'a> {
+    /// A symbol of this name under the owner.
+    Declares(&'a str),
+    /// Any ref or symbol of this name.
+    Mentions(&'a str),
+}
+
 impl WitnessAttachment {
     /// The owner whose declaring files answer this attachment, and the
     /// provider site that names the scan, for the owner-keyed attachments
@@ -220,16 +229,17 @@ impl WitnessAttachment {
         }
     }
 
-    /// The name every file that can answer this owner-keyed attachment
-    /// mentions: the slot's key, or the sub that holds the parameter. An
-    /// owner scan skips a declaring file whose rows rule the name out.
-    pub fn provider_mention(&self) -> Option<&str> {
+    /// What every file that can answer this owner-keyed attachment holds in
+    /// its rows: the sub that owns the parameter is DECLARED there, a slot's
+    /// key is at least MENTIONED. An owner scan skips a declaring file whose
+    /// rows rule it out.
+    pub fn provider_rows(&self) -> Option<ProviderRows<'_>> {
         match self {
-            WitnessAttachment::Field { name, .. }
-            | WitnessAttachment::Param { name, .. }
+            WitnessAttachment::Param { name, .. }
             | WitnessAttachment::CallbackIn { name, .. }
-            | WitnessAttachment::ParamWrites { name, .. } => Some(name),
-            WitnessAttachment::SlotElements { key, .. } => Some(key),
+            | WitnessAttachment::ParamWrites { name, .. } => Some(ProviderRows::Declares(name)),
+            WitnessAttachment::Field { name, .. } => Some(ProviderRows::Mentions(name)),
+            WitnessAttachment::SlotElements { key, .. } => Some(ProviderRows::Mentions(key)),
             _ => None,
         }
     }

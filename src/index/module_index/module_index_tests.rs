@@ -2755,6 +2755,24 @@ fn a_hash_passed_to_a_sub_holds_the_keys_the_sub_writes() {
     );
 }
 
+/// Effects of successive calls accumulate: the second call's keys join the
+/// first's rather than replacing them, and a plain read in between doesn't
+/// cut the earlier effect off.
+#[test]
+fn successive_calls_accumulate_the_keys_they_write() {
+    let util = parse_source_to_cached(
+        "package Util;\nsub add_a { my ($cfg) = @_; $cfg->{a} = bless({}, 'Alpha'); return }\nsub add_b { my ($cfg) = @_; $cfg->{b} = bless({}, 'Beta'); return }\n1;\n",
+        "Util",
+    );
+    let app = parse_source_to_cached(
+        "package App;\nsub run {\n    my $cfg = { name => 'x' };\n    Util::add_a($cfg);\n    my $n = $cfg->{name};\n    Util::add_b($cfg);\n    my $aa = $cfg->{a};\n    my $bb = $cfg->{b};\n    return;\n}\n1;\n",
+        "App",
+    );
+    let idx = index_of(&[&util, &app]);
+    assert_eq!(class_at(&app, &idx, "$aa", 7, 4).as_deref(), Some("Alpha"));
+    assert_eq!(class_at(&app, &idx, "$bb", 8, 4).as_deref(), Some("Beta"));
+}
+
 /// The sweep probe store answers a repeated probe without re-running it,
 /// re-runs after a shape bump, and never keeps "file never shredded".
 #[test]
