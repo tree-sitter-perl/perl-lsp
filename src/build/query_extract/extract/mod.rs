@@ -268,8 +268,7 @@ pub fn extract_in(
     let compiled = cached_query(&language, pack.query_source)?;
 
     let root = tree.root_node();
-    let mut out = SkeletonAnalysis::default();
-    out.names = pack.names.clone();
+    let mut out = SkeletonAnalysis::for_pack(pack);
     out.scopes.push(Scope {
         id: ScopeId(0),
         parent: None,
