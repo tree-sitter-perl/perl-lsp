@@ -112,6 +112,14 @@ placeholder: no dormant slot, no impossible span, no empty name.
   constructor's keys), so its heads stay in base slots; each slot holds
   the head of whichever reading is installed, and the walk's
   `Expression(slot)` facts hold under the fallback.
+- Every post-walk ref pass reaches held refs as well as table refs through
+  one accessor: `every_ref` / `ref_of` / `ref_mut` addressed by a `RefAt`
+  (`Table`, a slot head's `Slot{slot, arm}`, or `Held`) on `FileAnalysis`,
+  and `BuildRefAt` over the builder's `HeldHeads` during the walk. A
+  binding, stamp or owner link written through it lands on every reading,
+  so a reading a view installs later is already resolved; nothing
+  re-stamps at seat time. `layering_tests::post_walk_ref_binds_reach_held_refs`
+  allowlists the raw `refs` iterations that remain.
 - The row store lists the base in `refs`/`syms` and held names in `held`,
   a presence table: any retrieval that must not miss a view (candidate
   files, the member/name probes, the dead-export view) consults it, and a
