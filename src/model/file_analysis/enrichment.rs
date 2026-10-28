@@ -721,8 +721,8 @@ impl FileAnalysis {
         // Enrichment runs it with module_index so cross-file
         // receiver types resolve; the same routine runs from
         // `finalize_post_walk` with module_index=None for the
-        // in-file-resolvable case (chain recursion via
-        // `RefTable::call_at_start` doesn't need module_index).
+        // in-file-resolvable case (chain recursion through
+        // `RefTable::call_spanning` doesn't need module_index).
         self.fix_chain_receiver_hash_key_owners(module_index);
 
         // Cross-file inheritance edges. Local writeback emits

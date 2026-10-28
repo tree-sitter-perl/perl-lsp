@@ -10,6 +10,9 @@ use crate::model::file_analysis::NameSpellings;
 /// MINIMAL on purpose so the findings honestly measure how far
 /// patterns alone go.
 pub struct LangPack {
+    /// The language's id — the driver it serves under and the
+    /// `FileAnalysis::language` its assembly stamps.
+    pub id: &'static str,
     pub query_source: &'static str,
     /// How the language spells names — its namespace separator and its
     /// variable sigils. Baked onto `PackFacts::names`; every key function
@@ -110,6 +113,7 @@ impl LangPack {
     #[cfg(test)]
     pub(crate) fn declared_strings(&self) -> Vec<(&'static str, &'static str)> {
         let LangPack {
+            id: _,
             query_source: _,
             names: _,
             shape_name: _,

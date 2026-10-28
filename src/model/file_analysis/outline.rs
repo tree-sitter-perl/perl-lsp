@@ -264,7 +264,7 @@ impl FileAnalysis {
                     // route their kind word through `detail`.
                     let disp = sym.presentation.display;
                     let default_word = if matches!(sym.kind, SymKind::Method) { "method" } else { "sub" };
-                    let identifier = sym.presentation.label.clone().unwrap_or_else(|| sym.name.clone());
+                    let identifier = sym.listed_name().to_string();
                     let params_suffix = match &sym.detail {
                         SymbolDetail::Sub { params, .. } => {
                             let visible: Vec<&str> = params.iter()
@@ -293,7 +293,7 @@ impl FileAnalysis {
                     let children = body_scope
                         .map(|s| self.outline_children_of(s))
                         .unwrap_or_default();
-                    (sym.name.clone(), Some("class".to_string()), children)
+                    (sym.listed_name().to_string(), Some("class".to_string()), children)
                 }
                 SymKind::Package => {
                     // Statement-form Perl `package Foo;` has no body scope
@@ -303,7 +303,7 @@ impl FileAnalysis {
                         .find_body_scope(sym)
                         .map(|s| self.outline_children_of(s))
                         .unwrap_or_default();
-                    (sym.name.clone(), Some("package".to_string()), children)
+                    (sym.listed_name().to_string(), Some("package".to_string()), children)
                 }
                 // `use` statements are not structure — mainstream language
                 // servers (rust-analyzer, pyright, tsserver, gopls, clangd)
@@ -324,21 +324,20 @@ impl FileAnalysis {
                             .find_body_scope(sym)
                             .map(|s| self.outline_children_of(s))
                             .unwrap_or_default();
-                        (sym.name.clone(), Some("union".to_string()), children)
+                        (sym.listed_name().to_string(), Some("union".to_string()), children)
                     } else {
                         let detail = match &sym.detail {
                             SymbolDetail::Variable { decl_kind, .. } => decl_kind.label(),
                             _ => "my",
                         };
-                        (sym.name.clone(), Some(detail.to_string()), Vec::new())
+                        (sym.listed_name().to_string(), Some(detail.to_string()), Vec::new())
                     }
                 }
                 SymKind::Field => {
-                    let identifier = sym.presentation.label.clone().unwrap_or_else(|| sym.name.clone());
-                    (identifier, Some("field".to_string()), Vec::new())
+                    (sym.listed_name().to_string(), Some("field".to_string()), Vec::new())
                 }
                 SymKind::Enumerator => {
-                    (sym.name.clone(), Some("enumerator".to_string()), Vec::new())
+                    (sym.listed_name().to_string(), Some("enumerator".to_string()), Vec::new())
                 }
                 SymKind::HashKeyDef => continue, // Skip hash key defs from outline
                 SymKind::Handler => {
@@ -370,7 +369,7 @@ impl FileAnalysis {
                         }
                         _ => String::new(),
                     };
-                    let identifier = sym.presentation.label.clone().unwrap_or_else(|| sym.name.clone());
+                    let identifier = sym.listed_name().to_string();
                     let label = format!("<{}> {}{}", word, identifier, params_suffix);
                     (label, Some(word.to_string()), Vec::new())
                 }

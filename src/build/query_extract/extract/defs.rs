@@ -11,6 +11,9 @@ pub(super) struct State {
     nested_stacks: HashMap<usize, Vec<crate::model::file_analysis::DerefStep>>,
     /// A def's name token, joined to its def event by match.
     names_by_match: HashMap<(usize, DefCap), (String, Point, Point)>,
+    /// The kinds of def a match's name token declares, by where it starts
+    /// (php's promoted parameter is a property and a local on one token).
+    kinds_by_name: HashMap<(usize, Point), Vec<DefCap>>,
     /// `@def.<kind>.spelled`: the declaration as written around its name
     /// token, joined to the def by match.
     spelled_by_match: HashMap<(usize, DefCap), String>,
@@ -26,10 +29,10 @@ pub(super) struct State {
     /// `@def` event fires before these inner captures.
     qualifier_by_match: HashMap<usize, String>,
     rettype_by_match: HashMap<usize, (String, Point, Point)>,
-    /// `@rettype.enclosing`: the declared returns that name the class their
-    /// method is written in. Joined to a def's `@rettype` by span, because
-    /// the stating pattern is not the def's match.
-    enclosing_returns: std::collections::HashSet<(Point, Point)>,
+    /// `@type.enclosing`: the written types that name the class they are
+    /// written in. Joined to a `@rettype` or `@type.annot` by span, because
+    /// the stating pattern is not the writing site's match.
+    enclosing_types: std::collections::HashSet<(Point, Point)>,
     /// (symbol index, site) of each declared return a class spelling may
     /// name, resolved through the use-map once every row is in.
     written_returns: Vec<(usize, Point)>,
@@ -146,11 +149,30 @@ pub(super) fn flatten_nested(
     }
 }
 
+impl State {
+    /// Whether match `match_id`'s defs declare in the scope around them.
+    pub(super) fn hoists(&self, match_id: usize) -> bool {
+        self.hoisted_matches.contains(&match_id)
+    }
+
+    /// Whether the written type at `start..end` names the class it is
+    /// written in (`@type.enclosing`).
+    pub(super) fn names_enclosing(&self, start: Point, end: Point) -> bool {
+        self.enclosing_types.contains(&(start, end))
+    }
+
+    /// The kinds of def whose name token `e` is, in its own match.
+    pub(super) fn declared_by(&self, e: &Event) -> &[DefCap] {
+        self.kinds_by_name.get(&(e.match_id, e.start)).map_or(&[], Vec::as_slice)
+    }
+}
+
 pub(super) fn collect(st: &mut ExtractState, e: &Event) {
     let d = &mut st.defs;
     match e.cap {
         Capture::Def { kind, part: DefPart::Name } => {
             d.names_by_match.insert((e.match_id, kind), (e.text.clone(), e.start, e.end));
+            d.kinds_by_name.entry((e.match_id, e.start)).or_default().push(kind);
         }
         Capture::DefHoist => {
             d.hoisted_matches.insert(e.match_id);
@@ -176,8 +198,8 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
         Capture::RetType => {
             d.rettype_by_match.insert(e.match_id, (e.text.clone(), e.start, e.end));
         }
-        Capture::RetTypeEnclosing => {
-            d.enclosing_returns.insert((e.start, e.end));
+        Capture::TypeEnclosing => {
+            d.enclosing_types.insert((e.start, e.end));
         }
         Capture::ParamReceiver => {
             *d.marks.entry((e.start, e.end)).or_default() |= crate::model::file_analysis::SymbolFlags::RECEIVER;
@@ -264,7 +286,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     // parameter's once the walk is done (`resolve_returns`).
     let mut written_return = None;
     let return_type = match d.rettype_by_match.get(&e.match_id).cloned() {
-        Some((_, s, en)) if d.enclosing_returns.contains(&(s, en)) => pkg.clone().map(InferredType::ClassName),
+        Some((_, s, en)) if d.names_enclosing(s, en) => pkg.clone().map(InferredType::ClassName),
         Some((t, s, _)) => {
             let t = (pack.annot_type)(&t);
             if t.is_some() {
@@ -283,15 +305,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         name_start,
         name_end,
         package: pkg,
-        // A data member belongs to its class body even where it is written
-        // inside a callable (php's constructor-promoted property).
-        scope: if matches!(kind, DefCap::Field | DefCap::Slot) {
-            st.member_scope()
-        } else if d.hoisted_matches.contains(&e.match_id) {
-            st.out.scopes[st.cur_scope.0 as usize].parent.unwrap_or(st.cur_scope)
-        } else {
-            st.bind_scope()
-        },
+        scope: st.def_scope(kind, e.match_id),
         spelled: d.spelled_by_match.get(&(e.match_id, kind)).cloned(),
         pair: d.paired_matches.contains(&e.match_id).then_some(e.match_id),
         return_type,
@@ -334,48 +348,47 @@ pub(super) fn resolve_returns(st: &mut ExtractState) {
 }
 
 /// Variables declared by being written (`@def.assigned`). In source order,
-/// a write declares its name only when nothing the write can see declares
-/// it already — a parameter, an earlier write, the variable around a
-/// closure that captures it; the declaration is the callable's (or, outside
-/// any callable, the file's), so every use in the body reaches it whatever
-/// the order. Every other write is a `var_writes` row of that declaration.
+/// a write declares its name only when no declaration the write reaches
+/// (`write_lookup_chain`) is in force there — a parameter, an earlier
+/// write, the variable around a closure that captures it. The declaration
+/// is its callable's (or, outside any callable, the file's), so every use
+/// in the body reaches it whatever the order. Every other write is a
+/// `var_writes` row of the declaration it reaches.
 pub(super) fn unify_assigned(st: &mut ExtractState) {
-    use crate::model::file_analysis::ScopeKind;
+    use crate::build::query_extract::skeleton::{nearest_declaration, VariableDecl};
+    use crate::model::file_analysis::{callable_reach, write_lookup_chain, SymKind};
     let out = &mut st.out;
     if !out.symbols.iter().any(|s| s.kind == DefCap::Assigned) {
         return;
     }
-    let owning = |mut s: ScopeId| loop {
-        let sc = &out.scopes[s.0 as usize];
-        match (&sc.kind, sc.parent) {
-            (ScopeKind::Sub { .. }, _) | (_, None) => return s,
-            (_, Some(p)) => s = p,
-        }
-    };
     // Every other Variable def declares where it is written, from its token on.
-    let mut declared: HashMap<(ScopeId, String), Point> = HashMap::new();
-    for s in out.symbols.iter().filter(|s| s.kind != DefCap::Assigned && s.kind.sym_kind() == crate::model::file_analysis::SymKind::Variable) {
-        let at = declared.entry((s.scope, s.name.clone())).or_insert(s.name_start);
-        *at = (*at).min(s.name_start);
+    let mut decls: HashMap<String, Vec<VariableDecl<()>>> = HashMap::new();
+    for s in out.symbols.iter().filter(|s| s.kind != DefCap::Assigned && s.kind.sym_kind() == SymKind::Variable) {
+        decls.entry(s.name.clone()).or_default().push(VariableDecl {
+            scope: s.scope,
+            at: s.name_start,
+            id: (),
+            scope_wide: false,
+        });
     }
     let mut order: Vec<usize> = (0..out.symbols.len()).filter(|&i| out.symbols[i].kind == DefCap::Assigned).collect();
     order.sort_by_key(|&i| out.symbols[i].name_start);
-    let mut accepted: std::collections::HashSet<(ScopeId, String)> = Default::default();
     let mut keep = vec![true; out.symbols.len()];
     for i in order {
         let s = &out.symbols[i];
-        let seen = out.variable_lookup_chain(s.scope, &s.name)
-            .scopes()
-            .any(|sc| {
-                accepted.contains(&(sc, s.name.clone()))
-                    || declared.get(&(sc, s.name.clone())).is_some_and(|&at| at <= s.name_start)
-            });
+        let chain = write_lookup_chain(&out.scopes, s.scope, &s.name);
+        let seen = decls.get(&s.name).is_some_and(|d| nearest_declaration(&chain, d, s.name_start).is_some());
         if seen {
             keep[i] = false;
             out.var_writes.push((s.name.clone(), s.scope, Span { start: s.name_start, end: s.name_end }));
         } else {
-            let home = owning(s.scope);
-            accepted.insert((home, s.name.clone()));
+            let home = callable_reach(&out.scopes, s.scope).last().unwrap_or(s.scope);
+            decls.entry(s.name.clone()).or_default().push(VariableDecl {
+                scope: home,
+                at: s.name_start,
+                id: (),
+                scope_wide: true,
+            });
             out.symbols[i].scope = home;
         }
     }
@@ -449,16 +462,16 @@ pub(super) fn tag_inline_namespaces(st: &mut ExtractState) {
 pub(super) fn dedup(st: &mut ExtractState) {
     let symbols = &mut st.out.symbols;
     // The defs a pair declares at one token are both kept, and stand in
-    // for any other match's def of the same kind there.
-    let paired: std::collections::HashSet<(usize, usize, DefCap)> = symbols
+    // for any other match's def of the same model kind there.
+    let paired: std::collections::HashSet<(usize, usize, crate::model::file_analysis::SymKind)> = symbols
         .iter()
         .filter(|s| s.pair.is_some())
-        .map(|s| (s.name_start.row, s.name_start.column, s.kind))
+        .map(|s| (s.name_start.row, s.name_start.column, s.kind.sym_kind()))
         .collect();
     let mut best: HashMap<(usize, usize, Option<DefCap>), usize> = HashMap::new();
     let mut keep = vec![true; symbols.len()];
     for (i, sym) in symbols.iter().enumerate() {
-        if sym.pair.is_none() && paired.contains(&(sym.name_start.row, sym.name_start.column, sym.kind)) {
+        if sym.pair.is_none() && paired.contains(&(sym.name_start.row, sym.name_start.column, sym.kind.sym_kind())) {
             keep[i] = false;
             continue;
         }
@@ -468,7 +481,7 @@ pub(super) fn dedup(st: &mut ExtractState) {
                 best.insert(key, i);
             }
             Some(&j) => {
-                let (gen_i, gen_j) = (symbols[i].kind == DefCap::Var, symbols[j].kind == DefCap::Var);
+                let (gen_i, gen_j) = (symbols[i].kind.is_general(), symbols[j].kind.is_general());
                 let upgrade_ret = symbols[i].kind == symbols[j].kind
                     && symbols[i].return_type.is_some()
                     && symbols[j].return_type.is_none();

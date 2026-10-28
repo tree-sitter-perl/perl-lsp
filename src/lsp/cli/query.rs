@@ -1027,12 +1027,12 @@ fn run_rename(
     fmt: CoordFmt,
 ) -> Result<String, String> {
     use std::collections::HashMap;
-    if !resolve::is_valid_rename_name(new_name) {
-        return Err("rename: the new name must not be empty or whitespace".to_string());
-    }
     let file_path = std::path::Path::new(file).canonicalize()
         .unwrap_or_else(|_| std::path::PathBuf::from(file));
     let (_s, _t, mut analysis) = parse_file(file);
+    if !resolve::is_valid_rename_name(new_name, analysis.names()) {
+        return Err("rename: the new name must not be empty or whitespace".to_string());
+    }
     analysis.enrich_imported_types_with_keys(Some(idx));
     // Same shape as the LSP handler: stage the origin, construct the set
     // once, project the rename — the per-arm policy (cross-file vs group vs

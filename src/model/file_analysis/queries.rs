@@ -108,7 +108,7 @@ impl FileAnalysis {
     /// Returns the innermost-scope match (Perl lexical scoping).
     pub fn resolve_variable(&self, name: &str, point: Point) -> Option<&Symbol> {
         let scope = self.scope_at(point)?;
-        self.lookup_chain(scope)
+        variable_lookup_chain(&self.scopes, scope, name)
             .bindings(&self.symbols)
             .find(|sym| sym.name == name && matches!(sym.kind, SymKind::Variable | SymKind::Field) && sym.span.start <= point)
     }
@@ -623,8 +623,7 @@ impl FileAnalysis {
         // exact-span match is what distinguishes "the value of
         // `$f->get_bar()->get_name()`" (the outer call's return) from
         // "the inner receiver `$f->get_bar()`" (which has its own,
-        // narrower span), which is why this asks `call_spanning` and not
-        // `call_at_start` (the innermost receiver).
+        // narrower span).
         if let Some((recv_idx, kind)) =
             self.refs.call_spanning(span).map(|i| (i, &self.refs[i].kind))
         {

@@ -5,6 +5,7 @@ use crate::model::file_analysis::{ClassCall, InferredType, MemberNamespace, Name
 
 pub fn cpp_pack() -> LangPack {
     LangPack {
+        id: "cpp",
         query_source: include_str!("../../../queries/cpp/skeleton.scm"),
         // One member namespace: the nearest declaration of a name wins,
         // whether it is a data member or a member function. Calling a class

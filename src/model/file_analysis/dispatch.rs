@@ -279,19 +279,42 @@ pub fn callable_reach(scopes: &[Scope], from: ScopeId) -> impl Iterator<Item = S
 ///   directly in the scope, so only the innermost direct scope within
 ///   `from`'s `callable_reach` is on the chain. From a method of a Python
 ///   class, or a class nested in it, the class body is not.
-/// - a closed body (`@scope.sub.closed`): the walk ENDS at a body that
-///   sees no variable around it but the ones it captures, unless it
-///   captures the name. Only `lookup_chain_through` takes this arm.
+/// - a closed body (`Scope::closed`): a VARIABLE's walk ends at a body
+///   that sees no variable around it, unless it captures the name
+///   (`variable_lookup_chain`). Names that are not variables (subs,
+///   classes) walk past it.
 pub fn lookup_chain(scopes: &[Scope], from: ScopeId) -> LookupChain {
     lookup_chain_through(scopes, from, |_| false)
 }
 
-/// `lookup_chain` with the closed-body arm: `shut(scope)` answers whether
-/// `scope` is a closed body that does not capture the name looked up.
-/// The extractor holds those facts (php's closures), so its binding pass
-/// is the one caller; the model's queries walk past closed bodies, which
-/// over-approximates a type and never binds a name wrongly.
-pub fn lookup_chain_through(scopes: &[Scope], from: ScopeId, shut: impl Fn(ScopeId) -> bool) -> LookupChain {
+/// Where a use of the variable `name` in `from` looks it up: `lookup_chain`,
+/// ended by a closed body that does not capture `name`.
+pub fn variable_lookup_chain(scopes: &[Scope], from: ScopeId, name: &str) -> LookupChain {
+    lookup_chain_through(scopes, from, |id| {
+        let scope = &scopes[id.0 as usize];
+        scope.closed && !scope.captures.iter().any(|c| c == name)
+    })
+}
+
+/// Where a write of the variable `name` in `from` finds the variable it
+/// writes: no further than its own callable, unless the callable captures
+/// `name`. A write binds in its own callable even where a read would see
+/// past it (a Python or R closure reads the variables around it, and
+/// assigning one makes a local).
+///
+/// TODO(write-capture-declarations): Python's `nonlocal x` / `global x`
+/// and R's `<<-` are captures for writes; nothing states them yet, so such
+/// a write binds a local.
+pub fn write_lookup_chain(scopes: &[Scope], from: ScopeId, name: &str) -> LookupChain {
+    lookup_chain_through(scopes, from, |id| {
+        let scope = &scopes[id.0 as usize];
+        matches!(scope.kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. })
+            && !scope.captures.iter().any(|c| c == name)
+    })
+}
+
+/// `lookup_chain`, ended at the first scope `shut` answers for.
+fn lookup_chain_through(scopes: &[Scope], from: ScopeId, shut: impl Fn(ScopeId) -> bool) -> LookupChain {
     let direct = callable_reach(scopes, from).find(|&id| scopes[id.0 as usize].direct);
     let mut chain = scope_chain_of(scopes, from);
     if let Some(end) = chain.iter().position(|&id| shut(id)) {

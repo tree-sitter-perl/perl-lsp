@@ -99,41 +99,51 @@ of the method the token is written in (php's `$this`, `self::`,
 no receiver spelling.
 
 `@rettype` is a callable's declared return, captured in the def's match.
-`@rettype.enclosing` sits on a return the document says names the class the
-method is written in rather than a class by its spelling (php's `self`,
-`static`). It is a pattern of its own, joined to the def's `@rettype` by
-span.
+`@type.enclosing` sits on any written type (a return, a parameter's or
+property's `@type.annot`) the document says names the class it is written
+in rather than a class by its spelling (php's `self`, `static`). It is a
+pattern of its own, joined to the writing site's capture by span.
+
+`@expr.wrapper` sits on a node whose value is its one content's
+(`@expr.wrapper.inner`, parentheses in every pack): its `Expr` is an edge
+to the content's, so a source or a receiver written in parentheses reads
+what it wraps. A value merely inside a source (an argument, an operand) is
+never the source's.
 
 ## Decision: a function-scoped variable is declared by its first write
 
 A language whose variables belong to their function rather than a block
-(php) has no declaration syntax: `$x = …` declares `$x` when nothing the
-write can see declares it already, and is a write of that declaration
-otherwise. The document says so per pattern: `@def.assigned` marks such a
-write. After dedup, `defs::unify_assigned` walks those defs in source
-order; the first one per name whose lookup finds nothing is the
-declaration, re-anchored to the callable around it (or the file), and is
-visible from the top of that body, so a read above it in a loop reaches
-it. Every other one becomes a `var_writes` row, minted as a `Variable` ref
-with `AccessKind::Write`. Reads, writes and the unification look a name up
-along one chain, `SkeletonAnalysis::variable_lookup_chain` — the model's
-`lookup_chain` walk with its closed-body arm (`lookup_chain_through`), the
-same walk `@scope.direct` is an arm of. The arm needs the capture list,
-which the extractor holds, so the model's type queries walk past a closed
-body (an over-approximation of a type, never a wrong binding).
+(php, python, R) has no declaration syntax: `$x = …` declares `$x` when no
+declaration the write reaches is in force, and is a write of that
+declaration otherwise. The document says so per pattern: `@def.assigned`
+marks such a write. After dedup, `defs::unify_assigned` walks those defs
+in source order; the first one per name that reaches nothing is the
+declaration, re-anchored to the callable around it (`callable_reach`, or
+the file), and is visible from the top of that body, so a read above it in
+a loop reaches it. Every other one becomes a `var_writes` row, minted as a
+`Variable` ref with `AccessKind::Write`. One resolver,
+`skeleton::nearest_declaration`, answers the unification, the writes and
+the reads, along two chains of the model's (`model/file_analysis/
+dispatch.rs`): a read looks along `variable_lookup_chain`, which a closed
+body ends unless it captures the name; a write along `write_lookup_chain`,
+which any callable ends unless it captures the name, because assigning a
+name a python or R closure reads from around it makes a local. The
+model's type queries take the read chain too, so a closed body answers no
+type for a variable around it.
 
 `@scope.sub.closed` is a callable body that sees no variable of the code
 around it (php's functions, methods and closures; an arrow function is a
-plain `@scope.sub` and sees the enclosing function's).
+plain `@scope.sub` and sees the enclosing function's): `Scope::closed`.
 `@closure.capture` is a name such a body takes from around it (`use
-($x)`): the chain continues past the closed body for that name alone.
+($x)`), on `Scope::captures`: the chain continues past the closed body for
+that name alone.
 `@def.hoist` files the match's def in the scope around the one it is
 written in, so `use (&$x)` declares `$x` in the enclosing function when it
 does not exist yet.
 
-`@access.write` sits on a token an assignment writes through a
-reference that is not a variable's (php's `$o->p = v`): the ref at that
-token is a write.
+`@flow.place` is the left side of an assignment. When its own read
+projects a member (`$o->p`, `self.p`), that member takes the value and its
+token is written, not read.
 
 ## Decision: a def with no name is named from its anchor
 

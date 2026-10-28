@@ -77,7 +77,7 @@ fn family(cap: Capture) -> Family {
         | C::OolDef
         | C::NestedTarget
         | C::RetType
-        | C::RetTypeEnclosing
+        | C::TypeEnclosing
         | C::SymAttr
         | C::SpecPrimary
         | C::NsInline
@@ -86,7 +86,7 @@ fn family(cap: Capture) -> Family {
         | C::Tmpl(_)
         | C::ParamReceiver
         | C::Mark(_) => Family::Defs,
-        C::Ref(_) | C::RefSpelled | C::AccessWrite => Family::Refs,
+        C::Ref(_) | C::RefSpelled => Family::Refs,
         C::Member(_) | C::MemberOp(_) | C::Arity(_) => Family::Members,
         C::Flow(_)
         | C::Expr(_)
@@ -171,6 +171,21 @@ impl ExtractState<'_> {
     /// header belongs to.
     fn bind_scope(&self) -> ScopeId {
         self.scopes.headed.get(&self.cur_scope).copied().unwrap_or(self.cur_scope)
+    }
+
+    /// The scope a def of `kind`, declared in match `match_id` at the
+    /// current event, binds in. A data member belongs to its class body even
+    /// where it is written inside a callable (php's constructor-promoted
+    /// property); a hoisted def (`@def.hoist`) to the scope around the one
+    /// it is written in.
+    fn def_scope(&self, kind: DefCap, match_id: usize) -> ScopeId {
+        match kind {
+            DefCap::Field | DefCap::Slot => self.member_scope(),
+            _ if self.defs.hoists(match_id) => {
+                self.out.scopes[self.cur_scope.0 as usize].parent.unwrap_or(self.cur_scope)
+            }
+            _ => self.bind_scope(),
+        }
     }
 
     fn class_identity(&self, leaf: &str, from: ScopeId, at: Point) -> String {
@@ -273,8 +288,7 @@ pub fn extract_in(
     let compiled = cached_query(&language, pack.query_source)?;
 
     let root = tree.root_node();
-    let mut out = SkeletonAnalysis::default();
-    out.names = pack.names.clone();
+    let mut out = SkeletonAnalysis::for_pack(pack);
     out.scopes.push(Scope {
         id: ScopeId(0),
         parent: None,
@@ -283,6 +297,8 @@ pub fn extract_in(
         package: None,
         owner: None,
         implicit_receiver: false,
+        closed: false,
+        captures: Vec::new(),
         direct: false,
         declaration_rules: Vec::new(),
     });
@@ -329,7 +345,6 @@ pub fn extract_in(
             Capture::Member(MemberCap::Recv) => {
                 members::flatten_recv(&mut st.members, node, pack, source, match_id, &mut events)
             }
-            Capture::Flow(FlowCap::Source) => flow::flatten_source(&mut st.flow, node, pack, source, match_id, &mut events),
             Capture::Arity(ArityCap::Args) => members::open_args(&mut st.members, match_id),
             Capture::Arity(ArityCap::Arg) => members::record_arg(&mut st.members, node, match_id),
             Capture::Arity(ArityCap::Sig) => members::count_params(&mut st.members, node),

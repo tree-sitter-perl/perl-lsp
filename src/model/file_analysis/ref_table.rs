@@ -45,10 +45,8 @@ pub struct RefTable {
     by_target: HashMap<SymbolId, Vec<usize>>,
 
     /// Call-shaped refs (MethodCall / FunctionCall) sorted by
-    /// `(start, end, index)`. Answers both chain lookups by binary search:
-    /// the narrowest call at a start point (`Foo->new->m`'s outer `->m`
-    /// `invocant_span` starts at the inner `Foo->new` call's start), and
-    /// the call spanning exactly an expression.
+    /// `(start, end, index)`: the call spanning exactly an expression, by
+    /// binary search.
     #[serde(skip, default)]
     calls_by_span: Vec<usize>,
     /// Most calls sharing one start point: a fluent chain's calls all open
@@ -108,15 +106,6 @@ impl RefTable {
         self.by_target.get(&sym_id).map_or(&[], |v| v.as_slice())
     }
 
-    /// The call-shaped ref anchored at `start` — the chain-receiver hop.
-    /// The narrowest span wins (closest to the actual receiver: in
-    /// `Foo->new->m` the outer `m` and inner `Foo->new` share a start), a
-    /// tie the earlier ref.
-    pub fn call_at_start(&self, start: &Point) -> Option<usize> {
-        let at = self.calls_by_span.partition_point(|&i| self.refs[i].span.start < *start);
-        self.calls_by_span.get(at).copied().filter(|&i| self.refs[i].span.start == *start)
-    }
-
     /// Calls in the file's deepest fluent chain (`a->b->c` is 2, the
     /// receiver `a` is no call).
     pub fn longest_call_chain(&self) -> usize {
@@ -128,19 +117,6 @@ impl RefTable {
         let key = |i: usize| (self.refs[i].span.start, self.refs[i].span.end);
         let at = self.calls_by_span.partition_point(|&i| key(i) < (span.start, span.end));
         self.calls_by_span.get(at).copied().filter(|&i| self.refs[i].span == span)
-    }
-
-    /// Every `(anchor point, ref index)` `call_at_start` can answer — the
-    /// shape pins read it to assert the tiebreak and that only call-shaped
-    /// kinds are indexed.
-    pub fn call_index_entries(&self) -> impl Iterator<Item = (Point, usize)> + '_ {
-        self.calls_by_span
-            .iter()
-            .enumerate()
-            .filter(|&(k, &i)| {
-                k == 0 || self.refs[self.calls_by_span[k - 1]].span.start != self.refs[i].span.start
-            })
-            .map(|(_, &i)| (self.refs[i].span.start, i))
     }
 
     /// Every ref's relational row seed, in ref order.
@@ -159,7 +135,7 @@ impl RefTable {
     }
 
     /// Rebuild every index from the current refs. Both the name/target
-    /// lookups and the start-anchored call index.
+    /// lookups and the call index.
     pub fn rebuild_indices(&mut self, names: &NameSpellings) {
         self.by_key.clear();
         self.by_target.clear();

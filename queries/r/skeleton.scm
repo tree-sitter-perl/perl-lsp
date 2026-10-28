@@ -20,16 +20,19 @@
   name: (identifier) @def.sub.name
   value: (function_definition)) @def.sub @scope
 
+; A variable belongs to the function it is assigned in: the first write
+; declares it, and every later write and every read in the body is that
+; one variable.
 (binary_operator
-  lhs: (identifier) @def.var.name @flow.target
+  lhs: (identifier) @def.assigned.name @flow.target
   ["<-" "="]
-  rhs: (_) @flow.source) @def.var @flow.assign
+  rhs: (_) @flow.source) @def.assigned @flow.assign
 
 (parameter
   name: (identifier) @def.var.name) @def.var
 
 ; ---- scopes ----
-(function_definition) @scope
+(function_definition) @scope.sub
 
 ; ---- refs ----
 (call
@@ -55,6 +58,8 @@
   (#any-of? @_import "library" "require" "source"))
 
 ; ---- literals ----
+; Parentheses hold the value they wrap.
+(parenthesized_expression . (_) @expr.wrapper.inner .) @expr.wrapper
 (string) @expr.lit.string
 (float) @expr.lit.number
 (integer) @expr.lit.number

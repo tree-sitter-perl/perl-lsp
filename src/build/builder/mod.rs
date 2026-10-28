@@ -712,7 +712,7 @@ struct Builder<'a> {
 ///   * `Deferred` — owner=None at emit time. Post-walk fixup in
 ///     `FileAnalysis::fix_chain_receiver_hash_key_owners`
 ///     fills the owner once the enclosing call's receiver type
-///     resolves (in-file via `RefTable::call_at_start` recursion, or
+///     resolves (in-file via `RefTable::call_spanning` recursion, or
 ///     cross-file once `module_index` is available).
 enum Gate {
     Strict(HashKeyOwner),

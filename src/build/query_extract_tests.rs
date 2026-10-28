@@ -323,7 +323,7 @@ y = x
         .collect();
     assert!(names.contains(&(DefCap::Class, "Greeter".into())), "{names:?}");
     assert!(names.contains(&(DefCap::Sub, "greet".into())), "{names:?}");
-    assert!(names.contains(&(DefCap::Var, "x".into())), "{names:?}");
+    assert!(names.contains(&(DefCap::Assigned, "x".into())), "{names:?}");
     assert_eq!(skel.imports, vec!["os"]);
 
     let fa = skel.into_file_analysis();
@@ -653,11 +653,11 @@ fn r_outline_imports_and_s3_names() {
     // convention layer (print.myclass IS print on myclass) is a later
     // pack predicate, but the outline is already right.
     assert_eq!(subs, vec!["add_one", "print.myclass"]);
-    // params + locals are vars, the function names are NOT doubled
+    // params + locals are variables, the function names are NOT doubled
     let vars: Vec<&str> = skel
         .symbols
         .iter()
-        .filter(|s| s.kind == DefCap::Var)
+        .filter(|s| s.kind.sym_kind() == crate::model::file_analysis::SymKind::Variable)
         .map(|s| s.name.as_str())
         .collect();
     assert_eq!(vars, vec!["x", "y", "obj"]);
@@ -2235,6 +2235,16 @@ fn cpp_fa(src: &str) -> crate::model::file_analysis::FileAnalysis {
     extract(&tree, src.as_bytes(), &cpp_pack())
         .unwrap()
         .into_file_analysis()
+}
+
+/// An analysis is of its pack's language however it was assembled — through
+/// the driver, straight from extraction, or as the stand-in for a file that
+/// never parsed — because `resolve()` routes visibility on that stamp.
+#[test]
+fn assembly_stamps_the_packs_language() {
+    assert_eq!(cpp_fa("int f();").language, "cpp");
+    let empty = SkeletonAnalysis::for_pack(&cpp_pack()).into_file_analysis();
+    assert_eq!(empty.language, "cpp");
 }
 
 /// A member token with an argument list beside it is a call; without one
