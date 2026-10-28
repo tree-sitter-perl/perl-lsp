@@ -30,6 +30,19 @@ struct Event {
     text: String,
     /// Query match id — name captures join their parent def through it.
     match_id: usize,
+    /// What flattening read off the live node that the text cannot carry.
+    payload: Option<Box<Payload>>,
+}
+
+enum Payload {
+    /// A `@nested.target`'s declarator chain, peeled: its deref stack,
+    /// on the def it mints.
+    Deref(Vec<crate::model::file_analysis::DerefStep>),
+    /// Whether a `@member.recv` was a simple variable before its wrappers
+    /// were peeled.
+    SimpleRecv(bool),
+    /// An `@arity.sig` parameter list's arity.
+    Params(crate::model::file_analysis::ParamArity),
 }
 
 impl Event {
@@ -42,7 +55,13 @@ impl Event {
             cap,
             text,
             match_id,
+            payload: None,
         }
+    }
+
+    fn with(mut self, payload: Payload) -> Event {
+        self.payload = Some(Box::new(payload));
+        self
     }
 
     fn span(&self) -> Span {
@@ -218,8 +237,6 @@ struct ExtractState<'p> {
     cur_scope: ScopeId,
     package: Option<String>,
     scopes: scopes::State,
-    defs: defs::State,
-    members: members::State,
     flow: flow::State,
     narrowing: narrowing::State,
     commands: commands::State,
@@ -393,8 +410,6 @@ pub fn extract_in(
 
     // ---- flatten matches into ordered events ----
     let (links, captured) = record_matches(compiled, root, source);
-    let mut defs = defs::State::default();
-    let mut members = members::State::default();
     // A capture whose meaning needs its LIVE node (a declarator to peel, an
     // argument list to count) is read here, where the node is in hand;
     // everything else becomes an event carrying its text.
@@ -403,15 +418,15 @@ pub fn extract_in(
     for (node, cap, match_id) in captured {
         match cap {
             Capture::OolDef => defs::flatten_ool_def(node, &links, source, match_id, &mut events),
-            Capture::NestedTarget => {
-                defs::flatten_nested(&mut defs, node, &links, source, match_id, &mut events)
+            Capture::NestedTarget => defs::flatten_nested(node, &links, source, match_id, &mut events),
+            Capture::Member(MemberCap::Recv) => events.push(members::flatten_recv(node, pack, source, match_id)),
+            // A wildcard in a query also matches the grammar's extras, and a
+            // predicate filters a whole match rather than one quantified
+            // capture, so a comment between two arguments is dropped here.
+            Capture::Arity(ArityCap::Arg) if node.is_extra() => {}
+            Capture::Arity(ArityCap::Sig) => {
+                events.push(Event::at(node, cap, String::new(), match_id).with(Payload::Params(members::count_params(node))))
             }
-            Capture::Member(MemberCap::Recv) => {
-                members::flatten_recv(&mut members, node, pack, source, match_id, &mut events)
-            }
-            Capture::Arity(ArityCap::Args) => members::open_args(&mut members, match_id),
-            Capture::Arity(ArityCap::Arg) => members::record_arg(&mut members, node, match_id),
-            Capture::Arity(ArityCap::Sig) => members::count_params(&mut members, node),
             Capture::Qualifier => events.push(Event::at(node, cap, links.qualifier_text(node, source), match_id)),
             _ => events.push(Event::at(node, cap, node.utf8_text(source).unwrap_or("").to_string(), match_id)),
         }
@@ -446,8 +461,6 @@ pub fn extract_in(
         cur_scope: ScopeId(0),
         package: None,
         scopes: Default::default(),
-        defs,
-        members,
         flow: Default::default(),
         narrowing: Default::default(),
         commands: Default::default(),

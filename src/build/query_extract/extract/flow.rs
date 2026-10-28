@@ -142,7 +142,7 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
             if let Some((callee, receiver)) = callee {
                 let span = e.span();
                 st.minted[ix].value = true;
-                let args = st.members.call_args(ad, e.match_id);
+                let args = super::members::call_args(ad, e.match_id);
                 out.call_sites.push(crate::build::query_extract::CallSite {
                     span,
                     callee,

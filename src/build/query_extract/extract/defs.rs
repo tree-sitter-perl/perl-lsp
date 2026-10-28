@@ -4,13 +4,6 @@
 use super::*;
 use std::collections::HashMap;
 
-#[derive(Default)]
-pub(super) struct State {
-    /// match_id → the pointer/reference declarator stack a `@nested.target`
-    /// capture unravelled to. Read by the `def.*` handler to stamp the symbol.
-    nested_stacks: HashMap<usize, Vec<crate::model::file_analysis::DerefStep>>,
-}
-
 /// The class whose `@def.class.name` this match captured, as its def
 /// minted it: a pattern that names the class again (its `@context.class`,
 /// a `@parent` match) reads it rather than minting it a second time.
@@ -50,7 +43,6 @@ pub(super) fn flatten_ool_def(
 /// downstream join/symbol/witness paths are unchanged, and arbitrary
 /// nesting works without enumerating it.
 pub(super) fn flatten_nested(
-    defs: &mut State,
     node: tree_sitter::Node<'_>,
     links: &super::links::Links<'_>,
     source: &[u8],
@@ -58,12 +50,10 @@ pub(super) fn flatten_nested(
     events: &mut Vec<Event>,
 ) {
     if let Some(super::links::Peeled { leaf, stack, def }) = links.peel_declarator(node, source) {
-        defs.nested_stacks.insert(match_id, stack);
         let ltext = leaf.utf8_text(source).unwrap_or("").to_string();
+        events.push(Event::at(leaf, Capture::Flow(FlowCap::Target), ltext.clone(), match_id));
         let def = Capture::Def { kind: def, part: DefPart::Node };
-        for syn in [Capture::Flow(FlowCap::Target), def] {
-            events.push(Event::at(leaf, syn, ltext.clone(), match_id));
-        }
+        events.push(Event::at(leaf, def, ltext, match_id).with(Payload::Deref(stack)));
     }
 }
 
@@ -123,7 +113,6 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         Capture::ParamReceiver => f | crate::model::file_analysis::SymbolFlags::RECEIVER,
         _ => f,
     });
-    let d = &st.defs;
     let symbol = SkelSymbol {
         name: shaped,
         kind,
@@ -137,7 +126,13 @@ pub(super) fn handle(st: &mut ExtractState, ix: usize, e: &Event) {
         scope: if matches!(kind, DefCap::Field | DefCap::Slot) { st.member_scope() } else { st.bind_scope() },
         pair: mine(Capture::DefPair).map(|_| e.match_id),
         return_type: mine(Capture::RetType).and_then(|t| (pack.annot_type)(&t.text)),
-        deref_stack: d.nested_stacks.get(&e.match_id).cloned().unwrap_or_default(),
+        deref_stack: ad
+            .of_match(e.match_id)
+            .find_map(|t| match t.payload.as_deref() {
+                Some(Payload::Deref(stack)) => Some(stack.clone()),
+                _ => None,
+            })
+            .unwrap_or_default(),
         attributes: {
             let mut a: Vec<String> =
                 ad.of_match(e.match_id).filter(|t| t.cap == Capture::SymAttr).map(|t| t.text.clone()).collect();

@@ -19,11 +19,11 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     if inside_def {
         return;
     }
-    let m = &st.members;
     let ad = st.adorned;
-    let simple = m.member_simple.get(&e.match_id).copied().unwrap_or(false);
+    let recv = ad.in_match(e.match_id, Capture::Member(MemberCap::Recv));
+    let simple = recv.is_some_and(|r| matches!(r.payload.as_deref(), Some(Payload::SimpleRecv(true))));
     let member_op = simple.then(|| super::members::op_of(ad, e.match_id)).flatten();
-    let arg_count = m.arg_count(e.match_id);
+    let arg_count = super::members::call_args(ad, e.match_id).map(|a| a.len());
     st.out.refs.push(SkelRef {
         kind: ref_kind,
         // `@ref.spelled`: the name as the match spells it, where that is
@@ -32,7 +32,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         start: e.start,
         end: e.end,
         scope: st.cur_scope,
-        invocant: ad.in_match(e.match_id, Capture::Member(MemberCap::Recv)).map(|r| (r.span(), r.text.clone())),
+        invocant: recv.map(|r| (r.span(), r.text.clone())),
         member_op,
         arg_count,
     });
