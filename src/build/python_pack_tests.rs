@@ -1366,3 +1366,43 @@ def f():
     let fa = idx.workspace_file_for_test(&t.0.join("pkg/lib.py")).unwrap();
     assert_eq!(fa.sub_return_type_at_arity("nothing", Some(0)), None, "`-> None` names no class");
 }
+
+/// Calling a class another file declares constructs it: the call is an
+/// instance of the class its spelling names through the file's imports,
+/// whether the call is assigned, chained, or returned by a def.
+#[cfg(feature = "python")]
+#[test]
+fn calling_a_class_from_another_file_constructs_it() {
+    let widgets = "\
+class Widget:
+    def spin(self):
+        return 1
+
+class Holder:
+    def __init__(self):
+        self.made = Widget()
+";
+    let main = "\
+from pkg.widgets import Widget, Holder
+
+w = Widget()
+w.spin()
+Widget().spin()
+Holder().made.spin()
+
+def make():
+    return Widget()
+
+make().spin()
+";
+    let (t, idx) = indexed("pyclasscall", &[
+        ("pkg/__init__.py", ""),
+        ("pkg/widgets.py", widgets),
+        ("pkg/main.py", main),
+    ]);
+    let path = t.0.join("pkg/main.py");
+    for at in [Point::new(3, 2), Point::new(4, 9), Point::new(5, 14), Point::new(10, 7)] {
+        let (defs, _, _) = landing(&idx, &path, at);
+        assert_eq!(defs, [("widgets.py".to_string(), 1)], "goto-def on spin at {at:?}");
+    }
+}

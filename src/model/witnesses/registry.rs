@@ -2660,7 +2660,7 @@ impl ReducerRegistry {
                     .map(|package| WitnessAttachment::PackageSymbol { package, name: name.clone() })
                     .collect()
             }
-            Callee::Function { name, local: None, .. } => {
+            Callee::Function { name, local: None, constructs, .. } => {
                 let Some(ctx) = q.context.filter(|c| c.module_index.is_some()) else {
                     // The definition is in another file, and no conclusion
                     // key names a free function, so a bake can't link it.
@@ -2669,7 +2669,7 @@ impl ReducerRegistry {
                     return None;
                 };
                 let arity = exact.then_some(arg_types.len() as u32);
-                return self.free_function_cross_file(ctx, name, arity, recv, &arg_types, state);
+                return self.free_function_cross_file(ctx, name, constructs.as_deref(), arity, recv, &arg_types, state);
             }
             Callee::Function { local: Some(sid), .. } => vec![WitnessAttachment::Symbol(*sid)],
             Callee::Value(att) => {
@@ -2715,11 +2715,16 @@ impl ReducerRegistry {
     /// for both entries — `query_sub_return_type`'s cross-file half and an
     /// unresolved `Callee::Function` — and the chase shares `state`, so a
     /// call that crosses back into a file already on the path stops at the
-    /// cycle guard instead of recursing through a fresh query.
+    /// cycle guard instead of recursing through a fresh query. `class` is
+    /// the identity the call constructs if it names a class
+    /// (`Callee::Function::constructs`): a class declared under it is a
+    /// callee too, whose value is an instance of itself.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn free_function_cross_file(
         &self,
         ctx: &BagContext,
         name: &str,
+        class: Option<&str>,
         arity_hint: Option<u32>,
         receiver: Option<InferredType>,
         args: &[InferredType],
@@ -2732,7 +2737,8 @@ impl ReducerRegistry {
             return None;
         }
         let is_callable = |s: &crate::model::file_analysis::Symbol| {
-            s.name == name && matches!(s.kind, SymKind::Sub | SymKind::Method)
+            (s.name == name && matches!(s.kind, SymKind::Sub | SymKind::Method))
+                || (class == Some(s.name.as_str()) && s.kind == SymKind::Class)
         };
         // The callable's answer in its own file, under the caller's arity,
         // receiver and arguments. The copy is pinned: the memo keys on its
@@ -2813,7 +2819,13 @@ impl ReducerRegistry {
             return None;
         }
         let mut answer: Option<InferredType> = None;
-        for cached in idx.def_candidates(name) {
+        let mut candidates = idx.def_candidates(name);
+        for cached in class.filter(|c| *c != name).map(|c| idx.def_candidates(c)).unwrap_or_default() {
+            if !candidates.iter().any(|c| c.path == cached.path) {
+                candidates.push(cached);
+            }
+        }
+        for cached in candidates {
             let p = cached.path.to_string_lossy();
             // Reachability reads pinned fields (path + include_closure), so
             // gate BEFORE rehydrating: an unreachable candidate never pays a

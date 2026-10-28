@@ -427,9 +427,12 @@ pub enum Callee {
     /// definition lookup uses. `member_of`: the call is written in a body
     /// of this class that elides the receiver, so a member of the class
     /// (its own or inherited, in any file) answers before any free
-    /// function. Kept at the END for bincode variant-index stability (bump
+    /// function. `constructs`: in a language where calling a class
+    /// constructs it, the class identity the name spells at the call, so a
+    /// class declared under it in another file answers with an instance of
+    /// itself. Kept at the END for bincode variant-index stability (bump
     /// `EXTRACT_VERSION`).
-    Function { name: String, local: Option<SymbolId>, member_of: Option<String> },
+    Function { name: String, local: Option<SymbolId>, member_of: Option<String>, constructs: Option<String> },
 }
 
 /// Where a named method's lookup starts.

@@ -851,18 +851,20 @@ impl SkeletonAnalysis {
             // an unknown uppercase macro leaves the enclosing `auto x =
             // F(..)` honestly untyped). Where calling a class constructs it
             // (`NameSpellings::class_call`), prefer a `Class` over a
-            // like-named callable (the constructor is the stronger claim);
-            // elsewhere a class is no callee at all. A method is
+            // like-named callable (the constructor is the stronger claim),
+            // and a name looked up across files carries the class identity
+            // it spells here, so a class declared under it elsewhere answers
+            // too; elsewhere a class is no callee at all. A method is
             // never a free callee: a bare call in a member body reaches it
             // through `member_of`, with the class as its receiver.
             let class_identity_at = |written: &str, site: tree_sitter::Point| {
                 let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &self.names, site, &symbols)?;
                 Some(map.resolve(written).identity(map.sep))
             };
+            let calls_construct = self.names.class_call == crate::model::file_analysis::ClassCall::Constructs;
             let callee_sid: std::collections::HashMap<&str, SymbolId> = {
                 let mut m: std::collections::HashMap<&str, SymbolId> =
                     std::collections::HashMap::new();
-                let calls_construct = self.names.class_call == crate::model::file_analysis::ClassCall::Constructs;
                 for s in &symbols {
                     match s.kind {
                         SymKind::Class if calls_construct => {
@@ -925,6 +927,8 @@ impl SkeletonAnalysis {
                                 callee_sid.get(class_identity_at(name, span.start)?.as_str())
                             }).copied(),
                             member_of: elided_class.get(site.scope.0 as usize).cloned().flatten(),
+                            constructs: calls_construct
+                                .then(|| class_identity_at(name, span.start).unwrap_or_else(|| name.clone())),
                         },
                         None,
                     ),
