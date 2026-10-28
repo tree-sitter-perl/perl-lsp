@@ -1193,28 +1193,40 @@ impl<'a> Builder<'a> {
         if sub_pkgs.is_empty() {
             return;
         }
-        let mut pins: Vec<(usize, String)> = Vec::new();
-        for (i, r) in self.refs.iter().enumerate() {
+        let pin = |r: &Ref| -> Option<String> {
             if !matches!(r.kind, RefKind::FunctionCall) || r.settled_binding().is_some() {
-                continue;
+                return None;
             }
             if crate::model::file_analysis::split_qualified(&r.target_name, &crate::model::conventions::PERL_SPELLINGS).0.is_some() {
-                continue; // qualified calls already pin at walk time (step 1)
+                return None; // qualified calls already pin at walk time (step 1)
             }
-            let Some(pkgs) = sub_pkgs.get(r.target_name.as_str()) else { continue };
+            let pkgs = sub_pkgs.get(r.target_name.as_str())?;
             // Pin ONLY to a local sub in the call's OWN enclosing package
             // (`package_at_pos` is the canonical span-containment query — block-
             // scoped `{ package X; }` aware). A same-named sub in a DIFFERENT
             // local package is NOT this call's target: it may be an imported sub
             // of that name, which cross-file resolution owns. (An earlier
             // unique-local fallback pinned to it and hijacked the import.)
-            let Some(encl) = self.package_at_pos(r.span.start) else { continue };
-            if pkgs.iter().any(|p| *p == encl) {
-                pins.push((i, encl.to_string()));
-            }
-        }
+            let encl = self.package_at_pos(r.span.start)?;
+            pkgs.iter().any(|p| *p == encl).then(|| encl.to_string())
+        };
+        let pins: Vec<(usize, String)> =
+            self.refs.iter().enumerate().filter_map(|(i, r)| Some((i, pin(r)?))).collect();
+        // A held indirect site's function-call heads are the same calls: a
+        // view installing them must resolve them as the walk's would be.
+        let held_pins: Vec<(usize, bool, String)> = self
+            .held_indirect
+            .iter()
+            .enumerate()
+            .flat_map(|(i, h)| [(i, true, &h.verb.1), (i, false, &h.class.1)])
+            .filter_map(|(i, verb, r)| Some((i, verb, pin(r)?)))
+            .collect();
         for (i, pkg) in pins {
             self.refs[i].bind_function_package(pkg);
+        }
+        for (i, verb, pkg) in held_pins {
+            let h = &mut self.held_indirect[i];
+            if verb { &mut h.verb.1 } else { &mut h.class.1 }.bind_function_package(pkg);
         }
     }
 

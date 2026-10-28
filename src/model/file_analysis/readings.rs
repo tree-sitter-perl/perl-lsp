@@ -328,6 +328,14 @@ impl FileAnalysis {
         for i in 0..self.readings.slots.len() {
             let HeldSlot { question, slot, .. } = self.readings.slots[i];
             let Some(arm) = self.readings.fallback(question) else { continue };
+            // The slot's ref is the walk's head as every later pass left it
+            // (a forward call pinned, a dispatch target stamped); the held
+            // copy was taken before them, so the fallback arm keeps the ref.
+            let walked = self.refs[slot as usize].clone();
+            match arm {
+                Arm::Then => self.readings.slots[i].then = walked,
+                Arm::Otherwise => self.readings.slots[i].otherwise = walked,
+            }
             let att = WitnessAttachment::Expression(crate::model::witnesses::RefIdx(slot));
             for w in self.witnesses.take_attachment(&att) {
                 self.hold_witness(question, arm, HeldWitness::Plain(w));
@@ -386,6 +394,9 @@ impl FileAnalysis {
         self.symbols.truncate(base.symbols as usize);
         self.refs.truncate(base.refs as usize);
         self.witnesses.truncate(base.witnesses as usize);
+        // TODO(held-method-stamp): a view installing the non-fallback method
+        // head gets it without the local dispatch target finalize stamps on
+        // walked method calls; the function heads are pinned by the builder.
         for s in &readings.slots {
             let arm = picks.get(s.question as usize).copied().flatten().or(readings.fallback(s.question));
             self.refs.as_mut_slice()[s.slot as usize] = match arm {

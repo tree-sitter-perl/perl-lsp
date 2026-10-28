@@ -196,3 +196,32 @@ fn a_decided_site_navigates_through_its_reading_at_the_same_ids() {
     );
     assert!(fa.decided(&fa.readings.fallbacks()).is_none(), "the fallbacks are the base");
 }
+
+#[test]
+fn a_held_function_head_resolves_a_call_to_a_sub_defined_below() {
+    // `FW_pO FW_textfield(..)` (FHEM's 01_FHEMWEB.pm): `FW_pO` is declared
+    // above, `FW_textfield` only below, so the site defers. Its
+    // `FW_textfield` call is a forward call, pinned to `main` after the
+    // walk, in the analysis as stored and in any view reading the call.
+    let src = "package main;\nsub FW_pO(@);\nsub show {\n  FW_pO FW_textfield(\"cmd\", 1, \"m\");\n}\nsub FW_textfield { 1 }\nsub FW_pO { 1 }\n";
+    let fa = build_fa(src);
+    let call = Point::new(3, 9);
+    let pinned = |fa: &FileAnalysis| {
+        fa.ref_at(call).filter(|r| matches!(r.kind, RefKind::FunctionCall)).and_then(|r| r.resolved_package()).map(str::to_string)
+    };
+    assert_eq!(pinned(&fa).as_deref(), Some("main"), "the stored fallback keeps the walk's pin");
+
+    // Fallback a method call (`Thing` is named a package above); the file
+    // itself defines `sub Thing`, so the index picks the function reading
+    // and the view installs the held call heads.
+    let src = "package Thing;\npackage main;\nmy $a = new Thing(1);\nsub Thing { 1 }\n";
+    let fa = build_fa(src);
+    let class = Point::new(2, 13);
+    assert!(matches!(fa.ref_at(class).map(|r| &r.kind), Some(RefKind::PackageRef)));
+    let idx = ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(std::path::PathBuf::from("/tmp/qa_ind/main.pl"), build_fa(src));
+    let view = fa.decided_with(&idx).expect("the index moves the site off its fallback");
+    let r = view.ref_at(class).expect("the class word is a call in the function reading");
+    assert!(matches!(r.kind, RefKind::FunctionCall));
+    assert_eq!(r.resolved_package(), Some("main"), "the installed head is pinned like a walked one");
+}

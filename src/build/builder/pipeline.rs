@@ -1251,7 +1251,9 @@ impl<'a> Builder<'a> {
         // just synthesized — to `pkg`, so goto-def lands on the data-section
         // definition. Scoped to autoload-backed packages: we only touch refs
         // whose target is one of the freshly minted names.
-        for r in self.refs.iter_mut() {
+        // A held indirect site's function-call heads are the same calls.
+        let held = self.held_indirect.iter_mut().flat_map(|h| [&mut h.verb.1, &mut h.class.1]);
+        for r in self.refs.iter_mut().chain(held) {
             if matches!(r.kind, RefKind::FunctionCall) {
                 if r.settled_binding().is_none() && synth_names.contains(&r.target_name) {
                     let in_pkg = crate::model::file_analysis::namespace_range_at(&self.namespace_ranges, r.span.start)
