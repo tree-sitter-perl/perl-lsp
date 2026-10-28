@@ -247,7 +247,7 @@ spelled! {
         Arg = "arg",
         Sig = "sig",
         Spread = "spread",
-        /// A declared parameter of its match's `@arity.sig`: a required
+        /// A declared parameter of the `@arity.sig` it sits in: a required
         /// one, one with a default, or one that takes any number of values.
         Required = "required",
         Optional = "optional",

@@ -54,11 +54,13 @@ in the quantified group, because a bare `(_)*` stops at the first comma. A
 wildcard also matches the grammar's extras, and a predicate filters a whole
 match rather than one capture, so the extractor drops a captured comment.
 `@arity.spread` marks the children that spread (`*xs`, `**kw`, `args...`).
-A callable's parameter list is the same shape from the other side: `@arity.sig`
-is the list, and each parameter in its match is `@arity.required`,
-`@arity.optional` (it has a default) or `@arity.variadic` (it takes any number
-of values, and counts none). A comment between parameters is listed as an
-uncaptured alternative, or it would end the repetition.
+A callable's parameter list is `@arity.sig`, and each parameter in it is
+`@arity.required`, `@arity.optional` (it has a default) or `@arity.variadic`
+(it takes any number of values, and counts none), each its own pattern: a
+parameter joins the signature whose list holds it on the tree, less any
+signature nested in it. A quantified group would not do: its repetitions
+must be adjacent siblings, so a comment between two parameters ends it,
+and only a wildcard element (`(_)`, as `@arity.arg` is) can absorb one.
 
 ## Current state
 
