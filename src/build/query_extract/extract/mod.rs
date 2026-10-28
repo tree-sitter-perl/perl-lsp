@@ -530,21 +530,21 @@ pub fn extract_in(
     // The narrowing cutoff reads the flow edges.
     narrowing::finish(&mut st);
     members::finish(&mut st);
-    dump_for_equivalence(source, pack, file_module, &st.out);
+    dump_for_equivalence(source, &language, file_module, &st.out);
     Ok(st.out)
 }
 
 /// `PERL_LSP_SKEL_DUMP_DIR=<dir>`: write every extraction's
 /// `SkeletonAnalysis` to `<dir>/<hash of input>`, so two builds of the
 /// extractor diff over every source any test feeds it.
-fn dump_for_equivalence(source: &[u8], pack: &LangPack, file_module: Option<&FileModule>, out: &SkeletonAnalysis) {
+fn dump_for_equivalence(source: &[u8], language: &tree_sitter::Language, file_module: Option<&FileModule>, out: &SkeletonAnalysis) {
     use std::hash::{Hash, Hasher};
     static DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
     let Some(dir) = DIR.get_or_init(|| std::env::var_os("PERL_LSP_SKEL_DUMP_DIR").map(Into::into)) else {
         return;
     };
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    (source, pack.query_source, file_module.map(|m| (&m.segments, m.is_package))).hash(&mut h);
+    (source, language.name(), file_module.map(|m| (&m.segments, m.is_package))).hash(&mut h);
     let _ = std::fs::write(dir.join(format!("{:016x}", h.finish())), format!("{out:#?}"));
 }
 
