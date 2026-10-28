@@ -21,7 +21,7 @@ map cannot answer.
 pub enum ConclusionKey {
     MethodOnClass { class: String, name: String },
     SubByName(String),
-    SlotType { class: String, key: String },
+    Field { owner: String, name: String },
     TypeName(String),
 }
 
@@ -77,7 +77,7 @@ the enumeration misses turns "the bag would answer" into a silent `None`.
 ### Keys: `ConclusionKey` vs. internal ids
 
 The four variants are exactly the four cross-file consult shapes the chase
-uses: `MethodOnClass` (the overwhelming majority of consults), `SlotType`,
+uses: `MethodOnClass` (the overwhelming majority of consults), `Field`,
 bridged plugin-namespace lookups, and imported-sub-return lookups. Every
 variant is strings-only: mintable by an asker holding nothing but names,
 stable across any edit of the provider.
@@ -85,7 +85,7 @@ stable across any edit of the provider.
 The internal ids — `SymbolId`, `ScopeId`, `RefIdx`, `Span` — are
 per-`FileAnalysis` and shift on unrelated edits. They never appear in a
 key. Every cross-file entry lands on a strings-only attachment
-(`MethodOnClass`, `SlotType`, `TypeName`) or resolves a name to a local
+(`MethodOnClass`, `Field`, `TypeName`) or resolves a name to a local
 `Symbol(sid)` on the provider's side (`SubByName` is that lookup given a
 key spelling). The one exception is the bridged hop, which enters at
 `Symbol(sym.id)` because per-FA `SymbolId`s can't be portably edge-encoded;
@@ -213,8 +213,8 @@ arity: Some(0), receiver: Dispatch("My::Worker") }, step: HashKey("dbh") }`.
 
 **Evaluation.** Evaluate `base`, then narrow: a `Value(HashWithKeys{...})`
 base answers `key_value_type("dbh")` directly; a class-typed base mints a
-follow-on `SlotType{class, "dbh"}` lookup up that class's ancestry —
-exactly the `SlotType` fallback ladder the live chase uses. `ArrayIndex(i)`
+follow-on `Field{class, "dbh"}` lookup up that class's ancestry —
+exactly the `Field` fallback ladder the live chase uses. `ArrayIndex(i)`
 uses `element_at(i)`.
 
 **Where it breaks.** A base with no structure axis (bare `HashRef`,

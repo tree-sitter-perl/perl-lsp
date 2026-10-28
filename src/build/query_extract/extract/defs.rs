@@ -234,7 +234,13 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         // inside a callable.
         scope: if matches!(kind, DefCap::Field | DefCap::Slot) { st.member_scope() } else { st.bind_scope() },
         pair: d.paired_matches.contains(&e.match_id).then_some(e.match_id),
-        return_type: d.rettype_by_match.get(&e.match_id).and_then(|t| (pack.annot_type)(t)),
+        // A def's header is code of the scope around it: its return type
+        // is spelled there.
+        return_type: d
+            .rettype_by_match
+            .get(&e.match_id)
+            .and_then(|t| (pack.annot_type)(t))
+            .map(|t| written_type_at(&st.out, &pack.names, t, e.start)),
         deref_stack: d.nested_stacks.get(&e.match_id).cloned().unwrap_or_default(),
         attributes: {
             let mut a = d.attrs_by_match.get(&e.match_id).cloned().unwrap_or_default();

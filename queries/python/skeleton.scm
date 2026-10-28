@@ -30,8 +30,10 @@
     [(identifier) @parent @ref.type
      (attribute attribute: (identifier) @ref.type) @parent @ref.spelled]))
 
+; A def's `-> T` is its declared return; without one, what it returns is.
 (function_definition
-  name: (identifier) @def.sub.name) @def.sub
+  name: (identifier) @def.sub.name
+  return_type: (type)? @rettype) @def.sub
 
 ; `@scope.sub`: params/locals are sub-body content — shielded from the
 ; outline and the class-content lane (a method local carries the sticky
@@ -67,6 +69,11 @@
   left: (attribute
     object: (identifier) @def.slot.receiver
     attribute: (identifier) @def.slot.name) @def.slot)
+
+; An assignment writes the place its left side denotes, whatever that is.
+(assignment
+  left: (_) @flow.place
+  right: (_) @flow.source) @flow.assign
 
 (parameters
   (identifier) @def.var.name @def.var)
@@ -187,3 +194,7 @@
     function: (identifier) @narrow.guard
     arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
   consequence: (block) @scope)
+
+; `return EXPR` — the returned expression carries its own witness; this marks
+; the site, an arm of the enclosing def's return when the def declares none.
+(return_statement (_) @expr.return.value)
