@@ -278,7 +278,7 @@ pub struct FileAnalysis {
     #[serde(default)]
     pub flow_edges: Vec<FlowEdge>,
     /// Class-keyed bag attachment names (`PackageSymbol{..}.name`,
-    /// `SlotType{..}.key`) with NO backing symbol/ref in this file — the
+    /// `Field{..}.name`) with NO backing symbol/ref in this file — the
     /// declarative residue (parametric method declarations, plugin `Method`
     /// overrides, bridged entities under a foreign container) the relational
     /// rows cannot see. Derived generically from the final bag in
@@ -712,6 +712,10 @@ pub struct FieldProjections {
     pub bare: String,
     pub has_param: bool,
     pub has_reader: bool,
+    /// The family the reader spelling is asked as: an accessor is called,
+    /// whatever backs it; a member that IS the field (python's class-body
+    /// binding, `obj.count`) is read.
+    pub reader_kind: MemberKind,
     /// An `InternalKey` projection was minted (hash-backed repr) —
     /// `$obj->{attr}` slot pokes join the group, cross-file included.
     pub has_internal: bool,
@@ -721,10 +725,11 @@ pub struct FieldProjections {
     /// arg keys (`Sub{class, verb}`-owned) — joins the group. Distinct from
     /// `has_internal` (STRICT `Class` match, Moo/bless internal slots).
     pub has_class_key: bool,
-    /// Backed by a Corinna `field $x` lexical (vs a `has`/column pair). Field
-    /// storage is per-class PRIVATE — not inherited — so the inheritance bridge
-    /// must NOT widen a field-backed group to an ancestor's same-named field.
-    pub field_backed: bool,
+    /// Per-class PRIVATE storage (a Corinna `field $x`), never inherited, so
+    /// the inheritance bridge must NOT widen the group to an ancestor's
+    /// same-named field. A `has`/column pair and a python class-body member
+    /// are shared down the hierarchy.
+    pub private: bool,
     /// Origin-file variable spellings (decl + body uses), bare-adjusted.
     pub variable_spans: Vec<Span>,
     /// The DECLARATION subset of `variable_spans` — the `has`/column token,
@@ -744,16 +749,19 @@ pub struct MappedMember {
 }
 
 /// One field/attr-group entity: the facts the projection union needs.
-/// Corinna fields carry the field symbol (variable spellings live on it);
-/// Moo `has` attrs have no variable side — their decl token is the
-/// synthesized pair's selection span.
+/// A field's variable spellings live on `spelling_sym` — a Corinna field's
+/// own lexical, or the bare name a member was declared with from one token
+/// (`Symbol::declared_with`). Moo `has` attrs have no variable side — their
+/// decl token is the synthesized pair's selection span.
 struct FieldGroup {
-    field_sym: Option<SymbolId>,
+    spelling_sym: Option<SymbolId>,
+    private: bool,
     decl_span: Option<Span>,
     class: String,
     bare: String,
     has_param: bool,
     has_reader: bool,
+    reader_kind: MemberKind,
 }
 
 /// Occurs-check + memo node for the `expr_type_at_span` ⇄

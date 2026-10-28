@@ -26,20 +26,13 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
         st.out.label_refs.push(((pack.shape_name)(&e.text), st.cur_scope, e.span()));
         return;
     }
-    // Generic suppression: a "reference" inside a def's own
-    // header is the declaration, not a use. `ref.type` is exempt:
-    // a prototype's RETURN type is the def node's first token
-    // (`Widget make_widget();` starts at `Widget`), which is a
-    // genuine use — its decl-name overlap is suppressed precisely
-    // (exact selection-span match) in `into_file_analysis`.
+    // A "reference" on a def's own name token is the declaration, not
+    // a use. Only the name: a def node's last token is often a use
+    // (python's `def f(o): return o.count` ends at `count`). `ref.type`
+    // is exempt; its decl-name overlap is suppressed precisely (exact
+    // selection-span match) in `into_file_analysis`.
     let inside_def = ref_kind != RefCap::Type
-        && st.defs.def_name_spans.iter().any(|&(s, en)| {
-            e.start_byte >= s && e.end_byte <= en && {
-                // only suppress when it IS the def name region
-                // (cheap heuristic: same start)
-                s == e.start_byte || en == e.end_byte
-            }
-        });
+        && st.defs.def_name_spans.iter().any(|&(s, en)| e.start >= s && e.end <= en);
     if inside_def {
         return;
     }

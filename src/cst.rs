@@ -60,6 +60,18 @@ impl<'a> NodeExt<'a> for Node<'a> {
     }
 }
 
+/// The replacement of an `s///e` (or `/ee`, which evals the result once
+/// more): Perl compiles it as code, the grammar reads it as a string.
+pub(crate) fn eval_replacement<'a>(node: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
+    if node.kind() != "substitution_regexp" {
+        return None;
+    }
+    if !node.child_by_field_name("modifiers")?.text(src)?.contains('e') {
+        return None;
+    }
+    node.elements().find(|c| c.kind() == "replacement")
+}
+
 pub(crate) fn node_to_span(node: Node) -> Span {
     Span {
         start: node.start_position(),
@@ -537,6 +549,12 @@ pub(crate) fn pair_nodes<'a>(container: Node<'a>) -> Vec<(Node<'a>, Node<'a>)> {
 /// always a simple identifier.
 pub(crate) fn varname_child<'a>(node: Node<'a>) -> Option<Node<'a>> {
     node.named().find(|c| c.kind() == "varname")
+}
+
+/// `no Module LIST`: a `use_statement` led by the `no` keyword (the grammar
+/// has no `no_statement` kind).
+pub(crate) fn is_negated_use(node: Node) -> bool {
+    (0..node.child_count()).filter_map(|i| node.child(i)).any(|c| !c.is_named() && c.kind() == "no")
 }
 
 /// The name token of a braced variable spelling (`${name}`, `@{ name }`) —

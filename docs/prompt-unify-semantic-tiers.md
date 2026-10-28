@@ -52,10 +52,10 @@ strings won't.
 - `src/model/witnesses/` — `WitnessBag`, `WitnessAttachment` (`Symbol`,
   `SymbolReturnArm`, `Expr`, `BranchArm`, `Variable{name,scope}`,
   `Expression(refidx)`, `TypeName`, `PackageSymbol{package,name}`,
-  `SlotType{class,key}`), `ReducerRegistry::with_defaults()`, the
+  `Field{owner,name}`), `ReducerRegistry::with_defaults()`, the
   reducers, `query_variable_type` / `query_sub_return_type`, the
   cross-file fallback hops in `query_rec` (PackageSymbol primary +
-  parents + bridged entities; SlotType primary + parents; TypeName
+  parents + bridged entities; Field primary + parents; TypeName
   terminal), `QueryState` pins/memo.
 - `src/model/file_analysis/` — the bag rides `FileAnalysis`
   (`#[serde(default)]`, cached in the blob); `inferred_type_via_bag`,
@@ -69,8 +69,8 @@ strings won't.
 - `Builder::populate_witness_bag` (`builder.rs`, `fn populate_witness_bag`)
   — post-walk: `HashRefAccess` observations, mutation Facts, the
   implicit-return chain (`Symbol(sid) → Edge(SymbolReturnArm(sid))`,
-  `SymbolReturnArm(sid) → Edge(Expr(last_expr_span))`), SlotType write
-  edges (`SlotType{class,key} → Edge(Expr(rhs_span))`).
+  `SymbolReturnArm(sid) → Edge(Expr(last_expr_span))`), slot write
+  edges (`Field{class,key} → Edge(Expr(rhs_span))`).
 - `resolve_forward_expr_witnesses` — deferred `Expr(span) →
   Edge(Symbol(sid))` for forward-defined callees.
 

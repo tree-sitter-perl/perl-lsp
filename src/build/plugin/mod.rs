@@ -198,6 +198,9 @@ pub struct UseContext {
     /// can anchor on the word it is about. Empty for a synthetic `use`.
     #[serde(default)]
     pub import_words: Vec<ImportWord>,
+    /// `no Module LIST` rather than `use Module LIST`.
+    #[serde(default)]
+    pub negated: bool,
     pub current_package: Option<String>,
     pub span: Span,
 }
@@ -614,6 +617,12 @@ pub enum EmitAction {
     /// Perl's, not the plugin's — it lands in the language namespace and
     /// resolves like any `our`.
     PackageVariable { name: String, span: Span },
+
+    /// From the end of `span` to the end of its enclosing scope, every
+    /// variable must (`required`) or need not be declared: `use strict`,
+    /// `no strict 'vars'`, and the modules that turn strict on for their
+    /// importer (`frameworks/strict.rhai`).
+    RequireDeclaration { required: bool, span: Span },
 
     /// Declare a type for a variable inside a scope. Plugins use this
     /// when they know a framework-provided variable's type that the
