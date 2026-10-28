@@ -40,13 +40,17 @@ another, and that is a closed set, `Subsumption`:
   (`bool <: int`), C++ (promotion), R (logical arithmetic).
 
 A language declares its set as data: Perl in `conventions::PERL_LATTICE`,
-a pack on `LangPack::lattice`. The build layer registers each served
-language's set by id (`conventions::register_lattice`, from the driver
-registry and from each pack analysis), and a `BagContext` reads the set of
-the analysis it queries (`lattice_for(&fa.language)`). Nothing is stored per
-file beyond the language id the analysis already carries, and a cross-file
-recursion into a cached module's bag joins under that module's language.
-An unregistered language joins under Perl's.
+beside its other conventions, and a pack on `LangPack::lattice`. The model
+cannot see the packs, so the build layer registers each pack language's
+set by id (`conventions::register_lattice`, from the driver registry and
+from each pack analysis); Perl's is declared, never registered. Every
+reader, the Perl builder's fold included, asks `lattice_for(language)`,
+and a `BagContext` reads the set of the analysis it queries
+(`lattice_for(&fa.language)`). Nothing is stored per file beyond the
+language id the analysis already carries, and a cross-file recursion into
+a cached module's bag joins under that module's language. A language
+nobody registered holds no rules (and debug builds assert): it never
+borrows another language's.
 `TypeOrder::holds` is how the join asks; it never asks which language it
 serves. A context-free join (`Unordered`) holds no
 rule. A new rule is a new variant, and every language's declaration is
