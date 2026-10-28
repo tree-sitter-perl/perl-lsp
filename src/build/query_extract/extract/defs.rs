@@ -11,8 +11,9 @@ pub(super) struct State {
     nested_stacks: HashMap<usize, Vec<crate::model::file_analysis::DerefStep>>,
     /// A def's name token, joined to its def event by match.
     names_by_match: HashMap<(usize, DefCap), (String, Point, Point)>,
-    /// The kind of def a match's name token declares, by where it starts.
-    kind_by_name: HashMap<(usize, Point), DefCap>,
+    /// The kinds of def a match's name token declares, by where it starts
+    /// (php's promoted parameter is a property and a local on one token).
+    kinds_by_name: HashMap<(usize, Point), Vec<DefCap>>,
     /// `@def.<kind>.spelled`: the declaration as written around its name
     /// token, joined to the def by match.
     spelled_by_match: HashMap<(usize, DefCap), String>,
@@ -130,9 +131,9 @@ pub(super) fn flatten_nested(
 }
 
 impl State {
-    /// The kind of def whose name token `e` is, in its own match.
-    pub(super) fn declared_by(&self, e: &Event) -> Option<DefCap> {
-        self.kind_by_name.get(&(e.match_id, e.start)).copied()
+    /// The kinds of def whose name token `e` is, in its own match.
+    pub(super) fn declared_by(&self, e: &Event) -> &[DefCap] {
+        self.kinds_by_name.get(&(e.match_id, e.start)).map_or(&[], Vec::as_slice)
     }
 }
 
@@ -141,7 +142,7 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
     match e.cap {
         Capture::Def { kind, part: DefPart::Name } => {
             d.names_by_match.insert((e.match_id, kind), (e.text.clone(), e.start, e.end));
-            d.kind_by_name.insert((e.match_id, e.start), kind);
+            d.kinds_by_name.entry((e.match_id, e.start)).or_default().push(kind);
         }
         Capture::Def { kind, part: DefPart::Spelled } => {
             d.spelled_by_match.insert((e.match_id, kind), e.text.clone());
