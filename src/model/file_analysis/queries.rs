@@ -124,7 +124,7 @@ impl FileAnalysis {
     /// Each READ of a variable that occurs after a `std::move` of it and
     /// before it is reassigned — a use-after-move bug. The moved-from region
     /// runs from the move call to the earliest FlowEdge rebinding the var (the
-    /// SAME edge-driven cutoff narrowing uses, `earliest_rebind_in`), or the
+    /// SAME edge-driven cutoff narrowing uses, `RebindIndex`), or the
     /// enclosing scope's end. Reads are matched on name + access AND filtered
     /// to the move's scope subtree, so a same-named var in another function
     /// never false-flags. Returns (var name, read span).
@@ -153,6 +153,7 @@ impl FileAnalysis {
             key(&outer.start) <= key(&inner.start) && key(&inner.end) <= key(&outer.end)
         };
         let mut out = Vec::new();
+        let rebinds = RebindIndex::new(&self.flow_edges);
         for (name, move_span, move_scope) in &self.pack.moved_from {
             let scope_span = self.scope(*move_scope).span;
             // GATE B (in-function): only a move that is lexically inside SOME
@@ -207,7 +208,7 @@ impl FileAnalysis {
             }
             let scope_end = scope_span.end;
             let region = Span { start: move_span.end, end: scope_end };
-            let cutoff = earliest_rebind_in(&self.flow_edges, name, region).unwrap_or(scope_end);
+            let cutoff = rebinds.earliest_in(name, region).unwrap_or(scope_end);
             for r in self.refs() {
                 if r.target_name != *name || r.access != AccessKind::Read {
                     continue;
