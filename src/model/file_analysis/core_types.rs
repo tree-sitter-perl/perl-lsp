@@ -1003,22 +1003,36 @@ impl FlowEdge {
     }
 }
 
-/// The earliest FlowEdge that rebinds `var` within `region` — the
-/// LANGUAGE-AGNOSTIC narrowing cutoff. A rebind is a value flowing into the
-/// subject (a `@flow` edge), so this one truncation is shared by the Perl
-/// narrowing pass (`first_subject_write_via_edges`) and the query-engine
-/// (cpp/python) narrowing. `None` ⇒ no rebind in the region, narrowing runs to
-/// the region's end. The grammar scan it replaced lived in one language;
-/// reading the edge set, every LangPack feeding `@flow` gets the cutoff.
-pub fn earliest_rebind_in(flow_edges: &[FlowEdge], var: &str, region: Span) -> Option<Point> {
-    let key = |p: &Point| (p.row, p.column);
-    let (lo, hi) = (key(&region.start), key(&region.end));
-    flow_edges
-        .iter()
-        .filter(|fe| fe.target_name == var)
-        .map(|fe| fe.target_at)
-        .filter(|p| lo <= key(p) && key(p) < hi)
-        .min_by_key(key)
+/// Every FlowEdge target site, by name, sorted — the LANGUAGE-AGNOSTIC
+/// narrowing cutoff. A rebind is a value flowing into the subject (a `@flow`
+/// edge), so this one truncation is shared by the Perl narrowing pass and the
+/// query-engine (cpp/python) narrowing. Built once per cutoff pass: a region
+/// fact per use made a linear scan over every edge per fact the measured cost
+/// (FHEM `--check` +6%).
+pub struct RebindIndex<'e> {
+    by_name: HashMap<&'e str, Vec<Point>>,
+}
+
+impl<'e> RebindIndex<'e> {
+    pub fn new(flow_edges: &'e [FlowEdge]) -> Self {
+        let mut by_name: HashMap<&'e str, Vec<Point>> = HashMap::new();
+        for fe in flow_edges {
+            by_name.entry(fe.target_name.as_str()).or_default().push(fe.target_at);
+        }
+        for sites in by_name.values_mut() {
+            sites.sort_unstable_by_key(|p| (p.row, p.column));
+        }
+        RebindIndex { by_name }
+    }
+
+    /// The earliest rebind of `var` within `region` (start inclusive, end
+    /// exclusive). `None` ⇒ no rebind, the fact runs to the region's end.
+    pub fn earliest_in(&self, var: &str, region: Span) -> Option<Point> {
+        let key = |p: &Point| (p.row, p.column);
+        let sites = self.by_name.get(var)?;
+        let i = sites.partition_point(|p| key(p) < key(&region.start));
+        sites.get(i).copied().filter(|p| key(p) < key(&region.end))
+    }
 }
 
 impl Symbol {
