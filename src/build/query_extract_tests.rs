@@ -133,11 +133,8 @@ fn query_skeleton_differential_report() {
                     // recall number speaks only about syntactic defs:
                     // plugin namespace, requires markers, and the
                     // has-accessor projection families.
-                    let sym_id = crate::model::file_analysis::SymbolId(
-                        fa.symbols().iter().position(|s2| std::ptr::eq(s2, sym)).unwrap() as u32,
-                    );
                     let plugin_or_marker = !matches!(sym.namespace, crate::model::file_analysis::Namespace::Language)
-                        || fa.contract_symbols.contains(&sym_id)
+                        || sym.flags.contains(crate::model::file_analysis::SymbolFlags::CONTRACT)
                         || fa.attr_projections.iter().any(|pr| {
                             pr.attr == sym.name
                                 && Some(pr.class.as_str()) == sym.package.as_deref()
@@ -561,6 +558,22 @@ fn operator_evidence_types_through_usage() {
     use crate::model::file_analysis::InferredType;
     assert_eq!(fa.inferred_type_via_bag("$x", end), Some(InferredType::Numeric));
     assert_eq!(fa.inferred_type_via_bag("$s", end), Some(InferredType::String));
+}
+
+/// A use inside a conditionally-run arm observes its operand within the
+/// arm only, as the walker's does.
+#[test]
+fn operator_evidence_holds_within_its_arm() {
+    let src = "my $x = f();\nmy $c = g();\nmy $y = $c ? $x + 1 : 0;\nmy $z = 1;\n";
+    let mut parser = crate::build::builder::create_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let fa = extract(&tree, src.as_bytes(), &perl_pack())
+        .unwrap()
+        .into_file_analysis();
+    use crate::model::file_analysis::InferredType;
+    let at = |row, column| fa.inferred_type_via_bag("$x", tree_sitter::Point { row, column });
+    assert_eq!(at(2, 19), Some(InferredType::Numeric), "inside the arm");
+    assert_eq!(at(4, 0), None, "past the arm");
 }
 
 #[test]
@@ -995,6 +1008,7 @@ fn sksym(src: &str, kind: DefCap, name: &str, occ: usize, package: Option<&str>)
         name_end: Point { row: ns.row, column: ns.column + name.len() },
         package: package.map(str::to_string),
         scope: crate::model::file_analysis::ScopeId(0),
+        pair: None,
         return_type: None,
         deref_stack: Vec::new(),
         attributes: Vec::new(),
@@ -1834,13 +1848,15 @@ void f() {
 }
 ";
     let fa = cpp_skel(src).into_file_analysis();
-    let off = crate::lsp::symbols::pack_diagnostics(&fa, crate::lsp::symbols::DiagnosticOptions::default());
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let off = crate::lsp::symbols::pack_diagnostics(&fa, &idx, crate::lsp::symbols::DiagnosticOptions::default());
     assert!(
         !off.iter().any(|d| matches!(&d.code, Some(tower_lsp::lsp_types::NumberOrString::String(s)) if s == "use-after-move")),
         "off by default: {off:?}",
     );
     let on = crate::lsp::symbols::pack_diagnostics(
         &fa,
+        &idx,
         crate::lsp::symbols::DiagnosticOptions { use_after_move: true, ..Default::default() },
     );
     assert!(
@@ -1917,6 +1933,51 @@ void f(std::optional<Widget> a, std::optional<Widget> b) {
         widget(),
         "`has_value()` narrows the engaged optional to its inner Widget",
     );
+}
+
+#[test]
+fn a_pack_guard_narrows_every_arm_it_enters() {
+    // One region rule for every pack guard: the arm the pattern tags
+    // `@narrow.arm`, whatever construct holds it, and nothing outside it.
+    let src = "\
+void f(Base* b, std::optional<Widget> o) {
+    if (o) return o->run();
+    int i = dynamic_cast<Derived*>(b) ? b->id() : 0;
+    bool ok = o.has_value() && o->ok();
+    b->tail();
+}
+";
+    let fa = cpp_skel(src).into_file_analysis();
+    use crate::model::file_analysis::InferredType;
+    let at = |v: &str, row, column| fa.inferred_type_via_bag(v, tree_sitter::Point { row, column });
+    let class = |c: &str| Some(InferredType::ClassName(c.into()));
+    assert_eq!(at("o", 1, 18), class("Widget"), "an `if` arm that is no block");
+    assert_eq!(at("b", 2, 40), class("Derived"), "a ternary's consequence");
+    assert_ne!(at("b", 2, 50), class("Derived"), "not its alternative");
+    assert_eq!(at("o", 3, 31), class("Widget"), "the right of `&&`");
+    assert_ne!(at("b", 4, 4), class("Derived"), "nothing after the statement");
+
+    let src = "\
+class Foo:
+    pass
+x = maybe()
+a = x.run() if isinstance(x, Foo) else x.other()
+b = isinstance(x, Foo) and x.run()
+if cond():
+    pass
+elif isinstance(x, Foo):
+    x.run()
+x.tail()
+";
+    let mut parser = python_parser();
+    let tree = parser.parse(src, None).unwrap();
+    let fa = extract(&tree, src.as_bytes(), &python_pack()).unwrap().into_file_analysis();
+    let at = |row, column| fa.inferred_type_via_bag("x", tree_sitter::Point { row, column });
+    assert_eq!(at(3, 4), class("Foo"), "the value a conditional expression yields when the test holds");
+    assert_ne!(at(3, 39), class("Foo"), "not its else value");
+    assert_eq!(at(4, 27), class("Foo"), "the right of `and`");
+    assert_eq!(at(8, 4), class("Foo"), "an `elif` body");
+    assert_ne!(at(9, 0), class("Foo"), "nothing after");
 }
 
 #[test]

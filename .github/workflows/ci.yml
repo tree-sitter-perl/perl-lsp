@@ -53,16 +53,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # `--features cpp` everywhere the gate builds: a plain build serves Perl
-      # only, so the pack half of the repo goes unchecked while the run stays
+      # `--features cpp,php` everywhere the gate builds: a plain build serves
+      # Perl only, so the pack half of the repo goes unchecked while the run stays
       # green — 61 unit tests never compiled, and gold reports its 255 pack rows
       # as lang-SKIPS rather than failures, which is the mode that hides a
-      # regression behind a passing check.
+      # regression behind a passing check. The unit gate adds `python`: its
+      # cross-file tests run files through the driver, which only it compiles.
       - name: Build
-        run: cargo build --features cpp
+        run: cargo build --features cpp,php,python
 
       - name: Test
-        run: cargo test --features cpp
+        run: cargo test --features cpp,php,python
 
   e2e-tests:
     name: E2E tests (headless nvim)
@@ -77,10 +78,11 @@ jobs:
 
       # Changes no test TODAY — `run.sh` drives a fixed, Perl-only suite list, so
       # the pack suites (`e2e/run-cpp.sh`, its own lane) are unaffected by the
-      # flag. It is here so the four build lines do not diverge and invite the
-      # question of why this one is different.
+      # flag. It is here so CI's three build lines do not diverge and invite the
+      # question of why this one is different. `release.yml` builds only the
+      # languages a release ships, so it carries fewer features than these.
       - name: Build release binary
-        run: cargo build --release --features cpp
+        run: cargo build --release --features cpp,php
 
       - name: Install Neovim
         uses: rhysd/action-setup-vim@v1
@@ -167,7 +169,7 @@ jobs:
           cpm install -L local --resolver snapshot
 
       - name: Build release binary
-        run: cargo build --release --features cpp   # see rust-tests' Build step
+        run: cargo build --release --features cpp,php   # see rust-tests' Build step
 
       - name: Run gold-corpus harness
         run: perl gold-corpus/run.pl

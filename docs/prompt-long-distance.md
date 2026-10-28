@@ -6,7 +6,7 @@ one; resolution flows use → definition) landed its four members: the
 `helper-not-loaded` entrypoint lint, loader-config param typing
 (`from_loader_config` / `PluginLoad{name, config_span}` joined at
 enrichment), and A4 v2 (`$self->{k}` reads narrowing through slot writes in
-other files and up ancestry via `SlotType{class,key}`).
+other files and up ancestry via `Field{class,key}`).
 
 ## What stays open (the epic's honest boundary)
 

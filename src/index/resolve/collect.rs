@@ -545,7 +545,7 @@ pub(super) fn symbol_defines_target(
     target: &TargetRef,
     analysis: &FileAnalysis,
 ) -> bool {
-    use crate::model::file_analysis::{DeclKind, HashKeyOwner, SymbolDetail};
+    use crate::model::file_analysis::{HashKeyOwner, SymbolDetail};
     if sym.name != target.name {
         return false;
     }
@@ -559,7 +559,7 @@ pub(super) fn symbol_defines_target(
         // sigil-bearing name is already matched by the `sym.name == target.name`
         // gate above; `collect_package_var` owns the (sigil-narrowed) span.
         TargetKind::PackageVar { package } => {
-            matches!(&sym.detail, SymbolDetail::Variable { decl_kind: DeclKind::Our, .. })
+            matches!(&sym.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global())
                 && sym.package.as_deref() == Some(package.as_str())
         }
         TargetKind::Sub { package } => {
@@ -749,7 +749,7 @@ pub(super) fn collect_package_var(
     name: &str,
     out: &mut Vec<RefLocation>,
 ) {
-    use crate::model::file_analysis::{DeclKind, RefKind, SymbolDetail};
+    use crate::model::file_analysis::{RefKind, SymbolDetail};
     // Rewrite only the trailing name token, anchored at the span *end* so the
     // sigil and any `Pkg::` qualifier survive — regardless of whether the ref
     // span is the whole `$Pkg::name` (container/element/slice reads span
@@ -763,12 +763,12 @@ pub(super) fn collect_package_var(
     };
     let is_our_decl = |id: crate::model::file_analysis::SymbolId| {
         let s = analysis.symbol(id);
-        matches!(&s.detail, SymbolDetail::Variable { decl_kind: DeclKind::Our, .. })
+        matches!(&s.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global())
             && s.package.as_deref() == Some(package)
             && s.name == name
     };
     for sym in analysis.symbols() {
-        if matches!(&sym.detail, SymbolDetail::Variable { decl_kind: DeclKind::Our, .. })
+        if matches!(&sym.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global())
             && sym.package.as_deref() == Some(package)
             && sym.name == name
         {
@@ -789,13 +789,27 @@ pub(super) fn collect_package_var(
             // Qualified `$Pkg::var` (the sigil is canonicalized to the declared
             // one, so `@arr` element reads `$Pkg::arr[0]` still match `@arr`).
             if qpkg == package && qname == name {
+                // A symbolic ref folded through a variable (`${$n}`) sits on
+                // the `$n` token, which rename must not rewrite; a
+                // single-literal fold's rewrite lands on that literal
+                // (rule #9), as for a const-folded method call.
+                let folded = span_is_folded_name(analysis, r.span, false, &r.target_name);
                 out.push(RefLocation {
                     key: key.clone(),
-                    span: tail(r.span),
+                    span: if folded { r.span } else { tail(r.span) },
                     access: r.access,
-                    rewritable: true,
+                    rewritable: !folded,
                     label: None
                 });
+                if let Some(src) = r.folded_from {
+                    out.push(RefLocation {
+                        key: key.clone(),
+                        span: src,
+                        access: r.access,
+                        rewritable: true,
+                        label: None
+                    });
+                }
             }
         } else if r.target_name == name && r.resolved_symbol().is_some_and(is_our_decl) {
             // Unqualified — only this package's `our` var (resolved in-file).
@@ -1025,7 +1039,17 @@ pub(super) fn collect_from_analysis(
         // dispatch-class checks in the call arms below still pin the right
         // package/class). A member value read matches on the same tail;
         // every other ref kind matches by exact name.
-        let name_matches = if matches!(r.kind, RefKind::FunctionCall { .. }) || r.member_site().is_some() {
+        // Where calling a class constructs it, a call-shaped token can name
+        // a class too (`class_named_by_call`), so a class target reads it
+        // as one.
+        let call_names_class = matches!(r.kind, RefKind::FunctionCall)
+            && matches!(target.kind, TargetKind::Package)
+            && analysis.pack.names.class_call_sep().is_some();
+        let name_matches = if matches!(r.kind, RefKind::PackageRef) || call_names_class {
+            // A class token names the class its file's use-map says it
+            // does; the target is that identity.
+            analysis.spelled_identity(r) == target.name
+        } else if matches!(r.kind, RefKind::FunctionCall { .. }) || r.member_site().is_some() {
             r.unqualified_target_name(analysis.names()) == target.name
         } else {
             r.target_name == target.name
@@ -1203,6 +1227,7 @@ pub(super) fn collect_from_analysis(
                 }
             }
             (TargetKind::Package, RefKind::PackageRef) => true,
+            (TargetKind::Package, RefKind::FunctionCall) => call_names_class,
             // A class member read by BARE name (`x = OP_SCOPE`,
             // `case OP_SCOPE:`) — a `Variable` ref the generic goto-def
             // resolves to this def by name (the value-read half of the shared

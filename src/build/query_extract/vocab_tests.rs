@@ -1,5 +1,5 @@
 use super::*;
-use crate::build::packs::{cmake_pack, cpp_pack, perl_pack, python_pack, r_pack};
+use crate::build::packs::{cmake_pack, cpp_pack, perl_pack, php_pack, python_pack, r_pack};
 use crate::build::query_extract::{extract, LangPack};
 
 fn bundled() -> Vec<(&'static str, LangPack, tree_sitter::Language)> {
@@ -9,6 +9,7 @@ fn bundled() -> Vec<(&'static str, LangPack, tree_sitter::Language)> {
         ("python", python_pack(), tree_sitter_python::LANGUAGE.into()),
         ("r", r_pack(), tree_sitter_r::LANGUAGE.into()),
         ("cmake", cmake_pack(), tree_sitter_cmake::LANGUAGE.into()),
+        ("php", php_pack(), tree_sitter_php::LANGUAGE_PHP.into()),
     ]
 }
 
@@ -56,6 +57,18 @@ fn predicate_only_captures_are_skipped() {
             Some(Capture::Def { kind: DefCap::Sub, part: DefPart::Name }),
         ]
     );
+}
+
+/// A mark spelled like an attribute means that attribute's flag, so the
+/// two ways a document states one fact cannot drift apart.
+#[test]
+fn a_mark_spelled_as_an_attribute_mints_that_attribute() {
+    use crate::model::file_analysis::SymbolFlags;
+    for &mark in MarkCap::ALL {
+        if let Ok(flag) = SymbolFlags::try_from(mark.spelling()) {
+            assert_eq!(mark.flag(), flag, "@mark.{mark}");
+        }
+    }
 }
 
 #[test]

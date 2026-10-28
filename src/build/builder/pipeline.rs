@@ -110,11 +110,19 @@ pub(crate) const MAX_CST_DEPTH: usize = 100_000;
 /// Maximum node depth of the tree, measured iteratively (`TreeCursor`, no
 /// recursion — safe to run on exactly the trees the walk cannot handle).
 pub(crate) fn cst_depth(tree: &Tree) -> usize {
-    let mut cursor = tree.root_node().walk();
+    survey(tree.root_node(), |_| {})
+}
+
+/// Depth of the tree under `root`, calling `visit` on every node on the way
+/// — one iterative pass for every whole-tree screen the build needs.
+fn survey<'t>(root: Node<'t>, mut visit: impl FnMut(Node<'t>)) -> usize {
+    let mut cursor = root.walk();
     let mut depth = 0usize;
     let mut max_depth = 0usize;
+    visit(root);
     loop {
         if cursor.goto_first_child() {
+            visit(cursor.node());
             depth += 1;
             if depth > max_depth {
                 max_depth = depth;
@@ -123,6 +131,7 @@ pub(crate) fn cst_depth(tree: &Tree) -> usize {
         }
         loop {
             if cursor.goto_next_sibling() {
+                visit(cursor.node());
                 break;
             }
             if !cursor.goto_parent() {
@@ -131,6 +140,31 @@ pub(crate) fn cst_depth(tree: &Tree) -> usize {
             depth -= 1;
         }
     }
+}
+
+/// Every `s///e` replacement parsed as Perl over the file's own bytes
+/// (tree-sitter included ranges), so its nodes index `source` and the walk
+/// visits them as code. Keyed by the replacement's start byte; replacements
+/// nested inside one are parsed too.
+fn parse_eval_replacements(mut ranges: Vec<tree_sitter::Range>, source: &[u8]) -> Vec<(usize, Tree)> {
+    let mut out = Vec::new();
+    if ranges.is_empty() {
+        return out;
+    }
+    let mut parser = super::create_parser();
+    while let Some(range) = ranges.pop() {
+        if parser.set_included_ranges(&[range]).is_err() {
+            continue;
+        }
+        let Some(code) = parser.parse(source, None) else { continue };
+        survey(code.root_node(), |n| {
+            if let Some(r) = crate::cst::eval_replacement(n, source) {
+                ranges.push(r.range());
+            }
+        });
+        out.push((range.start_byte, code));
+    }
+    out
 }
 
 /// Honest degradation for a tree too deep to walk: no analysis, and a
@@ -152,6 +186,8 @@ fn too_deep_analysis(tree: &Tree, depth: usize) -> FileAnalysis {
             package: Some("main".to_string()),
             owner: None,
             implicit_receiver: false,
+            direct: false,
+            declaration_rules: Vec::new(),
         }],
         plugin: crate::model::file_analysis::PluginFacts {
             diagnostics: vec![PluginDiagnostic {
@@ -292,14 +328,21 @@ fn build_once(
     // Cheap structural bound, measured iteratively so it is safe on exactly
     // the trees it screens. See `MAX_CST_DEPTH` for why the number is what
     // it is and what it does — and no longer does.
-    let depth = cst_depth(tree);
+    let mut evals = Vec::new();
+    let depth = survey(tree.root_node(), |n| {
+        if let Some(r) = crate::cst::eval_replacement(n, source) {
+            evals.push(r.range());
+        }
+    });
     if depth > MAX_CST_DEPTH {
         return too_deep_analysis(tree, depth);
     }
+    let eval_trees = parse_eval_replacements(evals, source);
     let topic_dsls: Vec<plugin::TopicRouteDsl> =
         plugins.all().filter_map(|pl| pl.topic_route_dsl()).collect();
     let mut b = Builder {
         source,
+        eval_injections: eval_trees.iter().map(|(at, t)| (*at, t.root_node())).collect(),
         scopes: Vec::new(),
         symbols: Vec::new(),
         owner_scope: std::collections::HashMap::new(),
@@ -352,12 +395,14 @@ fn build_once(
         current_package: Some("main".to_string()),
         next_scope_id: 0,
         next_symbol_id: 0,
-        package_ranges: Vec::new(),
-        open_statement_package: None,
+        namespace_ranges: Vec::new(),
+        open_sections: Default::default(),
+        package_regions: Vec::new(),
         plugins,
         dispatch_manifest: std::collections::HashMap::new(),
         load_manifest: std::collections::HashMap::new(),
         type_constraint_names: std::collections::HashSet::new(),
+        ref_tag_functions: Vec::new(),
         app_surface_consumers: Vec::new(),
         meta_methods: Vec::new(),
         param_type_manifest: std::collections::HashMap::new(),
@@ -373,7 +418,6 @@ fn build_once(
         attr_projections: Vec::new(),
         escape_recorded: std::collections::HashSet::new(),
         role_requires: std::collections::HashMap::new(),
-        contract_symbols: std::collections::HashSet::new(),
         dynamic_parent_packages: std::collections::HashSet::new(),
         dynamic_dispatch_sites: 0,
         role_maker_modules: std::collections::HashSet::new(),
@@ -391,6 +435,7 @@ fn build_once(
         parametric_emitted_refs: std::collections::HashSet::new(),
         method_call_ref_dedup: std::collections::HashSet::new(),
         defined_narrowings: Vec::new(),
+        tag_narrowings: Vec::new(),
         pending_narrowings: Vec::new(),
         guard_sites: Vec::new(),
         arrow_deref_sites: Vec::new(),
@@ -423,6 +468,7 @@ fn build_once(
         .map(|s| s.to_string())
         .collect();
     b.meta_methods = b.plugins.meta_methods().map(|s| s.to_string()).collect();
+    b.ref_tag_functions = b.plugins.ref_tag_functions().cloned().collect();
     b.role_maker_modules
         .extend(b.plugins.role_makers().map(|s| s.to_string()));
     b.framework_mode_modules = b
@@ -694,7 +740,7 @@ fn build_once(
             ..Default::default()
         },
         type_provenance: b.type_provenance,
-        package_ranges: b.package_ranges,
+        namespace_ranges: b.namespace_ranges,
         witnesses: b.bag,
         provisional_dispatches: b.provisional_dispatches,
         guard_sites: b.guard_sites,
@@ -703,7 +749,6 @@ fn build_once(
         gated_param_types: b.gated_param_types,
         reassigned_scalars: b.reassigned_scalars,
         key_writes: b.key_writes,
-        contract_symbols: b.contract_symbols,
         dynamic_dispatch_sites: b.dynamic_dispatch_sites,
         dbic_source_name: b.dbic_source_name,
         column_keyed_verbs: b.plugins.column_keyed_verbs().map(|s| s.to_string()).collect(),
@@ -839,44 +884,21 @@ impl<'a> Builder<'a> {
     /// inside the worklist, once `invocant_class` is filled.
     pub(super) fn populate_witness_bag(&mut self) {
         use crate::model::witnesses::{
-            TypeObservation, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
+            Witness, WitnessAttachment, WitnessPayload, WitnessSource,
         };
         self.seed_arg_windows();
-
-        // Rep observations from `$v->{k}` access. Method-call return
-        // edges on `Expression(refidx)` are emitted later — by the
-        // chain-typing PostFold pass once `invocant_class` is filled —
-        // as `Edge(PackageSymbol{package, method})`. Without a known
-        // class there's no class-keyed answer to chase to, so the
-        // emission is gated by chain-typing's own progress.
-        let mut hash_obs: Vec<(String, ScopeId, Span)> = Vec::new();
-        for r in self.refs.iter() {
-            if let RefKind::HashKeyAccess { var_text, .. } = &r.kind {
-                if var_text.starts_with('$') {
-                    hash_obs.push((var_text.clone(), r.scope, r.span));
-                }
-            }
-        }
-        for (var, scope, span) in hash_obs {
-            self.bag.push(Witness {
-                attachment: WitnessAttachment::Variable { name: var, scope },
-                source: WitnessSource::Builder("hash_ref_access".into()),
-                payload: WitnessPayload::Observation(TypeObservation::HashRefAccess),
-                span,
-            });
-        }
 
         // Invocant mutations on hash keys.
         //
         // Two seeds per typed-owner write: the untyped `mutation` Fact
         // (key-name completion via `mutated_keys_on_class`) and — when
         // the owner resolves to a CLASS and the RHS has a recorded span
-        // and a bag-resolved type — a typed `SlotType{class, key} →
-        // Edge(Expr(rhs_span))`. The edge routes through the same
-        // canonical chase as implicit-return chains; `SlotTypeFold`
-        // agrees the per-write arms. Honest-skip if the owner is a
-        // `Sub` (not a class), or the RHS is unknown — never a bare
-        // SlotType seed.
+        // and a bag-resolved type — a typed `Field{class, key} →
+        // Edge(Expr(rhs_span))`, the slot's value as any language's member
+        // write states it. The edge routes through the same canonical chase
+        // as implicit-return chains; `FieldValueReducer` agrees the
+        // per-write arms. Honest-skip if the owner is a `Sub` (not a
+        // class), or the RHS is unknown — never a bare slot seed.
         let mut mutations: Vec<(HashKeyOwner, String, Span)> = Vec::new();
         let mut slot_writes: Vec<(String, String, Span, Span)> = Vec::new();
         for r in &self.refs {
@@ -930,8 +952,8 @@ impl<'a> Builder<'a> {
                 continue;
             }
             self.bag.push(Witness {
-                attachment: WitnessAttachment::SlotType { class, key },
-                source: WitnessSource::Builder("slot_type".into()),
+                attachment: WitnessAttachment::Field { owner: class, name: key },
+                source: WitnessSource::Builder("slot_write".into()),
                 payload: WitnessPayload::Edge(WitnessAttachment::Expr(rhs_span)),
                 span,
             });
@@ -988,11 +1010,8 @@ impl<'a> Builder<'a> {
         // module that's the only package in the file.
         let data_start = data.start_position();
         let owner_pkg = self
-            .package_ranges
-            .iter()
-            .rev()
-            .find(|r| crate::model::file_analysis::contains_point(&r.span, data_start))
-            .map(|r| r.package.clone())
+            .package_at_pos(data_start)
+            .map(str::to_string)
             .or_else(|| self.current_package.clone());
 
         let Some(pkg) = owner_pkg else { return };
@@ -1066,12 +1085,8 @@ impl<'a> Builder<'a> {
         for r in self.refs.iter_mut() {
             if matches!(r.kind, RefKind::FunctionCall) {
                 if r.binding.is_none() && synth_names.contains(&r.target_name) {
-                    let in_pkg = self
-                        .package_ranges
-                        .iter()
-                        .rev()
-                        .find(|pr| crate::model::file_analysis::contains_point(&pr.span, r.span.start))
-                        .is_some_and(|pr| pr.package == pkg);
+                    let in_pkg = crate::model::file_analysis::namespace_range_at(&self.namespace_ranges, r.span.start)
+                        .is_some_and(|pr| pr.namespace == pkg);
                     if in_pkg {
                         r.bind_function_package(pkg.clone());
                     }

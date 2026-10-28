@@ -124,6 +124,19 @@ pub(super) fn walk_ancestry(
     hit
 }
 
+/// Does `class`, or one of its ancestors on the `local` parent graph,
+/// satisfy `holds`? The isa walk (`walk_ancestry`) with an existence
+/// predicate, for a caller that holds a file's parents but no analysis yet
+/// (the extractor deciding whether a slot write declares).
+pub fn class_or_ancestor(class: &str, local: &dyn LocalParents, mut holds: impl FnMut(&str) -> bool) -> bool {
+    walk_ancestry(
+        class,
+        crate::model::graph::WalkBound::ISA,
+        |cur| isa_parents(cur, local, None),
+        |c| if holds(c) { WalkVerdict::Hit } else { WalkVerdict::Miss },
+    )
+}
+
 /// The local+cross-file parent seam for the isa walkers: the file's own
 /// declared parents first (preserving push order under a budget
 /// truncation), then the cross-file graph via `module_index.parents_cached`
@@ -592,10 +605,7 @@ impl FileAnalysis {
             let sym = self.symbol(sid);
             let member_kind = match sym.kind {
                 SymKind::Sub | SymKind::Method => true,
-                SymKind::Variable | SymKind::Field | SymKind::Enumerator => {
-                    self.symbol_is_class_content(sym)
-                }
-                _ => false,
+                _ => self.symbol_is_class_content(sym),
             };
             // A re-export (`using Base::m;`) is API surface, not a def —
             // fall through so the walk reaches the origin ancestor.
@@ -666,9 +676,7 @@ impl FileAnalysis {
                 });
                 let cand_cls: String = if widened {
                     whole
-                        .symbols
-                        .iter()
-                        .find(|s| matches!(s.kind, SymKind::Class) && name_match_key(&s.name, self.names()) == leaf)
+                        .declared_class_with_leaf(&leaf)
                         .map(|s| s.name.clone())
                         .unwrap_or_else(|| cls.to_string())
                 } else {
@@ -680,14 +688,11 @@ impl FileAnalysis {
                         && !s.is_reexport()
                         && want.admits_decl(s.kind, namespace)
                         && (matches!(s.kind, SymKind::Sub | SymKind::Method)
-                            || (matches!(
-                                s.kind,
-                                SymKind::Variable | SymKind::Field | SymKind::Enumerator
-                                // On the WHOLE view: the class-content test
-                                // resolves the owning container through
-                                // `symbols_named`, which the evicted copy
-                                // answers empty.
-                            ) && whole.symbol_is_class_content(s)))
+                            // On the WHOLE view: the class-content test
+                            // resolves the owning container through
+                            // `symbols_named`, which the evicted copy
+                            // answers empty.
+                            || whole.symbol_is_class_content(s))
                 });
                 crate::util::ghost_stats::count(if has_member {
                     "mroc.candidate_matched"
@@ -788,6 +793,26 @@ impl FileAnalysis {
         want: MemberKind,
     ) -> Option<MethodResolution> {
         let _t = crate::util::ghost_stats::ScopedNs::start("mroc.total");
+        // An instance's own slots answer before any class member, ancestors
+        // included in each (`InstanceSlots::BeforeClass`): python reads the
+        // instance `__dict__`, then the class.
+        if self.names().instance_slots == InstanceSlots::BeforeClass
+            && want.admits_decl(SymKind::HashKeyDef, self.names().member_namespace)
+        {
+            let mut slot: Option<MethodResolution> = None;
+            self.for_each_ancestor_class(class_name, module_index, |cls| {
+                match self.slot_on_class(cls, method_name, module_index) {
+                    Some(r) => {
+                        slot = Some(r);
+                        std::ops::ControlFlow::Break(())
+                    }
+                    None => std::ops::ControlFlow::Continue(()),
+                }
+            });
+            if slot.is_some() {
+                return slot;
+            }
+        }
         let mut result: Option<MethodResolution> = None;
         let mut iface_fallback: Option<MethodResolution> = None;
         self.for_each_ancestor_class(class_name, module_index, |cls| {
@@ -810,6 +835,32 @@ impl FileAnalysis {
             }
         });
         result.or(iface_fallback)
+    }
+
+    /// `cls`'s own instance slot `name` (`slot_class_of`): this file's, else
+    /// one a file declaring `cls` holds.
+    fn slot_on_class(
+        &self,
+        cls: &str,
+        name: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<MethodResolution> {
+        for &sid in self.symbols_named(name) {
+            if self.slot_class_of(self.symbol(sid)) == Some(cls) {
+                return Some(MethodResolution::Local { class: cls.to_string(), sym_id: sid });
+            }
+        }
+        let idx = module_index?;
+        for cached in idx.visible_def_candidates(cls) {
+            if !idx.candidate_may_declare(&cached, name, cls) {
+                continue;
+            }
+            let whole = idx.symbols_present(&cached);
+            if whole.symbols.iter().any(|s| s.name == name && whole.slot_class_of(s) == Some(cls)) {
+                return Some(MethodResolution::CrossFile { class: cls.to_string(), def_module: None, widened: false });
+            }
+        }
+        None
     }
 
     /// Is the class that answered a method resolution an INTERFACE (php:

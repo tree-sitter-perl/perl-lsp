@@ -8,6 +8,7 @@ impl<'a> Builder<'a> {
     // ---- Main visitor ----
 
     pub(super) fn visit_node(&mut self, node: Node<'a>) {
+        self.observe_deref(node);
         match node.kind() {
             "package_statement" => self.visit_package(node),
             "class_statement" => self.visit_class(node),
@@ -18,6 +19,13 @@ impl<'a> Builder<'a> {
             "for_statement" => self.visit_for(node),
             "postfix_for_expression" => self.visit_postfix_for(node),
             "use_statement" => self.visit_use(node),
+            "use_version_statement" => {
+                if let Some(version) = node.child_by_field_name("version").and_then(|v| v.utf8_text(self.source).ok()) {
+                    if crate::model::conventions::version_enables_strict(version) {
+                        self.switch_declaration_rule(node_to_span(node), true);
+                    }
+                }
+            }
             "require_expression" => self.visit_require(node),
             "assignment_expression" => self.visit_assignment(node),
 
@@ -57,23 +65,35 @@ impl<'a> Builder<'a> {
                 self.queue_children(node);
             }
 
-            // Flow-sensitive narrowing: a block guard refines the then-block;
-            // a statement-level exit guard refines the rest of the block.
+            // Flow-sensitive narrowing: a guard refines each arm it decides
+            // (a block, a modified statement, a ternary branch, a logical
+            // operator's right side); a statement-level exit guard refines
+            // the rest of the block.
             "conditional_statement" => {
                 self.narrow_block_guard(node);
                 self.queue_children(node);
             }
-            "postfix_conditional_expression" => {
-                self.narrow_postfix_exit(node);
+            "postfix_conditional_expression" | "postfix_loop_expression" => {
+                self.narrow_postfix(node);
+                self.queue_children(node);
+            }
+            "loop_statement" | "cstyle_for_statement" => {
+                self.narrow_loop(node);
                 self.queue_children(node);
             }
             "lowprec_logical_expression" => {
+                self.narrow_logical_rhs(node);
                 self.narrow_logical_exit(node);
                 self.queue_children(node);
             }
+            "conditional_expression" => {
+                self.narrow_ternary(node);
+                self.queue_children(node);
+            }
 
-            // Variable references
-            "scalar" | "array" | "hash" => self.visit_var_ref(node),
+            // Variable references. The `scalar` keyword token of
+            // `scalar @items` shares the kind but is anonymous.
+            "scalar" | "array" | "hash" if node.is_named() => self.visit_var_ref(node),
             "container_variable" | "slice_container_variable" | "keyval_container_variable" => {
                 self.visit_container_ref(node);
             }
@@ -128,9 +148,6 @@ impl<'a> Builder<'a> {
             // (the EXPR inside the block) is a coderef. Narrow it, then visit
             // children so the inner scalar still gets its read ref.
             "code_deref_expression" => {
-                if let Some(operand) = code_deref_operand(node) {
-                    self.push_rep_observation(operand, node, TypeObservation::CodeRefInvocation);
-                }
                 self.queue_children(node);
             }
             "array_deref_expression" => {
@@ -144,6 +161,7 @@ impl<'a> Builder<'a> {
 
             // Binary operators → type constraints on variable operands
             "binary_expression" => {
+                self.narrow_logical_rhs(node);
                 self.infer_binary_op_type(node);
                 self.queue_children(node);
             }
@@ -156,7 +174,7 @@ impl<'a> Builder<'a> {
             "postinc_expression" | "preinc_expression" => {
                 // $x++ / $x-- / ++$x / --$x → Numeric
                 if let Some(operand) = node.named_child(0) {
-                    self.push_var_type_constraint(operand, node, InferredType::Numeric);
+                    self.observe(operand, node, TypeObservation::NumericUse);
                 }
                 self.queue_children(node);
             }
@@ -220,21 +238,30 @@ impl<'a> Builder<'a> {
             "quoted_regexp" | "match_regexp" => {
                 self.queue_children(node);
             }
-            "substitution_regexp" => {
-                // `s///e`: the replacement is Perl *code*, but the grammar
-                // emits it as a plain `replacement` node (not parsed as code).
-                // Re-parse it so calls/vars inside resolve (rule #7), mapping
-                // spans back to the file. Same idea as the __END__/ISA re-parses.
-                let repl = self.subst_replacement_is_eval(node).then(|| {
-                    (0..node.named_child_count())
-                        .filter_map(|i| node.named_child(i))
-                        .find(|c| c.kind() == "replacement")
-                }).flatten();
-                if let Some(repl) = repl {
-                    self.emit_refs_in_eval_replacement(repl);
+            // The grammar reads an `/e` replacement as an interpolated
+            // string: its own children are the string view (`$h{k}` as a `$h`
+            // scalar). The code is the replacement's own parse, walked in a
+            // block scope of its own.
+            "substitution_regexp" => match crate::cst::eval_replacement(node, self.source) {
+                Some(repl) => {
+                    let code = self.eval_injections.get(&repl.start_byte()).copied();
+                    let mut steps: Vec<Box<dyn FnOnce(&mut Builder<'a>) + 'a>> = Vec::new();
+                    for c in crate::cst::NodeExt::elements(&node) {
+                        if c != repl {
+                            steps.push(Box::new(move |b: &mut Builder<'a>| b.queue_node(c)));
+                        } else if let Some(root) = code {
+                            steps.push(Box::new(move |b: &mut Builder<'a>| {
+                                b.push_scope(ScopeKind::Block, node_to_span(repl), None);
+                                b.queue_children_then(root, |b| {
+                                    b.pop_scope();
+                                });
+                            }));
+                        }
+                    }
+                    self.queue_sequence(steps);
                 }
-                self.queue_children(node);
-            }
+                None => self.queue_children(node),
+            },
 
             // ERROR nodes: recover structural declarations (the file's skeleton)
             // but skip expressions/refs which are unreliable inside broken regions
@@ -399,9 +426,9 @@ impl<'a> Builder<'a> {
     /// Walk a `{ ... }` block's children, reverting package context at block
     /// close. `package Foo;` is file-scoped in Perl, but a `{ }` block is a
     /// hard boundary: `{ package Inner; }` must not leak Inner to the
-    /// statements that follow. Saves the walk-time package name and the open
-    /// statement-range cursor, restores both on exit, and repairs the
-    /// `package_ranges` spans so `package_at` reverts past the block too.
+    /// statements that follow. The block is a region of the namespace lane,
+    /// so a statement-form package inside it ends at its close; the
+    /// walk-time package name is restored on exit.
     pub(super) fn walk_block_package_scoped(&mut self, node: Node<'a>) {
         self.walk_block_package_scoped_then(node, |_| {});
     }
@@ -414,27 +441,9 @@ impl<'a> Builder<'a> {
         work: impl FnOnce(&mut Builder<'a>) + 'a,
     ) {
         let saved_pkg = self.current_package.clone();
-        let saved_stmt_range = self.open_statement_package;
+        self.package_regions.push(node.end_position());
         self.queue_children_then(node, move |b| {
-            if b.open_statement_package != saved_stmt_range {
-                // A `package Inner;` inside the block opened a range to file-end;
-                // trim it to block close so it doesn't shadow the enclosing pkg.
-                if let Some(idx) = b.open_statement_package {
-                    b.package_ranges[idx].span.end = node.end_position();
-                }
-                // The enclosing `package Outer;` range (if any) was truncated to
-                // Inner's start when Inner opened — resume it to file-end so
-                // Outer covers the post-block tail.
-                if let Some(idx) = saved_stmt_range {
-                    let file_end = b
-                        .scope_stack
-                        .first()
-                        .map(|id| b.scopes[id.0 as usize].span.end)
-                        .unwrap_or_else(|| node.end_position());
-                    b.package_ranges[idx].span.end = file_end;
-                }
-                b.open_statement_package = saved_stmt_range;
-            }
+            b.package_regions.pop();
             b.current_package = saved_pkg;
             work(b);
         });
@@ -482,7 +491,7 @@ impl<'a> Builder<'a> {
         } else {
             // `package Foo;` — package context flows to the next
             // sibling `package X;` / `class X;` or end of file.
-            // `package_ranges` carries that for `package_at`; the
+            // `namespace_ranges` carries that for `package_at`; the
             // walk-time `current_package` drives synthesised
             // sub/method packages. No lexical scope is pushed —
             // `package Foo;` is not a lexical boundary in Perl.
@@ -570,7 +579,7 @@ impl<'a> Builder<'a> {
         } else {
             // Flat `class Foo;` — same semantics as non-block
             // `package Foo;`: package context flows in
-            // `package_ranges`; no lexical scope is pushed. The
+            // `namespace_ranges`; no lexical scope is pushed. The
             // Class SYMBOL was already emitted above.
             self.current_package = Some(name.clone());
             self.open_statement_package_range(name, node.start_position());
