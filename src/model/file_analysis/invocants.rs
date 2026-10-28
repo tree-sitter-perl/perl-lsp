@@ -691,10 +691,9 @@ impl FileAnalysis {
     ///     the narrowing witness at the use-site point, ahead of the
     ///     functional chase (docs/adr/flow-narrowing.md); `is_element_
     ///     place` tells a real place from a scalar deref.
-    ///   * function-call receiver → the zero-arg return of the named sub
-    ///     (its ref spans only the name, invisible to the exact-span read).
     ///   * any recorded expression → `expr_type_at_span` (scalar/array/
-    ///     hash reads, baked literals, and chain receivers — its
+    ///     hash reads, baked literals, and call and chain receivers, each
+    ///     an `Expr` at its whole span — its
     ///     exact-span call-ref arm keeps Parametric flavors intact, so
     ///     DBIC row-class narrowing survives the hop).
     ///   * cross-file chain receiver → re-resolve the receiver's class
