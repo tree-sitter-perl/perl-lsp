@@ -1194,7 +1194,6 @@ fn remap_spans(
         | WitnessAttachment::HashKey { .. }
         | WitnessAttachment::PackageSymbol { .. }
         | WitnessAttachment::SymbolReturnArm(_)
-        | WitnessAttachment::SlotType { .. }
         | WitnessAttachment::TypeName(_)
         | WitnessAttachment::Field { .. }
         | WitnessAttachment::Param { .. } => {}

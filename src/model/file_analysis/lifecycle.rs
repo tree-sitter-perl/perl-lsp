@@ -341,7 +341,7 @@ impl FileAnalysis {
                         out.push(name.clone());
                     }
                 }
-                WitnessAttachment::SlotType { key, .. } => {
+                WitnessAttachment::Field { name: key, .. } => {
                     if !ref_keys.contains(key)
                         && !ref_keys.contains(&super::name_match_key(key, self.names()))
                     {

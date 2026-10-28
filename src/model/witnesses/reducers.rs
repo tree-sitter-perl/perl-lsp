@@ -645,39 +645,6 @@ impl WitnessReducer for SymbolReturnArmFold {
     }
 }
 
-// ---- Typed-slot fold ----
-//
-// Claims `SlotType{class, key}` attachments carrying `InferredType`
-// payloads (per-write `Edge(Expr(rhs_span))` witnesses, materialized to
-// types by the registry). Each witness is one `$obj->{key} = <rhs>`
-// WRITE; the per-write arms agree via `resolve_return_type` (1+ agree →
-// that type, HashRef subsumed by an Object) with one added guard: two
-// DISTINCT concrete classes are honest disagreement → None. The guard
-// matters here because `resolve_return_type`'s Object/HashRef
-// subsumption was tuned for return arms (one Object absorbs sibling
-// HashRefs) and otherwise picks the last of two different classes —
-// the wrong answer when `$self->{h} = A->new` in one method and
-// `= B->new` in another genuinely conflict. Nothing consumes this
-// attachment yet — it's the typed half of the hash-key-write seed,
-// paired with the untyped `mutation` Fact.
-
-pub struct SlotTypeFold;
-
-impl WitnessReducer for SlotTypeFold {
-    fn name(&self) -> &str {
-        "slot_type_fold"
-    }
-
-    fn claims(&self, w: &Witness) -> bool {
-        matches!(w.attachment, WitnessAttachment::SlotType { .. })
-            && matches!(w.payload, WitnessPayload::InferredType(_))
-    }
-
-    fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
-        agree_slot_arms(ws)
-    }
-}
-
 /// One stored slot's value over its writes: each `InferredType` is an arm,
 /// agreed via `resolve_return_type`, except that two distinct class
 /// identities never agree — a slot can't be both `A` and `B`, and
@@ -848,9 +815,12 @@ impl WitnessReducer for TypeNameReducer {
 // Claims `Field{owner, name}` carrying a materialized `InferredType` — the
 // storage slot's value edges after `materialize` chased them: one per field
 // declaration (`Edge(Variable{decl})`, whose own fold already ranked
-// annotation over assignment) and one per write to a member nothing in the
-// writing file declares. Each is an arm; the arms agree as a hash slot's
-// writes do (`agree_slot_arms`).
+// annotation over assignment) and one per write to a slot nothing in the
+// writing file declares (`$obj->{k} = rhs`, `obj.k = rhs`). Each is an arm,
+// and the arms agree (`agree_slot_arms`): `resolve_return_type`'s agreement
+// was tuned for return arms, where one Object absorbs sibling HashRefs and
+// the last of two different classes wins, but `$self->{h} = A->new` in one
+// method and `= B->new` in another genuinely conflict.
 
 pub struct FieldValueReducer;
 

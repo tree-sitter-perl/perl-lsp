@@ -81,10 +81,10 @@ fn note_type_name_exit(state: &mut QueryState, name: &str) {
 }
 
 #[inline(never)]
-fn note_slot_exit(state: &mut QueryState, class: &str, key: &str) {
-    state.note_exit(Some(super::ConclusionKey::SlotType {
-        class: class.to_string(),
-        key: key.to_string(),
+fn note_field_exit(state: &mut QueryState, owner: &str, name: &str) {
+    state.note_exit(Some(super::ConclusionKey::Field {
+        owner: owner.to_string(),
+        name: name.to_string(),
     }));
 }
 
@@ -409,7 +409,7 @@ fn consult_prefilter_equiv() -> bool {
 }
 
 /// May candidate `cached` contribute ANY answer to a class-keyed consult
-/// (`PackageSymbol{class, name}` when `attributed`, `SlotType{class, key}`
+/// (`PackageSymbol{class, name}` when `attributed`, `Field{owner, name}`
 /// otherwise)? The registry-sweep face of the rows-backed pre-filter
 /// (`docs/prompt-relational-iteration.md`) for the many-provider shape a
 /// package-`main` monoculture mints — where a no-answer sweep walks every
@@ -654,11 +654,6 @@ impl ReducerRegistry {
         // shape; single-arm answers surface here, where BranchArmFold's
         // ≥2-arm rule would reject them.
         r.register(Box::new(SymbolReturnArmFold));
-        // SlotTypeFold claims the dedicated `SlotType{..}` shape. Nothing
-        // consumes it yet (typed `$obj->{k}` resolution is a later step),
-        // so placement here is non-load-bearing — grouped with the other
-        // arm-agreement folds for legibility.
-        r.register(Box::new(SlotTypeFold));
         // BranchArmFold claims the dedicated `BranchArm(_)` shape — no
         // overlap with the Variable/Expr folds below, so order here is
         // not load-bearing.
@@ -1137,17 +1132,18 @@ impl ReducerRegistry {
             }
         }
 
-        // `SlotType{C, k}` the local bag couldn't answer: the typed
-        // slot WRITE may live in C's own file (cross-file primary) or
-        // anywhere up C's ancestry (a base class's BUILD populating
+        // `Field{C, k}` the local bag couldn't answer: the slot's value —
+        // a member declaration's, or a write's (`$self->{conn} = …`,
+        // `self.conn = …`) — may live in C's own file (cross-file primary)
+        // or anywhere up C's ancestry (a base class's BUILD populating
         // `$self->{conn}`). Hops (1) and (2) of the `PackageSymbol`
-        // fallback above, same shared visited set; no bridge hop —
-        // slot writes are real code, not plugin entities.
-        if let WitnessAttachment::SlotType { class, key } = q.attachment {
+        // fallback above, same shared visited set; no bridge hop — a
+        // stored value is real code, not a plugin entity.
+        if let WitnessAttachment::Field { owner: class, name: key } = q.attachment {
             if let Some(ctx) = q.context {
                 if ctx.module_index.is_none() {
-                    super::note_bake_exit("slot_type", true);
-                    note_slot_exit(state, class, key);
+                    super::note_bake_exit("field", true);
+                    note_field_exit(state, class, key);
                 }
                 if let Some(idx) = ctx.module_index {
                     // The point-free memo spelling, same as the primary's:
@@ -1241,7 +1237,7 @@ impl ReducerRegistry {
                                 (*self.query_rec(&full.witnesses, &sub_q, state)).clone()
                             };
                         crate::util::ghost_stats::count("moc.provider_fetched");
-                        crate::util::ghost_stats::count("mocsite.slot_type");
+                        crate::util::ghost_stats::count("mocsite.field");
                         let full = idx.bag_present(&cached);
                         if !std::ptr::eq(bag, &full.witnesses) {
                             let v = attempt(&full, state);
@@ -1273,16 +1269,11 @@ impl ReducerRegistry {
                                 return v;
                             }
                             // Fallback-on-miss (R4), symmetric with the
-                            // PackageSymbol primary: a slot WRITE typed only in
-                            // C's enriched copy resolves here. Today SlotType
-                            // seeds are build-gated on a resolvable RHS
-                            // (`builder.rs`), so a seed that exists already
-                            // answers on the raw bag and this retry is the
-                            // forward-looking twin — live the moment slot
-                            // seeding emits an unconditional edge. Pin the
+                            // PackageSymbol primary: a slot value typed only in
+                            // C's enriched copy resolves here. Pin the
                             // enriched Arc: this chase threads the SHARED
                             // QueryState, whose memo keys on bag pointers.
-                            crate::util::ghost_stats::count("consult.slot_type");
+                            crate::util::ghost_stats::count("consult.field");
                             if idx.serves_enriched() {
                                 let enriched = idx.enriched_present(&cached);
                                 if !std::sync::Arc::ptr_eq(&enriched, &full)
@@ -1336,9 +1327,9 @@ impl ReducerRegistry {
                     ctx.app_surface_consumers,
                 );
                 for p in parents {
-                    let parent_att = WitnessAttachment::SlotType {
-                        class: p,
-                        key: key.clone(),
+                    let parent_att = WitnessAttachment::Field {
+                        owner: p,
+                        name: key.clone(),
                     };
                     let sub_q = ReducerQuery {
                         attachment: &parent_att,
@@ -1412,19 +1403,6 @@ impl ReducerRegistry {
             );
         }
 
-        // `Field{owner, name}` the local bag couldn't answer: the slot's
-        // value edge lives in the file declaring `owner` (cross-file
-        // primary), or the slot is a PARENT's (ancestry) — hops (1) and (2)
-        // of the `PackageSymbol` ladder, same shared visited set. No bridge
-        // hop: a plugin entity is a callable, never a stored value.
-        if let WitnessAttachment::Field { owner, name } = q.attachment {
-            if let Some(v) = self.owner_keyed_fallback(bag, q, state, owner, "field", &|p| {
-                WitnessAttachment::Field { owner: p, name: name.clone() }
-            }) {
-                return v;
-            }
-        }
-
         // `Param{package, name, index}`: the callee's bag is the authority.
         // Its own witness present but untyped → the position IS bound, so
         // `Unknown` (a value flowed, nothing named it) rather than silence —
@@ -1458,11 +1436,10 @@ impl ReducerRegistry {
 
 
 
-    /// The owner-keyed ladder shared by the `Field` and `Param` fallbacks:
-    /// every candidate file declaring `owner` (cross-file primary), then the
-    /// same attachment re-keyed to each parent (`rekey`), one visited set
-    /// throughout. No bridge hop — neither a slot nor a parameter is a
-    /// plugin-synthesized callable.
+    /// The owner-keyed ladder of the `Param` fallback: every candidate file
+    /// declaring `owner` (cross-file primary), then the same attachment
+    /// re-keyed to each parent (`rekey`), one visited set throughout. No
+    /// bridge hop — a parameter is no plugin-synthesized callable.
     ///
     /// Out of line for the same reason as `moc_cross_file_primary`: this
     /// block's locals would otherwise live in `query_rec_body`'s frame,
@@ -1486,11 +1463,7 @@ impl ReducerRegistry {
         if let Some(idx) = ctx.module_index {
             for cached in idx.visible_def_candidates(owner) {
                 crate::util::ghost_stats::count("moc.provider_fetched");
-                crate::util::ghost_stats::count(if site == "field" {
-                    "mocsite.field"
-                } else {
-                    "mocsite.param"
-                });
+                crate::util::ghost_stats::count("mocsite.param");
                 let full = idx.bag_present(&cached);
                 if std::ptr::eq(bag, &full.witnesses) {
                     continue;
@@ -2377,16 +2350,16 @@ impl ReducerRegistry {
                                 t.key_value_type(k).flatten().cloned().or_else(|| {
                                     // Class-typed base: the structural
                                     // literal can't answer, but a typed
-                                    // slot WRITE can — `SlotType{class,
+                                    // slot WRITE can — `Field{class,
                                     // key}`, local or (via the arm in
                                     // query_rec_body) cross-file and up
                                     // the ancestry. The read drills
                                     // through the registry, never a
                                     // baked value.
-                                    let class = t.class_name()?.to_string();
-                                    let att = WitnessAttachment::SlotType {
-                                        class,
-                                        key: k.clone(),
+                                    let owner = t.class_name()?.to_string();
+                                    let att = WitnessAttachment::Field {
+                                        owner,
+                                        name: k.clone(),
                                     };
                                     let sub_q = ReducerQuery {
                                         attachment: &att,

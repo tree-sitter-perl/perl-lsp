@@ -2229,7 +2229,7 @@ fn name_in_no_export_or_tag_is_not_exported() {
 fn cross_file_slot_write_types_the_read() {
     // A4 v2: the typed slot write lives in the PARENT class's file;
     // the read in the child file narrows through the registry's
-    // SlotType cross-file + ancestor arm at query time.
+    // Field cross-file + ancestor arm at query time.
     use std::sync::Arc;
     let idx = crate::index::module_index::ModuleIndex::new_for_test();
     let parent_src = "package Parent;\nsub init {\n    my ($self) = @_;\n    $self->{conn} = My::Conn->new;\n}\n1;\n";
