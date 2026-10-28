@@ -312,7 +312,7 @@ struct Builder<'a> {
     /// For each `$obj->{k} = <rhs>` hash-key WRITE, maps the key node's
     /// span (the span the matching `HashKeyAccess` Write ref carries) to
     /// the RHS expression's span. `populate_witness_bag`'s mutation loop
-    /// reads it to seed `SlotType{class, key} → Edge(Expr(rhs_span))`
+    /// reads it to seed `Field{class, key} → Edge(Expr(rhs_span))`
     /// alongside the untyped mutation Fact. Hash-element LHS only; plain
     /// variable assignments never enter it.
     slot_write_rhs_span: std::collections::HashMap<Span, Span>,

@@ -645,59 +645,31 @@ impl WitnessReducer for SymbolReturnArmFold {
     }
 }
 
-// ---- Typed-slot fold ----
-//
-// Claims `SlotType{class, key}` attachments carrying `InferredType`
-// payloads (per-write `Edge(Expr(rhs_span))` witnesses, materialized to
-// types by the registry). Each witness is one `$obj->{key} = <rhs>`
-// WRITE; the per-write arms agree via `resolve_return_type` (1+ agree →
-// that type, HashRef subsumed by an Object) with one added guard: two
-// DISTINCT concrete classes are honest disagreement → None. The guard
-// matters here because `resolve_return_type`'s Object/HashRef
-// subsumption was tuned for return arms (one Object absorbs sibling
-// HashRefs) and otherwise picks the last of two different classes —
-// the wrong answer when `$self->{h} = A->new` in one method and
-// `= B->new` in another genuinely conflict. Nothing consumes this
-// attachment yet — it's the typed half of the hash-key-write seed,
-// paired with the untyped `mutation` Fact.
-
-pub struct SlotTypeFold;
-
-impl WitnessReducer for SlotTypeFold {
-    fn name(&self) -> &str {
-        "slot_type_fold"
-    }
-
-    fn claims(&self, w: &Witness) -> bool {
-        matches!(w.attachment, WitnessAttachment::SlotType { .. })
-            && matches!(w.payload, WitnessPayload::InferredType(_))
-    }
-
-    fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
-        let arms: Vec<InferredType> = ws
-            .iter()
-            .filter_map(|w| match &w.payload {
-                WitnessPayload::InferredType(t) => Some(t.clone()),
-                _ => None,
-            })
-            .collect();
-        // Two distinct class identities never agree: a slot can't be
-        // both `A` and `B`. `class_name()` is the value's own "what
-        // class am I" answer (rule #10) — distinct answers → None.
-        let mut seen_class: Option<String> = None;
-        for t in &arms {
-            if let Some(cn) = t.class_name() {
-                match &seen_class {
-                    None => seen_class = Some(cn.to_string()),
-                    Some(prev) if prev != cn => return ReducedValue::None,
-                    _ => {}
-                }
+/// One stored slot's value over its writes: each `InferredType` is an arm,
+/// agreed via `resolve_return_type`, except that two distinct class
+/// identities never agree — a slot can't be both `A` and `B`, and
+/// `class_name()` is the value's own "what class am I" answer (rule #10).
+fn agree_slot_arms(ws: &[&Witness]) -> ReducedValue {
+    let arms: Vec<InferredType> = ws
+        .iter()
+        .filter_map(|w| match &w.payload {
+            WitnessPayload::InferredType(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut seen_class: Option<String> = None;
+    for t in &arms {
+        if let Some(cn) = t.class_name() {
+            match &seen_class {
+                None => seen_class = Some(cn.to_string()),
+                Some(prev) if prev != cn => return ReducedValue::None,
+                _ => {}
             }
         }
-        match crate::model::file_analysis::resolve_return_type(&arms) {
-            Some(t) => ReducedValue::Type(t),
-            None => ReducedValue::None,
-        }
+    }
+    match crate::model::file_analysis::resolve_return_type(&arms) {
+        Some(t) => ReducedValue::Type(t),
+        None => ReducedValue::None,
     }
 }
 
@@ -841,9 +813,14 @@ impl WitnessReducer for TypeNameReducer {
 // ---- Field value ----
 //
 // Claims `Field{owner, name}` carrying a materialized `InferredType` — the
-// storage slot's value edge (`Edge(Variable{decl})`, pushed per field
-// declaration) after `materialize` chased it. Latest wins: the declaring
-// file's `Variable` fold already ranked annotation over assignment.
+// storage slot's value edges after `materialize` chased them: one per field
+// declaration (`Edge(Variable{decl})`, whose own fold already ranked
+// annotation over assignment) and one per write to a slot nothing in the
+// writing file declares (`$obj->{k} = rhs`, `obj.k = rhs`). Each is an arm,
+// and the arms agree (`agree_slot_arms`): `resolve_return_type`'s agreement
+// was tuned for return arms, where one Object absorbs sibling HashRefs and
+// the last of two different classes wins, but `$self->{h} = A->new` in one
+// method and `= B->new` in another genuinely conflict.
 
 pub struct FieldValueReducer;
 
@@ -858,12 +835,7 @@ impl WitnessReducer for FieldValueReducer {
     }
 
     fn reduce(&self, ws: &[&Witness], _q: &ReducerQuery) -> ReducedValue {
-        for w in ws.iter().rev() {
-            if let WitnessPayload::InferredType(t) = &w.payload {
-                return ReducedValue::Type(t.clone());
-            }
-        }
-        ReducedValue::None
+        agree_slot_arms(ws)
     }
 }
 

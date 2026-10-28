@@ -916,12 +916,12 @@ impl<'a> Builder<'a> {
         // Two seeds per typed-owner write: the untyped `mutation` Fact
         // (key-name completion via `mutated_keys_on_class`) and — when
         // the owner resolves to a CLASS and the RHS has a recorded span
-        // and a bag-resolved type — a typed `SlotType{class, key} →
-        // Edge(Expr(rhs_span))`. The edge routes through the same
-        // canonical chase as implicit-return chains; `SlotTypeFold`
-        // agrees the per-write arms. Honest-skip if the owner is a
-        // `Sub` (not a class), or the RHS is unknown — never a bare
-        // SlotType seed.
+        // and a bag-resolved type — a typed `Field{class, key} →
+        // Edge(Expr(rhs_span))`, the slot's value as any language's member
+        // write states it. The edge routes through the same canonical chase
+        // as implicit-return chains; `FieldValueReducer` agrees the
+        // per-write arms. Honest-skip if the owner is a `Sub` (not a
+        // class), or the RHS is unknown — never a bare slot seed.
         let mut mutations: Vec<(HashKeyOwner, String, Span)> = Vec::new();
         let mut slot_writes: Vec<(String, String, Span, Span)> = Vec::new();
         for r in &self.refs {
@@ -975,8 +975,8 @@ impl<'a> Builder<'a> {
                 continue;
             }
             self.bag.push(Witness {
-                attachment: WitnessAttachment::SlotType { class, key },
-                source: WitnessSource::Builder("slot_type".into()),
+                attachment: WitnessAttachment::Field { owner: class, name: key },
+                source: WitnessSource::Builder("slot_write".into()),
                 payload: WitnessPayload::Edge(WitnessAttachment::Expr(rhs_span)),
                 span,
             });
