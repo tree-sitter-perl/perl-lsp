@@ -170,6 +170,16 @@ impl ExtractState<'_> {
         self.scopes.headed.get(&self.cur_scope).copied().unwrap_or(self.cur_scope)
     }
 
+    /// The scope a def of `kind` at the current event binds in. A data
+    /// member belongs to its class body even where it is written inside a
+    /// callable (php's constructor-promoted property).
+    fn def_scope(&self, kind: DefCap) -> ScopeId {
+        match kind {
+            DefCap::Field | DefCap::Slot => self.member_scope(),
+            _ => self.bind_scope(),
+        }
+    }
+
     fn class_identity(&self, leaf: &str, from: ScopeId, at: Point) -> String {
         match self.pack.names.use_map_sep() {
             Some(sep) => crate::model::conventions::join_qualified(scopes::home_of(self, from, at).unwrap_or(""), leaf, sep),
@@ -270,8 +280,7 @@ pub fn extract_in(
     let compiled = cached_query(&language, pack.query_source)?;
 
     let root = tree.root_node();
-    let mut out = SkeletonAnalysis::default();
-    out.names = pack.names.clone();
+    let mut out = SkeletonAnalysis::for_pack(pack);
     out.scopes.push(Scope {
         id: ScopeId(0),
         parent: None,

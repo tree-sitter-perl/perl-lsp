@@ -2237,6 +2237,16 @@ fn cpp_fa(src: &str) -> crate::model::file_analysis::FileAnalysis {
         .into_file_analysis()
 }
 
+/// An analysis is of its pack's language however it was assembled — through
+/// the driver, straight from extraction, or as the stand-in for a file that
+/// never parsed — because `resolve()` routes visibility on that stamp.
+#[test]
+fn assembly_stamps_the_packs_language() {
+    assert_eq!(cpp_fa("int f();").language, "cpp");
+    let empty = SkeletonAnalysis::for_pack(&cpp_pack()).into_file_analysis();
+    assert_eq!(empty.language, "cpp");
+}
+
 /// A member token with an argument list beside it is a call; without one
 /// it reads a value — spaced or not, the extractor states which.
 #[test]

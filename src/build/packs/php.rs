@@ -1,10 +1,11 @@
 //! PHP's pack.
 
 use crate::build::query_extract::*;
-use crate::model::file_analysis::{ClassCall, ClassSpelling, InferredType, NameSpellings};
+use crate::model::file_analysis::{ClassCall, ClassSpelling, FunctionLookup, InferredType, NameSpellings};
 
 pub fn php_pack() -> LangPack {
     LangPack {
+        id: "php",
         query_source: include_str!("../../../queries/php/skeleton.scm"),
         // `\` qualifies, `$` leads every variable, and a written class
         // spelling names the class the file's `use` rows and namespace say
@@ -16,6 +17,7 @@ pub fn php_pack() -> LangPack {
             sigils: std::borrow::Cow::Borrowed(&['$']),
             class_spelling: ClassSpelling::UseMap,
             class_call: ClassCall::FunctionCall,
+            functions: FunctionLookup::NamespaceThenGlobal,
             ..NameSpellings::NONE
         },
         shape_name: |raw| raw.to_string(),

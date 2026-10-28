@@ -214,13 +214,13 @@ pub(super) fn refs_to_in_file(
 }
 
 /// Reject a `newName` that would corrupt rather than rename: empty,
-/// whitespace, or just sigils (`$`/`@`/`%`). The LSP client normally validates
+/// whitespace, or just the language's sigils. The LSP client normally validates
 /// the new name, but the server must not emit a token-*deleting* edit set when
 /// it doesn't — both rename entry points (LSP handler + CLI) gate on this.
 /// Keyword/identifier-shape validation stays the client's job; this is the
 /// safety floor against silent corruption.
-pub fn is_valid_rename_name(new_name: &str) -> bool {
-    !crate::model::conventions::strip_variable_sigils(new_name.trim()).trim().is_empty()
+pub fn is_valid_rename_name(new_name: &str, names: &crate::model::file_analysis::NameSpellings) -> bool {
+    !names.strip_sigils(new_name.trim()).trim().is_empty()
 }
 
 /// Rename edit set for a projection group: every span paired with ITS

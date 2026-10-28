@@ -32,6 +32,7 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     enclosing_class: crate::model::file_analysis::EnclosingClass::NamespaceInForce,
     // `$obj->{key}` reaches a slot; `$obj->key` never does.
     instance_slots: crate::model::file_analysis::InstanceSlots::Apart,
+    functions: NameSpellings::NONE.functions,
 };
 
 /// Split a possibly-qualified name into `(Option<package>, basename)`.
@@ -124,17 +125,6 @@ pub fn is_conventional_invocant_name(name: &str) -> bool {
         name.strip_prefix('$').unwrap_or(name),
         "self" | "class" | "this" | "proto"
     )
-}
-
-/// Strip Perl variable sigils from a typed name: the bare identity token
-/// a rename writes at every collected span (`$total` → `total`). This is
-/// the PERL instance of the per-language name-semantics hook on the
-/// resolution CandidateSet's identity keying (`CandidateSet::bare_new_name`)
-/// — pack languages canonicalize spellings at extraction instead (the
-/// LangPack `shape_name` hook; cpp's `canonical_template_spelling`), so
-/// their typed names pass through bare.
-pub fn strip_variable_sigils(name: &str) -> &str {
-    name.trim_start_matches(['$', '@', '%'])
 }
 
 /// A variable Perl itself defines (perlvar): punctuation (`$_`, `$@`, `@_`),
@@ -547,6 +537,7 @@ mod tests {
             class_call: NameSpellings::NONE.class_call,
             enclosing_class: NameSpellings::NONE.enclosing_class,
             instance_slots: NameSpellings::NONE.instance_slots,
+            functions: NameSpellings::NONE.functions,
         };
         assert_eq!(super::split_qualified("App\\Models\\User", &php), (Some("App\\Models"), "User"));
         assert_eq!(super::name_match_key("App\\Models\\User", &php), "User");

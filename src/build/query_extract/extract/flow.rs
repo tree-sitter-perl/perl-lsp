@@ -9,8 +9,9 @@ use std::collections::HashMap;
 
 #[derive(Default)]
 pub(super) struct State {
-    /// flow.assign joins: match_id → (target name+scope, source span)
-    flow_targets: HashMap<usize, (String, ScopeId, Point)>,
+    /// flow.assign joins: match_id → (target name, the scopes it binds
+    /// in, its site)
+    flow_targets: HashMap<usize, (String, Vec<ScopeId>, Point)>,
     flow_sources: HashMap<usize, Span>,
     /// Writes to a place: match_id → the place's span.
     flow_places: HashMap<usize, Span>,
@@ -65,7 +66,14 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
     let pack = st.pack;
     let cur_scope = st.cur_scope;
     let bind_scope = st.bind_scope();
-    let member_scope = st.member_scope();
+    // A target that is the name defs in its match declare binds where each
+    // of them binds; any other binds in the innermost scope, or the def
+    // scope of the header it is written in (an annotated parameter).
+    let mut target_scopes: Vec<ScopeId> = st.defs.declared_by(e).iter().map(|&kind| st.def_scope(kind)).collect();
+    target_scopes.dedup();
+    if target_scopes.is_empty() {
+        target_scopes.push(bind_scope);
+    }
     let f = &mut st.flow;
     let out = &mut st.out;
     match e.cap {
@@ -111,18 +119,17 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
             // function's `Symbol` onto it when undeclared.
             out.return_sites.push((cur_scope, e.span()));
         }
-        Capture::Flow(target @ (FlowCap::Target | FlowCap::TargetMember)) => {
-            // a target a def's header declares (an annotated parameter)
-            // binds in the def's own scope
-            let scope = if target == FlowCap::TargetMember { member_scope } else { bind_scope };
-            f.flow_targets.insert(e.match_id, ((pack.shape_name)(&e.text), scope, e.start));
+        Capture::Flow(FlowCap::Target) => {
             // Record the declared-type text keyed by (var, DECLARING scope)
             // for the token-less optional-engagement narrowing. cur_scope is
             // only known here (scopes mint during this walk); the type-annot
             // half was pre-collected (it precedes the declarator in source).
             if let Some(annot) = f.annots.get(&e.match_id) {
-                st.narrowing.annot_text_by_var.insert(((pack.shape_name)(&e.text), scope), annot.clone());
+                for &scope in &target_scopes {
+                    st.narrowing.annot_text_by_var.insert(((pack.shape_name)(&e.text), scope), annot.clone());
+                }
             }
+            f.flow_targets.insert(e.match_id, ((pack.shape_name)(&e.text), target_scopes, e.start));
         }
         Capture::Flow(FlowCap::Rebind) => {
             f.flow_rebinds.push(((pack.shape_name)(&e.text), cur_scope, e.start));
@@ -188,22 +195,22 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
             // f(..)` flow edge targets it. A member call (`recv.m(..)`)
             // carries its receiver, the `@member.recv` of the same match.
             let in_match = |cap: Capture| events.iter().find(|x| x.match_id == e.match_id && x.cap == cap);
-            // A qualified free callee (`\Lib\f()`) is named by its whole
-            // spelling, which resolves through the use-map at the site.
             let callee = in_match(Capture::Ref(RefCap::Call))
-                .map(|x| (in_match(Capture::RefSpelled).unwrap_or(x).text.clone(), None))
+                .map(|x| (x, None))
                 .or_else(|| {
                     let name = in_match(Capture::Ref(RefCap::MemberCall))?;
                     let recv = in_match(Capture::Member(MemberCap::Recv))?;
-                    Some(((pack.shape_name)(&name.text), Some(recv.span())))
+                    Some((name, Some(recv.span())))
                 });
-            if let Some((callee, receiver)) = callee {
+            if let Some((token, receiver)) = callee {
+                let (callee, callee_at) = ((pack.shape_name)(&token.text), token.start);
                 let span = e.span();
                 f.lit_spans.push((e.start_byte, e.end_byte, span));
                 let args = st.members.call_args(e.match_id);
                 out.call_sites.push(crate::build::query_extract::CallSite {
                     span,
                     callee,
+                    callee_at,
                     receiver,
                     scope: cur_scope,
                     args,
@@ -306,8 +313,8 @@ pub(super) fn finish(st: &mut ExtractState, events: &[Event]) {
         .filter(|s| s.kind == DefCap::Field)
         .filter_map(|s| out.scopes.get(s.scope.0 as usize).map(|sc| ((s.name.clone(), s.scope), sc.span)))
         .collect();
-    for mid in flow_mids {
-        let (name, scope, at) = &f.flow_targets[mid];
+    for (mid, scope) in flow_mids.into_iter().flat_map(|mid| f.flow_targets[mid].1.iter().map(move |s| (mid, s))) {
+        let (name, _, at) = &f.flow_targets[mid];
         let var = WitnessAttachment::Variable { name: name.clone(), scope: *scope };
         // Class-wide extent for a data member; the sequential decl point for a
         // local (see `field_scope_span`).

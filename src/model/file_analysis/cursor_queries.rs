@@ -415,8 +415,8 @@ impl FileAnalysis {
             });
 
         let edits: Vec<(Span, String)> = if let Some(old) = variable_name {
-            let bare_name = crate::model::conventions::strip_variable_sigils(new_name);
-            let base_len = crate::model::conventions::strip_variable_sigils(old).len();
+            let bare_name = self.names().strip_sigils(new_name);
+            let base_len = self.names().strip_sigils(old).len();
             refs.into_iter().map(|span| {
                 let name_span = Span {
                     start: Point::new(span.end.row, span.end.column.saturating_sub(base_len)),

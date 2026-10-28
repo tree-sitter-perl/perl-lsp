@@ -4,9 +4,6 @@ use super::*;
 use crate::build::packs::php_pack;
 use crate::model::file_analysis::{FileAnalysis, SymKind};
 
-// TODO(language-stamped-at-assembly): the driver stamps `language`, so an
-// analysis assembled without it (other packs' test helpers) routes as the
-// host; the stamp belongs where the skeleton is assembled.
 fn php(src: &str) -> FileAnalysis {
     crate::build::language_driver::LanguageRegistry::compiled()
         .for_path(std::path::Path::new("t.php"))
@@ -580,8 +577,25 @@ fn the_outline_lists_properties_under_their_class() {
     assert!(ctor.children.is_empty(), "the constructor lists none of its promoted properties");
 }
 
+/// A property's hover names it as it is listed, `$` and all.
+#[test]
+fn a_property_hovers_by_its_listed_name() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let path = std::path::PathBuf::from("/fake/php/App/Order.php");
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), php(MEMBERS));
+    let file = idx.workspace_file_for_test(&path).unwrap();
+    let store = OpenDocs::new();
+    let at = tree_sitter::Point { row: 6, column: 17 };
+    let cs = resolve(&store, &file, FileKey::Path(path), at, Some(&idx), OverrideScope::default()).with_source(MEMBERS);
+    let hover = crate::lsp::symbols::pack_hover_markdown(&cs, "php").unwrap();
+    assert!(hover.contains("\n$total: "), "{hover}");
+}
+
 /// Rename from a property's declaration rewrites its bare name, never the
-/// `$`, and never the method that shares the name.
+/// `$` (a typed `$` is the sigil, not part of the name), and never the
+/// method that shares the name.
 #[test]
 fn a_property_renames_from_its_declaration() {
     use crate::index::open_docs::{FileKey, OpenDocs};
@@ -596,7 +610,7 @@ fn a_property_renames_from_its_declaration() {
         let at = tree_sitter::Point { row, column };
         let cs = resolve(&store, &file, FileKey::Path(path.clone()), at, Some(&idx), OverrideScope::default());
         let mut sites: Vec<(usize, usize, usize, String)> = cs
-            .rename_edits("label")
+            .rename_edits("$label")
             .unwrap()
             .into_iter()
             .map(|(loc, text)| (loc.span.start.row, loc.span.start.column, loc.span.end.column, text))
