@@ -1301,6 +1301,14 @@ def fill(h: Holder):
 
 def use(h: Holder):
     return h.kept.spin()
+
+class Outer:
+    def __init__(self):
+        self.inner = Holder()
+    def fill(self):
+        self.inner.deep = Gadget()
+    def go(self):
+        return self.inner.deep.spin()
 ";
     let (t, idx) = indexed("pymemberwrite", &[("pkg/__init__.py", ""), ("pkg/mod.py", src)]);
     let path = t.0.join("pkg/mod.py");
@@ -1310,4 +1318,6 @@ def use(h: Holder):
     assert_eq!(defs, [], "`either` is written a Widget and a Gadget");
     let (defs, _, _) = landing(&idx, &path, Point::new(24, 18));
     assert_eq!(defs, [("mod.py".to_string(), 5)], "a write through a parameter states the value");
+    let (defs, _, _) = landing(&idx, &path, Point::new(32, 32));
+    assert_eq!(defs, [("mod.py".to_string(), 5)], "a nested write states the value");
 }
