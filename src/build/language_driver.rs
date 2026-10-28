@@ -201,7 +201,7 @@ impl LanguageDriver for PerlDriver {
         Maturity::Stable
     }
     fn id(&self) -> &'static str {
-        "perl"
+        crate::model::conventions::PERL_LANGUAGE
     }
     fn extensions(&self) -> &[&'static str] {
         &["pm", "pl", "t"]
