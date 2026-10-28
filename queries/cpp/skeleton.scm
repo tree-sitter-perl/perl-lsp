@@ -714,6 +714,10 @@
     field: (field_identifier) @ref.member.call)
   arguments: (argument_list ((_) @arity.arg ","?)*) @arity.args) @expr.call
 
+; `this` is the object the enclosing method runs on, an instance of the
+; method's class (out-of-line bodies included).
+(this) @receiver.enclosing
+
 ; which operator a member access wrote, so op-DX can name the other one. A
 ; token no pattern names here claims no operator.
 (field_expression operator: "->" @member.op.arrow)
@@ -822,6 +826,8 @@
 (type_identifier) @ref.type
 
 ; ---- literals + variable reads (the edge-chase substrate) ----
+; Parentheses hold the value they wrap.
+(parenthesized_expression . (_) @expr.wrapper.inner .) @expr.wrapper
 (number_literal) @expr.lit.number
 (string_literal) @expr.lit.string
 (true) @expr.lit.bool
@@ -862,6 +868,9 @@
 ; a plain `x = rhs` reassignment rebinds x with the rhs value — mints a Whole
 ; FlowEdge (like a declaration's init) so the moved-from region AND the
 ; narrowing cutoff end at the reassignment, via the same edge-driven cutoff.
+; TODO(declared-type-across-writes): no `@flow.assign`, so the write binds at
+; `x`, before the rhs reads it. The anchor would land it after, but its
+; reset retires `x`'s declared type, which in C++ holds for life.
 (assignment_expression
   left: (identifier) @flow.target
   right: (_) @flow.source)

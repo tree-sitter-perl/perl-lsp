@@ -5,6 +5,7 @@ use crate::model::file_analysis::NameSpellings;
 
 pub fn r_pack() -> LangPack {
     LangPack {
+        id: "r",
         query_source: include_str!("../../../queries/r/skeleton.scm"),
         names: NameSpellings::NONE,
         shape_name: |raw| raw.to_string(),

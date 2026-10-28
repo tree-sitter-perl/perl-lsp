@@ -44,10 +44,10 @@ spelled! {
         Var = "var",
         /// A parameter or block local.
         Local = "local",
-        /// A variable declared by being written (php's `$x = …`): the first
-        /// such def of a name in its callable is the declaration, unless
-        /// something the callable sees already declares the name; every
-        /// other one is a write of that declaration.
+        /// A variable declared by being written (php's `$x = …`, python's
+        /// and R's `x = …`): the first such def of a name in its callable is
+        /// the declaration, unless a declaration the write reaches is
+        /// already in force; every other one is a write of that declaration.
         Assigned = "assigned",
         /// A struct/class data member.
         Field = "field",
@@ -185,16 +185,14 @@ spelled! {
 
 spelled! {
     pub enum FlowCap {
-        /// The assignment node (pattern anchor).
-        Assign = "assign",
         /// The assignment node of a write that replaces its target's value:
-        /// every target of the match is written at the node's end, where
-        /// everything believed about it before dies.
-        Write = "write",
+        /// every target of the match is written at the node's end, once the
+        /// value has been read, and everything believed about it before
+        /// dies there.
+        Assign = "assign",
+        /// A name the value binds. A def's own name token binds where the
+        /// def does (a property's at its class body).
         Target = "target",
-        /// A member of the enclosing class as the target: its value lands
-        /// at the class body, where the member's readers look.
-        TargetMember = "target.member",
         Source = "source",
         /// A rebind with no inflowing value (loop variables).
         Rebind = "rebind",
@@ -240,6 +238,10 @@ pub enum ExprCap {
     /// An expression whose value is the class its match's `@receiver.*`
     /// token names (php's `Foo::class`).
     Class,
+    /// A node whose value is its one content's (`(x)`): its
+    /// `@expr.wrapper.inner` shares the match.
+    Wrapper,
+    WrapperInner,
 }
 
 spelled! {
@@ -283,11 +285,23 @@ spelled! {
         /// The class whose method the token is written in (`self::m()`,
         /// `$this->m()`).
         Enclosing = "enclosing",
-        /// The class that class extends (php's `new parent`).
-        Parent = "parent",
+        /// The class the enclosing class's `@parent.super` edge names (php's
+        /// `parent`).
+        Super = "super",
         /// The class the same token anchors the declaration of (php's
         /// `class` in `new class {…}`).
         Declared = "declared",
+    }
+}
+
+spelled! {
+    /// A class a written type names by where it is written, not by its
+    /// spelling. Resolved the way the same `@receiver.*` mark is.
+    pub enum RelativeClass {
+        /// The class it is written in (php's `self`, `static`).
+        Enclosing = "enclosing",
+        /// The class that class's `@parent.super` edge names (php's `parent`).
+        Super = "super",
     }
 }
 
@@ -403,8 +417,6 @@ pub enum Capture {
     /// closure).
     DefHoist,
     Ref(RefCap),
-    /// The token is written, not read: the reference it carries is a write.
-    AccessWrite,
     /// The whole written spelling of the match's reference when its token
     /// is only the leaf (`Base\Model` around `Model`): the reference
     /// resolves by the spelling and rewrites only the leaf.
@@ -416,6 +428,10 @@ pub enum Capture {
     Context(ContextKind),
     /// A base class, paired with the match's `@def.class.name`.
     Parent,
+    /// The base class the language's own parent keyword names (php's
+    /// `extends`): a `Parent` edge the class's `@receiver.super` and
+    /// `@type.super` resolve through.
+    ParentSuper,
     Import(ImportCap),
     Alias(AliasPart),
     MacroAlias(AliasPart),
@@ -452,9 +468,9 @@ pub enum Capture {
     OolDef,
     /// A callable's declared return type, as written.
     RetType,
-    /// A declared return that names the class the method is written in
-    /// (php's `self`, `static`), not a class by its spelling.
-    RetTypeEnclosing,
+    /// A written type (a declared return, a parameter's or property's
+    /// declared type) that names a class by where it is written.
+    TypeRelative(RelativeClass),
     TypeAnnot,
     /// A token whose text rides onto the match's def symbol as an attribute.
     SymAttr,
@@ -505,10 +521,10 @@ impl Capture {
             ["scope", "sub", "implicit_receiver"] => C::Scope(ScopeCap::SubImplicitReceiver),
             ["scope", "sub", "closed"] => C::Scope(ScopeCap::SubClosed),
             ["closure", "capture"] => C::ClosureCapture,
-            ["access", "write"] => C::AccessWrite,
             ["scope", k] if !k.is_empty() => C::Scope(ScopeCap::parse(k)?),
             ["context", k] => C::Context(ContextKind::parse(k)?),
             ["parent"] => C::Parent,
+            ["parent", "super"] => C::ParentSuper,
             ["import"] => C::Import(ImportCap::Statement),
             ["import", k] if !k.is_empty() => C::Import(ImportCap::parse(k)?),
             ["alias", k] => C::Alias(AliasPart::parse(k)?),
@@ -524,6 +540,8 @@ impl Capture {
             ["expr", "member"] => C::Expr(ExprCap::Member),
             ["expr", "construct"] => C::Expr(ExprCap::Construct),
             ["expr", "class"] => C::Expr(ExprCap::Class),
+            ["expr", "wrapper"] => C::Expr(ExprCap::Wrapper),
+            ["expr", "wrapper", "inner"] => C::Expr(ExprCap::WrapperInner),
             ["obs", k] => C::Obs(ObsKind::parse(k)?),
             ["narrow", k] => C::Narrow(NarrowCap::parse(k)?),
             ["move", k] => C::Move(MoveCap::parse(k)?),
@@ -547,8 +565,8 @@ impl Capture {
             ["qualifier"] => C::Qualifier,
             ["ool", "def"] => C::OolDef,
             ["rettype"] => C::RetType,
-            ["rettype", "enclosing"] => C::RetTypeEnclosing,
             ["type", "annot"] => C::TypeAnnot,
+            ["type", k] => C::TypeRelative(RelativeClass::parse(k)?),
             ["sym", "attr"] => C::SymAttr,
             ["spec", "primary"] => C::SpecPrimary,
             ["ns", "inline"] => C::NsInline,
@@ -576,7 +594,6 @@ impl fmt::Display for Capture {
             C::Def { kind, part: DefPart::Anchor } => write!(f, "def.{kind}.anchor"),
             C::DefPair => f.write_str("def.pair"),
             C::DefHoist => f.write_str("def.hoist"),
-            C::AccessWrite => f.write_str("access.write"),
             C::ClosureCapture => f.write_str("closure.capture"),
             C::Def { kind, part: DefPart::Receiver } => write!(f, "def.{kind}.receiver"),
             C::Ref(k) => write!(f, "ref.{k}"),
@@ -584,6 +601,7 @@ impl fmt::Display for Capture {
             C::Scope(k) => family(f, "scope", k.spelling()),
             C::Context(k) => write!(f, "context.{k}"),
             C::Parent => f.write_str("parent"),
+            C::ParentSuper => f.write_str("parent.super"),
             C::Import(k) => family(f, "import", k.spelling()),
             C::Alias(k) => write!(f, "alias.{k}"),
             C::MacroAlias(k) => write!(f, "macro.alias.{k}"),
@@ -598,6 +616,8 @@ impl fmt::Display for Capture {
             C::Expr(ExprCap::Member) => f.write_str("expr.member"),
             C::Expr(ExprCap::Construct) => f.write_str("expr.construct"),
             C::Expr(ExprCap::Class) => f.write_str("expr.class"),
+            C::Expr(ExprCap::Wrapper) => f.write_str("expr.wrapper"),
+            C::Expr(ExprCap::WrapperInner) => f.write_str("expr.wrapper.inner"),
             C::Obs(k) => write!(f, "obs.{k}"),
             C::Narrow(k) => write!(f, "narrow.{k}"),
             C::Move(k) => write!(f, "move.{k}"),
@@ -617,7 +637,7 @@ impl fmt::Display for Capture {
             C::Qualifier => f.write_str("qualifier"),
             C::OolDef => f.write_str("ool.def"),
             C::RetType => f.write_str("rettype"),
-            C::RetTypeEnclosing => f.write_str("rettype.enclosing"),
+            C::TypeRelative(k) => write!(f, "type.{k}"),
             C::TypeAnnot => f.write_str("type.annot"),
             C::SymAttr => f.write_str("sym.attr"),
             C::SpecPrimary => f.write_str("spec.primary"),
@@ -703,6 +723,13 @@ impl DefCap {
                 SymKind::Variable
             }
         }
+    }
+
+    /// A def every assignment of a name mints (`@def.var`,
+    /// `@def.assigned`): a more specific def at the same token (R's
+    /// `f <- function…` is a sub) stands in for it.
+    pub fn is_general(self) -> bool {
+        matches!(self, DefCap::Var | DefCap::Assigned)
     }
 
     /// The structural marker a def of this kind carries onto

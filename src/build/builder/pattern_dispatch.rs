@@ -113,6 +113,7 @@ fn cached_pattern_query(source: &str) -> Result<&'static Query, String> {
                     ));
                 }
             }
+            crate::build::query_predicates::check_source(source)?;
             crate::build::query_predicates::check(&q, &language, &[RECEIVER_ISA])?;
             let leaked: &'static Query = Box::leak(Box::new(q));
             Ok(leaked)

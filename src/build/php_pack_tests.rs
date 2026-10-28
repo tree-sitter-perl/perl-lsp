@@ -4,9 +4,6 @@ use super::*;
 use crate::build::packs::php_pack;
 use crate::model::file_analysis::{FileAnalysis, SymKind};
 
-// TODO(language-stamped-at-assembly): the driver stamps `language`, so an
-// analysis assembled without it (other packs' test helpers) routes as the
-// host; the stamp belongs where the skeleton is assembled.
 fn php(src: &str) -> FileAnalysis {
     crate::build::language_driver::LanguageRegistry::compiled()
         .for_path(std::path::Path::new("t.php"))
@@ -580,8 +577,25 @@ fn the_outline_lists_properties_under_their_class() {
     assert!(ctor.children.is_empty(), "the constructor lists none of its promoted properties");
 }
 
+/// A property's hover names it as it is listed, `$` and all.
+#[test]
+fn a_property_hovers_by_its_listed_name() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let path = std::path::PathBuf::from("/fake/php/App/Order.php");
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), php(MEMBERS));
+    let file = idx.workspace_file_for_test(&path).unwrap();
+    let store = OpenDocs::new();
+    let at = tree_sitter::Point { row: 6, column: 17 };
+    let cs = resolve(&store, &file, FileKey::Path(path), at, Some(&idx), OverrideScope::default()).with_source(MEMBERS);
+    let hover = crate::lsp::symbols::pack_hover_markdown(&cs, "php").unwrap();
+    assert!(hover.contains("\n$total: "), "{hover}");
+}
+
 /// Rename from a property's declaration rewrites its bare name, never the
-/// `$`, and never the method that shares the name.
+/// `$` (a typed `$` is the sigil, not part of the name), and never the
+/// method that shares the name.
 #[test]
 fn a_property_renames_from_its_declaration() {
     use crate::index::open_docs::{FileKey, OpenDocs};
@@ -596,7 +610,7 @@ fn a_property_renames_from_its_declaration() {
         let at = tree_sitter::Point { row, column };
         let cs = resolve(&store, &file, FileKey::Path(path.clone()), at, Some(&idx), OverrideScope::default());
         let mut sites: Vec<(usize, usize, usize, String)> = cs
-            .rename_edits("label")
+            .rename_edits("$label")
             .unwrap()
             .into_iter()
             .map(|(loc, text)| (loc.span.start.row, loc.span.start.column, loc.span.end.column, text))
@@ -1224,6 +1238,37 @@ fn a_declared_return_is_the_callables_value() {
     assert_eq!(fa.sub_return_type_at_arity("make", Some(0)), builder, "a function's declared return");
 }
 
+/// `self` and `static` name the class they are written in wherever a type
+/// is written: a parameter, a property, a promoted parameter, a closure's
+/// parameter, nullable or not.
+#[test]
+fn self_names_the_enclosing_class_in_every_written_type() {
+    use crate::model::file_analysis::RefKind;
+    let fa = php("<?php
+namespace App;
+
+class Node {
+    private ?self $next;
+    public function __construct(private self $peer) {}
+    public function link(self $other) {
+        $other->hop();
+        $this->next->hop();
+        $this->peer->hop();
+        $f = function (?self $n) { $n->hop(); };
+    }
+    public function hop() {}
+}
+");
+    let receivers: Vec<Option<String>> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "hop")
+        .map(|r| fa.method_call_invocant_class(r, None))
+        .collect();
+    let node = || Some("App\\Node".to_string());
+    assert_eq!(receivers, [node(), node(), node(), node()]);
+}
+
 /// A call's value is its callee's declared return, so a chain of calls
 /// types hop by hop: every receiver in `$this->with()->again()->…->tick()`
 /// is the class the previous call returns, and a free call's value starts
@@ -1382,6 +1427,32 @@ class Timer {
 }
 ";
 
+/// A body that sees no variable around it answers no type for one: a
+/// function's `$config` is not the script's, and a method's bare `$peer`
+/// is not the property a promoted parameter declares.
+#[test]
+fn a_closed_body_types_no_variable_of_the_code_around_it() {
+    use crate::model::file_analysis::InferredType as T;
+    let src = "<?php
+namespace App;
+
+class Clock { public function tick() {} }
+function clock(): Clock {}
+
+$config = clock();
+function f() { return $config; }
+class Box {
+    public function __construct(private Clock $peer) {}
+    public function m() { return $peer; }
+}
+";
+    let fa = php(src);
+    let clock = Some(T::ClassName("App\\Clock".into()));
+    assert_eq!(fa.inferred_type_via_bag("config", at(src, "; }", 0)), None);
+    assert_eq!(fa.inferred_type_via_bag("config", at(src, "\nfunction f", 0)), clock, "the script's own");
+    assert_eq!(fa.inferred_type_via_bag("peer", at(src, "; }\n}", 0)), None);
+}
+
 /// (name, row, column) of every local `Variable` the analysis declares.
 fn locals(fa: &FileAnalysis) -> Vec<(String, usize, usize)> {
     fa.symbols()
@@ -1491,6 +1562,41 @@ fn a_write_highlights_as_a_write() {
     assert_eq!(clock, [(17, AccessKind::Write)]);
 }
 
+/// An assignment writes the place its left side denotes: `$this->p = v`
+/// gives the property `v`'s value and writes its token, and a compound
+/// write writes it too.
+#[test]
+fn an_assignment_writes_the_member_its_left_side_reads() {
+    use crate::model::file_analysis::{AccessKind, RefKind};
+    let fa = php("<?php
+namespace App;
+
+class Clock { public function tick() {} }
+function clock(): Clock {}
+
+class Box {
+    public $c;
+    public $n;
+    public function fill() {
+        $this->c = clock();
+        $this->n += 1;
+        $this->c->tick();
+    }
+}
+");
+    let access = |name: &str| -> Vec<(usize, AccessKind)> {
+        fa.refs()
+            .iter()
+            .filter(|r| matches!(r.kind, RefKind::FieldAccess { .. }) && r.target_name == name)
+            .map(|r| (r.span.start.row, r.access))
+            .collect()
+    };
+    assert_eq!(access("c"), [(10, AccessKind::Write), (12, AccessKind::Read)]);
+    assert_eq!(access("n"), [(11, AccessKind::Write)]);
+    let tick = fa.refs().iter().find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "tick").unwrap();
+    assert_eq!(fa.method_call_invocant_class(tick, None).as_deref(), Some("App\\Clock"));
+}
+
 /// A function sees no variable of the file around it: the script's
 /// `$config` and the function's are two variables.
 #[test]
@@ -1569,6 +1675,62 @@ fn a_construction_is_an_instance_of_its_class() {
     assert_eq!(ty("f"), class("Lib\\Clock"), "the class a variable holds");
     assert_eq!(ty("h"), class("App\\class@anonymous:20:18"));
     assert_eq!(ty("i"), class("App\\Box"));
+}
+
+const PARENT: &str = "<?php
+namespace App;
+interface Shape {}
+trait Named { public function name(): string { return ''; } }
+class Base {
+    public function base(): self { return $this; }
+}
+class Kid extends Base implements Shape {
+    use Named;
+    public parent $p;
+    public function own(parent $q): ?parent {
+        $a = parent::base();
+        $b = parent::class;
+        $c = new parent();
+        $d = $q;
+        $e = $this->p;
+        return $a;
+    }
+}
+class Lone implements Shape {
+    public function f(): parent {
+        $x = new parent();
+        $y = parent::class;
+        $z = new $u();
+    }
+}
+";
+
+/// `parent` names the class the writing class extends, wherever it is
+/// written: a call's receiver, a class literal, a construction, and a
+/// written type. A class that extends nothing has no `parent`, whatever
+/// it implements or uses.
+#[test]
+fn parent_names_the_class_extended() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php(PARENT);
+    let base = Some(T::ClassName("App\\Base".into()));
+    let kid_end = at(PARENT, "        return $a;", 0);
+    let ty = |v: &str, at| fa.inferred_type_via_bag(v, at);
+    assert_eq!(ty("a", kid_end), base, "`parent::m()` dispatches on the extended class");
+    assert_eq!(ty("b", kid_end), base, "`parent::class`");
+    assert_eq!(ty("c", kid_end), base, "`new parent`");
+    assert_eq!(ty("d", kid_end), base, "a parameter typed `parent`");
+    assert_eq!(ty("e", kid_end), base, "a property typed `parent`");
+    let ret = |class: &str, m: &str| fa.find_method_return_type(class, m, None, None);
+    assert_eq!(ret("App\\Kid", "own"), base, "a nullable `parent` return");
+    // an interface or a trait is never what `parent` names
+    let lone_end = at(PARENT, "        $z = new $u();", 0);
+    assert_eq!(ty("x", lone_end), None);
+    assert_eq!(ty("y", lone_end), None);
+    // a construction whose class nothing types answers nothing, and its
+    // ref on the class token is not its own receiver
+    assert_eq!(ty("z", at(PARENT, "$z = new $u();\n", 15)), None);
+    assert_eq!(ret("App\\Lone", "f"), None);
 }
 
 /// A construction is an `Invoke` of the constructor on the class it
@@ -1662,6 +1824,22 @@ fn an_anonymous_class_is_a_class_of_its_own() {
     let classes: Vec<String> =
         two.symbols().iter().filter(|s| s.kind == SymKind::Class).map(|s| s.name.clone()).collect();
     assert_eq!(classes, ["class@anonymous:2:10", "class@anonymous:3:10"]);
+}
+
+/// An anonymous class has no spelling another file could write, so it is
+/// not part of the file's cross-file surface: two files with one at the
+/// same place keep two classes.
+#[cfg(feature = "php")]
+#[test]
+fn an_anonymous_class_is_not_linkage_visible() {
+    let fa = php(NEW);
+    let anon = fa.symbols().iter().find(|s| s.name == "App\\class@anonymous:20:18").unwrap();
+    assert!(!fa.is_linkage_visible(anon));
+    let base = fa.symbols().iter().find(|s| s.name == "App\\Base").unwrap();
+    assert!(fa.is_linkage_visible(base));
+    let ws = Workspace::new(&[("/fake/php/App/Box.php", NEW), ("/fake/php/App/Crate.php", NEW)]);
+    assert_eq!(ws.defs("Box.php", "hi();", 0), vec![site("Box.php", 20, 28)]);
+    assert_eq!(ws.defs("Crate.php", "hi();", 0), vec![site("Crate.php", 20, 28)]);
 }
 
 /// The constructor a construction calls is the method the document marks,
@@ -1955,3 +2133,4 @@ fn a_relative_qualified_parent_lands_on_its_resolved_class() {
     assert_eq!(hover.as_deref(), Some("App/Sub/Model.php"));
     assert!(php_widening(&idx, user.0).is_empty());
 }
+

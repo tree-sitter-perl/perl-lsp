@@ -46,8 +46,13 @@ impl FileAnalysis {
     /// that annotation must NOT hide it, so key off scope, not package.
     /// Shared by cross-file registration (`ModuleIndex::register_symbols`)
     /// and include-closure completion gathering, so "resolvable" and
-    /// "offered" never drift apart.
+    /// "offered" never drift apart. A def the pack named for it
+    /// (`ANONYMOUS`: an anonymous class, union or sub) has no spelling
+    /// another file could write, so it is never part of the surface.
     pub fn is_linkage_visible(&self, sym: &Symbol) -> bool {
+        if sym.flags.contains(SymbolFlags::ANONYMOUS) {
+            return false;
+        }
         match sym.kind {
             SymKind::Class | SymKind::Sub => true,
             // An anonymous-enum constant leaks to file scope the same way an

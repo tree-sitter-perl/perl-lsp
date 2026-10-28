@@ -278,10 +278,12 @@ fn calling_a_local_class_constructs_it() {
 /// still holds its operand's value.
 #[test]
 fn a_value_inside_the_right_hand_side_is_not_the_variables() {
-    let src = "class Widget:\n    pass\n\nw = Widget()[0]\np = (Widget())\n";
+    let src = "class Widget:\n    pass\n\nw = Widget()[0]\np = (Widget())\nq = ((p))\n";
     let fa = py_in(src, None);
-    assert_eq!(fa.inferred_type_via_bag("w", Point::new(5, 0)), None);
-    assert_eq!(fa.inferred_type_via_bag("p", Point::new(5, 0)), Some(InferredType::ClassName("Widget".to_string())));
+    let widget = Some(InferredType::ClassName("Widget".to_string()));
+    assert_eq!(fa.inferred_type_via_bag("w", Point::new(6, 0)), None);
+    assert_eq!(fa.inferred_type_via_bag("p", Point::new(6, 0)), widget);
+    assert_eq!(fa.inferred_type_via_bag("q", Point::new(6, 0)), widget, "parentheses hold a variable's value too");
 }
 
 /// Calling a class constructs it, so the call is a reference to the class
@@ -510,8 +512,9 @@ class Other(Outer.Inner):
     assert_eq!(fa.inferred_type_via_bag("child", Point::new(5, 4)), Some(InferredType::ClassName("pkg.mod.Outer.Inner".into())));
     assert_eq!(fa.declared_parents("pkg.mod.Outer.Sub"), ["pkg.mod.Outer.Inner"]);
     // Sub's body and build's body see past Outer to the module's class
-    assert_eq!(fa.inferred_type_via_bag("peer", Point::new(7, 8)), Some(InferredType::ClassName("pkg.mod.Inner".into())));
-    assert_eq!(fa.inferred_type_via_bag("x", Point::new(9, 8)), Some(InferredType::ClassName("pkg.mod.Inner".into())));
+    // (each declared type holds from the end of its write)
+    assert_eq!(fa.inferred_type_via_bag("peer", Point::new(7, 28)), Some(InferredType::ClassName("pkg.mod.Inner".into())));
+    assert_eq!(fa.inferred_type_via_bag("x", Point::new(9, 25)), Some(InferredType::ClassName("pkg.mod.Inner".into())));
     assert_eq!(fa.declared_parents("pkg.mod.Local"), ["pkg.mod.Inner"]);
     // a dotted spelling hangs its leaf off the class its head names
     assert_eq!(fa.declared_parents("pkg.mod.Other"), ["pkg.mod.Outer.Inner"]);
@@ -1457,4 +1460,94 @@ make().spin()
         let (defs, _, _) = landing(&idx, &path, at);
         assert_eq!(defs, [("widgets.py".to_string(), 1)], "goto-def on spin at {at:?}");
     }
+}
+
+/// An assignment's left side is written: `self.n = 0` and `self.n += 1`
+/// write the member, and a read of it stays a read.
+#[test]
+fn a_member_an_assignment_writes_is_a_write() {
+    use crate::model::file_analysis::{AccessKind, RefKind};
+    let fa = py_in(
+        "class C:
+    def __init__(self):
+        self.n = 0
+    def bump(self):
+        self.n += 1
+        return self.n
+",
+        None,
+    );
+    let n: Vec<(usize, AccessKind)> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::FieldAccess { .. }) && r.target_name == "n")
+        .map(|r| (r.span.start.row, r.access))
+        .collect();
+    assert_eq!(n, [(2, AccessKind::Write), (4, AccessKind::Write), (5, AccessKind::Read)]);
+}
+
+/// A write lands once the assignment has read what it reads, and replaces
+/// what the variable held: `n = n.nxt` reads the old `n`, and after
+/// `x = {}` the variable is no longer the `Foo` it was.
+#[test]
+fn a_write_replaces_the_value_after_its_right_side_is_read() {
+    let src = "class Foo:
+    nxt: Foo
+def f():
+    x = Foo()
+    x = {}
+    n = Foo()
+    n = n.nxt
+    return x
+";
+    let fa = py_in(src, None);
+    let foo = Some(InferredType::ClassName("Foo".into()));
+    assert_ne!(fa.inferred_type_via_bag("x", Point::new(7, 11)), foo, "the later write replaces it");
+    assert_eq!(fa.inferred_type_via_bag("n", Point::new(7, 4)), foo, "the right side read the old `n`");
+}
+
+/// A variable is the function's it is assigned in: the first write
+/// declares it, and every later write and every read is that one variable.
+/// A nested function that assigns the name makes its own, and reads the
+/// one around it until it does.
+#[test]
+fn a_variable_is_one_across_its_writes_in_its_function() {
+    use crate::model::file_analysis::{RefKind, SymKind};
+    let fa = py_in(
+        "x = 0
+def f():
+    x = 1
+    if x:
+        x = 2
+    def g():
+        return x
+    def h():
+        x = 3
+        return x
+    return x
+",
+        None,
+    );
+    let decls: Vec<(usize, usize)> = fa
+        .symbols()
+        .iter()
+        .filter(|s| s.kind == SymKind::Variable && s.name == "x")
+        .map(|s| (s.selection_span.start.row, s.selection_span.start.column))
+        .collect();
+    assert_eq!(decls, [(0, 0), (2, 4), (8, 8)], "the module's, f's and h's");
+    let decl_row = |r: &crate::model::file_analysis::Ref| {
+        r.resolved_symbol().map(|sid| fa.symbol(sid).selection_span.start.row)
+    };
+    let mut uses: Vec<(usize, Option<usize>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::Variable) && r.target_name == "x")
+        .map(|r| (r.span.start.row, decl_row(r)))
+        .collect();
+    uses.sort();
+    assert_eq!(
+        uses,
+        [(3, Some(2)), (4, Some(2)), (6, Some(2)), (9, Some(8)), (10, Some(2))],
+        "the write in a branch, g's read and f's return are f's; h's are h's"
+    );
 }

@@ -769,36 +769,6 @@ impl FileAnalysis {
             }
         }
 
-        // Function-call receiver (`create_user(5)->name`) the exact-span
-        // read found no value for: the ref spans only the function NAME, so
-        // chase it via `RefTable::call_at_start` (start-anchored, contained
-        // in the invocant). It runs after the exact-span read because the
-        // start-anchored index holds the INNERMOST call at a point: under a
-        // chain that starts with a call (`f()->a->b`, `b`'s receiver is
-        // `f()->a`) the function is a strict prefix of the receiver — the
-        // wrong hop, which only the receiver's own value can rule out.
-        if let Some(span) = invocant_span {
-            if let Some(recv_idx) = self.refs.call_at_start(&span.start) {
-                let recv_span = self.refs[recv_idx].span;
-                let contained = recv_span.start == span.start
-                    && (recv_span.end.row, recv_span.end.column)
-                        <= (span.end.row, span.end.column);
-                let is_self = std::ptr::eq(&self.refs[recv_idx], r);
-                if contained && !is_self {
-                    if let RefKind::FunctionCall { .. } = &self.refs[recv_idx].kind {
-                        if let Some(t) = self.sub_return_type_at_arity(
-                            &self.refs[recv_idx].target_name,
-                            Some(0),
-                        ) {
-                            if self.dispatch_class_of(&t, module_index).is_some() {
-                                return Some(t);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         // Cross-file chain-receiver fallback. When the inner receiver's
         // class is only knowable once other modules load (`$c->minion->
         // enqueue` at enrichment), the build-time `Expr(span)` witness
@@ -808,37 +778,34 @@ impl FileAnalysis {
         // `find_method_return_type` (ancestors + cross-file bridges via
         // the registry). This is the one structure-from-refs step the
         // bag can't pre-record, so it lives here, not in the builder.
+        // The receiver is the call spanning exactly the invocant — never
+        // a call that merely opens it, which under `$x->a->b->c` is an
+        // earlier hop, and never the call itself: a construction's ref
+        // sits on its class token, which is also its receiver.
         if let Some(span) = invocant_span {
-            if let Some(recv_idx) = self.refs.call_at_start(&span.start) {
-                let recv_span = self.refs[recv_idx].span;
-                let contained = recv_span.start == span.start
-                    && (recv_span.end.row, recv_span.end.column)
-                        <= (span.end.row, span.end.column);
-                let is_self = std::ptr::eq(&self.refs[recv_idx], r);
-                if contained && !is_self {
-                    if let RefKind::MethodCall { .. } = &self.refs[recv_idx].kind {
-                        let recv = &self.refs[recv_idx];
-                        if let Some(recv_class) =
-                            self.method_call_invocant_class(recv, module_index)
-                        {
-                            let recv_method = recv.unqualified_target_name(self.names());
-                            if crate::model::conventions::is_constructor_name(recv_method) {
-                                return Some(InferredType::ClassName(recv_class));
-                            }
-                            if let Some(t) = self.find_method_return_type(
-                                &recv_class,
-                                recv_method,
-                                module_index,
-                                None,
-                            ) {
-                                return Some(t);
-                            }
+            if let Some(recv_idx) = self.refs.call_spanning(*span).filter(|&i| !std::ptr::eq(&self.refs[i], r)) {
+                if let RefKind::MethodCall { .. } = &self.refs[recv_idx].kind {
+                    let recv = &self.refs[recv_idx];
+                    if let Some(recv_class) =
+                        self.method_call_invocant_class(recv, module_index)
+                    {
+                        let recv_method = recv.unqualified_target_name(self.names());
+                        if crate::model::conventions::is_constructor_name(recv_method) {
+                            return Some(InferredType::ClassName(recv_class));
                         }
-                        // A chain receiver's invocant text is the whole
-                        // receiver expression, never a variable or
-                        // bareword — the trailing rungs cannot answer it.
-                        return None;
+                        if let Some(t) = self.find_method_return_type(
+                            &recv_class,
+                            recv_method,
+                            module_index,
+                            None,
+                        ) {
+                            return Some(t);
+                        }
                     }
+                    // A chain receiver's invocant text is the whole
+                    // receiver expression, never a variable or
+                    // bareword — the trailing rungs cannot answer it.
+                    return None;
                 }
             }
         }

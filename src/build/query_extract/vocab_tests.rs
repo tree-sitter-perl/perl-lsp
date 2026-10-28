@@ -109,3 +109,12 @@ fn load_err(query_source: &'static str) -> String {
     let tree = parser.parse("sub f {}", None).unwrap();
     extract(&tree, b"sub f {}", &pack).unwrap_err()
 }
+
+/// A node written with a fourth capture fails the load: tree-sitter would
+/// drop it without a word.
+#[test]
+fn a_fourth_capture_on_one_node_fails_the_load() {
+    let err = load_err("(subroutine_declaration_statement\n  name: (_) @def.sub.name @_a @_b @_c) @def.sub");
+    assert!(err.contains("line 2: a node holds at most three captures"), "{err}");
+    assert!(crate::build::query_predicates::check_source("(x) @a @b @c ; @d @e\n(y \"@q @r\" @s) @t").is_ok());
+}

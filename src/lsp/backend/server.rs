@@ -1074,11 +1074,6 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         let new_name = &params.new_name;
-        if !crate::index::resolve::is_valid_rename_name(new_name) {
-            return Err(tower_lsp::jsonrpc::Error::invalid_params(
-                "rename: the new name must not be empty or whitespace",
-            ));
-        }
         self.await_open_ready(uri, WaitPolicy::Complete).await;
         // Cross-file rename edits are act-on-able: a cold-index rename that
         // silently missed files would corrupt the workspace. Wait Complete.
@@ -1090,6 +1085,11 @@ impl LanguageServer for Backend {
             Some(doc) => Arc::clone(&doc.analysis),
             None => return self.not_ready_or_null(uri),
         };
+        if !crate::index::resolve::is_valid_rename_name(new_name, analysis.names()) {
+            return Err(tower_lsp::jsonrpc::Error::invalid_params(
+                "rename: the new name must not be empty or whitespace",
+            ));
+        }
 
         let point = symbols::position_to_point(pos);
         // Rename is the references image + policy, projected from the same
