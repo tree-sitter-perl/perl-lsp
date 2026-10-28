@@ -225,3 +225,26 @@ fn a_held_function_head_resolves_a_call_to_a_sub_defined_below() {
     assert!(matches!(r.kind, RefKind::FunctionCall));
     assert_eq!(r.resolved_package(), Some("main"), "the installed head is pinned like a walked one");
 }
+
+#[test]
+fn a_held_method_head_dispatches_like_a_walked_one() {
+    // `new Thing(1)` above `package Thing`: the file alone reads it
+    // `new(Thing(1))`; the index decides it a method call. The installed
+    // head carries the dispatch target finalize freezes on a walked
+    // `Thing->new(1)`: the local `Thing::new`.
+    let src = "package main;\nmy $a = new Thing(1);\npackage Thing;\nsub new { bless {}, shift }\n";
+    let fa = build_fa(src);
+    let verb = Point::new(1, 9);
+    assert!(matches!(fa.ref_at(verb).map(|r| &r.kind), Some(RefKind::FunctionCall)));
+    let idx = ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(std::path::PathBuf::from("/tmp/qa_ind/thing.pl"), build_fa(src));
+    let view = fa.decided_with(&idx).expect("the index moves the site off its fallback");
+    let r = view.ref_at(verb).expect("the verb's head");
+    assert!(matches!(r.kind, RefKind::MethodCall { .. }));
+    let new = view.symbols().iter().find(|s| s.name == "new").expect("Thing::new").id;
+    assert!(
+        matches!(r.method_target(), Some(MethodTarget::Local { sym_id, invocant_class }) if *sym_id == new && invocant_class == "Thing"),
+        "{:?}",
+        r.method_target()
+    );
+}

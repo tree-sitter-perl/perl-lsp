@@ -409,6 +409,28 @@ impl FileAnalysis {
         verdict
     }
 
+    /// The dispatch target `stamp_method_call_targets` freezes on a member
+    /// call: its invocant class, and the member found through its ancestry.
+    pub(crate) fn member_call_target(&self, r: &Ref, module_index: Option<&dyn CrossFileLookup>) -> Option<MethodTarget> {
+        let cn = self.method_call_invocant_class(r, module_index)?;
+        let member = r.unqualified_target_name(self.names());
+        let resolved = match &r.kind {
+            RefKind::FieldAccess { .. } => self.resolve_field_in_ancestors(&cn, member, module_index),
+            _ => self.resolve_method_in_ancestors(&cn, member, module_index),
+        };
+        Some(match resolved {
+            Some(MethodResolution::Local { sym_id, .. }) => MethodTarget::Local { sym_id, invocant_class: cn },
+            // Method found cross-file, OR the invocant class is known but the
+            // method isn't found on it locally and the class has cross-file
+            // parents / a cross-file body the index may carry. Either way the
+            // invocant froze, so keep the edge (CrossFile); the rename chain
+            // still gates which targets it matches. A class with no method and
+            // no parents still resolved its invocant — the edge records that
+            // fact; find_def's method-not-found arm returns None honestly.
+            _ => MethodTarget::CrossFile { invocant_class: cn },
+        })
+    }
+
     pub(crate) fn stamp_method_call_targets(&mut self, module_index: Option<&dyn CrossFileLookup>) {
         // Collect resolutions first; `method_call_invocant_class` /
         // `resolve_method_in_ancestors` borrow `&self`, so we can't hold a
@@ -456,33 +478,7 @@ impl FileAnalysis {
             // than stopping at a hit), so apportioning the pass's cost by ref
             // COUNT would misattribute it in an unknown direction.
             let _t0 = std::time::Instant::now();
-            let target = (|| self
-                .method_call_invocant_class(r, module_index)
-                .map(|cn| {
-                    let member = r.unqualified_target_name(self.names());
-                    let resolved = match &r.kind {
-                        RefKind::FieldAccess { .. } => {
-                            self.resolve_field_in_ancestors(&cn, member, module_index)
-                        }
-                        _ => self.resolve_method_in_ancestors(&cn, member, module_index),
-                    };
-                    match resolved {
-                        Some(MethodResolution::Local { sym_id, .. }) => MethodTarget::Local {
-                            sym_id,
-                            invocant_class: cn,
-                        },
-                        // Method found cross-file, OR the invocant class is
-                        // known but the method isn't found on it locally and
-                        // the class has cross-file parents / a cross-file
-                        // body the index may carry. Either way the invocant
-                        // froze, so keep the edge (CrossFile); the rename
-                        // chain still gates which targets it matches. A class
-                        // with no method and no parents still resolved its
-                        // invocant — the edge records that fact; find_def's
-                        // method-not-found arm returns None honestly.
-                        _ => MethodTarget::CrossFile { invocant_class: cn },
-                    }
-                }))();
+            let target = self.member_call_target(r, module_index);
             if crate::util::ghost_stats::enabled() {
                 let ns = _t0.elapsed().as_nanos();
                 crate::util::ghost_stats::add_ns(

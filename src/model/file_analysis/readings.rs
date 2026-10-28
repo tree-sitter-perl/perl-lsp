@@ -341,6 +341,35 @@ impl FileAnalysis {
                 self.hold_witness(question, arm, HeldWitness::Plain(w));
             }
         }
+        // A held member call is frozen as finalize freezes a walked one, so
+        // a view installing it dispatches the same way.
+        let target = |fa: &Self, r: &Ref| {
+            r.member_site().filter(|site| !site.invocant.is_bridged())?;
+            fa.member_call_target(r, None)
+        };
+        let slot_targets: Vec<(usize, Option<MethodTarget>, Option<MethodTarget>)> = self
+            .readings
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (i, target(self, &s.then), target(self, &s.otherwise)))
+            .collect();
+        let held_targets: Vec<(usize, Option<MethodTarget>)> =
+            self.readings.refs.iter().enumerate().map(|(i, h)| (i, target(self, &h.entry))).collect();
+        for (i, then, otherwise) in slot_targets {
+            let slot = &mut self.readings.slots[i];
+            if let Some(t) = then {
+                slot.then.bind_method(t);
+            }
+            if let Some(t) = otherwise {
+                slot.otherwise.bind_method(t);
+            }
+        }
+        for (i, t) in held_targets {
+            if let Some(t) = t {
+                self.readings.refs[i].entry.bind_method(t);
+            }
+        }
         self.readings.base = BaseLengths {
             symbols: self.symbols.len() as u32,
             refs: self.refs.len() as u32,
@@ -394,9 +423,6 @@ impl FileAnalysis {
         self.symbols.truncate(base.symbols as usize);
         self.refs.truncate(base.refs as usize);
         self.witnesses.truncate(base.witnesses as usize);
-        // TODO(held-method-stamp): a view installing the non-fallback method
-        // head gets it without the local dispatch target finalize stamps on
-        // walked method calls; the function heads are pinned by the builder.
         for s in &readings.slots {
             let arm = picks.get(s.question as usize).copied().flatten().or(readings.fallback(s.question));
             self.refs.as_mut_slice()[s.slot as usize] = match arm {
