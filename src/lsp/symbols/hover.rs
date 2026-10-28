@@ -28,8 +28,12 @@ pub fn pack_hover_markdown(
         .and_then(|r| Some((r, crate::model::file_analysis::MemberKind::of_ref(&r.kind)?)))
     {
         if let Some(midx) = module_index {
-            if let Some(cn) = analysis.method_call_invocant_class(r, Some(midx)) {
-                let field = r.unqualified_target_name(analysis.names());
+            let called = analysis.method_call_invocant_class(r, Some(midx)).and_then(|cn| {
+                let member = analysis.called_member(r, &cn, Some(midx))?;
+                Some((cn, member))
+            });
+            if let Some((cn, field)) = called {
+                let field: &str = &field;
                 // The receiver's full VALUE (not just its dispatch class):
                 // a template instance's args refine a param-shaped member
                 // type (`T get()` on a `Box<int>` receiver → `int`) — shown

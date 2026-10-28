@@ -473,13 +473,12 @@ impl FileAnalysis {
             let target = (|| self
                 .method_call_invocant_class(r, module_index)
                 .map(|cn| {
-                    let member = r.unqualified_target_name(self.names());
-                    let resolved = match &r.kind {
-                        RefKind::FieldAccess { .. } => {
-                            self.resolve_field_in_ancestors(&cn, member, module_index)
-                        }
-                        _ => self.resolve_method_in_ancestors(&cn, member, module_index),
+                    let want = match &r.kind {
+                        RefKind::FieldAccess { .. } => MemberKind::Value,
+                        _ => MemberKind::Callable,
                     };
+                    let resolved =
+                        self.resolve_member_key_in_ancestors(&cn, r.member_key(self.names()), module_index, want);
                     match resolved {
                         Some(MethodResolution::Local { sym_id, .. }) => MethodTarget::Local {
                             sym_id,

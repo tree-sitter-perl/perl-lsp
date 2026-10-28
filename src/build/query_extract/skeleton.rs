@@ -831,6 +831,9 @@ impl SkeletonAnalysis {
         // resolve via the SAME chase Perl uses — no bypass. Declared
         // returns need no fixpoint (the type is in the syntax); only the
         // edge-minting half of the fold's writeback is needed here.
+        // The class each class-naming receiver token names, which a
+        // construction's reference on that token takes as its name.
+        let named_class: std::collections::HashMap<Span, String>;
         {
             use crate::model::witnesses::{Witness, WitnessAttachment as WA, WitnessPayload as WP, WitnessSource};
             let mk = |att: WA, pay: WP, span: Span| Witness {
@@ -1011,6 +1014,7 @@ impl SkeletonAnalysis {
                 });
                 receiver_class.insert(r.span, class);
             }
+            named_class = receiver_class.clone();
             let calls_construct = self.names.class_call == crate::model::file_analysis::ClassCall::Constructs;
             let callee_sid: std::collections::HashMap<&str, SymbolId> = {
                 let mut m: std::collections::HashMap<&str, SymbolId> =
@@ -1060,17 +1064,17 @@ impl SkeletonAnalysis {
                 // time; a free call's callee is the file's own definition
                 // when it has one.
                 let (callee, receiver) = match site.receiver {
-                    Some(recv) => (
-                        crate::model::witnesses::Callee::Method {
-                            name: name.clone(),
-                            lookup: match receiver_class.get(&recv) {
-                                Some(class) => crate::model::witnesses::Lookup::Named(class.clone()),
-                                None => crate::model::witnesses::Lookup::Receiver,
-                            },
-                            constructs: site.constructs,
-                        },
-                        Some(WA::Expr(recv)),
-                    ),
+                    Some(recv) => {
+                        let lookup = match receiver_class.get(&recv) {
+                            Some(class) => crate::model::witnesses::Lookup::Named(class.clone()),
+                            None => crate::model::witnesses::Lookup::Receiver,
+                        };
+                        let callee = match site.constructs {
+                            true => crate::model::witnesses::Callee::Construct { lookup },
+                            false => crate::model::witnesses::Callee::Method { name: name.clone(), lookup, constructs: false },
+                        };
+                        (callee, Some(WA::Expr(recv)))
+                    }
                     None => match free_calls.get(&site.callee_at) {
                         Some((fq, identity)) => {
                             // under a use-map a class is filed under the
@@ -1319,7 +1323,18 @@ impl SkeletonAnalysis {
                     kind,
                     span,
                     scope: r.scope,
-                    target_name: r.name.clone(),
+                    // A construction's token names the class it constructs,
+                    // so its reference is retrieved under the class
+                    // reference's key.
+                    target_name: match r.constructs {
+                        true => r
+                            .invocant
+                            .as_ref()
+                            .and_then(|(at, _)| named_class.get(at))
+                            .cloned()
+                            .unwrap_or_else(|| r.name.clone()),
+                        false => r.name.clone(),
+                    },
                     access,
                     binding,
                     folded_from: None,

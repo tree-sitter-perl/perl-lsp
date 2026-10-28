@@ -1551,3 +1551,24 @@ def f():
         "the write in a branch, g's read and f's return are f's; h's are h's"
     );
 }
+
+/// `__init__` is the constructor by its flag, so a class that declares
+/// none constructs through the one it inherits; a module-level function
+/// of that name is no constructor.
+#[test]
+fn init_is_the_constructor_a_class_inherits() {
+    let m = module(&["app"], false);
+    let fa = py_in(
+        "class Base:\n    def __init__(self, n):\n        pass\nclass Kid(Base):\n    pass\nclass Deco:\n    @staticmethod\n    def __init__(self):\n        pass\ndef __init__():\n    pass\n",
+        Some(&m),
+    );
+    let flagged: Vec<(usize, bool)> = fa
+        .symbols()
+        .iter()
+        .filter(|s| s.name == "__init__")
+        .map(|s| (s.selection_span.start.row, s.is_constructor()))
+        .collect();
+    assert_eq!(flagged, [(1, true), (7, true), (9, false)]);
+    assert_eq!(fa.constructor_of("app.Kid", None), Some(("app.Base".to_string(), "__init__".to_string())));
+    assert_eq!(fa.constructor_of("app.Deco", None), Some(("app.Deco".to_string(), "__init__".to_string())));
+}

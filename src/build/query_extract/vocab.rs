@@ -232,8 +232,9 @@ pub enum ExprCap {
     Member,
     /// A construction (`new Foo(…)`): a call of the constructor of the
     /// class its `@member.recv` names, on the match's arguments, whose
-    /// value is an instance of that class. The constructor is the method
-    /// the document's `@mark.constructor` admits.
+    /// value is an instance of that class. The constructor is the member
+    /// flagged `@mark.constructor` in that class's MRO, asked by role where
+    /// the class is known; the site never names it.
     Construct,
     /// An expression whose value is the class its match's `@receiver.*`
     /// token names (php's `Foo::class`).

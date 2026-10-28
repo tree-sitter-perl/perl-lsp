@@ -133,8 +133,6 @@ struct ExtractState<'p> {
     /// driver had one: its dotted name is the section every declaration
     /// without a namespace of its own joins.
     file_module: Option<&'p FileModule>,
-    /// The constructor's name, as the document spells it.
-    constructor: Option<&'static str>,
 }
 
 pub use crate::model::file_analysis::FileModule;
@@ -318,7 +316,6 @@ pub fn extract_in(
         commands: Default::default(),
         imports: Default::default(),
         file_module,
-        constructor: compiled.constructor,
     };
     // A module named by its path is one section, the whole file.
     if let (Some(m), Some(sep)) = (file_module, pack.names.use_map_sep()) {

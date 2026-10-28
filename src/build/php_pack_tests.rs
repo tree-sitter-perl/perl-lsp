@@ -1734,8 +1734,8 @@ fn parent_names_the_class_extended() {
 }
 
 /// A construction is an `Invoke` of the constructor on the class it
-/// names, with its arguments, and a reference to the constructor on its
-/// class token.
+/// names, with its arguments, and a reference on its class token keyed by
+/// that class, never by a constructor name.
 #[test]
 fn a_construction_calls_its_classs_constructor() {
     use crate::model::witnesses::{Callee, Lookup, WitnessPayload};
@@ -1745,8 +1745,7 @@ fn a_construction_calls_its_classs_constructor() {
         .all()
         .iter()
         .filter_map(|w| match &w.payload {
-            WitnessPayload::Invoke { callee: Callee::Method { name, lookup, constructs: true }, args, .. } => {
-                assert_eq!(name, "__construct");
+            WitnessPayload::Invoke { callee: Callee::Construct { lookup }, args, .. } => {
                 let on = match lookup {
                     Lookup::Named(c) => c.clone(),
                     Lookup::Receiver => "$receiver".to_string(),
@@ -1771,9 +1770,28 @@ fn a_construction_calls_its_classs_constructor() {
     .map(|(c, n)| (c.to_string(), *n))
     .collect();
     assert_eq!(calls, want);
-    let sites: Vec<(usize, usize)> =
-        fa.refs().iter().filter(|r| r.constructs()).map(|r| (r.span.start.row, r.span.start.column)).collect();
-    assert_eq!(sites, [(11, 17), (12, 17), (13, 17), (13, 26), (14, 17), (15, 17), (17, 17), (19, 17)]);
+    let sites: Vec<(usize, usize, &str)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.constructs())
+        .map(|r| (r.span.start.row, r.span.start.column, r.target_name.as_str()))
+        .collect();
+    assert_eq!(
+        sites,
+        [
+            (11, 17, "Lib\\Clock"),
+            (12, 17, "Lib\\Clock"),
+            (13, 17, "App\\Box"),
+            (13, 26, "Lib\\Clock"),
+            (14, 17, "App\\Box"),
+            (15, 17, "App\\Base"),
+            // TODO(dynamic-construction-retrieval): no class is known where
+            // the site is minted, so it keys by its spelling and a
+            // cross-file references walk does not retrieve it.
+            (17, 17, "$cls"),
+            (19, 17, "App\\class@anonymous:20:18"),
+        ]
+    );
 }
 
 /// The class token of a construction is the class: goto-def and a class
@@ -1801,6 +1819,130 @@ fn a_construction_names_its_class_and_reaches_its_constructor() {
     let in_box: Vec<(usize, usize)> =
         renamed.iter().filter(|(f, ..)| f == "Box.php").map(|&(_, r, c)| (r, c)).collect();
     assert_eq!(in_box, [(3, 8), (9, 32), (10, 25), (11, 17), (12, 22), (13, 26), (16, 15)]);
+}
+
+const MODEL: &str = "<?php
+namespace Lib;
+
+class Model {
+    public function __construct(array $a = []) {}
+}
+";
+
+const MODELS: &str = "<?php
+namespace App;
+
+use Lib\\Model;
+
+class User extends Model {}
+class Post extends Model {
+    public function __construct() {}
+}
+class Admin extends User {}
+";
+
+const MAKES: &str = "<?php
+namespace App;
+
+$u = new User();
+$p = new Post();
+$a = new Admin();
+$m = new \\Lib\\Model([]);
+";
+
+/// A construction runs the constructor its class declares or inherits,
+/// found by its flag, in whichever file declares it: a constructor's
+/// references are the constructions of the classes that inherit it, from
+/// files that never spell its name, and a class that overrides it
+/// constructs through its own.
+#[cfg(feature = "php")]
+#[test]
+fn a_construction_reaches_an_inherited_constructor_across_files() {
+    let ws = Workspace::new(&[
+        ("/fake/php/Lib/Model.php", MODEL),
+        ("/fake/php/App/Models.php", MODELS),
+        ("/fake/php/App/Makes.php", MAKES),
+    ]);
+    // The override family (the default scope) takes in `Post`'s, whose
+    // constructions are its own.
+    let family = vec![
+        site("Makes.php", 3, 9),
+        site("Makes.php", 4, 9),
+        site("Makes.php", 5, 9),
+        site("Makes.php", 6, 9),
+        site("Model.php", 4, 20),
+        site("Models.php", 7, 20),
+    ];
+    assert_eq!(ws.ask("Model.php", "__construct", 0, |cs| Workspace::sites(cs.references())), family);
+    assert_eq!(ws.ask("Models.php", "__construct", 0, |cs| Workspace::sites(cs.references())), family);
+    // Dispatch keeps to the constructions that run it: `User` and `Admin`
+    // inherit `Model`'s, `Post` runs its own.
+    let dispatch = |file: &str| {
+        use crate::index::open_docs::FileKey;
+        use crate::index::resolve::{resolve, OverrideScope};
+        let (path, src) = ws.files.iter().find(|(p, _)| p.ends_with(file)).unwrap();
+        let fa = ws.idx.workspace_file_for_test(path).unwrap();
+        let cs = resolve(&ws.store, &fa, FileKey::Path(path.clone()), at(src, "__construct", 0), Some(&ws.idx), OverrideScope::Dispatch);
+        Workspace::sites(cs.references())
+    };
+    assert_eq!(
+        dispatch("Model.php"),
+        [site("Makes.php", 3, 9), site("Makes.php", 5, 9), site("Makes.php", 6, 9), site("Model.php", 4, 20)]
+    );
+    assert_eq!(dispatch("Models.php"), [site("Makes.php", 4, 9), site("Models.php", 7, 20)]);
+    // A constructor is retrieved under the classes that may construct
+    // through it, from the in-memory class graph.
+    let model = ws.idx.workspace_file_for_test(&std::path::PathBuf::from("/fake/php/Lib/Model.php")).unwrap();
+    let target = crate::index::resolve::TargetRef::method(
+        "__construct".into(),
+        "Lib\\Model".into(),
+        None,
+        &model,
+        Some(&ws.idx),
+        crate::index::resolve::OverrideScope::Dispatch,
+    );
+    let mut keys = target.retrieval_keys([], model.names());
+    keys.sort();
+    let mut want: Vec<String> = ["__construct", "Lib\\Model", "App\\User", "App\\Post", "App\\Admin"]
+        .iter()
+        .map(|n| crate::model::file_analysis::name_match_key(n, model.names()))
+        .collect();
+    want.sort();
+    want.dedup();
+    assert_eq!(keys, want);
+    // The stamp freezes the class each construction dispatches on, keyed by
+    // that class's identity.
+    let fa = ws.idx.workspace_file_for_test(&std::path::PathBuf::from("/fake/php/App/Makes.php")).unwrap();
+    let stamped: Vec<(&str, Option<&str>)> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.constructs())
+        .map(|r| (r.target_name.as_str(), r.method_target().map(|e| e.invocant_class())))
+        .collect();
+    assert_eq!(
+        stamped,
+        [
+            ("App\\User", Some("App\\User")),
+            ("App\\Post", Some("App\\Post")),
+            ("App\\Admin", Some("App\\Admin")),
+            ("Lib\\Model", Some("Lib\\Model")),
+        ]
+    );
+}
+
+/// A class constructs whether or not it declares a constructor, so a
+/// construction is never an unresolved method, whatever its class token
+/// spells.
+#[test]
+fn a_construction_is_never_an_unresolved_method() {
+    let fa = php("<?php\nclass Plain { public function go() {} }\n$p = new Plain();\nPlain::gone();\n");
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    let messages: Vec<String> = crate::lsp::symbols::collect_diagnostics(&fa, &idx, Default::default())
+        .into_iter()
+        .map(|d| d.message)
+        .collect();
+    // `gone` shows the lane runs on this class.
+    assert_eq!(messages, ["'gone' is not defined in Plain"]);
 }
 
 /// An anonymous class is a class of its own, named by where it is written:
@@ -1840,16 +1982,6 @@ fn an_anonymous_class_is_not_linkage_visible() {
     let ws = Workspace::new(&[("/fake/php/App/Box.php", NEW), ("/fake/php/App/Crate.php", NEW)]);
     assert_eq!(ws.defs("Box.php", "hi();", 0), vec![site("Box.php", 20, 28)]);
     assert_eq!(ws.defs("Crate.php", "hi();", 0), vec![site("Crate.php", 20, 28)]);
-}
-
-/// The constructor a construction calls is the method the document marks,
-/// and a document that constructs without marking one does not compile.
-#[test]
-fn a_construction_calls_the_method_the_document_marks() {
-    let lang: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP.into();
-    assert_eq!(super::cached_query(&lang, php_pack().query_source).unwrap().constructor, Some("__construct"));
-    let unmarked = super::cached_query(&lang, "(object_creation_expression) @expr.construct");
-    assert!(unmarked.is_err_and(|e| e.contains("@mark.constructor")));
 }
 
 /// `Foo()` calls the function `Foo` even where a class `Foo` is in scope:

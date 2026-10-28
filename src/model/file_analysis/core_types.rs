@@ -360,6 +360,8 @@ pub struct NameSpellings {
     pub imports: ImportRule,
     /// What calling a name that is a class does.
     pub class_call: ClassCall,
+    /// What a construction's reference to its constructor is keyed by.
+    pub construction: ConstructionKey,
     /// Which class a site's code belongs to (`FileAnalysis::package_at`).
     pub enclosing_class: EnclosingClass,
     /// Whether a member access reaches an instance's slots
@@ -417,6 +419,20 @@ pub enum EnclosingClass {
     /// The namespace in force: Perl's `package Foo;` makes the code after
     /// it Foo's, so the namespace lane answers.
     NamespaceInForce,
+}
+
+/// What a construction's reference to its constructor is keyed by, so a
+/// constructor's references know where to look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ConstructionKey {
+    /// The constructor's own name: the site calls it by name (Perl's
+    /// `Foo->new`), like any other call.
+    #[default]
+    Constructor,
+    /// The class the site spells (php's `new Foo`): the site never names
+    /// its constructor, so a constructor's references are retrieved under
+    /// the classes that construct through it (`RefKind::MethodCall::constructs`).
+    Class,
 }
 
 /// What a call whose callee names a class means in a language.
@@ -489,6 +505,7 @@ impl NameSpellings {
         member_namespace: MemberNamespace::PerFamily,
         imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
         class_call: ClassCall::FunctionCall,
+        construction: ConstructionKey::Constructor,
         enclosing_class: EnclosingClass::ScopeChain,
         instance_slots: InstanceSlots::Apart,
         functions: FunctionLookup::Global,
@@ -506,6 +523,7 @@ impl NameSpellings {
             member_namespace: MemberNamespace::PerFamily,
             imports: ImportRule { reach: ImportReach::Section, prefix: ImportPrefix::Absolute },
             class_call: ClassCall::FunctionCall,
+            construction: ConstructionKey::Constructor,
             enclosing_class: EnclosingClass::ScopeChain,
             instance_slots: InstanceSlots::Apart,
             functions: FunctionLookup::Global,
@@ -613,7 +631,7 @@ bitflags::bitflags! {
         /// instance's class.
         const TRAIT = 1 << 16;
         /// The method a construction invokes (Perl's `new`, php
-        /// `__construct`). A construction can reach it without naming it, so
+        /// `__construct`, python `__init__`). A construction can reach it without naming it, so
         /// no reference to it is not evidence that it is dead.
         const CONSTRUCTOR = 1 << 17;
         /// A callable declared for a composer to provide (a Perl role's
@@ -1151,6 +1169,44 @@ impl Symbol {
     }
 }
 
+/// What a member walk looks for on each class of an MRO: a member by its
+/// name, or the class's constructor — the callable its language flags
+/// `CONSTRUCTOR`, whatever it is called (`__construct`, `__init__`). A
+/// construction spells its class, never its constructor, so it asks by
+/// role (`Ref::member_key`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberKey<'a> {
+    Named(&'a str),
+    Constructor,
+}
+
+impl<'a> MemberKey<'a> {
+    /// Does `sym` answer this key (its name or its role)? The kind and
+    /// class gates stay the walk's.
+    pub fn admits(self, sym: &Symbol) -> bool {
+        match self {
+            MemberKey::Named(n) => sym.name == n,
+            MemberKey::Constructor => sym.is_constructor(),
+        }
+    }
+
+    /// The name this key asks for, when it asks by name: the lanes keyed
+    /// by name (the row prefilter, typeglob installs, plugin bridges)
+    /// answer only these.
+    pub fn name(self) -> Option<&'a str> {
+        match self {
+            MemberKey::Named(n) => Some(n),
+            MemberKey::Constructor => None,
+        }
+    }
+}
+
+impl<'a> From<&'a str> for MemberKey<'a> {
+    fn from(name: &'a str) -> Self {
+        MemberKey::Named(name)
+    }
+}
+
 /// Which family a member belongs to: a stored value or a callable. An ask
 /// carries the family of the fact that produced it, a declaration the
 /// family of its symbol kind (`docs/adr/member-kinds.md`).
@@ -1546,6 +1602,17 @@ impl Ref {
         matches!(self.kind, RefKind::MethodCall { constructs: true, .. })
     }
 
+    /// The member a member-site ref asks its class for: the one its token
+    /// names, or — at a construction, whose token spells the class — the
+    /// class's constructor.
+    pub fn member_key(&self, names: &NameSpellings) -> MemberKey<'_> {
+        if self.constructs() {
+            MemberKey::Constructor
+        } else {
+            MemberKey::Named(self.unqualified_target_name(names))
+        }
+    }
+
     /// Whether matching this ref against a target consults only the frozen
     /// build-time verdict on the ref itself. `false` means the matcher's
     /// fallback arm re-derives the verdict at query time through this FILE's
@@ -1863,8 +1930,11 @@ pub enum RefKind {
         named_by_string: bool,
         /// The site constructs an instance of the invocant's class (php's
         /// `new Foo(…)`): it calls the constructor, but its token spells
-        /// the class. A reference to the constructor that rename never
-        /// rewrites, and a cursor companion of the class's own reference.
+        /// the class, so `target_name` is the class identity (the class
+        /// reference's key) and the member is asked by role
+        /// (`MemberKey::Constructor`). A reference to the constructor that
+        /// rename never rewrites, and a cursor companion of the class's own
+        /// reference.
         #[serde(default)]
         constructs: bool,
     },

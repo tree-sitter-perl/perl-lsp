@@ -942,11 +942,12 @@ pub(super) fn collect_from_analysis(
         return;
     }
 
-    // `name` is constant across all refs in this call (it is `target.name`), so
-    // the only varying key is the invocant class. Cache chains keyed by class to
-    // avoid an O(refs × ancestor_depth) DFS on large files with many same-method
-    // calls against the same class.
-    let mut rename_chain_cache: std::collections::HashMap<String, Vec<String>> =
+    // The member is constant across all refs in this call (the target's name,
+    // or the constructor role for a construction), so the varying key is the
+    // invocant class plus which of the two the ref asks for. Cache chains by
+    // that pair to avoid an O(refs × ancestor_depth) DFS on large files with
+    // many same-method calls against the same class.
+    let mut rename_chain_cache: std::collections::HashMap<(String, bool), Vec<String>> =
         std::collections::HashMap::new();
     // The chain walks the target's family (constant per call, so the
     // class-keyed cache stays sound); the scanned file's namespace decides
@@ -1021,13 +1022,9 @@ pub(super) fn collect_from_analysis(
     // a match; the union is walked in ref order so `out` keeps the vec's
     // order (the final sort is by start point, and same-start refs — a
     // chain's outer call and its receiver — rely on insertion order).
-    let target_key = crate::model::file_analysis::name_match_key(&target.name, analysis.names());
-    let mut keyed: Vec<usize> = analysis.ref_indices_keyed(&target_key).to_vec();
-    for a in &visible_aliases {
-        let k = crate::model::file_analysis::name_match_key(&a.name, analysis.names());
-        if k != target_key {
-            keyed.extend_from_slice(analysis.ref_indices_keyed(&k));
-        }
+    let mut keyed: Vec<usize> = Vec::new();
+    for k in target.retrieval_keys(visible_aliases.iter().map(|a| a.name.as_str()), analysis.names()) {
+        keyed.extend_from_slice(analysis.ref_indices_keyed(&k));
     }
     keyed.sort_unstable();
     keyed.dedup();
@@ -1049,6 +1046,10 @@ pub(super) fn collect_from_analysis(
             // A class token names the class its file's use-map says it
             // does; the target is that identity.
             analysis.spelled_identity(r) == target.name
+        } else if r.constructs() {
+            // A construction is keyed by its class; whether it runs this
+            // constructor is the dispatch check below.
+            !target.constructed_classes.is_empty()
         } else if matches!(r.kind, RefKind::FunctionCall { .. }) || r.member_site().is_some() {
             r.unqualified_target_name(analysis.names()) == target.name
         } else {
@@ -1167,7 +1168,7 @@ pub(super) fn collect_from_analysis(
                 {
                     continue;
                 }
-                let method = r.unqualified_target_name(analysis.names());
+                let member = r.member_key(analysis.names());
                 {
                     let resolved_class = match r.method_target() {
                         // The frozen edge can carry an UNRESOLVED DBIC source
@@ -1202,9 +1203,9 @@ pub(super) fn collect_from_analysis(
                                 // chain reaches the family.
                                 target.method_classes.iter().any(|c| c == &cn)
                                     || rename_chain_cache
-                                        .entry(cn.clone())
+                                        .entry((cn.clone(), r.constructs()))
                                         .or_insert_with(|| {
-                                            analysis.member_rename_chain(&cn, method, chain_want, module_index)
+                                            analysis.member_rename_chain(&cn, member, chain_want, module_index)
                                         })
                                         .iter()
                                         .any(|c| target.method_classes.iter().any(|f| f == c))
@@ -1214,9 +1215,9 @@ pub(super) fn collect_from_analysis(
                                 // ancestor target via the per-invocant chain,
                                 // unrelated same-named methods stay out.
                                 cn == *pkg || rename_chain_cache
-                                    .entry(cn.clone())
+                                    .entry((cn.clone(), r.constructs()))
                                     .or_insert_with(|| {
-                                        analysis.member_rename_chain(&cn, method, chain_want, module_index)
+                                        analysis.member_rename_chain(&cn, member, chain_want, module_index)
                                     })
                                     .iter()
                                     .any(|c| c == pkg)

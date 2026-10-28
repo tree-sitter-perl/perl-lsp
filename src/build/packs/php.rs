@@ -1,7 +1,9 @@
 //! PHP's pack.
 
 use crate::build::query_extract::*;
-use crate::model::file_analysis::{ClassCall, ClassSpelling, FunctionLookup, InferredType, NameSpellings};
+use crate::model::file_analysis::{
+    ClassCall, ClassSpelling, ConstructionKey, FunctionLookup, InferredType, NameSpellings,
+};
 
 pub fn php_pack() -> LangPack {
     LangPack {
@@ -17,6 +19,7 @@ pub fn php_pack() -> LangPack {
             sigils: std::borrow::Cow::Borrowed(&['$']),
             class_spelling: ClassSpelling::UseMap,
             class_call: ClassCall::FunctionCall,
+            construction: ConstructionKey::Class,
             functions: FunctionLookup::NamespaceThenGlobal,
             ..NameSpellings::NONE
         },

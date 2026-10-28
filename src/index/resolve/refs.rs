@@ -447,19 +447,11 @@ fn retrieve_dep_files(
     Some(df)
 }
 
-/// The name keys the relational retrieval probes for `target`: the target
-/// name's match key plus every delegation alias's — the same
-/// `name_match_key` spelling rows are written under, so retrieval is exactly
-/// as generous as the matcher's name checks.
+/// The name keys the relational retrieval probes for `target`, spelled the
+/// way rows are written (`name_match_key`), so retrieval is exactly as
+/// generous as the matcher's name checks.
 pub(super) fn retrieval_keys(target: &TargetRef, aliases: &[DelegationAlias]) -> Vec<String> {
-    let mut keys = vec![crate::model::file_analysis::name_match_key(&target.name, &target.names)];
-    for a in aliases {
-        let k = crate::model::file_analysis::name_match_key(&a.name, &target.names);
-        if !keys.contains(&k) {
-            keys.push(k);
-        }
-    }
-    keys
+    target.retrieval_keys(aliases.iter().map(|a| a.name.as_str()), &target.names)
 }
 
 /// The analysis view the backward-walk matcher runs on for one closed file:
@@ -484,11 +476,16 @@ pub(super) fn matcher_view(
     let view = idx.refs_present(cached);
     let needs_whole = match &target.kind {
         TargetKind::Handler { .. } => !view.provisional_dispatches.is_empty(),
-        TargetKind::Sub { .. } | TargetKind::Method { .. } => refs_keyed(&view, &target.name).any(|r| {
-            r.member_site().is_some()
-                && r.unqualified_target_name(view.names()) == target.name
-                && !r.match_verdict_baked()
-        }),
+        TargetKind::Sub { .. } | TargetKind::Method { .. } => target
+            .retrieval_keys([], view.names())
+            .iter()
+            .flat_map(|k| view.ref_indices_keyed(k).iter().map(|&i| &view.refs()[i]))
+            .any(|r| {
+                r.member_site().is_some()
+                    && (r.unqualified_target_name(view.names()) == target.name
+                        || (r.constructs() && !target.constructed_classes.is_empty()))
+                    && !r.match_verdict_baked()
+            }),
         TargetKind::HashKeyOfSub { .. }
         | TargetKind::HashKeyOfBridged(_)
         | TargetKind::InternalHashKey { .. } => refs_keyed(&view, &target.name).any(|r| {

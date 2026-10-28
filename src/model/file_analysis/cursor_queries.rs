@@ -1167,8 +1167,16 @@ impl FileAnalysis {
                     // covers the token the user sees as one word.
                     let token_span = {
                         let mut s = *method_name_span;
-                        let qual =
-                            r.target_name.len().saturating_sub(r.unqualified_target_name(self.names()).len());
+                        // A construction's token is its class's spelling,
+                        // already the whole name span; its name is the
+                        // class identity, never the token's text.
+                        let qual = match r.constructs() {
+                            true => 0,
+                            false => r
+                                .target_name
+                                .len()
+                                .saturating_sub(r.unqualified_target_name(self.names()).len()),
+                        };
                         s.start.column = s.start.column.saturating_sub(qual);
                         s
                     };
@@ -1176,11 +1184,14 @@ impl FileAnalysis {
                         if let Some(class) = self.method_call_invocant_class(r, module_index) {
                             // FQ `$o->Foo::Bar::m` renames the bare `m` tail; the
                             // qualifier scopes the class (same as Function above).
-                            return Some(RenameKind::Method {
-                                name: r.unqualified_target_name(self.names()).to_string(),
-                                class,
-                                member: MemberKind::of_ref(&r.kind),
-                            });
+                            // A construction names its class's constructor.
+                            if let Some(name) = self.called_member(r, &class, module_index) {
+                                return Some(RenameKind::Method {
+                                    name: name.into_owned(),
+                                    class,
+                                    member: MemberKind::of_ref(&r.kind),
+                                });
+                            }
                         }
                     }
                     // Invocant unresolvable (or cursor in args) — try symbol-at

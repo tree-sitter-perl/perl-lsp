@@ -28,6 +28,7 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     imports: NameSpellings::NONE.imports,
     // `Foo()` calls a sub; construction is `Foo->new`.
     class_call: crate::model::file_analysis::ClassCall::FunctionCall,
+    construction: crate::model::file_analysis::ConstructionKey::Constructor,
     // A package is both the namespace and the class its code belongs to.
     enclosing_class: crate::model::file_analysis::EnclosingClass::NamespaceInForce,
     // `$obj->{key}` reaches a slot; `$obj->key` never does.
@@ -535,6 +536,7 @@ mod tests {
             member_namespace: crate::model::file_analysis::MemberNamespace::PerFamily,
             imports: NameSpellings::NONE.imports,
             class_call: NameSpellings::NONE.class_call,
+            construction: NameSpellings::NONE.construction,
             enclosing_class: NameSpellings::NONE.enclosing_class,
             instance_slots: NameSpellings::NONE.instance_slots,
             functions: NameSpellings::NONE.functions,

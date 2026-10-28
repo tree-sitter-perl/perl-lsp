@@ -372,6 +372,7 @@ fn collect_from_analysis_still_finds_sub_refs_after_scope_hardening() {
         method_classes: Vec::new(),
         scope: OverrideScope::Dispatch,
         def_paths: Vec::new(),
+        constructed_classes: Vec::new(),
         bare_constant: false, member_kind: None,
     };
     let store = OpenDocs::new();
