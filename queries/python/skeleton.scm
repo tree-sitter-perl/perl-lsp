@@ -91,10 +91,22 @@
 (type (identifier) @ref.type)
 (type (attribute attribute: (identifier) @ref.type) @ref.spelled)
 
-; a method's leading `self` / `cls` is its receiver: the object, not a member
-; of the class it is declared in.
-((parameters . (identifier) @receiver)
-  (#match? @receiver "^(self|cls)$"))
+; A method's receiver is its first parameter, whatever it is called: the
+; object (the class, for a classmethod), not a member of the class. A method
+; is a `def` written directly in a class body; a `@staticmethod` has none.
+(class_definition
+  body: (block
+    (function_definition
+      parameters: (parameters
+        . [(identifier) @receiver (typed_parameter . (identifier) @receiver)]))))
+((class_definition
+  body: (block
+    (decorated_definition
+      (decorator)+ @_decorators
+      definition: (function_definition
+        parameters: (parameters
+          . [(identifier) @receiver (typed_parameter . (identifier) @receiver)])))))
+ (#not-match? @_decorators "^@staticmethod$"))
 
 ; ---- imports: the module a statement loads, and the names it binds ----
 (import_statement
@@ -164,16 +176,29 @@
 ; MethodCall ref core resolves for Perl `$obj->m`. The document states the
 ; kind: an attribute that is a call's callee is a member call, any other is a
 ; value read. The read's value is the receiver's slot (@expr.member); the
-; call's is an Invoke of the member on the receiver (@expr.call). ----
+; call's is an Invoke of the member on the receiver (@expr.call). A receiver
+; written as a bare name is @member.recv.name (it may spell a class); any
+; other is an expression, @member.recv. ----
+((attribute
+  object: (identifier) @member.recv.name
+  attribute: (identifier) @ref.member.value) @expr.member
+ (#not-has-parent? @expr.member call))
 ((attribute
   object: (_) @member.recv
   attribute: (identifier) @ref.member.value) @expr.member
- (#not-has-parent? @expr.member call))
+ (#not-has-parent? @expr.member call)
+ (#not-is-kind? @member.recv identifier))
 (call
+  function: (attribute
+    object: (identifier) @member.recv.name
+    attribute: (identifier) @ref.member.call)
+  arguments: [(argument_list ((_) @arity.arg ","?)*) @arity.args (generator_expression)]) @expr.call
+((call
   function: (attribute
     object: (_) @member.recv
     attribute: (identifier) @ref.member.call)
   arguments: [(argument_list ((_) @arity.arg ","?)*) @arity.args (generator_expression)]) @expr.call
+ (#not-is-kind? @member.recv identifier))
 ; A bare name read. An attribute's name (`count` in `o.count`) is the member
 ; read above, never a bare name; its receiver is.
 ((identifier) @expr.read.var

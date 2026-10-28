@@ -11,10 +11,6 @@ pub(super) struct State {
     /// match_id → was the IMMEDIATE member-access receiver a simple variable?
     /// Recorded at construction (the un-peeled node); gates op-DX at the mint.
     pub(super) member_simple: HashMap<usize, bool>,
-    /// match_id → was the PEELED receiver a written name (`w`, `Widget`)
-    /// rather than an expression (`self.x`, `f()`)? Decides whether the
-    /// receiver's text may spell a class.
-    recv_named: HashMap<usize, bool>,
     /// A call's written arguments (span + byte range), keyed by the match
     /// that captured its callee (`@ref.call` / `@ref.qcall` /
     /// `@ref.member.call`), its argument list (`@arity.args`) and each
@@ -58,24 +54,30 @@ impl State {
     }
 }
 
-/// `@member.recv`: a member access receiver. Peel transparent wrappers
-/// (`(*p)`, `(&o)`, `(p)`) to the typed inner where the node is live, so the
-/// minted MethodCall ref's invocant_span lands on the inner expression
+/// `@member.recv.name` / `@member.recv`: a member access receiver, which
+/// the document states is a written name or an expression. An expression
+/// peels its transparent wrappers (`(*p)`, `(&o)`, `(p)`) to the typed inner,
+/// so the minted MethodCall ref's invocant_span lands on the inner expression
 /// `expr_type_at_span` already types.
 pub(super) fn flatten_recv(
     members: &mut State,
     node: tree_sitter::Node<'_>,
+    cap: MemberCap,
     pack: &LangPack,
     source: &[u8],
     match_id: usize,
     events: &mut Vec<Event>,
 ) {
-    // op-DX applies only to a bare-variable immediate receiver
-    // (its deref_stack resolves by name); a wrapper/chain doesn't.
-    members.member_simple.insert(match_id, pack.simple_var_kinds.contains(&node.kind()));
-    let inner = peel_receiver(node, pack.recv_peel);
-    members.recv_named.insert(match_id, pack.simple_var_kinds.contains(&inner.kind()));
+    let named = cap == MemberCap::RecvName;
+    // op-DX applies only to a written-name receiver (its deref_stack
+    // resolves by name); a wrapper/chain doesn't.
+    members.member_simple.insert(match_id, named);
+    let inner = if named { node } else { peel_receiver(node, pack.recv_peel) };
     let text = inner.utf8_text(source).unwrap_or("").to_string();
+    // A written name (`w`, `Widget`) may spell a class; an expression never does.
+    let invocant = if named { Invocant::assume_canonical(text.clone()) } else { Invocant::expr(text.clone()) };
+    let span = Span { start: inner.start_position(), end: inner.end_position() };
+    members.member_recv.insert(match_id, (span, invocant));
     events.push(Event::at(inner, Capture::Member(MemberCap::Recv), text, match_id));
 }
 
@@ -143,15 +145,6 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
 
 pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     match e.cap {
-        Capture::Member(MemberCap::Recv) => {
-            let named = st.members.recv_named.get(&e.match_id).copied().unwrap_or(false);
-            let invocant = if named {
-                Invocant::assume_canonical(e.text.clone())
-            } else {
-                Invocant::expr(e.text.clone())
-            };
-            st.members.member_recv.insert(e.match_id, (e.span(), invocant));
-        }
         Capture::Member(MemberCap::Op) => {
             st.members.member_op_span.insert(e.match_id, e.span());
         }

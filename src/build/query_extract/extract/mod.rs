@@ -321,8 +321,8 @@ pub fn extract_in(
             Capture::NestedTarget => {
                 defs::flatten_nested(&mut st.defs, node, &links, source, match_id, &mut events)
             }
-            Capture::Member(MemberCap::Recv) => {
-                members::flatten_recv(&mut st.members, node, pack, source, match_id, &mut events)
+            Capture::Member(cap @ (MemberCap::Recv | MemberCap::RecvName)) => {
+                members::flatten_recv(&mut st.members, node, cap, pack, source, match_id, &mut events)
             }
             Capture::Arity(ArityCap::Args) => members::open_args(&mut st.members, match_id),
             Capture::Arity(ArityCap::Arg) => members::record_arg(&mut st.members, node, match_id),

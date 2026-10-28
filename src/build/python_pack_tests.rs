@@ -1458,3 +1458,40 @@ def make():
         "a class name read",
     );
 }
+
+/// A method's receiver is its first parameter, whatever it is called; a
+/// `@staticmethod` and a free function have none, whatever theirs is.
+#[cfg(feature = "python")]
+#[test]
+fn a_receiver_is_a_methods_first_parameter_by_position() {
+    let src = "\
+class A:
+    def m(this, y):
+        return this
+    @staticmethod
+    def s(self):
+        return self
+    @classmethod
+    def c(klass: \"A\"):
+        return klass
+
+def f(self):
+    return self
+";
+    let fa = py_in(src, None);
+    let receiver = |name: &str, row: usize| {
+        fa.symbols()
+            .iter()
+            .find(|s| s.name == name && s.selection_span.start.row == row)
+            .unwrap_or_else(|| panic!("{name} at {row}"))
+            .flags
+            .contains(crate::model::file_analysis::SymbolFlags::RECEIVER)
+    };
+    assert!(receiver("this", 1));
+    assert!(!receiver("y", 1));
+    assert!(!receiver("self", 4), "a staticmethod has no receiver");
+    assert!(receiver("klass", 7));
+    assert!(!receiver("self", 10), "a free function has no receiver");
+    assert_eq!(fa.inferred_type_via_bag("this", Point::new(2, 15)), Some(InferredType::ClassName("A".into())));
+    assert_eq!(fa.inferred_type_via_bag("self", Point::new(11, 11)), None);
+}
