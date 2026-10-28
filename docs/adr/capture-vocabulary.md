@@ -101,8 +101,12 @@ no receiver spelling.
 `@rettype` is a callable's declared return, captured in the def's match.
 `@type.enclosing` sits on any written type (a return, a parameter's or
 property's `@type.annot`) the document says names the class it is written
-in rather than a class by its spelling (php's `self`, `static`). It is a
-pattern of its own, joined to the writing site's capture by span.
+in rather than a class by its spelling (php's `self`, `static`);
+`@type.super` one naming the class that class's `@parent.super` edge names
+(php's `parent`). Each is a pattern of its own, joined to the writing
+site's capture by span. `@parent.super` is a `@parent` edge the document
+marks as the one its parent keyword names (php's `extends`, not an
+`implements` or a trait `use`).
 
 `@expr.wrapper` sits on a node whose value is its one content's
 (`@expr.wrapper.inner`, parentheses in every pack): its `Expr` is an edge

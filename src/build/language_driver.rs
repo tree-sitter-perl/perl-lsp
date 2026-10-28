@@ -1055,6 +1055,7 @@ fn remap_spans(
         scopes,
         witnesses,
         parents: _,
+        super_parents: _,
         var_reads,
         var_writes,
         // scope-keyed — no spans to fix.

@@ -91,9 +91,11 @@ match rather than one capture, so the extractor drops a captured comment.
   the nearest named callable around the token, so a closure in a method
   reads the method's class and a free function's body names none.
   `static::` is late-bound in php; here it names the writing class, as
-  `$this` does. `@receiver.parent` names the first parent the writing
-  class declares (php's `new parent`), and `@receiver.declared` the class
-  the same token anchors (php's anonymous `class`).
+  `$this` does. `@receiver.super` names the parent the writing class's
+  `@parent.super` edge marks (php's `parent`, its `extends`: never an
+  interface or a trait), and `@receiver.declared` the class the same token
+  anchors (php's anonymous `class`). `parent::m()` dispatches on that
+  class, as `self::m()` does on the writing one.
 - A construction (`@expr.construct`, php's `new Foo(…)`) is a call of the
   constructor on its `@member.recv`: `Method { name: <constructor>,
   lookup, constructs: true }`, the constructor being the method the
@@ -114,7 +116,9 @@ match rather than one capture, so the extractor drops a captured comment.
   pack's `annot_type`, then the use-map at the return's site), and
   `@type.enclosing` marks a written type naming the class it is written in
   (php's `self`, `static`, nullable or not), in a return, a parameter or a
-  property alike: that class.
+  property alike: that class. `@type.super` marks one naming the class its
+  `@parent.super` edge names (php's `parent`), resolved with the receiver
+  mark of the same name.
   Like `static::`, a `static` return names the writing class, not the
   receiver's.
 - A receiver whose own expression has a value is typed by it before the

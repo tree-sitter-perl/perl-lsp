@@ -69,7 +69,7 @@ enum Family {
 fn family(cap: Capture) -> Family {
     use Capture as C;
     match cap {
-        C::Scope(_) | C::ClosureCapture | C::Context(_) | C::Parent => Family::Scopes,
+        C::Scope(_) | C::ClosureCapture | C::Context(_) | C::Parent | C::ParentSuper => Family::Scopes,
         C::Def { .. }
         | C::DefPair
         | C::DefHoist
@@ -77,7 +77,7 @@ fn family(cap: Capture) -> Family {
         | C::OolDef
         | C::NestedTarget
         | C::RetType
-        | C::TypeEnclosing
+        | C::TypeRelative(_)
         | C::SymAttr
         | C::SpecPrimary
         | C::NsInline

@@ -29,13 +29,12 @@ pub(super) struct State {
     /// `@def` event fires before these inner captures.
     qualifier_by_match: HashMap<usize, String>,
     rettype_by_match: HashMap<usize, (String, Point, Point)>,
-    /// `@type.enclosing`: the written types that name the class they are
-    /// written in. Joined to a `@rettype` or `@type.annot` by span, because
-    /// the stating pattern is not the writing site's match.
-    enclosing_types: std::collections::HashSet<(Point, Point)>,
-    /// (symbol index, site) of each declared return a class spelling may
-    /// name, resolved through the use-map once every row is in.
-    written_returns: Vec<(usize, Point)>,
+    /// `@type.<relative>`: the written types that name a class by where
+    /// they are written. Joined to a `@rettype` or `@type.annot` by span,
+    /// because the stating pattern is not the writing site's match.
+    relative_types: HashMap<(Point, Point), RelativeClass>,
+    /// Each declared return, resolved once every row and parent edge is in.
+    written_returns: Vec<(usize, WrittenType)>,
     /// Flags the document states about the def whose name token sits at a
     /// span (`@mark.<flag>`, and `@param.receiver` → `RECEIVER`). Joined by
     /// span because the stating pattern is not the def's match.
@@ -155,10 +154,10 @@ impl State {
         self.hoisted_matches.contains(&match_id)
     }
 
-    /// Whether the written type at `start..end` names the class it is
-    /// written in (`@type.enclosing`).
-    pub(super) fn names_enclosing(&self, start: Point, end: Point) -> bool {
-        self.enclosing_types.contains(&(start, end))
+    /// The class the written type at `start..end` names by where it is
+    /// written (`@type.<relative>`), if it is one.
+    pub(super) fn names_relative(&self, start: Point, end: Point) -> Option<RelativeClass> {
+        self.relative_types.get(&(start, end)).copied()
     }
 
     /// The kinds of def whose name token `e` is, in its own match.
@@ -198,8 +197,8 @@ pub(super) fn collect(st: &mut ExtractState, e: &Event) {
         Capture::RetType => {
             d.rettype_by_match.insert(e.match_id, (e.text.clone(), e.start, e.end));
         }
-        Capture::TypeEnclosing => {
-            d.enclosing_types.insert((e.start, e.end));
+        Capture::TypeRelative(rel) => {
+            d.relative_types.insert((e.start, e.end), rel);
         }
         Capture::ParamReceiver => {
             *d.marks.entry((e.start, e.end)).or_default() |= crate::model::file_analysis::SymbolFlags::RECEIVER;
@@ -281,19 +280,24 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     if let Some(primary) = d.spec_primary_by_match.get(&e.match_id) {
         st.out.specializations.push((shaped.clone(), (pack.shape_name)(primary)));
     }
-    // A return naming the enclosing class is the def's own class, already an
-    // identity; any other spelling is a written type, resolved like a
-    // parameter's once the walk is done (`resolve_returns`).
+    // A written return resolves like a parameter's type once the walk is
+    // done (`resolve_returns`): a spelling at its site, a relative mark
+    // through the class the def is written in.
     let mut written_return = None;
     let return_type = match d.rettype_by_match.get(&e.match_id).cloned() {
-        Some((_, s, en)) if d.names_enclosing(s, en) => pkg.clone().map(InferredType::ClassName),
-        Some((t, s, _)) => {
-            let t = (pack.annot_type)(&t);
-            if t.is_some() {
-                written_return = Some(s);
+        Some((t, s, en)) => match d.names_relative(s, en) {
+            Some(rel) => {
+                written_return = pkg.clone().map(|class| WrittenType::Relative(rel, class));
+                None
             }
-            t
-        }
+            None => {
+                let t = (pack.annot_type)(&t);
+                if t.is_some() {
+                    written_return = Some(WrittenType::Spelled(s));
+                }
+                t
+            }
+        },
         None => None,
     };
     let d = &st.defs;
@@ -328,8 +332,8 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
     match through {
         Some(receiver) => st.out.slot_writes.push(SlotWrite { symbol, receiver }),
         None => {
-            if let Some(site) = written_return {
-                st.defs.written_returns.push((st.out.symbols.len(), site));
+            if let Some(written) = written_return {
+                st.defs.written_returns.push((st.out.symbols.len(), written));
             }
             st.out.symbols.push(symbol);
         }
@@ -340,11 +344,22 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
 /// way a parameter's declared type is. Runs before dedup, while a symbol's
 /// index is still where its def pushed it.
 pub(super) fn resolve_returns(st: &mut ExtractState) {
-    for (i, site) in std::mem::take(&mut st.defs.written_returns) {
-        if let Some(t) = st.out.symbols[i].return_type.take() {
-            st.out.symbols[i].return_type = Some(written_type_at(&st.out, &st.pack.names, t, site));
-        }
+    for (i, written) in std::mem::take(&mut st.defs.written_returns) {
+        let t = match written {
+            WrittenType::Spelled(site) => {
+                st.out.symbols[i].return_type.take().map(|t| written_type_at(&st.out, &st.pack.names, t, site))
+            }
+            WrittenType::Relative(rel, class) => st.out.relative_class(rel, &class).map(InferredType::ClassName),
+        };
+        st.out.symbols[i].return_type = t;
     }
+}
+
+/// A declared return as written: a spelling at its site, or a relative mark
+/// in the class it is written in.
+enum WrittenType {
+    Spelled(Point),
+    Relative(RelativeClass, String),
 }
 
 /// Variables declared by being written (`@def.assigned`). In source order,

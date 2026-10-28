@@ -1677,6 +1677,62 @@ fn a_construction_is_an_instance_of_its_class() {
     assert_eq!(ty("i"), class("App\\Box"));
 }
 
+const PARENT: &str = "<?php
+namespace App;
+interface Shape {}
+trait Named { public function name(): string { return ''; } }
+class Base {
+    public function base(): self { return $this; }
+}
+class Kid extends Base implements Shape {
+    use Named;
+    public parent $p;
+    public function own(parent $q): ?parent {
+        $a = parent::base();
+        $b = parent::class;
+        $c = new parent();
+        $d = $q;
+        $e = $this->p;
+        return $a;
+    }
+}
+class Lone implements Shape {
+    public function f(): parent {
+        $x = new parent();
+        $y = parent::class;
+        $z = new $u();
+    }
+}
+";
+
+/// `parent` names the class the writing class extends, wherever it is
+/// written: a call's receiver, a class literal, a construction, and a
+/// written type. A class that extends nothing has no `parent`, whatever
+/// it implements or uses.
+#[test]
+fn parent_names_the_class_extended() {
+    use crate::model::file_analysis::InferredType as T;
+    let fa = php(PARENT);
+    let base = Some(T::ClassName("App\\Base".into()));
+    let kid_end = at(PARENT, "        return $a;", 0);
+    let ty = |v: &str, at| fa.inferred_type_via_bag(v, at);
+    assert_eq!(ty("a", kid_end), base, "`parent::m()` dispatches on the extended class");
+    assert_eq!(ty("b", kid_end), base, "`parent::class`");
+    assert_eq!(ty("c", kid_end), base, "`new parent`");
+    assert_eq!(ty("d", kid_end), base, "a parameter typed `parent`");
+    assert_eq!(ty("e", kid_end), base, "a property typed `parent`");
+    let ret = |class: &str, m: &str| fa.find_method_return_type(class, m, None, None);
+    assert_eq!(ret("App\\Kid", "own"), base, "a nullable `parent` return");
+    // an interface or a trait is never what `parent` names
+    let lone_end = at(PARENT, "        $z = new $u();", 0);
+    assert_eq!(ty("x", lone_end), None);
+    assert_eq!(ty("y", lone_end), None);
+    // a construction whose class nothing types answers nothing, and its
+    // ref on the class token is not its own receiver
+    assert_eq!(ty("z", at(PARENT, "$z = new $u();\n", 15)), None);
+    assert_eq!(ret("App\\Lone", "f"), None);
+}
+
 /// A construction is an `Invoke` of the constructor on the class it
 /// names, with its arguments, and a reference to the constructor on its
 /// class token.
@@ -2077,3 +2133,4 @@ fn a_relative_qualified_parent_lands_on_its_resolved_class() {
     assert_eq!(hover.as_deref(), Some("App/Sub/Model.php"));
     assert!(php_widening(&idx, user.0).is_empty());
 }
+

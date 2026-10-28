@@ -38,9 +38,9 @@ pub(super) struct State {
     write_at: HashMap<usize, Point>,
     /// `@type.annot` — a declaration's type text and span, joined per match.
     annots: HashMap<usize, (String, Point, Point)>,
-    /// The class each `@type.enclosing` annotation names: the one in force
+    /// Each `@type.<relative>` annotation's mark and the class in force
     /// where it is written, known only once the walk reaches it.
-    enclosing_annots: HashMap<usize, String>,
+    relative_annots: HashMap<usize, (RelativeClass, String)>,
     /// `@expr.read.var.name` — a read's name token, joined to its node.
     read_names: HashMap<usize, (String, Span)>,
     /// keyed-shape collection: keys grouped per @expr.shape span
@@ -164,8 +164,8 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
                 for &scope in &target_scopes {
                     st.narrowing.annot_text_by_var.insert(((pack.shape_name)(&e.text), scope), annot.clone());
                 }
-                if let Some(class) = st.package.as_ref().filter(|_| st.defs.names_enclosing(*s, *en)) {
-                    f.enclosing_annots.insert(e.match_id, class.clone());
+                if let (Some(rel), Some(class)) = (st.defs.names_relative(*s, *en), st.package.as_ref()) {
+                    f.relative_annots.insert(e.match_id, (rel, class.clone()));
                 }
             }
             f.flow_targets.insert(e.match_id, (name, target_scopes, at, e.start));
@@ -432,10 +432,10 @@ pub(super) fn finish(st: &mut ExtractState) {
             // primitives stay leaves; `None` (auto/void) defers to the flow
             // edge as before. `TypeName` chases the typedef or falls back to
             // the same `ClassName`, so a plain struct/class is unchanged.
-            // A type naming the class it is written in is that class, already
-            // an identity; any other spelling resolves at its site.
-            let annot_type = match f.enclosing_annots.get(mid) {
-                Some(class) => Some(InferredType::ClassName(class.clone())),
+            // A type naming a class by where it is written is that class,
+            // already an identity; any other spelling resolves at its site.
+            let annot_type = match f.relative_annots.get(mid) {
+                Some((rel, class)) => out.relative_class(*rel, class).map(InferredType::ClassName),
                 None => (st.pack.annot_type)(annot).map(|t| written_type_at(out, &st.pack.names, t, annot_span.start)),
             };
             if let (Some(t), true) = (&annot_type, field_scope_span.contains_key(&(name.clone(), *scope))) {

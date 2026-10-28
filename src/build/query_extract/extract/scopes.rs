@@ -193,7 +193,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
                 captures.push(name);
             }
         }
-        Capture::Parent => {
+        Capture::Parent | Capture::ParentSuper => {
             // `@parent` (a base class) pairs with the `@def.class.name`
             // in the same match — record the inheritance edge from the
             // class as its def minted it. The base is shaped like a def
@@ -202,6 +202,9 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event) {
             if let Some(child) = st.defs.class_of_match(e.match_id).map(str::to_string) {
                 if pack.names.use_map_sep().is_some() {
                     st.scopes.written_parents.push((st.out.parents.len(), e.span().start, st.cur_scope));
+                }
+                if e.cap == Capture::ParentSuper {
+                    st.out.super_parents.push(st.out.parents.len());
                 }
                 st.out.parents.push((child, (pack.shape_name)(&e.text)));
             }

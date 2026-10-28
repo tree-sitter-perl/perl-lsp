@@ -32,13 +32,19 @@
   name: (name) @def.class.name @context.class) @def.class @scope
 
 ; ---- written types ----
-; `self` and `static` name the class they are written in, nullable or not,
-; wherever a type is written: a return, a parameter, a property.
+; `self` and `static` name the class they are written in, and `parent` the
+; class it extends, nullable or not, wherever a type is written: a return,
+; a parameter, a property.
 (([
   (named_type (name) @_class)
   (optional_type (named_type (name) @_class))
  ] @type.enclosing)
  (#any-of? @_class "self" "static"))
+(([
+  (named_type (name) @_class)
+  (optional_type (named_type (name) @_class))
+ ] @type.super)
+ (#eq? @_class "parent"))
 
 ; ---- callables ----
 ; A declared return is the callable's value at every call.
@@ -131,15 +137,16 @@
 
 ; ---- parents ----
 ; `extends`, `implements` and a trait `use` are all parents for member
-; lookup. The whole written spelling is the capture: it resolves through
-; the file's use-map to the parent's identity. The same name is a class
-; reference — goto-def, references and rename reach it — and a qualified
-; spelling references by the whole spelling while rewriting only its leaf.
+; lookup; a class's `extends` is the one `parent` names. The whole written
+; spelling is the capture: it resolves through the file's use-map to the
+; parent's identity. The same name is a class reference — goto-def,
+; references and rename reach it — and a qualified spelling references by
+; the whole spelling while rewriting only its leaf.
 (class_declaration
   name: (name) @def.class.name
   (base_clause
-    [(name) @parent @ref.type
-     (qualified_name (name) @ref.type) @parent @ref.spelled]))
+    [(name) @parent.super @ref.type
+     (qualified_name (name) @ref.type) @parent.super @ref.spelled]))
 (class_declaration
   name: (name) @def.class.name
   (class_interface_clause
@@ -271,8 +278,8 @@
   object: (_) @member.recv
   name: (name) @ref.member.value) @expr.member
 ; `Foo::m()` calls the method of the class `Foo` names; `self::` and
-; `static::` name the class whose method the call is written in. `parent::`
-; dispatches above it, which is no named class.
+; `static::` name the class whose method the call is written in, `parent::`
+; the class it extends.
 (scoped_call_expression
   scope: [(name) (qualified_name)] @member.recv @receiver.class
   name: (name) @ref.member.call
@@ -282,6 +289,11 @@
   name: (name) @ref.member.call
   arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
  (#any-of? @receiver.enclosing "self" "static"))
+((scoped_call_expression
+  scope: (relative_scope) @member.recv @receiver.super
+  name: (name) @ref.member.call
+  arguments: (arguments ((_) @arity.arg ","?)*) @arity.args) @expr.call
+ (#eq? @receiver.super "parent"))
 ; `$cls::m()` calls the method of whatever class the variable holds.
 (scoped_call_expression
   scope: (variable_name) @member.recv
@@ -309,9 +321,9 @@
    (arguments ((_) @arity.arg ","?)*)?) @expr.construct @arity.args
  (#any-of? @receiver.enclosing "self" "static"))
 ((object_creation_expression
-   . (name) @member.recv @receiver.parent
+   . (name) @member.recv @receiver.super
    (arguments ((_) @arity.arg ","?)*)?) @expr.construct @arity.args
- (#eq? @receiver.parent "parent"))
+ (#eq? @receiver.super "parent"))
 (object_creation_expression
   . (variable_name) @member.recv
   (arguments ((_) @arity.arg ","?)*)?) @expr.construct @arity.args
@@ -322,8 +334,8 @@
 (anonymous_class
   "class" @def.class.anchor
   (base_clause
-    [(name) @parent @ref.type
-     (qualified_name (name) @ref.type) @parent @ref.spelled]))
+    [(name) @parent.super @ref.type
+     (qualified_name (name) @ref.type) @parent.super @ref.spelled]))
 (anonymous_class
   "class" @def.class.anchor
   (class_interface_clause
@@ -342,7 +354,8 @@
 
 ; ---- class literals ----
 ; `Foo::class` is the class `Foo` names, as a value; `self::class` and
-; `static::class` are the class the method is written in. The class token
+; `static::class` are the class the method is written in, `parent::class`
+; the class it extends. The class token
 ; of a class literal and of a class constant `Foo::BAR` is a class
 ; reference.
 ((class_constant_access_expression
@@ -353,6 +366,11 @@
    . (relative_scope) @receiver.enclosing
    . (name) @_member) @expr.class
  (#any-of? @receiver.enclosing "self" "static")
+ (#eq? @_member "class"))
+((class_constant_access_expression
+   . (relative_scope) @receiver.super
+   . (name) @_member) @expr.class
+ (#eq? @receiver.super "parent")
  (#eq? @_member "class"))
 (class_constant_access_expression . (name) @ref.type)
 (class_constant_access_expression . (qualified_name (name) @ref.type) @ref.spelled)

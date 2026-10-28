@@ -138,6 +138,8 @@ pub struct SkeletonAnalysis {
     pub witnesses: Vec<crate::model::witnesses::Witness>,
     /// (child class, parent class) inheritance edges — `@parent` captures.
     pub parents: Vec<(String, String)>,
+    /// The `parents` edges the document marks `@parent.super`, by index.
+    pub super_parents: Vec<usize>,
     /// (specialization, primary) family edges — a `@spec.primary` capture in
     /// a class-def match whose name is a template spelling. Rides onto
     /// `FileAnalysis.pack.specializes`; the graph's `Specializes` edge derives from
@@ -404,6 +406,20 @@ fn brace_body_extent(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
 }
 
 impl SkeletonAnalysis {
+    /// The class `rel` names written in `class`: the class itself, or the
+    /// one its `@parent.super` edge names.
+    pub fn relative_class(&self, rel: super::vocab::RelativeClass, class: &str) -> Option<String> {
+        match rel {
+            super::vocab::RelativeClass::Enclosing => Some(class.to_string()),
+            super::vocab::RelativeClass::Super => self
+                .super_parents
+                .iter()
+                .map(|&i| &self.parents[i])
+                .find(|(child, _)| child == class)
+                .map(|(_, parent)| parent.clone()),
+        }
+    }
+
     /// An empty skeleton of `pack`'s language: what extraction fills, and
     /// what a file that never reached extraction assembles from.
     pub fn for_pack(pack: &super::LangPack) -> Self {
@@ -976,13 +992,11 @@ impl SkeletonAnalysis {
                     super::vocab::ReceiverCap::Class => {
                         Some(class_identity_at(&r.text, r.span.start).unwrap_or_else(|| r.text.clone()))
                     }
-                    // The first parent the class declares is the one it
-                    // extends: `extends` is written ahead of `implements`.
-                    super::vocab::ReceiverCap::Parent => {
-                        method_class.get(r.scope.0 as usize).cloned().flatten().and_then(|class| {
-                            self.parents.iter().find(|(child, _)| *child == class).map(|(_, p)| p.clone())
-                        })
-                    }
+                    super::vocab::ReceiverCap::Super => method_class
+                        .get(r.scope.0 as usize)
+                        .cloned()
+                        .flatten()
+                        .and_then(|class| self.relative_class(super::vocab::RelativeClass::Super, &class)),
                     super::vocab::ReceiverCap::Declared => symbols
                         .iter()
                         .find(|s| s.kind == SymKind::Class && s.selection_span == r.span)
