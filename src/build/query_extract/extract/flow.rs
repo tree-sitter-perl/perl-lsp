@@ -261,14 +261,15 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
             // The site calls the constructor on the class its receiver
             // names, and the call's own reference sits on that token: it
             // spells the class, so the class's own reference keeps the
-            // token for the cursor and for a class rename.
+            // token for the cursor and for a class rename. Which member is
+            // the constructor is the class's `@mark.constructor` flag, asked
+            // where the class is in hand; the token names only the class.
             let in_match = |cap: Capture| events.iter().find(|x| x.match_id == e.match_id && x.cap == cap);
-            if let (Some(ctor), Some(recv)) = (st.constructor, in_match(Capture::Member(MemberCap::Recv))) {
+            if let Some(recv) = in_match(Capture::Member(MemberCap::Recv)) {
                 let span = e.span();
                 out.call_sites.push(crate::build::query_extract::CallSite {
                     span,
-                    callee: ctor.to_string(),
-                    // the construction's callee is spelled by the class token
+                    callee: recv.text.clone(),
                     callee_at: recv.start,
                     receiver: Some(recv.span()),
                     scope: cur_scope,
@@ -277,7 +278,7 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
                 });
                 out.refs.push(SkelRef {
                     kind: RefCap::MemberCall,
-                    name: ctor.to_string(),
+                    name: recv.text.clone(),
                     start: recv.start,
                     end: recv.end,
                     scope: cur_scope,

@@ -924,9 +924,14 @@ impl<'a> CandidateSet<'a> {
             if let Some(want) = MemberKind::of_ref(&r.kind) {
                 use crate::model::file_analysis::MethodResolution;
                 let namespace = analysis.names().member_namespace;
-                // FQ `$o->Foo::Bar::m` dispatches the bare `m` on the named class.
-                let method = r.unqualified_target_name(analysis.names());
-                if let Some(cn) = analysis.method_call_invocant_class(r, Some(idx)) {
+                // FQ `$o->Foo::Bar::m` dispatches the bare `m` on the named
+                // class; a construction calls its class's constructor.
+                let called = analysis.method_call_invocant_class(r, Some(idx)).and_then(|cn| {
+                    let method = analysis.called_member(r, &cn, Some(idx))?;
+                    Some((cn, method))
+                });
+                if let Some((cn, method)) = called {
+                    let method: &str = &method;
                     // The invocant resolved (e.g. a plugin-bridged route token
                     // → controller class) but the controller lives in THIS
                     // file: jump to the local method symbol. The build-time

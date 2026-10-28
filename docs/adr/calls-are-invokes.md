@@ -8,13 +8,15 @@ receiver, args }`, on the call's own attachment. Every operand is an
 attachment the registry materializes under the query that holds the index,
 so the callee is chosen at query time, never fixed when the file was built.
 
-## Decision: one call shape, three callees
+## Decision: one call shape, four callees
 
 `Callee` names what is called:
 
 - `Method { name, lookup, constructs }`: a named method, looked up on the
   receiver's class, the writer's parents (`SUPER::`), or a named class.
 - `Value(att)`: whatever callable `att` holds (`$cb->(…)`).
+- `Construct { lookup }`: a construction, an instance of the class `lookup`
+  names. It runs that class's constructor, which the site never spells.
 - `Function { name, local, member_of }`: a free name. `local` is the
   in-file definition the producer resolved the name to, a class named as a
   callable included (a functional cast or constructor). `None` sends the
@@ -96,18 +98,30 @@ match rather than one capture, so the extractor drops a captured comment.
   interface or a trait), and `@receiver.declared` the class the same token
   anchors (php's anonymous `class`). `parent::m()` dispatches on that
   class, as `self::m()` does on the writing one.
-- A construction (`@expr.construct`, php's `new Foo(…)`) is a call of the
-  constructor on its `@member.recv`: `Method { name: <constructor>,
-  lookup, constructs: true }`, the constructor being the method the
-  document's `@mark.constructor` names. A constructor declares no return,
-  so the value falls to `constructs`: an instance of the receiver's class.
-  A receiver token that names a class (`Foo`, `self`, `parent`) looks the
-  constructor up there; `new $cls` dispatches on the variable's value, so
-  `$cls = Foo::class; new $cls` is a `Foo`. The site's reference to the
-  constructor is a `MethodCall` with `constructs: true` on the receiver
-  token, beside the class's own `PackageRef` there: a cursor companion,
-  so the token navigates to the class, and never rewritable, since it
-  spells the class, so a rename of the constructor refuses.
+- A construction (`@expr.construct`, php's `new Foo(…)`) is
+  `Construct { lookup }` on its `@member.recv`: its value is an instance
+  of the class the lookup names, whatever the constructor declares. A
+  receiver token that names a class (`Foo`, `self`, `parent`) is a
+  `Named` lookup; `new $cls` dispatches on the variable's value, so
+  `$cls = Foo::class; new $cls` is a `Foo`. The constructor it runs is the
+  member flagged `CONSTRUCTOR` (`@mark.constructor`) in that class's MRO,
+  local or cross-file (`resolve_constructor_in_ancestors`), asked by role
+  (`MemberKey::Constructor`), never by a name. The site's reference is a
+  `MethodCall` with `constructs: true` on the receiver token, keyed by the
+  class identity the token spells, the same key as the class's own
+  `PackageRef` there, so it adds no ref row. The PostFold stamp freezes the
+  class it dispatches on. The language states that its constructions key
+  by class (`NameSpellings::construction`, `ConstructionKey::Class`), so a
+  constructor's references retrieve under its class and every class
+  inheriting it (`TargetRef::retrieval_keys`, from the in-memory class
+  graph) and match a site whose class's constructor walk reaches it; Perl
+  calls `new` by name and retrieves under the name alone. The companion is a cursor companion, so the token
+  navigates to the class, and never rewritable, since it spells the
+  class, so a rename of the constructor refuses. A `new $cls` whose class
+  no producer knows keys by its spelling, so only an in-file walk finds it
+  (`TODO(dynamic-construction-retrieval)`). Python's `Foo()` and C++'s
+  `Foo(x)` are a `Function` whose `constructs` names the class: a class
+  that answers the call answers with an instance of itself.
 - A class literal (`@expr.class`, php's `Foo::class`) is an edge to its
   `@receiver.*` token's value, the class.
 - A pack callable's declared return (`@rettype`) is its `Symbol`'s value,

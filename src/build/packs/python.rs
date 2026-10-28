@@ -25,6 +25,8 @@ pub fn python_pack() -> LangPack {
             member_namespace: MemberNamespace::Shared,
             imports: ImportRule { reach: ImportReach::FromImport, prefix: ImportPrefix::PackageRelative },
             class_call: ClassCall::Constructs,
+            // TODO(construction-navigation): `Foo()` reaches no `__init__`
+            // yet, so a constructor's references do not list its calls.
             instance_slots: InstanceSlots::BeforeClass,
             ..NameSpellings::NONE
         },

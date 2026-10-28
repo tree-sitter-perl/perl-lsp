@@ -10,6 +10,59 @@ when, why), not the contract.
 
 ---
 
+## Stacked refs at one span — 2026-09-15 — RATIFIED A (veesh, 2026-10-28)
+- **Context:** the class-named rail (Laravel's event bus): `event(new X)`
+  is a class token AND a use on the event rail. Two refs sit on one span —
+  the class ref and a `DispatchCall` whose owner's names are classes —
+  and `ref_at` breaks the tie with `Ref::is_cursor_companion` so the token
+  keeps resolving as the class while goto-def's union and the handler
+  hierarchy surface the bus.
+- **Options:** A) a companion ref per extra identity + the cursor
+  tiebreak (one ref, one binding; projections union the companions).
+  B) one ref carrying a `Vec<RefBinding>` — the token has several
+  identities and every projection walks them. C) the rail use as a
+  derived fact on the class ref (no second ref; the rail is a projection
+  of "class token whose class is a declared event").
+- **Picked:** A. It keeps `Ref` single-bound (every matcher, row shredder
+  and surface arm reads one binding) and confines the stacking to the one
+  cursor tiebreak, which is a method on the value rather than a handler
+  branch. Two callers today: `ref_at` and the definitions union.
+- **Undo cost:** B reshapes `Ref::binding` (bincode + the relational rows
+  + every `binding` reader); C moves the rail use off the ref axis and
+  the undefined-event lane would have to re-derive it. Either is a model
+  commit plus an `EXTRACT_VERSION` bump; nothing persists the companion
+  shape beyond the ref rows.
+- **Discussion needed:** does a second stacked identity ever appear (a
+  string that is both a route name and a view name is kept APART by the
+  rail, so no)? If none does, A is the answer and the fork closes; if one
+  does, B is the honest shape and the tiebreak is the tell.
+- **Resolution:** A. The second stacked identity that looked like it
+  forced B was a construction's: `new Foo` is a class token AND a call of
+  the constructor `Foo` runs, which the site never names (php
+  `__construct`, python `__init__`). A carries it: the construction's
+  companion ref (`RefKind::MethodCall { constructs: true }`) keys on the
+  class identity its token spells, and its constructor is the member
+  flagged `CONSTRUCTOR` in that class's MRO (`MemberKey::Constructor`),
+  frozen by the PostFold stamp. A constructor's references retrieve under
+  its class and the classes inheriting it (`TargetRef::retrieval_keys`,
+  from the in-memory class graph), so the class identity is the key and
+  no ref needs a second binding. The class ref on the same token keeps
+  the cursor through the companion tiebreak.
+- **What B would cost (sizes from `size_of` on the layer-8 head, 2026-10-28):** `Ref`
+  is 352 bytes and `Option<RefBinding>` 56. A `Vec<RefBinding>` is one
+  heap allocation per bound ref, on every ref of every language. A
+  one-slot inline small-vector avoids that but adds 8 bytes per ref
+  (2.3%) and a new dependency. The blob grows 7 bytes per ref before zstd,
+  because bincode 1 writes a `u64` length where `Option` writes a 1-byte
+  tag. The code change is the 7 files that read `binding` directly plus
+  the 5 projection accessors.
+- **What would reopen it:** a second identity on one token that A cannot
+  carry, i.e. one that no producer-known key (a class, a rail owner) can
+  stand for, so retrieval would have to find the site under a name the
+  token never spells and no graph can derive. A string that is both a
+  route name and a view name does not qualify: the rail keeps those
+  apart.
+
 ## Invocant class vs inner-scope rep narrowing — 2026-07-15 — RESOLVED (veesh, 2026-07-15)
 - **Context:** edit-bench finding (`bench/RESULTS.md`): `$self->` completion
   returned a lone `{key} hash dereference` inside `use base` classes

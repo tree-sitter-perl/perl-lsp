@@ -222,7 +222,7 @@ sub run {
                 owner: HandlerOwner::Class("Producer".to_string()),
                 name: "ready".to_string(),
             },
-            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), bare_constant: false, member_kind: None,
+            method_classes: Vec::new(), scope: crate::index::resolve::OverrideScope::Dispatch, def_paths: Vec::new(), constructed_classes: Vec::new(), bare_constant: false, member_kind: None,
         },
         RoleMask::EDITABLE,
     );

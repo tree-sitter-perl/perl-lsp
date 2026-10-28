@@ -2631,23 +2631,34 @@ impl ReducerRegistry {
                 return member;
             }
         }
+        // The classes a lookup starts at, in the order they answer.
+        let lookup_classes = |lookup: &Lookup, recv: &Option<InferredType>| -> Vec<String> {
+            match lookup {
+                Lookup::Receiver => {
+                    recv.as_ref().and_then(|t| t.class_name()).map(str::to_string).into_iter().collect()
+                }
+                Lookup::Super { writer } => match q.context {
+                    Some(ctx) => crate::model::file_analysis::parents_of(
+                        writer,
+                        ctx.package_parents,
+                        ctx.module_index,
+                        ctx.app_surface_consumers,
+                    ),
+                    None => Vec::new(),
+                },
+                Lookup::Named(class) => vec![class.clone()],
+            }
+        };
         let lookups: Vec<WitnessAttachment> = match callee {
+            // A construction's value is an instance of the class it names,
+            // whatever its constructor declares: no constructor here answers
+            // anything else, so the constructor is navigation's to find
+            // (`resolve_constructor_in_ancestors`), never the value's.
+            Callee::Construct { lookup } => {
+                return lookup_classes(lookup, &recv).into_iter().next().map(InferredType::ClassName);
+            }
             Callee::Method { name, lookup, .. } => {
-                let classes: Vec<String> = match lookup {
-                    Lookup::Receiver => {
-                        recv.as_ref().and_then(|t| t.class_name()).map(str::to_string).into_iter().collect()
-                    }
-                    Lookup::Super { writer } => match q.context {
-                        Some(ctx) => crate::model::file_analysis::parents_of(
-                            writer,
-                            ctx.package_parents,
-                            ctx.module_index,
-                            ctx.app_surface_consumers,
-                        ),
-                        None => Vec::new(),
-                    },
-                    Lookup::Named(class) => vec![class.clone()],
-                };
+                let classes = lookup_classes(lookup, &recv);
                 // A call with no typed receiver still blesses into the class
                 // it dispatched on (`Foo->new`, a plugin-declared class).
                 if recv.is_none() {
