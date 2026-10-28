@@ -889,7 +889,7 @@ impl FileAnalysis {
     /// TIME. Receiver resolution is two-tier: the build-time `receiver_class`
     /// hint (a locally-constructed `My::Minion->new`, a typed `has`-attribute)
     /// when present, else cross-file resolution of the call's invocant via
-    /// `method_call_invocant_class` with the module index — which lights up
+    /// `method_call_invocant_classes` with the module index — which lights up
     /// helper-/attribute-returned receivers (`$c->minion->enqueue`,
     /// `$self->_minion->enqueue`) that only type once other modules are in
     /// scope. The gate (`isa target_class`) is applied by `resolve_for`; the
@@ -899,31 +899,40 @@ impl FileAnalysis {
         gated: &'a ProvisionalDispatch,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> GateResult<&'a DispatchCandidate> {
-        let recv = self.dispatch_receiver_class(gated, module_index);
-        gated.resolve_for(recv.as_deref(), &self.packages, module_index)
+        // A union receiver applies the handler when any arm passes the gate.
+        let mut out = GateResult::ReceiverUntyped;
+        for recv in self.dispatch_receiver_classes(gated, module_index) {
+            match gated.resolve_for(Some(&recv), &self.packages, module_index) {
+                applies @ GateResult::Applies(_) => return applies,
+                other => out = other,
+            }
+        }
+        out
     }
 
-    /// Resolve the receiver class for a gated dispatch candidate: the
+    /// Resolve the receiver classes for a gated dispatch candidate: the
     /// build-time hint, else the call's invocant via the MethodCall ref at
     /// `call_span` (cross-file aware through the bag). Uses only the gate-input
     /// accessors, never the gated handler payload.
-    fn dispatch_receiver_class(
+    fn dispatch_receiver_classes(
         &self,
         gated: &ProvisionalDispatch,
         module_index: Option<&dyn CrossFileLookup>,
-    ) -> Option<String> {
-        gated.receiver_hint().cloned().or_else(|| {
-            let call_span = gated.call_span();
-            let dispatcher = gated.dispatcher();
-            self.refs
-                .iter()
-                .find(|r| {
-                    r.span == call_span
-                        && r.target_name == dispatcher
-                        && matches!(r.kind, RefKind::MethodCall { .. })
-                })
-                .and_then(|r| self.method_call_invocant_class(r, module_index))
-        })
+    ) -> ReceiverClasses {
+        if let Some(hint) = gated.receiver_hint() {
+            return [hint.clone()].into_iter().collect();
+        }
+        let call_span = gated.call_span();
+        let dispatcher = gated.dispatcher();
+        self.refs
+            .iter()
+            .find(|r| {
+                r.span == call_span
+                    && r.target_name == dispatcher
+                    && matches!(r.kind, RefKind::MethodCall { .. })
+            })
+            .map(|r| self.method_call_invocant_classes(r, module_index))
+            .unwrap_or_default()
     }
 
     /// Query-time handler call-sites in THIS file: every gated dispatch

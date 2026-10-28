@@ -9,7 +9,8 @@ const CAT: &str = "package Cat;\nsub new { bless {}, shift }\nsub sound { 'meow'
 const BIRD: &str = "package Bird;\nsub new { bless {}, shift }\nsub sound { 'tweet' }\n1;\n";
 const ZOO: &str = "package Zoo;\nuse Cat;\nuse Bird;\n\
 sub pick { my $pet = rand() ? Cat->new : Bird->new; return $pet->sound; }\n\
-sub cat { my $c = Cat->new; return $c->sound; }\n1;\n";
+sub cat { my $c = Cat->new; return $c->sound; }\n\
+sub maybe { my $m = rand() ? Cat->new : rand() ? Bird->new : undef; return $m->sound; }\n1;\n";
 
 struct Fixture {
     store: OpenDocs,
@@ -103,7 +104,33 @@ fn completion_on_a_union_offers_the_members_every_arm_has() {
     );
     let ty = fa.inferred_type_via_bag("$pet", tree_sitter::Point { row: 10, column: 0 }).expect("typed");
     let labels: Vec<String> = fa
-        .shared_members(&ty, |c| fa.complete_methods_for_class(c, None))
+        .shared_members(&fa.dispatch_classes_of(&ty, None), |c| fa.complete_methods_for_class(c, None))
+        .into_iter()
+        .map(|c| c.label)
+        .collect();
+    assert!(labels.iter().any(|l| l == "sound"), "{labels:?}");
+    assert!(!labels.iter().any(|l| l == "purr" || l == "fly"), "{labels:?}");
+}
+
+#[test]
+fn a_maybe_union_receiver_navigates_like_the_union() {
+    // `Cat|Bird|undef` is `Optional(Union)`: the undef half adds no class.
+    let f = fixture();
+    let fa = f.idx.workspace_file_for_test(&f.zoo).unwrap();
+    let col = ZOO.lines().nth(5).unwrap().rfind("sound").unwrap();
+    let defs = at(&f, &fa, &f.zoo, 5, col).definitions();
+    assert!(in_file(&defs, &f.cat, 2) && in_file(&defs, &f.bird, 2), "both arms' `sound`: {defs:?}");
+}
+
+#[test]
+fn a_text_receiver_completes_what_every_arm_has() {
+    let fa = parse(
+        "package Cat;\nsub new { bless {}, shift }\nsub sound { 1 }\nsub purr { 1 }\n\
+         package Bird;\nsub new { bless {}, shift }\nsub sound { 1 }\nsub fly { 1 }\n\
+         package main;\nmy $pet = rand() ? Cat->new : Bird->new;\n1;\n",
+    );
+    let labels: Vec<String> = fa
+        .complete_methods("$pet", tree_sitter::Point { row: 10, column: 0 }, None)
         .into_iter()
         .map(|c| c.label)
         .collect();

@@ -563,7 +563,7 @@ impl FileAnalysis {
 
     /// The type of the expression occupying `span`, resolved tree-free
     /// from the bag. This is the single query-time entry that
-    /// `method_call_invocant_class` and `resolve_expression_type` both
+    /// `method_call_invocant_classes` and `resolve_expression_type` both
     /// route through: structure was discovered once in the builder
     /// (recorded as `Expr(span)` witnesses + the `Expression(refidx)`
     /// call axis), and every consumer reads it back by span.

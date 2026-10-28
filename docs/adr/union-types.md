@@ -109,17 +109,26 @@ The build-time chain walker (`invocant_type_at_node`) does not distribute
 yet (`TODO(union-chain-walker)`); the registry's projections above are
 the query-time answer.
 
-Navigation reads every arm too. `method_call_invocant_classes` is the
-dispatch projection over a union receiver (one class per object arm), and:
+Navigation reads every arm too. `FileAnalysis::receiver_classes(ref)` is
+the one answer to "which classes does this member access dispatch on":
+the frozen edge when the build stamped one, else
+`method_call_invocant_classes` — one class per `receiver_arms` arm that
+dispatches (`dispatch_classes_of`), so a receiver dispatches when ANY arm
+does. It returns `ReceiverClasses`; a consumer whose answer is one class
+(the frozen edge itself, a hash-key or domain owner, an overload family)
+asks `.single()` and says why at the call. Every other consumer iterates:
 
-- a member token on a union receiver resolves to one `Group` whose
-  members are each arm's target (an attribute's accessor group where the
-  arm declares one), so references and rename reach every arm;
-- goto-def offers each arm's definition;
+- a member token resolves through one pipeline per class (the accessor
+  group an attribute mints, else the `RenameKind::Method` target with its
+  pack visibility identity); one class answers itself, several answer
+  one `Group`, so references and rename reach every arm;
+- goto-def offers each arm's definition; hover shows a section per arm;
 - the reference matcher counts a union site as a use of each arm's
   member, so `Cat::sound`'s references include `$pet->sound` on
   `Cat|Bird`;
-- completion offers the members every object arm has (`shared_members`).
+- completion offers the members every class has (`shared_members`), for a
+  typed receiver and a text one alike, and so does dispatch-target
+  completion.
 
 Renaming one arm's member from its own declaration renames the union
 sites too, leaving the other arms' declarations alone: those sites then

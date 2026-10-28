@@ -546,7 +546,7 @@ fn test_fq_method_call_nav_dispatches_from_named_class() {
         .find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "Widget::build")
         .expect("FQ method ref present");
     assert_eq!(
-        fa.method_call_invocant_class(mref, None).as_deref(),
+        fa.method_call_invocant_classes(mref, None).single().map(str::to_string).as_deref(),
         Some("Widget"),
         "FQ call dispatches from the named class, not the (untyped) invocant"
     );
@@ -612,7 +612,7 @@ fn test_super_method_nav_resolves_to_parent() {
         .find(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "SUPER::greet")
         .expect("SUPER method ref present");
     assert_eq!(
-        fa.method_call_invocant_class(sref, None).as_deref(),
+        fa.method_call_invocant_classes(sref, None).single().map(str::to_string).as_deref(),
         Some("Base"),
         "SUPER dispatches to the enclosing package's parent"
     );
@@ -1610,7 +1610,7 @@ $r->get('/x')->to('Y#z');
 }
 
 /// End-to-end wiring check: the public path
-/// `resolve_invocant_class` now goes through the witness bag, so
+/// `invocant_classes_in_scope` now goes through the witness bag, so
 /// the Mojo `$self->{k}` access inside a Mojo::Base method no
 /// longer flips `$self` to HashRef — method chains downstream
 /// still see the class.
@@ -1633,7 +1633,7 @@ sub name {
     // At a point inside the method body where `$self` has been
     // assigned via `shift`, the flat `inferred_type` returns
     // HashRef (because the access flipped it). The witness-based
-    // path — which is what `resolve_invocant_class` now calls —
+    // path — which is what `invocant_classes_in_scope` now calls —
     // should return the class.
     let point = Point { row: 5, column: 15 };
 
@@ -1644,7 +1644,7 @@ sub name {
     assert_eq!(
         resolved.as_deref(),
         Some("Mojolicious::Routes::Route"),
-        "resolve_invocant_class (public path) should see $self as the class, \
+        "invocant_classes_in_scope (public path) should see $self as the class, \
              not HashRef — got {:?}",
         resolved
     );
@@ -2066,7 +2066,7 @@ fn test_route_controller_token_resolves_cross_file() {
         })
         .expect("plugin emits MethodCall {invocant: users, method: list} for ->to('users#list')");
 
-    let class = app.method_call_invocant_class(to_ref, Some(&idx));
+    let class = app.method_call_invocant_classes(to_ref, Some(&idx)).single().map(str::to_string);
     assert_eq!(
         class.as_deref(),
         Some("Some::App::Controller::Users"),
@@ -2153,7 +2153,7 @@ fn test_partial_route_brand_composes_with_camelize_cross_file() {
                 panic!("partial ->to('#{action}') should emit MethodCall {{invocant: Alerts (camelized), method: {action}}}")
             });
 
-        let class = app.method_call_invocant_class(to_ref, Some(&idx));
+        let class = app.method_call_invocant_classes(to_ref, Some(&idx)).single().map(str::to_string);
         assert_eq!(
             class.as_deref(),
             Some("GenericCo::Controller::Alerts"),
@@ -2172,7 +2172,7 @@ fn test_partial_route_brand_composes_with_camelize_cross_file() {
         })
         .expect("sibling group partial ->to('#index') should inherit `billing` (camelized)");
     assert_eq!(
-        app.method_call_invocant_class(index_ref, Some(&idx)).as_deref(),
+        app.method_call_invocant_classes(index_ref, Some(&idx)).single().map(str::to_string).as_deref(),
         Some("GenericCo::Controller::Billing"),
         "sibling group must re-brand to `billing`, not leak `alerts`",
     );
@@ -2234,7 +2234,7 @@ fn test_route_controller_token_disambiguates_by_ownership() {
         })
         .expect("MethodCall for ->to('reports#monthly')");
 
-    let class = app.method_call_invocant_class(to_ref, Some(&idx));
+    let class = app.method_call_invocant_classes(to_ref, Some(&idx)).single().map(str::to_string);
     assert_eq!(
         class.as_deref(),
         Some("Beta::Controller::Reports"),

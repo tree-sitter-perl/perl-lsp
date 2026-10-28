@@ -407,8 +407,8 @@ fn completion_items_native(
     let mut suppress_firehose = false;
     if let Some(call_ctx) = cursor_context::find_call_context(tree, source.as_bytes(), point) {
         if call_ctx.is_method {
-            let dispatch_class = analysis.invocant_text_to_class(call_ctx.invocant.as_deref(), point);
-            let has_any_handlers = dispatch_class.as_ref().is_some_and(|c|
+            let dispatch_class = analysis.invocant_text_classes(call_ctx.invocant.as_deref(), point);
+            let has_any_handlers = dispatch_class.iter().any(|c|
                 class_has_dispatch_handlers(analysis, module_index, c, &call_ctx.name)
             );
             // Debug line for dispatch completion — one-shot diagnoses
@@ -488,7 +488,9 @@ fn completion_items_native(
                 // An unguarded optional receiver still offers its methods,
                 // a union the ones every arm has. Ref types get deref
                 // snippet completions (handled below).
-                analysis.shared_members(ty, |cn| analysis.complete_methods_for_class(cn, Some(module_index)))
+                analysis.shared_members(&analysis.dispatch_classes_of(ty, Some(module_index)), |cn| {
+                    analysis.complete_methods_for_class(cn, Some(module_index))
+                })
             } else {
                 let invocant_text = receiver.receiver_text.as_deref().unwrap_or("");
                 analysis.complete_methods(invocant_text, point, Some(module_index))
@@ -737,7 +739,7 @@ pub fn member_completion_for_type(
     let requesting_class = analysis
         .scope_at(point)
         .and_then(|sc| analysis.enclosing_class_for_scope(sc));
-    let candidates = analysis.shared_members(receiver, |class| {
+    let candidates = analysis.shared_members(&analysis.dispatch_classes_of(receiver, Some(module_index)), |class| {
         analysis.complete_members_for_class(class, Some(module_index), requesting_class.as_deref())
     });
     if candidates.is_empty() {

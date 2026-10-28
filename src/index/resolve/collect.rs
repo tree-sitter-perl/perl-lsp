@@ -1171,21 +1171,7 @@ pub(super) fn collect_from_analysis(
                 {
                     // A union receiver dispatches on every arm, so the
                     // site references each arm's member.
-                    let resolved_classes: Vec<String> = match r.method_target() {
-                        // The frozen edge can carry an UNRESOLVED DBIC source
-                        // moniker (`Artist`) when it was stamped at build with
-                        // no index (a closed call-site file — enrichment
-                        // re-stamps OPEN docs only). Map it to the FQ result
-                        // class here, index in hand, so `$row->cds` sites match
-                        // the same target goto-def reaches. No-op for a class
-                        // that already resolves.
-                        Some(edge) => vec![analysis.resolve_dbic_source_moniker(
-                            edge.invocant_class().to_string(),
-                            None,
-                            module_index,
-                        )],
-                        None => analysis.method_call_invocant_classes(r, module_index),
-                    };
+                    let resolved_classes = analysis.receiver_classes(r, module_index);
                     match scope {
                         Some(pkg) => resolved_classes.into_iter().any(|cn| {
                             if target.scope == OverrideScope::Hierarchy {
