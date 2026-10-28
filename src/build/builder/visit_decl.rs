@@ -1407,6 +1407,32 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Every callable's invocant, settled, is a `RECEIVER` symbol: the
+    /// variable its binding site declares. Consumers ask the flag, never
+    /// the name (`$self` is Perl's convention, decided here once).
+    pub(super) fn flag_receiver_symbols(&mut self) {
+        let receivers: Vec<(String, Point)> = self
+            .symbols
+            .iter()
+            .filter_map(|s| match &s.detail {
+                SymbolDetail::Sub { params, .. } => params.first(),
+                _ => None,
+            })
+            .filter(|p| p.is_invocant)
+            .filter_map(|p| Some((p.name.clone(), p.binding_site?)))
+            .collect();
+        for (name, at) in receivers {
+            if let Some(sym) = self.symbols.iter_mut().find(|s| {
+                matches!(s.kind, SymKind::Variable)
+                    && s.name == name
+                    && s.span.start <= at
+                    && at <= s.span.end
+            }) {
+                sym.flags |= crate::model::file_analysis::SymbolFlags::RECEIVER;
+            }
+        }
+    }
+
     pub(super) fn visit_variable_decl(&mut self, node: Node<'a>) {
         let keyword = self.get_decl_keyword(node, );
         let decl_kind = match keyword.as_deref() {

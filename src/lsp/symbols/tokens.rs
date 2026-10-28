@@ -55,7 +55,7 @@ pub fn inlay_hints(analysis: &FileAnalysis, range: Range) -> Vec<InlayHint> {
         match sym.kind {
             FaSymKind::Variable => {
                 // Skip conventional invocants — always the enclosing class.
-                if crate::model::conventions::is_conventional_invocant_name(&sym.name) {
+                if sym.flags.contains(crate::model::file_analysis::SymbolFlags::RECEIVER) {
                     continue;
                 }
                 // Skip variables whose type is written EXPLICITLY (`int c`,
