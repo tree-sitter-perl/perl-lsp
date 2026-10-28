@@ -71,9 +71,9 @@ fn a_slot_key_with_no_backing_ref_lands_in_the_residue() {
     let mut fa = build(src);
     for (key, expect_unrowed) in [("ghostkey", true), ("conn", false)] {
         fa.witnesses.push(Witness {
-            attachment: WitnessAttachment::SlotType {
-                class: "Foo".to_string(),
-                key: key.to_string(),
+            attachment: WitnessAttachment::Field {
+                owner: "Foo".to_string(),
+                name: key.to_string(),
             },
             source: WitnessSource::Builder("test".into()),
             payload: WitnessPayload::Derivation,

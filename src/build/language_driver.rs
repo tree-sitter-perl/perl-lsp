@@ -1080,6 +1080,7 @@ fn remap_spans(
         macro_body_member_reads: _,
         names: _,
         slot_writes,
+        member_writes,
         // scope-keyed — no spans to fix.
         class_scopes: _,
     } = skel;
@@ -1153,6 +1154,13 @@ fn remap_spans(
     for (_, span) in return_sites.iter_mut() {
         *span = rspan(*span);
     }
+    // Member writes settle through `expr_type_at_span` on the receiver and an
+    // edge to the value's `Expr`, both of which speak original coords.
+    for w in member_writes.iter_mut() {
+        let crate::build::query_extract::MemberWrite { receiver, member: _, value } = w;
+        *receiver = rspan(*receiver);
+        *value = rspan(*value);
+    }
     for sc in scopes.iter_mut() {
         sc.span.start = r(sc.span.start);
         sc.span.end = r(sc.span.end);
@@ -1186,7 +1194,6 @@ fn remap_spans(
         | WitnessAttachment::HashKey { .. }
         | WitnessAttachment::PackageSymbol { .. }
         | WitnessAttachment::SymbolReturnArm(_)
-        | WitnessAttachment::SlotType { .. }
         | WitnessAttachment::TypeName(_)
         | WitnessAttachment::Field { .. }
         | WitnessAttachment::Param { .. } => {}

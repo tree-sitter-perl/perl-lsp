@@ -1034,10 +1034,10 @@ fn idx_find_method_return(
         .find_method_return_type(class, method, Some(idx), None)
 }
 
-/// Seam (b), primary (hop 1): the cross-file `SlotType{class, key}` primary —
+/// Seam (b), primary (hop 1): the cross-file `Field{owner, name}` primary —
 /// a typed slot WRITE in the class's OWN file, read from a consumer, resolves
 /// through the extracted `attempt` closure. (The enriched-retry twin of this
-/// hop is dormant today: SlotType seeds are build-gated on a resolvable RHS,
+/// hop is dormant today: Perl slot seeds are build-gated on a resolvable RHS,
 /// so a seed that exists already answers on the raw bag. The retry is wired
 /// for symmetry with the PackageSymbol primary; this test guards the refactor
 /// that extracted its `attempt` closure.)
@@ -1056,7 +1056,7 @@ fn cross_file_slot_type_primary_resolves_hop1() {
     let tree = parser.parse(app_src, None).unwrap();
     let fa = crate::build::builder::build(&tree, app_src.as_bytes());
 
-    // `$c` rode `Edge(Expr($s->{conn}))`, which drilled `SlotType{Store, conn}`
+    // `$c` rode `Edge(Expr($s->{conn}))`, which drilled `Field{Store, conn}`
     // into Store's own file (hop 1) and found the `Conn->new` slot write.
     let t = fa.inferred_type_via_bag_ctx(
         "$c",
@@ -1066,7 +1066,7 @@ fn cross_file_slot_type_primary_resolves_hop1() {
     assert_eq!(
         t.as_ref().and_then(|t| t.class_name().map(|s| s.to_string())).as_deref(),
         Some("Conn"),
-        "read narrows via Store's own slot write (cross-file SlotType primary): {t:?}"
+        "read narrows via Store's own slot write (cross-file Field primary): {t:?}"
     );
 }
 
