@@ -191,13 +191,18 @@ binding, a member, an earlier slot); every other write, augmented or not,
 and any write through an untyped receiver, stays a member reference. The
 write's own token stays a member reference too.
 
-What a write puts in a member is a separate fact, and not a slot's: a
-write to a member is an assignment to it. `@flow.member` names the member
-and `@flow.receiver` the receiver, beside the `@flow.source` an assignment
-to a name carries, so any member write, through any receiver, is one
-pattern of the document. Its target is the member of the class the
-receiver's value is (`skeleton::settle_member_writes`, after the slots,
-adopted into the sealed baseline with `FileAnalysis::adopt_witnesses`). A
+What a write puts in a member is a separate fact, and not a slot's: an
+assignment writes the place its left side denotes. `@flow.place` marks
+the left side, whatever it is, beside `@flow.source`; the vocabulary has
+no lvalue kinds. The place is what the left side's own read projects, so
+a write lands where a read of the same expression looks, at any depth
+(`self.a.b.c = v` writes `c` of the class `self.a.b` is). A name's place
+is its binding, which `@flow.target` writes and rebinds; a left side no
+read projects (a subscript, until element reads are minted; a tuple,
+until destructuring pairs its elements) takes nothing. A member read's
+place is the member of the class the receiver's value is
+(`skeleton::settle_member_writes`, after the slots, adopted into the
+sealed baseline with `FileAnalysis::adopt_witnesses`). A
 member the file declares on that class or an ancestor takes the write
 into its declaration's `Variable`, as a variable takes one, so a declared
 type outranks what flows in. Any other member — an instance slot, or one
