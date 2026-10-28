@@ -47,7 +47,7 @@
   (readonly_modifier)? @sym.attr
   type: (_)? @type.annot
   (property_element
-    name: (variable_name (name) @def.field.name @flow.target.member) @def.field.spelled) @def.field)
+    name: (variable_name (name) @def.field.name @flow.target) @def.field.spelled) @def.field)
 ; A constructor parameter with a visibility or `readonly` is also a
 ; property of the class (PHP 8 promotion); the member belongs to the class
 ; body, not to the constructor whose parameter list declares it.
@@ -55,8 +55,8 @@
   readonly: (readonly_modifier)? @sym.attr
   type: (_)? @type.annot
   name: [
-    (variable_name (name) @def.field.name @flow.target.member) @def.field.spelled
-    (by_ref (variable_name (name) @def.field.name @flow.target.member) @def.field.spelled)
+    (variable_name (name) @def.field.name @flow.target) @def.field.spelled
+    (by_ref (variable_name (name) @def.field.name @flow.target) @def.field.spelled)
   ]) @def.field
 
 ; ---- what a declaration is, stated on its name ----

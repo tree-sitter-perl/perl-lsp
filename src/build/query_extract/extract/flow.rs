@@ -60,7 +60,9 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
     let pack = st.pack;
     let cur_scope = st.cur_scope;
     let bind_scope = st.bind_scope();
-    let member_scope = st.member_scope();
+    // A target that is the name a def in its match declares binds where
+    // that def binds.
+    let target_scope = st.defs.declared_by(e).map_or(bind_scope, |kind| st.def_scope(kind));
     let f = &mut st.flow;
     let out = &mut st.out;
     match e.cap {
@@ -100,10 +102,10 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
             // function's `Symbol` onto it when undeclared.
             out.return_sites.push((cur_scope, e.span()));
         }
-        Capture::Flow(target @ (FlowCap::Target | FlowCap::TargetMember)) => {
+        Capture::Flow(FlowCap::Target) => {
             // a target a def's header declares (an annotated parameter)
             // binds in the def's own scope
-            let scope = if target == FlowCap::TargetMember { member_scope } else { bind_scope };
+            let scope = target_scope;
             f.flow_targets.insert(e.match_id, ((pack.shape_name)(&e.text), scope, e.start));
             // Record the declared-type text keyed by (var, DECLARING scope)
             // for the token-less optional-engagement narrowing. cur_scope is

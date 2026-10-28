@@ -178,10 +178,9 @@ spelled! {
     pub enum FlowCap {
         /// The assignment node (pattern anchor).
         Assign = "assign",
+        /// A name the value binds. A def's own name token binds where the
+        /// def does (a property's at its class body).
         Target = "target",
-        /// A member of the enclosing class as the target: its value lands
-        /// at the class body, where the member's readers look.
-        TargetMember = "target.member",
         Source = "source",
         /// A rebind with no inflowing value (loop variables).
         Rebind = "rebind",
