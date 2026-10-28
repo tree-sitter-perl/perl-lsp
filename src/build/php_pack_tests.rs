@@ -1770,6 +1770,22 @@ fn an_anonymous_class_is_a_class_of_its_own() {
     assert_eq!(classes, ["class@anonymous:2:10", "class@anonymous:3:10"]);
 }
 
+/// An anonymous class has no spelling another file could write, so it is
+/// not part of the file's cross-file surface: two files with one at the
+/// same place keep two classes.
+#[cfg(feature = "php")]
+#[test]
+fn an_anonymous_class_is_not_linkage_visible() {
+    let fa = php(NEW);
+    let anon = fa.symbols().iter().find(|s| s.name == "App\\class@anonymous:20:18").unwrap();
+    assert!(!fa.is_linkage_visible(anon));
+    let base = fa.symbols().iter().find(|s| s.name == "App\\Base").unwrap();
+    assert!(fa.is_linkage_visible(base));
+    let ws = Workspace::new(&[("/fake/php/App/Box.php", NEW), ("/fake/php/App/Crate.php", NEW)]);
+    assert_eq!(ws.defs("Box.php", "hi();", 0), vec![site("Box.php", 20, 28)]);
+    assert_eq!(ws.defs("Crate.php", "hi();", 0), vec![site("Crate.php", 20, 28)]);
+}
+
 /// The constructor a construction calls is the method the document marks,
 /// and a document that constructs without marking one does not compile.
 #[test]
