@@ -389,14 +389,14 @@ impl ModuleIndex {
 
     /// The held symbols `cached`'s questions pick through the index now —
     /// what a listing adds to the file's base symbols (its resident copy's
-    /// or its rows), with no view built. A file already deciding on this
-    /// thread lists its fallbacks'.
+    /// or its rows), with no view built. Read while a question is being
+    /// decided, it lists the fallbacks'.
     pub fn shown_held_symbols(&self, cached: &Arc<CachedModule>) -> Vec<crate::model::file_analysis::Symbol> {
         let base = cached.analysis();
         if base.readings.is_empty() {
             return Vec::new();
         }
-        let picks = match Deciding::enter(&cached.path) {
+        let picks = match Deciding::enter() {
             Some(_deciding) => base.picks(Some(self)),
             None => base.readings.fallbacks(),
         };
@@ -414,11 +414,12 @@ impl ModuleIndex {
         if base.readings.is_empty() {
             return None;
         }
-        // A question can read another file's view, whose questions can read
-        // this one's: a file already deciding on this thread answers with
-        // its fallbacks.
-        let Some(_deciding) = Deciding::enter(&cached.path) else {
-            crate::util::ghost_stats::count("decided_view.cycle");
+        // A question reads other files as stored, fallbacks installed: were
+        // their own questions decided too, each read would decide the next
+        // file's, and FHEM's indirect sites chained that across the whole
+        // workspace (every worker spinning for 10+ minutes).
+        let Some(_deciding) = Deciding::enter() else {
+            crate::util::ghost_stats::count("decided_view.nested");
             return None;
         };
         let picks = base.picks(Some(self));
@@ -454,30 +455,24 @@ impl ModuleIndex {
 }
 
 thread_local! {
-    static DECIDING: std::cell::RefCell<Vec<std::path::PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+    static DECIDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// The files whose questions this thread is deciding.
+/// A question being decided on this thread. Its reads see every file as
+/// stored, so deciding never nests.
 struct Deciding;
 
 impl Deciding {
-    fn enter(path: &std::path::Path) -> Option<Deciding> {
-        DECIDING.with(|d| {
-            let mut d = d.borrow_mut();
-            if d.iter().any(|p| p == path) {
-                return None;
-            }
-            d.push(path.to_path_buf());
-            Some(Deciding)
-        })
+    fn enter() -> Option<Deciding> {
+        // `then`, not `then_some`: a guard built eagerly on the nested path
+        // would drop at once and clear the outer one's flag.
+        DECIDING.with(|d| (!d.replace(true)).then(|| Deciding))
     }
 }
 
 impl Drop for Deciding {
     fn drop(&mut self) {
-        DECIDING.with(|d| {
-            d.borrow_mut().pop();
-        });
+        DECIDING.with(|d| d.set(false));
     }
 }
 
