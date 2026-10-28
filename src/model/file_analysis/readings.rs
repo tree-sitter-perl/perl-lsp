@@ -157,6 +157,28 @@ impl FileAnalysis {
         self.readings.base
     }
 
+    /// The symbols every view shows. Empty on a symbol-evicted copy, as
+    /// `symbols()` is.
+    pub fn base_symbols(&self) -> &[Symbol] {
+        let all = self.symbols();
+        &all[..(self.base_lengths().symbols as usize).min(all.len())]
+    }
+
+    /// The held symbols a view installing `picks` shows, without building
+    /// it: one per synthesized identity, as `install` dedups. Their ids are
+    /// the stored copy's to give, so a lister reads them for their names
+    /// and spans only.
+    pub fn shown_held_symbols(&self, picks: &[Option<Arm>]) -> Vec<&Symbol> {
+        let mut shown: HashSet<(&str, SymKind, Option<&str>, &Namespace)> = HashSet::new();
+        self.readings
+            .symbols
+            .iter()
+            .filter(|h| picks.get(h.question as usize).copied().flatten() == Some(h.arm))
+            .map(|h| &h.entry)
+            .filter(|s| shown.insert((s.name.as_str(), s.kind, s.package.as_deref(), &s.namespace)))
+            .collect()
+    }
+
     /// Every name a held reading could add to this file, as the relational
     /// rows key them: the candidate presence its own row table records, so
     /// a retrieval that must not miss a view's entries finds the file

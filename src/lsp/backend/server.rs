@@ -1535,7 +1535,11 @@ impl LanguageServer for Backend {
             // they don't shadow.
             let mut open_paths: std::collections::HashSet<std::path::PathBuf> =
                 std::collections::HashSet::new();
-            let mut visit = |uri: Url, analysis: &crate::model::file_analysis::FileAnalysis| {
+            // `symbols`: what the copy shows — an open doc's whole view; an
+            // index copy's base, then the held symbols its questions pick.
+            let mut visit = |uri: Url,
+                             analysis: &crate::model::file_analysis::FileAnalysis,
+                             symbols: &mut dyn Iterator<Item = &crate::model::file_analysis::Symbol>| {
                 if !analysis.symbols_are_evicted() {
                     if let Ok(p) = uri.to_file_path() {
                         // Claim the canonical spelling too: rows are keyed
@@ -1547,7 +1551,7 @@ impl LanguageServer for Backend {
                         covered.insert(p);
                     }
                 }
-                for sym in analysis.symbols() {
+                for sym in symbols {
                     if sym.name.to_lowercase().contains(&query) {
                         if let Some(info) = symbols::symbol_to_workspace_info(sym, uri.clone()) {
                             results.push(info);
@@ -1568,7 +1572,7 @@ impl LanguageServer for Backend {
                 if let Ok(p) = url.to_file_path() {
                     open_paths.insert(std::fs::canonicalize(&p).unwrap_or(p));
                 }
-                visit(url.clone(), &doc.analysis);
+                visit(url.clone(), &doc.analysis, &mut doc.analysis.symbols().iter());
             });
             cx.index().for_each_registered_file(&mut |cached| {
                 if open_paths.contains(&cached.path) {
@@ -1577,7 +1581,15 @@ impl LanguageServer for Backend {
                 let uri = Url::from_file_path(&cached.path).unwrap_or_else(|_| {
                     Url::parse(&format!("file://{}", cached.path.display())).unwrap()
                 });
-                visit(uri, &cx.index().listing_copy(cached));
+                let analysis = cached.analysis();
+                // A held symbol is listed only where some view could show a
+                // match, and then only if its question picks it now.
+                let held = if analysis.readings.held_symbols().any(|s| s.name.to_lowercase().contains(&query)) {
+                    cx.index().shown_held_symbols(cached)
+                } else {
+                    Vec::new()
+                };
+                visit(uri, &analysis, &mut analysis.base_symbols().iter().chain(&held));
             });
 
             // Rows pass: symbol-evicted copies (the served language's

@@ -875,16 +875,25 @@ fn run_one(
             let mut covered: std::collections::HashSet<std::path::PathBuf> =
                 std::collections::HashSet::new();
             idx.for_each_registered_file(&mut |cached| {
-                let (path, analysis) = (cached.path.as_path(), &idx.listing_copy(cached));
+                let (path, analysis) = (cached.path.as_path(), &cached.analysis());
                 let file = path.display().to_string();
                 if !analysis.symbols_are_evicted() {
                     covered.insert(path.to_path_buf());
                 }
-                for sym in analysis.symbols() {
+                for sym in analysis.base_symbols() {
                     if sym.hidden_in_outline() {
                         continue;
                     }
                     push(&sym.name, &sym.kind, file.clone(), sym.selection_span);
+                }
+                // A held symbol is listed only where some view could show a
+                // match, and then only if its question picks it now.
+                if analysis.readings.held_symbols().any(|s| s.name.to_lowercase().contains(&q)) {
+                    for sym in idx.shown_held_symbols(cached) {
+                        if !sym.hidden_in_outline() {
+                            push(&sym.name, &sym.kind, file.clone(), sym.selection_span);
+                        }
+                    }
                 }
             });
             for hit in idx.sym_search(&q) {

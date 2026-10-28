@@ -91,6 +91,34 @@ call off the binding. Neither re-finds a call by span containment, and a
 `$h->{k}` deref that merely sits inside a call's arguments is never owned
 by that call.
 
+## Decision: held readings live in a table of their own
+
+A site whose ENTRIES (not just a value) wait on a question — a plugin
+emission gated on cross-file ancestry, an indirect-object call — mints
+every reading into `FileAnalysis::readings` (`readings.rs`), never into
+the symbol or ref tables. The tables are the base (what the file states
+whatever the answers) followed by the installed readings: the stored
+analysis installs each question's fallback, and a decided view cuts back
+to the base and installs its own picks. Nothing in a table is a
+placeholder: no dormant slot, no impossible span, no empty name.
+
+- A base id or index is the same in every view; an installed entry's is
+  its view's own. Held symbols carry no id, and a held witness names its
+  symbol by its place among the held ones.
+- Readings seat after `finalize_post_walk`, and a view links only its
+  installed refs, so no base entry names an id a later cut removes.
+- An indirect-object site is the one REPLACING reading. The walk runs its
+  undecided reading whole (a framework keyword's declarations, a
+  constructor's keys), so its heads stay in base slots; each slot holds
+  the head of whichever reading is installed, and the walk's
+  `Expression(slot)` facts hold under the fallback.
+- The row store lists the base in `refs`/`syms` and held names in `held`,
+  a presence table: any retrieval that must not miss a view (candidate
+  files, the member/name probes, the dead-export view) consults it, and a
+  hit fails open to deciding the file. A listing (workspace/symbol) adds
+  a file's held symbols by their picks, without building a view, and
+  only where a held name could match.
+
 ## Consequences
 
 - The answer is computed at query time through `CrossFileLookup` only, so

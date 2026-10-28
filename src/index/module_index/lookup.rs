@@ -387,6 +387,22 @@ impl ModuleIndex {
         self.rehydrate_or_resident(cached)
     }
 
+    /// The held symbols `cached`'s questions pick through the index now —
+    /// what a listing adds to the file's base symbols (its resident copy's
+    /// or its rows), with no view built. A file already deciding on this
+    /// thread lists its fallbacks'.
+    pub fn shown_held_symbols(&self, cached: &Arc<CachedModule>) -> Vec<crate::model::file_analysis::Symbol> {
+        let base = cached.analysis();
+        if base.readings.is_empty() {
+            return Vec::new();
+        }
+        let picks = match Deciding::enter(&cached.path) {
+            Some(_deciding) => base.picks(Some(self)),
+            None => base.readings.fallbacks(),
+        };
+        base.shown_held_symbols(&picks).into_iter().cloned().collect()
+    }
+
     /// The view of `cached` with the readings its questions pick through
     /// the index right now, or `None` when they pick the fallbacks the base
     /// shows (the caller serves its ordinary view). The questions are asked
