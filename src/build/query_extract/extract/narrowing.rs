@@ -143,25 +143,27 @@ pub(super) fn finish(st: &mut ExtractState) {
     let out = &mut st.out;
     // Narrowing cutoffs (THE cross-language lift): truncate each guarded region
     // at the first FlowEdge that rebinds the subject — the SAME edge-driven
-    // cutoff the Perl narrowing uses (`earliest_rebind_in`). Deferred to here so
+    // cutoff the Perl narrowing uses (`RebindIndex`). Deferred to here so
     // the edges exist. The witness gets a REAL region span [start, cutoff], so
     // point-containment ends the narrowing at the rebind — the soundness Perl
     // got from its cutoff, now generic. Every LangPack that narrows (python
     // isinstance, cpp dynamic_cast + optional engagement) gets it free.
+    let rebinds = crate::model::file_analysis::RebindIndex::new(&out.flow_edges);
+    let mut narrowed = Vec::new();
     for (name, refined, region, scope) in std::mem::take(&mut n.pending_narrow) {
-        let refined = written_type_at(out, &st.pack.names, refined, region.start);
-        let end = crate::model::file_analysis::earliest_rebind_in(&out.flow_edges, &name, region)
-            .unwrap_or(region.end);
+        let end = rebinds.earliest_in(&name, region).unwrap_or(region.end);
         if (region.start.row, region.start.column) >= (end.row, end.column) {
             continue; // rebound before the region even opens — nothing holds
         }
-        out.witnesses.push(crate::model::witnesses::Witness {
+        let refined = written_type_at(out, &st.pack.names, refined, region.start);
+        narrowed.push(crate::model::witnesses::Witness {
             attachment: crate::model::witnesses::WitnessAttachment::Variable { name, scope },
             source: crate::model::witnesses::WitnessSource::Builder("skeleton-narrow".into()),
             payload: crate::model::witnesses::WitnessPayload::InferredType(refined),
             span: Span { start: region.start, end },
         });
     }
+    out.witnesses.extend(narrowed);
     // std::move sites → moved-from facts. The qualifier/name verify the
     // call IS `std::move` here (no query predicates), so the diagnostic never
     // sees the call shape — it reads the recorded var + span + scope.
