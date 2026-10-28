@@ -1009,8 +1009,8 @@ impl FileAnalysis {
     }
 
     /// Resolve the class name for an invocant expression text (the token
-    /// left of `->`). Handles the two Perl conventions `$self` and
-    /// `__PACKAGE__` by falling back to the enclosing package; typed
+    /// left of `->`). A receiver (the variable its producer flagged
+    /// `RECEIVER`) and `__PACKAGE__` fall back to the enclosing package; typed
     /// scalars go through `inferred_type`; barewords are treated as
     /// class names verbatim.
     ///
@@ -1020,7 +1020,7 @@ impl FileAnalysis {
     pub fn invocant_text_to_class(&self, invocant: Option<&str>, point: Point) -> Option<String> {
         use crate::model::conventions::InvocantText;
         let text = invocant?;
-        if crate::model::conventions::is_conventional_invocant_name(text, self.names()) {
+        if self.is_receiver_at(text, point) {
             return self.package_at(point).map(|s| s.to_string());
         }
         match InvocantText::parse(text) {

@@ -444,7 +444,7 @@ impl FileAnalysis {
         for sym in &self.symbols {
             match sym.kind {
                 SymKind::Variable | SymKind::Field => {
-                    let is_self = sym.flags.contains(SymbolFlags::RECEIVER) || crate::model::conventions::is_conventional_invocant_name(&sym.name, self.names());
+                    let is_self = sym.flags.contains(SymbolFlags::RECEIVER);
                     let (sigil, is_readonly, is_param) = match &sym.detail {
                         // Anchored on a use, not a declaration: the use's
                         // own ref carries the token.
@@ -529,8 +529,7 @@ impl FileAnalysis {
                     let is_self = r
                         .resolved_symbol()
                         .and_then(|sid| self.symbols.get(sid.0 as usize))
-                        .is_some_and(|s| s.flags.contains(SymbolFlags::RECEIVER))
-                        || crate::model::conventions::is_conventional_invocant_name(&r.target_name, self.names());
+                        .is_some_and(|s| s.flags.contains(SymbolFlags::RECEIVER));
                     let token_type = if is_self { TOK_KEYWORD } else { TOK_VARIABLE };
                     // Don't add sigil modifier for $self/$class — it would override the keyword color
                     let mut mods = if is_self { 0 } else { sigil_modifier(sigil) };

@@ -1293,5 +1293,5 @@ pub(crate) fn is_conventional_invocant_scalar<'a>(node: Node<'a>, src: &'a [u8])
     node.kind() == "scalar"
         && varname_child(node)
             .and_then(|v| v.text(src))
-            .is_some_and(|n| is_conventional_invocant_name(n, &crate::model::conventions::PERL_SPELLINGS))
+            .is_some_and(is_conventional_invocant_name)
 }

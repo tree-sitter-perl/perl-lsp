@@ -857,22 +857,21 @@ impl FileAnalysis {
         let first = invocant.as_bytes()[0];
         if first == b'$' || first == b'@' || first == b'%' {
             if let Some(t) = self.inferred_type_via_bag_ctx(invocant, point, module_index) {
-                // A conventional invocant (`$self`/`$class`/...) whose bag
+                // A receiver (`$self`/`$class`/...) whose bag
                 // type carries no dispatch class still dispatches on the
                 // enclosing class — identity outranks a classless value
                 // type (`$self->{count}++` observations must not demote
                 // `$self` to a plain hashref).
                 if self.dispatch_class_of(&t, module_index).is_none()
-                    && crate::model::conventions::is_conventional_invocant_name(invocant, self.names())
+                    && self.is_receiver_at(invocant, point)
                 {
                     return self.enclosing_class_for_scope(r.scope).map(InferredType::ClassName);
                 }
                 return Some(t);
             }
-            // Enclosing-class fallback for an untyped conventional
-            // invocant. Other untyped variable invocants stay None —
+            // Enclosing-class fallback for an untyped receiver. Other untyped variable invocants stay None —
             // better than poisoning them with the surrounding package.
-            if crate::model::conventions::is_conventional_invocant_name(invocant, self.names()) {
+            if self.is_receiver_at(invocant, point) {
                 return self.enclosing_class_for_scope(r.scope).map(InferredType::ClassName);
             }
             return None;
@@ -984,13 +983,13 @@ impl FileAnalysis {
                     .and_then(|t| t.class_name().map(|s| s.to_string()))
                     .or_else(|| {
                         // Enclosing-class fallback only applies to
-                        // conventional invocants — other variable invocants
+                        // receivers — other variable invocants
                         // whose type we don't know stay None, not poisoned
                         // with the surrounding package. Otherwise `$r->to(...)`
                         // with `$r` un-typed would pretend `to` is a method on
                         // the enclosing package (MyApp), and goto-def on the
                         // method name lands on `package MyApp;`.
-                        if crate::model::conventions::is_conventional_invocant_name(invocant, self.names()) {
+                        if self.is_receiver_at(invocant, point) {
                             enclosing()
                         } else {
                             None

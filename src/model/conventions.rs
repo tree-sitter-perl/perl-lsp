@@ -32,8 +32,6 @@ pub const PERL_SPELLINGS: NameSpellings = NameSpellings {
     enclosing_class: crate::model::file_analysis::EnclosingClass::NamespaceInForce,
     // `$obj->{key}` reaches a slot; `$obj->key` never does.
     instance_slots: crate::model::file_analysis::InstanceSlots::Apart,
-    // `my $self = shift` is an ordinary parameter; its name is the statement.
-    receiver_names: crate::model::file_analysis::ReceiverNames::Conventional,
 };
 
 /// Split a possibly-qualified name into `(Option<package>, basename)`.
@@ -115,18 +113,14 @@ pub fn qualify_var(sigil: char, package: &str, base: &str, names: &NameSpellings
 }
 
 /// Conventional invocant variable names — `sub f { my ($self) = @_ }` and
-/// friends — in a language whose names mark its receivers
-/// (`ReceiverNames::Conventional`); `names` is the spellings of the
-/// language the name is in. Accepts the bare identifier or the `$`-sigiled
-/// spelling so both param names (`"$self"`) and canonical varnames
-/// (`"self"`) route here.
+/// friends. Accepts the bare identifier or the `$`-sigiled spelling so both
+/// param names (`"$self"`) and canonical varnames (`"self"`) route here.
 ///
 /// "Conventional" means: the *name alone* signals receiver-ness. A variable
 /// not on this list can still be the invocant (`my ($c) = @_;`) — callers
 /// that know the position (first param of a method) must not gate on this.
-pub fn is_conventional_invocant_name(name: &str, names: &NameSpellings) -> bool {
-    names.receiver_names == crate::model::file_analysis::ReceiverNames::Conventional
-        && matches!(
+pub fn is_conventional_invocant_name(name: &str) -> bool {
+    matches!(
         name.strip_prefix('$').unwrap_or(name),
         "self" | "class" | "this" | "proto"
     )
@@ -591,7 +585,6 @@ mod tests {
             class_call: NameSpellings::NONE.class_call,
             enclosing_class: NameSpellings::NONE.enclosing_class,
             instance_slots: NameSpellings::NONE.instance_slots,
-            receiver_names: NameSpellings::NONE.receiver_names,
         };
         assert_eq!(super::split_qualified("App\\Models\\User", &php), (Some("App\\Models"), "User"));
         assert_eq!(super::name_match_key("App\\Models\\User", &php), "User");

@@ -560,6 +560,7 @@ fn build_once(
     // ones.
     b.flush_deferred_named_sub_param_types();
     b.mark_method_invocants();
+    b.flag_receiver_symbols();
 
     // Post-pass 1: resolve variable refs -> Symbol bindings
     bphase!("resolve_variable_refs", b.resolve_variable_refs());

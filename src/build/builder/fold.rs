@@ -2106,7 +2106,7 @@ impl<'a> Builder<'a> {
                     let known_tc = typed_names.contains(&vt);
                     let known_def = var_defs.contains_key(&vt);
                     crate::util::ghost_stats::count("unowned.total");
-                    if crate::model::conventions::is_conventional_invocant_name(&vt, &crate::model::conventions::PERL_SPELLINGS) {
+                    if crate::model::conventions::is_conventional_invocant_name(&vt) {
                         crate::util::ghost_stats::count("unowned.self_like");
                     }
                     if !vt.starts_with(['$', '@', '%']) {
