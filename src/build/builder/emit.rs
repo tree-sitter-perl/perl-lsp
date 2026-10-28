@@ -752,16 +752,13 @@ impl<'a> Builder<'a> {
     }
 
     pub(super) fn emit_expr_witness(&mut self, node: Node<'a>) {
-        // A plainly assigned element and the levels on a write's path are the
-        // write, not drills: their keys extend the shape
+        // A written element and the levels on a write's path are the write,
+        // not drills: their keys extend the shape
         // (`emit_mutation_extension_witnesses`) instead of being read out of
-        // it. A compound assignment (`||=`, `.=`) still reads its element.
-        let plainly_assigned = node.parent().is_some_and(|p| {
-            crate::cst::assign_op(p) == Some(crate::cst::AssignOp::Plain)
-                && p.child_by_field_name("left") == Some(node)
-        });
+        // it — unless the write reads the element first (`ElementWrite`).
         if matches!(node.kind(), "hash_element_expression" | "array_element_expression")
-            && (plainly_assigned || self.on_write_path(node))
+            && (self.on_write_path(node)
+                || self.element_write_kind(node).is_some_and(|w| !w.reads_element()))
         {
             return;
         }
