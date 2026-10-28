@@ -255,3 +255,19 @@ fn every_declarator_folds_its_constant() {
     }
 }
 
+
+#[test]
+fn a_written_element_is_a_drill_only_when_the_write_reads_it() {
+    let src = "my $h = {}; my $x;\n$h->{a}++;\n$h->{b} ||= 1;\n$h->{c} = 1;\n($h->{d}, $x) = (1, 2);\npush @{$h->{e}}, 1;\n@{$h->{f}} = (1);\n";
+    let fa = build_fa(src);
+    let drilled = |row: usize| {
+        let line = src.lines().nth(row).unwrap();
+        let col = line.find("$h").unwrap();
+        fa.witnesses.all().iter().any(|w| {
+            matches!(&w.attachment, crate::model::witnesses::WitnessAttachment::Expr(s)
+                if s.start == tree_sitter::Point::new(row, col) && s.end.column == col + 7)
+        })
+    };
+    let got: Vec<bool> = (1..=6).map(drilled).collect();
+    assert_eq!(got, vec![false, true, false, false, false, false]);
+}
