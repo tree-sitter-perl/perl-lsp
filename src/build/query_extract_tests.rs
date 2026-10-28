@@ -1465,7 +1465,7 @@ fn cmake_cross_file_function_rename_and_subdirectory_resolution() {
 
 #[test]
 fn python_union_annotations_are_unions() {
-    use crate::model::file_analysis::{format_inferred_type, InferredType};
+    use crate::model::file_analysis::format_inferred_type;
     let at = python_pack().annot_type;
     let spelled = |t: &str| at(t).map(|t| format_inferred_type(&t));
     for (src, want) in [
@@ -1481,7 +1481,8 @@ fn python_union_annotations_are_unions() {
     }
     // An arm nothing reads types the whole spelling as nothing.
     assert_eq!(at("Cat | 3"), None);
-    assert_eq!(at("None"), Some(InferredType::Undef));
+    // `None` alone types nothing; it is only ever an arm.
+    assert_eq!(at("None"), None);
 }
 
 #[test]
