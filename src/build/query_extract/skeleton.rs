@@ -1156,6 +1156,13 @@ impl SkeletonAnalysis {
                     // suppresses the `@expr.read.var` duplicate at the same
                     // start). The tail segment is an identifier, so it never
                     // spans rows — the end-anchored column math is safe.
+                    //
+                    // TODO(cpp-qualified-call-spelled): this is `@ref.call` on
+                    // the leaf token plus `@ref.spelled` on the path, as php's
+                    // qualified calls are, but cpp nests a qualifier per
+                    // segment (`a::b::f` is `a::(b::f)`, a template call's
+                    // leaf one level deeper), so the leaf needs a link walk
+                    // down the `name:` fields the document can state.
                     RefCap::QCall => {
                         let (pkg, bare) = crate::model::file_analysis::split_qualified(&r.name, &names);
                         let pkg = pkg?;
