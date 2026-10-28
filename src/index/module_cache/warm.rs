@@ -449,10 +449,7 @@ fn adopt_warm_provider(
     inc_roots: &[PathBuf],
 ) {
     let mut v = all_defs.entry(module_name.to_string()).or_default();
-    match v.iter().position(|c| c.path == cand.path) {
-        Some(i) => v[i] = cand.clone(),
-        None => v.push(cand.clone()),
-    }
+    crate::model::file_analysis::upsert_candidate(&mut v, cand.clone());
     let rel = module_name.replace("::", "/") + ".pm";
     let rank = |c: &CachedModule| inc_roots.iter().position(|r| r.join(&rel) == c.path).unwrap_or(usize::MAX);
     let winner = v.iter().min_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.path.cmp(&b.path))).cloned();

@@ -1152,9 +1152,8 @@ impl CrossFileLookup for ModuleIndex {
     }
 
     fn leaf_def_candidates(&self, leaf: &str) -> Vec<Arc<CachedModule>> {
-        let mut v = self.core.leaf_defs.get(leaf).map(|c| c.clone()).unwrap_or_default();
-        v.sort_by(|a, b| a.path.cmp(&b.path));
-        v
+        // Path-ordered on insert (`upsert_candidate`).
+        self.core.leaf_defs.get(leaf).map(|c| c.clone()).unwrap_or_default()
     }
 
     fn for_each_workspace_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) {
@@ -1308,13 +1307,11 @@ impl ModuleIndex {
     pub(crate) fn def_candidates_now(&self, name: &str) -> Vec<Arc<CachedModule>> {
         match self.core.all_defs.get(name) {
             Some(cands) if !cands.is_empty() => {
-                // Path-ordered HERE, the one speller of candidate order —
-                // `all_defs` vecs are insertion-ordered (parallel indexing),
-                // and every consumer scan/union/tie-break leans on this
-                // being deterministic.
-                let mut v = cands.clone();
-                v.sort_by(|a, b| a.path.cmp(&b.path));
-                v
+                // Path-ordered by `upsert_candidate`, the one speller of
+                // candidate order: every consumer scan/union/tie-break leans
+                // on it being deterministic.
+                debug_assert!(cands.windows(2).all(|w| w[0].path < w[1].path));
+                cands.clone()
             }
             // No workspace candidates: fall back to the name-slot winner.
             // The @INC tier lands here — single-provider by CURRENT

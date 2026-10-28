@@ -481,10 +481,7 @@ impl ModuleIndex {
         }
         for (name, _) in &names {
             let mut v = self.core.all_defs.entry(name.clone()).or_default();
-            match v.iter().position(|c| c.path == cached.path) {
-                Some(i) => v[i] = cached.clone(),
-                None => v.push(cached.clone()),
-            }
+            crate::model::file_analysis::upsert_candidate(&mut v, cached.clone());
         }
         for name in &affected {
             self.rebuild_name_registration(name);
@@ -1367,10 +1364,7 @@ impl ModuleIndex {
             // stale analysis, and duplicate paths never stack.
             {
                 let mut v = self.core.all_defs.entry(sym_name.clone()).or_default();
-                match v.iter().position(|c| c.path == cached.path) {
-                    Some(i) => v[i] = cached.clone(),
-                    None => v.push(cached.clone()),
-                }
+                crate::model::file_analysis::upsert_candidate(&mut v, cached.clone());
             }
             // A TYPE wins the cache slot over a callable/value of the same
             // name. C reuses names freely — a `#define OP(x)` macro in one
@@ -1415,10 +1409,7 @@ impl ModuleIndex {
         // competes with a declaration of the identity.
         for leaf in super::widening_leaves(analysis.names(), feed) {
             let mut v = self.core.leaf_defs.entry(leaf).or_default();
-            match v.iter().position(|c| c.path == cached.path) {
-                Some(i) => v[i] = cached.clone(),
-                None => v.push(cached.clone()),
-            }
+            crate::model::file_analysis::upsert_candidate(&mut v, cached.clone());
         }
         // Specialization family edges: primary → spec NAMES. A spec's Class
         // symbol registered above makes `get_cached(spec_name)` resolve, so

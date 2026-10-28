@@ -6,6 +6,16 @@ use super::*;
 
 // ---- Cross-file lookup capability ----
 
+/// Put `cand` into a candidate set kept in path order, replacing the entry
+/// with its path. Kept sorted on insert so every read is a clone, not a
+/// sort: `main` has hundreds of candidates and is read per query.
+pub fn upsert_candidate(v: &mut Vec<std::sync::Arc<CachedModule>>, cand: std::sync::Arc<CachedModule>) {
+    match v.binary_search_by(|c| c.path.cmp(&cand.path)) {
+        Ok(i) => v[i] = cand,
+        Err(i) => v.insert(i, cand),
+    }
+}
+
 /// A module in the cache — its filesystem path plus the analysis of its
 /// source, SEALED. The model reads a module only through the index's read
 /// seams (`CrossFileLookup::bag_present` and its siblings), which record the
