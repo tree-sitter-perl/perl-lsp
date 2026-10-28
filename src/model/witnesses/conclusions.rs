@@ -41,7 +41,7 @@ use std::collections::HashMap;
 pub enum ConclusionKey {
     MethodOnClass { class: String, name: String },
     SubByName(String),
-    SlotType { class: String, key: String },
+    Field { owner: String, name: String },
     TypeName(String),
 }
 
@@ -54,9 +54,9 @@ impl ConclusionKey {
                 class: package.clone(),
                 name: name.clone(),
             }),
-            WitnessAttachment::SlotType { class, key } => Some(Self::SlotType {
-                class: class.clone(),
-                key: key.clone(),
+            WitnessAttachment::Field { owner, name } => Some(Self::Field {
+                owner: owner.clone(),
+                name: name.clone(),
             }),
             WitnessAttachment::TypeName(n) => Some(Self::TypeName(n.clone())),
             _ => None,

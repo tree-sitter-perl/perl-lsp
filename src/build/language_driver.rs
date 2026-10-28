@@ -135,6 +135,29 @@ pub trait LanguageDriver: Send + Sync {
     fn analysis_input_fingerprint(&self) -> u64 {
         0
     }
+    /// The file whose presence gives a directory meaning to this
+    /// language's analyses (python's `__init__.py`). The index records
+    /// where a walk saw it (`walk_markers`) and the pack invalidator notes
+    /// each one created or deleted. `None` = no such file.
+    fn module_marker(&self) -> Option<&'static str> {
+        None
+    }
+    /// Whether what `analysis` read about `path` from outside its source
+    /// still holds — the module a path-named file is. A warm row that
+    /// fails it re-analyzes.
+    fn path_inputs_current(&self, _path: &Path, _analysis: &FileAnalysis) -> bool {
+        true
+    }
+}
+
+/// How a language that names modules by path names one: the marker file
+/// that makes a directory a package, and the namer that walks the marked
+/// directories above a file.
+#[cfg(feature = "pack-langs")]
+#[derive(Clone, Copy)]
+pub struct FileModuleRule {
+    pub marker: &'static str,
+    pub name: fn(&Path, &crate::build::walk_markers::MarkedDirs<'_>) -> Option<crate::build::query_extract::FileModule>,
 }
 
 /// Perl — the reference driver. Wraps the production builder; behaviour
@@ -276,6 +299,10 @@ pub struct PackDriver {
     /// concept). Stamps a `non_public` attribute on member symbols so
     /// completion can filter by visibility.
     access_regions: Option<fn(&mut tree_sitter::Parser, &str) -> Vec<crate::build::cpp_reparse::AccessRegion>>,
+    /// The module a file is, for a language that names modules by path
+    /// (python). Asks the walk's marker snapshot, else the disk, so it
+    /// runs in the gather phase.
+    file_module: Option<FileModuleRule>,
 }
 
 /// Pre-parse external state gathered in phase 1 (`gather_pack_context`) and
@@ -285,6 +312,7 @@ pub struct PackDriver {
 struct PackContext {
     external: std::sync::Arc<crate::build::cpp_reparse::PreExpandedExternal>,
     plan: Option<crate::build::cpp_reparse::MemberBlockPlan>,
+    module: Option<crate::build::query_extract::FileModule>,
 }
 
 #[cfg(feature = "pack-langs")]
@@ -315,7 +343,9 @@ impl LanguageDriver for PackDriver {
     /// 1. `gather_pack_context` — pre-parse external inputs read from the
     ///    ORIGINAL source: the cross-file macro table (`gather_macros`) and
     ///    the member-block plan (blanks standalone macro-in-struct-body uses
-    ///    so the base parses clean). Produces `PackContext`.
+    ///    so the base parses clean), plus the module a path-named file is
+    ///    (`file_module`, which phase 3 files its classes under). Produces
+    ///    `PackContext`.
     /// 2. `transform_and_parse` — the macro-expansion reparse (`transform`)
     ///    over the plan's blanked source (or the original, when there's no
     ///    plan), then the real tree-sitter parse of the transformed text.
@@ -378,10 +408,23 @@ impl LanguageDriver for PackDriver {
     fn analysis_input_fingerprint(&self) -> u64 {
         self.input_fingerprint.map(|f| f()).unwrap_or(0)
     }
+    fn module_marker(&self) -> Option<&'static str> {
+        self.file_module.map(|r| r.marker)
+    }
+    fn path_inputs_current(&self, path: &Path, analysis: &FileAnalysis) -> bool {
+        self.file_module.is_none() || self.module_of(path) == analysis.pack.file_module
+    }
 }
 
 #[cfg(feature = "pack-langs")]
 impl PackDriver {
+    /// The module `path` is, by the language's rule over the marked
+    /// directories the walk saw (the disk, outside any walk).
+    fn module_of(&self, path: &Path) -> Option<crate::build::query_extract::FileModule> {
+        let rule = self.file_module?;
+        crate::build::walk_markers::with_dirs(rule.marker, path, |dirs| (rule.name)(path, dirs))
+    }
+
     /// The phase pipeline `analyze_with_path` documents; the trait method
     /// wraps it to stamp `FileAnalysis.language` on every exit.
     fn analyze_pipeline(&self, source: &str, path: Option<&Path>) -> FileAnalysis {
@@ -394,7 +437,7 @@ impl PackDriver {
             return fa;
         };
         let pack = (self.pack)();
-        match crate::build::query_extract::extract(&tree, src.as_bytes(), &pack) {
+        match crate::build::query_extract::extract_in(&tree, src.as_bytes(), &pack, ctx.module.as_ref()) {
             Ok(mut skel) => {
                 // remap extracted spans from transformed → original coords
                 // (no-op for identity / pass-through languages).
@@ -432,7 +475,8 @@ impl PackDriver {
 #[cfg(feature = "pack-langs")]
 impl PackDriver {
     /// Phase 1: pre-parse external context — the cross-file macro table and
-    /// the member-block plan. Both read the ORIGINAL source only.
+    /// the member-block plan, both read from the ORIGINAL source only, and
+    /// the module the file's path makes it.
     fn gather_pack_context(&self, parser: &mut tree_sitter::Parser, source: &str, path: Option<&Path>) -> PackContext {
         // Cross-file macros from #included headers (C++), so a macro
         // #defined elsewhere (SPDLOG_NAMESPACE_BEGIN) expands here.
@@ -447,7 +491,8 @@ impl PackDriver {
         // coordinates; the ORIGINAL source keeps the token (goto-def-on-`BASEOP`
         // untouched). `docs/adr/macro-handling.md`.
         let plan = self.member_blocks.map(|f| crate::util::timings::phase("cpp.member_blocks", || f(parser, source)));
-        PackContext { external, plan }
+        let module = path.and_then(|p| self.module_of(p));
+        PackContext { external, plan, module }
     }
 
     /// Phase 2: the macro-expansion reparse over `ctx`'s blanked/original
@@ -576,6 +621,7 @@ impl PackDriver {
         macro_defs: Vec<crate::model::file_analysis::MacroDef>,
     ) {
         fa.pack.macro_defs = macro_defs;
+        fa.pack.file_module = ctx.module.clone();
         apply_attribute_macros(fa, recovered);
         // Access-specifier regions: a fresh parse of the ORIGINAL source
         // (spans already in original coords, no remap needed) tags each
@@ -631,6 +677,7 @@ fn cpp_driver() -> PackDriver {
         include_closure: Some(crate::build::cpp_reparse::include_closure),
         input_fingerprint: Some(crate::build::cpp_reparse::toolchain_fingerprint),
         access_regions: Some(crate::build::cpp_reparse::access_regions),
+        file_module: None,
     }
 }
 
@@ -654,6 +701,34 @@ fn python_driver() -> PackDriver {
         include_closure: None,
         input_fingerprint: None,
         access_regions: None,
+        file_module: Some(FileModuleRule { marker: "__init__.py", name: crate::build::packs::python_file_module }),
+    }
+}
+
+#[cfg(feature = "php")]
+fn php_driver() -> PackDriver {
+    PackDriver {
+        id: "php",
+        maturity: Maturity::Alpha,
+        // `.phtml` templates parse under the same HTML-interleaved grammar.
+        exts: &["php", "phtml"],
+        filenames: &[],
+        make_parser: || {
+            let mut p = tree_sitter::Parser::new();
+            // The `php` flavor, not `php_only`: real files open with `<?php`
+            // and may interleave HTML, which this grammar keeps as inert text.
+            p.set_language(&tree_sitter_php::LANGUAGE_PHP.into()).expect("php grammar");
+            p
+        },
+        pack: crate::build::packs::php_pack,
+        transform: None,
+        gather_macros: None,
+        collect_macro_defs: None,
+        member_blocks: None,
+        include_closure: None,
+        input_fingerprint: None,
+        access_regions: None,
+        file_module: None,
     }
 }
 
@@ -677,6 +752,7 @@ fn r_driver() -> PackDriver {
         include_closure: None,
         input_fingerprint: None,
         access_regions: None,
+        file_module: None,
     }
 }
 
@@ -701,6 +777,7 @@ fn cmake_driver() -> PackDriver {
         include_closure: None,
         input_fingerprint: None,
         access_regions: None,
+        file_module: None,
     }
 }
 
@@ -817,6 +894,8 @@ fn inject_member_blocks(
             package: Some(base.macro_name.clone()),
             owner: None,
             implicit_receiver: false,
+            direct: false,
+            declaration_rules: Vec::new(),
         });
         skel.scope_count = skel.scopes.len();
         for m in &base.members {
@@ -833,6 +912,7 @@ fn inject_member_blocks(
                 name_end: m.name_span.end,
                 package: Some(base.macro_name.clone()),
                 scope: scope_id,
+                pair: None,
                 return_type: None,
                 deref_stack: m.deref_stack.clone(),
                 attributes: Vec::new(),
@@ -973,6 +1053,8 @@ fn remap_spans(
         refs,
         imports: _,
         import_sites,
+        use_rows,
+        namespace_ranges,
         scope_count: _,
         scopes,
         witnesses,
@@ -998,9 +1080,13 @@ fn remap_spans(
         // Populated later (enrich_skeleton) already in original coords — no remap.
         macro_body_member_reads: _,
         names: _,
+        slot_writes,
+        member_writes,
+        // scope-keyed — no spans to fix.
+        class_scopes: _,
     } = skel;
 
-    for s in symbols.iter_mut() {
+    for s in symbols.iter_mut().chain(slot_writes.iter_mut().map(|w| &mut w.symbol)) {
         let crate::build::query_extract::SkelSymbol {
             kind: _,
             name: _,
@@ -1010,6 +1096,7 @@ fn remap_spans(
             name_end,
             package: _,
             scope: _,
+            pair: _,
             return_type: _,
             deref_stack: _,
             attributes: _,
@@ -1068,6 +1155,13 @@ fn remap_spans(
     for (_, span) in return_sites.iter_mut() {
         *span = rspan(*span);
     }
+    // Member writes settle through `expr_type_at_span` on the receiver and an
+    // edge to the value's `Expr`, both of which speak original coords.
+    for w in member_writes.iter_mut() {
+        let crate::build::query_extract::MemberWrite { receiver, member: _, value } = w;
+        *receiver = rspan(*receiver);
+        *value = rspan(*value);
+    }
     for sc in scopes.iter_mut() {
         sc.span.start = r(sc.span.start);
         sc.span.end = r(sc.span.end);
@@ -1075,6 +1169,14 @@ fn remap_spans(
     // `#include` path tokens — goto-def on the token is span-keyed.
     for (_, span) in import_sites.iter_mut() {
         *span = rspan(*span);
+    }
+    // `use` row name tokens — a class token inside one names the row.
+    for row in use_rows.iter_mut() {
+        row.span = rspan(row.span);
+        row.reach = rspan(row.reach);
+    }
+    for section in namespace_ranges.iter_mut() {
+        section.span = rspan(section.span);
     }
     // Witness spans (the type tier). A length-changing splice (`PBF op_type` →
     // `unsigned op_type`) shifts every span AFTER it, so a declared-type
@@ -1093,7 +1195,6 @@ fn remap_spans(
         | WitnessAttachment::HashKey { .. }
         | WitnessAttachment::PackageSymbol { .. }
         | WitnessAttachment::SymbolReturnArm(_)
-        | WitnessAttachment::SlotType { .. }
         | WitnessAttachment::TypeName(_)
         | WitnessAttachment::Field { .. }
         | WitnessAttachment::Param { .. } => {}
@@ -1302,6 +1403,8 @@ impl LanguageRegistry {
             drivers.push(Box::new(r_driver()));
             #[cfg(feature = "cmake")]
             drivers.push(Box::new(cmake_driver()));
+            #[cfg(feature = "php")]
+            drivers.push(Box::new(php_driver()));
             // Registered here too, not only on analysis, because a warm start
             // answers from cached analyses no driver has built this process.
             for d in &drivers {
@@ -1410,6 +1513,35 @@ impl LanguageRegistry {
             .any(|l| *l == id)
     }
 
+    /// The visibility routing fact for `id`'s language, which
+    /// `VisibilityAxis::for_origin` derives the origin's axis from: a pack
+    /// whose class spellings resolve through a use-map is scoped by that
+    /// use-map (`NameKeyed`), any other pack by its include closure, the
+    /// host by its search path. Read off the pack's own `names`, never a
+    /// language-name branch. Memoized like `is_pack_language`.
+    pub fn pack_visibility(id: &str) -> crate::model::file_analysis::PackVisibility {
+        use crate::model::file_analysis::PackVisibility;
+        static ROUTES: std::sync::OnceLock<Vec<(&'static str, PackVisibility)>> = std::sync::OnceLock::new();
+        ROUTES
+            .get_or_init(|| {
+                LanguageRegistry::compiled()
+                    .drivers
+                    .iter()
+                    .filter_map(|d| {
+                        let pack = d.lang_pack()?;
+                        let route = match pack.names.use_map_sep() {
+                            Some(_) => PackVisibility::NameKeyed,
+                            None => PackVisibility::IncludePaths,
+                        };
+                        Some((d.id(), route))
+                    })
+                    .collect()
+            })
+            .iter()
+            .find(|(l, _)| *l == id)
+            .map_or(PackVisibility::Host, |(_, route)| *route)
+    }
+
     /// The declared capabilities of `id`'s driver — THE generic capability
     /// asker (the collapse the two-boolean ceiling in docs/PARKED.md
     /// called for). An id no driver claims answers `DriverCaps::default()`
@@ -1478,6 +1610,7 @@ impl LanguageRegistry {
             "python" => "Python",
             "r" => "R",
             "cmake" => "CMake",
+            "php" => "PHP",
             _ => id,
         }
     }

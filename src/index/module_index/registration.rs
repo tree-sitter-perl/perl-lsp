@@ -414,6 +414,13 @@ impl ModuleIndex {
                     }
                 }
             }
+            for leaf in super::widening_leaves(cm.analysis.names(), &rec) {
+                if let Some(mut v) = self.core.leaf_defs.get_mut(&leaf) {
+                    if let Some(i) = v.iter().position(|c| c.path == path) {
+                        v[i] = cm.clone();
+                    }
+                }
+            }
         }
         self.insert_cache(&name, Some(cm));
     }
@@ -904,7 +911,7 @@ impl ModuleIndex {
         let mut copy: FileAnalysis = (*whole).clone();
         // A session around the build, same as `enrich_open`'s: the overlay's
         // enrichment is where the cross-file consult cascade lives (FHEM
-        // measured 12.3M SlotType attempts inside these builds, every one
+        // measured 12.3M slot-value attempts inside these builds, every one
         // `session.absent`), and without a session the candidate-answer memo
         // is inert on exactly the path that repeats. A caller already holding
         // a session (server verbs) nests — this owns only when outermost.
@@ -1861,6 +1868,16 @@ impl ModuleIndex {
                 }
             }
         }
+        // A use-map class answers under its leaf too, in the widening
+        // relation only — no slot, no `all_defs` entry, so the leaf never
+        // competes with a declaration of the identity.
+        for leaf in super::widening_leaves(analysis.names(), feed) {
+            let mut v = self.core.leaf_defs.entry(leaf).or_default();
+            match v.iter().position(|c| c.path == cached.path) {
+                Some(i) => v[i] = cached.clone(),
+                None => v.push(cached.clone()),
+            }
+        }
         // Specialization family edges: primary → spec NAMES. A spec's Class
         // symbol registered above makes `get_cached(spec_name)` resolve, so
         // the reverse map's values are the same by-name keys the rest of the
@@ -1901,9 +1918,9 @@ impl ModuleIndex {
         crate::util::ghost_stats::count("epoch.shape.unregister_file");
         self.core.note_shape_change();
         let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        if self.all_files.remove(&canon).is_none() {
+        let Some((_, old)) = self.all_files.remove(&canon) else {
             return;
-        }
+        };
         // Symbols may be evicted on the resident copy, and rehydration
         // would fetch the WRONG generation after an edit persists — so the
         // inverse runs on the name list registration recorded, not on
@@ -1913,6 +1930,12 @@ impl ModuleIndex {
             .remove(&canon)
             .map(|(_, v)| v)
             .unwrap_or_default();
+        for leaf in super::widening_leaves(old.analysis.names(), &names) {
+            if let Some(mut v) = self.core.leaf_defs.get_mut(&leaf) {
+                v.retain(|c| c.path != canon);
+            }
+            self.core.leaf_defs.remove_if(&leaf, |_, v| v.is_empty());
+        }
         for (name, _) in &names {
             if let Some(mut v) = self.core.all_defs.get_mut(name) {
                 v.retain(|c| c.path != canon);

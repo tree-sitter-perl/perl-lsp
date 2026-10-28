@@ -130,6 +130,7 @@ impl TargetRef {
     pub fn owned_accessor(
         name: String,
         class: String,
+        member_kind: MemberKind,
         origin: &FileAnalysis,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Self {
@@ -142,8 +143,7 @@ impl TargetRef {
             scope: OverrideScope::Hierarchy,
             def_paths: Vec::new(),
             bare_constant: false,
-            // an accessor is called, whatever backs it
-            member_kind: Some(MemberKind::Callable),
+            member_kind: Some(member_kind),
         }
     }
 

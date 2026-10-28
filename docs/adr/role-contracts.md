@@ -22,11 +22,11 @@ design holds them together so they can't drift:
 `requires NAMES` synthesizes one Method symbol per name (span = the
 name's atom) so in-role `$self->name` resolves: no unresolved-method
 hint, completion offers it, hover documents it. The names also land in
-`PackageFacts::requires` (per-package lists) and the synthesized
-symbols' ids in `FileAnalysis.contract_symbols`.
+`PackageFacts::requires` (per-package lists), and each synthesized
+symbol carries `SymbolFlags::CONTRACT`.
 
-The id set, not the name list, is what "is this def a marker?" must
-consult. A role may both require AND define a name — the
+The symbol's flag, not the name list, is what "is this def a marker?"
+must consult. A role may both require AND define a name — the
 default-implementation pattern (`requires 'fetch'; ... sub fetch {...}`
 — requires as documentation, def as override-point). Name-keyed marker
 checks fail in **both** directions:
@@ -41,7 +41,7 @@ checks fail in **both** directions:
 
 Both stay correct only symbol-keyed. The provision predicates
 (`class_provides_method`, `provides_method_anywhere`,
-`provides_method_in_package`) filter `contract_symbols` by id;
+`provides_method_in_package`) skip symbols flagged `CONTRACT`;
 `method_resolution_on_class` stays marker-INCLUSIVE on purpose, because
 dispatch resolution wants the contract (that's how in-role calls land
 on it).
@@ -120,12 +120,12 @@ struct, never as a free-standing map.
 ## Pack contracts ride the same lane
 
 A pack declares its contract shapes and inherits the check: php's
-skeleton captures an interface's methods and every `abstract` method as
-`@contract.target` (the `contract` symbol attribute → `contract_symbols` +
-the declaring package's `requires`), and an interface, a trait or an
-abstract class is a role (`PackageFacts::is_role`, from the `interface` /
-`trait` / `abstract` class attributes) — it defers its obligations to a
-concrete composer exactly as a Moose role does. `unfulfilled_role_requires`
+skeleton marks every method declared without a body (an interface's, an
+abstract one) `@mark.contract`, so the symbol carries `CONTRACT` and its
+name joins the declaring package's `requires`, and an interface, a trait
+or an abstract class is a role (`PackageFacts::is_role`, from the
+`INTERFACE` / `TRAIT` / `ABSTRACT` class flags) — it defers its obligations
+to a concrete composer exactly as a Moose role does. `unfulfilled_role_requires`
 then answers php with no php in it: the composer's MRO must provide each
 name with a non-contract declaration, the walk continues through deferring
 ancestors and prunes at concrete ones, and every honest-silence rule above

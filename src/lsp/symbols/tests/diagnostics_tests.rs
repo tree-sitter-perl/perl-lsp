@@ -1003,3 +1003,237 @@ fn a_method_every_arm_answers_is_silent() {
 fn a_method_no_arm_answers_names_every_arm() {
     assert_eq!(union_pet_diags("bark"), ["'bark' is not defined in Bird or Cat, which $pet may be"]);
 }
+
+/// `use strict;` and `use Moo;` are bare imports: until their producers are
+/// cached the valve keeps the file silent, so the lint's tests seed them the
+/// way @INC resolution does in the server.
+fn pragma_index() -> crate::index::module_index::ModuleIndex {
+    let module_index = crate::index::module_index::ModuleIndex::new_for_test();
+    for name in ["strict", "Moo"] {
+        module_index.insert_cache(
+            name,
+            Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+                std::path::PathBuf::from(format!("/fake/{name}.pm")),
+                std::sync::Arc::new(parse_analysis(&format!("package {name};\nsub import {{}}\n1;\n"))),
+            ))),
+        );
+    }
+    module_index
+}
+
+fn missing_declarations(diags: &[Diagnostic]) -> Vec<(u32, String)> {
+    diags
+        .iter()
+        .filter(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == codes::MISSING_DECLARATION))
+        .map(|d| (d.range.start.line, d.message.clone()))
+        .collect()
+}
+
+/// #116: an undeclared variable is what `use strict 'vars'` rejects — every
+/// use is flagged (WARNING); `$a`/`$b`, special variables, qualified
+/// spellings and the `scalar` keyword are not.
+#[test]
+fn missing_declaration_flags_each_undeclared_use() {
+    let source = "use strict; $a = 1;\n$abel = 3;\nprint \"$a $abel $_ $0 $ENV{X} @ARGV $main::abel\";\nmy @s = sort { $a <=> $b } @ARGV;\nmy $ok = scalar @s; print $ok;\n";
+    let analysis = parse_analysis(source);
+    let module_index = pragma_index();
+    let diags = collect_diagnostics(&analysis, &module_index, Default::default());
+    let found = missing_declarations(&diags);
+    let lines: Vec<u32> = found.iter().map(|(l, _)| *l).collect();
+    assert_eq!(lines, vec![1, 2], "only the two bare `$abel` uses: {found:?}");
+    assert!(found[0].1.contains("'$abel'"), "{found:?}");
+    let d = diags
+        .iter()
+        .find(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == codes::MISSING_DECLARATION))
+        .unwrap();
+    assert_eq!(d.severity, Some(DiagnosticSeverity::WARNING));
+}
+
+/// An element, slice or `$#` access through a deref names the referent,
+/// not a variable: `${Bugzilla->languages}[0]` declares nothing and needs
+/// nothing declared.
+#[test]
+fn missing_declaration_ignores_deref_element_access() {
+    let source = "use strict; my $x = [];\nmy @r = (${Foo->bar}[0], ${ Foo->bar }{k}, @{Foo->bar}[1, 2], @{$x}{qw(a)}, %$x{a}, $$x[0], ${$x}[0], $#{Foo->bar}, $#$x, ${ f() }[0]);\nsub f { [] }\n";
+    let analysis = parse_analysis(source);
+    let module_index = pragma_index();
+    let found = missing_declarations(&collect_diagnostics(&analysis, &module_index, Default::default()));
+    assert!(found.is_empty(), "{found:?}");
+}
+
+/// A global used inside a sub before a file-level `my` of the same name is
+/// still the global: the lexical isn't in scope yet.
+#[test]
+fn missing_declaration_sees_lexical_declared_later() {
+    let source = "use strict; sub f { return $later }\nmy $later = 1;\nprint $later;\n";
+    let analysis = parse_analysis(source);
+    let module_index = pragma_index();
+    let found = missing_declarations(&collect_diagnostics(&analysis, &module_index, Default::default()));
+    assert_eq!(found.iter().map(|(l, _)| *l).collect::<Vec<_>>(), vec![0], "{found:?}");
+}
+
+/// `our` and `use vars` declare; an Exporter `qw($x)` import or an exported
+/// glob declares too.
+#[test]
+fn missing_declaration_respects_declarations_and_imports() {
+    let source = "use strict; package P;\nour $o = 1;\nuse vars qw($v @w);\nuse vars ('%h');\nuse FakeVars qw($imported);\nuse FakeGlobs;\n$o++; $v++; push @w, 1; $h{k} = 1; print $imported, $globbed;\n";
+    let analysis = parse_analysis(source);
+    let module_index = pragma_index();
+    for (name, src) in [
+        ("FakeVars", "package FakeVars;\nour @EXPORT_OK = qw($imported);\nour $imported;\n1;\n"),
+        ("FakeGlobs", "package FakeGlobs;\nour @EXPORT = qw(*globbed);\nour $globbed;\n1;\n"),
+    ] {
+        module_index.insert_cache(
+            name,
+            Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+                std::path::PathBuf::from(format!("/fake/{name}.pm")),
+                std::sync::Arc::new(parse_analysis(src)),
+            ))),
+        );
+    }
+    let found = missing_declarations(&collect_diagnostics(&analysis, &module_index, Default::default()));
+    assert!(found.is_empty(), "{found:?}");
+}
+
+/// A bare `use` whose producer isn't cached may export any variable: stay
+/// silent until it resolves rather than flag what it might declare.
+#[test]
+fn missing_declaration_silent_while_a_bare_import_is_unresolved() {
+    let source = "use strict; use NotCachedYet;\n$x = 1;\n";
+    let analysis = parse_analysis(source);
+    let module_index = pragma_index();
+    let found = missing_declarations(&collect_diagnostics(&analysis, &module_index, Default::default()));
+    assert!(found.is_empty(), "{found:?}");
+}
+
+/// `disableMissingDeclaration` turns the default-on lint off.
+#[test]
+fn missing_declaration_opt_out() {
+    let analysis = parse_analysis("use strict; $abel = 1;\n");
+    let module_index = pragma_index();
+    assert_eq!(missing_declarations(&collect_diagnostics(&analysis, &module_index, Default::default())).len(), 1);
+    let opts: DiagnosticOptions =
+        serde_json::from_value(serde_json::json!({ "disableMissingDeclaration": true })).unwrap();
+    assert!(missing_declarations(&collect_diagnostics(&analysis, &module_index, opts)).is_empty());
+}
+
+/// `use English` picks `@EXPORT` at runtime; the bundled `english` plugin
+/// states the glob list, so its variables count as declared — minus the
+/// match variables under `-no_match_vars`.
+#[test]
+fn missing_declaration_knows_use_english() {
+    let module_index = pragma_index();
+    module_index.insert_cache(
+        "English",
+        Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+            std::path::PathBuf::from("/fake/English.pm"),
+            std::sync::Arc::new(parse_analysis("package English;\nsub import {}\n1;\n")),
+        ))),
+    );
+    let bare = parse_analysis("use strict; use English;\nprint $ERRNO, $EVAL_ERROR, @ARG, $MATCH, @LAST_MATCH_START;\n");
+    let found = missing_declarations(&collect_diagnostics(&bare, &module_index, Default::default()));
+    assert!(found.is_empty(), "{found:?}");
+
+    let no_match = parse_analysis("use strict; use English qw(-no_match_vars);\nprint $ERRNO, $MATCH;\n");
+    let found = missing_declarations(&collect_diagnostics(&no_match, &module_index, Default::default()));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].1.contains("'$MATCH'"), "{found:?}");
+}
+
+/// `use Env qw(...)` ties package variables to `%ENV` through Env's own
+/// `import`; the bundled `env` plugin declares each listed word, a bare
+/// word as a scalar.
+#[test]
+fn missing_declaration_knows_use_env() {
+    let module_index = pragma_index();
+    module_index.insert_cache(
+        "Env",
+        Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+            std::path::PathBuf::from("/fake/Env.pm"),
+            std::sync::Arc::new(parse_analysis("package Env;\nsub import {}\n1;\n")),
+        ))),
+    );
+    let analysis = parse_analysis("use strict; use Env qw(WEBWORK_ROOT @PATH $HOME);\nprint $WEBWORK_ROOT, @PATH, $HOME, $OTHER, @WEBWORK_ROOT;\n");
+    let names: Vec<String> = missing_declarations(&collect_diagnostics(&analysis, &module_index, Default::default()))
+        .into_iter()
+        .map(|(_, m)| m)
+        .collect();
+    assert_eq!(names.len(), 2, "{names:?}");
+    assert!(names[0].contains("'$OTHER'"), "{names:?}");
+    assert!(names[1].contains("'@WEBWORK_ROOT'"), "{names:?}");
+}
+
+/// Log::Log4perl installs its exports from tags at runtime; the bundled
+/// `log4perl` plugin states them: `:levels` the level scalars, `:easy`
+/// those plus the stealth loggers, and a bare `use Log::Log4perl::Level`
+/// the scalars plus their `*_INT` functions.
+#[test]
+fn log4perl_tags_declare_their_exports() {
+    let module_index = pragma_index();
+    for name in ["Log::Log4perl", "Log::Log4perl::Level"] {
+        module_index.insert_cache(
+            name,
+            Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+                std::path::PathBuf::from(format!("/fake/{name}.pm")),
+                std::sync::Arc::new(parse_analysis(&format!("package {name};\nsub import {{}}\n1;\n"))),
+            ))),
+        );
+    }
+    let messages = |src: &str| -> Vec<String> {
+        collect_diagnostics(&parse_analysis(src), &module_index, Default::default())
+            .into_iter()
+            .map(|d| d.message)
+            .collect()
+    };
+    let levels = messages("use strict; use Log::Log4perl qw(:levels);\nmy $l = $WARN + $DEBUG;\n");
+    assert!(levels.is_empty(), "{levels:?}");
+
+    let easy = messages("use strict; use Log::Log4perl qw(:easy);\nmy $l = $WARN; DEBUG('x'); LOGDIE('y'); get_logger();\n");
+    assert!(easy.is_empty(), "{easy:?}");
+
+    let level_mod = messages("use strict; use Log::Log4perl::Level;\nmy $l = $INFO + WARN_INT();\n");
+    assert!(level_mod.is_empty(), "{level_mod:?}");
+
+    let untagged = messages("use strict; use Log::Log4perl;\nmy $l = $WARN;\n");
+    assert!(untagged.iter().any(|m| m.contains("'$WARN'")), "{untagged:?}");
+}
+
+/// The lint is `use strict 'vars'`: silent where strict isn't in force.
+/// Strict is lexical — on from its statement to the end of the enclosing
+/// scope, off in a `no strict 'vars'` block — and `use v5.12`+ or a module
+/// that imports strict (Moo) turns it on; `no strict 'refs'` leaves it.
+#[test]
+fn missing_declaration_only_under_strict_vars() {
+    let source = "$before = 1;\nuse strict;\n$on = 1;\n{ no strict 'vars'; $off = 1; }\n{ no strict 'refs'; $still = 1; }\n$after = 1;\n";
+    let analysis = parse_analysis(source);
+    let module_index = pragma_index();
+    let names: Vec<String> = missing_declarations(&collect_diagnostics(&analysis, &module_index, Default::default()))
+        .into_iter()
+        .map(|(_, m)| m)
+        .collect();
+    assert_eq!(names.len(), 3, "{names:?}");
+    for (msg, name) in names.iter().zip(["$on", "$still", "$after"]) {
+        assert!(msg.contains(&format!("'{name}'")), "{names:?}");
+    }
+
+    let count = |src: &str| {
+        missing_declarations(&collect_diagnostics(&parse_analysis(src), &module_index, Default::default())).len()
+    };
+    assert_eq!(count("$x = 1;\n"), 0, "no strict at all");
+    assert_eq!(count("use v5.36;\n$x = 1;\n"), 1);
+    assert_eq!(count("use 5.012;\n$x = 1;\n"), 1);
+    assert_eq!(count("use 5.010_001;\n$x = 1;\n"), 0);
+    assert_eq!(count("package P;\nuse Moo;\n$x = 1;\n"), 1);
+    assert_eq!(count("sub f { use strict; $x = 1 }\n$y = 1;\n"), 1, "strict ends with its block");
+}
+
+/// An `s{}{}e` replacement is code: it reads the enclosing sub's lexicals
+/// (`$Param{k}` is `%Param`) and its own `my` is a declaration, not a use.
+#[test]
+fn missing_declaration_reads_eval_replacement_as_code() {
+    let source = "use strict;\nsub f {\n    my (%Param) = @_;\n    my $s = '';\n    $s =~ s{(a)}{\n        my $Start = $1;\n        $Start .= $Param{x};\n        $Start . $typo;\n    }e;\n}\n";
+    let module_index = pragma_index();
+    let found = missing_declarations(&collect_diagnostics(&parse_analysis(source), &module_index, Default::default()));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].1.contains("'$typo'"), "{found:?}");
+}
