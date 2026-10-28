@@ -181,7 +181,7 @@ impl Slot {
             return None; // cross-file: pre-resolved as display tags, not InferredType
         }
         let param = sig.params.get(*index)?;
-        if param.is_invocant || crate::model::conventions::is_conventional_invocant_name(&param.name) {
+        if param.is_invocant {
             return None;
         }
         analysis.inferred_type_via_bag(&param.name, sig.body_end)
