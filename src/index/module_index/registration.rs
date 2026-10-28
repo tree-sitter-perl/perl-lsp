@@ -911,7 +911,7 @@ impl ModuleIndex {
         let mut copy: FileAnalysis = (*whole).clone();
         // A session around the build, same as `enrich_open`'s: the overlay's
         // enrichment is where the cross-file consult cascade lives (FHEM
-        // measured 12.3M SlotType attempts inside these builds, every one
+        // measured 12.3M slot-value attempts inside these builds, every one
         // `session.absent`), and without a session the candidate-answer memo
         // is inert on exactly the path that repeats. A caller already holding
         // a session (server verbs) nests — this owns only when outermost.

@@ -75,6 +75,6 @@ Provenance: an `Optional` return is tagged `optional_join` in its
 ## Forward work
 
 Production gaps (empty-list `return ()`, all-undef → `Undef`,
-`SlotTypeFold`, the bareword `Maybe[…]` constructor form) live in
+`FieldValueReducer`, the bareword `Maybe[…]` constructor form) live in
 `docs/prompt-optional-types.md`. Diagnostics on unguarded `Optional` /
 known-`Undef` derefs: `docs/adr/narrowing-diagnostics.md`.

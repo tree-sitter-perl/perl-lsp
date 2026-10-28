@@ -23,7 +23,7 @@
   total-arm count the fold doesn't track (untypeable arms leave no
   trace). Payoff: feeds the method-on-`Undef` (D1) and always-false-guard
   (D4) diagnostics.
-- **`SlotTypeFold` production** — `{T, undef}` slot writes (`$self->{x} =
+- **`FieldValueReducer` production** — `{T, undef}` slot writes (`$self->{x} =
   $maybe`) → `Optional` on the slot.
 - **Bareword Type::Tiny `Maybe[…]` constructor form** — the
   `TypeConstraintOf` path; the quoted-string `isa => 'Maybe[T]'` form
