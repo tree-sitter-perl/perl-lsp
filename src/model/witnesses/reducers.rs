@@ -296,10 +296,12 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             if !window.admits(w) {
                 continue;
             }
-            // Skip scoped InferredType witnesses that don't contain the
-            // query point — narrowing facts for a different slice of the
-            // variable's lifetime.
-            if let (Some(point), WitnessPayload::InferredType(_)) = (narrow_point, &w.payload) {
+            // Skip region witnesses that don't contain the query point —
+            // a narrowing or a use's observation for a different slice of
+            // the variable's lifetime (past the arm it was made in).
+            if let (Some(point), WitnessPayload::InferredType(_) | WitnessPayload::Observation(_)) =
+                (narrow_point, &w.payload)
+            {
                 if !span_is_zero(&w.span) && !span_contains(&w.span, point) {
                     continue;
                 }

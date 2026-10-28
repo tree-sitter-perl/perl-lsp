@@ -478,6 +478,8 @@ struct Builder<'a> {
     /// (`InstanceOf`, …), flattened once. A call to one of these is typed as
     /// `TypeConstraintOf` via the plugin's fold rather than its callee return.
     type_constraint_names: std::collections::HashSet<String>,
+    /// Plugin `ref_tag_functions()` manifest union, flattened once.
+    ref_tag_functions: Vec<plugin::RefTagFunction>,
     /// Plugin `meta_methods()` manifest union, flattened once at build.
     meta_methods: Vec<String>,
 
@@ -650,6 +652,9 @@ struct Builder<'a> {
     /// Recorded `defined`/`blessed` guards whose `Optional<T> → T` strip
     /// is re-derived each fold iteration (`emit_defined_narrowing_witnesses`).
     defined_narrowings: Vec<narrowing::DefinedNarrowing>,
+    /// Recorded tag guards (`$ref eq 'ARRAY'`), re-derived each fold
+    /// iteration (`emit_tag_narrowing_witnesses`).
+    tag_narrowings: Vec<narrowing::TagNarrowing>,
     /// Recognized narrowings whose region cutoff resolves post-walk against the
     /// minted FlowEdges (`apply_narrowing_cutoffs`) — the edge-driven rebind
     /// truncation that replaced the `cst::rebinds_scalar` grammar scan.

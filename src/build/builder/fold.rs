@@ -545,7 +545,7 @@ impl<'a> Builder<'a> {
             // the write has not produced yet. Block-relative on purpose: inside
             // the block, the block has run; whether it ran at all is the
             // binding-scope question below.
-            let conditional = is_rebind && crate::cst::is_conditionally_executed_in_block(node);
+            let conditional = is_rebind && crate::cst::conditional_arm(node, crate::cst::ArmBound::Block).is_some();
             // Innermost scope containing this assignment.
             let _t_scope = crate::util::ghost_stats::ScopedNs::start("chain::scope_pick");
             let scope_idx = self
@@ -951,6 +951,7 @@ impl<'a> Builder<'a> {
         timed("fold::arity", || self.emit_arity_return_witnesses());
         timed("fold::mc_edges", || self.emit_method_call_return_edges());
         timed("fold::narrowing", || self.emit_defined_narrowing_witnesses());
+        timed("fold::tag_narrowing", || self.emit_tag_narrowing_witnesses());
         let (return_types, return_provenance) =
             timed("fold::seed", || self.seed_return_types_from_bag(reg, method_sym_by_name));
         timed("fold::writeback", || self.write_back_sub_return_types(&return_provenance));

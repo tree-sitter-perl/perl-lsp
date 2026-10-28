@@ -106,9 +106,9 @@ Variable shape witnesses:
   drills back typed, and a typo beside it still hints.
 - **Dynamic key, conditional write, scope-crossing write, or slice
   write → OPEN.** Conditionality is syntactic
-  (`cst::is_conditionally_executed`: if/unless, postfix modifiers,
-  ternary, loops, short-circuit chains — over-marking is the safe
-  direction, it only widens) plus structural at the pass (the write's
+  (`cst::conditional_arm` with `ArmBound::Sub`: if/unless bodies, loop
+  bodies, postfix modifiers, ternary branches, short-circuit right
+  operands) plus structural at the pass (the write's
   scope chain crossing any boundary before the attachment scope:
   nested block or closure, execution unknowable). Slice writes land
   several keys at once; all six spellings (`@h{…}`/`%h{k}`,

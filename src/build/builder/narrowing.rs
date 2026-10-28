@@ -26,6 +26,10 @@ use super::{connector_keyword_between, point_lt, raw_leading_op, raw_mid_op, Bui
 pub(super) enum NarrowSubject {
     Variable(String),
     Place { key: String, root: String, key_vars: Vec<String> },
+    /// A variable holding a `ref`/`reftype`/`blessed` result (`$ref` in
+    /// `$ref eq 'ARRAY'`): the guard is on whatever that tag names, which
+    /// only the bag can say once `$ref`'s value has folded.
+    TagOf(String),
 }
 
 /// Classify a guard's operand into the subject it narrows: a plain
@@ -50,6 +54,8 @@ pub(super) enum NarrowOp {
     /// location IN THE GUARD — before the narrowed region, so the read
     /// sees the un-narrowed `Optional`, not the pass's own output.
     StripOptional { query_point: Point },
+    /// The tag a [`NarrowSubject::TagOf`] holds equals this literal.
+    TagEq(String),
 }
 
 impl NarrowOp {
@@ -60,7 +66,7 @@ impl NarrowOp {
     /// wins). See `docs/adr/flow-narrowing.md` negative-polarity rows.
     fn negated(&self) -> Option<NarrowOp> {
         match self {
-            NarrowOp::To(_) => None,
+            NarrowOp::To(_) | NarrowOp::TagEq(_) => None,
             NarrowOp::StripOptional { .. } => Some(NarrowOp::To(InferredType::Undef)),
         }
     }
@@ -99,6 +105,25 @@ pub(super) struct DefinedNarrowing {
     query_point: Point,
 }
 
+/// A pending tag guard (`$ref eq 'ARRAY'`): re-derived each fold iteration,
+/// since what `var` holds is a fold answer.
+#[derive(Clone)]
+pub(super) struct TagNarrowing {
+    var: String,
+    scope: ScopeId,
+    region: Span,
+    lit: String,
+}
+
+/// What holds over a region of a subject's lifetime: a guard's proof, or
+/// a use's evidence. Both share the region and its cutoffs; only the
+/// payload's strength differs — a proof outranks every other belief, a
+/// use ranks below a value and a class.
+pub(super) enum RegionFact {
+    Guard(NarrowOp),
+    Observe(crate::model::witnesses::TypeObservation),
+}
+
 /// A recognized narrowing whose region cutoff is computed AFTER the walk —
 /// once `mint_flow_edges_via_query` has run, so the scalar-rebind truncation
 /// reads FlowEdges (`apply_narrowing_cutoffs`) instead of a CST scan. The
@@ -108,7 +133,7 @@ pub(super) struct DefinedNarrowing {
 /// walk's `current_scope`), invisible post-walk.
 pub(super) struct PendingNarrow {
     subject: NarrowSubject,
-    op: NarrowOp,
+    fact: RegionFact,
     region: Span,
     scope: ScopeId,
     place_cut: Option<Point>,
@@ -128,6 +153,17 @@ fn ref_string_to_type(s: &str) -> Option<InferredType> {
         "SCALAR" | "REF" | "GLOB" | "LVALUE" | "FORMAT" | "IO" | "VSTRING" => return None,
         other => InferredType::ClassName(other.to_string()),
     })
+}
+
+/// What a tag from `via` equal to `s` proves: `ref` names a reftype token
+/// or a class, `reftype` only a token, `blessed` only a class.
+fn tag_string_to_type(via: crate::model::file_analysis::RefTagFn, s: &str) -> Option<InferredType> {
+    use crate::model::file_analysis::RefTagFn;
+    match via {
+        RefTagFn::Ref => ref_string_to_type(s),
+        RefTagFn::RefType => ref_string_to_type(s).filter(|t| !t.is_object()),
+        RefTagFn::Blessed => (!s.is_empty()).then(|| InferredType::ClassName(s.to_string())),
+    }
 }
 
 /// The earlier of two optional truncation points (`None` = no bound).
@@ -192,7 +228,7 @@ fn recognize_guards<'a>(builder: &Builder<'a>, cond: Node<'a>, source: &[u8]) ->
         "equality_expression" => recognize_ref_eq_guard(builder, cond, source).into_iter().collect(),
         "func1op_call_expression" => recognize_defined_guard(cond, source).into_iter().collect(),
         "ambiguous_function_call_expression" | "function_call_expression" => {
-            recognize_blessed_guard(cond, source).into_iter().collect()
+            recognize_blessed_guard(builder, cond, source).into_iter().collect()
         }
         _ => Vec::new(),
     }
@@ -214,15 +250,9 @@ fn recognize_defined_guard(call: Node, source: &[u8]) -> Option<GuardFact> {
 /// `blessed $x` / `blessed($x)` → strip `Optional` off the subject (v1
 /// treats `blessed` as `defined`'s strip; the extra "is an object"
 /// precision has no lattice target yet).
-fn recognize_blessed_guard(call: Node, source: &[u8]) -> Option<GuardFact> {
-    let name = call.child_by_field_name("function")?.utf8_text(source).ok()?;
-    if name != "blessed" {
-        return None;
-    }
-    // The `arguments` field is the lone operand; peel grouping and accept
-    // it only if it's a scalar/place — never descend into a call/deref.
-    let arg = crate::cst::peel_groups(call.child_by_field_name("arguments")?);
-    if !is_subject_node_kind(arg.kind()) {
+fn recognize_blessed_guard<'a>(builder: &Builder<'a>, call: Node<'a>, source: &[u8]) -> Option<GuardFact> {
+    let (via, arg) = builder.ref_tag_call(call)?;
+    if via != crate::model::file_analysis::RefTagFn::Blessed {
         return None;
     }
     Some(GuardFact {
@@ -253,36 +283,38 @@ fn recognize_isa_guard<'a>(builder: &Builder<'a>, call: Node<'a>, source: &[u8])
     })
 }
 
-/// `ref($x) eq 'Foo'` / `reftype($x) eq 'HASH'` (either operand order) →
-/// narrow `$x` to the proven type. `ref($x) eq __PACKAGE__` proves the
-/// enclosing class.
+/// `ref($x) eq 'Foo'` / `reftype($x) eq 'HASH'` / `blessed($x) eq 'Foo'`
+/// (either operand order) → narrow `$x` to the proven type;
+/// `__PACKAGE__` proves the enclosing class. A scalar compared to a
+/// literal (`$ref eq 'ARRAY'`) is a guard on whatever tag it holds —
+/// resolved once its value folds (`emit_tag_narrowing_witnesses`).
 fn recognize_ref_eq_guard<'a>(builder: &Builder<'a>, eq: Node<'a>, source: &[u8]) -> Option<GuardFact> {
     if raw_mid_op(eq, source) != "eq" {
         return None;
     }
     let left = eq.child_by_field_name("left")?;
     let right = eq.child_by_field_name("right")?;
-    let (ref_call, lit) = if left.kind() == "func1op_call_expression" {
-        (left, right)
-    } else if right.kind() == "func1op_call_expression" {
-        (right, left)
-    } else {
-        return None;
-    };
-    let fname = ref_call.child(0)?.utf8_text(source).ok()?;
-    if fname != "ref" && fname != "reftype" {
-        return None;
+    let call = |n: Node<'a>| builder.ref_tag_call(crate::cst::peel_groups(n));
+    if let Some(((via, operand), lit)) = call(left).map(|c| (c, right)).or_else(|| call(right).map(|c| (c, left))) {
+        let ty = match crate::cst::plain_string_literal_text(lit, source) {
+            Some(s) => tag_string_to_type(via, &s)?,
+            None => InferredType::ClassName(builder.current_package_literal(lit)?),
+        };
+        return Some(GuardFact {
+            subject: narrow_subject_of(operand, source)?,
+            op: NarrowOp::To(ty),
+            asserts_when_true: true,
+        });
     }
-    let subject = narrow_subject_of(func1op_subject_arg(ref_call)?, source)?;
-    let ty = match crate::cst::plain_string_literal_text(lit, source) {
-        Some(s) => ref_string_to_type(&s)?,
-        None => InferredType::ClassName(builder.current_package_literal(lit)?),
+    let tagged = |var: Node<'a>, lit: Node<'a>| {
+        let var = crate::cst::peel_groups(var);
+        if var.kind() != "scalar" {
+            return None;
+        }
+        Some((crate::cst::canonical_var_name(var, source)?, crate::cst::plain_string_literal_text(lit, source)?))
     };
-    Some(GuardFact {
-        subject,
-        op: NarrowOp::To(ty),
-        asserts_when_true: true,
-    })
+    let (var, lit) = tagged(left, right).or_else(|| tagged(right, left))?;
+    Some(GuardFact { subject: NarrowSubject::TagOf(var), op: NarrowOp::TagEq(lit), asserts_when_true: true })
 }
 
 /// True if an expression is a guaranteed control-flow exit
@@ -312,7 +344,7 @@ pub(super) fn is_exit_expression(node: Node, source: &[u8]) -> bool {
 /// A subject's identity for dedup across arms (its source spelling).
 fn subject_key(subject: &NarrowSubject) -> String {
     match subject {
-        NarrowSubject::Variable(v) => v.clone(),
+        NarrowSubject::Variable(v) | NarrowSubject::TagOf(v) => v.clone(),
         NarrowSubject::Place { key, .. } => key.clone(),
     }
 }
@@ -404,6 +436,9 @@ impl<'a> Builder<'a> {
             let predicate = match &fact.op {
                 NarrowOp::To(ty) => GuardPredicate::IsType(ty.clone()),
                 NarrowOp::StripOptional { .. } => GuardPredicate::Defined,
+                // What it proves is a fold answer; D3/D4 read the prior
+                // type at the guard, which a tag guard has no subject for.
+                NarrowOp::TagEq(_) => continue,
             };
             self.guard_sites.push(GuardSite {
                 subject: subject_key(&fact.subject),
@@ -416,22 +451,90 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// `STMT if/unless G;` where STMT is a control-flow exit — narrow the
-    /// rest of the enclosing block (the guard holds for the fall-through).
-    pub(super) fn narrow_postfix_exit(&mut self, postfix: Node<'a>) {
+    /// `STMT if/unless G;` — STMT runs only where G says, so it is a one-arm
+    /// region the guard narrows; when STMT is a control-flow exit, the rest
+    /// of the enclosing block is the fall-through, which holds the opposite.
+    /// `STMT while/until G;` tests G before every run of STMT, so it narrows
+    /// STMT the same way — except `do BLOCK while G`, whose first run comes
+    /// before any test. A loop's fall-through is not narrowed: `last` leaves
+    /// with G unchanged.
+    pub(super) fn narrow_postfix(&mut self, postfix: Node<'a>) {
         let Some(condition) = postfix.child_by_field_name("condition") else { return };
         let Some(modified) = postfix.named_child(0) else { return };
-        if !is_exit_expression(modified, self.source) {
-            return;
-        }
         let Some(kw) = connector_keyword_between(modified, condition, self.source) else { return };
-        // `return unless G` → fall-through holds when G TRUE; `if G` → FALSE.
-        let holds_when_true = match kw.as_str() {
-            "unless" => true,
-            "if" => false,
+        let (runs_when_true, is_loop) = match kw.as_str() {
+            "if" => (true, false),
+            "unless" => (false, false),
+            "while" => (true, true),
+            "until" => (false, true),
             _ => return,
         };
-        self.narrow_block_remainder(postfix, condition, holds_when_true);
+        // TODO(do-loop-node): the grammar gives `do BLOCK while G` the same
+        // node as `STMT while G`; a node of its own would make this a kind.
+        if is_loop && modified.kind() == "do_expression" {
+            return;
+        }
+        self.narrow_arm(condition, modified, runs_when_true);
+        if !is_loop && is_exit_expression(modified, self.source) {
+            self.narrow_block_remainder(postfix, condition, !runs_when_true);
+        }
+    }
+
+    /// `while (G) BLOCK` / `for (…; G; …) BLOCK` — G is tested before every
+    /// run of the body, so the body narrows by G (`until` by its negation),
+    /// and the rebind cutoff ends it at a write. Nothing narrows after the
+    /// loop: `last` leaves with G unchanged.
+    pub(super) fn narrow_loop(&mut self, stmt: Node<'a>) {
+        let (Some(condition), Some(body)) = (stmt.child_by_field_name("condition"), stmt.child_by_field_name("block"))
+        else {
+            return;
+        };
+        // The C-style condition is an `expression_statement` around the test.
+        let condition = match condition.kind() {
+            "expression_statement" => match crate::cst::nth_element(condition, 0) {
+                Some(test) => test,
+                None => return,
+            },
+            _ => condition,
+        };
+        let enter = stmt.child(0).is_none_or(|k| k.kind() != "until");
+        self.narrow_arm(condition, body, enter);
+    }
+
+    /// `G ? A : B` — A runs where G holds, B where it fails.
+    pub(super) fn narrow_ternary(&mut self, expr: Node<'a>) {
+        let Some(condition) = expr.child_by_field_name("condition") else { return };
+        if let Some(a) = expr.child_by_field_name("consequent") {
+            self.narrow_arm(condition, a, true);
+        }
+        if let Some(b) = expr.child_by_field_name("alternative") {
+            self.narrow_arm(condition, b, false);
+        }
+    }
+
+    /// `L && R` / `L and R` — R runs where L holds; `||` / `or` where it
+    /// fails.
+    pub(super) fn narrow_logical_rhs(&mut self, expr: Node<'a>) {
+        let holds = match raw_mid_op(expr, self.source).as_str() {
+            "&&" | "and" => true,
+            "||" | "or" => false,
+            _ => return,
+        };
+        let (Some(left), Some(right)) = (expr.child_by_field_name("left"), expr.child_by_field_name("right"))
+        else {
+            return;
+        };
+        self.narrow_arm(left, right, holds);
+    }
+
+    /// Narrow `arm`, which runs only where `condition` is `holds`.
+    fn narrow_arm(&mut self, condition: Node<'a>, arm: Node<'a>, holds: bool) {
+        let region = node_to_span(arm);
+        for fact in recognize_guards(self, condition, self.source) {
+            if let Some(op) = fact.op_for_region(holds) {
+                self.emit_narrowing_fact(&fact.subject, op, region, arm);
+            }
+        }
     }
 
     /// `G or EXIT;` / `G and EXIT;` — the bare-logical early-exit idiom.
@@ -476,6 +579,51 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// A deref observes its operand as the reference its sigil names:
+    /// `@$x` / `@{$x}` / `$$x[0]` an array, `%$x` / `$$x{k}` a hash,
+    /// `&$x` / `&{$x}` code. Every deref spelling reaches here, keyed on
+    /// the deref node, whichever visitor then walks it.
+    pub(super) fn observe_deref(&mut self, node: Node<'a>) {
+        use crate::model::conventions::Sigil;
+        use crate::model::witnesses::TypeObservation;
+        let Some(sigil) = crate::cst::deref_sigil(node) else { return };
+        let Some(operand) = crate::cst::deref_operand_expr(node) else { return };
+        let obs = match sigil {
+            Sigil::Array => TypeObservation::ArrayRefAccess,
+            Sigil::Hash => TypeObservation::HashRefAccess,
+            Sigil::Code => TypeObservation::CodeRefInvocation,
+            // No reference type in the lattice to observe.
+            Sigil::Scalar | Sigil::Glob => return,
+        };
+        self.observe(operand, node, obs);
+    }
+
+    /// Record what `operand`'s use at `context` reveals about it. A use
+    /// says what the operand holds on the paths that reach it and no others:
+    /// it holds from `context` to the end of the conditionally-run arm
+    /// around it (`cst::conditional_arm`), or else to the end of the block
+    /// it sits in, and like any narrowing it ends at the subject's next
+    /// rebind. Past an arm the value is a join of the arm and its bypass,
+    /// which `JoinFold` will answer; until then the arm says nothing
+    /// outside itself.
+    pub(super) fn observe(
+        &mut self,
+        operand: Node<'a>,
+        context: Node<'a>,
+        obs: crate::model::witnesses::TypeObservation,
+    ) {
+        let operand = crate::cst::peel_groups(operand);
+        if !is_subject_node_kind(operand.kind()) {
+            return;
+        }
+        let Some(subject) = narrow_subject_of(operand, self.source) else { return };
+        let extent = crate::cst::conditional_arm(context, crate::cst::ArmBound::Block)
+            .or_else(|| crate::cst::enclosing_block(context));
+        let Some(extent) = extent else { return };
+        let region = Span { start: context.start_position(), end: extent.end_position() };
+        self.emit_region_fact(&subject, RegionFact::Observe(obs), region, extent);
+    }
+
     /// Push the span-extent narrowing witness on the subject's home scope,
     /// truncating the region at the first reassignment of the subject.
     /// Emit a guard's narrowing into `region`. `op` is the polarity-
@@ -486,6 +634,16 @@ impl<'a> Builder<'a> {
         &mut self,
         subject: &NarrowSubject,
         op: NarrowOp,
+        region: Span,
+        container: Node<'a>,
+    ) {
+        self.emit_region_fact(subject, RegionFact::Guard(op), region, container);
+    }
+
+    fn emit_region_fact(
+        &mut self,
+        subject: &NarrowSubject,
+        fact: RegionFact,
         region: Span,
         container: Node<'a>,
     ) {
@@ -500,11 +658,11 @@ impl<'a> Builder<'a> {
             NarrowSubject::Place { key, root, .. } => {
                 self.first_place_invalidation(key, root, region, container)
             }
-            NarrowSubject::Variable(_) => None,
+            NarrowSubject::Variable(_) | NarrowSubject::TagOf(_) => None,
         };
         self.pending_narrowings.push(PendingNarrow {
             subject: subject.clone(),
-            op,
+            fact,
             region,
             scope: self.current_scope(),
             place_cut,
@@ -539,6 +697,57 @@ impl<'a> Builder<'a> {
                 span: region,
             });
         }
+    }
+
+    /// Re-emittable: tag guards. A guard `$ref eq 'LIT'` narrows the
+    /// variable `$ref`'s tag names, when `$ref` holds a `RefTagOf` computed
+    /// in the same sub and its subject is not rebound between the tag and
+    /// the guard. Clear-and-emit on tag `tag_narrowing`: what `$ref` holds
+    /// is a fold answer.
+    pub(super) fn emit_tag_narrowing_witnesses(&mut self) {
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        self.bag.remove_by_source_tag("tag_narrowing");
+        let mut emits: Vec<(String, ScopeId, InferredType, Span)> = Vec::new();
+        let rebinds = crate::model::file_analysis::RebindIndex::new(&self.flow_edges);
+        for g in &self.tag_narrowings {
+            let Some(InferredType::RefTagOf { subject, site, via }) =
+                self.bag_query_variable(&g.var, g.scope, g.region.start)
+            else {
+                continue;
+            };
+            if self.enclosing_sub_scope_at(site.start) != self.enclosing_sub_scope_at(g.region.start) {
+                continue;
+            }
+            let since_tag = Span { start: site.end, end: g.region.start };
+            if rebinds.earliest_in(&subject, since_tag).is_some() {
+                continue;
+            }
+            let Some(ty) = tag_string_to_type(via, &g.lit) else { continue };
+            let end = rebinds.earliest_in(&subject, g.region).unwrap_or(g.region.end);
+            if point_lt(g.region.start, end) {
+                emits.push((subject, g.scope, ty, Span { start: g.region.start, end }));
+            }
+        }
+        for (name, scope, ty, region) in emits {
+            self.bag.push(Witness {
+                attachment: WitnessAttachment::Variable { name, scope },
+                source: WitnessSource::Builder("tag_narrowing".into()),
+                payload: WitnessPayload::InferredType(ty),
+                span: region,
+            });
+        }
+    }
+
+    /// The innermost sub or method scope holding `at` — the extent a
+    /// variable's tag means anything in.
+    fn enclosing_sub_scope_at(&self, at: Point) -> Option<ScopeId> {
+        use crate::model::file_analysis::ScopeKind;
+        self.scopes
+            .iter()
+            .filter(|s| matches!(s.kind, ScopeKind::Sub { .. } | ScopeKind::Method { .. }))
+            .filter(|s| crate::model::file_analysis::contains_point(&s.span, at))
+            .max_by_key(|s| (s.span.start.row, s.span.start.column))
+            .map(|s| s.id)
     }
 
     /// Point of the first operation in `container` (at or after
@@ -629,16 +838,6 @@ impl<'a> Builder<'a> {
         best
     }
 
-    /// Point of the first FlowEdge that rebinds `$var` within `region` — the
-    /// narrowing region's truncation bound. A rebind IS a value flowing into
-    /// the subject (assignment / `my`·`local` clear / list slot / `foreach`
-    /// var — every shape that mints a bind/assign edge), so this reads the
-    /// EDGE SET, not the CST. Language-agnostic: any LangPack feeding FlowEdges
-    /// gets the cutoff for free (the seam the grammar scan couldn't cross).
-    fn first_subject_write_via_edges(&self, var: &str, region: Span) -> Option<Point> {
-        crate::model::file_analysis::earliest_rebind_in(&self.flow_edges, var, region)
-    }
-
     /// Post-walk: resolve every recognized narrowing's region cutoff against
     /// the now-minted FlowEdges, then emit — `To` → a scoped `InferredType`
     /// witness; `StripOptional` → a `DefinedNarrowing` the fold re-derives.
@@ -648,15 +847,28 @@ impl<'a> Builder<'a> {
     pub(super) fn apply_narrowing_cutoffs(&mut self) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let pending = std::mem::take(&mut self.pending_narrowings);
+        let rebinds = crate::model::file_analysis::RebindIndex::new(&self.flow_edges);
         for pn in pending {
+            if let (NarrowSubject::TagOf(var), RegionFact::Guard(NarrowOp::TagEq(lit))) = (&pn.subject, &pn.fact) {
+                // The guard reads the tag once, at the region's start; what
+                // truncates is a write to the subject it names, known only
+                // once the tag resolves.
+                self.tag_narrowings.push(TagNarrowing {
+                    var: var.clone(),
+                    scope: pn.scope,
+                    region: pn.region,
+                    lit: lit.clone(),
+                });
+                continue;
+            }
             let (name, end) = match &pn.subject {
-                NarrowSubject::Variable(var) => {
-                    (var.clone(), self.first_subject_write_via_edges(var, pn.region))
+                NarrowSubject::Variable(var) | NarrowSubject::TagOf(var) => {
+                    (var.clone(), rebinds.earliest_in(var, pn.region))
                 }
                 NarrowSubject::Place { key, key_vars, .. } => {
                     let mut end = pn.place_cut;
                     for kv in key_vars {
-                        end = earliest_point(end, self.first_subject_write_via_edges(kv, pn.region));
+                        end = earliest_point(end, rebinds.earliest_in(kv, pn.region));
                     }
                     (key.clone(), end)
                 }
@@ -666,8 +878,8 @@ impl<'a> Builder<'a> {
                 continue; // truncated to nothing
             }
             let region = Span { start: pn.region.start, end };
-            match pn.op {
-                NarrowOp::To(ty) => {
+            match pn.fact {
+                RegionFact::Guard(NarrowOp::To(ty)) => {
                     self.bag.push(Witness {
                         attachment: WitnessAttachment::Variable { name, scope: pn.scope },
                         source: WitnessSource::Builder("narrowing".into()),
@@ -675,12 +887,21 @@ impl<'a> Builder<'a> {
                         span: region,
                     });
                 }
-                NarrowOp::StripOptional { query_point } => {
+                RegionFact::Guard(NarrowOp::StripOptional { query_point }) => {
                     self.defined_narrowings.push(DefinedNarrowing {
                         name,
                         scope: pn.scope,
                         region,
                         query_point,
+                    });
+                }
+                RegionFact::Guard(NarrowOp::TagEq(_)) => {}
+                RegionFact::Observe(obs) => {
+                    self.bag.push(Witness {
+                        attachment: WitnessAttachment::Variable { name, scope: pn.scope },
+                        source: WitnessSource::Builder("usage_observation".into()),
+                        payload: WitnessPayload::Observation(obs),
+                        span: region,
                     });
                 }
             }

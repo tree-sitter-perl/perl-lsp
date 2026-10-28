@@ -8,6 +8,7 @@ impl<'a> Builder<'a> {
     // ---- Main visitor ----
 
     pub(super) fn visit_node(&mut self, node: Node<'a>) {
+        self.observe_deref(node);
         match node.kind() {
             "package_statement" => self.visit_package(node),
             "class_statement" => self.visit_class(node),
@@ -64,18 +65,29 @@ impl<'a> Builder<'a> {
                 self.queue_children(node);
             }
 
-            // Flow-sensitive narrowing: a block guard refines the then-block;
-            // a statement-level exit guard refines the rest of the block.
+            // Flow-sensitive narrowing: a guard refines each arm it decides
+            // (a block, a modified statement, a ternary branch, a logical
+            // operator's right side); a statement-level exit guard refines
+            // the rest of the block.
             "conditional_statement" => {
                 self.narrow_block_guard(node);
                 self.queue_children(node);
             }
-            "postfix_conditional_expression" => {
-                self.narrow_postfix_exit(node);
+            "postfix_conditional_expression" | "postfix_loop_expression" => {
+                self.narrow_postfix(node);
+                self.queue_children(node);
+            }
+            "loop_statement" | "cstyle_for_statement" => {
+                self.narrow_loop(node);
                 self.queue_children(node);
             }
             "lowprec_logical_expression" => {
+                self.narrow_logical_rhs(node);
                 self.narrow_logical_exit(node);
+                self.queue_children(node);
+            }
+            "conditional_expression" => {
+                self.narrow_ternary(node);
                 self.queue_children(node);
             }
 
@@ -136,9 +148,6 @@ impl<'a> Builder<'a> {
             // (the EXPR inside the block) is a coderef. Narrow it, then visit
             // children so the inner scalar still gets its read ref.
             "code_deref_expression" => {
-                if let Some(operand) = code_deref_operand(node) {
-                    self.push_rep_observation(operand, node, TypeObservation::CodeRefInvocation);
-                }
                 self.queue_children(node);
             }
             "array_deref_expression" => {
@@ -152,6 +161,7 @@ impl<'a> Builder<'a> {
 
             // Binary operators → type constraints on variable operands
             "binary_expression" => {
+                self.narrow_logical_rhs(node);
                 self.infer_binary_op_type(node);
                 self.queue_children(node);
             }
@@ -164,7 +174,7 @@ impl<'a> Builder<'a> {
             "postinc_expression" | "preinc_expression" => {
                 // $x++ / $x-- / ++$x / --$x → Numeric
                 if let Some(operand) = node.named_child(0) {
-                    self.push_var_type_constraint(operand, node, InferredType::Numeric);
+                    self.observe(operand, node, TypeObservation::NumericUse);
                 }
                 self.queue_children(node);
             }

@@ -37,6 +37,9 @@ pub(super) struct State {
     /// the empty sentinel: it stays a SITE (counter-evidence in the coherence
     /// vote's denominator) without persisting arbitrary expression text.
     domain_value_by_match: HashMap<usize, String>,
+    /// `@arm` spans seen so far; events arrive by start, so every arm
+    /// around an observation is here when it arrives.
+    arms: Vec<Span>,
 }
 
 pub(super) fn collect(st: &mut ExtractState, e: &Event) {
@@ -156,15 +159,27 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
                 f.shape_keys.push((range.0, range.1, e.text.clone()));
             }
         }
+        Capture::Arm => f.arms.push(e.span()),
         Capture::Obs(obs) => {
             // Usage-site evidence: a mono-typed operator observes
             // its operand. Same Observation payloads the Perl
-            // walker emits; the fold is the production one.
+            // walker emits; the fold is the production one. It holds from
+            // the site to the end of the innermost `@arm` around it inside
+            // its scope, else to the end of the scope.
+            let site = e.span();
+            let scope = out.scopes[cur_scope.0 as usize].span;
+            let end = f
+                .arms
+                .iter()
+                .filter(|a| a.start >= scope.start && a.start <= site.start && site.end <= a.end)
+                .map(|a| a.end)
+                .min()
+                .unwrap_or(scope.end);
             out.witnesses.push(skeleton_witness(
                 WitnessAttachment::Variable { name: (pack.shape_name)(&e.text), scope: cur_scope },
                 "skeleton-obs",
                 WitnessPayload::Observation(obs.observation()),
-                e.span(),
+                Span { start: site.start, end },
             ));
         }
         Capture::Expr(ExprCap::Call) => {

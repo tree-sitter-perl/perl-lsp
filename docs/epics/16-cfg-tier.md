@@ -22,7 +22,7 @@ Three shipped things are parked on a tier that does not exist:
 The brief's answer is deliberately *not* a control-flow graph in the
 textbook sense. It is **sparse guarded value-flow on the existing
 `FlowEdge` spine**: `FlowEdge` is already the def-site record and
-`earliest_rebind_in` is already a poor-man's dominance query, so the
+`RebindIndex` is already a poor-man's dominance query, so the
 tier adds only what SSA adds to a def list — **join points and guard
 labels on their arms**.
 
@@ -61,7 +61,7 @@ the brief weighs all three options and says why.
 4. `src/build/builder/narrowing.rs` — `NarrowSubject`, `GuardFact`,
    `NarrowOp`, `recognize_guards`.
 5. `src/model/file_analysis/core_types.rs` — `FlowEdge`,
-   `earliest_rebind_in`.
+   `RebindIndex`.
 6. CLAUDE.md worklist invariants, in full.
 
 ## Current state — exact anchors
@@ -71,8 +71,8 @@ the brief weighs all three options and says why.
 | `control_regions` (untyped `Vec<Span>`) | **`PackFacts`** — pack-only | `grep -rn 'control_regions' src/` — note `surface_feed` discards it as "own-file straight-line gate spans"; the typed upgrade is also its promotion to a lane Perl populates |
 | `NarrowSubject` (builder-transient) | `build/builder/narrowing.rs` | `grep -rn 'NarrowSubject' src/` |
 | The three spellings `Place` converges | across layers | `GuardSite.subject: String`, `moved_from`'s `(String, Span, ScopeId)`, `ArrowDerefSite.receiver` |
-| `FlowEdge` + the dominance stand-in | `model/file_analysis/core_types.rs` | `grep -n 'struct FlowEdge' -A 12 src/model/file_analysis/core_types.rs`; `grep -n 'fn earliest_rebind_in'` |
-| `cst::is_conditionally_executed` — the syntactic must-run stand-in, shared by key-write flow edges and the `@_` window (`consume_arg_head`: a conditional `shift` opens the window) | `cst.rs` | `grep -rn 'is_conditionally_executed' src/` — reachability replaces the "unconditional syntax or open" rule with the real must-run verdict |
+| `FlowEdge` + the dominance stand-in | `model/file_analysis/core_types.rs` | `grep -n 'struct FlowEdge' -A 12 src/model/file_analysis/core_types.rs`; `grep -n 'struct RebindIndex'` |
+| `cst::conditional_arm` — the syntactic must-run stand-in, shared by key-write flow edges and the `@_` window (`consume_arg_head`: a conditional `shift` opens the window) | `cst.rs` | `grep -rn 'conditional_arm' src/` — reachability replaces the "unconditional syntax or open" rule with the real must-run verdict |
 | `BranchArmFold` — what grows into `JoinFold` | `model/witnesses/reducers.rs` | `grep -rn 'BranchArmFold' src/model/witnesses/` |
 | **The join approximation `JoinFold` deletes** — a rebind inside a nested block or under a statement modifier is emitted as `Unknown` on the variable's binding scope, because a reducer only sees one attachment and the write landed on the block's | `build/builder/fold.rs`, `apply_chain_typing_assignments` | `grep -n 'approximation of a join' src/build/builder/fold.rs` — Phase C's `Join { place, at }` + `JoinFold` answer `old ⊔ new` natively (one attachment per variable, write witnesses carrying their region, a write/guard distinction the join reads); when that lands, delete this block and re-measure `redundant-guard` on the substrate, which is where the approximation earns its keep today |
 | **The union element** (`TODO(union-join)`) — `JoinFold` folds arms by lattice join, but `InferredType` has no join beyond `Optional` (T ⊔ undef). Disagreeing arms fall back instead: `BranchArmFold`'s `\|\|`/`//` arm answers the RHS floor (`Optional<Bar> \|\| Baz` reads `Baz`, not `Bar \| Baz`) and a disagreeing ternary answers nothing | `model/witnesses/reducers.rs`, `BranchArmFold` | `grep -rn 'TODO(union-join)' src/` — the union is option B of `docs/open-forks.md`, "Union types in the lattice"; once it lands these sites answer through it and `Optional` becomes its `undef` case |
@@ -260,7 +260,7 @@ Evidence, all from the tree and the ADRs:
   The cpp arc's own lesson (`cpp-golive-map.md` ARC 2 E): "a narrowing
   is a SCOPED ASSERTION over a region, not a temporal value — must be
   explicitly region-bounded… cutoff is the shared
-  `earliest_rebind_in`, edge-driven, consumed by Perl AND the query
+  `RebindIndex`, edge-driven, consumed by Perl AND the query
   engine (cross-language)." Phase A is that lesson's next rung.
 
 Obligations:

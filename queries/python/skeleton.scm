@@ -186,14 +186,35 @@
 (list) @expr.lit.arrayref
 (dictionary) @expr.lit.hashref
 
-; Guard narrowing: `if isinstance(x, Foo): <body>` refines x to Foo
-; inside the block. The pack's narrow_guard predicate maps the guard
-; (isinstance) + type token to the refinement; core scopes it to @scope.
+; Guard narrowing: `isinstance(x, Foo)` refines x to Foo over the arm it
+; enters, tagged `@narrow.arm` — an `if`/`elif` body, the value a conditional
+; expression yields when the test holds, the right of `and`. The pack's
+; narrow_guard maps the guard + type token to the refinement; core attaches
+; it in the guard's scope over the arm (an `if` body is no scope in Python).
 (if_statement
   condition: (call
     function: (identifier) @narrow.guard
     arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
-  consequence: (block) @scope)
+  consequence: (block) @narrow.arm)
+(elif_clause
+  condition: (call
+    function: (identifier) @narrow.guard
+    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
+  consequence: (block) @narrow.arm)
+(conditional_expression
+  (_) @narrow.arm
+  .
+  "if"
+  .
+  (call
+    function: (identifier) @narrow.guard
+    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type)))
+(boolean_operator
+  left: (call
+    function: (identifier) @narrow.guard
+    arguments: (argument_list (identifier) @narrow.var (identifier) @narrow.type))
+  operator: "and"
+  right: (_) @narrow.arm)
 
 ; `return EXPR` — the returned expression carries its own witness; this marks
 ; the site, an arm of the enclosing def's return when the def declares none.

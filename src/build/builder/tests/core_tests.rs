@@ -1415,6 +1415,29 @@ fn symbolic_reference_to_a_constant_name_is_the_global() {
     assert_eq!(folded_from(Point::new(3, 37), "$main::cain"), None);
 }
 
+/// A deref's element/slice/`$#` access visits its operand: the variable
+/// and the call inside get their refs (rename reaches them), the access
+/// itself names no variable, and a constant name is the package aggregate.
+#[test]
+fn deref_container_access_visits_its_operand() {
+    let src = "our @abel;\nmy $x = [];\nprint $$x[0], ${$x}[0], @$x[1], @{$x}{a}, %$x{a}, $$x{k}, $#$x, $#{$x};\nprint ${Foo->bar}[0], $#{Foo->bar}, ${\"abel\"}[0], $#{\"abel\"};\n";
+    let fa = build_fa(src);
+    assert!(implicit_globals(&fa).is_empty(), "{:?}", implicit_globals(&fa));
+    let x = fa.symbols().iter().find(|s| s.name == "$x").unwrap().id;
+    let x_uses = fa.refs().iter().filter(|r| r.resolved_symbol() == Some(x) && r.span.start.row == 2).count();
+    assert_eq!(x_uses, 8, "every deref of `$x`");
+    let bars = fa.refs().iter().filter(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "bar").count();
+    assert_eq!(bars, 2, "the call inside each braced deref");
+    let abel = fa.symbols().iter().find(|s| s.name == "@abel").unwrap().id;
+    let abel_cols: Vec<usize> = fa
+        .refs()
+        .iter()
+        .filter(|r| r.resolved_symbol() == Some(abel) && r.span.start.row == 3)
+        .map(|r| r.span.start.column)
+        .collect();
+    assert_eq!(abel_cols, vec![39, 54], "each literal names `@main::abel`");
+}
+
 /// A declared variable never mints a global, and `use vars` declares.
 #[test]
 fn declared_variables_mint_no_implicit_global() {

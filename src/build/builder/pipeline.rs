@@ -402,6 +402,7 @@ fn build_once(
         dispatch_manifest: std::collections::HashMap::new(),
         load_manifest: std::collections::HashMap::new(),
         type_constraint_names: std::collections::HashSet::new(),
+        ref_tag_functions: Vec::new(),
         app_surface_consumers: Vec::new(),
         meta_methods: Vec::new(),
         param_type_manifest: std::collections::HashMap::new(),
@@ -434,6 +435,7 @@ fn build_once(
         parametric_emitted_refs: std::collections::HashSet::new(),
         method_call_ref_dedup: std::collections::HashSet::new(),
         defined_narrowings: Vec::new(),
+        tag_narrowings: Vec::new(),
         pending_narrowings: Vec::new(),
         guard_sites: Vec::new(),
         arrow_deref_sites: Vec::new(),
@@ -466,6 +468,7 @@ fn build_once(
         .map(|s| s.to_string())
         .collect();
     b.meta_methods = b.plugins.meta_methods().map(|s| s.to_string()).collect();
+    b.ref_tag_functions = b.plugins.ref_tag_functions().cloned().collect();
     b.role_maker_modules
         .extend(b.plugins.role_makers().map(|s| s.to_string()));
     b.framework_mode_modules = b
@@ -881,32 +884,9 @@ impl<'a> Builder<'a> {
     /// inside the worklist, once `invocant_class` is filled.
     pub(super) fn populate_witness_bag(&mut self) {
         use crate::model::witnesses::{
-            TypeObservation, Witness, WitnessAttachment, WitnessPayload, WitnessSource,
+            Witness, WitnessAttachment, WitnessPayload, WitnessSource,
         };
         self.seed_arg_windows();
-
-        // Rep observations from `$v->{k}` access. Method-call return
-        // edges on `Expression(refidx)` are emitted later — by the
-        // chain-typing PostFold pass once `invocant_class` is filled —
-        // as `Edge(PackageSymbol{package, method})`. Without a known
-        // class there's no class-keyed answer to chase to, so the
-        // emission is gated by chain-typing's own progress.
-        let mut hash_obs: Vec<(String, ScopeId, Span)> = Vec::new();
-        for r in self.refs.iter() {
-            if let RefKind::HashKeyAccess { var_text, .. } = &r.kind {
-                if var_text.starts_with('$') {
-                    hash_obs.push((var_text.clone(), r.scope, r.span));
-                }
-            }
-        }
-        for (var, scope, span) in hash_obs {
-            self.bag.push(Witness {
-                attachment: WitnessAttachment::Variable { name: var, scope },
-                source: WitnessSource::Builder("hash_ref_access".into()),
-                payload: WitnessPayload::Observation(TypeObservation::HashRefAccess),
-                span,
-            });
-        }
 
         // Invocant mutations on hash keys.
         //

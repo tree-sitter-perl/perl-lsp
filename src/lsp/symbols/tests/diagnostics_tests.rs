@@ -1015,6 +1015,18 @@ fn missing_declaration_flags_each_undeclared_use() {
     assert_eq!(d.severity, Some(DiagnosticSeverity::WARNING));
 }
 
+/// An element, slice or `$#` access through a deref names the referent,
+/// not a variable: `${Bugzilla->languages}[0]` declares nothing and needs
+/// nothing declared.
+#[test]
+fn missing_declaration_ignores_deref_element_access() {
+    let source = "use strict; my $x = [];\nmy @r = (${Foo->bar}[0], ${ Foo->bar }{k}, @{Foo->bar}[1, 2], @{$x}{qw(a)}, %$x{a}, $$x[0], ${$x}[0], $#{Foo->bar}, $#$x, ${ f() }[0]);\nsub f { [] }\n";
+    let analysis = parse_analysis(source);
+    let module_index = pragma_index();
+    let found = missing_declarations(&collect_diagnostics(&analysis, &module_index, Default::default()));
+    assert!(found.is_empty(), "{found:?}");
+}
+
 /// A global used inside a sub before a file-level `my` of the same name is
 /// still the global: the lexical isn't in scope yet.
 #[test]

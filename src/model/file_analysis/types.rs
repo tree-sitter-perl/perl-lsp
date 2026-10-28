@@ -228,6 +228,23 @@ pub enum InferredType {
     /// scope walk stops on it instead of falling through to a shadowed
     /// namesake. Consumers read it as "no information".
     Unknown,
+    /// The string `ref`/`reftype`/`blessed` returns: it names what
+    /// `subject` held at `site`, so comparing it to a literal is a guard on
+    /// `subject` (`docs/adr/flow-narrowing.md`). A `String` to every
+    /// consumer but that guard; it means nothing outside the sub that
+    /// computed it, so the Surface sees `String`. Kept at the END for
+    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
+    RefTagOf { subject: String, site: Span, via: RefTagFn },
+}
+
+/// Which builtin minted a [`InferredType::RefTagOf`] — what its string can
+/// say: `ref` a reftype token or a class, `reftype` only a token, `blessed`
+/// only a class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RefTagFn {
+    Ref,
+    RefType,
+    Blessed,
 }
 
 /// Concrete parametric flavors + type-level operators. Each
@@ -929,8 +946,15 @@ impl InferredType {
             | InferredType::TypeConstraintOf(None)
             | InferredType::Undef
             | InferredType::Bool
+            | InferredType::RefTagOf { .. }
             | InferredType::Unknown => {}
         }
+    }
+
+    /// A string value: `String`, or a [`InferredType::RefTagOf`] — which is
+    /// one to everything but the guard that reads its subject.
+    pub fn is_string(&self) -> bool {
+        matches!(self, InferredType::String | InferredType::RefTagOf { .. })
     }
 
     /// Witness-bag attachment whose type IS this callable's return
@@ -1140,6 +1164,11 @@ pub fn resolve_return_type(return_types: &[InferredType]) -> Option<InferredType
         .all(|t| matches!(t, InferredType::Bool | InferredType::Numeric))
     {
         return Some(InferredType::Numeric);
+    }
+    // Tags naming different subjects (or a tag and a literal) are all
+    // strings; what one arm's tag says about its subject the join can't keep.
+    if return_types.iter().all(InferredType::is_string) {
+        return Some(InferredType::String);
     }
     // Object subsumes HashRef: if some returns are Object(X) and others are
     // hash-shaped, the Object wins (overloaded hash access is common in Perl).
