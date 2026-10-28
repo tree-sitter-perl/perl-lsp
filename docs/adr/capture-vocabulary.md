@@ -96,6 +96,12 @@ property's `@type.annot`) the document says names the class it is written
 in rather than a class by its spelling (php's `self`, `static`). It is a
 pattern of its own, joined to the writing site's capture by span.
 
+`@expr.wrapper` sits on a node whose value is its one content's
+(`@expr.wrapper.inner`, parentheses in every pack): its `Expr` is an edge
+to the content's, so a source or a receiver written in parentheses reads
+what it wraps. A value merely inside a source (an argument, an operand) is
+never the source's.
+
 ## Decision: a function-scoped variable is declared by its first write
 
 A language whose variables belong to their function rather than a block

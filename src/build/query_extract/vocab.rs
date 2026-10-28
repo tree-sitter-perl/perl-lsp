@@ -230,6 +230,10 @@ pub enum ExprCap {
     /// A member value read (`recv.field`): its `@member.recv` and
     /// `@ref.member.value` share the match.
     Member,
+    /// A node whose value is its one content's (`(x)`): its
+    /// `@expr.wrapper.inner` shares the match.
+    Wrapper,
+    WrapperInner,
 }
 
 spelled! {
@@ -500,6 +504,8 @@ impl Capture {
             ["expr", "return", "value"] => C::Expr(ExprCap::ReturnValue),
             ["expr", "shape"] => C::Expr(ExprCap::Shape),
             ["expr", "member"] => C::Expr(ExprCap::Member),
+            ["expr", "wrapper"] => C::Expr(ExprCap::Wrapper),
+            ["expr", "wrapper", "inner"] => C::Expr(ExprCap::WrapperInner),
             ["obs", k] => C::Obs(ObsKind::parse(k)?),
             ["narrow", k] => C::Narrow(NarrowCap::parse(k)?),
             ["move", k] => C::Move(MoveCap::parse(k)?),
@@ -570,6 +576,8 @@ impl fmt::Display for Capture {
             C::Expr(ExprCap::ReturnValue) => f.write_str("expr.return.value"),
             C::Expr(ExprCap::Shape) => f.write_str("expr.shape"),
             C::Expr(ExprCap::Member) => f.write_str("expr.member"),
+            C::Expr(ExprCap::Wrapper) => f.write_str("expr.wrapper"),
+            C::Expr(ExprCap::WrapperInner) => f.write_str("expr.wrapper.inner"),
             C::Obs(k) => write!(f, "obs.{k}"),
             C::Narrow(k) => write!(f, "narrow.{k}"),
             C::Move(k) => write!(f, "move.{k}"),

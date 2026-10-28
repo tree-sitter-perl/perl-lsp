@@ -58,6 +58,8 @@
   (#any-of? @_import "library" "require" "source"))
 
 ; ---- literals ----
+; Parentheses hold the value they wrap.
+(parenthesized_expression . (_) @expr.wrapper.inner .) @expr.wrapper
 (string) @expr.lit.string
 (float) @expr.lit.number
 (integer) @expr.lit.number

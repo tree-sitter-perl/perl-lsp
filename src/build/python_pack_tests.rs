@@ -278,10 +278,12 @@ fn calling_a_local_class_constructs_it() {
 /// still holds its operand's value.
 #[test]
 fn a_value_inside_the_right_hand_side_is_not_the_variables() {
-    let src = "class Widget:\n    pass\n\nw = Widget()[0]\np = (Widget())\n";
+    let src = "class Widget:\n    pass\n\nw = Widget()[0]\np = (Widget())\nq = ((p))\n";
     let fa = py_in(src, None);
-    assert_eq!(fa.inferred_type_via_bag("w", Point::new(5, 0)), None);
-    assert_eq!(fa.inferred_type_via_bag("p", Point::new(5, 0)), Some(InferredType::ClassName("Widget".to_string())));
+    let widget = Some(InferredType::ClassName("Widget".to_string()));
+    assert_eq!(fa.inferred_type_via_bag("w", Point::new(6, 0)), None);
+    assert_eq!(fa.inferred_type_via_bag("p", Point::new(6, 0)), widget);
+    assert_eq!(fa.inferred_type_via_bag("q", Point::new(6, 0)), widget, "parentheses hold a variable's value too");
 }
 
 /// Calling a class constructs it, so the call is a reference to the class

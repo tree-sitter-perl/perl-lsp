@@ -20,10 +20,10 @@ pub(super) struct State {
     /// flow.assign joins: match_id → (target name, the scopes it binds
     /// in, the write's site, the target token's start)
     flow_targets: HashMap<usize, (String, Vec<ScopeId>, Point, Point)>,
+    /// `@flow.source`: the node whose value flows in. A wrapper (`(5)`)
+    /// carries its content's value as an edge (`@expr.wrapper`), and a
+    /// value merely inside it — an argument, an operand — is not its value.
     flow_sources: HashMap<usize, Span>,
-    /// match_id → the source with the pack's transparent wrappers peeled
-    /// off (`(5)` → `5`): the node whose value the source is.
-    source_inner: HashMap<usize, Span>,
     /// Writes to a place: match_id → the place's span and byte range.
     flow_places: HashMap<usize, (Span, (usize, usize))>,
     /// Member reads by byte range: what a place's own read projects, so a
@@ -43,9 +43,6 @@ pub(super) struct State {
     enclosing_annots: HashMap<usize, String>,
     /// `@expr.read.var.name` — a read's name token, joined to its node.
     read_names: HashMap<usize, (String, Span)>,
-    /// expr-literal spans, for narrowing an Edge target onto the actual
-    /// literal when the rhs node wraps it.
-    lit_spans: Vec<(usize, usize, Span)>,
     /// keyed-shape collection: keys grouped per @expr.shape span
     shape_spans: Vec<(usize, usize, Span)>,
     shape_keys: Vec<(usize, usize, String)>,
@@ -57,21 +54,6 @@ pub(super) struct State {
     /// the empty sentinel: it stays a SITE (counter-evidence in the coherence
     /// vote's denominator) without persisting arbitrary expression text.
     domain_value_by_match: HashMap<usize, String>,
-}
-
-/// `@flow.source`: record the value node under the source's transparent
-/// wrappers (`recv_peel`), where the node is live.
-pub(super) fn flatten_source(
-    f: &mut State,
-    node: tree_sitter::Node<'_>,
-    pack: &LangPack,
-    source: &[u8],
-    match_id: usize,
-    events: &mut Vec<Event>,
-) {
-    let inner = super::members::peel_receiver(node, pack.recv_peel);
-    f.source_inner.insert(match_id, Span { start: inner.start_position(), end: inner.end_position() });
-    events.push(Event::at(node, Capture::Flow(FlowCap::Source), node.utf8_text(source).unwrap_or("").to_string(), match_id));
 }
 
 pub(super) fn collect(st: &mut ExtractState, e: &Event) {
@@ -129,7 +111,6 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
     match e.cap {
         Capture::Expr(ExprCap::Lit(lit)) => {
             let span = e.span();
-            f.lit_spans.push((e.start_byte, e.end_byte, span));
             out.witnesses.push(skeleton_witness(
                 WitnessAttachment::Expr(span),
                 "skeleton",
@@ -264,7 +245,6 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
             if let Some((token, receiver)) = callee {
                 let (callee, callee_at) = ((pack.shape_name)(&token.text), token.start);
                 let span = e.span();
-                f.lit_spans.push((e.start_byte, e.end_byte, span));
                 let args = st.members.call_args(e.match_id);
                 out.call_sites.push(crate::build::query_extract::CallSite {
                     span,
@@ -274,6 +254,20 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
                     scope: cur_scope,
                     args,
                 });
+            }
+        }
+        Capture::Expr(ExprCap::Wrapper) => {
+            // A wrapper's value is its content's: an edge, so a source or
+            // receiver written in parens reads what it wraps.
+            if let Some(inner) =
+                events.iter().find(|x| x.match_id == e.match_id && x.cap == Capture::Expr(ExprCap::WrapperInner))
+            {
+                out.witnesses.push(skeleton_witness(
+                    WitnessAttachment::Expr(e.span()),
+                    "skeleton",
+                    WitnessPayload::Edge(WitnessAttachment::Expr(inner.span())),
+                    e.span(),
+                ));
             }
         }
         Capture::Expr(ExprCap::Member) => {
@@ -286,7 +280,6 @@ pub(super) fn handle(st: &mut ExtractState, e: &Event, events: &[Event]) {
             {
                 let span = e.span();
                 let member = (pack.shape_name)(&name.text);
-                f.lit_spans.push((e.start_byte, e.end_byte, span));
                 f.member_reads.insert(
                     (e.start_byte, e.end_byte),
                     MemberRead { receiver: recv.span(), member: member.clone(), token: name.span() },
@@ -335,7 +328,6 @@ pub(super) fn emit_keyed_shapes(st: &mut ExtractState) {
             .map(|(_, _, k)| (k.clone(), None))
             .collect();
         keys.dedup_by(|a, b| a.0 == b.0);
-        f.lit_spans.push((sb, eb, span));
         st.out.witnesses.push(skeleton_witness(
             WitnessAttachment::Expr(span),
             "skeleton-shape",
@@ -418,7 +410,7 @@ pub(super) fn finish(st: &mut ExtractState) {
                 });
             }
         }
-        if let Some(target_span) = source_value_span(f, *mid) {
+        if let Some(target_span) = f.flow_sources.get(mid).copied() {
             // Mint a value-flow edge (cpp init is `Whole`); the witness is its
             // lowering, so type inference sees the same `Variable → Edge(Expr)`
             // it always did — now with the source span kept for provenance.
@@ -444,7 +436,7 @@ pub(super) fn finish(st: &mut ExtractState) {
     for mid in place_mids {
         let Some(read) = f.member_reads.get(&f.flow_places[mid].1) else { continue };
         out.write_sites.push(read.token);
-        if let Some(value) = source_value_span(f, *mid) {
+        if let Some(value) = f.flow_sources.get(mid).copied() {
             out.member_writes.push(crate::build::query_extract::MemberWrite {
                 receiver: read.receiver,
                 member: read.member.clone(),
@@ -474,18 +466,6 @@ pub(super) fn finish(st: &mut ExtractState) {
     }
 }
 
-/// The span whose witness is match `mid`'s inflowing value. A source that
-/// states no value of its own takes the value its transparent wrappers hold
-/// (`(5)`). A value merely inside it — an argument, an operand, a
-/// subscripted call — is not its value, so the edge stays on the source.
-fn source_value_span(f: &State, mid: usize) -> Option<Span> {
-    let src_span = f.flow_sources.get(&mid)?;
-    let valued = |sp: &Span| f.lit_spans.iter().any(|(_, _, l)| l == sp);
-    Some(match f.source_inner.get(&mid) {
-        Some(inner) if !valued(src_span) && valued(inner) => *inner,
-        _ => *src_span,
-    })
-}
 
 /// A bare identifier lexeme — the only shape that can name an enumerator.
 /// Pure string test (no node-kind probe) so every language's capture text

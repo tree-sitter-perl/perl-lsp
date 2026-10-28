@@ -183,6 +183,9 @@
 ((variable_name) @receiver.enclosing
  (#eq? @receiver.enclosing "$this"))
 
+; Parentheses hold the value they wrap.
+(parenthesized_expression . (_) @expr.wrapper.inner .) @expr.wrapper
+
 ; ---- writes ----
 ; A variable belongs to its function: the first write declares it, and
 ; every later write and every read in the body is that one variable. A

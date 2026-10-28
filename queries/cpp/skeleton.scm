@@ -826,6 +826,8 @@
 (type_identifier) @ref.type
 
 ; ---- literals + variable reads (the edge-chase substrate) ----
+; Parentheses hold the value they wrap.
+(parenthesized_expression . (_) @expr.wrapper.inner .) @expr.wrapper
 (number_literal) @expr.lit.number
 (string_literal) @expr.lit.string
 (true) @expr.lit.bool

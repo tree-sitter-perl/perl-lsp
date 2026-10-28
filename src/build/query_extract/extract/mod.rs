@@ -342,7 +342,6 @@ pub fn extract_in(
             Capture::Member(MemberCap::Recv) => {
                 members::flatten_recv(&mut st.members, node, pack, source, match_id, &mut events)
             }
-            Capture::Flow(FlowCap::Source) => flow::flatten_source(&mut st.flow, node, pack, source, match_id, &mut events),
             Capture::Arity(ArityCap::Args) => members::open_args(&mut st.members, match_id),
             Capture::Arity(ArityCap::Arg) => members::record_arg(&mut st.members, node, match_id),
             Capture::Arity(ArityCap::Sig) => members::count_params(&mut st.members, node),

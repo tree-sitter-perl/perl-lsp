@@ -183,6 +183,8 @@
  (#not-has-parent? @expr.read.var attribute))
 (attribute object: (identifier) @expr.read.var)
 
+; Parentheses hold the value they wrap.
+(parenthesized_expression . (_) @expr.wrapper.inner .) @expr.wrapper
 (string) @expr.lit.string
 (integer) @expr.lit.number
 (float) @expr.lit.number
