@@ -133,7 +133,7 @@ fn narrow_truncated_at_reassignment() {
 // Truncation must recognize EVERY way Perl rebinds a scalar, not just
 // `$x = …` / `my $x` — else a stale narrowing leaks past the rebind (an
 // always-on false `undef-deref` for the `defined`-guard flavor). One test
-// per binding shape; the cutoff (`first_subject_write_via_edges`) reads the
+// per binding shape; the cutoff (`RebindIndex`) reads the
 // FlowEdge set, so each shape must mint a `@flow` edge targeting the subject.
 
 #[test]

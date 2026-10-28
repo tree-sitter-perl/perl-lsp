@@ -708,6 +708,7 @@ impl<'a> Builder<'a> {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         self.bag.remove_by_source_tag("tag_narrowing");
         let mut emits: Vec<(String, ScopeId, InferredType, Span)> = Vec::new();
+        let rebinds = crate::model::file_analysis::RebindIndex::new(&self.flow_edges);
         for g in &self.tag_narrowings {
             let Some(InferredType::RefTagOf { subject, site, via }) =
                 self.bag_query_variable(&g.var, g.scope, g.region.start)
@@ -718,11 +719,11 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let since_tag = Span { start: site.end, end: g.region.start };
-            if self.first_subject_write_via_edges(&subject, since_tag).is_some() {
+            if rebinds.earliest_in(&subject, since_tag).is_some() {
                 continue;
             }
             let Some(ty) = tag_string_to_type(via, &g.lit) else { continue };
-            let end = self.first_subject_write_via_edges(&subject, g.region).unwrap_or(g.region.end);
+            let end = rebinds.earliest_in(&subject, g.region).unwrap_or(g.region.end);
             if point_lt(g.region.start, end) {
                 emits.push((subject, g.scope, ty, Span { start: g.region.start, end }));
             }
@@ -837,16 +838,6 @@ impl<'a> Builder<'a> {
         best
     }
 
-    /// Point of the first FlowEdge that rebinds `$var` within `region` — the
-    /// narrowing region's truncation bound. A rebind IS a value flowing into
-    /// the subject (assignment / `my`·`local` clear / list slot / `foreach`
-    /// var — every shape that mints a bind/assign edge), so this reads the
-    /// EDGE SET, not the CST. Language-agnostic: any LangPack feeding FlowEdges
-    /// gets the cutoff for free (the seam the grammar scan couldn't cross).
-    fn first_subject_write_via_edges(&self, var: &str, region: Span) -> Option<Point> {
-        crate::model::file_analysis::earliest_rebind_in(&self.flow_edges, var, region)
-    }
-
     /// Post-walk: resolve every recognized narrowing's region cutoff against
     /// the now-minted FlowEdges, then emit — `To` → a scoped `InferredType`
     /// witness; `StripOptional` → a `DefinedNarrowing` the fold re-derives.
@@ -856,6 +847,7 @@ impl<'a> Builder<'a> {
     pub(super) fn apply_narrowing_cutoffs(&mut self) {
         use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
         let pending = std::mem::take(&mut self.pending_narrowings);
+        let rebinds = crate::model::file_analysis::RebindIndex::new(&self.flow_edges);
         for pn in pending {
             if let (NarrowSubject::TagOf(var), RegionFact::Guard(NarrowOp::TagEq(lit))) = (&pn.subject, &pn.fact) {
                 // The guard reads the tag once, at the region's start; what
@@ -871,12 +863,12 @@ impl<'a> Builder<'a> {
             }
             let (name, end) = match &pn.subject {
                 NarrowSubject::Variable(var) | NarrowSubject::TagOf(var) => {
-                    (var.clone(), self.first_subject_write_via_edges(var, pn.region))
+                    (var.clone(), rebinds.earliest_in(var, pn.region))
                 }
                 NarrowSubject::Place { key, key_vars, .. } => {
                     let mut end = pn.place_cut;
                     for kv in key_vars {
-                        end = earliest_point(end, self.first_subject_write_via_edges(kv, pn.region));
+                        end = earliest_point(end, rebinds.earliest_in(kv, pn.region));
                     }
                     (key.clone(), end)
                 }

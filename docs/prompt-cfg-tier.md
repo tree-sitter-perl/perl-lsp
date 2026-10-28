@@ -13,7 +13,7 @@ Prereq reading: `docs/adr/flow-narrowing.md`, `docs/adr/use-after-move.md`,
 `docs/adr/narrowing-diagnostics.md`, `docs/adr/bag-canonical.md`,
 `src/model/witnesses/` (attachments; `query_rec` in `registry.rs`),
 `src/build/builder/narrowing.rs` (`NarrowSubject`),
-`src/model/file_analysis/core_types.rs` (`FlowEdge`, `earliest_rebind_in`),
+`src/model/file_analysis/core_types.rs` (`FlowEdge`, `RebindIndex`),
 CLAUDE.md worklist invariants. Scheduled as
 `docs/epics/16-cfg-tier.md` — read that for the phased ladder, the
 anchors and the gates; this brief is the design it implements.
@@ -49,7 +49,7 @@ from that fact.
   mutable state — fights both the bag invariants and the residency
   discipline. Wrong prominence.
 - **C — sparse guarded value-flow** (φ nodes on the `FlowEdge` spine):
-  `FlowEdge` is already the def-site record; `earliest_rebind_in` is
+  `FlowEdge` is already the def-site record; `RebindIndex` is
   already a poor-man's dominance query. Add the two things SSA adds to
   a def list — join points and guard labels on their arms — and
   dataflow runs sparse, per place, through the existing edge-chase.
