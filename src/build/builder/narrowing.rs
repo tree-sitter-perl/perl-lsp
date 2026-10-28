@@ -463,14 +463,45 @@ impl<'a> Builder<'a> {
             "unless" => false,
             _ => return,
         };
-        let region = node_to_span(modified);
-        for fact in recognize_guards(self, condition, self.source) {
-            if let Some(op) = fact.op_for_region(runs_when_true) {
-                self.emit_narrowing_fact(&fact.subject, op, region, modified);
-            }
-        }
+        self.narrow_arm(condition, modified, runs_when_true);
         if is_exit_expression(modified, self.source) {
             self.narrow_block_remainder(postfix, condition, !runs_when_true);
+        }
+    }
+
+    /// `G ? A : B` — A runs where G holds, B where it fails.
+    pub(super) fn narrow_ternary(&mut self, expr: Node<'a>) {
+        let Some(condition) = expr.child_by_field_name("condition") else { return };
+        if let Some(a) = expr.child_by_field_name("consequent") {
+            self.narrow_arm(condition, a, true);
+        }
+        if let Some(b) = expr.child_by_field_name("alternative") {
+            self.narrow_arm(condition, b, false);
+        }
+    }
+
+    /// `L && R` / `L and R` — R runs where L holds; `||` / `or` where it
+    /// fails.
+    pub(super) fn narrow_logical_rhs(&mut self, expr: Node<'a>) {
+        let holds = match raw_mid_op(expr, self.source).as_str() {
+            "&&" | "and" => true,
+            "||" | "or" => false,
+            _ => return,
+        };
+        let (Some(left), Some(right)) = (expr.child_by_field_name("left"), expr.child_by_field_name("right"))
+        else {
+            return;
+        };
+        self.narrow_arm(left, right, holds);
+    }
+
+    /// Narrow `arm`, which runs only where `condition` is `holds`.
+    fn narrow_arm(&mut self, condition: Node<'a>, arm: Node<'a>, holds: bool) {
+        let region = node_to_span(arm);
+        for fact in recognize_guards(self, condition, self.source) {
+            if let Some(op) = fact.op_for_region(holds) {
+                self.emit_narrowing_fact(&fact.subject, op, region, arm);
+            }
         }
     }
 

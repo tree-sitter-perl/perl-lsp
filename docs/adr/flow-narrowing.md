@@ -187,7 +187,10 @@ cross-condition intersection automatic. General negation stays parked
 (see `optional-types.md`).
 
 A statement modifier is a one-arm region: `STMT if G` narrows STMT by G
-TRUE, `STMT unless G` by G FALSE, exit or not. When STMT is an exit, the
+TRUE, `STMT unless G` by G FALSE, exit or not. A ternary's branches and a
+logical operator's right side are arms the same way: `G ? A : B` narrows A
+by G TRUE and B by G FALSE, `G && R` / `G and R` narrow R by G TRUE, and
+`G || R` / `G or R` by G FALSE (`narrow_arm`, the one spelling). When STMT is an exit, the
 rest of the block is the fall-through and takes the opposite polarity.
 Only the fall-through records a `GuardSite`, so the D3/D4 redundancy
 diagnostics see each statement-level guard once, as before.

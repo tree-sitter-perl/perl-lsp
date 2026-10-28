@@ -894,3 +894,22 @@ fn a_parameter_assertion_survives_its_own_declaration() {
         );
     }
 }
+
+#[test]
+fn a_guard_narrows_every_arm_it_decides() {
+    // A ternary's branches and a logical operator's right side are arms
+    // like any block: each narrows by its guard at the polarity it runs on.
+    let fa = build_fa(
+        "package P;\nsub f {\n    my ($x, $y) = @_;\n    my $a = $x->isa('Foo') ? $x->go : $x->stop;\n    my $b = defined $y ? $y : $y;\n    my $c = $x->isa('Foo') && $x->go;\n    my $d = defined $y || $y;\n    $x->isa('Foo') and $x->go;\n    $x->go;\n}",
+    );
+    let at = |row, column| fa.inferred_type_via_bag("$x", Point::new(row, column));
+    let at_y = |row, column| fa.inferred_type_via_bag("$y", Point::new(row, column));
+    let foo = Some(InferredType::ClassName("Foo".into()));
+    assert_eq!(at(3, 29), foo, "the branch a ternary takes when the guard holds");
+    assert_eq!(at(3, 38), None, "isa has no complement: the other branch stays wide");
+    assert_eq!(at_y(4, 31), Some(InferredType::Undef), "the branch taken when `defined` fails");
+    assert_eq!(at(5, 30), foo, "the right of `&&`");
+    assert_eq!(at_y(6, 26), Some(InferredType::Undef), "the right of `||` runs where the guard fails");
+    assert_eq!(at(7, 24), foo, "the right of `and`");
+    assert_eq!(at(8, 4), None, "nothing after");
+}

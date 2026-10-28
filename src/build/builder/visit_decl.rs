@@ -65,8 +65,10 @@ impl<'a> Builder<'a> {
                 self.queue_children(node);
             }
 
-            // Flow-sensitive narrowing: a block guard refines the then-block;
-            // a statement-level exit guard refines the rest of the block.
+            // Flow-sensitive narrowing: a guard refines each arm it decides
+            // (a block, a modified statement, a ternary branch, a logical
+            // operator's right side); a statement-level exit guard refines
+            // the rest of the block.
             "conditional_statement" => {
                 self.narrow_block_guard(node);
                 self.queue_children(node);
@@ -76,7 +78,12 @@ impl<'a> Builder<'a> {
                 self.queue_children(node);
             }
             "lowprec_logical_expression" => {
+                self.narrow_logical_rhs(node);
                 self.narrow_logical_exit(node);
+                self.queue_children(node);
+            }
+            "conditional_expression" => {
+                self.narrow_ternary(node);
                 self.queue_children(node);
             }
 
@@ -150,6 +157,7 @@ impl<'a> Builder<'a> {
 
             // Binary operators → type constraints on variable operands
             "binary_expression" => {
+                self.narrow_logical_rhs(node);
                 self.infer_binary_op_type(node);
                 self.queue_children(node);
             }
