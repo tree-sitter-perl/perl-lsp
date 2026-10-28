@@ -719,8 +719,8 @@ impl<'a> Builder<'a> {
             };
             let var = var.to_string();
             let Some(scope) =
-                crate::model::file_analysis::scope_chain_of(&self.scopes, self.current_scope())
-                    .into_iter()
+                crate::model::file_analysis::lookup_chain(&self.scopes, self.current_scope())
+                    .scopes()
                     .find(|&sid| {
                         !self
                             .bag

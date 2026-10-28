@@ -1532,6 +1532,18 @@ impl ModuleIndex {
         n
     }
 
+    /// The copy a listing sweep reads for `cached`: its stored analysis,
+    /// or, when it holds readings, the view its questions pick now — the
+    /// stored copy installs only the fallbacks, and its rows list only the
+    /// base.
+    pub fn listing_copy(&self, cached: &Arc<CachedModule>) -> Arc<FileAnalysis> {
+        if cached.analysis().readings.is_empty() {
+            return cached.analysis().clone();
+        }
+        use crate::model::file_analysis::CrossFileLookup;
+        self.symbols_present(cached)
+    }
+
     /// Every front-door registration — the project's own files, the one
     /// home they have.
     pub fn for_each_registered_file(&self, f: &mut dyn FnMut(&Arc<CachedModule>)) {

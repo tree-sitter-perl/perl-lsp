@@ -875,7 +875,7 @@ fn run_one(
             let mut covered: std::collections::HashSet<std::path::PathBuf> =
                 std::collections::HashSet::new();
             idx.for_each_registered_file(&mut |cached| {
-                let (path, analysis) = (cached.path.as_path(), &cached.analysis());
+                let (path, analysis) = (cached.path.as_path(), &idx.listing_copy(cached));
                 let file = path.display().to_string();
                 if !analysis.symbols_are_evicted() {
                     covered.insert(path.to_path_buf());

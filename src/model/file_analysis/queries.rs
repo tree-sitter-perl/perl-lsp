@@ -388,11 +388,11 @@ impl FileAnalysis {
             return None;
         }
         let idx = module_index?;
-        let chain = self.scope_chain(scope);
+        let chain = self.lookup_chain(scope);
         let m = self
             .loader_config_params
             .iter()
-            .find(|m| m.variable == var && chain.contains(&m.scope))?;
+            .find(|m| m.variable == var && chain.contains(m.scope))?;
         let pkg = self.scopes.get(m.scope.0 as usize).and_then(|sc| sc.package.clone())?;
         if !self.class_isa(&pkg, &m.in_role, module_index) {
             return None;

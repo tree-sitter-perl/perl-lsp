@@ -94,14 +94,12 @@ fn save_one_provider(
     }
     if let Some(m) = result {
         if !m.analysis().degraded {
-            let seeds: Vec<_> = m.analysis().ref_row_seeds();
-            let sym_seeds = m.analysis().sym_row_seeds();
+            let seeds = m.analysis().row_seeds();
             if let Err(e) = module_cache::shred_derived_rows(
                 conn,
                 &m.path.to_string_lossy(),
                 module_cache::NAME_KEYED_SOURCE,
                 &seeds,
-                &sym_seeds,
             ) {
                 log::warn!("Failed to shred derived rows for '{}': {}", module_name, e);
             }

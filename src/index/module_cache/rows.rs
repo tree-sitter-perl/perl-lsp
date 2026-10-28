@@ -70,14 +70,13 @@ pub fn shred_derived_rows(
     conn: &Connection,
     path: &str,
     source: &str,
-    seeds: &[crate::model::file_analysis::RefRowSeed],
-    sym_seeds: &[crate::model::file_analysis::SymRowSeed],
+    seeds: &crate::model::file_analysis::RowSeeds,
 ) -> rusqlite::Result<()> {
     // Accumulated, never printed per file: the row-store write cost is what
     // an index change on these tables moves, and the persist writer runs
     // this once per file.
     crate::util::ghost_stats::timed("persist.shred", || {
-        shred_derived_rows_inner(conn, path, source, seeds, sym_seeds)
+        shred_derived_rows_inner(conn, path, source, &seeds.refs, &seeds.syms, &seeds.held)
     })
 }
 
@@ -87,6 +86,7 @@ fn shred_derived_rows_inner(
     source: &str,
     seeds: &[crate::model::file_analysis::RefRowSeed],
     sym_seeds: &[crate::model::file_analysis::SymRowSeed],
+    held: &[String],
 ) -> rusqlite::Result<()> {
     // Sticky workspace tier: project lib/ files are inside the walk AND on
     // @INC (add_project_lib_paths), so the resolver re-shreds them as
@@ -106,6 +106,7 @@ fn shred_derived_rows_inner(
     )?;
     conn.execute("DELETE FROM refs WHERE file_id = ?1", params![file_id])?;
     conn.execute("DELETE FROM syms WHERE file_id = ?1", params![file_id])?;
+    conn.execute("DELETE FROM held WHERE file_id = ?1", params![file_id])?;
 
     let generation = crate::index::module_cache::strings_generation(conn);
     INTERN_MEMO.with(|cell| -> rusqlite::Result<()> {
@@ -193,6 +194,16 @@ fn shred_derived_rows_inner(
                 seed.flags,
             ])?;
         }
+        drop(insert_sym);
+
+        // A held reading's names are candidates only: present in the views
+        // that pick it. They never join `refs`/`syms`, whose rows every
+        // view shows; a retrieval that must find those views asks `held`.
+        let mut insert_held = conn.prepare_cached("INSERT OR IGNORE INTO held (name_id, file_id) VALUES (?1, ?2)")?;
+        for name in held {
+            let name_id = intern_str(name, &mut memo)?;
+            insert_held.execute(params![name_id, file_id])?;
+        }
         Ok(())
     })?;
     Ok(())
@@ -229,6 +240,7 @@ pub fn gc_strings(conn: &Connection) -> usize {
              UNION SELECT name_id FROM syms
              UNION SELECT key_id FROM syms
              UNION SELECT container_id FROM syms WHERE container_id IS NOT NULL
+             UNION SELECT name_id FROM held
          )",
         [],
     );
@@ -321,6 +333,11 @@ pub fn invalidate_generation_tier(conn: &Connection, path: &str, source: &str) {
         params![path, source],
     );
     let _ = conn.execute(
+        "DELETE FROM held WHERE file_id IN
+           (SELECT file_id FROM files WHERE path = ?1 AND source = ?2)",
+        params![path, source],
+    );
+    let _ = conn.execute(
         "DELETE FROM files WHERE path = ?1 AND source = ?2",
         params![path, source],
     );
@@ -335,6 +352,10 @@ pub fn delete_ref_rows(conn: &Connection, path: &str) {
     );
     let _ = conn.execute(
         "DELETE FROM syms WHERE file_id IN (SELECT file_id FROM files WHERE path = ?1)",
+        params![path],
+    );
+    let _ = conn.execute(
+        "DELETE FROM held WHERE file_id IN (SELECT file_id FROM files WHERE path = ?1)",
         params![path],
     );
     let _ = conn.execute("DELETE FROM files WHERE path = ?1", params![path]);
@@ -357,25 +378,15 @@ pub fn has_ref_rows(conn: &Connection, path: &str) -> bool {
 /// SQL arms rehydrate and run the (unchanged) matcher over.
 pub fn ref_candidate_files(conn: &Connection, keys: &[String]) -> Vec<String> {
     let mut out = Vec::new();
-    // Usage candidacy comes from ref rows; DECLARATION candidacy from sym
-    // rows — a file that declares `helper` but never mentions it again has
-    // no matching ref row, and without the union the backward walk's
-    // matcher (whose declaration half reads symbols) never rehydrates it.
-    let Ok(mut stmt) = conn.prepare_cached(
-        "SELECT DISTINCT f.path FROM refs r
-           JOIN files f ON f.file_id = r.file_id
-          WHERE r.name_id = (SELECT str_id FROM strings WHERE s = ?1)
-         UNION
-         SELECT DISTINCT f.path FROM syms y
-           JOIN files f ON f.file_id = y.file_id
-          WHERE y.key_id = (SELECT str_id FROM strings WHERE s = ?1)",
-    ) else {
-        return out;
-    };
     let mut seen = std::collections::HashSet::new();
-    for key in keys {
-        let rows = stmt.query_map(params![key], |row| row.get::<_, String>(0));
-        if let Ok(rows) = rows {
+    for sql in REF_CANDIDATE_SQL {
+        let Ok(mut stmt) = conn.prepare_cached(sql) else {
+            return Vec::new();
+        };
+        for key in keys {
+            let Ok(rows) = stmt.query_map(params![key], |row| row.get::<_, String>(0)) else {
+                continue;
+            };
             for r in rows {
                 match r {
                     Ok(p) => {
@@ -396,6 +407,23 @@ pub fn ref_candidate_files(conn: &Connection, keys: &[String]) -> Vec<String> {
     }
     out
 }
+
+/// `ref_candidate_files`' three families, one statement each and deduped by
+/// the caller: a UNION (or a DISTINCT) builds an ephemeral btree per
+/// execution, and creating one takes SQLite's process-global page-cache
+/// mutex. Usage candidacy comes from ref rows; DECLARATION candidacy from
+/// sym rows (a file that declares `helper` but never mentions it again has
+/// no ref row, and the backward walk's matcher reads its symbols too); HELD
+/// candidacy from `held` rows, a name only the views that pick a reading
+/// show.
+pub(super) const REF_CANDIDATE_SQL: [&str; 3] = [
+    "SELECT f.path FROM refs r JOIN files f ON f.file_id = r.file_id
+      WHERE r.name_id = (SELECT str_id FROM strings WHERE s = ?1)",
+    "SELECT f.path FROM syms y JOIN files f ON f.file_id = y.file_id
+      WHERE y.key_id = (SELECT str_id FROM strings WHERE s = ?1)",
+    "SELECT f.path FROM held h JOIN files f ON f.file_id = h.file_id
+      WHERE h.name_id = (SELECT str_id FROM strings WHERE s = ?1)",
+];
 
 /// One workspace/symbol row hit: (path, name, kind code, selection span,
 /// container, flags). The caller applies the adapter's kind/flag filters
@@ -546,6 +574,14 @@ macro_rules! syms_half {
         )
     };
 }
+/// A held reading's name: present in the views that pick it, so any probe
+/// that licenses skipping a file must fail open on it. Kind- and
+/// container-blind — `held` stores presence only.
+macro_rules! held_half {
+    ($n:literal) => {
+        concat!("EXISTS(SELECT 1 FROM held h WHERE h.name_id = ", sid!($n), " AND h.file_id = f.file_id)")
+    };
+}
 macro_rules! refs_half {
     ($n:literal) => {
         concat!("EXISTS(SELECT 1 FROM refs r WHERE r.name_id = ", sid!($n), " AND r.file_id = f.file_id)")
@@ -557,7 +593,9 @@ pub(super) const SYM_MEMBER_PROBE_SQL: &str = concat!(
     syms_half!("name_id", "?2", container), " OR ",
     syms_half!("key_id", "?2", container), " OR ",
     syms_half!("name_id", "?3", container), " OR ",
-    syms_half!("key_id", "?3", container),
+    syms_half!("key_id", "?3", container), " OR ",
+    held_half!("?2"), " OR ",
+    held_half!("?3"),
     " FROM files f WHERE f.path = ?1"
 );
 
@@ -566,7 +604,9 @@ pub(super) const SYM_NAME_PROBE_SQL: &str = concat!(
     syms_half!("name_id", "?2"), " OR ",
     syms_half!("key_id", "?2"), " OR ",
     syms_half!("name_id", "?3"), " OR ",
-    syms_half!("key_id", "?3"),
+    syms_half!("key_id", "?3"), " OR ",
+    held_half!("?2"), " OR ",
+    held_half!("?3"),
     " FROM files f WHERE f.path = ?1"
 );
 
@@ -577,7 +617,9 @@ pub(super) const NAME_PROBE_SQL: &str = concat!(
     syms_half!("name_id", "?2"), " OR ",
     syms_half!("key_id", "?2"), " OR ",
     syms_half!("name_id", "?3"), " OR ",
-    syms_half!("key_id", "?3"),
+    syms_half!("key_id", "?3"), " OR ",
+    held_half!("?2"), " OR ",
+    held_half!("?3"),
     " FROM files f WHERE f.path = ?1"
 );
 
@@ -650,11 +692,12 @@ pub fn sym_member_files(
     names: &[String],
     container: &str,
 ) -> Option<std::collections::HashSet<String>> {
-    const SQL: [&str; 2] = [
+    const SQL: [&str; 3] = [
         "SELECT f.path FROM syms y JOIN files f ON f.file_id = y.file_id
           WHERE y.name_id = ?1 AND y.container_id = ?2",
         "SELECT f.path FROM syms y JOIN files f ON f.file_id = y.file_id
           WHERE y.key_id = ?1 AND y.container_id = ?2",
+        HELD_FILES_SQL,
     ];
     let Some(container_id) = str_id_of(conn, container)? else {
         return Some(Default::default());
@@ -669,14 +712,21 @@ pub fn sym_kind_files(
     names: &[String],
     kind: u8,
 ) -> Option<std::collections::HashSet<String>> {
-    const SQL: [&str; 2] = [
+    const SQL: [&str; 3] = [
         "SELECT f.path FROM syms y JOIN files f ON f.file_id = y.file_id
           WHERE y.name_id = ?1 AND y.kind = ?2",
         "SELECT f.path FROM syms y JOIN files f ON f.file_id = y.file_id
           WHERE y.key_id = ?1 AND y.kind = ?2",
+        HELD_FILES_SQL,
     ];
     files_matching(conn, names, &SQL, kind as i64)
 }
+
+/// Files holding a held reading named `?1` — kind- and container-blind, so
+/// it fails open for either sym lookup. `?2` is bound but unused, to share
+/// the lookups' binding.
+pub(super) const HELD_FILES_SQL: &str = "SELECT f.path FROM held h JOIN files f ON f.file_id = h.file_id
+  WHERE h.name_id = ?1 AND ?2 IS NOT NULL";
 
 /// The paths `sql` (bound to a name id and `second`) yields, over every
 /// interned spelling in `names`.
@@ -896,6 +946,13 @@ pub fn unused_exported_syms(conn: &Connection) -> Vec<DeadExportRow> {
                   SELECT 1 FROM refs r
                    WHERE r.name_id = y.key_id
                      AND r.file_id != y.file_id
+                )
+            -- A held reading's name is a candidate use in the views that
+            -- pick it: absence must mean absent from every view.
+            AND NOT EXISTS (
+                  SELECT 1 FROM held h
+                   WHERE h.name_id = y.key_id
+                     AND h.file_id != y.file_id
                 )",
     ) else {
         return out;

@@ -1173,10 +1173,6 @@ pub enum SymKind {
     /// search as a navigable entry. Outline entity — not backed by a
     /// Perl symbol, so most queries (gd/gr/rename) don't hit it.
     Namespace,
-    /// A slot held for a reading its question did not pick
-    /// (`readings.rs`): no name, no meaning. It keeps every later symbol's
-    /// id the same whichever reading a view picks.
-    Dormant,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1623,8 +1619,6 @@ impl Ref {
             RefKind::ContainerAccess => 5,
             RefKind::DispatchCall { .. } => 6,
             RefKind::FieldAccess { .. } => 7,
-            // Held slots never reach the row store (`RefTable::row_seeds`).
-            RefKind::Dormant => u8::MAX,
         };
         let (qual_kind, qual): (u8, Option<String>) = match &self.kind {
             RefKind::FunctionCall => {
@@ -1668,6 +1662,15 @@ impl Ref {
 /// Full `Symbol` detail (SymbolDetail, deref stacks, attributes, full
 /// span) stays blob-only and rehydrates. Kind/flag discriminants are
 /// row-format contract: changing them bumps `REF_ROWS_VERSION`.
+/// One file's whole relational shred: its base refs and symbols, and the
+/// names its held readings could add (their own candidate rows).
+#[derive(Debug, Clone, Default)]
+pub struct RowSeeds {
+    pub refs: Vec<RefRowSeed>,
+    pub syms: Vec<SymRowSeed>,
+    pub held: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SymRowSeed {
     pub name: String,
@@ -1731,8 +1734,6 @@ pub fn sym_kind_code(k: &SymKind) -> u8 {
         SymKind::HashKeyDef => 8,
         SymKind::Handler => 9,
         SymKind::Namespace => 10,
-        // Held slots never reach the row store (`SymbolTable::row_seeds`).
-        SymKind::Dormant => u8::MAX,
     }
 }
 
@@ -1837,9 +1838,6 @@ pub enum RenameKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub enum RefKind {
-    /// A slot held for a reading its question did not pick
-    /// (`readings.rs`); it keeps every later ref's index stable.
-    Dormant,
     Variable,
     /// Bare `foo()` or `Pkg::foo()` call. The build-time package pin
     /// lives in `Ref::binding` (`RefBinding::Function`).

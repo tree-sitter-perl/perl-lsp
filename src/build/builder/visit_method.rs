@@ -154,9 +154,11 @@ impl<'a> Builder<'a> {
 
     /// The head refs of both readings of a deferred `meth Class(ARGS)`:
     /// `Class->meth(ARGS)`'s method call and package, `meth(Class(ARGS))`'s
-    /// two function calls. The walk mints the undecided reading's as usual;
-    /// these let the assembled analysis hold each under its arm. The
-    /// arguments are the same in both readings, so only the heads differ.
+    /// two function calls. The walk mints the undecided reading's as usual,
+    /// with everything that reading means to the walk (a framework keyword's
+    /// declarations, a constructor's keys); the assembled analysis lets a
+    /// view put the other reading's heads in their place. The arguments are
+    /// the same in both readings, so only the heads differ.
     pub(super) fn hold_indirect_heads(
         &mut self,
         node: Node<'a>,
@@ -179,7 +181,7 @@ impl<'a> Builder<'a> {
             folded_from: None,
             arg_count: None,
         };
-        let method = vec![
+        let method = [
             head(
                 RefKind::MethodCall {
                     invocant: crate::model::conventions::Invocant::assume_canonical(class.clone()),
@@ -195,11 +197,14 @@ impl<'a> Builder<'a> {
             head(RefKind::PackageRef, class_span, &class, None),
         ];
         let pin = |name: &str| self.resolve_call_package(name).map(|package| RefBinding::Function { package });
-        let function = vec![
-            head(RefKind::FunctionCall, crate::cst::fq_tail_span(io.method, &verb), &verb, pin(&verb)),
-            head(RefKind::FunctionCall, crate::cst::fq_tail_span(io.class, &class), &class, pin(&class)),
-        ];
-        self.held_indirect.push(crate::model::file_analysis::IndirectHeads { site, method, function });
+        let [m_verb, m_class] = method;
+        let f_verb = head(RefKind::FunctionCall, crate::cst::fq_tail_span(io.method, &verb), &verb, pin(&verb));
+        let f_class = head(RefKind::FunctionCall, crate::cst::fq_tail_span(io.class, &class), &class, pin(&class));
+        self.held_indirect.push(crate::model::file_analysis::IndirectHeads {
+            site,
+            verb: (m_verb, f_verb),
+            class: (m_class, f_class),
+        });
     }
 
     /// An indirect-object call is a method call on its class: the same

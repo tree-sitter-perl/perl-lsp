@@ -1577,7 +1577,7 @@ impl LanguageServer for Backend {
                 let uri = Url::from_file_path(&cached.path).unwrap_or_else(|_| {
                     Url::parse(&format!("file://{}", cached.path.display())).unwrap()
                 });
-                visit(uri, &cached.analysis());
+                visit(uri, &cx.index().listing_copy(cached));
             });
 
             // Rows pass: symbol-evicted copies (the served language's

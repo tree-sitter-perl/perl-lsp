@@ -1,5 +1,5 @@
 //! Query-time dispatch/guard resolution, and the index rebuild after a
-//! decided view swaps held slots.
+//! decided view installs its readings.
 
 use super::*;
 
@@ -316,15 +316,16 @@ impl FileAnalysis {
     }
 
 
-    /// Rebuild the table indices after a view swapped held slots, and link
-    /// the HashKeyAccess refs the swap left unresolved to the HashKeyDefs it
-    /// installed — the same `(target_name, owner)` linker `build_indices`
-    /// runs.
-    pub fn rebuild_decided_indices(&mut self) {
+    /// Rebuild the table indices after a view installed its readings, and
+    /// link its installed HashKeyAccess refs to the HashKeyDefs it installed
+    /// — the same `(target_name, owner)` linker `build_indices` runs.
+    pub fn rebuild_decided_indices(&mut self, first_installed_ref: usize) {
         self.symbols.rebuild_indices();
 
-        // Re-link HashKeyAccess refs to (possibly newly-injected) HashKeyDef
-        // symbols, mirroring build_indices's logic.
+        // Link installed HashKeyAccess refs to installed HashKeyDef symbols,
+        // mirroring build_indices's logic. Base refs keep the links the
+        // build gave them: a base ref linked to an installed symbol would
+        // name an id the next view's cut removes.
         let hashkey_defs: HashMap<(String, HashKeyOwner), SymbolId> = self.symbols.iter()
             .filter_map(|sym| {
                 if let SymbolDetail::HashKeyDef { owner, .. } = &sym.detail {
@@ -335,7 +336,7 @@ impl FileAnalysis {
             })
             .collect();
         let mut hashkey_resolutions: Vec<(usize, SymbolId)> = Vec::new();
-        for (i, r) in self.refs.iter().enumerate() {
+        for (i, r) in self.refs.iter().enumerate().skip(first_installed_ref) {
             if r.resolved_symbol().is_some() {
                 continue;
             }

@@ -765,19 +765,17 @@ fn build_once(
         loader_config_params: b.loader_config_params,
         flow_edges: b.flow_edges,
     });
-    // Held slots join the tables before the seals, so every view shares the
-    // base's ids.
     for em in b.gated_emissions {
         fa.hold_gated_emission(em);
     }
     for heads in b.held_indirect {
         fa.hold_indirect(heads);
     }
-    if !fa.readings.is_empty() {
-        fa.rebuild_decided_indices();
-    }
     // Finalize: owner fixup, target stamping, and the base-count seals.
     bphase!("finalize_post_walk", fa.finalize_post_walk());
+    // Last: the readings' base is the tables as finalize left them, so no
+    // base entry is stamped against an installed one.
+    fa.seat_readings();
     fa.source_stamp = crate::model::file_analysis::source_stamp_of(source);
 
     fa

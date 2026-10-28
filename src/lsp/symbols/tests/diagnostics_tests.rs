@@ -978,7 +978,7 @@ fn pragma_index() -> crate::index::module_index::ModuleIndex {
     for name in ["strict", "Moo"] {
         module_index.insert_cache(
             name,
-            Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+            Some(std::sync::Arc::new(crate::index::sealed::cached_module(
                 std::path::PathBuf::from(format!("/fake/{name}.pm")),
                 std::sync::Arc::new(parse_analysis(&format!("package {name};\nsub import {{}}\n1;\n"))),
             ))),
@@ -1039,7 +1039,7 @@ fn missing_declaration_respects_declarations_and_imports() {
     ] {
         module_index.insert_cache(
             name,
-            Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+            Some(std::sync::Arc::new(crate::index::sealed::cached_module(
                 std::path::PathBuf::from(format!("/fake/{name}.pm")),
                 std::sync::Arc::new(parse_analysis(src)),
             ))),
@@ -1079,7 +1079,7 @@ fn missing_declaration_knows_use_english() {
     let module_index = pragma_index();
     module_index.insert_cache(
         "English",
-        Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+        Some(std::sync::Arc::new(crate::index::sealed::cached_module(
             std::path::PathBuf::from("/fake/English.pm"),
             std::sync::Arc::new(parse_analysis("package English;\nsub import {}\n1;\n")),
         ))),
@@ -1102,7 +1102,7 @@ fn missing_declaration_knows_use_env() {
     let module_index = pragma_index();
     module_index.insert_cache(
         "Env",
-        Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+        Some(std::sync::Arc::new(crate::index::sealed::cached_module(
             std::path::PathBuf::from("/fake/Env.pm"),
             std::sync::Arc::new(parse_analysis("package Env;\nsub import {}\n1;\n")),
         ))),
@@ -1127,7 +1127,7 @@ fn log4perl_tags_declare_their_exports() {
     for name in ["Log::Log4perl", "Log::Log4perl::Level"] {
         module_index.insert_cache(
             name,
-            Some(std::sync::Arc::new(crate::index::module_index::CachedModule::new(
+            Some(std::sync::Arc::new(crate::index::sealed::cached_module(
                 std::path::PathBuf::from(format!("/fake/{name}.pm")),
                 std::sync::Arc::new(parse_analysis(&format!("package {name};\nsub import {{}}\n1;\n"))),
             ))),

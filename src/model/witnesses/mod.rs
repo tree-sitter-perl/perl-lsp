@@ -169,6 +169,27 @@ impl WitnessBag {
         idx
     }
 
+    /// Remove and return every witness attached at `att`.
+    pub fn take_attachment(&mut self, att: &WitnessAttachment) -> Vec<Witness> {
+        if self.index.get(att).is_none_or(|v| v.is_empty()) {
+            return Vec::new();
+        }
+        self.generation = next_generation();
+        let (taken, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.witnesses).into_iter().partition(|w| &w.attachment == att);
+        self.witnesses = kept;
+        self.rebuild_index();
+        taken
+    }
+
+    /// Drop every witness from `len` on (a view's cut back to its base).
+    pub fn truncate(&mut self, len: usize) {
+        if len < self.witnesses.len() {
+            self.generation = next_generation();
+            self.witnesses.truncate(len);
+            self.rebuild_index();
+        }
+    }
+
     #[allow(dead_code)]
     pub fn all(&self) -> &[Witness] {
         &self.witnesses

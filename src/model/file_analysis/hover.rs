@@ -60,8 +60,6 @@ impl FileAnalysis {
         // Check refs first
         if let Some(r) = self.ref_at(point) {
             match &r.kind {
-                // `ref_at` never lands on a held slot.
-                RefKind::Dormant => {}
                 RefKind::Variable | RefKind::ContainerAccess => {
                     // Check if this variable is also a dynamic method call target
                     // (e.g. $self->$method() where $method is a known constant).

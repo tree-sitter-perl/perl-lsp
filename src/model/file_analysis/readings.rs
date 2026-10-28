@@ -1,13 +1,19 @@
 //! Readings a question picks between. A site whose meaning waits on other
 //! files mints every reading it can have, each tagged with the question
-//! and the arm it belongs to; the base tables hold the arm a file alone
-//! supports (the question's `Fallback`), and every other arm sits in a
-//! dormant slot of its own. A view decides the questions with the index in
-//! hand and swaps slots, so every symbol id and ref index is the same in
-//! every view (`docs/adr/query-delayed-facts.md`).
+//! and the arm it belongs to, into `Readings`: a table of its own, never
+//! the symbol or ref tables. The tables hold what the file states whatever
+//! the answers (the base) followed by the readings a view installs; the
+//! stored analysis installs each question's fallback, and a decided view
+//! truncates to the base and installs its own picks. A base id or index is
+//! the same in every view; an installed reading's is its view's own.
+//!
+//! One kind of reading replaces rather than adds: a site the walk had to
+//! read one way (an indirect-object call, whose undecided reading the walk
+//! runs whole) keeps its head refs in base slots, and each slot holds the
+//! head of whichever reading is installed (`docs/adr/query-delayed-facts.md`).
 
 use super::*;
-use crate::model::witnesses::Witness;
+use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
 
 /// The two answers a question can give.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -35,89 +41,74 @@ pub struct HeldQuestion {
     pub fallback: Fallback,
 }
 
-/// An entry that is live only when its question picks `arm`.
+/// An entry that holds only when its question picks `arm`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Held<T> {
     pub question: u32,
     pub arm: Arm,
-    /// The table slot the entry occupies (a symbol's id, a ref's index).
+    pub entry: T,
+}
+
+/// A witness a reading adds. One that states a held symbol's value names
+/// the symbol by its place in `Readings::symbols`, since its id is the
+/// view's to assign.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HeldWitness {
+    Plain(Witness),
+    /// `Symbol(symbol)` is `ty`.
+    Returns { symbol: u32, ty: InferredType, source: WitnessSource, span: Span },
+    /// `PackageSymbol{package, name}` edges to `Symbol(symbol)`.
+    Dispatches { symbol: u32, package: String, name: String, source: WitnessSource, span: Span },
+}
+
+/// A base ref slot whose content is a reading's: `then` or `otherwise`, as
+/// the question picks. The witnesses the walk attached to the slot
+/// (`Expression(slot)`) state the undecided reading's head, so
+/// `seat_readings` moves them into the readings under the fallback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeldSlot {
+    pub question: u32,
     pub slot: u32,
-    pub live: T,
+    pub then: Ref,
+    pub otherwise: Ref,
+}
+
+/// How long each table is before any reading is installed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BaseLengths {
+    pub symbols: u32,
+    pub refs: u32,
+    pub witnesses: u32,
 }
 
 /// Every reading this file holds, by question.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Readings {
     pub questions: Vec<HeldQuestion>,
+    /// Held symbols carry no id of their own: a view assigns one as it
+    /// installs them.
     pub symbols: Vec<Held<Symbol>>,
     pub refs: Vec<Held<Ref>>,
-    /// Witnesses a non-fallback arm adds. A reading that must retract a
-    /// type the fallback states goes through a `Choose` payload instead,
-    /// since a view only appends to the bag.
-    pub witnesses: Vec<(u32, Arm, Witness)>,
+    pub witnesses: Vec<Held<HeldWitness>>,
+    pub slots: Vec<HeldSlot>,
+    base: BaseLengths,
+    /// The picks the tables show.
+    installed: Picks,
 }
 
 /// Both readings' head refs at one deferred `meth Class(ARGS)` (the
-/// builder's `hold_indirect_heads`).
+/// builder's `hold_indirect_heads`), as `(Then, Otherwise)` pairs: the
+/// verb's head (`Class->meth`'s method call, `meth(..)`'s function call)
+/// and the class word's (`Class`, the package; `Class(..)`, a call).
 #[derive(Debug, Clone)]
 pub struct IndirectHeads {
     pub site: IndirectSite,
-    /// `Class->meth(ARGS)`: the `Then` reading.
-    pub method: Vec<Ref>,
-    /// `meth(Class(ARGS))`: the `Otherwise` reading.
-    pub function: Vec<Ref>,
+    pub verb: (Ref, Ref),
+    pub class: (Ref, Ref),
 }
 
 /// One pick per question: the arm a view installs, `None` for neither.
 pub type Picks = Vec<Option<Arm>>;
-
-/// Where a dormant slot points: past any real position, so no span probe
-/// ever lands on it.
-const DORMANT_SPAN: Span = Span {
-    start: Point { row: usize::MAX, column: 0 },
-    end: Point { row: usize::MAX, column: 0 },
-};
-
-impl Symbol {
-    pub fn dormant(id: SymbolId) -> Symbol {
-        Symbol {
-            id,
-            name: String::new(),
-            kind: SymKind::Dormant,
-            span: DORMANT_SPAN,
-            selection_span: DORMANT_SPAN,
-            scope: ScopeId(0),
-            package: None,
-            detail: SymbolDetail::None,
-            namespace: Namespace::default(),
-            presentation: Presentation::default(),
-            attributes: Vec::new(),
-            flags: Default::default(),
-            declared_with: None,
-            deref_stack: Vec::new(),
-            arity: None,
-        }
-    }
-}
-
-impl Ref {
-    pub fn dormant() -> Ref {
-        Ref {
-            kind: RefKind::Dormant,
-            span: DORMANT_SPAN,
-            scope: ScopeId(0),
-            target_name: String::new(),
-            access: AccessKind::Read,
-            binding: Binding::NONE,
-            folded_from: None,
-            arg_count: None,
-        }
-    }
-
-    pub fn is_dormant(&self) -> bool {
-        matches!(self.kind, RefKind::Dormant)
-    }
-}
 
 impl Readings {
     pub fn is_empty(&self) -> bool {
@@ -128,23 +119,65 @@ impl Readings {
         self.questions[q as usize].fallback.arm()
     }
 
-    /// The picks every base table already shows.
+    /// Each question's fallback: what an undecided view installs.
     pub fn fallbacks(&self) -> Picks {
         self.questions.iter().map(|q| q.fallback.arm()).collect()
     }
 
-    /// Every entry's live form, picked or not — what registration lists,
-    /// since a name a view can show must be findable before any view asks.
-    pub fn live_symbols(&self) -> impl Iterator<Item = &Symbol> {
-        self.symbols.iter().map(|h| &h.live)
+    /// The picks the tables show.
+    pub fn installed(&self) -> &[Option<Arm>] {
+        &self.installed
     }
 
-    pub fn live_refs(&self) -> impl Iterator<Item = &Ref> {
-        self.refs.iter().map(|h| &h.live)
+    pub fn base(&self) -> BaseLengths {
+        self.base
+    }
+
+    /// Every held symbol, picked or not — what registration lists, since a
+    /// name some view can show must be findable before any view asks.
+    pub fn held_symbols(&self) -> impl Iterator<Item = &Symbol> {
+        self.symbols.iter().map(|h| &h.entry)
+    }
+
+    pub fn held_refs(&self) -> impl Iterator<Item = &Ref> {
+        self.refs.iter().map(|h| &h.entry)
     }
 }
 
 impl FileAnalysis {
+    /// How long each table is without any reading installed.
+    pub fn base_lengths(&self) -> BaseLengths {
+        if self.readings.is_empty() {
+            return BaseLengths {
+                symbols: self.symbols.len() as u32,
+                refs: self.refs.len() as u32,
+                witnesses: self.witnesses.len() as u32,
+            };
+        }
+        self.readings.base
+    }
+
+    /// Every name a held reading could add to this file, as the relational
+    /// rows key them: the candidate presence its own row table records, so
+    /// a retrieval that must not miss a view's entries finds the file
+    /// without the base rows claiming them.
+    pub fn held_row_names(&self) -> Vec<String> {
+        let names = &self.pack.names;
+        let mut out: Vec<String> = self.readings.held_refs().map(|r| r.match_key(names)).collect();
+        for s in self.readings.held_symbols() {
+            out.push(s.name.clone());
+            out.push(name_match_key(&s.name, names));
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Everything the relational rows store of this file.
+    pub fn row_seeds(&self) -> RowSeeds {
+        RowSeeds { refs: self.ref_row_seeds(), syms: self.sym_row_seeds(), held: self.held_row_names() }
+    }
+
     /// Ask a question of this file, appending it to the readings. Returns
     /// its index for the entries that follow.
     pub fn ask(&mut self, question: Question) -> u32 {
@@ -153,38 +186,25 @@ impl FileAnalysis {
         (self.readings.questions.len() - 1) as u32
     }
 
-    /// Hold a new symbol under `(question, arm)`: a fresh slot, live in the
-    /// base only when `arm` is the fallback.
-    pub fn hold_symbol(&mut self, question: u32, arm: Arm, mut live: Symbol) -> SymbolId {
-        let id = SymbolId(self.symbols.len() as u32);
-        live.id = id;
-        let base = if self.readings.fallback(question) == Some(arm) { live.clone() } else { Symbol::dormant(id) };
-        self.symbols.push(base);
-        self.readings.symbols.push(Held { question, arm, slot: id.0, live });
-        id
+    /// Hold a symbol under `(question, arm)`. Returns its place among the
+    /// held symbols, which a `HeldWitness` names it by.
+    pub fn hold_symbol(&mut self, question: u32, arm: Arm, entry: Symbol) -> u32 {
+        self.readings.symbols.push(Held { question, arm, entry });
+        (self.readings.symbols.len() - 1) as u32
     }
 
-    /// Hold a new ref under `(question, arm)`, as `hold_symbol` does.
-    pub fn hold_ref(&mut self, question: u32, arm: Arm, live: Ref) {
-        let slot = self.refs.len() as u32;
-        let base = if self.readings.fallback(question) == Some(arm) { live.clone() } else { Ref::dormant() };
-        self.refs.push(base);
-        self.readings.refs.push(Held { question, arm, slot, live });
+    pub fn hold_ref(&mut self, question: u32, arm: Arm, entry: Ref) {
+        self.readings.refs.push(Held { question, arm, entry });
     }
 
-    /// Hold a ref the walk already minted as the fallback's: it stays in
-    /// its slot, and a view that picks the other arm empties it.
-    pub fn hold_existing_ref(&mut self, question: u32, slot: usize) {
-        let Some(arm) = self.readings.fallback(question) else { return };
-        let live = self.refs[slot].clone();
-        self.readings.refs.push(Held { question, arm, slot: slot as u32, live });
+    pub fn hold_witness(&mut self, question: u32, arm: Arm, entry: HeldWitness) {
+        self.readings.witnesses.push(Held { question, arm, entry });
     }
 
-    /// Seat a plugin emission its `ClassIsa` trigger did not fire locally:
+    /// Hold a plugin emission its `ClassIsa` trigger did not fire locally:
     /// one `ClassIsaPrefix` question, the emission's symbols and refs held
     /// under its `Then`, with the return-type witnesses a fired emit pushes.
     pub fn hold_gated_emission(&mut self, em: GatedEmission) {
-        use crate::model::witnesses::{WitnessAttachment, WitnessPayload, WitnessSource};
         let q = self.ask(Question::ClassIsaPrefix { package: em.package.clone(), prefixes: em.gate_prefixes });
         let scope = self.scope_at(em.scope_point).unwrap_or(ScopeId(0));
         let ns = Namespace::framework(em.plugin_id.clone());
@@ -201,7 +221,7 @@ impl FileAnalysis {
                 continue;
             }
             let class_method = matches!(gs.kind, SymKind::Method | SymKind::Sub).then(|| package.clone()).flatten();
-            let id = self.hold_symbol(
+            let held = self.hold_symbol(
                 q,
                 Arm::Then,
                 Symbol {
@@ -222,20 +242,16 @@ impl FileAnalysis {
                     arity: None,
                 },
             );
-            if let Some(rt) = gs.return_type {
+            if let Some(ty) = gs.return_type {
                 // The fold writeback's `PackageSymbol → Edge(Symbol)` mirror
                 // too, so a cross-file return-type query reaches it.
-                self.hold_witness(q, Arm::Then, Witness {
-                    attachment: WitnessAttachment::Symbol(id),
-                    source: source(),
-                    payload: WitnessPayload::InferredType(rt),
-                    span: gs.span,
-                });
-                if let Some(class) = class_method {
-                    self.hold_witness(q, Arm::Then, Witness {
-                        attachment: WitnessAttachment::PackageSymbol { package: class, name: gs.name },
+                self.hold_witness(q, Arm::Then, HeldWitness::Returns { symbol: held, ty, source: source(), span: gs.span });
+                if let Some(package) = class_method {
+                    self.hold_witness(q, Arm::Then, HeldWitness::Dispatches {
+                        symbol: held,
+                        package,
+                        name: gs.name,
                         source: source(),
-                        payload: WitnessPayload::Edge(WitnessAttachment::Symbol(id)),
                         span: gs.span,
                     });
                 }
@@ -255,32 +271,53 @@ impl FileAnalysis {
         }
     }
 
-    /// Seat a deferred indirect-object site: the walk minted the undecided
-    /// reading's heads, which stay in their slots; the other reading's
-    /// heads take fresh ones.
+    /// Hold a deferred indirect-object site's heads. Where the walk minted
+    /// the undecided reading's head, that slot holds whichever head the
+    /// view installs; where it minted none (a framework keyword the walk
+    /// read as a declaration), the other reading's head is added.
     pub fn hold_indirect(&mut self, heads: IndirectHeads) {
         let q = self.ask(Question::IndirectCall(heads.site));
-        let fallback = self.readings.fallback(q);
-        for (arm, refs) in [(Arm::Then, heads.method), (Arm::Otherwise, heads.function)] {
-            for r in refs {
-                if Some(arm) != fallback {
-                    self.hold_ref(q, arm, r);
-                    continue;
-                }
-                let same = |m: &Ref| m.span == r.span && std::mem::discriminant(&m.kind) == std::mem::discriminant(&r.kind);
-                if let Some(slot) = self.refs.iter().position(same) {
-                    self.hold_existing_ref(q, slot);
-                }
+        let Some(fallback) = self.readings.fallback(q) else { return };
+        for (then, otherwise) in [heads.verb, heads.class] {
+            let minted = match fallback {
+                Arm::Then => &then,
+                Arm::Otherwise => &otherwise,
+            };
+            let same = |m: &Ref| m.span == minted.span && std::mem::discriminant(&m.kind) == std::mem::discriminant(&minted.kind);
+            match self.refs.iter().position(same) {
+                Some(slot) => self.readings.slots.push(HeldSlot { question: q, slot: slot as u32, then, otherwise }),
+                None => match fallback {
+                    Arm::Then => self.hold_ref(q, Arm::Otherwise, otherwise),
+                    Arm::Otherwise => self.hold_ref(q, Arm::Then, then),
+                },
             }
         }
     }
 
-    pub fn hold_witness(&mut self, question: u32, arm: Arm, w: Witness) {
-        if self.readings.fallback(question) == Some(arm) {
-            self.witnesses.push(w);
-        } else {
-            self.readings.witnesses.push((question, arm, w));
+    /// Close the base at the tables as they stand and install every
+    /// question's fallback. The builder's last step: nothing the walk or
+    /// its passes mint may land after it, or a view would truncate it away.
+    pub fn seat_readings(&mut self) {
+        if self.readings.is_empty() {
+            return;
         }
+        // A slot's own facts state the walk's reading of its head: they
+        // move into the readings under the fallback.
+        for i in 0..self.readings.slots.len() {
+            let HeldSlot { question, slot, .. } = self.readings.slots[i];
+            let Some(arm) = self.readings.fallback(question) else { continue };
+            let att = WitnessAttachment::Expression(crate::model::witnesses::RefIdx(slot));
+            for w in self.witnesses.take_attachment(&att) {
+                self.hold_witness(question, arm, HeldWitness::Plain(w));
+            }
+        }
+        self.readings.base = BaseLengths {
+            symbols: self.symbols.len() as u32,
+            refs: self.refs.len() as u32,
+            witnesses: self.witnesses.len() as u32,
+        };
+        let fallbacks = self.readings.fallbacks();
+        self.install(&fallbacks);
     }
 
     /// Decide every question this file holds, through the index when given.
@@ -298,9 +335,9 @@ impl FileAnalysis {
     }
 
     /// This analysis with `picks` installed, or `None` when they are the
-    /// fallbacks the base already shows.
+    /// ones it already shows.
     pub fn decided(&self, picks: &[Option<Arm>]) -> Option<FileAnalysis> {
-        if picks == self.readings.fallbacks().as_slice() {
+        if picks == self.readings.installed() {
             return None;
         }
         let mut view = self.clone();
@@ -316,34 +353,72 @@ impl FileAnalysis {
         self.decided(&self.picks(Some(index)))
     }
 
+    /// Cut the tables back to the base and append the readings `picks`
+    /// selects. A base ref is never linked to an installed symbol (the
+    /// links below touch installed refs only), so the cut leaves no base
+    /// entry naming an id it removed.
     fn install(&mut self, picks: &[Option<Arm>]) {
         let readings = std::mem::take(&mut self.readings);
-        let pick = |q: u32| picks.get(q as usize).copied().flatten();
-        let on = |q: u32, arm: Arm| pick(q) == Some(arm);
-        // A question at its fallback keeps the base's slots: the base's
-        // entries carry the build's own stamps, which a held copy predates.
-        let moved = |q: u32| pick(q) != readings.fallback(q);
-        // Two questions can mint the same synthesized symbol; a view shows
-        // it once, as the builder's emit dedup would have.
-        let mut shown: HashSet<(String, SymKind, Option<String>, Namespace)> = HashSet::new();
-        for h in readings.symbols.iter().filter(|h| moved(h.question)) {
-            let slot = h.slot as usize;
-            let key = (h.live.name.clone(), h.live.kind, h.live.package.clone(), h.live.namespace.clone());
-            self.symbols[slot] = if on(h.question, h.arm) && shown.insert(key) {
-                h.live.clone()
-            } else {
-                Symbol::dormant(h.live.id)
+        let base = readings.base;
+        let on = |q: u32, arm: Arm| picks.get(q as usize).copied().flatten() == Some(arm);
+        self.symbols.truncate(base.symbols as usize);
+        self.refs.truncate(base.refs as usize);
+        self.witnesses.truncate(base.witnesses as usize);
+        for s in &readings.slots {
+            let arm = picks.get(s.question as usize).copied().flatten().or(readings.fallback(s.question));
+            self.refs.as_mut_slice()[s.slot as usize] = match arm {
+                Some(Arm::Then) => s.then.clone(),
+                _ => s.otherwise.clone(),
             };
         }
-        for h in readings.refs.iter().filter(|h| moved(h.question)) {
-            self.refs[h.slot as usize] = if on(h.question, h.arm) { h.live.clone() } else { Ref::dormant() };
-        }
-        for (q, arm, w) in &readings.witnesses {
-            if on(*q, *arm) {
-                self.witnesses.push(w.clone());
+        // Two questions can mint the same synthesized symbol; a view shows
+        // it once, as the builder's emit dedup would have.
+        let mut shown: HashMap<(String, SymKind, Option<String>, Namespace), SymbolId> = HashMap::new();
+        let mut ids: Vec<Option<SymbolId>> = Vec::with_capacity(readings.symbols.len());
+        for h in &readings.symbols {
+            if !on(h.question, h.arm) {
+                ids.push(None);
+                continue;
             }
+            let key = (h.entry.name.clone(), h.entry.kind, h.entry.package.clone(), h.entry.namespace.clone());
+            let id = *shown.entry(key).or_insert_with(|| {
+                let id = SymbolId(self.symbols.len() as u32);
+                let mut s = h.entry.clone();
+                s.id = id;
+                self.symbols.push(s);
+                id
+            });
+            ids.push(Some(id));
+        }
+        for h in readings.refs.iter().filter(|h| on(h.question, h.arm)) {
+            self.refs.push(h.entry.clone());
+        }
+        for h in readings.witnesses.iter().filter(|h| on(h.question, h.arm)) {
+            let w = match &h.entry {
+                HeldWitness::Plain(w) => w.clone(),
+                HeldWitness::Returns { symbol, ty, source, span } => {
+                    let Some(id) = ids[*symbol as usize] else { continue };
+                    Witness {
+                        attachment: WitnessAttachment::Symbol(id),
+                        source: source.clone(),
+                        payload: WitnessPayload::InferredType(ty.clone()),
+                        span: *span,
+                    }
+                }
+                HeldWitness::Dispatches { symbol, package, name, source, span } => {
+                    let Some(id) = ids[*symbol as usize] else { continue };
+                    Witness {
+                        attachment: WitnessAttachment::PackageSymbol { package: package.clone(), name: name.clone() },
+                        source: source.clone(),
+                        payload: WitnessPayload::Edge(WitnessAttachment::Symbol(id)),
+                        span: *span,
+                    }
+                }
+            };
+            self.witnesses.push(w);
         }
         self.readings = readings;
-        self.rebuild_decided_indices();
+        self.readings.installed = picks.to_vec();
+        self.rebuild_decided_indices(base.refs as usize);
     }
 }

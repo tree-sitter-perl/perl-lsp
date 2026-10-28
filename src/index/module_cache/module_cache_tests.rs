@@ -523,7 +523,7 @@ fn shred_ref_rows_roundtrip() {
     assert!(!has_ref_rows(&conn, &path_str));
     let seeds: Vec<_> = cached.analysis().ref_row_seeds();
     assert!(!seeds.is_empty(), "call sites must produce row seeds");
-    shred_derived_rows(&conn, &path_str, "workspace", &seeds, &[]).unwrap();
+    shred_rows(&conn, &path_str, "workspace", &seeds, &[]).unwrap();
     assert!(has_ref_rows(&conn, &path_str));
 
     // Retrieval by the match key finds the file; an unknown key finds nothing.
@@ -539,12 +539,12 @@ fn shred_ref_rows_roundtrip() {
     );
 
     // Re-shred replaces: same seeds again must not double the rows.
-    shred_derived_rows(&conn, &path_str, "workspace", &seeds, &[]).unwrap();
+    shred_rows(&conn, &path_str, "workspace", &seeds, &[]).unwrap();
     assert_eq!(ref_candidate_file_count(&conn, "helper"), 1);
 
     // A zero-ref shred still marks the file as shredded (the backfill marker).
     let other = dir.join("TestModule_shred_empty.pm");
-    shred_derived_rows(&conn, &other.to_string_lossy(), "workspace", &[], &[]).unwrap();
+    shred_rows(&conn, &other.to_string_lossy(), "workspace", &[], &[]).unwrap();
     assert!(has_ref_rows(&conn, &other.to_string_lossy()));
 
     delete_ref_rows(&conn, &path_str);
@@ -573,7 +573,7 @@ fn shred_sym_rows_same_generation() {
         "sub symbols must project into row seeds; got {:?}",
         sym_seeds.iter().map(|s| &s.name).collect::<Vec<_>>()
     );
-    shred_derived_rows(&conn, &path_str, "workspace", &seeds, &sym_seeds).unwrap();
+    shred_rows(&conn, &path_str, "workspace", &seeds, &sym_seeds).unwrap();
     let count = |conn: &Connection| -> i64 {
         conn.query_row("SELECT COUNT(*) FROM syms", [], |r| r.get(0)).unwrap()
     };
@@ -581,7 +581,7 @@ fn shred_sym_rows_same_generation() {
     assert!(n >= 2, "expected sym rows for S's subs, got {n}");
 
     // Re-shred replaces.
-    shred_derived_rows(&conn, &path_str, "workspace", &seeds, &sym_seeds).unwrap();
+    shred_rows(&conn, &path_str, "workspace", &seeds, &sym_seeds).unwrap();
     assert_eq!(count(&conn), n);
 
     // Deletion takes both families.
@@ -612,7 +612,7 @@ fn sym_member_probe_is_three_valued() {
         "never shredded: the store cannot speak for the file"
     );
 
-    shred_derived_rows(
+    shred_rows(
         &conn,
         &path_str,
         "workspace",
@@ -656,7 +656,7 @@ fn row_probes_match_the_match_key_spelling() {
     std::fs::write(&pm, source).unwrap();
     let cached = parse_source_to_cached(source, &pm);
     let path_str = pm.to_string_lossy().to_string();
-    shred_derived_rows(
+    shred_rows(
         &conn,
         &path_str,
         "workspace",
@@ -707,7 +707,7 @@ fn row_probes_plan_as_index_point_lookups() {
     std::fs::write(&pm, source).unwrap();
     let cached = parse_source_to_cached(source, &pm);
     let path_str = pm.to_string_lossy().to_string();
-    shred_derived_rows(
+    shred_rows(
         &conn,
         &path_str,
         "workspace",
@@ -792,6 +792,64 @@ fn row_probes_plan_as_index_point_lookups() {
     let _ = std::fs::remove_file(&pm);
 }
 
+/// A held reading's names land in `held` only: retrieval finds the file
+/// through them, and the `refs`/`syms` rows every view shows never claim
+/// them.
+#[test]
+fn held_names_are_candidates_of_their_own() {
+    let conn = test_db();
+    let seeds = crate::model::file_analysis::RowSeeds {
+        refs: Vec::new(),
+        syms: Vec::new(),
+        held: vec!["accessor".to_string()],
+    };
+    shred_derived_rows(&conn, "/ws/Held.pm", "workspace", &seeds).unwrap();
+    assert_eq!(ref_candidate_files(&conn, &["accessor".to_string()]), vec!["/ws/Held.pm".to_string()]);
+    let in_rows: i64 = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM refs) + (SELECT COUNT(*) FROM syms)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(in_rows, 0, "a held name is no base row");
+    // Re-shredding without it drops it, as it drops the file's other rows.
+    shred_rows(&conn, "/ws/Held.pm", "workspace", &[], &[]).unwrap();
+    assert!(ref_candidate_files(&conn, &["accessor".to_string()]).is_empty());
+}
+
+/// The candidate retrieval runs one statement per row family, each an index
+/// search with no temp btree: a UNION or DISTINCT would build one per
+/// execution, under SQLite's process-global page-cache mutex.
+#[test]
+fn candidate_lookups_plan_without_temp_btrees() {
+    let conn = test_db();
+    let sqls: Vec<(&str, &str)> = super::rows::REF_CANDIDATE_SQL
+        .iter()
+        .map(|s| ("ref_candidate", *s))
+        .chain(std::iter::once(("held_files", super::rows::HELD_FILES_SQL)))
+        .collect();
+    for (label, sql) in sqls {
+        let n_params = if sql.contains("?2") { 2 } else { 1 };
+        let args: Vec<&dyn rusqlite::ToSql> = if n_params == 2 { vec![&"x", &1i64] } else { vec![&"x"] };
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let lines: Vec<String> =
+            stmt.query_map(args.as_slice(), |row| row.get::<_, String>(3)).unwrap().map(|r| r.unwrap()).collect();
+        for l in &lines {
+            assert!(!l.starts_with("SCAN"), "{label}: a table scan — {l} — plan: {lines:?}");
+            assert!(!l.contains("TEMP B-TREE"), "{label}: a temp btree — {l} — plan: {lines:?}");
+        }
+        let mut stmt = conn.prepare(&format!("EXPLAIN {sql}")).unwrap();
+        let ephemeral: Vec<String> = stmt
+            .query_map(args.as_slice(), |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .filter(|op| op == "OpenEphemeral" || op == "OpenAutoindex")
+            .collect();
+        assert!(ephemeral.is_empty(), "{label}: builds a temp btree per call — {ephemeral:?}");
+    }
+}
+
 /// `FLAG_EXPORTED` is minted from the real `@EXPORT`/`@EXPORT_OK` surface
 /// (`exports_name`), so the rows agree with the source the Surface projects —
 /// never a parallel notion of exportedness.
@@ -847,7 +905,7 @@ fn unused_exports_view() {
     let prod_path = prod.to_string_lossy().to_string();
     let prod_refs: Vec<_> = prod_cached.analysis().ref_row_seeds();
     let prod_syms = prod_cached.analysis().sym_row_seeds();
-    shred_derived_rows(&conn, &prod_path, "workspace", &prod_refs, &prod_syms).unwrap();
+    shred_rows(&conn, &prod_path, "workspace", &prod_refs, &prod_syms).unwrap();
 
     // Consumer in ANOTHER file references `used`.
     let cons = dir.join("UE_Consumer.pm");
@@ -859,7 +917,7 @@ fn unused_exports_view() {
     let cons_path = cons.to_string_lossy().to_string();
     let cons_refs: Vec<_> = cons_cached.analysis().ref_row_seeds();
     let cons_syms = cons_cached.analysis().sym_row_seeds();
-    shred_derived_rows(&conn, &cons_path, "workspace", &cons_refs, &cons_syms).unwrap();
+    shred_rows(&conn, &cons_path, "workspace", &cons_refs, &cons_syms).unwrap();
 
     let dead: std::collections::HashSet<String> =
         unused_exported_syms(&conn).into_iter().map(|d| d.name).collect();
@@ -899,7 +957,7 @@ fn unused_exports_view_cross_file_candidate_suppresses() {
     let prod_path = prod.to_string_lossy().to_string();
     let prod_syms = prod_cached.analysis().sym_row_seeds();
     // Producer has no ref rows of its own.
-    shred_derived_rows(&conn, &prod_path, "workspace", &[], &prod_syms).unwrap();
+    shred_rows(&conn, &prod_path, "workspace", &[], &prod_syms).unwrap();
 
     // Before any consumer: dead.
     let dead0: std::collections::HashSet<String> =
@@ -917,7 +975,7 @@ fn unused_exports_view_cross_file_candidate_suppresses() {
         cons_refs.iter().any(|s| s.key == "widget"),
         "consumer must produce a `widget` candidate row"
     );
-    shred_derived_rows(&conn, &cons_path, "workspace", &cons_refs, &[]).unwrap();
+    shred_rows(&conn, &cons_path, "workspace", &cons_refs, &[]).unwrap();
 
     let dead1: std::collections::HashSet<String> =
         unused_exported_syms(&conn).into_iter().map(|d| d.name).collect();
@@ -939,7 +997,7 @@ fn names_with_ref_rows_is_the_distinct_key_set() {
     std::fs::write(&pm, src).unwrap();
     let cached = parse_source_to_cached(src, &pm);
     let refs: Vec<_> = cached.analysis().ref_row_seeds();
-    shred_derived_rows(&conn, &pm.to_string_lossy(), "workspace", &refs, &[]).unwrap();
+    shred_rows(&conn, &pm.to_string_lossy(), "workspace", &refs, &[]).unwrap();
 
     let names = names_with_ref_rows(&conn);
     assert!(names.contains("helper"), "called name has a ref row: {names:?}");
@@ -991,7 +1049,7 @@ fn hard_clear_wipes_derived_rows() {
         qual: None,
         arg_count: None,
     }];
-    shred_derived_rows(&conn, "/some/file.pm", "workspace", &seeds, &[]).unwrap();
+    shred_rows(&conn, "/some/file.pm", "workspace", &seeds, &[]).unwrap();
     assert!(has_ref_rows(&conn, "/some/file.pm"));
     validate_plugin_fingerprint(&conn, "fingerprint-a").unwrap();
     validate_plugin_fingerprint(&conn, "fingerprint-b").unwrap();
@@ -1019,7 +1077,7 @@ fn ref_rows_version_bump_recreates_old_shape_tables() {
     .unwrap();
     init_schema(&conn).unwrap();
     // The v2 shape must accept a tier-tagged shred.
-    shred_derived_rows(&conn, "/migrated.pm", "workspace", &[], &[]).unwrap();
+    shred_rows(&conn, "/migrated.pm", "workspace", &[], &[]).unwrap();
     assert!(has_ref_rows(&conn, "/migrated.pm"));
 }
 
@@ -1040,7 +1098,7 @@ fn ref_rows_current_stamp_with_stale_shape_recreates_tables() {
     ))
     .unwrap();
     init_schema(&conn).unwrap();
-    shred_derived_rows(&conn, "/migrated.pm", "workspace", &[], &[]).unwrap();
+    shred_rows(&conn, "/migrated.pm", "workspace", &[], &[]).unwrap();
     assert!(has_ref_rows(&conn, "/migrated.pm"));
 }
 
@@ -1051,8 +1109,8 @@ fn ref_rows_current_stamp_with_stale_shape_recreates_tables() {
 fn inc_clear_is_import_tier_scoped() {
     let conn = test_db();
     validate_inc_paths(&conn, &[PathBuf::from("/lib/a")]).unwrap();
-    shred_derived_rows(&conn, "/ws/File.pm", "workspace", &[], &[]).unwrap();
-    shred_derived_rows(&conn, "/inc/Dep.pm", "import", &[], &[]).unwrap();
+    shred_rows(&conn, "/ws/File.pm", "workspace", &[], &[]).unwrap();
+    shred_rows(&conn, "/inc/Dep.pm", "import", &[], &[]).unwrap();
 
     validate_inc_paths(&conn, &[PathBuf::from("/lib/CHANGED")]).unwrap();
     assert!(
@@ -1365,14 +1423,14 @@ fn ref_rows_dedup_per_file_and_not_across_files() {
     );
     let (b_path, b_seeds) = mk("dedup_b.pm", "package B;\nsub go { helper(); }\n1;\n");
 
-    shred_derived_rows(&conn, &a_path, "workspace", &a_seeds, &[]).unwrap();
+    shred_rows(&conn, &a_path, "workspace", &a_seeds, &[]).unwrap();
     assert_eq!(
         ref_candidate_file_count(&conn, "helper"),
         1,
         "four call sites in one file must be one row",
     );
 
-    shred_derived_rows(&conn, &b_path, "workspace", &b_seeds, &[]).unwrap();
+    shred_rows(&conn, &b_path, "workspace", &b_seeds, &[]).unwrap();
     assert_eq!(
         ref_candidate_file_count(&conn, "helper"),
         2,
@@ -1402,7 +1460,7 @@ fn wiping_the_strings_table_does_not_leave_dangling_name_ids() {
     let path_str = p.to_string_lossy().to_string();
     let seeds = parse_source_to_cached(src, &p).analysis().ref_row_seeds();
 
-    shred_derived_rows(&conn, &path_str, "workspace", &seeds, &[]).unwrap();
+    shred_rows(&conn, &path_str, "workspace", &seeds, &[]).unwrap();
     assert_eq!(ref_candidate_files(&conn, &["helper".to_string()]), vec![path_str.clone()]);
 
     // The wipe every hard-clear performs, on the SAME connection and thread
@@ -1410,7 +1468,7 @@ fn wiping_the_strings_table_does_not_leave_dangling_name_ids() {
     clear_derived_rows(&conn).unwrap();
     assert!(ref_candidate_files(&conn, &["helper".to_string()]).is_empty());
 
-    shred_derived_rows(&conn, &path_str, "workspace", &seeds, &[]).unwrap();
+    shred_rows(&conn, &path_str, "workspace", &seeds, &[]).unwrap();
     assert_eq!(
         ref_candidate_files(&conn, &["helper".to_string()]),
         vec![path_str],
@@ -1441,7 +1499,7 @@ fn the_intern_memo_stays_bounded_and_correct_past_its_cap() {
         std::fs::write(&p, &src).unwrap();
         let path_str = p.to_string_lossy().to_string();
         let cached = parse_source_to_cached(&src, &p);
-        shred_derived_rows(
+        shred_rows(
             &conn,
             &path_str,
             "workspace",
@@ -1477,7 +1535,7 @@ fn a_qualified_symbols_declaring_file_is_a_ref_candidate() {
     std::fs::write(&p, src).unwrap();
     let path_str = p.to_string_lossy().to_string();
     let cached = parse_source_to_cached(src, &p);
-    shred_derived_rows(
+    shred_rows(
         &conn,
         &path_str,
         "workspace",
@@ -1530,7 +1588,7 @@ fn probe_strings_orphan_rate() {
         let Some(tree) = parser.parse(&src, None) else { continue };
         let fa = crate::build::builder::build(&tree, src.as_bytes());
         let ps = f.to_string_lossy().to_string();
-        shred_derived_rows(&conn, &ps, "workspace", &fa.ref_row_seeds(), &fa.sym_row_seeds()).unwrap();
+        shred_rows(&conn, &ps, "workspace", &fa.ref_row_seeds(), &fa.sym_row_seeds()).unwrap();
         paths.push(ps);
     }
     let count = |sql: &str| -> i64 {
@@ -1569,7 +1627,7 @@ fn gc_reclaims_orphaned_strings_and_keeps_live_ones() {
         std::fs::write(&p, src).unwrap();
         let ps = p.to_string_lossy().to_string();
         let cached = parse_source_to_cached(src, &p);
-        shred_derived_rows(
+        shred_rows(
             &conn, &ps, "workspace",
             &cached.analysis().ref_row_seeds(),
             &cached.analysis().sym_row_seeds(),
@@ -1615,7 +1673,7 @@ fn a_gc_invalidates_the_writer_intern_memo() {
         std::fs::write(&p, src).unwrap();
         let ps = p.to_string_lossy().to_string();
         let cached = parse_source_to_cached(src, &p);
-        shred_derived_rows(
+        shred_rows(
             &conn, &ps, "workspace",
             &cached.analysis().ref_row_seeds(),
             &cached.analysis().sym_row_seeds(),
@@ -1652,7 +1710,7 @@ fn a_deleted_files_rows_are_collectable() {
     std::fs::write(&p, src).unwrap();
     let path_str = p.to_string_lossy().to_string();
     let cached = parse_source_to_cached(src, &p);
-    shred_derived_rows(
+    shred_rows(
         &conn, &path_str, "workspace",
         &cached.analysis().ref_row_seeds(),
         &cached.analysis().sym_row_seeds(),
@@ -2405,4 +2463,20 @@ fn warm_cache_winner_follows_inc_order() {
     let winner = cache.get("WarmRank").unwrap().as_ref().unwrap().path.clone();
     assert_eq!(winner, paths[0], "the first @INC root wins");
     let _ = std::fs::remove_dir_all(&base);
+}
+
+/// `shred_derived_rows` over loose ref and symbol seeds, with no held names.
+fn shred_rows(
+    conn: &rusqlite::Connection,
+    path: &str,
+    source: &str,
+    refs: &[crate::model::file_analysis::RefRowSeed],
+    syms: &[crate::model::file_analysis::SymRowSeed],
+) -> rusqlite::Result<()> {
+    shred_derived_rows(
+        conn,
+        path,
+        source,
+        &crate::model::file_analysis::RowSeeds { refs: refs.to_vec(), syms: syms.to_vec(), held: Vec::new() },
+    )
 }

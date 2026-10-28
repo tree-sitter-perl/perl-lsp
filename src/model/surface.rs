@@ -163,14 +163,8 @@ impl Surface {
         let mut free_methods: Vec<MethodSurface> = Vec::new();
         // One pass over the (few) HashKeyDef symbols instead of an
         // O(symbols) scan per sub — projection runs per registration.
-        // A held slot's base entry is one of its readings: list it once.
-        let held: std::collections::HashSet<_> = feed.held_symbols.iter().map(|s| s.id).collect();
-        let symbols: Vec<&crate::model::file_analysis::Symbol> = feed
-            .symbols
-            .iter()
-            .filter(|s| s.kind != SymKind::Dormant && !held.contains(&s.id))
-            .chain(feed.held_symbols.iter().copied())
-            .collect();
+        let symbols: Vec<&crate::model::file_analysis::Symbol> =
+            feed.symbols.iter().chain(feed.held_symbols.iter().copied()).collect();
         let hash_key_defs: Vec<&crate::model::file_analysis::Symbol> = symbols
             .iter()
             .copied()

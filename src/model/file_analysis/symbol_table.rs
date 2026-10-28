@@ -60,8 +60,15 @@ impl SymbolTable {
         self.symbols.get(i)
     }
 
-    /// Append a symbol. Callers that append post-build (enrichment, gated
-    /// emissions) refresh the indices afterwards.
+    /// Drop every symbol from `len` on (a view's cut back to its base).
+    /// The caller rebuilds the indices.
+    pub fn truncate(&mut self, len: usize) {
+        self.symbols.truncate(len);
+    }
+
+    /// Append a symbol. Callers that append post-build (a view installing
+    /// its readings) refresh the indices afterwards.
+
     pub fn push(&mut self, s: Symbol) {
         self.symbols.push(s);
     }
@@ -78,8 +85,7 @@ impl SymbolTable {
         self.by_scope.get(&scope).map_or(&[], |v| v.as_slice())
     }
 
-    /// Every symbol's relational row seed, then every held reading's: a
-    /// row is a candidate, so a name some view shows is listed. The two
+    /// Each symbol's relational row seed. The two
     /// analysis-level predicates are injected because they read tables
     /// this one doesn't own — linkage visibility needs the declaring
     /// scope's kind, exportedness the `@EXPORT`/`@EXPORT_OK` surface.
@@ -120,7 +126,7 @@ impl SymbolTable {
     pub fn rebuild_indices(&mut self) {
         self.by_name.clear();
         self.by_scope.clear();
-        for sym in self.symbols.iter().filter(|s| s.kind != SymKind::Dormant) {
+        for sym in self.symbols.iter() {
             self.by_name.entry(sym.name.clone()).or_default().push(sym.id);
             self.by_scope.entry(sym.scope).or_default().push(sym.id);
         }
@@ -236,11 +242,10 @@ impl FileAnalysis {
     /// surface the Surface projection does (`exports_name` →
     /// `export_lookup`), so "exported" never drifts between the two.
     pub fn sym_row_seeds(&self) -> Vec<SymRowSeed> {
-        // A held slot's base entry is one of its readings: seed it once.
-        let held: HashSet<SymbolId> = self.readings.live_symbols().map(|s| s.id).collect();
-        let own = self.symbols.iter().filter(|s| s.kind != SymKind::Dormant && !held.contains(&s.id));
+        // The base only: a held symbol's name is a candidate row of its
+        // own (`held_row_names`), never a declaration every view shows.
         SymbolTable::row_seeds_of(
-            own.chain(self.readings.live_symbols()),
+            self.symbols.as_slice()[..self.base_lengths().symbols as usize].iter(),
             &self.pack.names,
             |s| self.is_linkage_visible(s),
             |n| self.exports_name(n),

@@ -17,9 +17,10 @@ use super::*;
 /// `symbol_is_class_content`) — never for direct field access, which would
 /// bypass the classification gate.
 pub struct SurfaceFeed<'a> {
+    /// The base symbols: what every view shows.
     pub symbols: &'a [Symbol],
-    /// Every held reading's live symbol: a name some view shows is on the
-    /// Surface whichever view another file reads.
+    /// Every held symbol: a name some view shows is on the Surface
+    /// whichever view another file reads.
     pub held_symbols: Vec<&'a Symbol>,
     pub packages: &'a HashMap<String, PackageFacts>,
     pub imports: &'a [Import],
@@ -149,8 +150,11 @@ impl FileAnalysis {
             export_lookup: _export_lookup,
         } = self;
         SurfaceFeed {
-            symbols: symbols.as_slice(),
-            held_symbols: readings.live_symbols().collect(),
+            symbols: {
+                let base = if readings.is_empty() { symbols.len() } else { readings.base().symbols as usize };
+                &symbols.as_slice()[..base]
+            },
+            held_symbols: readings.held_symbols().collect(),
             packages,
             imports,
             plugin_loads,

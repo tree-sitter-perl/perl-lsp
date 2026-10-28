@@ -406,7 +406,7 @@ impl ModuleIndex {
             return None;
         };
         let picks = base.picks(Some(self));
-        if picks == base.readings.fallbacks() {
+        if picks == base.readings.installed() {
             return None;
         }
         let generation = self
