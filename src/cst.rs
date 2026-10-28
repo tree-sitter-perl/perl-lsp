@@ -22,6 +22,7 @@
 
 use tree_sitter::Node;
 
+use crate::model::conventions::Sigil;
 use crate::model::file_analysis::Span;
 
 pub(crate) use crate::model::conventions::is_conventional_invocant_name;
@@ -593,28 +594,46 @@ pub(crate) fn canonical_container_name<'a>(node: Node<'a>, src: &'a [u8]) -> Opt
         return None;
     }
     let bare = varname_child(node)?.text(src)?;
-    Some(format!("{}{}", container_sigil(node)?, bare))
+    Some(format!("{}{}", container_sigil(node)?.char(), bare))
 }
 
 /// The sigil of the aggregate a container access reads — `@` for `$a[0]`,
 /// `@a[..]`, `%a[..]`, `$#a`; `%` for `$h{k}`, `@h{..}`, `%h{..}`. The
 /// access node's own sigil never says it: a slice is always `@`.
-pub(crate) fn container_sigil(node: Node) -> Option<char> {
+pub(crate) fn container_sigil(node: Node) -> Option<Sigil> {
     if node.kind() == "arraylen" {
-        return Some('@');
+        return Some(Sigil::Array);
     }
     let parent = node.parent()?;
     match parent.kind() {
-        "array_element_expression" => Some('@'),
-        "hash_element_expression" => Some('%'),
+        "array_element_expression" => Some(Sigil::Array),
+        "hash_element_expression" => Some(Sigil::Hash),
         "slice_expression" | "keyval_expression" => {
             if parent.child_by_field_name("array").is_some_and(|c| c == node) {
-                Some('@')
+                Some(Sigil::Array)
             } else if parent.child_by_field_name("hash").is_some_and(|c| c == node) {
-                Some('%')
+                Some(Sigil::Hash)
             } else {
                 None
             }
+        }
+        _ => None,
+    }
+}
+
+/// What a deref node dereferences its operand as: `${..}` / `$$x` a
+/// scalar, `@{..}` / `@$x` an array, `%{..}` / `%$x` a hash, an element,
+/// slice or `$#` access the aggregate it reads, `&{..}` / `&$x` code,
+/// `*{..}` a glob.
+pub(crate) fn deref_sigil(node: Node) -> Option<Sigil> {
+    match node.kind() {
+        "scalar" => Some(Sigil::Scalar),
+        "array" => Some(Sigil::Array),
+        "hash" => Some(Sigil::Hash),
+        "function" | "code_deref_expression" => Some(Sigil::Code),
+        "glob" | "glob_deref_expression" => Some(Sigil::Glob),
+        "container_variable" | "slice_container_variable" | "keyval_container_variable" | "arraylen" => {
+            container_sigil(node)
         }
         _ => None,
     }

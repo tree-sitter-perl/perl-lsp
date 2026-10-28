@@ -473,6 +473,21 @@ fn deref_spellings_type_the_operand() {
     }
 }
 
+/// `&$x` / `&{$x}` call a code ref; `$$x` / `*{$x}` deref a scalar or glob
+/// ref, which the lattice has no type for.
+#[test]
+fn code_derefs_type_the_operand_and_scalar_or_glob_derefs_do_not() {
+    let fa = build_fa(
+        "sub f {\nmy ($c1, $c2, $s, $g) = @_;\n&$c1(1); &{$c2}(2); print $$s; print *{$g}{CODE};\nreturn;\n}\n",
+    );
+    let at = |v: &str| fa.inferred_type_via_bag(v, Point::new(3, 0));
+    for v in ["$c1", "$c2"] {
+        assert!(matches!(at(v), Some(InferredType::CodeRef { .. })), "{v}: {:?}", at(v));
+    }
+    assert_eq!(at("$s"), None);
+    assert_eq!(at("$g"), None);
+}
+
 #[test]
 fn test_refgen_types_by_what_it_references() {
     // Only `\&name` is code: `\%h` and `\@a` are container refs, and a

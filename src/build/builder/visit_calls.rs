@@ -21,9 +21,9 @@ impl<'a> Builder<'a> {
         // visited below for the refs inside it.
         let access = self.determine_access(node);
         let sigil = match node.kind() {
-            "scalar" => Some('$'),
-            "array" => Some('@'),
-            "hash" => Some('%'),
+            "scalar" => Some(crate::model::conventions::Sigil::Scalar),
+            "array" => Some(crate::model::conventions::Sigil::Array),
+            "hash" => Some(crate::model::conventions::Sigil::Hash),
             _ => None,
         };
         for (name, span, folded_from) in sigil.map(|s| self.symbolic_variables(node, s)).unwrap_or_default() {
@@ -162,7 +162,7 @@ impl<'a> Builder<'a> {
     /// rename skips, and a single-literal fold carries the literal as
     /// `folded_from` for rename to rewrite instead. Unqualified names belong
     /// to the package in force, as Perl resolves them.
-    fn symbolic_variables(&self, node: Node<'a>, sigil: char) -> Vec<(String, Span, Option<Span>)> {
+    fn symbolic_variables(&self, node: Node<'a>, sigil: crate::model::conventions::Sigil) -> Vec<(String, Span, Option<Span>)> {
         use crate::cst::NodeExt;
         use crate::model::conventions::{
             is_special_variable, qualify_var, split_qualified, PERL_SPELLINGS,
@@ -199,7 +199,7 @@ impl<'a> Builder<'a> {
                 let (pkg, base) = split_qualified(&name, &PERL_SPELLINGS);
                 if base.is_empty()
                     || !base.chars().all(|c| c.is_alphanumeric() || c == '_')
-                    || is_special_variable(&format!("{sigil}{base}"))
+                    || is_special_variable(&format!("{}{base}", sigil.char()))
                 {
                     return None;
                 }
@@ -207,7 +207,7 @@ impl<'a> Builder<'a> {
                     Some(pkg) => PERL_SPELLINGS.qualifier_package(pkg),
                     None => self.current_package.as_deref().unwrap_or_else(|| PERL_SPELLINGS.qualifier_package("")),
                 };
-                Some((qualify_var(sigil, pkg, base, &PERL_SPELLINGS), span, folded_from))
+                Some((qualify_var(sigil.char(), pkg, base, &PERL_SPELLINGS), span, folded_from))
             })
             .collect()
     }
@@ -256,39 +256,32 @@ impl<'a> Builder<'a> {
 
     /// The reference type a scalar must hold when it is the whole operand of
     /// a deref — `@{$x}` / `@$x` / `${$x}[0]` / `$$x[0]` / `$#{$x}` hold an
-    /// ArrayRef, `%{$x}` / `$$x{k}` / `@{$x}{..}` a HashRef, `&{$x}` a
-    /// CodeRef — with the deref node as the constraint's context.
+    /// ArrayRef, `%{$x}` / `$$x{k}` / `@{$x}{..}` a HashRef, `&{$x}` / `&$x`
+    /// a CodeRef — with the deref node as the constraint's context.
     ///
     /// Parent chain: scalar → varname → outer (sigil form), or scalar →
-    /// expression_statement → block → varname → outer (block form).
+    /// expression_statement → block → varname-or-deref → outer (block form).
     pub(super) fn block_deref_context(&self, node: Node<'a>) -> Option<(InferredType, Node<'a>)> {
-        let mut varname = node.parent()?;
-        if varname.kind() == "expression_statement" {
-            let block = varname.parent()?;
+        use crate::model::conventions::Sigil;
+        let mut up = node.parent()?;
+        if up.kind() == "expression_statement" {
+            let block = up.parent()?;
             if block.kind() != "block" { return None; }
-            varname = block.parent()?;
+            up = block.parent()?;
         }
-        if varname.kind() != "varname" { return None; }
-        let outer = varname.parent()?;
-        match outer.kind() {
-            "array" => Some((InferredType::ArrayRef, outer)),
-            "hash" => Some((InferredType::HashRef, outer)),
-            "container_variable" | "slice_container_variable" | "keyval_container_variable" | "arraylen" => {
-                match crate::cst::container_sigil(outer)? {
-                    '@' => Some((InferredType::ArrayRef, outer)),
-                    _ => Some((InferredType::HashRef, outer)),
-                }
-            }
-            "function" => {
-                if let Ok(text) = outer.utf8_text(self.source) {
-                    if text.starts_with("&{") {
-                        return Some((InferredType::CodeRef { return_edge: None }, outer));
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
+        let outer = match up.kind() {
+            "varname" => up.parent()?,
+            "code_deref_expression" | "glob_deref_expression" => up,
+            _ => return None,
+        };
+        let ty = match crate::cst::deref_sigil(outer)? {
+            Sigil::Array => InferredType::ArrayRef,
+            Sigil::Hash => InferredType::HashRef,
+            Sigil::Code => InferredType::CodeRef { return_edge: None },
+            // The lattice has no scalar or glob reference type to hold.
+            Sigil::Scalar | Sigil::Glob => return None,
+        };
+        Some((ty, outer))
     }
 
     pub(super) fn visit_container_ref(&mut self, node: Node<'a>) {
