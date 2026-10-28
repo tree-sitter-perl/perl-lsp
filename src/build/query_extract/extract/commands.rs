@@ -13,11 +13,9 @@ pub(super) struct State {
 }
 
 pub(super) fn handle(st: &mut ExtractState, e: &Event) {
-    match e.cap {
-        Capture::Cmd(CmdCap::Name) => {
-            st.commands.cmd_names.insert(e.match_id, (e.text.clone(), e.span(), st.cur_scope));
-        }
-        _ => {}
+    // An argument is counted through its command's match.
+    if e.cap == Capture::Cmd(CmdCap::Name) {
+        st.commands.cmd_names.insert(e.match_id, (e.text.clone(), e.span(), st.cur_scope));
     }
 }
 
