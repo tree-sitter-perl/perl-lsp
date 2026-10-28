@@ -397,7 +397,7 @@ impl ModuleIndex {
             return Vec::new();
         }
         let picks = match Deciding::enter() {
-            Some(_deciding) => base.picks(Some(self)),
+            Some(_deciding) => self.picks_now(cached),
             None => base.readings.fallbacks(),
         };
         base.shown_held_symbols(&picks).into_iter().cloned().collect()
@@ -422,7 +422,7 @@ impl ModuleIndex {
             crate::util::ghost_stats::count("decided_view.nested");
             return None;
         };
-        let picks = base.picks(Some(self));
+        let picks = self.picks_now(cached);
         if picks == base.readings.installed() {
             return None;
         }
@@ -451,6 +451,25 @@ impl ModuleIndex {
             super::index_core::DecidedView { generation, picks, view: Arc::clone(&view) },
         );
         Some(view)
+    }
+}
+
+impl ModuleIndex {
+    /// `cached`'s picks through the index as it stands, decided once per
+    /// resolution epoch. Call it holding a `Deciding`: a nested read would
+    /// see fallbacks and must not be remembered.
+    fn picks_now(&self, cached: &Arc<CachedModule>) -> crate::model::file_analysis::Picks {
+        let epoch = self.resolution_epoch_sum() + self.world_generation();
+        if let Some(hit) = self.core.decided_picks.get(&cached.path) {
+            if hit.0 == epoch {
+                crate::util::ghost_stats::count("decided_picks.hit");
+                return hit.1.clone();
+            }
+        }
+        crate::util::ghost_stats::count("decided_picks.decide");
+        let picks = cached.analysis().picks(Some(self));
+        self.core.decided_picks.insert(cached.path.clone(), (epoch, picks.clone()));
+        picks
     }
 }
 

@@ -177,6 +177,10 @@ pub(crate) struct IndexCore {
     /// moves a verdict re-derives at the next read and nothing has to
     /// remember to invalidate it. Count-capped (`DECIDED_VIEW_CAP`).
     pub(crate) decided_views: DashMap<std::path::PathBuf, DecidedView>,
+    /// The picks each file holding readings last decided, under the
+    /// resolution epoch they were decided at. A question can scan hundreds
+    /// of candidate files, and a file is read many times between edits.
+    pub(crate) decided_picks: DashMap<std::path::PathBuf, (u64, crate::model::file_analysis::Picks)>,
 }
 
 /// One decided view (see `IndexCore::decided_views`).
@@ -236,6 +240,7 @@ impl IndexCore {
             bag_cache: std::sync::RwLock::new(None),
             conclusion_cache: Arc::new(std::sync::RwLock::new(None)),
             decided_views: DashMap::new(),
+            decided_picks: DashMap::new(),
         }
     }
 
