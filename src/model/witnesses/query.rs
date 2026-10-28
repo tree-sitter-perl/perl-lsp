@@ -82,7 +82,7 @@ pub fn query_sub_return_type(
     // Cross-file: the exporters, then a pack's include closure — the same
     // ladder an unresolved `Callee::Function` walks.
     let ctx = context?;
-    reg.free_function_cross_file(ctx, sub_name, arity_hint, receiver, &[], &mut QueryState::new())
+    reg.free_function_cross_file(ctx, sub_name, None, arity_hint, receiver, &[], &mut QueryState::new())
 }
 
 /// Walk the scope chain from `scope` upward, folding every Variable

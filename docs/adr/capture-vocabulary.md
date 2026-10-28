@@ -234,9 +234,10 @@ names from one token: the class's data member (`@def.field`,
 written directly in the body reads bare through `lookup_chain`. The match
 says so with `@def.pair`: the two defs carrying one match id are linked
 each way as `Symbol::declared_with`, the relation Perl's `has` already
-mints. The twin is no class content of its own; a rename from either
-spelling rewrites both (`codeclared_member_group` from the twin's side,
-the references matcher folding the twin's uses in from the member's). A
+mints. The twin is no class content of its own. The pair is a field group
+(`field-projections.md`): the member is its reader, read rather than
+called, and the twin's uses are its variable spellings, so a rename from
+either spelling, in any file, rewrites both. A
 binding with a value is `@mark.static`; a bare annotation declares an
 instance's attribute and stays unmarked.
 
@@ -244,14 +245,47 @@ A write through a receiver (`self.n = …`, `@def.slot`, receiver token
 `@def.slot.receiver`) declares an instance slot: a `HashKeyDef` owned by
 `HashKeyOwner::Class`, Perl's own model for `$self->{n}`. The owner is the
 class the receiver is TYPED as at the write — the receiver parameter's
-class, or an annotated parameter's or local's annotation — read through
-the witness registry once extraction has lowered them
-(`defs::declare_slots`). A write declares only when neither its class nor
-an ancestor already declares the name (a class-body binding, a member, an
-earlier slot); every other write, augmented or not, and any write through
-an untyped receiver, stays a member reference. Ancestors are the file's
-own parents at extraction, and a local typed only by its value
-(`o = Counter()`) is untyped there: call witnesses are minted at assembly.
+class, an annotated parameter's or local's annotation, a local's value
+(`o = Counter()`) — asked of the assembled analysis's own registry
+(`skeleton::declare_slots`, the last step of `into_file_analysis`, the
+slots adopted into the sealed baseline). A write declares only when
+neither its class nor an ancestor already declares the name (a class-body
+binding, a member, an earlier slot); every other write, augmented or not,
+and any write through an untyped receiver, stays a member reference. The
+write's own token stays a member reference too.
+
+What a write puts in a member is a separate fact, and not a slot's: an
+assignment writes the place its left side denotes. `@flow.place` marks
+the left side, whatever it is, beside `@flow.source`; the vocabulary has
+no lvalue kinds. The place is what the left side's own read projects, so
+a write lands where a read of the same expression looks, at any depth
+(`self.a.b.c = v` writes `c` of the class `self.a.b` is). A name's place
+is its binding, which `@flow.target` writes and rebinds; a left side no
+read projects (a subscript, until element reads are minted; a tuple,
+until destructuring pairs its elements) takes nothing. A member read's
+place is the member of the class the receiver's value is
+(`skeleton::settle_member_writes`, after the slots, adopted into the
+sealed baseline with `FileAnalysis::adopt_witnesses`). A
+member the file declares on that class or an ancestor takes the write
+into its declaration's `Variable`, as a variable takes one, so a declared
+type outranks what flows in. Any other member — an instance slot, or one
+declared in another file — takes it on `Field{owner, name}`, the
+attachment a C++ or php member declaration's value rides and a member
+read's `ValueHop` chases, where each write is an arm and the arms agree
+as a hash slot's writes do: two classes are no answer. The witness spans
+the class body, as a declaration's does, so a method above `__init__`
+reads what `__init__` writes.
+`TODO(member-write-declared-elsewhere)`: a write to a member declared in
+another file lands on the writer's `Field` and shadows the declared type
+until the declaration is decided with the index.
+
+`TODO(slot-owner-deferred)`: an owner only the index can name (a receiver
+typed by another file, a parent declared in another file) is still decided
+without it. The target is Perl's shape — the write is a ref whose owner is
+a late binding (`resolve_hash_key_owners`,
+`fixup_call_bound_hash_key_owners`, `deferred_hash_key_owner`), and
+"declared" is the first write whose decided owner is the class — landing
+with the php variables stack (`unify_assigned`, `TODO(assigned-unify)`).
 
 A slot is reached only through a receiver: it is no bare name anywhere,
 because the lexical walk binds Variables alone. Member lookup reads it
