@@ -2387,9 +2387,9 @@ impl ReducerRegistry {
                                 }
                                 ProjectionStep::ArrayIndex(i) => t.element_at(*i).cloned(),
                                 ProjectionStep::Element => match t {
+                                    // An element is any of the sequence's values.
                                     crate::model::file_analysis::InferredType::Sequence(elems) => {
-                                        let mut it = elems.iter();
-                                        it.next().filter(|first| it.all(|e| e == *first)).cloned()
+                                        crate::model::file_analysis::join_all(elems, class_order(q))
                                     }
                                     // A parametric container's TRAILING argument is
                                     // its element by the same positional convention
@@ -2475,7 +2475,7 @@ impl ReducerRegistry {
                             }
                         };
                         // The base projects on each value it may be.
-                        let projected = base_ty.join_over_arms(&*class_order(q), |t| project(t, state));
+                        let projected = base_ty.join_over_arms(class_order(q), |t| project(t, state));
                         if let Some(t) = projected {
                             out.push(Witness {
                                 attachment: w.attachment.clone(),
@@ -2644,7 +2644,7 @@ impl ReducerRegistry {
         // with that arm as the receiver its method sees.
         match (callee, recv) {
             (Callee::Method { lookup: Lookup::Receiver, .. }, Some(t)) => t
-                .join_over_arms(&*class_order(q), |arm| {
+                .join_over_arms(class_order(q), |arm| {
                     self.dispatch_invoke(bag, q, state, callee, Some(arm.clone()), arg_types.clone(), exact)
                 }),
             (_, recv) => self.dispatch_invoke(bag, q, state, callee, recv, arg_types, exact),

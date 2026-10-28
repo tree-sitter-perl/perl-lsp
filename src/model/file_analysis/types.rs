@@ -1261,6 +1261,22 @@ pub trait TypeOrder {
     fn holds(&self, rule: Subsumption) -> bool;
 }
 
+/// A language's rules with no class graph in hand: a class is an instance
+/// only of itself, and a family absorbs another as the language declares.
+impl TypeOrder for LatticeRules {
+    fn isa(&self, child: &str, ancestor: &str) -> bool {
+        child == ancestor
+    }
+
+    fn common_class(&self, classes: &[&str]) -> Option<String> {
+        Unordered.common_class(classes)
+    }
+
+    fn holds(&self, rule: Subsumption) -> bool {
+        LatticeRules::holds(self, rule)
+    }
+}
+
 /// No inheritance and no language rules in hand: a class is an instance
 /// only of itself, and no family absorbs another.
 pub struct Unordered;

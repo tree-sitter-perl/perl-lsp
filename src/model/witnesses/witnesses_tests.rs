@@ -1462,3 +1462,31 @@ fn a_parent_class_aliased_position_answers_the_child_dispatch() {
         ReducedValue::Type(InferredType::String)
     );
 }
+
+// An element of a sequence is any of its values: the join of them, so a
+// mixed list's element is a union, not nothing.
+#[test]
+fn an_element_of_a_mixed_sequence_is_any_of_its_values() {
+    let mut bag = WitnessBag::new();
+    let s0 = ScopeId(0);
+    let var = |n: &str| WitnessAttachment::Variable { name: n.into(), scope: s0 };
+    let push = |bag: &mut WitnessBag, att: WitnessAttachment, payload: WitnessPayload| {
+        bag.push(Witness { attachment: att, source: WitnessSource::Builder("test".into()), payload, span: span(0, 0, 0, 0) });
+    };
+    let cat = InferredType::ClassName("Cat".into());
+    let bird = InferredType::ClassName("Bird".into());
+    push(&mut bag, var("@pets"), WitnessPayload::InferredType(InferredType::Sequence(vec![cat.clone(), bird.clone()])));
+    push(&mut bag, var("$p"), WitnessPayload::Projected { base: var("@pets"), step: ProjectionStep::Element });
+    let q = ReducerQuery {
+        args: Vec::new(),
+        attachment: &var("$p"),
+        point: None,
+        framework: FrameworkFact::Plain,
+        arity_hint: None,
+        receiver: None,
+        context: None,
+    };
+    let want = crate::model::file_analysis::join(&cat, &bird, &crate::model::file_analysis::Unordered);
+    assert!(matches!(want, InferredType::Union(_)));
+    assert_eq!(ReducerRegistry::with_defaults().query(&bag, &q), ReducedValue::Type(want));
+}

@@ -213,6 +213,7 @@ pub fn least_common_class(
 /// The type order a join reads: the isa graph (local declared parents plus
 /// the cross-file graph, through [`class_isa`] / [`least_common_class`]) and
 /// the bag's language's subsumption rules.
+#[derive(Clone, Copy)]
 pub struct IsaOrder<'a> {
     pub local: &'a dyn LocalParents,
     pub module_index: Option<&'a dyn CrossFileLookup>,
