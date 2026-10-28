@@ -695,38 +695,33 @@ impl SkeletonAnalysis {
                 }
             }
         }
-        // Implicit receiver: where the document says a body elides it, a bare
-        // name is a member of the class the body belongs to. That class is
-        // the package of the eliding scope's owning METHOD, in-class and
-        // out-of-line alike: a `void Buf<T>::reserve(…)` body is lexically at
-        // file scope, and only the method symbol carries `Buf`. A function in
-        // a namespace is a `Sub`, so its namespace is no receiver. Scopes are
-        // pushed in id order, so a parent's answer is in hand before its
-        // children's.
-        let elided_class: Vec<Option<String>> = {
-            let mut out: Vec<Option<String>> = Vec::with_capacity(self.scopes.len());
-            for sc in &self.scopes {
-                let class = if sc.implicit_receiver {
-                    sc.owner
-                        .and_then(|sid| symbols.get(sid.0 as usize))
-                        .filter(|s| matches!(s.kind, SymKind::Method))
-                        .and_then(|s| s.package.clone())
-                } else {
-                    sc.parent.and_then(|p| out.get(p.0 as usize).cloned().flatten())
-                };
-                out.push(class);
-            }
-            out
-        };
         // The class whose method each scope is the body of, or sits inside:
-        // the nearest callable that declares one names it, so a closure in
-        // a method reads the method's, and a free function's body has none.
+        // the nearest callable that declares one names it, in-class and
+        // out-of-line alike (a `void Buf<T>::reserve(…)` body is lexically at
+        // file scope, and only the method symbol carries `Buf`), so a closure
+        // in a method reads the method's, and a free function's body has
+        // none. Scopes are pushed in id order, so a parent's answer is in
+        // hand before its children's.
         let method_class: Vec<Option<String>> = {
             let mut out: Vec<Option<String>> = Vec::with_capacity(self.scopes.len());
             for sc in &self.scopes {
                 let class = match sc.owner.and_then(|sid| symbols.get(sid.0 as usize)) {
                     Some(owner) => owner.package.clone().filter(|_| matches!(owner.kind, SymKind::Method)),
                     None => sc.parent.and_then(|p| out.get(p.0 as usize).cloned().flatten()),
+                };
+                out.push(class);
+            }
+            out
+        };
+        // Implicit receiver: where the document says a body elides it, a bare
+        // name is a member of that body's method class.
+        let elided_class: Vec<Option<String>> = {
+            let mut out: Vec<Option<String>> = Vec::with_capacity(self.scopes.len());
+            for (i, sc) in self.scopes.iter().enumerate() {
+                let class = if sc.implicit_receiver {
+                    method_class[i].clone()
+                } else {
+                    sc.parent.and_then(|p| out.get(p.0 as usize).cloned().flatten())
                 };
                 out.push(class);
             }
