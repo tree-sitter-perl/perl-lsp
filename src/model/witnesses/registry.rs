@@ -2196,6 +2196,17 @@ impl ReducerRegistry {
         state: &mut QueryState,
     ) -> Vec<Witness> {
         let raw = bag.for_attachment(q.attachment);
+        // A linked attachment's writes end this one's facts too.
+        let linked: Vec<&Witness> = raw
+            .iter()
+            .filter_map(|w| match &w.payload {
+                WitnessPayload::ResetsWith(target) => Some(target),
+                _ => None,
+            })
+            .flat_map(|target| bag.for_attachment(target))
+            .filter(|w| matches!(w.payload, WitnessPayload::Reset))
+            .collect();
+        let raw: Vec<&Witness> = raw.into_iter().chain(linked).collect();
         // Is this attachment's value a pass-through of ONE sub-chase, or a fold
         // over several? With siblings present, whatever a sub-chase answers is
         // combined with them before this frame returns, so no single exit key
@@ -2923,6 +2934,11 @@ impl ReducerRegistry {
                 }
                 ReducedValue::FactMap(_) | ReducedValue::None => {}
             }
+            // The variable's home: an outer scope's same-named variable is
+            // a different one.
+            if scope_declares_variable(bag, var, sid, point) {
+                break;
+            }
         }
         weak
     }
@@ -2940,6 +2956,13 @@ fn scope_binds_variable(bag: &WitnessBag, var: &str, scope: ScopeId, point: Poin
     binds_variable_where(bag, var, scope, |w| w.span.start <= point)
 }
 
+fn scope_declares_variable(bag: &WitnessBag, var: &str, scope: ScopeId, point: Point) -> bool {
+    let att = WitnessAttachment::Variable { name: var.to_string(), scope };
+    bag.for_attachment(&att)
+        .iter()
+        .any(|w| w.span.start <= point && matches!(w.payload, WitnessPayload::Declare))
+}
+
 fn binds_variable_where(
     bag: &WitnessBag,
     var: &str,
@@ -2953,7 +2976,13 @@ fn binds_variable_where(
     bag.for_attachment(&att).iter().any(|w| {
         at(w)
             && (w.payload.binds_value()
-                || !matches!(&w.payload, WitnessPayload::Observation(_) | WitnessPayload::Reset))
+                || !matches!(
+                    &w.payload,
+                    WitnessPayload::Observation(_)
+                        | WitnessPayload::Reset
+                        | WitnessPayload::ResetsWith(_)
+                        | WitnessPayload::Declare
+                ))
     })
 }
 

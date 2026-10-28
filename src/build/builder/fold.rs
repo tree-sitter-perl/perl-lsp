@@ -428,7 +428,6 @@ impl<'a> Builder<'a> {
         // O(assignments * bag) (6+ s of a 46k-line file's fold). Safe as a
         // snapshot: the RHS typer takes `&self`, and this pass's own pushes
         // land only after the loop, so the bag cannot change mid-loop.
-        let mut markers: Vec<(String, ScopeId, Point)> = Vec::new();
         let mut typed_at: std::collections::HashMap<(String, Point), Vec<usize>> =
             std::collections::HashMap::new();
         {
@@ -566,26 +565,6 @@ impl<'a> Builder<'a> {
             drop(_t_scope);
             let sid = scope_idx.map(|i| self.scopes[i].id).unwrap_or(ScopeId(0));
 
-            // A rebind is a RESET at its site: the flow lane's reassign edge
-            // is the marker on the write's own scope, and every belief before
-            // it dies there (`FrameworkAwareTypeFold`'s cutoff), whatever the
-            // RHS turns out to be. A write inside a nested block is invisible
-            // to reads after the block, which never walk the block's scope,
-            // so the variable's BINDING scope gets a marker too, standing in
-            // for the join (`old ⊔ new`, which no reducer can compute from
-            // one attachment; `JoinFold`, `docs/epics/16-cfg-tier.md` Phase
-            // C, answers natively and this marker goes with it).
-            if is_rebind {
-                let binding_scope = var_ref_at
-                    .get(&left.start_position())
-                    .and_then(|&i| self.refs[i].resolved_symbol())
-                    .map(|sym| self.symbols[sym.0 as usize].scope)
-                    .filter(|b| *b != sid);
-                if let Some(bsid) = binding_scope {
-                    markers.push((var.clone(), bsid, at));
-                }
-            }
-
             // A write's value is its flow edge, plain or compound; what this
             // pass adds is the may-not-happen rebind, `Unknown`. Skipped when
             // an earlier fold iteration already pushed it.
@@ -612,9 +591,6 @@ impl<'a> Builder<'a> {
                 constraint_span,
                 inferred_type: ty,
             });
-        }
-        for (variable, scope, at) in markers {
-            self.push_reset_marker(variable, scope, at);
         }
     }
 

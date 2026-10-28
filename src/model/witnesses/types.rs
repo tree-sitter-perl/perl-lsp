@@ -223,7 +223,7 @@ impl WitnessPayload {
     /// new attachment-bearing shape can't be skipped by a span rewrite.
     pub fn for_each_attachment_mut(&mut self, f: &mut dyn FnMut(&mut WitnessAttachment)) {
         match self {
-            WitnessPayload::Edge(t) | WitnessPayload::Projected { base: t, .. } => f(t),
+            WitnessPayload::Edge(t) | WitnessPayload::Projected { base: t, .. } | WitnessPayload::ResetsWith(t) => f(t),
             WitnessPayload::Tuple(ts) => ts.iter_mut().for_each(|t| f(t)),
             WitnessPayload::Invoke { callee, receiver, args } => {
                 match callee {
@@ -246,6 +246,7 @@ impl WitnessPayload {
             | WitnessPayload::Custom { .. }
             | WitnessPayload::DomainCompare { .. }
             | WitnessPayload::Reset
+            | WitnessPayload::Declare
             | WitnessPayload::BrandOverlay { .. } => {}
         }
     }
@@ -409,6 +410,18 @@ pub enum WitnessPayload {
     /// (`docs/adr/brands.md`). Kept at the END for bincode variant-index
     /// stability (bump `EXTRACT_VERSION`).
     BrandOverlay { ns: String, on_class: String, set: Vec<(String, String)>, drop: Vec<String> },
+    /// The attachment's facts also end at every write to `target`: a place
+    /// keyed by a variable (`$self->{$k}`) stops naming the slot it named
+    /// once `$k` is rebound. The chase reads `target`'s resets as this
+    /// attachment's own. Kept at the END for bincode variant-index
+    /// stability (bump `EXTRACT_VERSION`).
+    ResetsWith(WitnessAttachment),
+    /// The attachment's variable is DECLARED here, zero-width at its
+    /// declaration: this scope is its home, and a read reaching it never
+    /// walks out to an outer variable of the same name, whether or not
+    /// anything typed the declaration. Kept at the END for bincode
+    /// variant-index stability (bump `EXTRACT_VERSION`).
+    Declare,
 }
 
 /// What an `Invoke` calls.

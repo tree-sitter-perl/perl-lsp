@@ -655,10 +655,6 @@ struct Builder<'a> {
     /// Recorded tag guards (`$ref eq 'ARRAY'`), re-derived each fold
     /// iteration (`emit_tag_narrowing_witnesses`).
     tag_narrowings: Vec<narrowing::TagNarrowing>,
-    /// Recognized narrowings whose region cutoff resolves post-walk against the
-    /// minted FlowEdges (`apply_narrowing_cutoffs`) — the edge-driven rebind
-    /// truncation that replaced the `cst::rebinds_scalar` grammar scan.
-    pending_narrowings: Vec<narrowing::PendingNarrow>,
 
     /// Recognized guard conditions, for the redundant/contradictory-guard
     /// diagnostics (D3/D4). Recorded alongside narrowing emission; moved into

@@ -115,21 +115,6 @@ pub(super) struct TagNarrowing {
     lit: String,
 }
 
-/// A recognized narrowing whose region cutoff is computed AFTER the walk —
-/// once `mint_flow_edges_via_query` has run, so the scalar-rebind truncation
-/// reads FlowEdges (`apply_narrowing_cutoffs`) instead of a CST scan. The
-/// PLACE-container invalidation IS a CST mutation scan, so it's pre-computed
-/// inline (`place_cut`) where the node is in hand; the scalar cutoffs (subject
-/// / dynamic-key vars) defer. `scope` is captured at recognition time (the
-/// walk's `current_scope`), invisible post-walk.
-pub(super) struct PendingNarrow {
-    subject: NarrowSubject,
-    op: NarrowOp,
-    region: Span,
-    scope: ScopeId,
-    place_cut: Option<Point>,
-}
-
 /// Map a `ref(...) eq STRING` right-hand string to the type it proves.
 /// The builtin reftype tokens are a fixed Perl language constant (reading
 /// a grammar constant, not a rule-#10 shape-table over an open behavior
@@ -157,13 +142,6 @@ fn tag_string_to_type(via: crate::model::file_analysis::RefTagFn, s: &str) -> Op
     }
 }
 
-/// The earlier of two optional truncation points (`None` = no bound).
-fn earliest_point(a: Option<Point>, b: Option<Point>) -> Option<Point> {
-    match (a, b) {
-        (Some(x), Some(y)) => Some(if point_lt(x, y) { x } else { y }),
-        (some, None) | (None, some) => some,
-    }
-}
 
 /// A narrowable subject node: a plain scalar, or a constant hash/array
 /// place element (`$self->{x}`).
@@ -507,12 +485,13 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Push the span-extent narrowing witness on the subject's home scope,
-    /// truncating the region at the first reassignment of the subject.
-    /// Emit a guard's narrowing into `region`. `op` is the polarity-
-    /// resolved operation (`GuardFact::op_for_region`); the subject is
-    /// keyed and the region truncated at the first disturbance, exactly
-    /// as for a positive narrowing.
+    /// Emit a guard's narrowing over `region`, its lexical extent. `op` is
+    /// the polarity-resolved operation (`GuardFact::op_for_region`). Where a
+    /// write cuts it short is the fold's to say: every write resets its
+    /// variable on each scope up to its binding (`reset_scopes_up_to_binding`),
+    /// and `FrameworkAwareTypeFold` drops a fact a reset follows. A place has
+    /// no writes of its own, so its disturbances are minted here as resets
+    /// on the place, and a dynamic key links the key variable's resets.
     fn emit_narrowing_fact(
         &mut self,
         subject: &NarrowSubject,
@@ -520,26 +499,51 @@ impl<'a> Builder<'a> {
         region: Span,
         container: Node<'a>,
     ) {
-        // The PLACE-container invalidation is a CST mutation scan (a place is
-        // disturbed by a write to its container/prefix, not by a scalar
-        // rebind) — compute it now, while `container` is in hand. The
-        // SCALAR-rebind cutoff (the subject, or a place's dynamic-key vars)
-        // defers to `apply_narrowing_cutoffs`, which reads the post-walk
-        // FlowEdges: a rebind is "an edge targeting the subject", not a grammar
-        // scan. `scope` is captured here (the walk's live `current_scope`).
-        let place_cut = match subject {
-            NarrowSubject::Place { key, root, .. } => {
-                self.first_place_invalidation(key, root, region, container)
+        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
+        let scope = self.current_scope();
+        let name = match subject {
+            NarrowSubject::Variable(var) => var.clone(),
+            // The guard is on whatever the tag names, which only the fold
+            // can say once the tag variable's value has settled.
+            NarrowSubject::TagOf(var) => match op {
+                NarrowOp::TagEq(lit) => {
+                    self.tag_narrowings.push(TagNarrowing { var: var.clone(), scope, region, lit });
+                    return;
+                }
+                _ => var.clone(),
+            },
+            NarrowSubject::Place { key, root, key_vars } => {
+                for at in self.place_disturbances(key, root, region, container) {
+                    self.push_reset_marker(key.clone(), scope, at);
+                }
+                for kv in key_vars {
+                    self.bag.push(Witness {
+                        attachment: WitnessAttachment::Variable { name: key.clone(), scope },
+                        source: WitnessSource::Builder("narrowing".into()),
+                        payload: WitnessPayload::ResetsWith(WitnessAttachment::Variable {
+                            name: kv.clone(),
+                            scope,
+                        }),
+                        span: Span { start: region.start, end: region.start },
+                    });
+                }
+                key.clone()
             }
-            NarrowSubject::Variable(_) | NarrowSubject::TagOf(_) => None,
         };
-        self.pending_narrowings.push(PendingNarrow {
-            subject: subject.clone(),
-            op,
-            region,
-            scope: self.current_scope(),
-            place_cut,
-        });
+        match op {
+            NarrowOp::To(ty) => {
+                self.bag.push(Witness {
+                    attachment: WitnessAttachment::Variable { name, scope },
+                    source: WitnessSource::Builder("narrowing".into()),
+                    payload: WitnessPayload::InferredType(ty),
+                    span: region,
+                });
+            }
+            NarrowOp::StripOptional { query_point } => {
+                self.defined_narrowings.push(DefinedNarrowing { name, scope, region, query_point });
+            }
+            NarrowOp::TagEq(_) => {}
+        }
     }
 
     /// Re-emittable: `defined`/`blessed` narrowing. For each recorded
@@ -595,10 +599,7 @@ impl<'a> Builder<'a> {
                 continue;
             }
             let Some(ty) = tag_string_to_type(via, &g.lit) else { continue };
-            let end = self.first_subject_write_via_edges(&subject, g.region).unwrap_or(g.region.end);
-            if point_lt(g.region.start, end) {
-                emits.push((subject, g.scope, ty, Span { start: g.region.start, end }));
-            }
+            emits.push((subject, g.scope, ty, g.region));
         }
         for (name, scope, ty, region) in emits {
             self.bag.push(Witness {
@@ -622,25 +623,19 @@ impl<'a> Builder<'a> {
             .map(|s| s.id)
     }
 
-    /// Point of the first operation in `container` (at or after
-    /// `region.start`) that could disturb place `key` rooted at `root`: a
+    /// Every operation in `container` (at or after `region.start`) that
+    /// could disturb place `key` rooted at `root`: a
     /// write to the slot, or an opaque use of any **proper prefix** of the
     /// place — the root scalar or an intermediate element (`$self->{a}`
     /// for `$self->{a}{b}`). A prefix is "guarded" (a read, not a
     /// disturbance) when it is the base of a longer access; otherwise it is
     /// a write, a method call on the prefix, or the prefix passed as an
     /// argument. Conservative — it under-narrows.
-    fn first_place_invalidation(
-        &self,
-        key: &str,
-        root: &str,
-        region: Span,
-        container: Node<'a>,
-    ) -> Option<Point> {
-        fn consider(node: Node, after: Point, best: &mut Option<Point>) {
+    fn place_disturbances(&self, key: &str, root: &str, region: Span, container: Node<'a>) -> Vec<Point> {
+        fn consider(node: Node, after: Point, hits: &mut Vec<Point>) {
             let p = node.start_position();
-            if !point_lt(p, after) && best.map_or(true, |b| point_lt(p, b)) {
-                *best = Some(p);
+            if !point_lt(p, after) {
+                hits.push(p);
             }
         }
         // `prefix` is a proper prefix of `key` at an access boundary
@@ -651,14 +646,14 @@ impl<'a> Builder<'a> {
                 && key.starts_with(prefix)
                 && matches!(key.as_bytes()[prefix.len()], b'-' | b'{' | b'[')
         }
-        fn scan(node: Node, key: &str, root: &str, after: Point, src: &[u8], best: &mut Option<Point>) {
+        fn scan(node: Node, key: &str, root: &str, after: Point, src: &[u8], hits: &mut Vec<Point>) {
             // Slot rewrite: `$self->{a}{b} = ...`.
             if node.kind() == "assignment_expression" {
                 if let Some(left) = node.child_by_field_name("left") {
                     if crate::cst::canonical_place_path(left, src).map(|(k, _)| k).as_deref()
                         == Some(key)
                     {
-                        consider(node, after, best);
+                        consider(node, after, hits);
                     }
                 }
             }
@@ -696,18 +691,18 @@ impl<'a> Builder<'a> {
                         && p.named_child(0) == Some(node)
                 });
                 if !guarded {
-                    consider(node, after, best);
+                    consider(node, after, hits);
                 }
             }
             for i in 0..node.named_child_count() {
                 if let Some(c) = node.named_child(i) {
-                    scan(c, key, root, after, src, best);
+                    scan(c, key, root, after, src, hits);
                 }
             }
         }
-        let mut best = None;
-        scan(container, key, root, region.start, self.source, &mut best);
-        best
+        let mut hits = Vec::new();
+        scan(container, key, root, region.start, self.source, &mut hits);
+        hits
     }
 
     /// Point of the first FlowEdge that rebinds `$var` within `region` — the
@@ -720,63 +715,19 @@ impl<'a> Builder<'a> {
         crate::model::file_analysis::earliest_rebind_in(&self.flow_edges, var, region)
     }
 
-    /// Post-walk: resolve every recognized narrowing's region cutoff against
-    /// the now-minted FlowEdges, then emit — `To` → a scoped `InferredType`
-    /// witness; `StripOptional` → a `DefinedNarrowing` the fold re-derives.
-    /// Deferred from the walk precisely so the scalar-rebind truncation can
-    /// read edges (minted post-walk). The PLACE-container cutoff was already
-    /// pre-computed inline (`place_cut`) where its node was in hand.
-    pub(super) fn apply_narrowing_cutoffs(&mut self) {
-        use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource};
-        let pending = std::mem::take(&mut self.pending_narrowings);
-        for pn in pending {
-            if let (NarrowSubject::TagOf(var), NarrowOp::TagEq(lit)) = (&pn.subject, &pn.op) {
-                // The guard reads the tag once, at the region's start; what
-                // truncates is a write to the subject it names, known only
-                // once the tag resolves.
-                self.tag_narrowings.push(TagNarrowing {
-                    var: var.clone(),
-                    scope: pn.scope,
-                    region: pn.region,
-                    lit: lit.clone(),
-                });
-                continue;
-            }
-            let (name, end) = match &pn.subject {
-                NarrowSubject::Variable(var) | NarrowSubject::TagOf(var) => {
-                    (var.clone(), self.first_subject_write_via_edges(var, pn.region))
+    /// Post-walk: each variable's home and every write's reach
+    /// (`file_analysis::binding_witnesses`).
+    pub(super) fn mint_binding_witnesses(&mut self) {
+        use crate::model::witnesses::WitnessPayload;
+        let marks = crate::model::file_analysis::binding_witnesses(&self.symbols, &self.scopes, &self.flow_edges);
+        for w in marks {
+            match (w.attachment, w.payload) {
+                (crate::model::witnesses::WitnessAttachment::Variable { name, scope }, WitnessPayload::Reset) => {
+                    self.push_reset_marker(name, scope, w.span.start)
                 }
-                NarrowSubject::Place { key, key_vars, .. } => {
-                    let mut end = pn.place_cut;
-                    for kv in key_vars {
-                        end = earliest_point(end, self.first_subject_write_via_edges(kv, pn.region));
-                    }
-                    (key.clone(), end)
+                (attachment, payload) => {
+                    self.bag.push(crate::model::witnesses::Witness { attachment, payload, source: w.source, span: w.span });
                 }
-            };
-            let end = end.unwrap_or(pn.region.end);
-            if !point_lt(pn.region.start, end) {
-                continue; // truncated to nothing
-            }
-            let region = Span { start: pn.region.start, end };
-            match pn.op {
-                NarrowOp::To(ty) => {
-                    self.bag.push(Witness {
-                        attachment: WitnessAttachment::Variable { name, scope: pn.scope },
-                        source: WitnessSource::Builder("narrowing".into()),
-                        payload: WitnessPayload::InferredType(ty),
-                        span: region,
-                    });
-                }
-                NarrowOp::StripOptional { query_point } => {
-                    self.defined_narrowings.push(DefinedNarrowing {
-                        name,
-                        scope: pn.scope,
-                        region,
-                        query_point,
-                    });
-                }
-                NarrowOp::TagEq(_) => {}
             }
         }
     }

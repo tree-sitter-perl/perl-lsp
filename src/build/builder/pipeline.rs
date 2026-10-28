@@ -436,7 +436,6 @@ fn build_once(
         method_call_ref_dedup: std::collections::HashSet::new(),
         defined_narrowings: Vec::new(),
         tag_narrowings: Vec::new(),
-        pending_narrowings: Vec::new(),
         guard_sites: Vec::new(),
         arrow_deref_sites: Vec::new(),
         anon_sub_symbol_by_span: std::collections::HashMap::new(),
@@ -570,10 +569,9 @@ fn build_once(
     // proves the query path before it subsumes the manual minting.
     bphase!("flow_query", b.mint_flow_edges_via_query(tree));
 
-    // Narrowing cutoffs: now that the FlowEdges exist, truncate each recognized
-    // narrowed region at the first edge that rebinds its subject (the
-    // edge-driven replacement for the `cst::rebinds_scalar` walk) and emit.
-    bphase!("narrowing_cutoffs", b.apply_narrowing_cutoffs());
+    // Each variable's home, and every write's reach up to it: the fold reads
+    // where any fact about the variable ends from these.
+    bphase!("binding_witnesses", b.mint_binding_witnesses());
 
     // Export-list member refs: a `@EXPORT` / `@EXPORT_OK` / `%EXPORT_TAGS`
     // member naming a local sub gets a FunctionCall ref back to it. Runs

@@ -1021,6 +1021,43 @@ pub fn earliest_rebind_in(flow_edges: &[FlowEdge], var: &str, region: Span) -> O
         .min_by_key(key)
 }
 
+/// What a file's bindings tell the fold, as witnesses: each variable's home
+/// (`Declare`, at its declaration) and, for every write, a `Reset` on each
+/// scope from the write's own up to that home. A fact attached anywhere on
+/// that path — a guard's proof, a use's evidence — sees the write that ends
+/// it, and a read after a nested block sees that the block may have rebound
+/// the variable: the stand-in for the join (`old ⊔ new`) `JoinFold` will
+/// answer natively (`docs/epics/16-cfg-tier.md` Phase C).
+pub fn binding_witnesses(
+    symbols: &[Symbol],
+    scopes: &[Scope],
+    flow_edges: &[FlowEdge],
+) -> Vec<crate::model::witnesses::Witness> {
+    use crate::model::witnesses::{Witness, WitnessAttachment, WitnessPayload, WitnessSource, RESET_SOURCE};
+    let mark = |name: &str, scope: ScopeId, at: Point, payload: WitnessPayload, source: &str| Witness {
+        attachment: WitnessAttachment::Variable { name: name.to_string(), scope },
+        source: WitnessSource::Builder(source.into()),
+        payload,
+        span: Span { start: at, end: at },
+    };
+    let variables = symbols.iter().filter(|s| matches!(s.kind, SymKind::Variable));
+    let declared: std::collections::HashSet<(&str, ScopeId)> =
+        variables.clone().map(|s| (s.name.as_str(), s.scope)).collect();
+    let mut out: Vec<Witness> = variables
+        .map(|s| mark(&s.name, s.scope, s.span.start, WitnessPayload::Declare, "declare"))
+        .collect();
+    for fe in flow_edges {
+        let mut scope = fe.target_scope;
+        out.push(mark(&fe.target_name, scope, fe.target_at, WitnessPayload::Reset, RESET_SOURCE));
+        while !declared.contains(&(fe.target_name.as_str(), scope)) {
+            let Some(parent) = scopes.get(scope.0 as usize).and_then(|s| s.parent) else { break };
+            scope = parent;
+            out.push(mark(&fe.target_name, scope, fe.target_at, WitnessPayload::Reset, RESET_SOURCE));
+        }
+    }
+    out
+}
+
 impl Symbol {
     /// A member RE-EXPORT (`using Base::insert;` in a class body): part of
     /// the class's API surface (outline/completion) but not a definition —

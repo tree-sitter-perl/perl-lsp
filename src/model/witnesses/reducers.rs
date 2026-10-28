@@ -231,7 +231,9 @@ impl WitnessReducer for FrameworkAwareTypeFold {
             let mut narrow: Option<(&Witness, u64)> = None;
             for w in ws {
                 if let WitnessPayload::InferredType(_) = w.payload {
-                    if span_contains(&w.span, point) && !span_is_zero(&w.span) {
+                    // A region fact holds from its start to the end of its
+                    // extent, unless a write lands in between.
+                    if span_contains(&w.span, point) && !span_is_zero(&w.span) && window.admits(w) {
                         let area = span_area(&w.span);
                         let prio = w.source.priority();
                         let better = narrow.is_none_or(|(nw, a)| {
