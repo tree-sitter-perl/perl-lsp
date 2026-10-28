@@ -101,10 +101,11 @@ match rather than one capture, so the extractor drops a captured comment.
   property alike: that class.
   Like `static::`, a `static` return names the writing class, not the
   receiver's.
-- A receiver whose own expression has a value is typed by it before the
-  start-anchored function-call fallback runs: under a chain that starts
-  with a call (`f()->a->b`), the innermost call at the receiver's start is
-  `f`, a strict prefix of `b`'s receiver.
+- A receiver is typed by the value at its exact span. Every call states
+  one at its whole span (Perl's builder and the packs' `@expr.call` alike),
+  so under `f()->a->b` the receiver of `b` is `f()->a`, never `f`, the
+  innermost call at its start. The cross-file fallback takes the call
+  spanning exactly the receiver (`RefTable::call_spanning`).
 - Perl's free calls mint `Function` too. The walk resolves a callee defined
   above the call; `resolve_forward_expr_witnesses` resolves one defined
   below it, and only a name still unresolved after that goes to the
