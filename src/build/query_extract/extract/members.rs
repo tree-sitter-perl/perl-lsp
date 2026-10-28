@@ -49,43 +49,29 @@ pub(super) fn flatten_recv(node: tree_sitter::Node<'_>, pack: &LangPack, source:
     Event::at(inner, Capture::Member(MemberCap::Recv), text, match_id).with(Payload::SimpleRecv(simple))
 }
 
-/// `@arity.sig`: a callable's parameter_list — count declared params
-/// structurally. `optional_parameter_declaration` carries a default (counts
-/// toward `total`, not `required`); a template pack
-/// (`variadic_parameter_declaration`) or a C `...` token makes the signature
-/// variadic.
-pub(super) fn count_params(node: tree_sitter::Node<'_>) -> ParamArity {
-    let mut total = 0usize;
-    let mut required = 0usize;
-    let mut variadic = false;
-    let mut c = node.walk();
-    for ch in node.children(&mut c) {
-        match ch.kind() {
-            "parameter_declaration" => {
-                total += 1;
-                required += 1;
-            }
-            "optional_parameter_declaration" => {
-                total += 1;
-            }
-            "variadic_parameter_declaration" | "..." => variadic = true,
-            _ => {}
-        }
-    }
-    ParamArity { total, required, variadic }
-}
-
 /// Callable parameter arities by parameter_list span, in match order;
 /// associated to the def symbol by span containment in
 /// `into_file_analysis` (`@arity.sig` fires a separate match from the def
 /// name).
 pub(super) fn finish(st: &mut ExtractState) {
-    st.out.param_sigs = st
-        .adorned
+    let ad = st.adorned;
+    st.out.param_sigs = ad
         .by_match()
-        .filter_map(|e| match e.payload.as_deref() {
-            Some(Payload::Params(arity)) => Some((e.span(), *arity)),
-            _ => None,
+        .filter(|e| e.cap == Capture::Arity(ArityCap::Sig))
+        .map(|sig| {
+            let mut arity = ParamArity { total: 0, required: 0, variadic: false };
+            for p in ad.of_match(sig.match_id) {
+                match p.cap {
+                    Capture::Arity(ArityCap::Required) => {
+                        arity.total += 1;
+                        arity.required += 1;
+                    }
+                    Capture::Arity(ArityCap::Optional) => arity.total += 1,
+                    Capture::Arity(ArityCap::Variadic) => arity.variadic = true,
+                    _ => {}
+                }
+            }
+            (sig.span(), arity)
         })
         .collect();
 }

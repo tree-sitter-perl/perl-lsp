@@ -41,8 +41,6 @@ enum Payload {
     /// Whether a `@member.recv` was a simple variable before its wrappers
     /// were peeled.
     SimpleRecv(bool),
-    /// An `@arity.sig` parameter list's arity.
-    Params(crate::model::file_analysis::ParamArity),
 }
 
 impl Event {
@@ -424,9 +422,6 @@ pub fn extract_in(
             // predicate filters a whole match rather than one quantified
             // capture, so a comment between two arguments is dropped here.
             Capture::Arity(ArityCap::Arg) if node.is_extra() => {}
-            Capture::Arity(ArityCap::Sig) => {
-                events.push(Event::at(node, cap, String::new(), match_id).with(Payload::Params(members::count_params(node))))
-            }
             Capture::Qualifier => events.push(Event::at(node, cap, links.qualifier_text(node, source), match_id)),
             _ => events.push(Event::at(node, cap, node.utf8_text(source).unwrap_or("").to_string(), match_id)),
         }

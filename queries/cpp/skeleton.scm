@@ -689,7 +689,14 @@
   function: (qualified_identifier) @ref.qcall
   arguments: (argument_list ((_) @arity.arg ","?)*) @arity.args) @expr.call
 
-(function_declarator parameters: (parameter_list) @arity.sig)
+; a declared parameter is required, defaulted, or takes any number of
+; values (a template pack or C's `...`).
+(function_declarator parameters: (parameter_list
+  ([(parameter_declaration) @arity.required
+    (optional_parameter_declaration) @arity.optional
+    (variadic_parameter_declaration) @arity.variadic
+    "..." @arity.variadic
+    (comment)] ","?)*) @arity.sig)
 ; a pack expansion (`f(args...)`) passes any number of values.
 (argument_list (parameter_pack_expansion) @arity.spread)
 
