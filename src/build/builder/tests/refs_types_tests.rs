@@ -1409,7 +1409,7 @@ $h{it}->kid();
         {
             continue;
         }
-        let via_ref = fa.method_call_invocant_class(r, None);
+        let via_ref = fa.method_call_invocant_classes(r, None).single().map(str::to_string);
         let via_node =
             crate::lsp::cursor_context::resolve_expression_type(&fa, invocant_node, src.as_bytes(), None)
                 .and_then(|t| t.class_name().map(|s| s.to_string()));
@@ -1438,7 +1438,7 @@ $h{it}->kid();
             && r.target_name == "kid"
     });
     assert_eq!(
-        kid_on_scalar.and_then(|r| fa.method_call_invocant_class(r, None)).as_deref(),
+        kid_on_scalar.and_then(|r| fa.method_call_invocant_classes(r, None).single().map(str::to_string)).as_deref(),
         Some("Foo"),
         "scalar invocant `$f->kid` should type as Foo, tree-free",
     );
@@ -1447,7 +1447,7 @@ $h{it}->kid();
             && r.target_name == "kid"
     });
     assert_eq!(
-        kid_on_array.and_then(|r| fa.method_call_invocant_class(r, None)).as_deref(),
+        kid_on_array.and_then(|r| fa.method_call_invocant_classes(r, None).single().map(str::to_string)).as_deref(),
         Some("Foo"),
         "array-element invocant `$arr[0]->kid` should type as Foo, tree-free",
     );

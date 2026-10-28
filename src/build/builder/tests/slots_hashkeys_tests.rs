@@ -327,7 +327,7 @@ ${$ref}->other;
     };
     assert_eq!(invocant.text(), "$sner");
     assert_eq!(
-        fa.method_call_invocant_class(thing, None).as_deref(),
+        fa.method_call_invocant_classes(thing, None).single().map(str::to_string).as_deref(),
         Some("Foo"),
         "braced spelling resolves through the variable's type",
     );
@@ -363,7 +363,7 @@ $c->bump;
         .find(|r| r.target_name == "bump" && matches!(r.kind, RefKind::MethodCall { .. }))
         .expect("MethodCall ref for bump");
     assert_eq!(
-        fa.method_call_invocant_class(bump, None).as_deref(),
+        fa.method_call_invocant_classes(bump, None).single().map(str::to_string).as_deref(),
         Some("Counter"),
         "const-folded invocant should dispatch on Counter",
     );

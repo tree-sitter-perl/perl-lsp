@@ -29,7 +29,7 @@ Two projections, deliberately split:
   the discriminant fallback (`(Undef, Undef) → true`, else `false`).
 
 - **`class_name_lenient()` peels `Optional`** — the consumer-side
-  receiver projection that `method_call_invocant_class` (and thus
+  receiver projection that `method_call_invocant_classes` (and thus
   goto-def / hover / references / rename / completion) uses. An
   `Optional<Foo>` receiver resolves its methods on `Foo` *without* a
   guard: type-silence on a half-written value reads as a broken IDE, not

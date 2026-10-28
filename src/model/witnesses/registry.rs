@@ -2474,14 +2474,8 @@ impl ReducerRegistry {
                                 }
                             }
                         };
-                        // A union base projects arm by arm (the order only for a
-                        // union: this arm is hot, and `class_order` allocates).
-                        let projected = match &base_ty {
-                            InferredType::Union(_) => {
-                                base_ty.join_over_arms(&*class_order(q), |t| project(t, state))
-                            }
-                            t => project(t, state),
-                        };
+                        // The base projects on each value it may be.
+                        let projected = base_ty.join_over_arms(&*class_order(q), |t| project(t, state));
                         if let Some(t) = projected {
                             out.push(Witness {
                                 attachment: w.attachment.clone(),
@@ -2646,10 +2640,10 @@ impl ReducerRegistry {
                 return member;
             }
         }
-        // A union receiver dispatches on each arm it may be, with that arm
-        // as the receiver its method sees.
+        // A receiver lookup dispatches on each value the receiver may be,
+        // with that arm as the receiver its method sees.
         match (callee, recv) {
-            (Callee::Method { lookup: Lookup::Receiver, .. }, Some(t @ InferredType::Union(_))) => t
+            (Callee::Method { lookup: Lookup::Receiver, .. }, Some(t)) => t
                 .join_over_arms(&*class_order(q), |arm| {
                     self.dispatch_invoke(bag, q, state, callee, Some(arm.clone()), arg_types.clone(), exact)
                 }),

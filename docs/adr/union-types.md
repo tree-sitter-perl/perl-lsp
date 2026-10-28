@@ -87,15 +87,19 @@ cost a cross-file ancestry read on every join.
 A union is not a class: `class_name()` is `None`, as for `Optional`, so
 no single-class dispatch lane reads one. Rendering spells `A|B`.
 
-A consumer of a union's VALUE reads each arm and joins what the arms
-answer (`InferredType::join_over_arms`): a call on a union receiver
+A consumer of a receiver's VALUE reads each value the receiver may be —
+`InferredType::receiver_arms`: the arms of its defined part, so an
+`Optional<A|B>` distributes exactly like `A|B`, and `Optional<Foo>` reads
+`Foo` (the dispatch lanes' long-standing leniency; a deref diagnostic owns
+"might be undef") — and joins what the arms answer
+(`InferredType::join_over_arms`). No consumer matches the `Union` variant
+to decide whether to distribute. A call on a union receiver
 dispatches on every arm with that arm as the receiver its method sees
 (the `Invoke`), a drill (`->{k}`, `->[i]`, element, key, slot) projects
 every arm, and so do the query-time member reads (`member_value_type`,
 `field_value_type`). An arm that answers nothing adds no evidence, the
 same as any other `None`: `$pet->purr` on `Cat|Bird` is Cat's `purr`, the
-Bird there a runtime error rather than a type. An `Optional` receiver
-stays strict, as before; only a union distributes.
+Bird there a runtime error rather than a type.
 
 Every per-arm query runs in an opaque frame, so a conclusion bake that
 crosses files under a union poisons to a decode instead of minting a
@@ -105,17 +109,26 @@ The build-time chain walker (`invocant_type_at_node`) does not distribute
 yet (`TODO(union-chain-walker)`); the registry's projections above are
 the query-time answer.
 
-Navigation reads every arm too. `method_call_invocant_classes` is the
-dispatch projection over a union receiver (one class per object arm), and:
+Navigation reads every arm too. `FileAnalysis::receiver_classes(ref)` is
+the one answer to "which classes does this member access dispatch on":
+the frozen edge when the build stamped one, else
+`method_call_invocant_classes` — one class per `receiver_arms` arm that
+dispatches (`dispatch_classes_of`), so a receiver dispatches when ANY arm
+does. It returns `ReceiverClasses`; a consumer whose answer is one class
+(the frozen edge itself, a hash-key or domain owner, an overload family)
+asks `.single()` and says why at the call. Every other consumer iterates:
 
-- a member token on a union receiver resolves to one `Group` whose
-  members are each arm's target (an attribute's accessor group where the
-  arm declares one), so references and rename reach every arm;
-- goto-def offers each arm's definition;
+- a member token resolves through one pipeline per class (the accessor
+  group an attribute mints, else the `RenameKind::Method` target with its
+  pack visibility identity); one class answers itself, several answer
+  one `Group`, so references and rename reach every arm;
+- goto-def offers each arm's definition; hover shows a section per arm;
 - the reference matcher counts a union site as a use of each arm's
   member, so `Cat::sound`'s references include `$pet->sound` on
   `Cat|Bird`;
-- completion offers the members every object arm has (`shared_members`).
+- completion offers the members every class has (`shared_members`), for a
+  typed receiver and a text one alike, and so does dispatch-target
+  completion.
 
 - the unresolved-method diagnostic checks each object arm on its own:
   `$pet->purr` warns "'purr' is not defined in Bird, which $pet may be".

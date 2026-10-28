@@ -780,29 +780,43 @@ impl InferredType {
         }
     }
 
-    /// Each value this may be: a union's arms, else this value alone.
-    pub fn arms(&self) -> &[InferredType] {
-        match self {
-            InferredType::Union(arms) => arms,
-            t => std::slice::from_ref(t),
+    /// The values a RECEIVER may be: the arms of its defined part (a
+    /// union's arms, else the defined part alone); none for `Undef`. Every
+    /// consumer that asks a receiver for a member reads this, so a union
+    /// and an `Optional` of one distribute the same way everywhere.
+    pub fn receiver_arms(&self) -> &[InferredType] {
+        match self.defined_part() {
+            Some(InferredType::Union(arms)) => arms,
+            Some(t) => std::slice::from_ref(t),
+            None => &[],
         }
     }
 
-    /// `f` over each value this may be (a union's arms, else this value),
-    /// joined under `order`. An arm `f` answers nothing for adds no
-    /// evidence, so a member only some arms carry answers from those arms.
+    /// The value once it is defined: an `Optional<T>`'s `T` (however
+    /// nested), nothing for `Undef`, else the value itself. A receiver is
+    /// read through this — the author may not have written the `defined`
+    /// guard yet, and the "might be undef" warning belongs to a deref
+    /// diagnostic, not to the silence of a dead receiver.
+    pub fn defined_part(&self) -> Option<&InferredType> {
+        let mut t = self;
+        while let InferredType::Optional(inner) = t {
+            t = inner;
+        }
+        (!t.is_undef()).then_some(t)
+    }
+
+    /// `f` over each value a receiver may be (`receiver_arms`), joined
+    /// under `order`. An arm `f` answers nothing for adds no evidence —
+    /// whether its member is untyped or absent there: the value is what
+    /// the access yields where it does not die, and an arm lacking the
+    /// member is the missing-member diagnostic's to report.
     pub fn join_over_arms(
         &self,
         order: &dyn TypeOrder,
-        mut f: impl FnMut(&InferredType) -> Option<InferredType>,
+        f: impl FnMut(&InferredType) -> Option<InferredType>,
     ) -> Option<InferredType> {
-        match self {
-            InferredType::Union(arms) => {
-                let answers: Vec<InferredType> = arms.iter().filter_map(&mut f).collect();
-                join_all(&answers, order)
-            }
-            t => f(t),
-        }
+        let answers: Vec<InferredType> = self.receiver_arms().iter().filter_map(f).collect();
+        join_all(&answers, order)
     }
 
     /// The wrapped type of an `Optional<T>`, else `None`. The `defined` /
@@ -825,11 +839,7 @@ impl InferredType {
     /// silence of a dead receiver. `Undef` peels to nothing — it is
     /// definitely not an object.
     pub fn class_name_lenient(&self) -> Option<&str> {
-        let mut t = self;
-        while let Some(inner) = t.optional_inner() {
-            t = inner;
-        }
-        t.class_name()
+        self.defined_part()?.class_name()
     }
 
     /// `->{key}` narrowing on a structurally-typed hash (rule #10: ask

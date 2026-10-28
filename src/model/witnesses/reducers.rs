@@ -536,10 +536,9 @@ impl WitnessReducer for BranchArmFold {
             // the value is `X` minus its false part — an `Optional` peels,
             // and a plain `undef` never gets past the exit.
             if exits {
-                return match typed.into_iter().next() {
-                    Some(InferredType::Optional(inner)) => ReducedValue::Type(*inner),
-                    Some(t) if !t.is_undef() => ReducedValue::Type(t),
-                    _ => ReducedValue::None,
+                return match typed.first().and_then(InferredType::defined_part) {
+                    Some(t) => ReducedValue::Type(t.clone()),
+                    None => ReducedValue::None,
                 };
             }
             // Writing a fallback says the author expects it to run, so the
@@ -551,10 +550,7 @@ impl WitnessReducer for BranchArmFold {
             // TODO(dead-fallback-lint): an LHS that can't be false (a
             // reference, an object without `bool` overloading) makes the
             // fallback dead; that belongs in a diagnostic, not in the type.
-            let defined = typed.iter().filter(|t| !t.is_undef()).map(|t| match t {
-                InferredType::Optional(inner) => (**inner).clone(),
-                t => t.clone(),
-            });
+            let defined = typed.iter().filter_map(InferredType::defined_part).cloned();
             if fallback.is_empty() {
                 return ReducedValue::None;
             }

@@ -534,7 +534,7 @@ struct Builder<'a> {
     /// fixed-point movement counter) read it.
     ///
     /// **Build-only.** Never copied into `FileAnalysis`. The reader-
-    /// side counterpart is `FileAnalysis::method_call_invocant_class`,
+    /// side counterpart is `FileAnalysis::method_call_invocant_classes`,
     /// which queries the bag at read time and so picks up cross-file
     /// enrichment automatically.
     method_call_invocant: std::collections::HashMap<usize, String>,

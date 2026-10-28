@@ -493,7 +493,7 @@ pub fn collect_diagnostics(
             InvocantText::Scalar(_) => match analysis.inferred_type_via_bag(invocant, r.span.start) {
                 Some(ty) => {
                     let mut cs: Vec<String> = Vec::new();
-                    for cn in ty.arms().iter().filter_map(|t| t.class_name()) {
+                    for cn in ty.receiver_arms().iter().filter_map(|t| t.class_name()) {
                         if !cs.iter().any(|c| c == cn) {
                             cs.push(cn.to_string());
                         }

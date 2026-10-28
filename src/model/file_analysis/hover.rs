@@ -55,6 +55,66 @@ impl FileAnalysis {
             .map(|(_, v)| v.clone())
     }
 
+    /// Hover for `mname` dispatched on `cn`, reached through the dynamic
+    /// method variable `via` (`$self->$via()`).
+    fn method_hover_on(
+        &self,
+        cn: &str,
+        mname: &str,
+        via: &str,
+        source: &str,
+        module_index: Option<&dyn CrossFileLookup>,
+    ) -> Option<String> {
+        match self.resolve_method_in_ancestors(cn, mname, module_index) {
+            Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
+                let sym = self.symbol(sym_id);
+                let line = source_line_at(source, sym.selection_span.start.row);
+                let class_label = if defining_class != cn {
+                    format!("{} (from {})", cn, defining_class)
+                } else {
+                    cn.to_string()
+                };
+                let mut text = format!("```perl\n{}\n```\n\n*class {} — resolved from `{}`*", line.trim(), class_label, via);
+                if let Some(ref rt) = self.find_method_return_type(cn, mname, module_index, None).filter(InferredType::is_known) {
+                    text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
+                }
+                if let SymbolDetail::Sub { ref doc, .. } = sym.detail {
+                    if let Some(ref d) = doc {
+                        text.push_str(&format!("\n\n{}", d));
+                    }
+                }
+                return Some(text);
+            }
+            Some(MethodResolution::CrossFile { ref class, ref def_module, .. }) => {
+                if let Some(idx) = module_index {
+                    // Bridged helper lives in `def_module`; real
+                    // inherited method in `class`'s own module.
+                    // Either name maps to a SET of files — the
+                    // definer may be a losing candidate.
+                    let module = def_module.as_deref().unwrap_or(class.as_str());
+                    if let Some(cached) =
+                        idx.candidate_defining_sub_in_package(module, class, mname)
+                    {
+                        let whole = idx.bag_present(&cached);
+                        if let Some(sub_info) = whole.sub_info_view(mname) {
+                            let sig = format_cross_file_signature(mname, &sub_info);
+                            let mut text = format!("```perl\n{}\n```\n\n*class {} — resolved from `{}`*", sig, class, via);
+                            if let Some(rt) = sub_info.return_type(Some(idx)).filter(InferredType::is_known) {
+                                text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
+                            }
+                            if let Some(doc) = sub_info.doc() {
+                                text.push_str(&format!("\n\n{}", doc));
+                            }
+                            return Some(text);
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
+        None
+    }
+
     /// Hover info: return display text for the symbol at cursor.
     pub fn hover_info(&self, point: Point, source: &str, module_index: Option<&dyn CrossFileLookup>) -> Option<String> {
         // Check refs first
@@ -76,56 +136,15 @@ impl FileAnalysis {
                             && mr.target_name != r.target_name);
                     if let Some(mr) = method_hover {
                         if matches!(mr.kind, RefKind::MethodCall { .. }) {
-                            let class_name = self.method_call_invocant_class(mr, module_index);
                             let mname = mr.unqualified_target_name(self.names());
-                            if let Some(ref cn) = class_name {
-                                match self.resolve_method_in_ancestors(cn, mname, module_index) {
-                                    Some(MethodResolution::Local { sym_id, class: ref defining_class, .. }) => {
-                                        let sym = self.symbol(sym_id);
-                                        let line = source_line_at(source, sym.selection_span.start.row);
-                                        let class_label = if defining_class != cn {
-                                            format!("{} (from {})", cn, defining_class)
-                                        } else {
-                                            cn.to_string()
-                                        };
-                                        let mut text = format!("```perl\n{}\n```\n\n*class {} — resolved from `{}`*", line.trim(), class_label, r.target_name);
-                                        if let Some(ref rt) = self.find_method_return_type(cn, mname, module_index, None).filter(InferredType::is_known) {
-                                            text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
-                                        }
-                                        if let SymbolDetail::Sub { ref doc, .. } = sym.detail {
-                                            if let Some(ref d) = doc {
-                                                text.push_str(&format!("\n\n{}", d));
-                                            }
-                                        }
-                                        return Some(text);
-                                    }
-                                    Some(MethodResolution::CrossFile { ref class, ref def_module, .. }) => {
-                                        if let Some(idx) = module_index {
-                                            // Bridged helper lives in `def_module`; real
-                                            // inherited method in `class`'s own module.
-                                            // Either name maps to a SET of files — the
-                                            // definer may be a losing candidate.
-                                            let module = def_module.as_deref().unwrap_or(class.as_str());
-                                            if let Some(cached) =
-                                                idx.candidate_defining_sub_in_package(module, class, mname)
-                                            {
-                                                let whole = idx.bag_present(&cached);
-                                                if let Some(sub_info) = whole.sub_info_view(mname) {
-                                                    let sig = format_cross_file_signature(mname, &sub_info);
-                                                    let mut text = format!("```perl\n{}\n```\n\n*class {} — resolved from `{}`*", sig, class, r.target_name);
-                                                    if let Some(rt) = sub_info.return_type(Some(idx)).filter(InferredType::is_known) {
-                                                        text.push_str(&format!("\n\n*returns: {}*", self.render_type(&rt)));
-                                                    }
-                                                    if let Some(doc) = sub_info.doc() {
-                                                        text.push_str(&format!("\n\n{}", doc));
-                                                    }
-                                                    return Some(text);
-                                                }
-                                            }
-                                        }
-                                    }
-                                    None => {}
-                                }
+                            // One section per class the receiver may be.
+                            let sections: Vec<String> = self
+                                .method_call_invocant_classes(mr, module_index)
+                                .iter()
+                                .filter_map(|cn| self.method_hover_on(cn, mname, &r.target_name, source, module_index))
+                                .collect();
+                            if !sections.is_empty() {
+                                return Some(sections.join("\n\n---\n\n"));
                             }
                         }
                     }

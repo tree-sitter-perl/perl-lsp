@@ -321,7 +321,11 @@ impl<'a> CandidateSet<'a> {
         // siblings gather in the right class/namespace without re-deriving C++
         // name lookup here.
         let pkg: Option<String> = match &r.kind {
-            RefKind::MethodCall { .. } => Some(analysis.method_call_invocant_class(r, Some(idx))?),
+            // An overload set is one class's; a union receiver falls through
+            // to the member lane, which offers every arm's definition.
+            RefKind::MethodCall { .. } => {
+                Some(analysis.method_call_invocant_classes(r, Some(idx)).single()?.to_string())
+            }
             RefKind::FunctionCall => r.resolved_package().map(str::to_string).or_else(|| {
                 analysis.find_definition(self.point, Some(idx)).and_then(|sp| {
                     analysis

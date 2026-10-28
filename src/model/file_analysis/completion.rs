@@ -236,22 +236,20 @@ impl FileAnalysis {
         point: Point,
         module_index: Option<&dyn CrossFileLookup>,
     ) -> Vec<CompletionCandidate> {
-        let class_name = self.resolve_invocant_class(
+        let classes = self.invocant_classes_in_scope(
             invocant,
             self.scope_at(point).unwrap_or(ScopeId(0)),
             point,
         );
 
-        if let Some(ref cn) = class_name {
-            // Pass `module_index` so the ancestor walk reaches CROSS-FILE
-            // parents. Without it, an untyped `$self` (e.g. assigned via
-            // `$class->SUPER::new`, which the bag can't yet type) resolves to
-            // the enclosing class but offers only its OWN methods — inherited
-            // methods from a `use parent`/`-base` ancestor vanish.
-            let candidates = self.complete_methods_for_class(cn, module_index);
-            if !candidates.is_empty() {
-                return candidates;
-            }
+        // Pass `module_index` so the ancestor walk reaches CROSS-FILE
+        // parents. Without it, an untyped `$self` (e.g. assigned via
+        // `$class->SUPER::new`, which the bag can't yet type) resolves to
+        // the enclosing class but offers only its OWN methods — inherited
+        // methods from a `use parent`/`-base` ancestor vanish.
+        let candidates = self.shared_members(&classes, |cn| self.complete_methods_for_class(cn, module_index));
+        if !candidates.is_empty() {
+            return candidates;
         }
 
         // Fallback: native subs/methods in file, deduped by label.
@@ -692,16 +690,14 @@ impl FileAnalysis {
         // For constructor calls on a class, check for :param fields
         if crate::model::conventions::is_constructor_name(call_name) {
             if let Some(inv) = invocant {
-                let class_name = self.resolve_invocant_class(
+                let classes = self.invocant_classes_in_scope(
                     inv,
                     self.scope_at(point).unwrap_or(ScopeId(0)),
                     point,
                 );
-                if let Some(ref cn) = class_name {
-                    let param_candidates = self.class_param_completions(cn, used_keys);
-                    if !param_candidates.is_empty() {
-                        return param_candidates;
-                    }
+                let param_candidates = self.shared_members(&classes, |cn| self.class_param_completions(cn, used_keys));
+                if !param_candidates.is_empty() {
+                    return param_candidates;
                 }
             }
         }
@@ -904,17 +900,16 @@ impl FileAnalysis {
                 .map(|r| r.class().to_string()),
             t => t.literal_package().map(str::to_string),
         };
-        // Resolve class name for scoped lookup
-        let class_name = if fq_class.is_some() {
-            fq_class
-        } else if is_method {
-            invocant.and_then(|inv| self.resolve_invocant_class(inv, scope, point))
-        } else {
-            None
+        // Resolve the classes for scoped lookup
+        let classes: ReceiverClasses = match (fq_class, invocant) {
+            (Some(fq), _) => [fq].into_iter().collect(),
+            (None, Some(inv)) if is_method => self.invocant_classes_in_scope(inv, scope, point),
+            _ => ReceiverClasses::default(),
         };
 
-        // Try inheritance-aware class-scoped lookup first
-        if let Some(ref cn) = class_name {
+        // Try inheritance-aware class-scoped lookup first, on each class the
+        // receiver may be; the first that defines the sub answers.
+        for cn in classes.iter() {
             match self.resolve_method_in_ancestors(cn, name, module_index) {
                 Some(MethodResolution::Local { sym_id, .. }) => {
                     return Some(ResolvedSub::Local(self.symbol(sym_id)));
@@ -1026,10 +1021,13 @@ impl FileAnalysis {
             {
                 let call = &self.refs()[mcb.call.0 as usize];
                 let method_name = &call.target_name;
+                // An owner is ONE producer: a union receiver's call has a
+                // return per arm, so it keeps the name-only fallback.
                 let package = self
-                    .method_call_invocant_class(call, None)
+                    .method_call_invocant_classes(call, None)
+                    .single()
                     .and_then(|cn| {
-                        match self.resolve_method_in_ancestors(&cn, method_name, None) {
+                        match self.resolve_method_in_ancestors(cn, method_name, None) {
                             Some(MethodResolution::Local { sym_id, .. }) => {
                                 self.symbol(sym_id).package.clone()
                             }

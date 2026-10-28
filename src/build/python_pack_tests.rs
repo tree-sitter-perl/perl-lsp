@@ -1271,7 +1271,7 @@ def f(h: Holder):
 
 /// A write to a member is an assignment to it, through any receiver: a
 /// declared attribute keeps its annotation over what is written to it,
-/// and an undeclared one whose writes disagree on the class has no value.
+/// and an undeclared one whose writes disagree on the class is either.
 #[cfg(feature = "python")]
 #[test]
 fn a_member_write_is_an_assignment_to_the_member() {
@@ -1315,7 +1315,11 @@ class Outer:
     let (defs, _, _) = landing(&idx, &path, Point::new(16, 25));
     assert_eq!(defs, [("mod.py".to_string(), 1)], "the annotation governs `made`");
     let (defs, _, _) = landing(&idx, &path, Point::new(18, 27));
-    assert_eq!(defs, [], "`either` is written a Widget and a Gadget");
+    assert_eq!(
+        defs,
+        [("mod.py".to_string(), 5), ("mod.py".to_string(), 1)],
+        "`either` is written a Widget and a Gadget, so it dispatches on both",
+    );
     let (defs, _, _) = landing(&idx, &path, Point::new(24, 18));
     assert_eq!(defs, [("mod.py".to_string(), 5)], "a write through a parameter states the value");
     let (defs, _, _) = landing(&idx, &path, Point::new(32, 32));

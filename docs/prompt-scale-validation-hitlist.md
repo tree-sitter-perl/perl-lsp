@@ -297,7 +297,7 @@ Full-depth stacks of the live server (`eu-stack` under an `LD_PRELOAD`
 `prctl(PR_SET_PTRACER_ANY)` shim, since `gdb -p` is blocked by
 `ptrace_scope=1`) put the request's `spawn_blocking` thread at ~100% CPU for
 its whole life, rooted in `references → refs_to → collect_from_analysis →
-method_call_invocant_class → ReducerRegistry::query → query_rec` — recursion
+method_call_invocant_classes → ReducerRegistry::query → query_rec` — recursion
 regularly past 600 frames — `→ enriched_present → enriched_snapshot →
 stamp_method_call_targets → resolve_method_in_ancestors → rehydrate`. The
 phase log is the clean proof: `refs.resolve` 0.02 ms, `refs.aliases` 33 ms,
