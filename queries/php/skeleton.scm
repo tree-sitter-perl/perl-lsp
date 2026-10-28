@@ -31,17 +31,19 @@
   "trait" @sym.attr
   name: (name) @def.class.name @context.class) @def.class @scope
 
+; ---- written types ----
+; `self` and `static` name the class they are written in, nullable or not,
+; wherever a type is written: a return, a parameter, a property.
+(([
+  (named_type (name) @_class)
+  (optional_type (named_type (name) @_class))
+ ] @type.enclosing)
+ (#any-of? @_class "self" "static"))
+
 ; ---- callables ----
-; A declared return is the callable's value at every call. `self` and
-; `static` name the class the method is written in, nullable or not.
+; A declared return is the callable's value at every call.
 (function_definition name: (name) @def.sub.name return_type: (_)? @rettype) @def.sub
 (method_declaration name: (name) @def.method.name return_type: (_)? @rettype) @def.method
-((method_declaration
-  return_type: [
-    (named_type (name) @_class)
-    (optional_type (named_type (name) @_class))
-  ] @rettype.enclosing)
- (#any-of? @_class "self" "static"))
 ; Parameters and locals are body content, not members. A closure's
 ; parameters are its own. A function, a method or a closure sees no
 ; variable of the code around it but the ones its `use` clause names; an
@@ -71,27 +73,22 @@
   (readonly_modifier)? @sym.attr
   type: (_)? @type.annot
   (property_element
-    name: (variable_name (name) @def.field.name @flow.target.member) @def.field.spelled) @def.field)
+    name: (variable_name (name) @def.field.name @flow.target) @def.field.spelled) @def.field)
 ; A constructor parameter with a visibility or `readonly` is also a
 ; property of the class (PHP 8 promotion); the member belongs to the class
 ; body, not to the constructor whose parameter list declares it.
 ; The same token is the constructor's local too, so the match declares
-; the two as one (`@def.pair`): a rename of either rewrites both.
+; the two as one (`@def.pair`): a rename of either rewrites both, and the
+; declared type is the value of each. (A node holds at most three
+; captures; tree-sitter drops the rest silently.)
 (property_promotion_parameter
   readonly: (readonly_modifier)? @sym.attr
   type: (_)? @type.annot
   name: [
-    (variable_name (name) @def.field.name @def.local.name @def.pair @flow.target.member) @def.field.spelled
+    (variable_name (name) @def.field.name @def.local.name @flow.target) @def.field.spelled
     (by_ref
-      (variable_name (name) @def.field.name @def.local.name @def.pair @flow.target.member) @def.field.spelled)
-  ]) @def.field @def.local
-; The local's own value, at its binding site in the constructor.
-(property_promotion_parameter
-  type: (_) @type.annot
-  name: [
-    (variable_name (name) @flow.target)
-    (by_ref (variable_name (name) @flow.target))
-  ])
+      (variable_name (name) @def.field.name @def.local.name @flow.target) @def.field.spelled)
+  ]) @def.field @def.local @def.pair
 
 ; ---- what a declaration is, stated on its name ----
 ; Modifiers come in any order, so each fact is a pattern of its own.

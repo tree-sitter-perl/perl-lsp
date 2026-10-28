@@ -5,6 +5,7 @@ use crate::model::file_analysis::NameSpellings;
 
 pub fn cmake_pack() -> LangPack {
     LangPack {
+        id: "cmake",
         query_source: include_str!("../../../queries/cmake/skeleton.scm"),
         names: NameSpellings::NONE,
         shape_name: |raw| raw.to_string(),

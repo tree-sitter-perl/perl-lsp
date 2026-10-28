@@ -22,19 +22,11 @@ impl<'a> CandidateSet<'a> {
         self
     }
 
-    /// Per-language name semantics on the set's identity keying: normalize
-    /// a typed NEW NAME to the bare identity token edits write. Perl names
-    /// carry sigils (`conventions.rs` owns the rule); pack languages
-    /// canonicalize spellings at extraction (the LangPack `shape_name`
-    /// hook — cpp's `canonical_template_spelling` is that seam's cpp
-    /// instance), so their typed names pass through bare. New per-language
-    /// spelling rules plug in HERE, never inline in a projection.
+    /// A typed NEW NAME as the bare identity token edits write: the origin
+    /// language's sigils stripped, since every collected site is a name
+    /// token (`$Pkg::x` and PHP's `$o->x` alike edit `x`).
     pub(super) fn bare_new_name<'n>(&self, typed: &'n str) -> &'n str {
-        if self.pack {
-            typed
-        } else {
-            crate::model::conventions::strip_variable_sigils(typed)
-        }
+        self.origin.names().strip_sigils(typed)
     }
 
     /// The origin-scoped index — every forward resolution (identity,
@@ -315,15 +307,14 @@ impl<'a> CandidateSet<'a> {
                         t.name
                     ));
                 }
+                let bare_new = self.bare_new_name(new_name);
                 locations
                     .into_iter()
                     .filter(|loc| loc.rewritable)
-                    .map(|loc| (loc, new_name.to_string()))
+                    .map(|loc| (loc, bare_new.to_string()))
                     .collect()
             }
             Some(ResolvedTarget::Group { local_spans, pinned_spans, members, .. }) => {
-                // Group spellings are bare name tokens; a sigil on the typed
-                // name applies only to variable-shaped members' own rules.
                 let bare_new = self.bare_new_name(new_name);
                 group_rename_edits(
                     self.files,
@@ -336,18 +327,6 @@ impl<'a> CandidateSet<'a> {
                     editable,
                 )
             }
-            // A pack's lexical names are minted as their name tokens, so
-            // the references image IS the edit set, written as typed.
-            Some(_) if self.pack => self
-                .origin
-                .find_occurrences(self.point, self.idx())
-                .into_iter()
-                .map(|(span, access)| {
-                    let key = self.origin_key.clone();
-                    let loc = RefLocation { key, span, access, rewritable: true, label: None };
-                    (loc, self.bare_new_name(new_name).to_string())
-                })
-                .collect(),
             // Lexical variables, unowned hash keys, non-cross-file targets:
             // the origin file's rename machinery owns the edit set.
             Some(_) => self

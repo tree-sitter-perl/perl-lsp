@@ -368,10 +368,10 @@ fn package_var_our_renames_cross_file() {
 fn rename_name_guard_rejects_empty_and_whitespace() {
     use crate::index::resolve::is_valid_rename_name;
     for bad in ["", " ", "   ", "\t", "$", "@", "%", "$ ", "  @  "] {
-        assert!(!is_valid_rename_name(bad), "should reject {bad:?}");
+        assert!(!is_valid_rename_name(bad, &crate::model::conventions::PERL_SPELLINGS), "should reject {bad:?}");
     }
     for ok in ["dim", "foo_bar", "$scalar", "@list", "%map", "RENAMED"] {
-        assert!(is_valid_rename_name(ok), "should accept {ok:?}");
+        assert!(is_valid_rename_name(ok, &crate::model::conventions::PERL_SPELLINGS), "should accept {ok:?}");
     }
 }
 
@@ -417,6 +417,31 @@ fn package_var_array_hash_globals_rename_name_tail_only() {
         let slice = &line[e.span.start.column..e.span.end.column];
         assert_eq!(slice, "items", "rewrite only the name tail, got {slice:?} in {line:?}");
     }
+}
+
+/// Every site a package global's rename collects is its name token, so a
+/// sigil typed on the new name is the language's, not the edit's: `$verbose`
+/// writes `verbose`, never `$$verbose` or `$Cfg::$verbose`.
+#[test]
+fn package_var_rename_writes_the_name_past_a_typed_sigil() {
+    use crate::index::module_index::ModuleIndex;
+    use std::sync::Arc;
+
+    let store = OpenDocs::new();
+    let lib = PathBuf::from("/tmp/pvs_cfg.pm");
+    let app = PathBuf::from("/tmp/pvs_app.pl");
+    let lib_src = "package Cfg;\nour $debug = 0;\nsub on { $debug = 1 }\n1;\n";
+    let app_src = "use Cfg;\nprint $Cfg::debug;\n";
+    let idx = ModuleIndex::new_for_test();
+    idx.register_workspace_module(lib.clone(), Arc::new(parse(lib_src)));
+    idx.insert_workspace_for_test(lib.clone(), parse(lib_src));
+    idx.insert_workspace_for_test(app.clone(), parse(app_src));
+    let lib_fa = idx.workspace_file_for_test(&lib).unwrap();
+    let at = tree_sitter::Point { row: 1, column: 6 };
+    let cs = crate::index::resolve::resolve(&store, &lib_fa, FileKey::Path(lib.clone()), at, Some(&idx), OverrideScope::default());
+    let edits = cs.rename_edits("$verbose").unwrap();
+    assert_eq!(edits.len(), 3, "{edits:?}");
+    assert!(edits.iter().all(|(_, text)| text == "verbose"), "{edits:?}");
 }
 
 /// A `main` package global unifies its spellings *within its file* — decl, bare

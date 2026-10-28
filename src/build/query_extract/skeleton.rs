@@ -83,7 +83,12 @@ pub struct SkelRef {
 #[derive(Debug, Clone)]
 pub struct CallSite {
     pub span: Span,
+    /// The callee as its token spells it: a member's name, a free call's
+    /// name token.
     pub callee: String,
+    /// Where the callee's token starts, the key a free call's reference
+    /// shares.
+    pub callee_at: tree_sitter::Point,
     /// A member call's receiver expression; `None` for a free call.
     pub receiver: Option<Span>,
     /// The scope the call is written in, which says whether a bare callee
@@ -172,6 +177,8 @@ pub struct SkeletonAnalysis {
     /// is a macro parameter with no type, hence the class is frozen from the
     /// field decl rather than inferred from the (untypeable) invocant.
     pub macro_body_member_reads: Vec<(String, crate::model::file_analysis::Span)>,
+    /// The pack's language id (`LangPack::id`), stamped on the assembly.
+    pub language: &'static str,
     /// The language's name spellings (`LangPack::names`), baked onto
     /// `PackFacts::names`.
     pub names: crate::model::file_analysis::NameSpellings,
@@ -383,6 +390,12 @@ fn brace_body_extent(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
 }
 
 impl SkeletonAnalysis {
+    /// An empty skeleton of `pack`'s language: what extraction fills, and
+    /// what a file that never reached extraction assembles from.
+    pub fn for_pack(pack: &super::LangPack) -> Self {
+        SkeletonAnalysis { language: pack.id, names: pack.names.clone(), ..Default::default() }
+    }
+
     /// Re-anchor members that lost their enclosing container to a tree-sitter
     /// misparse — the re-anchor invariant (`docs/adr/config-superposition-declarations.md`).
     /// When a deep misparse truncates a `class_specifier`/`namespace` node
@@ -716,38 +729,33 @@ impl SkeletonAnalysis {
                 }
             }
         }
-        // Implicit receiver: where the document says a body elides it, a bare
-        // name is a member of the class the body belongs to. That class is
-        // the package of the eliding scope's owning METHOD, in-class and
-        // out-of-line alike: a `void Buf<T>::reserve(…)` body is lexically at
-        // file scope, and only the method symbol carries `Buf`. A function in
-        // a namespace is a `Sub`, so its namespace is no receiver. Scopes are
-        // pushed in id order, so a parent's answer is in hand before its
-        // children's.
-        let elided_class: Vec<Option<String>> = {
-            let mut out: Vec<Option<String>> = Vec::with_capacity(self.scopes.len());
-            for sc in &self.scopes {
-                let class = if sc.implicit_receiver {
-                    sc.owner
-                        .and_then(|sid| symbols.get(sid.0 as usize))
-                        .filter(|s| matches!(s.kind, SymKind::Method))
-                        .and_then(|s| s.package.clone())
-                } else {
-                    sc.parent.and_then(|p| out.get(p.0 as usize).cloned().flatten())
-                };
-                out.push(class);
-            }
-            out
-        };
         // The class whose method each scope is the body of, or sits inside:
-        // the nearest callable that declares one names it, so a closure in
-        // a method reads the method's, and a free function's body has none.
+        // the nearest callable that declares one names it, in-class and
+        // out-of-line alike (a `void Buf<T>::reserve(…)` body is lexically at
+        // file scope, and only the method symbol carries `Buf`), so a closure
+        // in a method reads the method's, and a free function's body has
+        // none. Scopes are pushed in id order, so a parent's answer is in
+        // hand before its children's.
         let method_class: Vec<Option<String>> = {
             let mut out: Vec<Option<String>> = Vec::with_capacity(self.scopes.len());
             for sc in &self.scopes {
                 let class = match sc.owner.and_then(|sid| symbols.get(sid.0 as usize)) {
                     Some(owner) => owner.package.clone().filter(|_| matches!(owner.kind, SymKind::Method)),
                     None => sc.parent.and_then(|p| out.get(p.0 as usize).cloned().flatten()),
+                };
+                out.push(class);
+            }
+            out
+        };
+        // Implicit receiver: where the document says a body elides it, a bare
+        // name is a member of that body's method class.
+        let elided_class: Vec<Option<String>> = {
+            let mut out: Vec<Option<String>> = Vec::with_capacity(self.scopes.len());
+            for (i, sc) in self.scopes.iter().enumerate() {
+                let class = if sc.implicit_receiver {
+                    method_class[i].clone()
+                } else {
+                    sc.parent.and_then(|p| out.get(p.0 as usize).cloned().flatten())
                 };
                 out.push(class);
             }
@@ -761,6 +769,19 @@ impl SkeletonAnalysis {
             .filter(|s| matches!(s.kind, SymKind::Sub))
             .map(|s| ((s.package.as_deref().unwrap_or(""), s.name.as_str()), s.id))
             .collect();
+        // Each free call under a use-map, by where its name token starts: the
+        // function it names and the identity a class of that spelling has
+        // there. Its `Invoke` and its reference both read this one answer.
+        let free_calls: std::collections::HashMap<tree_sitter::Point, (crate::model::file_analysis::QualifiedName, String)> =
+            self.refs
+                .iter()
+                .filter(|r| r.kind == super::vocab::RefCap::Call)
+                .filter_map(|r| {
+                    let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &names, r.start, &symbols)?;
+                    let function = function_identity(&map, names.functions, &r.name, &free_functions);
+                    Some((r.start, (function, map.resolve(&r.name).identity(map.sep))))
+                })
+                .collect();
         // Per-class template parameter lists (declaration order) — the
         // `ParamOf` index axis. Built here so the writeback below can route
         // param-mentioning member returns through the deferred shape; rides
@@ -1011,22 +1032,20 @@ impl SkeletonAnalysis {
                         },
                         Some(WA::Expr(recv)),
                     ),
-                    None => match use_map_at(span.start) {
-                        Some(map) => {
-                            let fq = function_identity(&map, name, &free_functions);
+                    None => match free_calls.get(&site.callee_at) {
+                        Some((fq, identity)) => {
                             // under a use-map a class is filed under the
                             // identity its spelling names at the call
-                            let identity = map.resolve(name).identity(map.sep);
                             let local = free_functions
                                 .get(&(fq.namespace.as_str(), fq.leaf.as_str()))
                                 .or_else(|| callee_sid.get(identity.as_str()))
                                 .copied();
                             (
                                 crate::model::witnesses::Callee::Function {
-                                    name: fq.leaf,
+                                    name: fq.leaf.clone(),
                                     local,
                                     member_of: elided_class.get(site.scope.0 as usize).cloned().flatten(),
-                                    constructs: calls_construct.then_some(identity),
+                                    constructs: calls_construct.then(|| identity.clone()),
                                 },
                                 None,
                             )
@@ -1184,9 +1203,8 @@ impl SkeletonAnalysis {
                     // Under a use-map a call is pinned to its function's
                     // namespace (`\Lib\f()` → `Lib`).
                     RefCap::Call => {
-                        let map = crate::model::file_analysis::UseMap::at(&self.use_rows, &self.namespace_ranges, &self.scopes, &names, r.start, &symbols);
-                        if let Some(map) = map {
-                            let namespace = function_identity(&map, &r.name, &free_functions).namespace;
+                        if let Some((function, _)) = free_calls.get(&r.start) {
+                            let namespace = function.namespace.clone();
                             binding = (!namespace.is_empty()).then_some(RefBinding::Function { package: namespace });
                         }
                         RefKind::FunctionCall
@@ -1198,6 +1216,13 @@ impl SkeletonAnalysis {
                     // suppresses the `@expr.read.var` duplicate at the same
                     // start). The tail segment is an identifier, so it never
                     // spans rows — the end-anchored column math is safe.
+                    //
+                    // TODO(cpp-qualified-call-spelled): this is `@ref.call` on
+                    // the leaf token plus `@ref.spelled` on the path, as php's
+                    // qualified calls are, but cpp nests a qualifier per
+                    // segment (`a::b::f` is `a::(b::f)`, a template call's
+                    // leaf one level deeper), so the leaf needs a link walk
+                    // down the `name:` fields the document can state.
                     RefCap::QCall => {
                         let (pkg, bare) = crate::model::file_analysis::split_qualified(&r.name, &names);
                         let pkg = pkg?;
@@ -1568,6 +1593,7 @@ impl SkeletonAnalysis {
             namespace_ranges: std::mem::take(&mut self.namespace_ranges),
             ..Default::default()
         });
+        fa.language = self.language.to_string();
         // Seal base_*_count so a later enrich pass (the CLI/--batch path
         // runs it unconditionally) truncates to the FULL analysis, not to
         // zero — otherwise enrichment wipes every pack-language symbol.
@@ -1581,20 +1607,23 @@ impl SkeletonAnalysis {
 }
 
 /// The free function `written` names at a use-map site, as its namespace
-/// and leaf. A qualified spelling resolves like a class spelling; a bare
-/// name is the namespace in force's own function when the file declares
-/// one there, else the global namespace's.
+/// and leaf: a qualified spelling resolves like a class spelling, a bare
+/// one by the language's `FunctionLookup`.
 fn function_identity(
     map: &crate::model::file_analysis::UseMap,
+    lookup: crate::model::file_analysis::FunctionLookup,
     written: &str,
     free_functions: &FreeFunctions,
 ) -> crate::model::file_analysis::QualifiedName {
-    use crate::model::file_analysis::QualifiedName;
-    if written.contains(map.sep) {
-        return map.resolve(written);
+    use crate::model::file_analysis::{FunctionLookup, QualifiedName};
+    match lookup {
+        _ if written.contains(map.sep) => map.resolve(written),
+        FunctionLookup::Global => QualifiedName::new("", written),
+        FunctionLookup::NamespaceThenGlobal => {
+            let own = map.own_namespace.unwrap_or("");
+            QualifiedName::new(if free_functions.contains_key(&(own, written)) { own } else { "" }, written)
+        }
     }
-    let own = map.own_namespace.unwrap_or("");
-    QualifiedName::new(if free_functions.contains_key(&(own, written)) { own } else { "" }, written)
 }
 
 /// A file's free functions by (namespace, leaf); the global namespace is `""`.

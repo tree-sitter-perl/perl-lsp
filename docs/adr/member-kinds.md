@@ -62,8 +62,9 @@ scope, wherever the declaration is written. Most languages write it there;
 php's constructor promotion (`__construct(private Clock $made)`) writes it
 in a callable's parameter list, which sits inside the callable's own scope.
 So a `@def.field` is filed at the innermost scope that is not a callable's
-body, and the document names the member as the target of its declared type
-with `@flow.target.member`, which lands the `Variable` at that same scope.
+body. The member's name token is also the `@flow.target` of its declared
+type, and a target that is a def's own name token binds where that def
+does, so the `Variable` lands at that same scope.
 The `Field{owner, name}` edge then reaches it class-wide, the outline lists
 it under the class rather than under the constructor, and no consumer
 reasons about where the token sat.

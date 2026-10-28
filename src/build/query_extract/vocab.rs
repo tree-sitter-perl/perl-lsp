@@ -191,10 +191,9 @@ spelled! {
         /// every target of the match is written at the node's end, where
         /// everything believed about it before dies.
         Write = "write",
+        /// A name the value binds. A def's own name token binds where the
+        /// def does (a property's at its class body).
         Target = "target",
-        /// A member of the enclosing class as the target: its value lands
-        /// at the class body, where the member's readers look.
-        TargetMember = "target.member",
         Source = "source",
         /// A rebind with no inflowing value (loop variables).
         Rebind = "rebind",
@@ -435,9 +434,10 @@ pub enum Capture {
     OolDef,
     /// A callable's declared return type, as written.
     RetType,
-    /// A declared return that names the class the method is written in
-    /// (php's `self`, `static`), not a class by its spelling.
-    RetTypeEnclosing,
+    /// A written type (a declared return, a parameter's or property's
+    /// declared type) that names the class it is written in (php's `self`,
+    /// `static`), not a class by its spelling.
+    TypeEnclosing,
     TypeAnnot,
     /// A token whose text rides onto the match's def symbol as an attribute.
     SymAttr,
@@ -527,7 +527,7 @@ impl Capture {
             ["qualifier"] => C::Qualifier,
             ["ool", "def"] => C::OolDef,
             ["rettype"] => C::RetType,
-            ["rettype", "enclosing"] => C::RetTypeEnclosing,
+            ["type", "enclosing"] => C::TypeEnclosing,
             ["type", "annot"] => C::TypeAnnot,
             ["sym", "attr"] => C::SymAttr,
             ["spec", "primary"] => C::SpecPrimary,
@@ -594,7 +594,7 @@ impl fmt::Display for Capture {
             C::Qualifier => f.write_str("qualifier"),
             C::OolDef => f.write_str("ool.def"),
             C::RetType => f.write_str("rettype"),
-            C::RetTypeEnclosing => f.write_str("rettype.enclosing"),
+            C::TypeEnclosing => f.write_str("type.enclosing"),
             C::TypeAnnot => f.write_str("type.annot"),
             C::SymAttr => f.write_str("sym.attr"),
             C::SpecPrimary => f.write_str("spec.primary"),

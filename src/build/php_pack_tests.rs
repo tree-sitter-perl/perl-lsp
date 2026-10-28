@@ -4,9 +4,6 @@ use super::*;
 use crate::build::packs::php_pack;
 use crate::model::file_analysis::{FileAnalysis, SymKind};
 
-// TODO(language-stamped-at-assembly): the driver stamps `language`, so an
-// analysis assembled without it (other packs' test helpers) routes as the
-// host; the stamp belongs where the skeleton is assembled.
 fn php(src: &str) -> FileAnalysis {
     crate::build::language_driver::LanguageRegistry::compiled()
         .for_path(std::path::Path::new("t.php"))
@@ -580,8 +577,25 @@ fn the_outline_lists_properties_under_their_class() {
     assert!(ctor.children.is_empty(), "the constructor lists none of its promoted properties");
 }
 
+/// A property's hover names it as it is listed, `$` and all.
+#[test]
+fn a_property_hovers_by_its_listed_name() {
+    use crate::index::open_docs::{FileKey, OpenDocs};
+    use crate::index::resolve::{resolve, OverrideScope};
+    let path = std::path::PathBuf::from("/fake/php/App/Order.php");
+    let idx = crate::index::module_index::ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(path.clone(), php(MEMBERS));
+    let file = idx.workspace_file_for_test(&path).unwrap();
+    let store = OpenDocs::new();
+    let at = tree_sitter::Point { row: 6, column: 17 };
+    let cs = resolve(&store, &file, FileKey::Path(path), at, Some(&idx), OverrideScope::default()).with_source(MEMBERS);
+    let hover = crate::lsp::symbols::pack_hover_markdown(&cs, "php").unwrap();
+    assert!(hover.contains("\n$total: "), "{hover}");
+}
+
 /// Rename from a property's declaration rewrites its bare name, never the
-/// `$`, and never the method that shares the name.
+/// `$` (a typed `$` is the sigil, not part of the name), and never the
+/// method that shares the name.
 #[test]
 fn a_property_renames_from_its_declaration() {
     use crate::index::open_docs::{FileKey, OpenDocs};
@@ -596,7 +610,7 @@ fn a_property_renames_from_its_declaration() {
         let at = tree_sitter::Point { row, column };
         let cs = resolve(&store, &file, FileKey::Path(path.clone()), at, Some(&idx), OverrideScope::default());
         let mut sites: Vec<(usize, usize, usize, String)> = cs
-            .rename_edits("label")
+            .rename_edits("$label")
             .unwrap()
             .into_iter()
             .map(|(loc, text)| (loc.span.start.row, loc.span.start.column, loc.span.end.column, text))
@@ -1222,6 +1236,37 @@ fn a_declared_return_is_the_callables_value() {
     assert_eq!(ret("nothing"), None);
     assert_eq!(ret("bare"), None);
     assert_eq!(fa.sub_return_type_at_arity("make", Some(0)), builder, "a function's declared return");
+}
+
+/// `self` and `static` name the class they are written in wherever a type
+/// is written: a parameter, a property, a promoted parameter, a closure's
+/// parameter, nullable or not.
+#[test]
+fn self_names_the_enclosing_class_in_every_written_type() {
+    use crate::model::file_analysis::RefKind;
+    let fa = php("<?php
+namespace App;
+
+class Node {
+    private ?self $next;
+    public function __construct(private self $peer) {}
+    public function link(self $other) {
+        $other->hop();
+        $this->next->hop();
+        $this->peer->hop();
+        $f = function (?self $n) { $n->hop(); };
+    }
+    public function hop() {}
+}
+");
+    let receivers: Vec<Option<String>> = fa
+        .refs()
+        .iter()
+        .filter(|r| matches!(r.kind, RefKind::MethodCall { .. }) && r.target_name == "hop")
+        .map(|r| fa.method_call_invocant_class(r, None))
+        .collect();
+    let node = || Some("App\\Node".to_string());
+    assert_eq!(receivers, [node(), node(), node(), node()]);
 }
 
 /// A call's value is its callee's declared return, so a chain of calls

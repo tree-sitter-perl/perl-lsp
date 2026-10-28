@@ -244,7 +244,6 @@ impl LanguageDriver for PerlDriver {
 /// whose extraction is query-shaped is a `PackDriver { ... }` literal.
 #[cfg(feature = "pack-langs")]
 pub struct PackDriver {
-    id: &'static str,
     maturity: Maturity,
     exts: &'static [&'static str],
     /// Exact filenames this driver also claims (extensionless conventions
@@ -321,7 +320,7 @@ impl LanguageDriver for PackDriver {
         self.maturity
     }
     fn id(&self) -> &'static str {
-        self.id
+        (self.pack)().id
     }
     fn extensions(&self) -> &[&'static str] {
         self.exts
@@ -377,12 +376,7 @@ impl LanguageDriver for PackDriver {
     /// phase's body.
     fn analyze_with_path(&self, source: &str, path: Option<&Path>) -> FileAnalysis {
         let _file = crate::util::timings::current_file_scope(path);
-        // Every exit stamps the driver id (degraded stand-ins included — a
-        // failed cpp parse is still a cpp file): `resolve()` derives pack
-        // routing from this origin-identity fact at construction.
-        let mut fa = self.analyze_pipeline(source, path);
-        fa.language = self.id.to_string();
-        fa
+        self.analyze_pipeline(source, path)
     }
     fn lang_pack(&self) -> Option<crate::build::query_extract::LangPack> {
         Some((self.pack)())
@@ -431,9 +425,7 @@ impl PackDriver {
         let ctx = self.gather_pack_context(&mut parser, source, path);
         let Some((tree, src, map, recovered)) = self.transform_and_parse(&mut parser, source, &ctx)
         else {
-            let mut fa = FileAnalysis::new(Default::default());
-            fa.degraded = true;
-            return fa;
+            return self.degraded_stand_in();
         };
         let pack = (self.pack)();
         match crate::build::query_extract::extract_in(&tree, src.as_bytes(), &pack, ctx.module.as_ref()) {
@@ -453,18 +445,25 @@ impl PackDriver {
                 fa
             }
             Err(e) => {
-                // Fail LOUD, and mark the empty stand-in degraded so the
-                // persist tier can't freeze it (a cached empty analysis would
-                // be re-served forever — the source file never changes).
+                // Fail LOUD: a cached empty analysis would be re-served
+                // forever (the source file never changes).
                 log::warn!(
                     "query extract failed for {:?}: {e:?} — serving an empty (non-cacheable) analysis",
                     path
                 );
-                let mut fa = FileAnalysis::new(Default::default());
-                fa.degraded = true;
-                fa
+                self.degraded_stand_in()
             }
         }
+    }
+
+    /// The empty analysis a file that never reached extraction serves —
+    /// still of its language (a failed cpp parse is a cpp file, and
+    /// `resolve()` routes on that), and degraded so the persist tier can't
+    /// freeze it.
+    fn degraded_stand_in(&self) -> FileAnalysis {
+        let mut fa = crate::build::query_extract::SkeletonAnalysis::for_pack(&(self.pack)()).into_file_analysis();
+        fa.degraded = true;
+        fa
     }
 }
 
@@ -655,7 +654,6 @@ impl PackDriver {
 #[cfg(feature = "cpp")]
 fn cpp_driver() -> PackDriver {
     PackDriver {
-        id: "cpp",
         maturity: Maturity::Beta,
         // `.c` too — tree-sitter-cpp parses C (a near-subset), and MISRA /
         // embedded code is C-heavy. One driver serves both.
@@ -683,7 +681,6 @@ fn cpp_driver() -> PackDriver {
 #[cfg(feature = "python")]
 fn python_driver() -> PackDriver {
     PackDriver {
-        id: "python",
         maturity: Maturity::Alpha,
         exts: &["py"],
         filenames: &[],
@@ -707,7 +704,6 @@ fn python_driver() -> PackDriver {
 #[cfg(feature = "php")]
 fn php_driver() -> PackDriver {
     PackDriver {
-        id: "php",
         maturity: Maturity::Alpha,
         // `.phtml` templates parse under the same HTML-interleaved grammar.
         exts: &["php", "phtml"],
@@ -734,7 +730,6 @@ fn php_driver() -> PackDriver {
 #[cfg(feature = "r")]
 fn r_driver() -> PackDriver {
     PackDriver {
-        id: "r",
         maturity: Maturity::Alpha,
         exts: &["R", "r"],
         filenames: &[],
@@ -759,7 +754,6 @@ fn r_driver() -> PackDriver {
 fn cmake_driver() -> PackDriver {
     PackDriver {
         // CMakeLists.txt (no extension match) is a follow-up; `.cmake` now.
-        id: "cmake",
         maturity: Maturity::Alpha,
         exts: &["cmake"],
         filenames: &["CMakeLists.txt"],
@@ -1085,6 +1079,7 @@ fn remap_spans(
         param_sigs,
         // Populated later (enrich_skeleton) already in original coords — no remap.
         macro_body_member_reads: _,
+        language: _,
         names: _,
         slot_writes,
         member_writes,
@@ -1155,6 +1150,7 @@ fn remap_spans(
     // (the same call span) they land beside.
     for site in call_sites.iter_mut() {
         site.span = rspan(site.span);
+        site.callee_at = rspan(crate::model::file_analysis::Span { start: site.callee_at, end: site.callee_at }).start;
         if let Some(recv) = site.receiver.as_mut() {
             *recv = rspan(*recv);
         }

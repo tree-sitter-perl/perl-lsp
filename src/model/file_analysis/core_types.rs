@@ -356,6 +356,27 @@ pub struct NameSpellings {
     /// Whether a member access reaches an instance's slots
     /// (`FileAnalysis::slot_class_of`).
     pub instance_slots: InstanceSlots,
+    /// Where a use-map language's bare function call finds its function.
+    pub functions: FunctionLookup,
+}
+
+/// Where a bare (unqualified) function call finds its function in a
+/// use-map language. A qualified call resolves like a class spelling in
+/// both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FunctionLookup {
+    /// The global function of that name.
+    ///
+    /// TODO(module-functions): Python files its functions by bare name, not
+    /// under their module, so a call names the leaf. Filed under the
+    /// module, a call would resolve through the use-map like a class
+    /// spelling (`from app.a import helper`).
+    #[default]
+    Global,
+    /// The namespace in force when it declares the function, else the
+    /// global namespace: PHP's fallback for an unqualified function, which
+    /// its `use` rows never name.
+    NamespaceThenGlobal,
 }
 
 /// Whether a language's member access (`obj.x`) reaches the slots an
@@ -461,6 +482,7 @@ impl NameSpellings {
         class_call: ClassCall::FunctionCall,
         enclosing_class: EnclosingClass::ScopeChain,
         instance_slots: InstanceSlots::Apart,
+        functions: FunctionLookup::Global,
     };
 
     /// A language with a namespace separator, no sigils, and spellings
@@ -477,6 +499,7 @@ impl NameSpellings {
             class_call: ClassCall::FunctionCall,
             enclosing_class: EnclosingClass::ScopeChain,
             instance_slots: InstanceSlots::Apart,
+            functions: FunctionLookup::Global,
         }
     }
 
@@ -506,6 +529,13 @@ impl NameSpellings {
 
     pub fn is_sigil(&self, c: char) -> bool {
         self.sigils.contains(&c)
+    }
+
+    /// A typed name without its leading sigils: the bare identity token a
+    /// rename writes (`$total` → `total`). A language with no sigils keeps
+    /// every character — a `$` in its identifiers is identifier text.
+    pub fn strip_sigils<'n>(&self, name: &'n str) -> &'n str {
+        name.trim_start_matches(&self.sigils[..])
     }
 
     /// The package a written qualifier names: an empty one (a leading
@@ -674,12 +704,12 @@ pub struct Presentation {
     /// the default `SymKind` → LSP mapping.
     #[serde(default)]
     pub display: Option<HandlerDisplay>,
-    /// Outline-only display-name override. When set, the outline uses
-    /// this verbatim instead of `name` (and drops any kind prefix).
-    /// A chained Mojo helper leaf has `name: "create"` (so method
-    /// resolution works on `$c->users->create`) but labels itself
-    /// `"users.create"`; a mojo-lite route prepends the HTTP verb.
-    /// Doesn't affect resolution, rename, or workspace-symbol.
+    /// The name the symbol is listed by, when it is not `name`: read
+    /// through `Symbol::listed_name` by every listing view. A chained
+    /// Mojo helper leaf has `name: "create"` (so method resolution works
+    /// on `$c->users->create`) but lists as `"users.create"`; a mojo-lite
+    /// route prepends the HTTP verb; a php property lists as written
+    /// (`$x`). Doesn't affect resolution, rename, or workspace-symbol.
     #[serde(default)]
     pub label: Option<String>,
 }
@@ -1022,6 +1052,11 @@ pub fn earliest_rebind_in(flow_edges: &[FlowEdge], var: &str, region: Span) -> O
 }
 
 impl Symbol {
+    /// The name listing views (outline, hover) show the symbol by.
+    pub fn listed_name(&self) -> &str {
+        self.presentation.label.as_deref().unwrap_or(&self.name)
+    }
+
     /// A member RE-EXPORT (`using Base::insert;` in a class body): part of
     /// the class's API surface (outline/completion) but not a definition —
     /// member resolution sees through it to the origin ancestor.
@@ -1793,9 +1828,9 @@ pub enum RefKind {
     /// edge witnesses; the helper reads those at query time.
     MethodCall {
         invocant: crate::model::conventions::Invocant,
-        /// Span of the invocant node. Used by
-        /// `method_call_invocant_class` to find an inner-receiver
-        /// ref via `RefTable::call_at_start` (chain dispatch).
+        /// Span of the invocant node. `method_call_invocant_class` reads
+        /// the receiver's value at it, and the call spanning it exactly
+        /// (`RefTable::call_spanning`, chain dispatch).
         invocant_span: Option<Span>,
         /// Span of just the method name (for rename — r.span covers the whole expression).
         method_name_span: Span,
