@@ -327,13 +327,13 @@ impl<'a> Builder<'a> {
                     return v.cloned();
                 }
                 // Class-typed base: a typed write to this slot
-                // (`SlotType{class,key}`, seeded at the write site, agreed
-                // by `SlotTypeFold`) is the honest answer; otherwise
+                // (`Field{class, key}`, seeded at the write site, agreed
+                // by `FieldValueReducer`) is the honest answer; otherwise
                 // untyped.
                 let class = base_ty.class_name()?.to_string();
-                self.bag_query_attachment(&crate::model::witnesses::WitnessAttachment::SlotType {
-                    class,
-                    key,
+                self.bag_query_attachment(&crate::model::witnesses::WitnessAttachment::Field {
+                    owner: class,
+                    name: key,
                 })
             }
             "function_call_expression" | "ambiguous_function_call_expression" => {

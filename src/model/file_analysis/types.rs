@@ -243,6 +243,13 @@ pub enum InferredType {
     /// scope walk stops on it instead of falling through to a shadowed
     /// namesake. Consumers read it as "no information".
     Unknown,
+    /// The string `ref`/`reftype`/`blessed` returns: it names what
+    /// `subject` held at `site`, so comparing it to a literal is a guard on
+    /// `subject` (`docs/adr/flow-narrowing.md`). A `String` to every
+    /// consumer but that guard; it means nothing outside the sub that
+    /// computed it, so the Surface sees `String`. Kept at the END for
+    /// bincode variant-index stability (bump `EXTRACT_VERSION`).
+    RefTagOf { subject: String, site: Span, via: RefTagFn },
     /// `A|B`: a value that is one of several types the join could not
     /// put a single type above. Built only by [`join`], so the arms are
     /// canonical: two or more, sorted, deduped, none a union, an
@@ -252,6 +259,16 @@ pub enum InferredType {
     /// a union is not definitely any one class. Kept at the END for
     /// bincode variant-index stability (bump `EXTRACT_VERSION`).
     Union(UnionArms),
+}
+
+/// Which builtin minted a [`InferredType::RefTagOf`] — what its string can
+/// say: `ref` a reftype token or a class, `reftype` only a token, `blessed`
+/// only a class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum RefTagFn {
+    Ref,
+    RefType,
+    Blessed,
 }
 
 /// The arms of an [`InferredType::Union`]. The field is private so the
@@ -1013,8 +1030,15 @@ impl InferredType {
             | InferredType::TypeConstraintOf(None)
             | InferredType::Undef
             | InferredType::Bool
+            | InferredType::RefTagOf { .. }
             | InferredType::Unknown => {}
         }
+    }
+
+    /// A string value: `String`, or a [`InferredType::RefTagOf`] — which is
+    /// one to everything but the guard that reads its subject.
+    pub fn is_string(&self) -> bool {
+        matches!(self, InferredType::String | InferredType::RefTagOf { .. })
     }
 
     /// Witness-bag attachment whose type IS this callable's return
@@ -1441,6 +1465,9 @@ fn join_precise(
         (T::Bool, T::Numeric) | (T::Numeric, T::Bool) if order.holds(Subsumption::BoolIntoNumeric) => {
             Some(T::Numeric)
         }
+        // Tags naming different subjects (or a tag and a literal) are all
+        // strings; what one arm's tag says about its subject the join can't keep.
+        _ if a.is_string() && b.is_string() => Some(T::String),
         _ => None,
     }
 }

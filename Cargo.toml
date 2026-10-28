@@ -42,6 +42,7 @@ cpp = ["dep:tree-sitter-cpp", "pack-langs"]
 python = ["dep:tree-sitter-python", "pack-langs"]
 r = ["dep:tree-sitter-r", "pack-langs"]
 cmake = ["dep:tree-sitter-cmake", "pack-langs"]
+php = ["dep:tree-sitter-php", "pack-langs"]
 # At least one pack language is compiled in. Implied by every language
 # feature and never enabled on its own: the pack-tier machinery (the query
 # extractor, the pack drivers' shared plumbing) is gated on this, so a new
@@ -69,7 +70,7 @@ tower = { version = "0.4", default-features = false }
 futures = "0.3"
 tokio = { version = "1", features = ["full"] }
 tree-sitter = "0.25"
-ts-parser-perl = "2.0.0"
+ts-parser-perl = "2.0.3"
 ts-parser-pod = "1"
 dashmap = "6"
 serde = { version = "1", features = ["derive"] }
@@ -93,6 +94,7 @@ tree-sitter-cpp = { version = "0.23", optional = true }
 tree-sitter-python = { version = "0.25", optional = true }
 tree-sitter-r = { version = "1.2", optional = true }
 tree-sitter-cmake = { version = "0.7", optional = true }
+tree-sitter-php = { version = "0.24", optional = true }
 
 [dev-dependencies]
 tree-sitter-python = "0.25"
@@ -100,3 +102,4 @@ tree-sitter-r = "1.2"
 tree-sitter-cmake = "0.7"
 tree-sitter-cpp = "0.23"
 tree-sitter-c = "0.24"
+tree-sitter-php = "0.24"

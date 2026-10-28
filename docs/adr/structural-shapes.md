@@ -106,9 +106,9 @@ Variable shape witnesses:
   drills back typed, and a typo beside it still hints.
 - **Dynamic key, conditional write, scope-crossing write, or slice
   write → OPEN.** Conditionality is syntactic
-  (`cst::is_conditionally_executed`: if/unless, postfix modifiers,
-  ternary, loops, short-circuit chains — over-marking is the safe
-  direction, it only widens) plus structural at the pass (the write's
+  (`cst::conditional_arm` with `ArmBound::Sub`: if/unless bodies, loop
+  bodies, postfix modifiers, ternary branches, short-circuit right
+  operands) plus structural at the pass (the write's
   scope chain crossing any boundary before the attachment scope:
   nested block or closure, execution unknowable). Slice writes land
   several keys at once; all six spellings (`@h{…}`/`%h{k}`,
@@ -132,7 +132,7 @@ which says nothing about elements.
 The RHS types the last hop; a list-assignment target takes its slot of
 the RHS. Through an object (`$self->{s}{k} = …`) the
 inner shape is the slot's, so the extended shape lands on
-`SlotType{class, s}`, where it joins the slot's other writes.
+`Field{class, s}`, where it joins the slot's other writes.
 
 An empty literal is a shape too: `{}`, `my %h;` and `my %h = ()` are a
 closed `HashWithKeys` with no keys, so `my $h = {}; $h->{k} = Foo->new`

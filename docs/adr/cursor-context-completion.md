@@ -10,12 +10,13 @@ no Perl semantics leak in.
 
 `symbols::in_scope_completion(analysis, point)` lists every symbol visible
 from the cursor: top-level defs (functions/classes/packages, globally
-addressable) plus the locals/params/members whose declaring scope is on
-the cursor's `scope_chain`. The client filters by the typed prefix — names
-are stored verbatim (sigils and all), so `$sn` → `$sner`/`$snerful` and
-`box.`'s prefix matching are the editor's job, not ours. This is pure
-`FileAnalysis` (`scope_at` → `scope_chain` → `symbols`); zero per-language
-code, no tree.
+addressable) plus the locals/params/members a scope on the cursor's
+lookup chain binds (`FileAnalysis::bindings_seen_from`, so a Python
+method is not offered its class body's names). The client filters by
+the typed prefix — names are stored verbatim (sigils and all), so
+`$sn` → `$sner`/`$snerful` and `box.`'s prefix matching are the
+editor's job, not ours. This is pure `FileAnalysis` (`scope_at` →
+`lookup_chain` → `bindings`); zero per-language code, no tree.
 
 It is the fallback whenever the cursor is not a member access.
 

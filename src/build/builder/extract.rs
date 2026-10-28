@@ -261,7 +261,7 @@ impl<'a> Builder<'a> {
             span,
             rhs_span: if typed { rhs.map(node_to_span) } else { None },
             rhs_slot,
-            conditional: crate::cst::is_conditionally_executed(left),
+            conditional: crate::cst::conditional_arm(left, crate::cst::ArmBound::Sub).is_some(),
         });
     }
 

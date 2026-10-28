@@ -557,6 +557,14 @@ pub trait CrossFileLookup {
     fn def_candidates(&self, name: &str) -> Vec<std::sync::Arc<CachedModule>> {
         self.get_cached(name).into_iter().collect()
     }
+    /// The files declaring a use-map class whose LEAF is `leaf`, under any
+    /// namespace — the widening relation, read only where nothing indexed
+    /// declares an identity (`ScopedLookup::use_map_candidates`). Kept apart
+    /// from `def_candidates` so a leaf never answers a name lookup or wins
+    /// a name slot. Path-ordered. Default: none, so nothing widens.
+    fn leaf_def_candidates(&self, _leaf: &str) -> Vec<std::sync::Arc<CachedModule>> {
+        Vec::new()
+    }
     /// `def_candidates` AS SEEN from the querying scope — the forward-
     /// resolution face of the candidate table. Raw indexes pass the full
     /// relation through; `ScopedLookup` narrows a CLOSURE-scoped origin
@@ -621,7 +629,7 @@ pub trait CrossFileLookup {
     }
     /// A cached module's analysis with its witness bag GUARANTEED present.
     /// Slice 2 evicts the bag from resident pack-index copies; every TYPE
-    /// query that reads a foreign file's bag (the `PackageSymbol` / `SlotType`
+    /// query that reads a foreign file's bag (the `PackageSymbol` / `Field`
     /// / `TypeName` cross-file chases, `def_candidates` return-type folds,
     /// cross-file field types) routes through here so the exact persisted bag
     /// rehydrates on demand. Default (Perl hub, tests, non-pack impls): a cheap
@@ -739,7 +747,7 @@ pub trait CrossFileLookup {
     }
     /// The registry-sweep sibling of `candidate_may_declare`: can `cached`'s
     /// BAG hold any witness for a class-keyed attachment named `name`
-    /// (`PackageSymbol{class, name}` when `attributed`, `SlotType{.., key}`
+    /// (`PackageSymbol{class, name}` when `attributed`, `Field{.., name}`
     /// otherwise)? Rows half only — the chase-shape gates (declared
     /// parents, dynamic parents, app-surface membership, the unrowed
     /// residue) live at the call site, which owns the chase semantics.
@@ -1262,7 +1270,7 @@ impl<'a> ScopedLookup<'a> {
             }
             let mut agree: Vec<std::sync::Arc<CachedModule>> = Vec::new();
             let mut rest: Vec<std::sync::Arc<CachedModule>> = Vec::new();
-            for c in self.inner.def_candidates(leaf) {
+            for c in self.inner.leaf_def_candidates(leaf) {
                 match self.inner.symbols_present(&c).declared_class_namespace(leaf) {
                     Some(d) if d == ns => agree.push(c),
                     _ => rest.push(c),
@@ -1356,6 +1364,9 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
         // definition-ness themselves, and a definition legitimately lives
         // OUTSIDE the querying file's closure (a `.c` body nobody includes).
         self.inner.def_candidates(name)
+    }
+    fn leaf_def_candidates(&self, leaf: &str) -> Vec<std::sync::Arc<CachedModule>> {
+        self.inner.leaf_def_candidates(leaf)
     }
     fn visible_def_candidates_widening(
         &self,
@@ -1611,3 +1622,44 @@ impl<'a> CrossFileLookup for ScopedLookup<'a> {
     }
 }
 
+/// A class reference answered by widening: the identity the file names,
+/// which nothing indexed declares, and the same-leaf class that stood in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WidenedClassRef {
+    pub span: Span,
+    pub named: String,
+    pub resolved: String,
+}
+
+/// A same-leaf class standing in for `identity` in a file `index` holds.
+#[derive(Debug, Clone)]
+pub struct WidenedStandIn {
+    pub path: std::path::PathBuf,
+    pub span: Span,
+    pub class: String,
+}
+
+/// The classes that stand in for `identity` when `index` widens it — the
+/// same-leaf declarations of other namespaces, in candidate order — and
+/// none when anything indexed declares the identity or the scope does not
+/// widen. One reader of the widening verdict for every class-shaped
+/// projection (goto-def's last lane, the diagnostic).
+pub fn widened_class_stand_ins(
+    index: &dyn CrossFileLookup,
+    identity: &str,
+    names: &NameSpellings,
+) -> Vec<WidenedStandIn> {
+    let (cands, widened) = index.visible_def_candidates_widening(identity);
+    if !widened {
+        return Vec::new();
+    }
+    let leaf = name_match_key(identity, names);
+    cands
+        .iter()
+        .filter_map(|c| {
+            let fa = index.symbols_present(c);
+            let sym = fa.declared_class_with_leaf(&leaf)?;
+            Some(WidenedStandIn { path: c.path.clone(), span: sym.selection_span, class: sym.name.clone() })
+        })
+        .collect()
+}
