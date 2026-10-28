@@ -1210,23 +1210,9 @@ impl<'a> Builder<'a> {
             let encl = self.package_at_pos(r.span.start)?;
             pkgs.iter().any(|p| *p == encl).then(|| encl.to_string())
         };
-        let pins: Vec<(usize, String)> =
-            self.refs.iter().enumerate().filter_map(|(i, r)| Some((i, pin(r)?))).collect();
-        // A held indirect site's function-call heads are the same calls: a
-        // view installing them must resolve them as the walk's would be.
-        let held_pins: Vec<(usize, bool, String)> = self
-            .held_indirect
-            .iter()
-            .enumerate()
-            .flat_map(|(i, h)| [(i, true, &h.verb.1), (i, false, &h.class.1)])
-            .filter_map(|(i, verb, r)| Some((i, verb, pin(r)?)))
-            .collect();
-        for (i, pkg) in pins {
-            self.refs[i].bind_function_package(pkg);
-        }
-        for (i, verb, pkg) in held_pins {
-            let h = &mut self.held_indirect[i];
-            if verb { &mut h.verb.1 } else { &mut h.class.1 }.bind_function_package(pkg);
+        let pins: Vec<(BuildRefAt, String)> = self.every_ref().filter_map(|(at, r)| Some((at, pin(r)?))).collect();
+        for (at, pkg) in pins {
+            self.ref_mut(at).bind_function_package(pkg);
         }
     }
 

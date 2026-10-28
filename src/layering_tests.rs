@@ -1849,3 +1849,37 @@ fn model_statics_cannot_hide_reads() {
     }
     assert!(out.is_empty(), "{}", out.join("\n"));
 }
+
+/// A view installs held refs (an indirect site's heads, a gated emission's
+/// refs) beside or in place of the table's, so a pass that binds refs
+/// after the walk must reach the held ones too, or an installed ref is
+/// left unresolved where the walked one beside it is not. Passes iterate
+/// `every_ref` / `every_ref_mut` and write through `ref_mut`; a bind on an
+/// indexed table ref, or a mutable walk of the table alone, is a pass
+/// that skips the readings.
+#[test]
+fn post_walk_ref_binds_reach_held_refs() {
+    let files = layer_files(&[Layer::Model, Layer::Build]);
+    let seen = count_lines(&files, &|l| {
+        let table_bind = l.contains("refs[") && (l.contains("].bind_") || l.contains("].link_owned_symbol("));
+        let table_walk = l.contains("refs.iter_mut()") || l.contains("&mut self.refs") || l.contains("refs.as_mut_slice()");
+        (table_bind || table_walk) && !l.contains("every_ref_mut(")
+    });
+    const TABLE: &str = "the table's own accessors";
+    const ACCESSOR: &str = "the accessor itself";
+    const PACK: &str = "the pack extractor: pack languages hold no readings";
+    let allow: &[(&str, usize, &str)] = &[
+        ("model/file_analysis/ref_table.rs", 4, TABLE),
+        ("model/file_analysis/readings.rs", 2, "the accessor's table arm, and a view swapping a slot's head in"),
+        (
+            "model/file_analysis/lifecycle.rs",
+            1,
+            "`link_owned_refs`: a link names a symbol id, so it is the table's; a view links what it installs",
+        ),
+        ("build/builder/infra.rs", 3, ACCESSOR),
+        ("build/query_extract/skeleton.rs", 3, PACK),
+        ("build/language_driver.rs", 2, PACK),
+    ];
+    let drift = allowlist_drift("held refs (post-walk binds)", &seen, allow);
+    assert!(drift.is_empty(), "{}", drift.join("\n"));
+}

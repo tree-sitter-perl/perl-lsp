@@ -540,7 +540,9 @@ pub struct GatedEmission {
     pub symbols: Vec<GatedSymbol>,
     /// Refs the pattern produced (dispatch-call / method-call / hash-key
     /// access sites) so cross-file references reach the re-fired symbols.
-    pub refs: Vec<GatedRef>,
+    /// Scoped at the match site; `binding` carries the plugin-declared
+    /// owner, its linked symbol left for the view's re-index.
+    pub refs: Vec<Ref>,
 }
 
 /// One symbol inside a [`GatedEmission`] — the file-analysis-native
@@ -568,19 +570,6 @@ pub struct GatedSymbol {
     pub return_type: Option<InferredType>,
 }
 
-/// One ref inside a [`GatedEmission`]. Scope is resolved at apply from the
-/// emission's `scope_point`; `binding` carries the plugin-declared owner —
-/// its linked symbol is left for the enrichment re-index to fill
-/// (HashKeyAccess → HashKeyDef) the same way build does.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GatedRef {
-    pub kind: RefKind,
-    pub span: Span,
-    pub target_name: String,
-    pub access: AccessKind,
-    #[serde(default)]
-    pub binding: Option<RefBinding>,
-}
 
 /// A confirmed dispatch — a gated candidate whose receiver isa-resolved at
 /// query time. The projection `refs_to` / goto-def consume to match a

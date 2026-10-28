@@ -62,6 +62,7 @@ pub use pipeline::*;
 mod arity;
 use arity::*;
 mod infra;
+use infra::{every_ref_mut, BuildRefAt};
 mod chain;
 mod plugin_emit;
 pub(crate) mod walk;
@@ -514,13 +515,8 @@ struct Builder<'a> {
     /// enrichment once the receiver's cross-file class is known. See
     /// `file_analysis::ProvisionalDispatch`.
     provisional_dispatches: Vec<crate::model::file_analysis::ProvisionalDispatch>,
-    /// Plugin pattern emissions whose `ClassIsa` trigger LOCAL ancestry
-    /// could not confirm (rule #1), held as readings once the analysis is
-    /// assembled (`FileAnalysis::hold_gated_emission`).
-    gated_emissions: Vec<crate::model::file_analysis::GatedEmission>,
-    /// Both readings' head refs at each deferred `meth Class(ARGS)`, held
-    /// once the analysis is assembled (`FileAnalysis::hold_indirect`).
-    held_indirect: Vec<crate::model::file_analysis::IndirectHeads>,
+    /// What the readings will hold once the analysis is assembled.
+    held: infra::HeldHeads,
     /// `param_types()` role-contract TCs, emitted ungated at the sub walk and
     /// gated on the enclosing package's `isa in_role` (checked cross-file at
     /// query time). See `FileAnalysis::gated_param_types`.

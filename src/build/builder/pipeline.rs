@@ -412,8 +412,7 @@ fn build_once(
         flow_edges: Vec::new(),
         any_requires_action_attr: false,
         provisional_dispatches: Vec::new(),
-        gated_emissions: Vec::new(),
-        held_indirect: Vec::new(),
+        held: Default::default(),
         gated_param_types: Vec::new(),
         method_call_invocant: std::collections::HashMap::new(),
         attr_projections: Vec::new(),
@@ -765,10 +764,10 @@ fn build_once(
         loader_config_params: b.loader_config_params,
         flow_edges: b.flow_edges,
     });
-    for em in b.gated_emissions {
+    for em in b.held.gated {
         fa.hold_gated_emission(em);
     }
-    for heads in b.held_indirect {
+    for heads in b.held.indirect {
         fa.hold_indirect(heads);
     }
     // Finalize: owner fixup, target stamping, and the base-count seals.
@@ -1251,9 +1250,7 @@ impl<'a> Builder<'a> {
         // just synthesized — to `pkg`, so goto-def lands on the data-section
         // definition. Scoped to autoload-backed packages: we only touch refs
         // whose target is one of the freshly minted names.
-        // A held indirect site's function-call heads are the same calls.
-        let held = self.held_indirect.iter_mut().flat_map(|h| [&mut h.verb.1, &mut h.class.1]);
-        for r in self.refs.iter_mut().chain(held) {
+        for (_, r) in every_ref_mut(&mut self.refs, &mut self.held) {
             if matches!(r.kind, RefKind::FunctionCall) {
                 if r.settled_binding().is_none() && synth_names.contains(&r.target_name) {
                     let in_pkg = crate::model::file_analysis::namespace_range_at(&self.namespace_ranges, r.span.start)

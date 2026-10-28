@@ -58,15 +58,16 @@ impl<'a> Builder<'a> {
         // (`$main::x`) bind to it once every global exists.
         let mut globals: std::collections::HashMap<(String, String), SymbolId> =
             std::collections::HashMap::new();
-        let mut unbound_qualified: Vec<(usize, (String, String))> = Vec::new();
+        let mut unbound_qualified: Vec<(BuildRefAt, (String, String))> = Vec::new();
 
-        for idx in 0..self.refs.len() {
-            if !matches!(self.refs[idx].kind, RefKind::Variable | RefKind::ContainerAccess) {
+        let ats: Vec<BuildRefAt> = self.every_ref().map(|(at, _)| at).collect();
+        for idx in ats {
+            if !matches!(self.ref_of(idx).kind, RefKind::Variable | RefKind::ContainerAccess) {
                 continue;
             }
-            let ref_span_start = self.refs[idx].span.start;
-            let ref_target = self.refs[idx].target_name.clone();
-            let ref_scope = self.refs[idx].scope;
+            let ref_span_start = self.ref_of(idx).span.start;
+            let ref_target = self.ref_of(idx).target_name.clone();
+            let ref_scope = self.ref_of(idx).scope;
 
             // Fully-qualified read (`$Foo::Bar::x`): resolve by
             // `(package, sigil+basename)` against the declaring symbol, not
@@ -75,16 +76,16 @@ impl<'a> Builder<'a> {
             // a `my` of the same name is never the answer. Cross-package
             // goto-def for non-local packages happens at query time via
             // `qualified_var_target()` + module_index.
-            if let Some((pkg, name)) = self.refs[idx]
+            if let Some((pkg, name)) = self.ref_of(idx)
                 .qualified_var_target(&crate::model::conventions::PERL_SPELLINGS)
                 .map(|(p, n)| (p.to_string(), n))
             {
-                if let Some(sym) = self.symbols.iter().find(|s| {
+                if let Some(id) = self.symbols.iter().find(|s| {
                     matches!(s.detail, SymbolDetail::Variable { decl_kind, .. } if decl_kind.is_package_global())
                         && s.name == name
                         && s.package.as_deref() == Some(pkg.as_str())
-                }) {
-                    self.refs[idx].bind_symbol(sym.id);
+                }).map(|s| s.id) {
+                    self.ref_mut(idx).bind_symbol(id);
                 } else {
                     unbound_qualified.push((idx, (pkg, name)));
                 }
@@ -112,20 +113,20 @@ impl<'a> Builder<'a> {
                     }
                 }
                 if let Some(sym_id) = found {
-                    self.refs[idx].bind_symbol(sym_id);
+                    self.ref_mut(idx).bind_symbol(sym_id);
                     break;
                 }
             }
 
             // `our` is lexical: a use the package gate turned away from an
             // earlier `our` is still declared, so it is no implicit global.
-            if self.refs[idx].settled_binding().is_some()
+            if self.ref_of(idx).settled_binding().is_some()
                 || gated_our
                 || crate::model::conventions::is_special_variable(&ref_target)
             {
                 continue;
             }
-            let span = self.refs[idx].span;
+            let span = self.ref_of(idx).span;
             let key = (use_pkg.unwrap_or_else(|| "main".to_string()), ref_target);
             let id = match globals.get(&key) {
                 Some(&id) => {
@@ -153,12 +154,12 @@ impl<'a> Builder<'a> {
                     id
                 }
             };
-            self.refs[idx].bind_symbol(id);
+            self.ref_mut(idx).bind_symbol(id);
         }
 
         for (idx, key) in unbound_qualified {
             if let Some(&id) = globals.get(&key) {
-                self.refs[idx].bind_symbol(id);
+                self.ref_mut(idx).bind_symbol(id);
             }
         }
     }
@@ -829,8 +830,8 @@ impl<'a> Builder<'a> {
     /// variable's type yields a class. Untyped variables keep their
     /// lexical grouping — plain `%config` hashes are untouched.
     pub(super) fn upgrade_variable_hash_key_owners(&mut self) {
-        let mut upgrades: Vec<(usize, HashKeyOwner)> = Vec::new();
-        for (i, r) in self.refs.iter().enumerate() {
+        let mut upgrades: Vec<(BuildRefAt, HashKeyOwner)> = Vec::new();
+        for (i, r) in self.every_ref() {
             let RefKind::HashKeyAccess { ref var_text } = r.kind else {
                 continue;
             };
@@ -847,7 +848,7 @@ impl<'a> Builder<'a> {
             upgrades.push((i, HashKeyOwner::Class(class.to_string())));
         }
         for (i, o) in upgrades {
-            self.refs[i].bind_hash_key_owner(o);
+            self.ref_mut(i).bind_hash_key_owner(o);
         }
     }
 
@@ -1876,7 +1877,7 @@ impl<'a> Builder<'a> {
             })
             .collect();
 
-        for r in &mut self.refs {
+        for (_, r) in every_ref_mut(&mut self.refs, &mut self.held) {
             if let RefKind::HashKeyAccess { ref var_text } = r.kind {
                 let new_owner = if let Some(func_name) = binding_map.get(var_text.as_str()) {
                     let resolved = walk_return_delegation_chain(
@@ -2052,10 +2053,8 @@ impl<'a> Builder<'a> {
             }
         }
 
-        let owner_class: std::collections::HashMap<usize, String> = self
-            .refs
-            .iter()
-            .enumerate()
+        let owner_class: std::collections::HashMap<BuildRefAt, String> = self
+            .every_ref()
             .filter_map(|(i, r)| {
                 let RefKind::HashKeyAccess { var_text } = &r.kind else { return None };
                 if r.hash_key_owner().is_some() {
@@ -2068,7 +2067,7 @@ impl<'a> Builder<'a> {
             })
             .collect();
 
-        for (i, r) in self.refs.iter_mut().enumerate() {
+        for (i, r) in every_ref_mut(&mut self.refs, &mut self.held) {
             if let RefKind::HashKeyAccess { ref var_text } = r.kind {
                 if r.hash_key_owner().is_some() { continue; }
 

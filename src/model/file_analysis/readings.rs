@@ -139,8 +139,55 @@ impl Readings {
         self.symbols.iter().map(|h| &h.entry)
     }
 
+    /// Every held ref, picked or not: both heads of each slot, then the
+    /// added refs.
     pub fn held_refs(&self) -> impl Iterator<Item = &Ref> {
-        self.refs.iter().map(|h| &h.entry)
+        self.held_refs_at().map(|(_, r)| r)
+    }
+
+    fn held_refs_at(&self) -> impl Iterator<Item = (RefAt, &Ref)> {
+        let slots = self.slots.iter().enumerate().flat_map(|(slot, s)| {
+            [(RefAt::Slot { slot, arm: Arm::Then }, &s.then), (RefAt::Slot { slot, arm: Arm::Otherwise }, &s.otherwise)]
+        });
+        slots.chain(self.refs.iter().enumerate().map(|(i, h)| (RefAt::Held(i), &h.entry)))
+    }
+}
+
+/// Where a ref the analysis holds lives: the table, or a reading (a slot's
+/// head, an added ref). A view installs held refs in place of or beside
+/// table refs, so every pass that binds refs after the walk reaches them
+/// through `FileAnalysis::every_ref` / `ref_mut`, and an installed ref was
+/// resolved like the table refs beside it
+/// (`layering_tests::post_walk_ref_binds_reach_held_refs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RefAt {
+    Table(usize),
+    Slot { slot: usize, arm: Arm },
+    Held(usize),
+}
+
+impl FileAnalysis {
+    /// Every ref this analysis holds, table first (see `RefAt`).
+    pub(crate) fn every_ref(&self) -> impl Iterator<Item = (RefAt, &Ref)> {
+        self.refs.iter().enumerate().map(|(i, r)| (RefAt::Table(i), r)).chain(self.readings.held_refs_at())
+    }
+
+    pub(crate) fn ref_of(&self, at: RefAt) -> &Ref {
+        match at {
+            RefAt::Table(i) => &self.refs[i],
+            RefAt::Slot { slot, arm: Arm::Then } => &self.readings.slots[slot].then,
+            RefAt::Slot { slot, arm: Arm::Otherwise } => &self.readings.slots[slot].otherwise,
+            RefAt::Held(i) => &self.readings.refs[i].entry,
+        }
+    }
+
+    pub(crate) fn ref_mut(&mut self, at: RefAt) -> &mut Ref {
+        match at {
+            RefAt::Table(i) => &mut self.refs.as_mut_slice()[i],
+            RefAt::Slot { slot, arm: Arm::Then } => &mut self.readings.slots[slot].then,
+            RefAt::Slot { slot, arm: Arm::Otherwise } => &mut self.readings.slots[slot].otherwise,
+            RefAt::Held(i) => &mut self.readings.refs[i].entry,
+        }
     }
 }
 
@@ -279,17 +326,8 @@ impl FileAnalysis {
                 }
             }
         }
-        for gr in em.refs {
-            self.hold_ref(q, Arm::Then, Ref {
-                kind: gr.kind,
-                span: gr.span,
-                scope,
-                target_name: gr.target_name,
-                access: gr.access,
-                binding: Binding::from(gr.binding),
-                folded_from: None,
-                arg_count: None,
-            });
+        for r in em.refs {
+            self.hold_ref(q, Arm::Then, r);
         }
     }
 
@@ -328,9 +366,9 @@ impl FileAnalysis {
         for i in 0..self.readings.slots.len() {
             let HeldSlot { question, slot, .. } = self.readings.slots[i];
             let Some(arm) = self.readings.fallback(question) else { continue };
-            // The slot's ref is the walk's head as every later pass left it
-            // (a forward call pinned, a dispatch target stamped); the held
-            // copy was taken before them, so the fallback arm keeps the ref.
+            // The fallback arm IS the walked head: the slot's ref, with what
+            // the walk recorded on it beyond the held copy (its fold source,
+            // its argument count).
             let walked = self.refs[slot as usize].clone();
             match arm {
                 Arm::Then => self.readings.slots[i].then = walked,
@@ -339,35 +377,6 @@ impl FileAnalysis {
             let att = WitnessAttachment::Expression(crate::model::witnesses::RefIdx(slot));
             for w in self.witnesses.take_attachment(&att) {
                 self.hold_witness(question, arm, HeldWitness::Plain(w));
-            }
-        }
-        // A held member call is frozen as finalize freezes a walked one, so
-        // a view installing it dispatches the same way.
-        let target = |fa: &Self, r: &Ref| {
-            r.member_site().filter(|site| !site.invocant.is_bridged())?;
-            fa.member_call_target(r, None)
-        };
-        let slot_targets: Vec<(usize, Option<MethodTarget>, Option<MethodTarget>)> = self
-            .readings
-            .slots
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (i, target(self, &s.then), target(self, &s.otherwise)))
-            .collect();
-        let held_targets: Vec<(usize, Option<MethodTarget>)> =
-            self.readings.refs.iter().enumerate().map(|(i, h)| (i, target(self, &h.entry))).collect();
-        for (i, then, otherwise) in slot_targets {
-            let slot = &mut self.readings.slots[i];
-            if let Some(t) = then {
-                slot.then.bind_method(t);
-            }
-            if let Some(t) = otherwise {
-                slot.otherwise.bind_method(t);
-            }
-        }
-        for (i, t) in held_targets {
-            if let Some(t) = t {
-                self.readings.refs[i].entry.bind_method(t);
             }
         }
         self.readings.base = BaseLengths {

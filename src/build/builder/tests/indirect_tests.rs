@@ -248,3 +248,31 @@ fn a_held_method_head_dispatches_like_a_walked_one() {
         r.method_target()
     );
 }
+
+#[test]
+fn a_view_links_the_dispatch_calls_it_installs_to_their_handlers() {
+    // `My::E` isa `Mojo::EventEmitter` only through `My::Base`, in another
+    // file, so the events plugin's emission is held. The view the index
+    // decides installs the `on` Handler and the `emit` DispatchCall, and
+    // links the call to the handler the way the build links walked ones.
+    let base = "package My::Base;\nuse parent 'Mojo::EventEmitter';\n1;\n";
+    let src = "package My::E;\nuse parent -norequire, 'My::Base';\nsub go {\n  my $self = shift;\n  $self->on(ping => sub { 1 });\n  $self->emit('ping');\n}\n1;\n";
+    let fa = build_fa(src);
+    assert!(!fa.readings.is_empty(), "the emission is held: {:?}", fa.readings.questions);
+    let idx = ModuleIndex::new_for_test();
+    idx.insert_workspace_for_test(std::path::PathBuf::from("/tmp/qa_ind/My/Base.pm"), build_fa(base));
+    idx.insert_workspace_for_test(std::path::PathBuf::from("/tmp/qa_ind/My/E.pm"), build_fa(src));
+    let view = fa.decided_with(&idx).expect("the index confirms the gate");
+    let handler = view
+        .symbols()
+        .iter()
+        .find(|s| s.name == "ping" && matches!(s.detail, SymbolDetail::Handler { .. }))
+        .expect("the installed handler")
+        .id;
+    let call = view
+        .refs()
+        .iter()
+        .find(|r| r.target_name == "ping" && matches!(r.kind, RefKind::DispatchCall { .. }))
+        .expect("the installed dispatch call");
+    assert_eq!(call.resolved_symbol(), Some(handler));
+}

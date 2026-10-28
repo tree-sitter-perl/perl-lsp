@@ -1052,11 +1052,22 @@ impl<'a> Builder<'a> {
         actions: Vec<plugin::EmitAction>,
     ) {
         use crate::model::file_analysis::{
-            GatedEmission, GatedRef, GatedSymbol, RefKind, SymKind, SymbolDetail,
+            GatedEmission, GatedSymbol, RefKind, SymKind, SymbolDetail,
         };
         use plugin::EmitAction;
         let mut symbols: Vec<GatedSymbol> = Vec::new();
-        let mut refs: Vec<GatedRef> = Vec::new();
+        let mut refs: Vec<crate::model::file_analysis::Ref> = Vec::new();
+        let scope = crate::model::file_analysis::innermost_scope_at(&self.scopes, scope_point).unwrap_or(crate::model::file_analysis::ScopeId(0));
+        let gated_ref = |kind, span, target_name, access, binding: RefBinding| crate::model::file_analysis::Ref {
+            kind,
+            span,
+            scope,
+            target_name,
+            access,
+            binding: Some(binding).into(),
+            folded_from: None,
+            arg_count: None,
+        };
         for a in actions {
             match a {
                 // Marks gate themselves on the value's class, so they need no
@@ -1151,22 +1162,22 @@ impl<'a> Builder<'a> {
                     });
                 }
                 EmitAction::DispatchCall { name, dispatcher, owner, span, .. } => {
-                    refs.push(GatedRef {
-                        kind: RefKind::DispatchCall { dispatcher },
+                    refs.push(gated_ref(
+                        RefKind::DispatchCall { dispatcher },
                         span,
-                        target_name: name,
-                        access: crate::model::file_analysis::AccessKind::Read,
-                        binding: Some(RefBinding::Handler { owner, sym: None }),
-                    });
+                        name,
+                        crate::model::file_analysis::AccessKind::Read,
+                        RefBinding::Handler { owner, sym: None },
+                    ));
                 }
                 EmitAction::HashKeyAccess { name, owner, var_text, span, access } => {
-                    refs.push(GatedRef {
-                        kind: RefKind::HashKeyAccess { var_text },
+                    refs.push(gated_ref(
+                        RefKind::HashKeyAccess { var_text },
                         span,
-                        target_name: name,
+                        name,
                         access,
-                        binding: Some(RefBinding::HashKey { owner, sym: None }),
-                    });
+                        RefBinding::HashKey { owner, sym: None },
+                    ));
                 }
                 other => {
                     log::debug!(
@@ -1181,7 +1192,7 @@ impl<'a> Builder<'a> {
         if symbols.is_empty() && refs.is_empty() {
             return;
         }
-        self.gated_emissions.push(GatedEmission {
+        self.held.gated.push(GatedEmission {
             gate_prefixes,
             package,
             scope_point,

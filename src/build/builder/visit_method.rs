@@ -200,7 +200,7 @@ impl<'a> Builder<'a> {
         let [m_verb, m_class] = method;
         let f_verb = head(RefKind::FunctionCall, crate::cst::fq_tail_span(io.method, &verb), &verb, pin(&verb));
         let f_class = head(RefKind::FunctionCall, crate::cst::fq_tail_span(io.class, &class), &class, pin(&class));
-        self.held_indirect.push(crate::model::file_analysis::IndirectHeads {
+        self.held.indirect.push(crate::model::file_analysis::IndirectHeads {
             site,
             verb: (m_verb, f_verb),
             class: (m_class, f_class),

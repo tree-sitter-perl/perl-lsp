@@ -452,17 +452,17 @@ impl FileAnalysis {
         // the pass borrows immutably until the collect loop ends, so a
         // receiver chain resolved for one ref is reused by the next.
         let _pass = super::ResolvePass::open(self, module_index);
-        let mut stamped: Vec<(usize, Option<MethodTarget>)> = Vec::new();
+        let mut stamped: Vec<(RefAt, Option<MethodTarget>)> = Vec::new();
         // Narrowest spans first, so an inner chain hop is answered before
         // the call wrapping it. The answer is the same in any order, but an
         // outer-first chase down a long chain hits RESOLVE_DEPTH_CAP, and a
         // capped answer can't be shared; inner-first keeps every chase one
         // hop deep. Ties keep source order (stable sort).
-        let mut order: Vec<usize> = (0..self.refs.len()).collect();
+        let mut order: Vec<(RefAt, &Ref)> = self.every_ref().collect();
         if _pass.is_some() {
-            order.sort_by_key(|&i| self.refs[i].span.nesting_key());
+            order.sort_by_key(|(_, r)| r.span.nesting_key());
         }
-        for (i, r) in order.into_iter().map(|i| (i, &self.refs[i])) {
+        for (i, r) in order {
             // A plugin-bridged invocant must NEVER freeze as a class:
             // its resolution needs the index + the owning plugin, absent
             // at build time. Leaving the edge `None` makes `refs_to` /
@@ -750,7 +750,7 @@ impl FileAnalysis {
             // whose class was frozen from the field decl (a macro-body
             // `->field` whose receiver is an untypeable macro parameter). Keep it.
             if let Some(target) = target {
-                self.refs[i].bind_method(target);
+                self.ref_mut(i).bind_method(target);
             }
         }
     }
@@ -767,8 +767,8 @@ impl FileAnalysis {
     /// Some(_)` to fill cross-file gaps. Idempotent — only call-bound
     /// refs are touched, so a second run leaves them alone.
     pub(super) fn fix_chain_receiver_hash_key_owners(&mut self, module_index: Option<&dyn CrossFileLookup>) {
-        let mut owner_fixes: Vec<(usize, HashKeyOwner)> = Vec::new();
-        for (i, r) in self.refs.iter().enumerate() {
+        let mut owner_fixes: Vec<(RefAt, HashKeyOwner)> = Vec::new();
+        for (i, r) in self.every_ref() {
             let Some(crate::model::witnesses::RefIdx(c)) = r.arg_key_call() else { continue };
             let Some(call) = self.refs.get(c as usize) else { continue };
             let Some(ty) = self.method_call_invocant_type(call, module_index) else {
@@ -782,7 +782,7 @@ impl FileAnalysis {
             owner_fixes.push((i, o));
         }
         for (i, o) in owner_fixes {
-            self.refs[i].bind_hash_key_owner(o);
+            self.ref_mut(i).bind_hash_key_owner(o);
         }
     }
 
@@ -797,20 +797,14 @@ impl FileAnalysis {
         self.build_indices();
     }
 
-    fn build_indices(&mut self) {
-        // Scope starts — sorted for binary search
-        self.scope_starts = self.scopes.iter()
-            .map(|s| (s.span.start, s.id))
-            .collect();
-        self.scope_starts.sort_by_key(|(p, _)| (p.row, p.column));
-
-        self.symbols.rebuild_indices();
-
-        // Link HashKeyAccess refs to their HashKeyDef symbols whenever the
-        // owner is already resolved (the builder's pre-pass handled type
-        // constraints + variable identity + call-binding fixups). With this
-        // link, `refs_to_symbol(def_id)` returns all accesses in O(1), which
-        // is what references, rename, and highlights consume.
+    /// Link the table's refs from `first` on to the symbols that own them
+    /// by `(name, owner)`: HashKeyAccess → HashKeyDef, DispatchCall →
+    /// Handler. A link names a symbol id, so it is the table's: a view runs
+    /// it over the refs it installs (`rebuild_decided_indices`), never over
+    /// the held copies.
+    pub(super) fn link_owned_refs(&mut self, first: usize) {
+        // With this link, `refs_to_symbol(def_id)` returns all accesses in
+        // O(1), which is what references, rename, and highlights consume.
         let hashkey_defs: HashMap<(&str, &HashKeyOwner), SymbolId> = self.symbols.iter()
             .filter_map(|sym| {
                 if let SymbolDetail::HashKeyDef { owner, .. } = &sym.detail {
@@ -820,32 +814,13 @@ impl FileAnalysis {
                 }
             })
             .collect();
-        let mut hashkey_resolutions: Vec<(usize, SymbolId)> = Vec::new();
-        for (i, r) in self.refs.iter().enumerate() {
-            if r.resolved_symbol().is_some() {
-                continue;
-            }
-            if let Some(owner) = r.hash_key_owner() {
-                if let Some(&sid) = hashkey_defs.get(&(r.target_name.as_str(), owner)) {
-                    hashkey_resolutions.push((i, sid));
-                }
-            }
-        }
-        for (idx, sid) in hashkey_resolutions {
-            self.refs[idx].link_owned_symbol(sid);
-        }
-
-        // Link DispatchCall refs → Handler symbols by (owner, name). A
-        // DispatchCall whose owner couldn't be resolved at build time (e.g.
-        // `$obj->emit('x')` where `$obj` type isn't known yet) stays
-        // unlinked here and may be re-resolved by enrichment when the
-        // cross-file receiver type becomes known.
-        //
         // Unlike hash keys, multiple Handlers with the same (owner, name)
-        // legitimately coexist (stacked registrations) — we link the ref
-        // to the *first* def found so the linked symbol is a single target,
-        // and rely on `refs_to_symbol` walking all stacked defs separately
-        // for features like references/rename.
+        // legitimately coexist (stacked registrations) — the ref links to
+        // the *first* def found so the linked symbol is a single target,
+        // and `refs_to_symbol` walks all stacked defs separately for
+        // references/rename. A DispatchCall whose owner couldn't be
+        // resolved at build time stays unlinked and may be re-resolved by
+        // enrichment once the cross-file receiver type is known.
         let handler_defs: HashMap<(&str, &HandlerOwner), SymbolId> = self.symbols.iter()
             .filter_map(|sym| {
                 if let SymbolDetail::Handler { owner, .. } = &sym.detail {
@@ -855,18 +830,35 @@ impl FileAnalysis {
                 }
             })
             .collect();
-        let mut handler_resolutions: Vec<(usize, SymbolId)> = Vec::new();
-        for (i, r) in self.refs.iter().enumerate() {
-            if r.resolved_symbol().is_some() { continue; }
-            if let Some(owner) = r.handler_owner() {
-                if let Some(&sid) = handler_defs.get(&(r.target_name.as_str(), owner)) {
-                    handler_resolutions.push((i, sid));
-                }
+        let mut links: Vec<(usize, SymbolId)> = Vec::new();
+        for (i, r) in self.refs.iter().enumerate().skip(first) {
+            if r.resolved_symbol().is_some() {
+                continue;
+            }
+            let sid = match (r.hash_key_owner(), r.handler_owner()) {
+                (Some(owner), _) => hashkey_defs.get(&(r.target_name.as_str(), owner)),
+                (None, Some(owner)) => handler_defs.get(&(r.target_name.as_str(), owner)),
+                (None, None) => None,
+            };
+            if let Some(&sid) = sid {
+                links.push((i, sid));
             }
         }
-        for (idx, sid) in handler_resolutions {
-            self.refs[idx].link_owned_symbol(sid);
+        for (i, sid) in links {
+            self.refs[i].link_owned_symbol(sid);
         }
+    }
+
+    fn build_indices(&mut self) {
+        // Scope starts — sorted for binary search
+        self.scope_starts = self.scopes.iter()
+            .map(|s| (s.span.start, s.id))
+            .collect();
+        self.scope_starts.sort_by_key(|(p, _)| (p.row, p.column));
+
+        self.symbols.rebuild_indices();
+
+        self.link_owned_refs(0);
 
         self.refs.rebuild_indices(&self.pack.names);
 

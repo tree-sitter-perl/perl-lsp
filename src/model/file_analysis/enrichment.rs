@@ -317,39 +317,11 @@ impl FileAnalysis {
 
 
     /// Rebuild the table indices after a view installed its readings, and
-    /// link its installed HashKeyAccess refs to the HashKeyDefs it installed
-    /// — the same `(target_name, owner)` linker `build_indices` runs.
+    /// link the refs it installed to the symbols that own them — the same
+    /// linker `build_indices` runs (`link_owned_refs`).
     pub fn rebuild_decided_indices(&mut self, first_installed_ref: usize) {
         self.symbols.rebuild_indices();
-
-        // Link installed HashKeyAccess refs to installed HashKeyDef symbols,
-        // mirroring build_indices's logic. Base refs keep the links the
-        // build gave them: a base ref linked to an installed symbol would
-        // name an id the next view's cut removes.
-        let hashkey_defs: HashMap<(String, HashKeyOwner), SymbolId> = self.symbols.iter()
-            .filter_map(|sym| {
-                if let SymbolDetail::HashKeyDef { owner, .. } = &sym.detail {
-                    Some(((sym.name.clone(), owner.clone()), sym.id))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let mut hashkey_resolutions: Vec<(usize, SymbolId)> = Vec::new();
-        for (i, r) in self.refs.iter().enumerate().skip(first_installed_ref) {
-            if r.resolved_symbol().is_some() {
-                continue;
-            }
-            if let Some(owner) = r.hash_key_owner() {
-                if let Some(&sid) = hashkey_defs.get(&(r.target_name.clone(), owner.clone())) {
-                    hashkey_resolutions.push((i, sid));
-                }
-            }
-        }
-        for (idx, sid) in hashkey_resolutions {
-            self.refs[idx].link_owned_symbol(sid);
-        }
-
+        self.link_owned_refs(first_installed_ref);
         self.refs.rebuild_indices(&self.pack.names);
     }
 

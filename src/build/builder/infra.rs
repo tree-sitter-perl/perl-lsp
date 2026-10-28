@@ -3,6 +3,119 @@
 
 use super::*;
 
+/// What the readings will hold once the analysis is assembled.
+#[derive(Default)]
+pub(super) struct HeldHeads {
+    /// Plugin pattern emissions whose `ClassIsa` trigger LOCAL ancestry
+    /// could not confirm (rule #1) (`FileAnalysis::hold_gated_emission`).
+    pub(super) gated: Vec<crate::model::file_analysis::GatedEmission>,
+    /// Both readings' head refs at each deferred `meth Class(ARGS)`
+    /// (`FileAnalysis::hold_indirect`).
+    pub(super) indirect: Vec<crate::model::file_analysis::IndirectHeads>,
+}
+
+/// Where a ref the build holds lives: the table, or a head a reading holds
+/// (an indirect site's, both arms of each word; a gated emission's). A view
+/// installs held refs in place of or beside table refs, so every post-walk
+/// pass that binds refs reaches them through `every_ref` / `every_ref_mut`,
+/// and an installed ref was resolved like the walked ones beside it
+/// (`layering_tests::post_walk_ref_binds_reach_held_refs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum BuildRefAt {
+    Table(usize),
+    Indirect { site: usize, word: IndirectWord },
+    Gated { emission: usize, at: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum IndirectWord {
+    VerbThen,
+    VerbOtherwise,
+    ClassThen,
+    ClassOtherwise,
+}
+
+/// Every ref the build holds, table first. Free functions over the two
+/// fields, so a pass can borrow the rest of the builder alongside.
+pub(super) fn every_ref<'r>(refs: &'r [Ref], held: &'r HeldHeads) -> impl Iterator<Item = (BuildRefAt, &'r Ref)> {
+    let table = refs.iter().enumerate().map(|(i, r)| (BuildRefAt::Table(i), r));
+    let indirect = held.indirect.iter().enumerate().flat_map(|(site, h)| {
+        [
+            (BuildRefAt::Indirect { site, word: IndirectWord::VerbThen }, &h.verb.0),
+            (BuildRefAt::Indirect { site, word: IndirectWord::VerbOtherwise }, &h.verb.1),
+            (BuildRefAt::Indirect { site, word: IndirectWord::ClassThen }, &h.class.0),
+            (BuildRefAt::Indirect { site, word: IndirectWord::ClassOtherwise }, &h.class.1),
+        ]
+    });
+    let gated = held
+        .gated
+        .iter()
+        .enumerate()
+        .flat_map(|(emission, em)| em.refs.iter().enumerate().map(move |(at, r)| (BuildRefAt::Gated { emission, at }, r)));
+    table.chain(indirect).chain(gated)
+}
+
+pub(super) fn every_ref_mut<'r>(
+    refs: &'r mut [Ref],
+    held: &'r mut HeldHeads,
+) -> impl Iterator<Item = (BuildRefAt, &'r mut Ref)> {
+    let table = refs.iter_mut().enumerate().map(|(i, r)| (BuildRefAt::Table(i), r));
+    let indirect = held.indirect.iter_mut().enumerate().flat_map(|(site, h)| {
+        let (vt, vo) = (&mut h.verb.0, &mut h.verb.1);
+        let (ct, co) = (&mut h.class.0, &mut h.class.1);
+        [
+            (BuildRefAt::Indirect { site, word: IndirectWord::VerbThen }, vt),
+            (BuildRefAt::Indirect { site, word: IndirectWord::VerbOtherwise }, vo),
+            (BuildRefAt::Indirect { site, word: IndirectWord::ClassThen }, ct),
+            (BuildRefAt::Indirect { site, word: IndirectWord::ClassOtherwise }, co),
+        ]
+    });
+    let gated = held
+        .gated
+        .iter_mut()
+        .enumerate()
+        .flat_map(|(emission, em)| em.refs.iter_mut().enumerate().map(move |(at, r)| (BuildRefAt::Gated { emission, at }, r)));
+    table.chain(indirect).chain(gated)
+}
+
+impl<'a> Builder<'a> {
+    pub(super) fn every_ref(&self) -> impl Iterator<Item = (BuildRefAt, &Ref)> {
+        every_ref(&self.refs, &self.held)
+    }
+
+    pub(super) fn ref_of(&self, at: BuildRefAt) -> &Ref {
+        match at {
+            BuildRefAt::Table(i) => &self.refs[i],
+            BuildRefAt::Indirect { site, word } => {
+                let h = &self.held.indirect[site];
+                match word {
+                    IndirectWord::VerbThen => &h.verb.0,
+                    IndirectWord::VerbOtherwise => &h.verb.1,
+                    IndirectWord::ClassThen => &h.class.0,
+                    IndirectWord::ClassOtherwise => &h.class.1,
+                }
+            }
+            BuildRefAt::Gated { emission, at } => &self.held.gated[emission].refs[at],
+        }
+    }
+
+    pub(super) fn ref_mut(&mut self, at: BuildRefAt) -> &mut Ref {
+        match at {
+            BuildRefAt::Table(i) => &mut self.refs[i],
+            BuildRefAt::Indirect { site, word } => {
+                let h = &mut self.held.indirect[site];
+                match word {
+                    IndirectWord::VerbThen => &mut h.verb.0,
+                    IndirectWord::VerbOtherwise => &mut h.verb.1,
+                    IndirectWord::ClassThen => &mut h.class.0,
+                    IndirectWord::ClassOtherwise => &mut h.class.1,
+                }
+            }
+            BuildRefAt::Gated { emission, at } => &mut self.held.gated[emission].refs[at],
+        }
+    }
+}
+
 impl<'a> Builder<'a> {
     // ---- Scope management ----
 
