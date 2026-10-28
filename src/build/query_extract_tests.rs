@@ -3135,11 +3135,28 @@ fn cpp_call_arg_count_skips_comments() {
 }
 
 // A comment ahead of a parenthesized C++ receiver is peeled with the parens.
+// The receiver stays an expression: the parens are how it was written.
 #[test]
 fn cpp_receiver_peel_skips_comments() {
     let skel = cpp_skel("struct W { void spin(); };\nvoid g() { W w; (/* c */ w).spin(); }\n");
     let call = skel.refs.iter().find(|r| r.name == "spin" && r.invocant.is_some()).expect("spin member ref");
-    assert_eq!(call.invocant.as_ref().unwrap().1, "w");
+    let (span, invocant) = call.invocant.as_ref().unwrap();
+    assert_eq!(*invocant, crate::model::conventions::Invocant::expr("w"));
+    assert_eq!(span.start, Point::new(1, 25));
+}
+
+// `this` is the object of the class whose body it is in, not a class named
+// `this`: its value types from the eliding body, never from its spelling.
+#[test]
+fn cpp_this_reads_the_enclosing_class() {
+    use crate::build::language_driver::LanguageRegistry;
+    let p = std::path::PathBuf::from("/x/this.cpp");
+    let src = "class Status {\n void Update() {\n  this->Ref();\n }\n void Ref();\n};\nvoid Status::Ref() { this->Update(); }\n";
+    let fa = LanguageRegistry::compiled().for_path(&p).unwrap().analyze_with_path(src, Some(&p));
+    for at in [Point::new(2, 8), Point::new(6, 27)] {
+        let r = fa.ref_at(at).expect("member call");
+        assert_eq!(fa.method_call_invocant_type(r, None), Some(InferredType::ClassName("Status".into())), "{at:?}");
+    }
 }
 
 // A comment inside a Python argument list is not an argument.

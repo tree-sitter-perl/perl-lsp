@@ -106,6 +106,12 @@ impl FileAnalysis {
 
     /// Resolve a variable name to its declaration at a given point.
     /// Returns the innermost-scope match (Perl lexical scoping).
+    /// Whether `name` at `point` is a method's receiver: the variable it
+    /// resolves to is the one its producer flagged `RECEIVER`.
+    pub fn is_receiver_at(&self, name: &str, point: Point) -> bool {
+        self.resolve_variable(name, point).is_some_and(|s| s.flags.contains(SymbolFlags::RECEIVER))
+    }
+
     pub fn resolve_variable(&self, name: &str, point: Point) -> Option<&Symbol> {
         let scope = self.scope_at(point)?;
         self.lookup_chain(scope)

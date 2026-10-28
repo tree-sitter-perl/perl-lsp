@@ -815,9 +815,7 @@ impl FileAnalysis {
                 let mut params = params;
                 let is_method = is_method
                     || sym_is_method
-                    || params.first().map_or(false, |p| {
-                        crate::model::conventions::is_conventional_invocant_name(&p.name)
-                    });
+                    || params.first().is_some_and(|p| p.is_invocant);
 
                 // Strip the implicit invocant from the display list.
                 // `is_invocant` covers both Perl-native `$self`/`$class`
@@ -849,9 +847,7 @@ impl FileAnalysis {
 
                 let is_method = is_method
                     || cf_is_method
-                    || params.first().map_or(false, |p| {
-                        crate::model::conventions::is_conventional_invocant_name(&p.name)
-                    });
+                    || params.first().is_some_and(|p| p.is_invocant);
 
                 // Same invocant-strip as the local branch — by flag,
                 // not by name. Cross-file ParamInfo carries the flag
